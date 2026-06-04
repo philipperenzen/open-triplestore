@@ -18,7 +18,6 @@ ignore = [
     # (`saml` via samael, `alerting` via lettre, and their TLS/crypto stack). Tracked
     # for upgrade; the rsa "Marvin" advisory currently has no fixed upstream release.
     "RUSTSEC-2023-0071",  # rsa — Marvin timing side-channel (no upstream fix; via `saml`)
-    "RUSTSEC-2026-0141",  # TLS hostname verification (Boring TLS backend; via `alerting`)
     "RUSTSEC-2026-0049",  # rustls-webpki — certificate/CRL validation (transitive TLS)
     "RUSTSEC-2026-0098",  # rustls-webpki — name constraints (URI) (transitive TLS)
     "RUSTSEC-2026-0099",  # rustls-webpki — name constraints (wildcard) (transitive TLS)
@@ -53,6 +52,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # quoted_printable (transitive via lettre, the optional `alerting` email stack)
+    # is 0BSD — OSI-approved, public-domain-equivalent, more permissive than MIT.
+    "0BSD",
     "ISC",
     "Zlib",
     "MPL-2.0",
