@@ -1564,3 +1564,58 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
+
+#[cfg(test)]
+mod panic_safety_net_tests {
+    //! Regression test for the panic safety net wired into [`build_router`]: a
+    //! panic inside a handler must surface as a clean `500` produced by
+    //! [`handle_request_panic`], never as an unwound (reset) connection.
+    //!
+    //! NB: the default panic hook still prints a "thread '…' panicked" line to
+    //! stderr when the panic is caught — that output is expected here and is not
+    //! a test failure.
+    use super::handle_request_panic;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _; // for `oneshot`
+
+    async fn always_panics() -> axum::response::Response {
+        panic!("simulated handler panic");
+    }
+
+    #[tokio::test]
+    async fn handler_panic_becomes_clean_500() {
+        let app = Router::new()
+            .route("/boom", get(always_panics))
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+                handle_request_panic,
+            ));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            // The panic must be caught: the service resolves to a response rather
+            // than propagating the unwind to the caller (the connection task).
+            .expect("service resolved to a response");
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        // Generic message only — the panic payload is never leaked to the client.
+        assert_eq!(body.as_ref(), b"Internal server error");
+    }
+}
