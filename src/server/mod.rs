@@ -1424,15 +1424,20 @@ pub async fn run(
     // Build router — auth endpoint rate limiting is applied inside build_router.
     let app = build_router(state, cors_origins, trusted_cidrs);
 
-    // Serve frontend SPA from frontend/dist (fallback to index.html for SPA routing).
-    // Gated by --serve-frontend / SERVE_FRONTEND (default on); disable for an
-    // API-only server. SPARQL, Graph Store and REST endpoints are unaffected.
+    // Serve frontend SPA from frontend/dist. Gated by --serve-frontend /
+    // SERVE_FRONTEND (default on); disable for an API-only server. SPARQL, Graph
+    // Store and REST endpoints are unaffected.
+    //
+    // Use `.fallback` (NOT `.not_found_service`) for the index.html catch-all:
+    // svelte-routing uses history mode, so a deep link or hard refresh to a client
+    // route such as /browse must return index.html with a 200. `.not_found_service`
+    // serves the body but forces a 404 status, which breaks deep links and caching.
     let frontend_dir = std::path::Path::new("frontend/dist");
     let mut app = Router::new().merge(app);
     if serve_frontend && frontend_dir.exists() {
         app = app.fallback_service(
             ServeDir::new("frontend/dist")
-                .not_found_service(ServeFile::new("frontend/dist/index.html")),
+                .fallback(ServeFile::new("frontend/dist/index.html")),
         );
         info!("Web UI served at http://{}/", addr);
     } else if !serve_frontend {
