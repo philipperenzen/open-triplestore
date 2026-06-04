@@ -1,0 +1,131 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SHACL-SHACL (meta): a focused, engine-evaluable subset of the W3C SHACL
+# shape-validation rules. It validates a *shapes graph treated as data* — i.e.
+# meta-validation / SHACL-of-SHACL.
+#
+# Design note — named property shapes:
+# This triplestore's SHACL engine resolves a shape's attributes by IRI. It does
+# NOT load the constraints of an *inline* (blank-node) `sh:property [ … ]` in a
+# **shapes** graph — a known engine limitation (see `shacl::engine` tests). So
+# every property constraint below is a *named* (IRI) property shape (the
+# `otsm:pc-*` nodes), referenced from the two meta node shapes. Authoring them
+# as IRIs is what makes their constraints actually load and fire.
+#
+# What the engine evaluates reliably inside a (named) property shape, and which
+# we therefore rely on here: sh:minCount/sh:maxCount (cardinality), sh:datatype,
+# sh:in, and sh:nodeKind (value node kind). We avoid sh:sparql (the engine does
+# not inject sh:prefixes into SPARQL constraints, which would silently skip
+# them).
+#
+# Reach over the *validated* data (the shapes-as-data):
+# `otsm:PropertyShape` targets every object of sh:property via
+# sh:targetObjectsOf. Those objects are usually *inline blank nodes* in real
+# shapes graphs, and the engine now resolves a blank focus node's predicate
+# values through the raw quad index — so the inline property shapes a user
+# actually writes ARE meta-validated (their sh:minCount must be an integer,
+# their sh:nodeKind must be a real kind, …). `otsm:NodeShape` targets every
+# explicitly-typed sh:NodeShape (named or, in principle, blank) and checks its
+# node-level attributes.
+#
+# The result: every rule produces real results, none are no-ops, and the graph
+# conforms when validated against itself (the seed self-consistency test).
+#
+# Remaining limitation (documented, not a regression):
+# Only *simple predicate* paths are resolved from a blank focus node; a complex
+# property path (sequence/inverse/…) from a blank node is not. Inline property
+# shapes use a single predicate sh:path, so this does not affect meta-validation
+# in practice.
+#
+# Seeded into <urn:system:shapes:shacl-shacl> by `shacl_studio::seed`.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix otsm: <https://opentriplestore.org/ontology/meta/> .
+
+# ── Reusable named property constraints ─────────────────────────────────────
+# Shared by both meta node shapes below. Each is itself a well-formed property
+# shape, so it also conforms to otsm:PropertyShape (objects of sh:property) —
+# keeping the meta graph self-consistent.
+
+otsm:pc-path
+    sh:path sh:path ;
+    sh:minCount 1 ;
+    sh:maxCount 1 ;
+    sh:message "A property shape (the object of sh:property) must have exactly one sh:path." .
+
+otsm:pc-minCount
+    sh:path sh:minCount ;
+    sh:datatype xsd:integer ;
+    sh:message "sh:minCount must be an integer." .
+
+otsm:pc-maxCount
+    sh:path sh:maxCount ;
+    sh:datatype xsd:integer ;
+    sh:message "sh:maxCount must be an integer." .
+
+otsm:pc-nodeKind
+    sh:path sh:nodeKind ;
+    sh:in ( sh:BlankNode sh:IRI sh:Literal sh:BlankNodeOrIRI sh:BlankNodeOrLiteral sh:IRIOrLiteral ) ;
+    sh:message "sh:nodeKind must be one of the six sh:NodeKind individuals." .
+
+otsm:pc-class
+    sh:path sh:class ;
+    sh:nodeKind sh:IRI ;
+    sh:message "sh:class must be an IRI." .
+
+otsm:pc-datatype
+    sh:path sh:datatype ;
+    sh:nodeKind sh:IRI ;
+    sh:message "sh:datatype must be an IRI." .
+
+otsm:pc-severity
+    sh:path sh:severity ;
+    sh:in ( sh:Violation sh:Warning sh:Info ) ;
+    sh:message "sh:severity must be sh:Violation, sh:Warning or sh:Info." .
+
+otsm:pc-node
+    sh:path sh:node ;
+    sh:nodeKind sh:BlankNodeOrIRI ;
+    sh:message "sh:node must reference a shape (an IRI or blank node)." .
+
+otsm:pc-closed
+    sh:path sh:closed ;
+    sh:datatype xsd:boolean ;
+    sh:message "sh:closed must be a boolean (true or false)." .
+
+otsm:pc-property
+    sh:path sh:property ;
+    sh:nodeKind sh:BlankNodeOrIRI ;
+    sh:message "sh:property must reference a property shape (an IRI or blank node)." .
+
+# ── Meta node shapes ─────────────────────────────────────────────────────────
+
+# Every object of sh:property is a property shape: it must carry exactly one
+# sh:path, and its value-type / cardinality attributes must be well-formed.
+otsm:PropertyShape
+    a sh:NodeShape ;
+    rdfs:label "Property shape" ;
+    sh:targetObjectsOf sh:property ;
+    sh:property otsm:pc-path ;
+    sh:property otsm:pc-minCount ;
+    sh:property otsm:pc-maxCount ;
+    sh:property otsm:pc-nodeKind ;
+    sh:property otsm:pc-class ;
+    sh:property otsm:pc-datatype ;
+    sh:property otsm:pc-severity ;
+    sh:property otsm:pc-node .
+
+# Node shapes (explicitly typed sh:NodeShape) must likewise carry well-formed
+# value-type attributes. The same value constraints apply at node level.
+otsm:NodeShape
+    a sh:NodeShape ;
+    rdfs:label "Node shape" ;
+    sh:targetClass sh:NodeShape ;
+    sh:property otsm:pc-nodeKind ;
+    sh:property otsm:pc-class ;
+    sh:property otsm:pc-datatype ;
+    sh:property otsm:pc-closed ;
+    sh:property otsm:pc-severity ;
+    sh:property otsm:pc-property .

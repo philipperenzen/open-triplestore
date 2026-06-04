@@ -1,0 +1,63 @@
+name: Browser E2E (Open Triplestore demo)
+
+# Boots the seeded backend + frontend and drives the public demo through a real
+# browser with Playwright. Heavier than the unit/integration suites, so it runs
+# on demand and on pushes that touch the demo, frontend, or seed.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'frontend/**'
+      - 'src/saved_queries/**'
+      - 'src/auth/handlers.rs'
+      - '.github/workflows/e2e.yml'
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # GeoSPARQL needs GEOS; lld matches .cargo/config.toml.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libgeos-dev lld
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Build the demo backend up front so the Playwright webServer start is fast
+      # and within its timeout. SAML is intentionally excluded (no xmlsec needed
+      # for the UI demo).
+      - name: Build backend (demo features)
+        run: cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl"
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run e2e
+        working-directory: frontend
+        env:
+          CI: 'true'
+          JWT_SECRET: e2e_jwt_secret_must_be_32_chars_xx
+          # Reuse the binary built above instead of `cargo run` (faster startup).
+          OTS_BACKEND_CMD: ../target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./e2e-data --log-level warn
+        run: npm run e2e
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7

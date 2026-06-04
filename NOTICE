@@ -1,0 +1,22 @@
+Open Triplestore
+Copyright (C) 2026 Philippe Renzen <philipperenzen@gmail.com>
+
+This product is licensed under the GNU Affero General Public License v3.0 with the
+Commons Clause License Condition v1.0. See the LICENSE file for the full terms.
+It is source-available, not OSI "open source": you may use, self-host, study, and
+modify it for free, but you may not Sell it (including offering it as a paid or
+hosted service) as defined by the Commons Clause.
+
+This software builds on, and bundles or depends on, third-party components that are
+distributed under their own licenses, including but not limited to:
+
+  - Oxigraph, oxrdf, spargebra (RDF/SPARQL engine) — MIT / Apache-2.0
+  - RocksDB (via oxrocksdb-sys) — Apache-2.0 / GPLv2 (dual)
+  - Axum, Tokio, Tower and the wider Rust async ecosystem — MIT
+  - GEOS (via the geos crate) — LGPL-2.1
+  - Tantivy (full-text search) — MIT
+  - and other crates / npm packages listed in Cargo.toml, Cargo.lock,
+    and frontend/package.json.
+
+The licenses of bundled and dependency components are unaffected by the Commons
+Clause condition above, which applies only to Open Triplestore itself.

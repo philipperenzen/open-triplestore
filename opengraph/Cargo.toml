@@ -1,0 +1,31 @@
+# OpenGraph is a member of the Open Triplestore Cargo workspace (repo root is one
+# level up). It can still be built and tested on its own with `cargo test`.
+[package]
+name = "opengraph"
+version = "0.1.0"
+edition = "2021"
+description = "OpenGraph — an RDF engine layer over Oxigraph for Open Triplestore. Adds durable blank-node identity (RDFC-1.0 canonical labels + opt-in Skolemization), cost-based query planning, and storage tuning."
+authors = ["Philippe Renzen <philipperenzen@gmail.com>"]
+license-file = "../LICENSE"
+repository = "https://github.com/philipperenzen/open-triplestore"
+
+[dependencies]
+# Oxigraph engine — opengraph wraps and extends these (re-exported from lib.rs).
+oxigraph  = "0.4"
+oxrdf     = "0.2"
+spargebra = "0.3"
+
+# Durable blank-node identity: SHA-256 canonical hashing + hex encoding.
+sha2      = "0.10"
+hex       = "0.4"
+
+# Utilities
+tracing   = "0.1"
+anyhow    = "1"
+
+[dev-dependencies]
+criterion  = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "hash_join"
+harness = false

@@ -1,0 +1,113 @@
+# Mock dataset: users in the Open Triplestore Organisation.
+#
+# A small, self-contained graph of organisation members built to exercise the
+# datatype/language and large-text UI features in the graph viewers:
+#   • typed literals — xsd:integer, xsd:decimal, xsd:boolean, xsd:date,
+#     xsd:dateTime, xsd:anyURI
+#   • language-tagged literals — @en / @nl / @fr
+#   • a long multi-line text literal (the hover tooltip should stay readable)
+#   • file-asset URLs (avatar .png, CV .pdf) and a DCAT distribution (.csv),
+#     which a graph viewer can surface in its data-asset preview
+#
+# Load it into the Graph explorer and hover / select the
+# literal nodes to see the datatype-coloured corner indicator and full values.
+
+@prefix ots:    <https://opentriplestore.org/data/> .
+@prefix org:    <http://www.w3.org/ns/org#> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+@prefix schema: <https://schema.org/> .
+@prefix dcat:   <http://www.w3.org/ns/dcat#> .
+@prefix dct:    <http://purl.org/dc/terms/> .
+@prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+
+# ── Vocabulary ───────────────────────────────────────────────────────────────
+ots:active        a owl:DatatypeProperty ; rdfs:range xsd:boolean ;
+  rdfs:label "active"@en, "actief"@nl .
+ots:loginCount    a owl:DatatypeProperty ; rdfs:range xsd:integer ;
+  rdfs:label "login count"@en, "aantal aanmeldingen"@nl .
+ots:storageQuotaGb a owl:DatatypeProperty ; rdfs:range xsd:decimal ;
+  rdfs:label "storage quota (GB)"@en .
+ots:joinedOn      a owl:DatatypeProperty ; rdfs:range xsd:date ;
+  rdfs:label "joined on"@en, "lid sinds"@nl .
+ots:lastActiveAt  a owl:DatatypeProperty ; rdfs:range xsd:dateTime ;
+  rdfs:label "last active at"@en .
+ots:bio           a owl:DatatypeProperty ; rdfs:range xsd:string ;
+  rdfs:label "biography"@en, "biografie"@nl .
+ots:cv            a owl:DatatypeProperty ; rdfs:range xsd:anyURI ;
+  rdfs:label "curriculum vitae"@en .
+
+# ── Organisation ─────────────────────────────────────────────────────────────
+ots:OpenTriplestore a org:Organization, foaf:Organization ;
+  rdfs:label "Open Triplestore"@en, "Open Triplestore"@nl ;
+  rdfs:comment "The Open Triplestore Organisation builds and maintains an open, standards-based linked-data platform — a high-performance triplestore, a SPARQL 1.1 + GeoSPARQL endpoint, and the graph and form tooling around it. This deliberately long description exists to exercise the large-text hover affordance in the graph viewer."@en ;
+  foaf:homepage "https://opentriplestore.org/"^^xsd:anyURI ;
+  org:hasMember ots:alice, ots:bram, ots:chloe, ots:diego ;
+  dcat:distribution ots:member-directory .
+
+# A DCAT distribution (data asset) — a graph viewer can preview/download this.
+ots:member-directory a dcat:Distribution ;
+  dct:title "Member directory (CSV)" ;
+  dcat:mediaType "text/csv" ;
+  dct:format "CSV" ;
+  dcat:downloadURL "https://opentriplestore.org/exports/members.csv" .
+
+# ── Members ──────────────────────────────────────────────────────────────────
+ots:alice a foaf:Person ;
+  foaf:name "Alice Jansen" ;
+  rdfs:label "Alice Jansen"@en ;
+  schema:jobTitle "Lead Engineer"@en, "Hoofdingenieur"@nl ;
+  ots:active true ;
+  ots:loginCount 1284 ;
+  ots:storageQuotaGb 25.5 ;
+  ots:joinedOn "2021-03-15"^^xsd:date ;
+  ots:lastActiveAt "2026-05-30T09:14:00Z"^^xsd:dateTime ;
+  ots:bio "Alice leads the storage engine team. She wrote much of the GeoSPARQL layer and cares a great deal about query performance, reproducible benchmarks, and keeping the docs honest. Ask her about spatial indexes."@en ;
+  foaf:homepage "https://opentriplestore.org/people/alice"^^xsd:anyURI ;
+  schema:image "https://opentriplestore.org/avatars/alice.png"^^xsd:anyURI ;
+  ots:cv "https://opentriplestore.org/cv/alice-jansen.pdf"^^xsd:anyURI ;
+  org:memberOf ots:OpenTriplestore .
+
+ots:bram a foaf:Person ;
+  foaf:name "Bram de Vries" ;
+  rdfs:label "Bram de Vries"@en, "Bram de Vries"@nl ;
+  schema:jobTitle "Frontend Developer"@en, "Frontend-ontwikkelaar"@nl ;
+  ots:active true ;
+  ots:loginCount 642 ;
+  ots:storageQuotaGb 10.0 ;
+  ots:joinedOn "2022-09-01"^^xsd:date ;
+  ots:lastActiveAt "2026-05-31T16:42:30Z"^^xsd:dateTime ;
+  ots:bio "Bram bouwt de Svelte-frontend en de graafverkenner. Hij houdt van strakke interacties en goede toegankelijkheid."@nl ;
+  foaf:homepage "https://opentriplestore.org/people/bram"^^xsd:anyURI ;
+  schema:image "https://opentriplestore.org/avatars/bram.png"^^xsd:anyURI ;
+  org:memberOf ots:OpenTriplestore .
+
+ots:chloe a foaf:Person ;
+  foaf:name "Chloé Lambert" ;
+  rdfs:label "Chloé Lambert"@en, "Chloé Lambert"@fr ;
+  schema:jobTitle "Ontologist"@en, "Ontologue"@fr ;
+  ots:active false ;
+  ots:loginCount 97 ;
+  ots:storageQuotaGb 5.25 ;
+  ots:joinedOn "2023-01-20"^^xsd:date ;
+  ots:lastActiveAt "2026-02-11T11:05:00Z"^^xsd:dateTime ;
+  ots:bio "Chloé maintains the shared vocabularies and SHACL shapes."@en ;
+  foaf:homepage "https://opentriplestore.org/people/chloe"^^xsd:anyURI ;
+  ots:cv "https://opentriplestore.org/cv/chloe-lambert.pdf"^^xsd:anyURI ;
+  org:memberOf ots:OpenTriplestore .
+
+ots:diego a foaf:Person ;
+  foaf:name "Diego Santos" ;
+  rdfs:label "Diego Santos"@en ;
+  schema:jobTitle "Site Reliability Engineer"@en ;
+  ots:active true ;
+  ots:loginCount 2310 ;
+  ots:storageQuotaGb 40.0 ;
+  ots:joinedOn "2020-11-05"^^xsd:date ;
+  ots:lastActiveAt "2026-06-01T07:58:12Z"^^xsd:dateTime ;
+  ots:bio "Diego keeps the cluster healthy and the deploys boring."@en ;
+  foaf:homepage "https://opentriplestore.org/people/diego"^^xsd:anyURI ;
+  schema:image "https://opentriplestore.org/avatars/diego.png"^^xsd:anyURI ;
+  org:memberOf ots:OpenTriplestore .

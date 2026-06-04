@@ -1,0 +1,9 @@
+# Force contributors to pick a structured template instead of a blank issue.
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/philipperenzen/open-triplestore/security/advisories/new
+    about: Report security issues privately. Please do NOT open a public issue.
+  - name: 💬 Questions & discussion
+    url: https://github.com/philipperenzen/open-triplestore/discussions
+    about: Ask questions, share ideas, or discuss usage with the community.
