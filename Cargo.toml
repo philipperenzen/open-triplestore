@@ -78,7 +78,7 @@ axum = { version = "0.7", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "set-header", "compression-gzip", "compression-br", "timeout", "catch-panic"] }
-tower_governor = { version = "0.4", features = ["axum"] }
+tower_governor = { version = "0.8", features = ["axum"] }
 
 # GeoSPARQL spatial operations
 geo = "0.28"
