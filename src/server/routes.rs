@@ -1324,15 +1324,23 @@ async fn service_description_handler(
         cached_graphs.0.iter().cloned().collect()
     };
 
-    // Triple count limited to the default graph (not revealing private named graph sizes).
-    let count = if is_admin {
-        state.store.len().unwrap_or(0)
+    // Default-graph triple count. Hidden (0) for anonymous/non-admin callers so the
+    // unauthenticated service description never reveals default-graph size.
+    let default_graph_count = if is_admin {
+        state.store.count_graph(None).unwrap_or(0)
     } else {
         0
     };
 
-    let graph_name_refs: Vec<&str> = accessible_graph_iris.iter().map(String::as_str).collect();
-    let desc = service_description::generate(count, &graph_name_refs);
+    // Pair each accessible named graph with its own triple count (void:triples).
+    let named_graph_counts: Vec<(&str, usize)> = accessible_graph_iris
+        .iter()
+        .map(|iri| {
+            let count = state.store.count_graph(Some(iri.as_str())).unwrap_or(0);
+            (iri.as_str(), count)
+        })
+        .collect();
+    let desc = service_description::generate(default_graph_count, &named_graph_counts);
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }

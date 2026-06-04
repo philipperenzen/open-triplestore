@@ -68,10 +68,15 @@ function broadcast(): void {
 
 /**
  * Initialise discovery: a one-shot resolve plus a live SSE subscription. Safe to call once at
- * boot. All failures are swallowed — the app keeps the seeded DEFAULTS (fail-soft).
+ * boot. Opt-in — a no-op unless LD_DISCOVERY is set (Vite injects `__LD_DISCOVERY__`); this keeps
+ * the app from contacting a registry that isn't running. All failures are swallowed — the app
+ * keeps the seeded DEFAULTS (fail-soft).
  */
 export function initServiceRegistry(): void {
   if (started || typeof window === 'undefined') return
+  // Discovery is opt-in: with it off, keep the localhost DEFAULTS and contact no registry — this
+  // avoids the /registry/events SSE reconnect loop when no registry is running.
+  if (typeof __LD_DISCOVERY__ === 'undefined' || !__LD_DISCOVERY__) return
   started = true
 
   // 1) One-shot resolve so the live map is in place ASAP (even before SSE connects).

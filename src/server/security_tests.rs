@@ -203,9 +203,11 @@ mod tests {
             body.contains("private.example.com"),
             "Admin must see private graphs in service description:\n{body}"
         );
+        // The named graph holds exactly one triple, which must surface as a
+        // per-graph void:triples count (the default graph is legitimately empty).
         assert!(
-            !body.contains("void:triples 0"),
-            "Admin service description must report real triple count:\n{body}"
+            body.contains("void:triples 1"),
+            "Admin service description must report the real per-graph triple count:\n{body}"
         );
     }
 

@@ -16,8 +16,9 @@ logBanner();
 initTheme();
 
 // Discover sibling-service addresses from the registry and re-broadcast changes as
-// 'ldapps-service-change'. This app reaches its own backend same-origin (Vite proxy), so the
-// client mainly powers cross-links + the change event. Fail-soft: localhost defaults stand.
+// 'ldapps-service-change'. Opt-in: a no-op unless LD_DISCOVERY is set (see vite.config.js). This
+// app reaches its own backend same-origin (Vite proxy), so the client mainly powers cross-links +
+// the change event. Fail-soft: localhost defaults stand.
 initServiceRegistry();
 
 let app: ReturnType<typeof mount>;

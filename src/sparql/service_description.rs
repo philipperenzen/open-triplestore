@@ -4,7 +4,12 @@
 //! per the W3C SPARQL 1.1 Service Description specification.
 
 /// Generate a SPARQL Service Description as Turtle.
-pub fn generate(triple_count: usize, named_graphs: &[&str]) -> String {
+///
+/// `default_graph_triples` is the `void:triples` count for the default graph.
+/// `named_graphs` pairs each named-graph IRI with its own triple count, emitted
+/// as `sd:graph [ a sd:Graph ; void:triples N ]` per the SPARQL 1.1 Service
+/// Description recommendation.
+pub fn generate(default_graph_triples: usize, named_graphs: &[(&str, usize)]) -> String {
     let mut desc = String::new();
 
     desc.push_str(
@@ -90,18 +95,22 @@ pub fn generate(triple_count: usize, named_graphs: &[&str]) -> String {
             a sd:Graph ;
             void:triples {}
         ]"#,
-        triple_count
+        default_graph_triples
     ));
 
-    // Named graphs
-    for graph_iri in named_graphs {
+    // Named graphs — each carries its own triple count via sd:graph / void:triples.
+    for (graph_iri, triples) in named_graphs {
         desc.push_str(&format!(
             r#" ;
         sd:namedGraph [
+            a sd:NamedGraph ;
             sd:name <{}> ;
-            a sd:NamedGraph
+            sd:graph [
+                a sd:Graph ;
+                void:triples {}
+            ]
         ]"#,
-            graph_iri
+            graph_iri, triples
         ));
     }
 
@@ -126,8 +135,31 @@ mod tests {
 
     #[test]
     fn test_generate_with_named_graphs() {
-        let desc = generate(100, &["http://example.org/graph1"]);
+        let desc = generate(100, &[("http://example.org/graph1", 7)]);
         assert!(desc.contains("http://example.org/graph1"));
         assert!(desc.contains("sd:namedGraph"));
+    }
+
+    #[test]
+    fn test_named_graph_reports_triple_count() {
+        let desc = generate(
+            5,
+            &[
+                ("http://example.org/g1", 42),
+                ("http://example.org/g2", 1000),
+            ],
+        );
+        // Default graph count.
+        assert!(desc.contains("void:triples 5"));
+        // Each named graph exposes its own count via sd:graph / void:triples.
+        assert!(desc.contains("sd:graph"));
+        assert!(
+            desc.contains("void:triples 42"),
+            "first named graph must report its own count:\n{desc}"
+        );
+        assert!(
+            desc.contains("void:triples 1000"),
+            "second named graph must report its own count:\n{desc}"
+        );
     }
 }
