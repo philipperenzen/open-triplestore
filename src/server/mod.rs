@@ -1127,7 +1127,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // truncated. The per-query 30s timeout and the expensive-op semaphore are the
         // primary guards; this catches anything that slips past them. (Slow-header
         // Slowloris is handled at the reverse proxy.)
-        .layer(tower_http::timeout::TimeoutLayer::new(
+        // `with_status_code` replaces the deprecated `TimeoutLayer::new`; passing
+        // REQUEST_TIMEOUT (408) keeps the exact response status `new` defaulted to.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(300),
         ))
         // M-6: Default body limit for all other endpoints (JSON API, image uploads, etc.).
