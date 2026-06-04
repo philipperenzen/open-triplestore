@@ -52,7 +52,7 @@
     "cytoscape": "^3.30.2",
     "cytoscape-cose-bilkent": "^4.1.0",
     "cytoscape-navigator": "^2.0.2",
-    "dompurify": "^3.4.7",
+    "dompurify": "^3.4.8",
     "lucide-svelte": "npm:@lucide/svelte@^1.17.0",
     "marked": "^18.0.4",
     "n3": "^2.0.3",
