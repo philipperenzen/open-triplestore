@@ -749,6 +749,10 @@ In short:
 
 If you need terms beyond these, contact the author.
 
+## Support the project
+
+Open Triplestore is free, and always will be. If it's useful to you and you'd like to say thanks, you can chip in via **[GitHub Sponsors](https://github.com/sponsors/philipperenzen)**, **[Liberapay](https://liberapay.com/opentriplestore)**, or **[Ko-fi](https://ko-fi.com/opentriplestore)**. Contributions are a **token of appreciation — not payment for the software, support, or any service**, and they buy no features, fixes, or priority. See [`FUNDING.md`](FUNDING.md).
+
 ## Legal & Privacy
 
 Open Triplestore is **self-hostable** software: whoever deploys it is the operator
