@@ -167,7 +167,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 tantivy = { version = "0.22", optional = true }
 
 # SAML 2.0 SSO (saml feature)
-samael = { version = "0.0.18", optional = true }
+samael = { version = "0.0.20", optional = true }
 
 # OAuth 2.0 / OIDC
 openidconnect = { version = "3", default-features = false, features = ["reqwest", "rustls-tls"] }
