@@ -11,6 +11,9 @@ services:
       - triplestore_data:/data
     environment:
       - RUST_LOG=info
+      # Serve the bundled web UI at /. Set SERVE_FRONTEND=false in .env for an
+      # API-only container (SPARQL / Graph Store / REST are unaffected).
+      - SERVE_FRONTEND=${SERVE_FRONTEND:-true}
       # No default: a public default secret makes every session token forgeable. Set it in .env
       # (see .env.example); `openssl rand -hex 32`. The server also refuses weak secrets under TLS.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
@@ -86,6 +89,31 @@ services:
       timeout: 5s
       start_period: 5s
       retries: 5
+
+  # One-shot helper: once the triplestore is healthy, print where each service is
+  # reachable so the URLs show up in the logs (and inline when you run
+  # `docker compose up` without -d). It echoes and exits — re-show the banner
+  # anytime with `docker compose logs info`.
+  info:
+    image: busybox:1.37
+    depends_on:
+      triplestore:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        echo
+        echo "=================================================="
+        echo "  Open Triplestore is up - reachable at:"
+        echo "    Web UI & API : http://localhost:7878"
+        echo "    Health check : http://localhost:7878/health"
+        echo "    API docs     : http://localhost:7878/api-docs/"
+        echo "    MinIO console: http://localhost:9001"
+        echo "    MinIO S3 API : http://localhost:9000"
+        echo "=================================================="
+        echo
+    restart: "no"
 
 volumes:
   triplestore_data:

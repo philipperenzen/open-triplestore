@@ -168,6 +168,7 @@ Options:
   -b, --bind      <ADDR>      Bind address              [default: 0.0.0.0]
       --load      <FILE>      Load RDF file on startup
       --log-level <LEVEL>     Log level                 [default: info]
+      --serve-frontend <BOOL> Serve the bundled web UI  [default: true]
       --access-token-expiry-minutes <N>  JWT access token TTL  [default: 30]
       --refresh-token-expiry-days   <N>  Refresh token TTL     [default: 30]
       --promote-super-admin <USERNAME>   Promote user and exit

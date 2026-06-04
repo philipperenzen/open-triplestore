@@ -139,6 +139,12 @@ struct Cli {
     #[arg(long, env = "SECURE_COOKIES", default_value_t = false)]
     secure_cookies: bool,
 
+    /// Serve the bundled web UI (frontend SPA) at `/`. On by default; set to
+    /// `false` (or pass `--serve-frontend false`) for a headless, API-only server
+    /// — SPARQL, Graph Store and the REST API are unaffected either way.
+    #[arg(long, env = "SERVE_FRONTEND", default_value_t = true, action = clap::ArgAction::Set)]
+    serve_frontend: bool,
+
     /// Directory for the Tantivy full-text index (default: {data_dir}/tantivy)
     #[cfg(feature = "text-search")]
     #[arg(long, env = "TEXT_SEARCH_DIR")]
@@ -438,6 +444,7 @@ async fn main() -> anyhow::Result<()> {
         trusted_cidrs,
         cli.query_timeout_secs,
         cli.secure_cookies,
+        cli.serve_frontend,
         #[cfg(feature = "text-search")]
         text_index,
     )

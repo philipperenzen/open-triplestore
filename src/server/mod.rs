@@ -1225,6 +1225,7 @@ pub async fn run(
     trusted_cidrs: Vec<IpNet>,
     query_timeout_secs: u64,
     secure_cookies: bool,
+    serve_frontend: bool,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
 ) -> anyhow::Result<()> {
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
@@ -1423,14 +1424,19 @@ pub async fn run(
     // Build router — auth endpoint rate limiting is applied inside build_router.
     let app = build_router(state, cors_origins, trusted_cidrs);
 
-    // Serve frontend SPA from frontend/dist (fallback to index.html for SPA routing)
+    // Serve frontend SPA from frontend/dist (fallback to index.html for SPA routing).
+    // Gated by --serve-frontend / SERVE_FRONTEND (default on); disable for an
+    // API-only server. SPARQL, Graph Store and REST endpoints are unaffected.
     let frontend_dir = std::path::Path::new("frontend/dist");
     let mut app = Router::new().merge(app);
-    if frontend_dir.exists() {
+    if serve_frontend && frontend_dir.exists() {
         app = app.fallback_service(
             ServeDir::new("frontend/dist")
                 .not_found_service(ServeFile::new("frontend/dist/index.html")),
         );
+        info!("Web UI served at http://{}/", addr);
+    } else if !serve_frontend {
+        info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
     }
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
