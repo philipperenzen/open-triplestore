@@ -54,7 +54,7 @@
     "cytoscape-navigator": "^2.0.2",
     "dompurify": "^3.4.7",
     "lucide-svelte": "npm:@lucide/svelte@^1.17.0",
-    "marked": "^18.0.4",
+    "marked": "^18.0.5",
     "n3": "^2.0.3",
     "sparqljs": "^3.7.4",
     "svelte-i18n": "^4.0.1",
