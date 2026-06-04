@@ -16,7 +16,7 @@ oxrdf     = "0.2"
 spargebra = "0.3"
 
 # Durable blank-node identity: SHA-256 canonical hashing + hex encoding.
-sha2      = "0.10"
+sha2      = "0.11"
 hex       = "0.4"
 
 # Utilities
