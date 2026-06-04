@@ -1,0 +1,59 @@
+# Library Catalogue 2025 — demo dataset for OpenTripleStore API Services.
+#
+# A small, self-contained graph that exercises the standards this build
+# supports — SPARQL 1.1 (types, RDFS subclass paths, multilingual labels,
+# numeric properties, optional properties) and GeoSPARQL (WKT geometries).
+# Loaded by the bundled "Library Catalogue 2025" dataset and the example API
+# services.
+
+@prefix ex:   <https://example.org/standards-demo/> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix dct:  <http://purl.org/dc/terms/> .
+
+# ── Ontology: RDFS/OWL class hierarchy + typed properties ────────────────────
+ex:Publication a owl:Class ; rdfs:label "Publication"@en, "Publicatie"@nl .
+ex:Book        a owl:Class ; rdfs:subClassOf ex:Publication ; rdfs:label "Book"@en, "Boek"@nl .
+ex:RareBook    a owl:Class ; rdfs:subClassOf ex:Book ; rdfs:label "Rare book"@en, "Zeldzaam boek"@nl .
+ex:Publisher   a owl:Class ; rdfs:label "Publisher"@en, "Uitgever"@nl .
+
+ex:pageCount a owl:DatatypeProperty ;
+  rdfs:domain ex:Book ; rdfs:range xsd:integer ;
+  rdfs:label "page count"@en, "aantal pagina's"@nl .
+ex:publishedBy a owl:ObjectProperty ;
+  rdfs:domain ex:Book ; rdfs:range ex:Publisher ;
+  rdfs:label "published by"@en, "uitgegeven door"@nl .
+
+# ── Publishers (with headquarters geometries) ────────────────────────────────
+ex:Querido a ex:Publisher ;
+  rdfs:label "Querido"@en, "Querido"@nl ;
+  geo:hasGeometry [ geo:asWKT "POINT(4.9041 52.3676)"^^geo:wktLiteral ] .
+ex:Lannoo  a ex:Publisher ;
+  rdfs:label "Lannoo"@en, "Lannoo"@nl, "Lannoo"@fr ;
+  geo:hasGeometry [ geo:asWKT "POINT(3.2247 51.2093)"^^geo:wktLiteral ] .
+
+# ── Books (instances) ─────────────────────────────────────────────────────────
+ex:DiscoveryOfHeaven a ex:Book ;
+  rdfs:label "The Discovery of Heaven"@en, "De ontdekking van de hemel"@nl ;
+  ex:pageCount 928 ; ex:publishedBy ex:Querido .
+
+ex:TheEvenings a ex:Book ;
+  rdfs:label "The Evenings"@en, "De avonden"@nl ;
+  ex:pageCount 256 ; ex:publishedBy ex:Querido .
+
+ex:Gutenberg42 a ex:RareBook ;
+  rdfs:label "Gutenberg Bible (42-line)"@en, "Gutenbergbijbel (42-regelig)"@nl ;
+  ex:pageCount 1286 ; ex:publishedBy ex:Lannoo ;
+  geo:hasGeometry [ geo:asWKT "POINT(3.2247 51.2093)"^^geo:wktLiteral ] .
+
+ex:CharacterOfRain a ex:Book ;
+  rdfs:label "The Character of Rain"@en, "Métaphysique des tubes"@fr, "De metafysica van de buizen"@nl ;
+  ex:pageCount 152 ; ex:publishedBy ex:Lannoo .
+
+# This rare book intentionally has no page count — exercises OPTIONAL.
+ex:VoynichManuscript a ex:RareBook ;
+  rdfs:label "Voynich Manuscript"@en, "Voynichmanuscript"@nl ;
+  ex:publishedBy ex:Lannoo .

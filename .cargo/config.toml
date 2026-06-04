@@ -1,0 +1,21 @@
+# Build-time tuning. Link-time only — does not change runtime behavior.
+#
+# Use the LLD linker on Linux (CI + Docker). LLD links far faster than the
+# default BFD linker, which dominates incremental rebuild time for a binary
+# with this many dependencies. Requires `lld` to be installed (added to the CI
+# apt step and the Dockerfile builder stage).
+#
+# macOS is intentionally left on its default linker — the system linker is
+# already fast there and this keeps local dev builds dependency-free.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# macOS (Apple Silicon): the `saml` feature links the Homebrew xmlsec1 OpenSSL
+# engine (`-lxmlsec1-openssl`), which lives under the keg-only libxmlsec1 prefix
+# rather than a default linker search path. Adding it lets `--features full`
+# (and `make release`) link locally. Harmless for builds without `saml`.
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/opt/libxmlsec1/lib"]

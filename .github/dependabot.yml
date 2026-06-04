@@ -1,0 +1,22 @@
+# Keep dependencies (and the CI actions themselves) patched. Security updates are
+# what close the dependency-CVE findings in the assessment over time. The
+# github-actions updates also keep the SHA-pinned action refs in ci.yml/e2e.yml
+# current (Dependabot bumps the pin and updates the # vX comment).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

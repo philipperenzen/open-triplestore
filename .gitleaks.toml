@@ -1,0 +1,13 @@
+# gitleaks configuration — auto-loaded from the repo root by the CI secret scan
+# (`gitleaks detect --source . --no-git`). Extends the full default ruleset and
+# only allowlists clearly non-secret, fixed test values.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dummy, non-secret test values used by CI/e2e (not real credentials)."
+regexes = [
+  # Fixed JWT signing secret used only by the Playwright e2e job in
+  # .github/workflows/e2e.yml — a throwaway value, never a real credential.
+  '''e2e_jwt_secret_must_be_32_chars_xx''',
+]
