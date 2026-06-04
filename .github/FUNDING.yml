@@ -1,0 +1,13 @@
+# These platforms power the "Sponsor" button on the repository.
+# Docs: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+#
+# The `github` entry requires an active GitHub Sponsors profile for the account.
+# Uncomment / replace any of the others with your own handles as you set them up.
+
+github: [philipperenzen]
+# ko-fi: your-handle
+# open_collective: open-triplestore
+# buy_me_a_coffee: your-handle
+# liberapay: your-handle
+# patreon: your-handle
+# custom: ["https://your-donation-page.example"]

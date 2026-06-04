@@ -1,0 +1,89 @@
+services:
+  triplestore:
+    build: .
+    container_name: open-triplestore
+    ports:
+      # Bind to loopback only: the triplestore must sit behind a TLS-terminating reverse proxy in
+      # production, not be published on every interface. Inter-container traffic uses the compose
+      # network and is unaffected by this. Override TRIPLESTORE_BIND to expose deliberately.
+      - "${TRIPLESTORE_BIND:-127.0.0.1}:7878:7878"
+    volumes:
+      - triplestore_data:/data
+    environment:
+      - RUST_LOG=info
+      # No default: a public default secret makes every session token forgeable. Set it in .env
+      # (see .env.example); `openssl rand -hex 32`. The server also refuses weak secrets under TLS.
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
+      - AUTH_DB_PATH=/data/auth.db
+      - BACKUP_DIR=/data/backups
+      - BACKUP_RETENTION_COUNT=7
+      - BACKUP_SCHEDULE_HOURS=24
+      - S3_ENDPOINT=http://minio:9000
+      - S3_BUCKET=triplestore-assets
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no minioadmin default)}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no minioadmin default)}
+      - S3_REGION=us-east-1
+      # OIDC resource server (optional). Set OIDC_ISSUER to
+      # enable verifying IdP-issued access tokens; leave blank to keep password/PAT only.
+      - OIDC_ISSUER=${OIDC_ISSUER:-}
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
+      - OIDC_DEFAULT_ROLE=${OIDC_DEFAULT_ROLE:-user}
+      - ACCEPT_LEGACY_TOKENS=${ACCEPT_LEGACY_TOKENS:-true}
+      # Claims-driven roles & org membership (all optional):
+      #   OIDC_ROLE_CLAIM_MAP: JSON '{"<claim value>":"super_admin|admin|user"}'
+      #   OIDC_ROLE_CLAIMS:    comma-sep claim names (default roles,realm_access.roles,groups)
+      #   OIDC_GROUPS_CLAIM:   claim holding org groups (default groups)
+      #   OIDC_ORG_GROUP_PREFIX: marks an org-membership group, e.g. org: → org:gis-team
+      - OIDC_ROLE_CLAIM_MAP=${OIDC_ROLE_CLAIM_MAP:-}
+      - OIDC_ROLE_CLAIMS=${OIDC_ROLE_CLAIMS:-}
+      - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-}
+      - OIDC_ORG_GROUP_PREFIX=${OIDC_ORG_GROUP_PREFIX:-}
+      # CORS allowlist for trusted frontend origin(s), comma-separated (dev + prod).
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # External validation platform base URL, used by /api/datasets/validate-and-commit.
+      - VALIDATION_API_URL=${VALIDATION_API_URL:-}
+      # service registry (discovery): self-register as "triplestore" so siblings/the browser
+      # resolve this store instead of hardcoding :7878. Points at the host-run registry; fail-soft if absent.
+      - LD_REGISTRY_URL=${LD_REGISTRY_URL:-http://host.docker.internal:8500}
+      - LD_REGISTRY_TOKEN=${LD_REGISTRY_TOKEN:-}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  minio:
+    # Pin to an immutable digest in production (e.g. quay.io/minio/minio@sha256:...) instead of a
+    # floating tag, so a re-pull can't silently change the image. Override via MINIO_IMAGE.
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:latest}
+    container_name: triplestore-minio
+    command: server /data --console-address ":9001"
+    ports:
+      # Loopback only — the S3 API + admin console must not be world-reachable. They are accessed
+      # by the triplestore over the compose network (unaffected) and locally for administration.
+      - "${MINIO_BIND:-127.0.0.1}:9000:9000"
+      - "${MINIO_BIND:-127.0.0.1}:9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      # No minioadmin/minioadmin default — credentials must be set explicitly (see .env.example).
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set (no default)}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set (no default)}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
+
+volumes:
+  triplestore_data:
+    driver: local
+  minio_data:
+    driver: local

@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a defect in Open Triplestore
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please **do not** report security
+        vulnerabilities here — see [SECURITY.md](../../SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps (with a query / dataset snippet if relevant) to reproduce.
+      placeholder: |
+        1. Start the server with `...`
+        2. POST `...` to `/sparql`
+        3. Observe `...`
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The release tag or `git` commit you are running.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Backend (Rust / SPARQL / API)
+        - Frontend (Svelte UI)
+        - Docker / deployment
+        - Documentation
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, how you run it (Docker / cargo), and anything else relevant.
+      placeholder: |
+        - OS:
+        - Run mode: docker compose / cargo build
+        - Browser (for UI bugs):
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Paste server logs or browser console errors. Automatically formatted as code.
+      render: shell

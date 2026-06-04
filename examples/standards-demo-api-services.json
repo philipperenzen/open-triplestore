@@ -1,0 +1,80 @@
+[
+  {
+    "name": "All triples",
+    "slug": "all-triples",
+    "description": "SPARQL 1.1 — basic SELECT over every triple.",
+    "sparql": "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 200",
+    "parameters": [],
+    "test_parameters": {}
+  },
+  {
+    "name": "Count by class",
+    "slug": "count-by-class",
+    "description": "SPARQL 1.1 — aggregation (GROUP BY / COUNT / ORDER BY).",
+    "sparql": "SELECT ?class (COUNT(?s) AS ?instances) WHERE { ?s a ?class } GROUP BY ?class ORDER BY DESC(?instances)",
+    "parameters": [],
+    "test_parameters": {}
+  },
+  {
+    "name": "Class hierarchy",
+    "slug": "class-hierarchy",
+    "description": "SPARQL 1.1 — transitive property path (rdfs:subClassOf+).",
+    "sparql": "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\nSELECT ?subclass ?ancestor WHERE { ?subclass rdfs:subClassOf+ ?ancestor } ORDER BY ?subclass",
+    "parameters": [],
+    "test_parameters": {}
+  },
+  {
+    "name": "Book statistics",
+    "slug": "book-statistics",
+    "description": "SPARQL 1.1 — aggregation (SUM/AVG) with OPTIONAL (the Voynich Manuscript has no page count).",
+    "sparql": "PREFIX ex: <https://example.org/standards-demo/>\nPREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\nSELECT (COUNT(?b) AS ?books) (SUM(?pages) AS ?totalPages) (AVG(?pages) AS ?avgPages) WHERE { ?b a/rdfs:subClassOf* ex:Book . OPTIONAL { ?b ex:pageCount ?pages } }",
+    "parameters": [],
+    "test_parameters": {}
+  },
+  {
+    "name": "Instances of a class",
+    "slug": "instances-of-class",
+    "description": "Parameter injection ({{class}} IRI) + property path (a/rdfs:subClassOf*) so subclasses are included without entailment.",
+    "sparql": "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\nSELECT ?s ?label WHERE { ?s a/rdfs:subClassOf* {{class}} OPTIONAL { ?s rdfs:label ?label . FILTER(langMatches(lang(?label), \"en\")) } } ORDER BY ?s",
+    "parameters": [
+      { "name": "class", "type": "iri", "required": true, "default": "https://example.org/standards-demo/Book", "description": "Class IRI to list instances of (subclasses included)." }
+    ],
+    "test_parameters": { "class": "https://example.org/standards-demo/Book" }
+  },
+  {
+    "name": "Describe a resource",
+    "slug": "describe-resource",
+    "description": "SPARQL 1.1 CONSTRUCT (graph result) + parameter injection ({{subject}} IRI).",
+    "sparql": "CONSTRUCT { {{subject}} ?p ?o } WHERE { {{subject}} ?p ?o }",
+    "parameters": [
+      { "name": "subject", "type": "iri", "required": true, "default": "https://example.org/standards-demo/DiscoveryOfHeaven", "description": "Subject IRI to describe." }
+    ],
+    "test_parameters": { "subject": "https://example.org/standards-demo/DiscoveryOfHeaven" }
+  },
+  {
+    "name": "Labels by language",
+    "slug": "labels-by-language",
+    "description": "SPARQL 1.1 — FILTER/langMatches with a string parameter ({{lang}}).",
+    "sparql": "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\nSELECT ?s ?label WHERE { ?s rdfs:label ?label . FILTER(langMatches(lang(?label), {{lang}})) } ORDER BY ?label",
+    "parameters": [
+      { "name": "lang", "type": "string", "required": false, "default": "en", "description": "BCP-47 language tag, e.g. en, nl, fr." }
+    ],
+    "test_parameters": { "lang": "nl" }
+  },
+  {
+    "name": "Publishers in an area",
+    "slug": "publishers-in-area",
+    "description": "GeoSPARQL — geof:sfWithin over WKT geometries, via the geo:hasGeometry/geo:asWKT path.",
+    "sparql": "PREFIX ex: <https://example.org/standards-demo/>\nPREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\nPREFIX geo: <http://www.opengis.net/ont/geosparql#>\nPREFIX geof: <http://www.opengis.net/def/function/geosparql/>\nSELECT ?publisher ?label ?wkt WHERE { ?publisher a ex:Publisher ; rdfs:label ?label ; geo:hasGeometry/geo:asWKT ?wkt . FILTER(geof:sfWithin(?wkt, \"POLYGON((3 50, 6 50, 6 53, 3 53, 3 50))\"^^geo:wktLiteral)) FILTER(langMatches(lang(?label), \"en\")) } ORDER BY ?label",
+    "parameters": [],
+    "test_parameters": {}
+  },
+  {
+    "name": "Has a rare book?",
+    "slug": "has-rare-book",
+    "description": "SPARQL 1.1 — ASK.",
+    "sparql": "PREFIX ex: <https://example.org/standards-demo/>\nASK { ?b a ex:RareBook }",
+    "parameters": [],
+    "test_parameters": {}
+  }
+]

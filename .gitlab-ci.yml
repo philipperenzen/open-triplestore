@@ -1,0 +1,119 @@
+# GitLab CI/CD for Open Triplestore.
+#
+# Mirrors the GitHub Actions workflows (.github/workflows/ci.yml + e2e.yml) so a
+# fork hosted on any GitLab instance (gitlab.com or self-managed) gets the same
+# gates: rustfmt + clippy + build + test (incl. conformance & security suites),
+# the frontend lint/test/build, the cargo-deny supply-chain audit (advisories,
+# bans, sources, licenses), an npm production-dependency audit, and a gitleaks
+# secret scan. Commands and versions are kept identical to the GitHub jobs.
+
+stages:
+  - check
+  - test
+  - audit
+
+variables:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Keep the cargo home inside the project so it can be cached between pipelines.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  GIT_DEPTH: "20"
+
+# ── Rust: format, lint, build, test ───────────────────────────────────────────
+# `cargo test --all-features` runs the unit, integration, conformance AND
+# security-regression suites (which ci.yml surfaces as separate jobs).
+rust:
+  stage: test
+  image: rust:1.88-bookworm
+  cache:
+    key: "rust-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  before_script:
+    # GEOS for GeoSPARQL; the rest match the GitHub backend job (SAML/xmlsec, TLS).
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+    - rustup component add rustfmt clippy
+  script:
+    - cargo fmt --all --check
+    - cargo clippy --all-targets --all-features
+    - cargo build --all-features --locked
+    - cargo test --all-features --locked
+
+# ── Frontend: lint, test, build ───────────────────────────────────────────────
+frontend:
+  stage: test
+  image: node:20-bookworm
+  cache:
+    key: "npm-$CI_COMMIT_REF_SLUG"
+    paths:
+      - frontend/node_modules/
+  before_script:
+    - cd frontend
+    - npm ci
+  script:
+    - npm run lint
+    - npm run test
+    - npm run build
+
+# ── Supply-chain audit: cargo-deny (advisories, bans, sources, licenses) ──────
+cargo-deny:
+  stage: audit
+  image: rust:1.88-bookworm
+  cache:
+    key: "deny-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/bin/
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq pkg-config libssl-dev
+    - cargo install cargo-deny --locked --version ^0.16
+  script:
+    - cargo deny check advisories bans sources licenses
+
+# ── npm audit (production dependencies, high severity) ────────────────────────
+npm-audit:
+  stage: audit
+  image: node:20-bookworm
+  script:
+    - cd frontend
+    - npm audit --audit-level=high --omit=dev
+
+# ── Secret scan (gitleaks; same version + flags as the GitHub job) ────────────
+secret-scan:
+  stage: check
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates tar
+  script:
+    - VER=8.18.4
+    - curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" | tar -xz gitleaks
+    - ./gitleaks detect --source . --no-git --redact --verbose --exit-code 1
+
+# ── Browser e2e (mirrors e2e.yml). Manual/opt-in: browser e2e is environment-
+# sensitive on self-managed runners, so it does not gate the pipeline. Trigger it
+# from the pipeline view when wanted. ─────────────────────────────────────────
+e2e:
+  stage: test
+  image: rust:1.88-bookworm
+  when: manual
+  allow_failure: true
+  variables:
+    CI: "true"
+    JWT_SECRET: "e2e_jwt_secret_must_be_32_chars_xx"
+    RATE_LIMIT_DISABLED: "1"
+    OTS_BACKEND_CMD: "../target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./e2e-data --log-level warn"
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld curl
+    - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    - apt-get install -y -qq nodejs
+  script:
+    - cargo build --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl"
+    - cd frontend
+    - npm ci
+    - npx playwright install --with-deps chromium
+    - npm run e2e

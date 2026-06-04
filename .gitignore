@@ -1,0 +1,34 @@
+# ─── Build output ─────────────────────────────────────────────────────────────
+/target
+frontend/dist/
+.vite/
+
+# ─── Dependencies ───────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Local data & runtime state ─────────────────────────────────────────────
+/data
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Test / CI artifacts ────────────────────────────────────────────────────
+**/playwright-report/
+**/test-results/
+
+# ─── Editor / OS / tooling noise ────────────────────────────────────────────
+*.swp
+*.swo
+.DS_Store
+.claude/
+
+# ─── Secrets — never commit (.env.example is the template) ───────────────────
+.env
+.env.*
+!.env.example
+jwt_secret
+
+# ─── Internal docs: kept on disk, never published ────────────────────────────
+# Defence in depth — these are also excluded from the public copy entirely.
+SECURITY_ASSESSMENT.md
+docs/audit-report-2026-04-22.md
