@@ -43,8 +43,12 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
      docs/assets/demo.gif, then replace this comment with:
        ![Open Triplestore web UI](docs/assets/demo.gif)
      Run locally with only the bundled (neutral) sample data:
+       # macOS / Linux / WSL:
        JWT_SECRET=$(openssl rand -hex 32) \
          cargo run --release -- --port 7878 --data-dir ./demo-data --load examples/standards-demo.ttl
+       # Windows PowerShell:
+       $env:JWT_SECRET = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
+       cargo run --release -- --port 7878 --data-dir .\demo-data --load examples\standards-demo.ttl
      then open http://localhost:7878/ and register the first user (it becomes super_admin). -->
 
 | Surface | What it does |
@@ -86,23 +90,76 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 
 ## Quick Start
 
+> [!NOTE]
+> **Runs on Windows, macOS, and Linux.** Docker is the easiest path on every OS and
+> the commands are identical. The shell snippets below use bash/`curl` syntax; on
+> **Windows PowerShell** call **`curl.exe`** (plain `curl` is an alias for
+> `Invoke-WebRequest`, which takes different flags) and either keep each command on
+> one line or use a backtick `` ` `` for line continuation instead of `\`. The
+> examples run verbatim in **WSL**, **Git Bash**, and `cmd.exe`. Native (non-Docker)
+> builds on Windows need extra setup — see the **[Windows guide](docs/windows.md)**;
+> WSL2 is the smoothest route.
+
 ### Docker (recommended)
 
+Docker Desktop runs the same Linux image on every OS, so this is the simplest way to
+get a fully-featured instance on Windows, macOS, or Linux.
+
+**1. Create `.env` with secrets.** Compose ships no insecure defaults and refuses to
+start until these are set (Option A only — the standalone container auto-generates a
+secret):
+
 ```bash
-# Option A: docker compose (includes MinIO)
+# macOS · Linux · WSL · Git Bash
+cp .env.example .env
+printf 'JWT_SECRET=%s\n'          "$(openssl rand -hex 32)" >> .env
+printf 'MINIO_ROOT_USER=%s\n'     "$(openssl rand -hex 8)"  >> .env
+printf 'MINIO_ROOT_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+```
+
+```powershell
+# Windows PowerShell — no OpenSSL required
+Copy-Item .env.example .env
+function New-Secret([int]$n) { -join ((1..$n) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) }) }
+Add-Content .env "JWT_SECRET=$(New-Secret 32)"
+Add-Content .env "MINIO_ROOT_USER=$(New-Secret 8)"
+Add-Content .env "MINIO_ROOT_PASSWORD=$(New-Secret 24)"
+```
+
+**2. Start the stack:**
+
+```bash
+# Option A: docker compose — full stack incl. MinIO (S3 asset store); reads .env
 docker compose up -d
 
-# Option B: standalone (no MinIO)
+# Option B: standalone container — no MinIO; JWT secret auto-generates in /data
 docker build -t open-triplestore .
 docker run -p 7878:7878 -v triplestore_data:/data open-triplestore
 ```
 
 ### Native (requires Rust 1.88+)
 
+System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
+**libxmlsec1** for the `saml` feature in `--features full`. On Debian/Ubuntu:
+`apt-get install libgeos-dev libxmlsec1-dev`; on macOS: `brew install geos libxmlsec1`.
+
 ```bash
+# macOS · Linux · WSL
 cargo build --release
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 ```
+
+```powershell
+# Windows PowerShell — note the .exe suffix and back-slashes
+.\target\release\open-triplestore.exe --port 7878 --data-dir .\data
+```
+
+> [!IMPORTANT]
+> A **native Windows** build has to provide GEOS (and, for `--features full`,
+> libxmlsec1) to the MSVC toolchain, which is fiddly. Prefer **Docker** (above) or
+> build inside **WSL2** using the Linux instructions. Full step-by-step setup —
+> including an experimental native MSVC build via vcpkg — is in the
+> **[Windows guide](docs/windows.md)**.
 
 ```
 Options:
@@ -123,6 +180,10 @@ curl http://localhost:7878/health
 # {"status":"ok","version":"0.1.0"}
 ```
 
+> On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
+> `curl` alias resolves to `Invoke-WebRequest` and won't behave like the examples.
+> (`cmd.exe`, Git Bash, and WSL all accept plain `curl`.)
+
 ---
 
 ## Authentication & First Login
@@ -139,7 +200,9 @@ Open Triplestore has no pre-seeded credentials. **The first account registered a
 Alternatively, if you need to promote an existing user (e.g. after a restore):
 
 ```bash
+# macOS / Linux / WSL
 ./target/release/open-triplestore --promote-super-admin <username>
+# Windows PowerShell: .\target\release\open-triplestore.exe --promote-super-admin <username>
 # Prints "Promoted user '<username>' to super_admin" and exits
 ```
 

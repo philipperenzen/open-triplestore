@@ -1,6 +1,21 @@
+# Build artifacts — rebuilt inside the image. Excluding host node_modules is
+# essential for cross-platform builds: the Dockerfile runs `npm install` in a Linux
+# stage, and copying a Windows/macOS node_modules over it would drop the wrong-arch
+# esbuild/rollup binaries into the image and break `npm run build`.
 target/
+**/node_modules/
+frontend/dist/
+
+# Local runtime data & secrets — never send these to the build context.
+data/
+.env
+.env.*
+!.env.example
+
+# VCS, docs, helper scripts — not needed inside the image.
 .git/
 .gitignore
+.gitattributes
 *.md
 test-data/
 scripts/

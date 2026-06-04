@@ -46,6 +46,11 @@ services:
       # resolve this store instead of hardcoding :7878. Points at the host-run registry; fail-soft if absent.
       - LD_REGISTRY_URL=${LD_REGISTRY_URL:-http://host.docker.internal:8500}
       - LD_REGISTRY_TOKEN=${LD_REGISTRY_TOKEN:-}
+    # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
+    # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
+    # adds the same hostname on plain Linux Docker so the config stays portable.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       minio:
         condition: service_healthy
