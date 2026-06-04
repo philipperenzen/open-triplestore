@@ -45,8 +45,12 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       # External validation platform base URL, used by /api/datasets/validate-and-commit.
       - VALIDATION_API_URL=${VALIDATION_API_URL:-}
-      # service registry (discovery): self-register as "triplestore" so siblings/the browser
-      # resolve this store instead of hardcoding :7878. Points at the host-run registry; fail-soft if absent.
+      # Cross-app service discovery (opt-in, off by default). Set LD_DISCOVERY=true to self-register
+      # as "triplestore" so siblings/the browser resolve this store instead of hardcoding :7878.
+      # A missing registry is fail-soft either way; this just makes discovery an explicit choice.
+      - LD_DISCOVERY=${LD_DISCOVERY:-false}
+      # Registry location + token, used only when LD_DISCOVERY=true. Points at the host-run
+      # registry; fail-soft if absent.
       - LD_REGISTRY_URL=${LD_REGISTRY_URL:-http://host.docker.internal:8500}
       - LD_REGISTRY_TOKEN=${LD_REGISTRY_TOKEN:-}
     # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every

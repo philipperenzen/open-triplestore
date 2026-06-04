@@ -1121,6 +1121,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     router = router.merge(openapi_doc_route);
 
     let mut router = router
+        // Innermost global layer (added first ⇒ closest to the route handlers): turn a
+        // panic in any handler into a clean `500` instead of letting it unwind the
+        // per-connection task. Without this a single malformed request that trips a
+        // panic (a failed `unwrap`, an out-of-bounds slice, a debug-build arithmetic
+        // overflow, or a panic raised deep inside a parsing library on adversarial
+        // input) drops the connection with no status code. Placing it *inside* the
+        // timeout / compression / CORS / security-header / trace / request-id layers
+        // means the synthesised 500 still receives all of those (security headers,
+        // gzip, an `x-request-id`, a trace span), exactly like a normal error response.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            handle_request_panic,
+        ))
         // Generous global request timeout as a DoS backstop for stuck/slow handlers.
         // It bounds the time to PRODUCE a response, not body streaming: SPARQL
         // results stream after a fast first-byte response, so large exports are not
@@ -1209,6 +1221,42 @@ async fn request_id_middleware(
         resp.headers_mut().insert("x-request-id", hv);
     }
     resp
+}
+
+/// Panic handler for the [`tower_http::catch_panic::CatchPanicLayer`] wrapped around
+/// every route (see [`build_router`]).
+///
+/// A panic in a handler — a failed `unwrap`/`expect`, an out-of-bounds index, a
+/// debug-build arithmetic overflow, or a panic raised deep inside a parsing library
+/// on adversarial input — would otherwise unwind the per-connection task, leaving the
+/// client with an abrupt connection reset (no status code) and the failure visible
+/// only as a stack trace in the logs. Catching it turns every such panic into a
+/// normal `500 Internal Server Error`, so one malformed request can no longer drop
+/// its connection. The response is deliberately generic: the panic payload is logged
+/// server-side but never sent to the client, matching [`error::AppError::Internal`].
+fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    // The panic payload is the value passed to `panic!` — almost always a `&str`
+    // (string literals) or a `String` (formatted messages, e.g. from `unwrap`).
+    let detail = if let Some(s) = err.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    // This layer runs inside TraceLayer + request_id_middleware, so the error line is
+    // emitted within the per-request span and is correlated with its `x-request-id`.
+    tracing::error!("caught panic in request handler: {detail}");
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
+        .body(axum::body::Body::from("Internal server error"))
+        // Infallible: a static status + header + body can never be a builder error.
+        .expect("static 500 response is always valid")
 }
 
 /// Start the HTTP server.
