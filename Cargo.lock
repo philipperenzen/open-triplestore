@@ -3534,7 +3534,7 @@ dependencies = [
  "lopdf",
  "lru",
  "mp4",
- "nom 7.1.3",
+ "nom 8.0.0",
  "oauth2",
  "opengraph",
  "openidconnect",

@@ -135,7 +135,7 @@ utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 # SHACL Compact Syntax parser
-nom = "7"
+nom = "8"
 
 # Parallel evaluation (SHACL, reasoning)
 rayon = "1"
