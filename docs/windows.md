@@ -154,40 +154,69 @@ Windows out of the box.
 
 ## Option 3 — Native Windows (MSVC) — experimental
 
-A fully native build is possible but unsupported, and `--features full` won't work
-because the `saml` feature needs libxml2 + xmlsec1, which are painful under MSVC.
-Build **without `saml`** and provide GEOS yourself.
+A fully native build is possible but unsupported. `--features full` won't work because the
+`saml` feature needs libxml2 + xmlsec1 (painful under MSVC), so you build **without `saml`**.
+Every native build also links the **GEOS** C library (GeoSPARQL), which you supply via vcpkg.
 
-1. **Rust (MSVC toolchain).** Install from <https://rustup.rs/> and the
-   *Build Tools for Visual Studio* (the "Desktop development with C++" workload) for
-   the MSVC linker.
+### Prerequisites — none ship with Windows; install these first
 
-2. **GEOS via [vcpkg](https://vcpkg.io).**
+| Tool | Why it's needed | Install |
+|---|---|---|
+| **Rust — MSVC toolchain** | compiles the backend | <https://rustup.rs/> (default host `x86_64-pc-windows-msvc`) |
+| **VS Build Tools — "Desktop development with C++"** | MSVC compiler + linker + Windows SDK — compiles the bundled **RocksDB** store (`oxrocksdb-sys`) and GEOS | [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) |
+| **LLVM / Clang (`libclang`)** | `bindgen` generates FFI bindings for `oxrocksdb-sys` (and `geos-sys`) at build time | `winget install LLVM.LLVM`, then set `LIBCLANG_PATH` (step 2) |
+| **vcpkg** | supplies the GEOS library | cloned in step 1 below (it fetches its own CMake + Ninja) |
 
-   ```powershell
-   git clone https://github.com/microsoft/vcpkg
-   .\vcpkg\bootstrap-vcpkg.bat
-   .\vcpkg\vcpkg install geos:x64-windows
-   ```
+> **This is a multi-GB toolchain** (the C++ Build Tools alone are several GB), and the first
+> build **compiles RocksDB and GEOS from source**, so it is slow. If that's more than you
+> want, use **Docker** (everything preinstalled) or **WSL2** (`apt-get install libgeos-dev
+> libclang-dev cmake`) — both fully featured. Native is the hard path.
 
-   Point the `geos-sys` build at the vcpkg install (exact variables can vary by
-   `geos-sys` version — consult the [`geos` crate docs](https://docs.rs/geos) if the
-   build can't find the library):
+### 1. GEOS via [vcpkg](https://vcpkg.io)
 
-   ```powershell
-   $env:GEOS_LIB_DIR = "$PWD\vcpkg\installed\x64-windows\lib"
-   $env:GEOS_VERSION = "3.13.0"   # match the version vcpkg installed
-   # Make the runtime DLL discoverable at run time:
-   $env:PATH = "$PWD\vcpkg\installed\x64-windows\bin;$env:PATH"
-   ```
+```powershell
+git clone https://github.com/microsoft/vcpkg
+.\vcpkg\bootstrap-vcpkg.bat
+.\vcpkg\vcpkg install geos:x64-windows
+.\vcpkg\vcpkg list geos                 # note the version, e.g. "geos:x64-windows  3.13.0"
+```
 
-3. **Build a reduced feature set** (everything except `saml`):
+### 2. Environment — point the build at GEOS + libclang
 
-   ```powershell
-   cargo build --release --no-default-features `
-     --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl,asset-pdf,asset-exif,asset-media,asset-archive,asset-spreadsheet,asset-thumbnail,asset-clamav"
-   .\target\release\open-triplestore.exe --port 7878 --data-dir .\data
-   ```
+This project pins `geos-sys` 2.0.x, which links dynamically from `GEOS_LIB_DIR` (with the
+matching `GEOS_VERSION`) when both are set — so **no `pkg-config` is required**. In the
+**same PowerShell** you'll build from:
+
+```powershell
+$vcpkg = "$PWD\vcpkg\installed\x64-windows"
+$env:GEOS_LIB_DIR = "$vcpkg\lib"        # holds geos_c.lib (the import library)
+$env:GEOS_VERSION = "3.13.0"            # must match `vcpkg list geos` above
+$env:PATH = "$vcpkg\bin;$env:PATH"      # so geos_c.dll is found at run time
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"   # bindgen -> oxrocksdb-sys / geos-sys
+```
+
+To persist these across shells, set them under *System → Environment Variables* (or with
+`setx`) instead of the per-session `$env:` assignments.
+
+### 3. Build without `saml` and run
+
+```powershell
+cargo build --release --no-default-features `
+  --features "rdf-12,owl2-rl,owl2-el,owl2-ql,owl2-dl,text-search,ldp,shex,swrl,asset-pdf,asset-exif,asset-media,asset-archive,asset-spreadsheet,asset-thumbnail,asset-clamav"
+.\target\release\open-triplestore.exe --port 7878 --data-dir .\data
+curl.exe http://localhost:7878/health    # -> {"status":"ok",...}
+```
+
+### Prebuilt GEOS — skip the C++ Build Tools
+
+If you'd rather not compile GEOS, grab a prebuilt build and point the same `GEOS_LIB_DIR` /
+`GEOS_VERSION` / `PATH` at it. You still need the Rust **MSVC** toolchain (for its linker):
+
+- **conda-forge:** `conda install -c conda-forge geos` → import libs under `…\Library\lib`, DLLs under `…\Library\bin`.
+- **OSGeo4W:** the GUI installer ships `geos_c.dll`, headers, and the import library.
+
+(MSYS2's `mingw-w64-x86_64-geos` is GNU-ABI — pair it only with the `x86_64-pc-windows-gnu`
+Rust toolchain, never the MSVC one.)
 
 If this is more friction than you want — and it usually is — use Docker or WSL2.
 
@@ -236,6 +265,10 @@ curl.exe -X POST http://localhost:7878/sparql `
 | `/bin/bash^M: bad interpreter` in WSL | A script got CRLF endings | Pull latest (the repo's `.gitattributes` pins scripts to LF); or `dos2unix <file>` |
 | `make: *** … Error 127` under Git Bash | `make` not installed, or `docker-compose` (v1) missing | The `Makefile` targets assume a Unix shell + Docker Compose v2; run them in WSL |
 | Docker build can't reach `host.docker.internal` | Not on Docker Desktop | It's Docker-Desktop-only; on plain Linux use the host IP |
+| `could not find native library 'geos_c'` / `GEOS_VERSION must be set` at build | `geos-sys` can't locate GEOS | Set **both** `GEOS_LIB_DIR` and `GEOS_VERSION` (Option 3, step 2) — or install `pkg-config` + GEOS |
+| `STATUS_DLL_NOT_FOUND` (`0xc0000135`) / `geos_c.dll` missing at run time | GEOS DLL not on `PATH` | Add the vcpkg/conda `bin` dir to `PATH` (Option 3, step 2) |
+| `Unable to find libclang` / `clang.dll` at build | `bindgen` (for `oxrocksdb-sys`) can't find LLVM | `winget install LLVM.LLVM`, set `LIBCLANG_PATH` to its `bin` (Option 3, step 2) |
+| `link.exe`/`cl.exe` not found, or `error: linker not found` | MSVC C++ Build Tools missing | Install VS Build Tools with the "Desktop development with C++" workload (Option 3 prerequisites) |
 
 See also: the main [README](../README.md), [administration guide](administration.md),
 and [CONTRIBUTING](../CONTRIBUTING.md).

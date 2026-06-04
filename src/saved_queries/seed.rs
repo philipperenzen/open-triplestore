@@ -18,6 +18,7 @@
 //! or creating one service is logged and skipped without aborting the rest. Opt
 //! out with `SEED_STANDARDS_DEMO=false`.
 
+use bytes::Bytes;
 use uuid::Uuid;
 
 use crate::auth::models::{OwnerType, Role, SystemRole, Visibility};
@@ -33,6 +34,14 @@ const ORG_DESCRIPTION: &str =
     "Public reference deployment showcasing every standard Open Triplestore implements: \
      RDF 1.1/1.2, SPARQL 1.1/1.2, RDFS, OWL 2 (QL/EL/RL/DL), GeoSPARQL, SHACL, ShEx, SWRL, \
      LDP and DCAT — each with a browsable dataset and runnable saved queries.";
+
+/// Branded artwork for the bundled demo organisation, applied at seed time so
+/// the public org page ships with a logo + header instead of a blank card. The
+/// mark is the Open Triplestore knowledge-graph motif (teal "O" ring + three
+/// nodes); PNG, because the image-upload allow-list rejects SVG. Regenerate
+/// with `scripts/gen_org_brand.py`. Bundled into the binary like the seed docs.
+const ORG_LOGO_PNG: &[u8] = include_bytes!("../../docs/assets/org-logo.png");
+const ORG_BANNER_PNG: &[u8] = include_bytes!("../../docs/assets/org-banner.png");
 
 /// Entry point — best-effort, never panics out of startup.
 pub fn seed_open_triplestore(state: &AppState) {
@@ -53,8 +62,17 @@ pub fn seed_open_triplestore(state: &AppState) {
 }
 
 fn try_seed(state: &AppState) -> anyhow::Result<()> {
-    // Idempotent: the demo organisation already present → nothing to do.
-    if state.auth_db.get_organisation_by_slug(ORG_SLUG)?.is_some() {
+    // Idempotent: if the demo organisation already exists we don't reseed it,
+    // but we do back-fill branding when an earlier (pre-branding) seed left it
+    // without a logo or banner — without ever clobbering artwork an admin has
+    // since uploaded.
+    if let Some(existing) = state.auth_db.get_organisation_by_slug(ORG_SLUG)? {
+        seed_org_branding(
+            state,
+            &existing.id,
+            existing.image_key.is_none(),
+            existing.banner_key.is_none(),
+        );
         return Ok(());
     }
 
@@ -86,6 +104,9 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         .auth_db
         .add_org_member(&owner.id, &org_id, Role::Admin);
     org_graph::write_org_metadata_graph(&state.store, &state.base_url, &org, &[]);
+
+    // Give the public org page a branded logo + banner out of the box.
+    seed_org_branding(state, &org_id, true, true);
 
     let sq = SavedQueryStore::new(state.auth_db.pool());
     let mut graph_count = 0usize;
@@ -174,6 +195,45 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         service_count
     );
     Ok(())
+}
+
+/// Upload the bundled logo/banner for the demo organisation and record their
+/// object keys (the same keys the upload endpoints use, so the existing
+/// `GET /api/organisations/:id/{image,banner}` handlers serve them). `do_logo`
+/// / `do_banner` let the caller back-fill only what's missing. Best-effort:
+/// it skips silently when object storage isn't configured and logs (without
+/// aborting the seed) on any failure.
+fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: bool) {
+    if !state.object_store.is_configured() || (!do_logo && !do_banner) {
+        return;
+    }
+    // The seed runs on a blocking thread (spawn_blocking), so drive the async
+    // object-store uploads to completion on the current runtime handle.
+    let rt = tokio::runtime::Handle::current();
+    let assets: [(bool, &str, &'static [u8]); 2] = [
+        (do_logo, "org-images", ORG_LOGO_PNG),
+        (do_banner, "org-banners", ORG_BANNER_PNG),
+    ];
+    for (wanted, prefix, bytes) in assets {
+        if !wanted {
+            continue;
+        }
+        let key = format!("{prefix}/{org_id}.png");
+        if let Err(e) =
+            rt.block_on(state.object_store.upload(&key, Bytes::from_static(bytes), "image/png"))
+        {
+            tracing::warn!("open-triplestore seed: branding upload to '{key}' failed: {e}");
+            continue;
+        }
+        let recorded = if prefix == "org-images" {
+            state.auth_db.update_org_image(org_id, Some(&key))
+        } else {
+            state.auth_db.update_org_banner(org_id, Some(&key))
+        };
+        if let Err(e) = recorded {
+            tracing::warn!("open-triplestore seed: recording branding key '{key}' failed: {e}");
+        }
+    }
 }
 
 /// Load one graph's bundled data into its named graph. Quoted-triple data is

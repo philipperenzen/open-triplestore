@@ -8,3 +8,8 @@ declare module '*.css?*';
 interface Window {
   L?: any;
 }
+
+// Build-time constant injected by Vite (`define` in vite.config.js): true only when the
+// LD_DISCOVERY opt-in is set. Gates the service-registry client so it contacts no registry
+// (and opens no SSE) unless discovery is explicitly enabled.
+declare const __LD_DISCOVERY__: boolean;

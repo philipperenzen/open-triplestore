@@ -5,6 +5,12 @@ import tailwindcss from '@tailwindcss/vite';
 // One-shot resolve of the service registry at dev-server startup so the backend proxy
 // targets can follow discovery. Falls back to {} (→ the localhost default) when it's down.
 const REGISTRY_URL = (process.env.LD_REGISTRY_URL || 'http://localhost:8500').replace(/\/+$/, '');
+
+// Cross-app service discovery is OPT-IN. Off by default so a registry that isn't running can't
+// spam the dev console with proxy ECONNREFUSED (/resolve, /events). Enable with LD_DISCOVERY=1
+// (see README / .env.example) to mount the /registry proxy and let the UI resolve sibling apps.
+const DISCOVERY = /^(1|true|yes|on)$/i.test((process.env.LD_DISCOVERY || '').trim());
+
 async function resolveRegistry() {
   try {
     const ctrl = new AbortController();
@@ -24,23 +30,20 @@ async function resolveRegistry() {
 }
 
 export default defineConfig(async () => {
-  const reg = await resolveRegistry();
+  // Only probe the registry when discovery is enabled — otherwise skip the startup round-trip.
+  const reg = DISCOVERY ? await resolveRegistry() : {};
   // The triplestore backend ("triplestore" in the registry); defaults to the local dev port.
   const TS = reg.triplestore || 'http://localhost:7878';
   return {
+    // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
+    // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
+    define: { __LD_DISCOVERY__: JSON.stringify(DISCOVERY) },
     plugins: [tailwindcss(), svelte()],
     server: {
       // --no-reload (LD_NO_HMR=1) turns off hot module reload while keeping the dev server + proxy.
       hmr: process.env.LD_NO_HMR === '1' ? false : undefined,
       port: 5173,
       proxy: {
-        // Same-origin path to the service registry, so the browser serviceRegistry client needs no
-        // cross-origin host / CORS. SSE (/registry/events) passes through unbuffered.
-        '/registry': {
-          target: REGISTRY_URL,
-          changeOrigin: true,
-          rewrite: (p) => p.replace(/^\/registry/, ''),
-        },
         '/health': TS,
         // `/api-docs` must precede `/api`: Vite matches proxy keys by prefix in
         // insertion order, so `/api` would otherwise swallow `/api-docs` and send
@@ -75,6 +78,18 @@ export default defineConfig(async () => {
         '/store': TS,
         '/resource/': TS,
         '/.well-known': TS,
+        // Optional cross-app registry proxy — only mounted when LD_DISCOVERY is set, so a registry
+        // that isn't running can't spam the console. The browser serviceRegistry client uses this
+        // same-origin path (no CORS); SSE (/registry/events) passes through unbuffered.
+        ...(DISCOVERY
+          ? {
+              '/registry': {
+                target: REGISTRY_URL,
+                changeOrigin: true,
+                rewrite: (p) => p.replace(/^\/registry/, ''),
+              },
+            }
+          : {}),
       },
     },
     build: {

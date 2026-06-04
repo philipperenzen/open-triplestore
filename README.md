@@ -259,6 +259,21 @@ npm run dev       # starts on http://localhost:5173 (proxied to :7878)
 npm run build     # production build → frontend/dist/
 ```
 
+#### Service discovery (optional)
+
+Cross-app discovery is **off by default** — the web UI talks to its own backend directly, so you
+need nothing else to run it. Turn it on to resolve sibling apps (and self-register the backend)
+through a service registry. It is an explicit opt-in via `LD_DISCOVERY`:
+
+```bash
+LD_DISCOVERY=1 npm run dev               # frontend: mount the /registry proxy (dev server)
+LD_DISCOVERY=true docker compose up -d   # backend: self-register (or set LD_DISCOVERY in .env)
+```
+
+When enabled, point `LD_REGISTRY_URL` at your registry (default `http://localhost:8500`). When off,
+the dev server makes no registry calls — so a registry that isn't running can't print
+`[vite] http proxy error: /resolve` / `/events`.
+
 ---
 
 ## SPARQL Endpoint
