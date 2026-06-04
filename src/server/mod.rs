@@ -1121,6 +1121,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     router = router.merge(openapi_doc_route);
 
     let mut router = router
+        // Innermost global layer (added first ⇒ closest to the route handlers): turn a
+        // panic in any handler into a clean `500` instead of letting it unwind the
+        // per-connection task. Without this a single malformed request that trips a
+        // panic (a failed `unwrap`, an out-of-bounds slice, a debug-build arithmetic
+        // overflow, or a panic raised deep inside a parsing library on adversarial
+        // input) drops the connection with no status code. Placing it *inside* the
+        // timeout / compression / CORS / security-header / trace / request-id layers
+        // means the synthesised 500 still receives all of those (security headers,
+        // gzip, an `x-request-id`, a trace span), exactly like a normal error response.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            handle_request_panic,
+        ))
         // Generous global request timeout as a DoS backstop for stuck/slow handlers.
         // It bounds the time to PRODUCE a response, not body streaming: SPARQL
         // results stream after a fast first-byte response, so large exports are not
@@ -1214,6 +1226,42 @@ async fn request_id_middleware(
     resp
 }
 
+/// Panic handler for the [`tower_http::catch_panic::CatchPanicLayer`] wrapped around
+/// every route (see [`build_router`]).
+///
+/// A panic in a handler — a failed `unwrap`/`expect`, an out-of-bounds index, a
+/// debug-build arithmetic overflow, or a panic raised deep inside a parsing library
+/// on adversarial input — would otherwise unwind the per-connection task, leaving the
+/// client with an abrupt connection reset (no status code) and the failure visible
+/// only as a stack trace in the logs. Catching it turns every such panic into a
+/// normal `500 Internal Server Error`, so one malformed request can no longer drop
+/// its connection. The response is deliberately generic: the panic payload is logged
+/// server-side but never sent to the client, matching [`error::AppError::Internal`].
+fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    // The panic payload is the value passed to `panic!` — almost always a `&str`
+    // (string literals) or a `String` (formatted messages, e.g. from `unwrap`).
+    let detail = if let Some(s) = err.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    // This layer runs inside TraceLayer + request_id_middleware, so the error line is
+    // emitted within the per-request span and is correlated with its `x-request-id`.
+    tracing::error!("caught panic in request handler: {detail}");
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
+        .body(axum::body::Body::from("Internal server error"))
+        // Infallible: a static status + header + body can never be a builder error.
+        .expect("static 500 response is always valid")
+}
+
 /// Start the HTTP server.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -1228,6 +1276,7 @@ pub async fn run(
     trusted_cidrs: Vec<IpNet>,
     query_timeout_secs: u64,
     secure_cookies: bool,
+    serve_frontend: bool,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
 ) -> anyhow::Result<()> {
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
@@ -1426,14 +1475,24 @@ pub async fn run(
     // Build router — auth endpoint rate limiting is applied inside build_router.
     let app = build_router(state, cors_origins, trusted_cidrs);
 
-    // Serve frontend SPA from frontend/dist (fallback to index.html for SPA routing)
+    // Serve frontend SPA from frontend/dist. Gated by --serve-frontend /
+    // SERVE_FRONTEND (default on); disable for an API-only server. SPARQL, Graph
+    // Store and REST endpoints are unaffected.
+    //
+    // Use `.fallback` (NOT `.not_found_service`) for the index.html catch-all:
+    // svelte-routing uses history mode, so a deep link or hard refresh to a client
+    // route such as /browse must return index.html with a 200. `.not_found_service`
+    // serves the body but forces a 404 status, which breaks deep links and caching.
     let frontend_dir = std::path::Path::new("frontend/dist");
     let mut app = Router::new().merge(app);
-    if frontend_dir.exists() {
+    if serve_frontend && frontend_dir.exists() {
         app = app.fallback_service(
             ServeDir::new("frontend/dist")
-                .not_found_service(ServeFile::new("frontend/dist/index.html")),
+                .fallback(ServeFile::new("frontend/dist/index.html")),
         );
+        info!("Web UI served at http://{}/", addr);
+    } else if !serve_frontend {
+        info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
     }
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
@@ -1506,5 +1565,60 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod panic_safety_net_tests {
+    //! Regression test for the panic safety net wired into [`build_router`]: a
+    //! panic inside a handler must surface as a clean `500` produced by
+    //! [`handle_request_panic`], never as an unwound (reset) connection.
+    //!
+    //! NB: the default panic hook still prints a "thread '…' panicked" line to
+    //! stderr when the panic is caught — that output is expected here and is not
+    //! a test failure.
+    use super::handle_request_panic;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _; // for `oneshot`
+
+    async fn always_panics() -> axum::response::Response {
+        panic!("simulated handler panic");
+    }
+
+    #[tokio::test]
+    async fn handler_panic_becomes_clean_500() {
+        let app = Router::new()
+            .route("/boom", get(always_panics))
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+                handle_request_panic,
+            ));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/boom")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            // The panic must be caught: the service resolves to a response rather
+            // than propagating the unwind to the caller (the connection task).
+            .expect("service resolved to a response");
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        // Generic message only — the panic payload is never leaked to the client.
+        assert_eq!(body.as_ref(), b"Internal server error");
     }
 }

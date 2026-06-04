@@ -51,6 +51,10 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
+# The binary embeds the user-facing docs at compile time — src/docs/mod.rs uses
+# include_str!("../../docs/*.md") — so the docs/ tree must be present for the build.
+# (.dockerignore's `*.md` only excludes root-level markdown, not docs/.)
+COPY docs/ docs/
 RUN cargo build --release --features full
 
 # ─── Stage 3: Runtime ───
