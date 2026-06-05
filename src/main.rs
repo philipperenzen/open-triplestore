@@ -243,7 +243,9 @@ fn parse_lenient_bool(s: &str) -> Result<bool, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "" | "0" | "false" | "no" | "off" => Ok(false),
-        other => Err(format!("expected a boolean (true/false/1/0/yes/no/on/off), got {other:?}")),
+        other => Err(format!(
+            "expected a boolean (true/false/1/0/yes/no/on/off), got {other:?}"
+        )),
     }
 }
 
@@ -449,7 +451,9 @@ async fn main() -> anyhow::Result<()> {
             cli.registry_token.clone(),
         );
     } else {
-        info!("service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)");
+        info!(
+            "service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)"
+        );
     }
 
     server::run(

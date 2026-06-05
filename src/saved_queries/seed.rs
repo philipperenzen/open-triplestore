@@ -219,9 +219,11 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
             continue;
         }
         let key = format!("{prefix}/{org_id}.png");
-        if let Err(e) =
-            rt.block_on(state.object_store.upload(&key, Bytes::from_static(bytes), "image/png"))
-        {
+        if let Err(e) = rt.block_on(state.object_store.upload(
+            &key,
+            Bytes::from_static(bytes),
+            "image/png",
+        )) {
             tracing::warn!("open-triplestore seed: branding upload to '{key}' failed: {e}");
             continue;
         }

@@ -1487,8 +1487,7 @@ pub async fn run(
     let mut app = Router::new().merge(app);
     if serve_frontend && frontend_dir.exists() {
         app = app.fallback_service(
-            ServeDir::new("frontend/dist")
-                .fallback(ServeFile::new("frontend/dist/index.html")),
+            ServeDir::new("frontend/dist").fallback(ServeFile::new("frontend/dist/index.html")),
         );
         info!("Web UI served at http://{}/", addr);
     } else if !serve_frontend {
@@ -1591,19 +1590,12 @@ mod panic_safety_net_tests {
 
     #[tokio::test]
     async fn handler_panic_becomes_clean_500() {
-        let app = Router::new()
-            .route("/boom", get(always_panics))
-            .layer(tower_http::catch_panic::CatchPanicLayer::custom(
-                handle_request_panic,
-            ));
+        let app = Router::new().route("/boom", get(always_panics)).layer(
+            tower_http::catch_panic::CatchPanicLayer::custom(handle_request_panic),
+        );
 
         let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/boom")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
             .await
             // The panic must be caught: the service resolves to a response rather
             // than propagating the unwind to the caller (the connection task).
