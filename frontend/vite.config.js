@@ -33,7 +33,7 @@ export default defineConfig(async () => {
   // Only probe the registry when discovery is enabled — otherwise skip the startup round-trip.
   const reg = DISCOVERY ? await resolveRegistry() : {};
   // The triplestore backend ("triplestore" in the registry); defaults to the local dev port.
-  const TS = reg.triplestore || 'http://localhost:7878';
+  const TS = reg.triplestore || (process.env.OTS_BACKEND_URL ?? 'http://localhost:7878');
   return {
     // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
     // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
