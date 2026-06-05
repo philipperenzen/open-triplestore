@@ -1,0 +1,95 @@
+[
+  {
+    "file": "compare-vs-fuseki.svg",
+    "title": "HTTP query latency: Open Triplestore vs Apache Jena Fuseki",
+    "subtitle": "500k triples, same host (Ryzen 9 7900X3D), median of 9 paced runs, compute-bound queries",
+    "unit": "ms", "lower_is_better": true,
+    "series": ["Open Triplestore", "Fuseki (TDB2)"],
+    "bars": [
+      {"label": "COUNT(*) all", "values": [117.3, 54.7]},
+      {"label": "2-way join COUNT", "values": [271.4, 117.6]},
+      {"label": "GROUP BY + AVG", "values": [272.3, 224.1]},
+      {"label": "FILTER COUNT", "values": [29.0, 42.4]},
+      {"label": "COUNT DISTINCT", "values": [25.4, 22.8]}
+    ]
+  },
+  {
+    "file": "query-latency-10k.svg",
+    "title": "In-process SPARQL query latency (10k persons / 50k triples)",
+    "subtitle": "criterion median, release build; lower is better",
+    "unit": "ms", "lower_is_better": true,
+    "bars": [
+      {"label": "CONSTRUCT", "value": 0.43},
+      {"label": "VALUES", "value": 2.03},
+      {"label": "FILTER", "value": 2.44},
+      {"label": "simple lookup", "value": 2.73},
+      {"label": "MINUS", "value": 3.11},
+      {"label": "named graph", "value": 3.46},
+      {"label": "COUNT(*)", "value": 7.09},
+      {"label": "2-way join", "value": 7.62},
+      {"label": "NOT EXISTS", "value": 8.06},
+      {"label": "GROUP BY", "value": 8.84},
+      {"label": "subquery", "value": 9.57},
+      {"label": "OPTIONAL", "value": 9.70},
+      {"label": "3-way join", "value": 11.86}
+    ]
+  },
+  {
+    "file": "bulk-load-throughput.svg",
+    "title": "Bulk-loader throughput vs dataset size",
+    "subtitle": "Turtle load via Oxigraph BulkLoader; higher is better",
+    "unit": "k triples/s", "higher_is_better": true,
+    "bars": [
+      {"label": "500 triples", "value": 908},
+      {"label": "5k triples", "value": 899},
+      {"label": "50k triples", "value": 744},
+      {"label": "500k triples", "value": 545}
+    ]
+  },
+  {
+    "file": "operators.svg",
+    "title": "SPARQL operator cost (10k persons / 50k triples)",
+    "subtitle": "equivalent-result operators compared; lower is better",
+    "unit": "ms", "lower_is_better": true,
+    "bars": [
+      {"label": "MINUS", "value": 3.11},
+      {"label": "NOT EXISTS (= MINUS)", "value": 8.06},
+      {"label": "VALUES (2-pattern)", "value": 2.03},
+      {"label": "2-way join (= VALUES)", "value": 7.62}
+    ]
+  },
+  {
+    "file": "geosparql.svg",
+    "title": "GeoSPARQL relation cost: points vs polygons",
+    "subtitle": "geof:sfIntersects per candidate via GEOS; lower is better",
+    "unit": "µs", "lower_is_better": true,
+    "series": ["points (2 coords)", "polygons (5 vertices)"],
+    "bars": [
+      {"label": "50 features", "values": [123.1, 164.2]},
+      {"label": "200 features", "values": [412.9, 617.6]}
+    ]
+  },
+  {
+    "file": "concurrent-reads.svg",
+    "title": "Concurrent read latency (shared store, 2-way join)",
+    "subtitle": "wall-clock for N parallel queries; lock-free reads scale sublinearly",
+    "unit": "µs", "lower_is_better": true,
+    "bars": [
+      {"label": "1 thread", "value": 195.5},
+      {"label": "2 threads", "value": 244.6},
+      {"label": "4 threads", "value": 362.0},
+      {"label": "8 threads", "value": 614.4}
+    ]
+  },
+  {
+    "file": "shacl-scaling.svg",
+    "title": "SHACL validation throughput vs focus-node count",
+    "subtitle": "1 NodeShape, 2 property constraints; fixed cost amortizes with scale",
+    "unit": "k nodes/s", "higher_is_better": true,
+    "bars": [
+      {"label": "100 nodes", "value": 85},
+      {"label": "500 nodes", "value": 226},
+      {"label": "1000 nodes", "value": 286}
+    ]
+  }
+]

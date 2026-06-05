@@ -53,10 +53,11 @@ the only variable is the host hardware.
 | Container runtime | Docker Desktop 28.5.1, WSL2 backend (kernel 6.6.87.2-microsoft-standard-WSL2) |
 | CPU | AMD Ryzen 9 7900X3D — 12 cores / 24 threads, 3D V-Cache |
 | CPU visible to Docker | 24 logical processors |
-| RAM visible to Docker | ~31 GiB |
+| RAM visible to Docker | 30.9 GiB |
 | Storage | NVMe SSD |
 | GPU | Not used — the triplestore has no GPU code path |
-| Rust | `ots-builder` image (rust:1.91-bookworm), `--release` |
+| Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 |
+| Rust / image | rustc 1.91.1 · `ots-builder` (rust:1.91-bookworm) · `--release` |
 
 > GPUs are listed for completeness only; RDF/SPARQL/GeoSPARQL/SHACL workloads
 > here are CPU- and memory-bound, so the GPU has no effect on these numbers.
@@ -105,38 +106,179 @@ per-benchmark `estimates.json` files that can be diffed across runs or machines.
 
 ### Measured results — reference system (AMD Ryzen 9 7900X3D)
 
-Measured on the reference system above (Docker/WSL2, release build) with a
-reduced-sample smoke run (`--sample-size 10 --measurement-time 3`). Times are
-Criterion's [low median high] estimate; treat as indicative, not definitive.
-A representative subset is shown (the full `cargo bench` run reproduces every
-group plus insert/query/path/update):
+A **full** `cargo bench --bench performance --features full` run on the reference
+system above (Docker/WSL2, release, 24 vCPU), captured 2026-06 — **97 benchmarks**,
+Criterion median shown. Reproduce with the [run command](#reproducible-run-command);
+per-benchmark `estimates.json` is written under `target/criterion/`. Charts are
+in [`docs/benchmarks/`](benchmarks/).
 
-```
-# GeoSPARQL (GEOS, per-binding)
-geosparql/distance/50                 124 µs        geosparql/distance/200          411 µs
-geosparql/sf_contains/200             447 µs        geosparql/sf_intersects/50      136 µs
-geosparql/sf_intersects/200           454 µs        geosparql/buffer/50            3.35 ms
-geosparql/buffer/200                13.76 ms
-geosparql/polygon_complexity/points/50    137 µs    .../polygons/50      186 µs  (~36% poly overhead)
-geosparql/polygon_complexity/points/200   501 µs    .../polygons/200     686 µs
+#### SPARQL query latency
 
-# SHACL validation (1 NodeShape, named property shapes)
-shacl/validate_clean/100             1.87 ms        shacl/validate_violations/100   1.89 ms
-shacl/validate_clean/500             2.34 ms        shacl/validate_violations/500   2.17 ms
-shacl/validate_clean/1000            2.63 ms        shacl/validate_violations/1000  2.74 ms
+![SPARQL query latency at 10k persons / 50k triples](benchmarks/query-latency-10k.svg)
 
-# Concurrency (shared Arc<TripleStore>, 2-way join workload)
-concurrent/reads/threads=1            198 µs        concurrent/writes/threads=1     262 µs
-concurrent/reads/threads=2            263 µs        concurrent/writes/threads=2     346 µs
-concurrent/reads/threads=4            398 µs        concurrent/writes/threads=4     579 µs
-concurrent/reads/threads=8            635 µs        concurrent/mixed/4r_1w         5.55 ms
-```
+| Query form | 1k | 10k | 100k |
+|---|--:|--:|--:|
+| simple lookup (full scan) | 275 µs | 2.73 ms | 43.8 ms |
+| lookup + `LIMIT 10` | 17.4 µs | 17.4 µs | 17.6 µs |
+| 2-way join | 627 µs | 7.62 ms | — |
+| 3-way join | 966 µs | 11.9 ms | — |
+| FILTER (numeric) | 262 µs | 2.44 ms | — |
+| REGEX filter | 218 µs | 1.80 ms | — |
+| OPTIONAL | 664 µs | 9.70 ms | — |
+| COUNT(*) | 620 µs | 7.09 ms | 66.2 ms |
+| GROUP BY + AVG | 604 µs | 8.84 ms | — |
+| GROUP_CONCAT | 639 µs | 7.71 ms | — |
+| subquery (MAX) | 741 µs | 9.57 ms | — |
+| VALUES | 206 µs | 2.03 ms | — |
+| BIND | 387 µs | 3.98 ms | — |
+| MINUS | 301 µs | 3.11 ms | — |
+| NOT EXISTS | 594 µs | 8.06 ms | — |
+| CONSTRUCT (`LIMIT 1000`) | 391 µs | 431 µs | — |
+| named graph (unbound `GRAPH ?g`) | 346 µs | 3.46 ms | — |
 
-> Notes: SHACL validation now runs in parallel (rayon) across shapes; the ~1.9 ms
-> floor at 100 nodes is shapes-loading + target-resolution overhead. Concurrent
-> reads scale sublinearly here because each "read" already runs an internal
-> parallel join; the figures are aggregate wall-clock per iteration. The 3D
-> V-Cache on the 7900X3D notably benefits the index-scan-heavy query paths.
+`LIMIT` short-circuits: `lookup_with_limit` stays ~17 µs regardless of dataset
+size (early termination), whereas an unbounded scan is O(n).
+
+#### SPARQL operators — pick the cheaper equivalent
+
+![operator cost at 10k](benchmarks/operators.svg)
+
+`MINUS` is **2.6× cheaper** than `FILTER NOT EXISTS` at 10k (3.11 ms vs 8.06 ms):
+MINUS hashes the exclusion set once; NOT EXISTS re-evaluates its inner pattern
+per row. `VALUES` (2.03 ms) beats the equivalent 2-pattern join (7.62 ms).
+
+#### Property paths
+
+| Path | small | mid | large |
+|---|--:|--:|--:|
+| transitive `+` (chain) | 283 µs (50) | 1.08 ms (100) | 4.42 ms (200) |
+| zero-or-more `*` (chain) | 309 µs (50) | 1.14 ms (100) | 4.47 ms (200) |
+| sequence `a/a` | 73 µs (100) | 305 µs (500) | 615 µs (1k) |
+| inverse `^a` | 44 µs (100) | 306 µs (1k) | 2.97 ms (10k) |
+| alternative `a\|b` | 684 µs (1k) | 8.99 ms (10k) | — |
+| negated `!(a\|b)` | 1.13 ms (1k) | 14.6 ms (10k) | — |
+
+Inverse paths match forward-scan speed (they use the O-P-S index); `*` adds ~2 %
+over `+` for the identity solutions.
+
+#### Bulk loading & writes
+
+![bulk-loader throughput vs size](benchmarks/bulk-load-throughput.svg)
+
+| Operation | 100 | 1k | 10k | 100k |
+|---|--:|--:|--:|--:|
+| bulk_loader (Turtle) | 551 µs | 5.56 ms | 67.2 ms | 917 ms |
+| → triples/s | 908 K | 899 K | 744 K | 545 K |
+| named-graph load (N-Quads, 10 graphs) | — | 3.57 ms | 39.8 ms | 570 ms |
+| `INSERT … WHERE` | 311 µs | 2.57 ms | 34.5 ms | — |
+| `DELETE … WHERE` | 208 µs | 1.84 ms | 18.9 ms | — |
+
+Single `INSERT DATA` is 72 µs/triple (~14 K/s); batching 10 triples per statement
+drops that to 27 µs/triple (~37 K/s, **2.6×**). Use the bulk loader for ingestion
+(~0.5–0.9 M triples/s).
+
+#### GeoSPARQL (GEOS, per candidate binding)
+
+![GeoSPARQL points vs polygons](benchmarks/geosparql.svg)
+
+| Function | 50 | 200 |
+|---|--:|--:|
+| `geof:sfContains` | 119 µs | 411 µs |
+| `geof:sfIntersects` | 124 µs | 413 µs |
+| `geof:distance` | 114 µs | 390 µs |
+| `geof:buffer` (constructive) | 2.95 ms | 11.9 ms |
+| polygon_complexity — points | 123 µs | 413 µs |
+| polygon_complexity — polygons | 164 µs | 618 µs |
+
+5-vertex polygons cost ~33–50 % more than points for the same DE-9IM relation;
+`buffer` is far heavier because it materialises a new geometry per row.
+
+#### SHACL validation
+
+![SHACL throughput vs focus-node count](benchmarks/shacl-scaling.svg)
+
+| Focus nodes | clean | 20 % violations |
+|---|--:|--:|
+| 100 | 1.18 ms | 1.20 ms |
+| 500 | 2.21 ms | 2.17 ms |
+| 1000 | 3.50 ms | 3.41 ms |
+
+Shapes are evaluated **in parallel** (rayon `par_iter`); the ~1.2 ms floor at 100
+nodes is shapes-loading + target resolution, so throughput rises from 85 K to
+286 K nodes/s as that fixed cost amortizes. Violations add negligible overhead
+for this shape.
+
+#### Concurrency
+
+![concurrent read latency vs threads](benchmarks/concurrent-reads.svg)
+
+| Threads | reads | writes |
+|---|--:|--:|
+| 1 | 196 µs | 251 µs |
+| 2 | 245 µs | 335 µs |
+| 4 | 362 µs | 597 µs |
+| 8 | 614 µs | — |
+
+Reads are lock-free: 4 concurrent join queries cost ~1.85× a single one, not 4×.
+Writes serialize on the store's write lock. Mixed 4-reader + 1-writer: 5.47 ms.
+
+> The 7900X3D's 3D V-Cache notably helps the index-scan-heavy paths. GPUs are
+> irrelevant — every path here is CPU/memory-bound.
+
+---
+
+## Comparison with Apache Jena Fuseki
+
+A direct, **same-hardware HTTP head-to-head** against
+[Apache Jena Fuseki](https://jena.apache.org/documentation/fuseki2/)
+(`stain/jena-fuseki@sha256:b1d0c96…`, TDB2 backend, ~Jena 4.x) — the most widely
+deployed open-source SPARQL server. Both servers load the **identical
+500k-triple** dataset (the same deterministic 100k-person generator the criterion
+suite uses) and answer the **identical** queries over HTTP on the reference
+machine. Latency is the **median of 9 paced runs** of compute-bound queries that
+return ≤10 rows, so the timing reflects engine work rather than result transfer.
+
+![Open Triplestore vs Fuseki — query latency on 500k triples](benchmarks/compare-vs-fuseki.svg)
+
+| Query (500k triples, over HTTP) | Open Triplestore | Fuseki (TDB2) |
+|---|--:|--:|
+| `COUNT(*)` over all triples | 117 ms | 55 ms |
+| 2-way join + `COUNT` | 271 ms | 118 ms |
+| `GROUP BY` + `AVG` | 272 ms | 224 ms |
+| `FILTER` + `COUNT` (≈30 % selectivity) | 29 ms | 42 ms |
+| `COUNT(DISTINCT …)` | 25 ms | 23 ms |
+| Bulk load 500k (GSP `PUT`) | ~5.0 s | ~4.4 s |
+
+**Reading these honestly.** Open Triplestore is faster on the selective
+`FILTER`/`COUNT(*)`-of-a-scan and within ~20 % on `GROUP BY`/`DISTINCT`/load,
+while Fuseki is ~2× faster on full `COUNT(*)` and the join-`COUNT`. Two factors
+explain the gap and are worth stating plainly:
+
+1. **This measures the full multi-tenant HTTP stack, not the raw engine.** Every
+   Open Triplestore query is rewritten by the ACL layer to scope to the caller's
+   readable graphs (`FROM` injection) and runs through Axum plus a per-IP rate
+   limiter; Fuseki's `/ds/query` has none of that. The **in-process** numbers
+   above (e.g. `COUNT(*)` over 500k in ~66 ms with no HTTP/ACL) are the engine's
+   true speed — roughly 2× faster than the same query over our HTTP path.
+2. **No fast `COUNT(*)` path yet.** Our aggregation materialises solution rows
+   (see optimization #4 below); TDB2 has a cardinality short-cut. This is the
+   single biggest contributor to the `COUNT`/join-`COUNT` gap.
+
+**Reproduce it.** Run both servers as containers on one Docker network, load
+`data.nt` into each (Fuseki via GSP with `-u admin:admin`; Open Triplestore by
+registering a public dataset and `PUT`ting to its graph), then time identical
+queries with `curl -w %{time_total}`, pacing requests below Open Triplestore's
+default SPARQL rate limit. The generator, queries and client scripts mirror the
+criterion `gen_persons` workload.
+
+**Why not a large multi-store leaderboard?** A fair cross-store benchmark needs
+the *same* hardware, dataset, query mix and protocol; published BSBM/SP2Bench
+figures run on different machines and configurations and are not comparable
+line-for-line. Open Triplestore embeds **Oxigraph 0.4** as its engine, so its raw
+query/parse throughput tracks Oxigraph's (a modern Rust store competitive with
+RDF4J and Jena on many workloads). The Fuseki comparison is included precisely
+because it could be run here under identical conditions; apply the same recipe to
+GraphDB, Virtuoso or RDF4J on your own hardware for an apples-to-apples result.
 
 ---
 
@@ -364,11 +506,12 @@ read-throughput degradation under write-lock contention.
 
 ---
 
-## Sample Results — Apple M3 Pro (18 GB, macOS 14, Rust 1.85, release build)
+## Illustrative results — second machine (Apple M3 Pro, 18 GB, macOS, Rust 1.85)
 
-These numbers were measured with Criterion's default sample configuration.
-Your hardware will produce different absolute values; relative ratios between
-groups are more informative.
+> The **authoritative, current** numbers are the reference-system results above
+> (AMD Ryzen 9 7900X3D, full run). The figures below are retained only as an
+> illustration on different hardware — useful for the *relative ratios* between
+> groups, not for absolute comparison, and predate some of the engine fixes.
 
 ### Data Ingestion
 
@@ -789,18 +932,13 @@ counter without row materialisation would be significantly faster.
 index and counts without building solution maps; wire it into the SPARQL
 evaluation engine for the `COUNT(*)` special case.
 
-### 5. Parallel SHACL evaluation
+### 5. Parallel SHACL evaluation — ✅ implemented
 
-**Impact:** 4–8× improvement on multi-core machines for datasets with many
-shapes.
-
-**Rationale:** SHACL shapes are currently evaluated sequentially. Each shape
-is independent — evaluating shape A does not depend on the result of shape B.
-
-**Implementation:** Replace the sequential loop over shapes in
-`shacl::engine::validate` with a `rayon::par_iter()` call. Results are then
-collected and merged. Requires thread-safe access to the store (already
-`Arc<…>`).
+`shacl::engine::validate` already evaluates shapes (and their focus nodes) in
+parallel via `rayon::par_iter()`, with a per-worker query cache. This is why
+SHACL throughput climbs from 85 K to 286 K nodes/s as the dataset grows (the
+fixed shapes-loading cost amortizes across cores). Remaining headroom is in the
+fixed ~1 ms shapes-loading floor, not the per-node evaluation.
 
 ### 6. Property path memoisation
 
