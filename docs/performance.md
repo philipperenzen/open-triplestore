@@ -350,6 +350,67 @@ This is increment 1 — a tested, benchmarked capability beside the engine. Next
 
 ---
 
+## Optimized showcase vs Fuseki (fast-COUNT + multi-core)
+
+After the profiling round (fast-`COUNT(*)` + subject-sharded parallel execution),
+re-run of the same-hardware head-to-head on ~500k triples. "Single-core HTTP" is
+the live server today; "16-shard parallel" is the OpenGraph parallel engine
+(`ParallelStore`) on the same workload; Fuseki is TDB2 over HTTP.
+
+![Optimized Open Triplestore vs Fuseki](benchmarks/showcase-vs-fuseki.svg)
+
+| Query (~500k triples) | OTS single-core (HTTP) | OTS 16-shard parallel | Fuseki (HTTP) | best OTS vs Fuseki |
+|---|--:|--:|--:|--:|
+| `COUNT(*)` | **2.1 ms** (fast-count) | 9.4 ms | 55 ms | **26× faster** |
+| 2-way join `COUNT` | 267 ms | **13.3 ms** | 118 ms | **8.9× faster** |
+| `FILTER` `COUNT` | 30 ms | **4.9 ms** | 41 ms | **8.4× faster** |
+| `GROUP BY` + `AVG` | 268 ms | n/a¹ | 217 ms | 0.8× |
+| `COUNT(DISTINCT)` | 27 ms | n/a¹ | 24 ms | 0.9× |
+
+¹ Not yet shard-decomposable (a `GROUP BY` on a non-subject key, or `DISTINCT`
+across shards, needs mergeable partial aggregates — on the roadmap). The
+single-core figures already match Fuseki here.
+
+**Reading it honestly.** `COUNT(*)` is now an O(1) index lookup, so it wins
+decisively (26×). For scans/joins the parallel engine wins ~8–9× by using many
+cores where Fuseki uses one per query. The two columns where Fuseki still leads
+slightly are the cases neither optimization covers yet — and even there we're
+within ~20%. Caveat: the parallel column is in-process (no HTTP/ACL round-trip,
+600k-triple generator) while single-core/Fuseki are over HTTP on 500k — the
+parallel numbers show engine scaling, not an HTTP-identical comparison.
+
+### Standards-workload query times (Open Triplestore)
+
+**GeoSPARQL** (GEOS, per candidate binding; in-process median):
+
+| Function | 50 features | 200 features | per-feature |
+|---|--:|--:|--:|
+| `geof:sfContains` | 119 µs | 411 µs | ~2 µs |
+| `geof:sfIntersects` | 124 µs | 413 µs | ~2 µs |
+| `geof:distance` | 114 µs | 390 µs | ~2 µs |
+| `geof:buffer` (constructive) | 2.95 ms | 11.9 ms | ~60 µs |
+
+Profiling note: GeoSPARQL relation cost is dominated by **WKT parsing** (`strtod`
+per coordinate + GEOS tokeniser), not the geometric computation — a parsed-geometry
+cache is the next geo win (deferred: GEOS geometries are tied to a thread-local
+GEOS context, so a naive thread-local cache aborts on thread teardown; a
+query-scoped or load-time precomputed cache is the safe path).
+
+**SHACL** (Core + Advanced/`sh:sparql`; shapes evaluated in parallel via rayon):
+
+| Focus nodes | clean | 20% violations |
+|---|--:|--:|
+| 100 | 1.18 ms | 1.20 ms |
+| 500 | 2.21 ms | 2.17 ms |
+| 1000 | 3.50 ms | 3.41 ms |
+
+A direct cross-store SHACL/GeoSPARQL comparison needs Jena's *separate* engines
+(`jena-shacl`, `jena-geosparql` with a spatial-index assembler) rather than the
+plain Fuseki query endpoint; the figures above are Open Triplestore's, with the
+recipe in [`docs/benchmarks/`](benchmarks/) to extend the harness to those tools.
+
+---
+
 ## Benchmark Groups
 
 ### `insert/bulk_loader`
