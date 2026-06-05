@@ -42,8 +42,7 @@ struct BulkMeta {
     /// is the filename; inner map is `{ embedded_iri: new_target_iri }`. Only
     /// consulted for quad formats with `merge=false`.
     #[serde(default)]
-    graph_remap:
-        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    graph_remap: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Filenames for which auto_split should be applied (triples split by role
     /// into `{target_graph}/model`, `{target_graph}/shapes`, etc.)
     #[serde(default)]
@@ -298,9 +297,10 @@ pub async fn bulk_import(
     // above (and stay out of the shared global default graph); admins and unmanaged
     // (no-`dataset_id`) imports keep the legacy global-default behavior.
     let unnamed_graph_target: Option<String> = match meta.dataset_id.as_deref() {
-        Some(ds_id) if !authz_is_admin => {
-            Some(dataset_graph::dataset_default_graph_iri(&state.base_url, ds_id))
-        }
+        Some(ds_id) if !authz_is_admin => Some(dataset_graph::dataset_default_graph_iri(
+            &state.base_url,
+            ds_id,
+        )),
         _ => None,
     };
 

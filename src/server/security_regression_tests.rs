@@ -857,8 +857,9 @@ mod tests {
         let foreign = "http://foreign.example/g";
         let target = "http://localhost:7878/dataset/dsA/data";
         let nquads = format!("<urn:x:s> <urn:x:p> <urn:x:o> <{foreign}> .");
-        let meta =
-            format!(r#"{{"dataset_id":"dsA","graph_remap":{{"a.nq":{{"{foreign}":"{target}"}}}}}}"#);
+        let meta = format!(
+            r#"{{"dataset_id":"dsA","graph_remap":{{"a.nq":{{"{foreign}":"{target}"}}}}}}"#
+        );
         let boundary = "BNDxt7";
         let body = multipart_body(
             boundary,

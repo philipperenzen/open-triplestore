@@ -130,9 +130,11 @@ fn parse_one(input: &InputFile) -> Result<(Vec<Quad>, Vec<String>), String> {
     // namespaced default graph so these triples are authorized and stay inside the
     // tenant boundary; `None` preserves the legacy global-default behavior.
     let unnamed_graph_node: Option<GraphName> = match input.unnamed_graph_target.as_deref() {
-        Some(iri) => Some(GraphName::NamedNode(NamedNode::new(iri).map_err(|e| {
-            format!("Invalid unnamed-graph target IRI '{iri}': {e}")
-        })?)),
+        Some(iri) => {
+            Some(GraphName::NamedNode(NamedNode::new(iri).map_err(|e| {
+                format!("Invalid unnamed-graph target IRI '{iri}': {e}")
+            })?))
+        }
         None => None,
     };
 
@@ -167,9 +169,10 @@ fn parse_one(input: &InputFile) -> Result<(Vec<Quad>, Vec<String>), String> {
                 // (used to move an embedded graph under the dataset namespace so
                 // the authorize gate admits it). Unmapped graphs keep their name.
                 GraphName::NamedNode(nn) => match input.graph_remap.get(nn.as_str()) {
-                    Some(to) => GraphName::NamedNode(NamedNode::new(to).map_err(|e| {
-                        format!("Invalid remap target IRI '{to}': {e}")
-                    })?),
+                    Some(to) => GraphName::NamedNode(
+                        NamedNode::new(to)
+                            .map_err(|e| format!("Invalid remap target IRI '{to}': {e}"))?,
+                    ),
                     None => q.graph_name.clone(),
                 },
                 // No usable graph IRI. Prefer an explicit `target_graph`, then the
@@ -565,7 +568,10 @@ mod tests {
         // the write target, so the authorize closure must see it (otherwise a
         // quad file could bypass a target-graph-only check).
         let embedded = "http://example.org/embedded";
-        let input = nq_input("a.nq", &format!("<http://e/s> <http://e/p> <http://e/o> <{embedded}> ."));
+        let input = nq_input(
+            "a.nq",
+            &format!("<http://e/s> <http://e/p> <http://e/o> <{embedded}> ."),
+        );
         let mut seen: Vec<String> = vec![];
         parse_and_load_bulk(
             &store,
@@ -706,8 +712,7 @@ mod tests {
             false,
         );
 
-        let res =
-            parse_and_load_bulk(&store, vec![bad, good], |_| Ok(()), |_| Ok(())).unwrap();
+        let res = parse_and_load_bulk(&store, vec![bad, good], |_| Ok(()), |_| Ok(())).unwrap();
 
         // The bad file is recorded as an error without aborting its sibling.
         assert_eq!(res.failed_count, 1);
