@@ -18,6 +18,16 @@ pub fn dataset_iri(base_url: &str, dataset_id: &str) -> String {
     format!("{}/dataset/{}", base_url.trim_end_matches('/'), dataset_id)
 }
 
+/// Named graph IRI for a dataset's "default graph": where DEFAULT-graph (and
+/// blank-node-graph) triples from a dataset-scoped quad import are routed so they
+/// fall under the per-graph write boundary instead of the shared global default
+/// graph. Lives under the dataset's owned namespace, so the bulk-import authorize
+/// gate admits it (`g.starts_with("{base}/dataset/{id}/")`). `default` is neither
+/// an auto-split role suffix nor a `urn:system:` graph, so it cannot collide.
+pub fn dataset_default_graph_iri(base_url: &str, dataset_id: &str) -> String {
+    format!("{}/default", dataset_iri(base_url, dataset_id))
+}
+
 /// Write (or overwrite) the DCAT/ADMS/VoID/VCARD metadata named graph for a dataset.
 /// Silently ignores errors so that metadata graph failures never abort the main operation.
 ///
