@@ -364,11 +364,24 @@ impl TripleStore {
         format: RdfFormat,
         to_graph: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.load_reader_with_base(reader, format, None, to_graph)
+    }
+
+    /// Like [`Self::load_reader`], but resolves relative IRIs in the input against
+    /// `base_iri`. Used by the LDP layer so an idiomatic `<>`-rooted request body
+    /// attaches to the target resource IRI instead of being rejected as schemeless.
+    pub fn load_reader_with_base(
+        &self,
+        reader: impl BufRead,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+        to_graph: Option<&str>,
+    ) -> Result<(), StoreError> {
         // Fast path: nothing to rewrite and no forced graph → stream directly.
         if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
             self.store
                 .bulk_loader()
-                .load_from_reader(RdfParser::from_format(format), reader)?;
+                .load_from_reader(Self::parser_for(format, base_iri)?, reader)?;
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
@@ -377,7 +390,7 @@ impl TripleStore {
 
         // Materialise quads (embedded graph names from NQuads/TriG are preserved;
         // triple formats land in the default graph). Parse errors are propagated.
-        let mut quads: Vec<Quad> = RdfParser::from_format(format)
+        let mut quads: Vec<Quad> = Self::parser_for(format, base_iri)?
             .for_reader(reader)
             .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
@@ -421,6 +434,30 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let reader = BufReader::new(data.as_bytes());
         self.load_reader(reader, format, to_graph)
+    }
+
+    /// Load RDF data from a string, resolving relative IRIs against `base_iri`.
+    pub fn load_str_with_base(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        base_iri: &str,
+        to_graph: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let reader = BufReader::new(data.as_bytes());
+        self.load_reader_with_base(reader, format, Some(base_iri), to_graph)
+    }
+
+    /// Build an [`RdfParser`] for `format`, optionally resolving relative IRIs
+    /// against `base_iri`.
+    fn parser_for(format: RdfFormat, base_iri: Option<&str>) -> Result<RdfParser, StoreError> {
+        let parser = RdfParser::from_format(format);
+        match base_iri {
+            Some(base) => parser
+                .with_base_iri(base)
+                .map_err(|e| StoreError::Parse(format!("Invalid base IRI '{base}': {e}"))),
+            None => Ok(parser),
+        }
     }
 
     /// Stream all triples from a graph in the specified format into `writer`.
