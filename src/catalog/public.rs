@@ -158,68 +158,45 @@ fn build_entry(
 pub async fn serve_public_catalog(State(state): State<AppState>) -> Json<PublicCatalog> {
     let auth_db = state.auth_db.as_ref();
 
-    let models = crate::data_models::registry::list_data_models(&state.store)
+    // One unified registry. The public JSON still splits entries by kind so a
+    // "Releases" page can present ontologies and SKOS vocabularies separately.
+    let mut models: Vec<PublicEntry> = Vec::new();
+    let mut vocabularies: Vec<PublicEntry> = Vec::new();
+
+    for m in crate::data_models::registry::list_data_models(&state.store)
         .into_iter()
         .filter(|m| m.is_public && m.latest_published.is_some())
-        .map(|m| {
-            let rows =
-                crate::data_models::registry::list_versions(&state.store, &state.base_url, &m.id)
-                    .into_iter()
-                    .map(|v| VersionRow {
-                        version: v.version,
-                        status: v.status.as_str().to_string(),
-                        created_at: v.created_at,
-                        notes: v.notes,
-                        created_by: v.created_by,
-                    })
-                    .collect();
-            build_entry(
-                auth_db,
-                "data-model",
-                m.id,
-                m.title,
-                m.description,
-                Some(m.namespace),
-                m.owner_type.as_deref(),
-                m.owner_id.as_deref(),
-                m.latest_published,
-                rows,
-            )
-        })
-        .collect();
-
-    let vocabularies = crate::vocabularies::registry::list_vocabularies(&state.store)
-        .into_iter()
-        .filter(|v| v.is_public && v.latest_published.is_some())
-        .map(|voc| {
-            let rows = crate::vocabularies::registry::list_versions(
-                &state.store,
-                &state.base_url,
-                &voc.id,
-            )
-            .into_iter()
-            .map(|v| VersionRow {
-                version: v.version,
-                status: v.status.as_str().to_string(),
-                created_at: v.created_at,
-                notes: v.notes,
-                created_by: v.created_by,
-            })
-            .collect();
-            build_entry(
-                auth_db,
-                "vocabulary",
-                voc.id,
-                voc.title,
-                voc.description,
-                Some(voc.namespace),
-                voc.owner_type.as_deref(),
-                voc.owner_id.as_deref(),
-                voc.latest_published,
-                rows,
-            )
-        })
-        .collect();
+    {
+        let is_vocab = m.kind == crate::kind_detector::RegistryKind::Vocabulary;
+        let rows =
+            crate::data_models::registry::list_versions(&state.store, &state.base_url, &m.id)
+                .into_iter()
+                .map(|v| VersionRow {
+                    version: v.version,
+                    status: v.status.as_str().to_string(),
+                    created_at: v.created_at,
+                    notes: v.notes,
+                    created_by: v.created_by,
+                })
+                .collect();
+        let entry = build_entry(
+            auth_db,
+            m.kind.as_str(),
+            m.id,
+            m.title,
+            m.description,
+            Some(m.namespace),
+            m.owner_type.as_deref(),
+            m.owner_id.as_deref(),
+            m.latest_published,
+            rows,
+        );
+        if is_vocab {
+            vocabularies.push(entry);
+        } else {
+            models.push(entry);
+        }
+    }
 
     Json(PublicCatalog {
         models,

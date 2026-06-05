@@ -4,6 +4,7 @@
 //! `<urn:system:data-model-registry>` inside Oxigraph.
 
 use super::models::{DataModelRecord, DataModelVersion, SubGraphStatus, VersionStatus};
+use crate::kind_detector::RegistryKind;
 use crate::store::TripleStore;
 use oxigraph::model::*;
 use oxigraph::sparql::QueryResults;
@@ -38,7 +39,7 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
         PREFIX ver: <{VER}>
         PREFIX dct: <{DCT}>
         PREFIX owl: <{OWL}>
-        SELECT ?id ?title ?ns ?latestPub ?latestDraft ?createdAt ?createdBy ?description ?isPublic ?ownerType ?ownerId WHERE {{
+        SELECT ?id ?title ?ns ?latestPub ?latestDraft ?createdAt ?createdBy ?description ?isPublic ?ownerType ?ownerId ?kind WHERE {{
           GRAPH <{REGISTRY_GRAPH}> {{
             ?id a ver:DataModel ;
                 dct:title ?title ;
@@ -51,6 +52,7 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
             OPTIONAL {{ ?id ver:isPublic ?isPublic }}
             OPTIONAL {{ ?id ver:ownerType ?ownerType }}
             OPTIONAL {{ ?id ver:ownerId ?ownerId }}
+            OPTIONAL {{ ?id ver:kind ?kind }}
           }}
         }}
         "#
@@ -95,6 +97,9 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
                 version_count,
                 created_at: var_str(&vals, 5).unwrap_or_default(),
                 created_by: var_str(&vals, 6),
+                kind: var_str(&vals, 11)
+                    .map(|s| RegistryKind::from_persisted(&s))
+                    .unwrap_or_default(),
             });
         }
     }
@@ -134,7 +139,7 @@ pub fn get_data_model(
         r#"
         PREFIX ver: <{VER}>
         PREFIX dct: <{DCT}>
-        SELECT ?title ?ns ?latestPub ?latestDraft ?createdAt ?createdBy ?description ?isPublic ?ownerType ?ownerId WHERE {{
+        SELECT ?title ?ns ?latestPub ?latestDraft ?createdAt ?createdBy ?description ?isPublic ?ownerType ?ownerId ?kind WHERE {{
           GRAPH <{REGISTRY_GRAPH}> {{
             <{ont_iri}> a ver:DataModel ;
                 dct:title ?title ;
@@ -147,6 +152,7 @@ pub fn get_data_model(
             OPTIONAL {{ <{ont_iri}> ver:isPublic ?isPublic }}
             OPTIONAL {{ <{ont_iri}> ver:ownerType ?ownerType }}
             OPTIONAL {{ <{ont_iri}> ver:ownerId ?ownerId }}
+            OPTIONAL {{ <{ont_iri}> ver:kind ?kind }}
           }}
         }}
         "#
@@ -179,6 +185,9 @@ pub fn get_data_model(
                 version_count,
                 created_at: var_str(&vals, 4).unwrap_or_default(),
                 created_by: var_str(&vals, 5),
+                kind: var_str(&vals, 10)
+                    .map(|s| RegistryKind::from_persisted(&s))
+                    .unwrap_or_default(),
             });
         }
     }
@@ -236,6 +245,28 @@ pub fn insert_data_model(
           }}
         }}
         "#
+    );
+    store.update(&q)
+}
+
+/// Upsert the logical `kind` (`data-model` | `vocabulary` | …) of a registry
+/// entry. Called on every version upload so the type badge/filter reflects the
+/// latest detected content.
+pub fn set_data_model_kind(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    kind: RegistryKind,
+) -> Result<(), crate::store::engine::StoreError> {
+    let ont_iri = format!("{}/data-model/{}", base_url, data_model_id);
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        DELETE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ont_iri}> ver:kind ?old }} }}
+        INSERT {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ont_iri}> ver:kind "{kind}" }} }}
+        WHERE  {{ GRAPH <{REGISTRY_GRAPH}> {{ OPTIONAL {{ <{ont_iri}> ver:kind ?old }} }} }}
+        "#,
+        kind = kind.as_str()
     );
     store.update(&q)
 }

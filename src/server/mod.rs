@@ -30,7 +30,6 @@ use crate::prefixes::PrefixRegistry;
 use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_routes};
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
-use crate::vocabularies::routes::{vocabulary_auth_routes, vocabulary_public_routes};
 use axum::extract::{ConnectInfo, DefaultBodyLimit};
 use axum::http::{HeaderName, HeaderValue, Method, Request};
 use axum::middleware;
@@ -898,19 +897,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // Vocabulary registry — public read routes
-    let vocabulary_read = Router::new()
-        .merge(vocabulary_public_routes())
-        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
-        .with_state(state.clone());
-
-    // Vocabulary registry — write routes
-    let vocabulary_write = Router::new()
-        .merge(vocabulary_auth_routes())
-        .route_layer(middleware::from_fn(require_publisher))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state.clone());
-
     // Dataset versioning — public read routes (visibility scoped via optional_auth)
     let dataset_version_read = Router::new()
         .merge(dataset_version_public_routes())
@@ -1069,8 +1055,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(reasoning_api_routes)
         .merge(data_model_read)
         .merge(data_model_write)
-        .merge(vocabulary_read)
-        .merge(vocabulary_write)
         .merge(dataset_version_read)
         .merge(dataset_version_write)
         .merge(saved_query_read)

@@ -4,20 +4,17 @@
   import { GitBranch, GitMerge, Plus, Loader2 } from 'lucide-svelte';
   import {
     getDataModelBranches, createDataModelBranch,
-    getVocabularyBranches, createVocabularyBranch,
   } from '../lib/api.js';
   import MergeDialog from './MergeDialog.svelte';
   import Select from './Select.svelte';
 
-  // 'data-model' | 'vocabulary'
-  export let kind = 'data-model';
   export let id;
   export let versions = [];
   export let canWrite = false;
 
   const dispatch = createEventDispatcher();
-  const listFn = kind === 'vocabulary' ? getVocabularyBranches : getDataModelBranches;
-  const createFn = kind === 'vocabulary' ? createVocabularyBranch : createDataModelBranch;
+  const listFn = getDataModelBranches;
+  const createFn = createDataModelBranch;
 
   let branches = [];
   let loading = false;
@@ -124,7 +121,7 @@
 
 {#if mergeFrom && mergeInto}
   <MergeDialog
-    {kind} {id} from={mergeFrom} into={mergeInto}
+    {id} from={mergeFrom} into={mergeInto}
     on:close={() => (mergeFrom = null)}
     on:merged={() => { mergeFrom = null; loadBranches(); dispatch('created'); }}
   />

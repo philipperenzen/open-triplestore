@@ -86,6 +86,33 @@ impl RegistryKind {
             RegistryKind::Instances => GraphKind::Instances,
         }
     }
+
+    /// Stable kebab-case string used to persist the kind in the registry
+    /// (`ver:kind`). Matches the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RegistryKind::DataModel => "data-model",
+            RegistryKind::Vocabulary => "vocabulary",
+            RegistryKind::Shapes => "shapes",
+            RegistryKind::Entailment => "entailment",
+            RegistryKind::Instances => "instances",
+        }
+    }
+
+    /// Parse a persisted kind string back into a [`RegistryKind`], tolerating the
+    /// same aliases as [`parse_kind_override`]. Unknown values fall back to
+    /// [`RegistryKind::DataModel`].
+    pub fn from_persisted(s: &str) -> Self {
+        parse_kind_override(s).unwrap_or(RegistryKind::DataModel)
+    }
+}
+
+/// A registry entry whose kind has never been recorded is treated as a plain
+/// data model (the original, pre-merge default).
+impl Default for RegistryKind {
+    fn default() -> Self {
+        RegistryKind::DataModel
+    }
 }
 
 /// Evidence tallies from a single-pass quad scan.

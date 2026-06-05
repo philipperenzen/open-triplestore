@@ -1,8 +1,10 @@
-//! Per-term dereference for data-model classes / properties / shapes.
+//! Per-term dereference for a model's classes / properties / shapes / SKOS concepts.
 //!
-//! `GET /api/data-models/:id/term?iri=<term IRI>` runs a SPARQL `DESCRIBE`
+//! `GET /api/models/:id/term?iri=<term IRI>` runs a SPARQL `DESCRIBE`
 //! over the latest published version's named graphs and returns the
-//! Concise Bounded Description in the client's preferred RDF format.
+//! Concise Bounded Description in the client's preferred RDF format. When the
+//! term is a SKOS concept the enclosing `skos:ConceptScheme` is pulled in too;
+//! for non-SKOS terms that extra clause simply binds nothing.
 
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -73,7 +75,18 @@ pub async fn describe_term(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let q = format!("DESCRIBE <{}>\n{from_clauses}", params.iri);
+    // Describe the term and, for SKOS concepts, the scheme it belongs to. The
+    // OPTIONAL is inert for ontology classes/properties (it binds nothing).
+    let q = format!(
+        r#"
+        DESCRIBE <{iri}> ?scheme
+        {from_clauses}
+        WHERE {{
+          OPTIONAL {{ <{iri}> <http://www.w3.org/2004/02/skos/core#inScheme> ?scheme }}
+        }}
+        "#,
+        iri = params.iri,
+    );
     let results = state
         .store
         .query(&q)

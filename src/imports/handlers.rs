@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use super::bulk::{parse_and_load_bulk, BulkResult, GraphChange, InputFile};
 use crate::auth::dataset_graph;
 use crate::auth::middleware::AuthenticatedUser;
+use crate::data_models::upload::{format_from_filename, format_from_media_type, parse_quads};
 use crate::dataset_versions::models::VersionStatus;
 use crate::kind_detector;
 use crate::server::error::AppError;
 use crate::server::AppState;
-use crate::vocabularies::upload::{format_from_filename, format_from_media_type, parse_quads};
 
 /// Optional metadata sidecar parsed from the `meta` multipart field.
 ///

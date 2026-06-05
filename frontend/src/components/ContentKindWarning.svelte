@@ -204,11 +204,11 @@
                 {#if converting}<Loader2 size={13} class="animate-spin" />{:else}<ArrowRight size={13} />{/if}
                 {$t('components.contentKindWarning.convertToVocabulary')}
               </button>
-              <button class="btn btn-ghost btn-sm" onclick={() => { closeModal(); navigate('/vocabularies'); }}>
+              <button class="btn btn-ghost btn-sm" onclick={() => { closeModal(); navigate('/models'); }}>
                 {$t('components.contentKindWarning.goToVocabularyRegistry')}
               </button>
             {:else}
-              <button class="btn btn-primary btn-sm" onclick={() => { closeModal(); navigate('/vocabularies'); }}>
+              <button class="btn btn-primary btn-sm" onclick={() => { closeModal(); navigate('/models'); }}>
                 <ArrowRight size={13} /> {$t('components.contentKindWarning.goToVocabularyRegistry')}
               </button>
               <button class="btn btn-ghost btn-sm" onclick={() => { closeModal(); navigate(`/import?graph=${encodeURIComponent(graphs[0] || '')}&target=vocabulary`); }}>

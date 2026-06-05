@@ -1059,36 +1059,37 @@ export function isLoggedIn() {
   return !!getAccessToken();
 }
 
-// ── Data Model Registry ───────────────────────────────────────────────────────
+// ── Model Registry (OWL/RDFS ontologies and SKOS vocabularies) ─────────────────
+// Each entry carries a `kind` ("data-model" | "vocabulary"), auto-detected on upload.
 
-export const listDataModels = () => request('GET', '/api/data-models');
-export const createDataModel = (data) => request('POST', '/api/data-models', data);
-export const getDataModel = (id) => request('GET', `/api/data-models/${id}`);
-export const deleteDataModel = (id) => request('DELETE', `/api/data-models/${id}`);
-export const updateDataModel = (id, data) => request('PATCH', `/api/data-models/${id}`, data);
+export const listDataModels = () => request('GET', '/api/models');
+export const createDataModel = (data) => request('POST', '/api/models', data);
+export const getDataModel = (id) => request('GET', `/api/models/${id}`);
+export const deleteDataModel = (id) => request('DELETE', `/api/models/${id}`);
+export const updateDataModel = (id, data) => request('PATCH', `/api/models/${id}`, data);
 
-export const listDataModelVersions = (id) => request('GET', `/api/data-models/${id}/versions`);
-export const getDataModelVersion = (id, ver) => request('GET', `/api/data-models/${id}/versions/${ver}`);
-export const deleteDataModelVersion = (id, ver) => request('DELETE', `/api/data-models/${id}/versions/${ver}`);
-export const updateDataModelVersionNotes = (id, ver, notes) => request('PATCH', `/api/data-models/${id}/versions/${ver}`, { notes });
-export const stageDataModelVersion = (id, ver) => request('POST', `/api/data-models/${id}/versions/${ver}/stage`);
-export const publishDataModelVersion = (id, ver) => request('POST', `/api/data-models/${id}/versions/${ver}/publish`);
+export const listDataModelVersions = (id) => request('GET', `/api/models/${id}/versions`);
+export const getDataModelVersion = (id, ver) => request('GET', `/api/models/${id}/versions/${ver}`);
+export const deleteDataModelVersion = (id, ver) => request('DELETE', `/api/models/${id}/versions/${ver}`);
+export const updateDataModelVersionNotes = (id, ver, notes) => request('PATCH', `/api/models/${id}/versions/${ver}`, { notes });
+export const stageDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/stage`);
+export const publishDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/publish`);
 export const createDataModelDraft = (id, fromVer, targetVer) =>
-  request('POST', `/api/data-models/${id}/versions/${fromVer}/draft`, { target_version: targetVer });
+  request('POST', `/api/models/${id}/versions/${fromVer}/draft`, { target_version: targetVer });
 export const getDataModelDiff = (id, from, to) =>
-  request('GET', `/api/data-models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-export const getDataModelCollaborators = (id) => request('GET', `/api/data-models/${id}/collaborators`);
-export const getDataModelBranches = (id) => request('GET', `/api/data-models/${id}/branches`);
+  request('GET', `/api/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+export const getDataModelCollaborators = (id) => request('GET', `/api/models/${id}/collaborators`);
+export const getDataModelBranches = (id) => request('GET', `/api/models/${id}/branches`);
 export const getDataModelCommits = (id, branch) =>
-  request('GET', `/api/data-models/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
+  request('GET', `/api/models/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
 export const createDataModelBranch = (id, branch, fromVersion, targetVersion) =>
-  request('POST', `/api/data-models/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
+  request('POST', `/api/models/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
 export const previewDataModelMerge = (id, from, into) =>
-  request('GET', `/api/data-models/${id}/merge/preview?from=${encodeURIComponent(from)}&into=${encodeURIComponent(into)}`);
-export const mergeDataModel = (id, body) => request('POST', `/api/data-models/${id}/merge`, body);
+  request('GET', `/api/models/${id}/merge/preview?from=${encodeURIComponent(from)}&into=${encodeURIComponent(into)}`);
+export const mergeDataModel = (id, body) => request('POST', `/api/models/${id}/merge`, body);
 /** Phase 6 — stage/publish/deprecate a single subgraph of a version. */
 export const subgraphActionDataModel = (id, ver, action: 'stage' | 'publish' | 'deprecate', graph) =>
-  request('POST', `/api/data-models/${id}/versions/${ver}/subgraph/${action}`, { graph });
+  request('POST', `/api/models/${id}/versions/${ver}/subgraph/${action}`, { graph });
 
 export function uploadDataModelVersion(id, file, versionOverride, notes, merge, isPublic) {
   const token = getAccessToken();
@@ -1100,7 +1101,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
   if (notes) form.append('notes', notes);
   if (merge) form.append('merge', 'true');
   form.append('is_public', isPublic ? 'true' : 'false');
-  return fetch(`/api/data-models/${id}/versions`, { method: 'POST', headers, body: form })
+  return fetch(`/api/models/${id}/versions`, { method: 'POST', headers, body: form })
     .then(async (res) => {
       if (!res.ok) {
         const msg = await res.text().then(t => {
@@ -1115,68 +1116,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
 }
 
 export function getDataModelVersionDataUrl(id, ver, format, graph) {
-  let url = `/api/data-models/${id}/versions/${ver}/data?format=${format || 'trig'}`;
-  if (graph) url += `&graph=${encodeURIComponent(graph)}`;
-  return url;
-}
-
-// ── Vocabulary Registry ───────────────────────────────────────────────────────
-
-export const listVocabularies = () => request('GET', '/api/vocabularies');
-export const createVocabulary = (data) => request('POST', '/api/vocabularies', data);
-export const getVocabulary = (id) => request('GET', `/api/vocabularies/${id}`);
-export const deleteVocabulary = (id) => request('DELETE', `/api/vocabularies/${id}`);
-export const updateVocabulary = (id, data) => request('PATCH', `/api/vocabularies/${id}`, data);
-
-export const listVocabularyVersions = (id) => request('GET', `/api/vocabularies/${id}/versions`);
-export const getVocabularyVersion = (id, ver) => request('GET', `/api/vocabularies/${id}/versions/${ver}`);
-export const deleteVocabularyVersion = (id, ver) => request('DELETE', `/api/vocabularies/${id}/versions/${ver}`);
-export const updateVocabularyVersionNotes = (id, ver, notes) => request('PATCH', `/api/vocabularies/${id}/versions/${ver}`, { notes });
-export const stageVocabularyVersion = (id, ver) => request('POST', `/api/vocabularies/${id}/versions/${ver}/stage`);
-export const publishVocabularyVersion = (id, ver) => request('POST', `/api/vocabularies/${id}/versions/${ver}/publish`);
-export const createVocabularyDraft = (id, fromVer, targetVer) =>
-  request('POST', `/api/vocabularies/${id}/versions/${fromVer}/draft`, { target_version: targetVer });
-export const getVocabularyDiff = (id, from, to) =>
-  request('GET', `/api/vocabularies/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-export const getVocabularyCollaborators = (id) => request('GET', `/api/vocabularies/${id}/collaborators`);
-export const getVocabularyBranches = (id) => request('GET', `/api/vocabularies/${id}/branches`);
-export const getVocabularyCommits = (id, branch) =>
-  request('GET', `/api/vocabularies/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
-export const createVocabularyBranch = (id, branch, fromVersion, targetVersion) =>
-  request('POST', `/api/vocabularies/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
-export const previewVocabularyMerge = (id, from, into) =>
-  request('GET', `/api/vocabularies/${id}/merge/preview?from=${encodeURIComponent(from)}&into=${encodeURIComponent(into)}`);
-export const mergeVocabulary = (id, body) => request('POST', `/api/vocabularies/${id}/merge`, body);
-/** Phase 6 — stage/publish/deprecate a single subgraph of a version. */
-export const subgraphActionVocabulary = (id, ver, action: 'stage' | 'publish' | 'deprecate', graph) =>
-  request('POST', `/api/vocabularies/${id}/versions/${ver}/subgraph/${action}`, { graph });
-
-export function uploadVocabularyVersion(id, file, versionOverride, notes, merge, isPublic) {
-  const token = getAccessToken();
-  const headers = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const form = new FormData();
-  form.append('file', file);
-  if (versionOverride) form.append('version', versionOverride);
-  if (notes) form.append('notes', notes);
-  if (merge) form.append('merge', 'true');
-  form.append('is_public', isPublic ? 'true' : 'false');
-  return fetch(`/api/vocabularies/${id}/versions`, { method: 'POST', headers, body: form })
-    .then(async (res) => {
-      if (!res.ok) {
-        const msg = await res.text().then(t => {
-          try { return JSON.parse(t).message || t; } catch { return t; }
-        });
-        const err = new ApiError(msg);
-        err.status = res.status;
-        throw err;
-      }
-      return res.json();
-    });
-}
-
-export function getVocabularyVersionDataUrl(id, ver, format, graph) {
-  let url = `/api/vocabularies/${id}/versions/${ver}/data?format=${format || 'trig'}`;
+  let url = `/api/models/${id}/versions/${ver}/data?format=${format || 'trig'}`;
   if (graph) url += `&graph=${encodeURIComponent(graph)}`;
   return url;
 }

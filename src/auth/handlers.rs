@@ -3396,13 +3396,13 @@ pub async fn update_dataset_role(
                         }
                     }
                 } else {
-                    // role_str == "vocabulary"
-                    if !crate::vocabularies::registry::vocabulary_exists(
+                    // role_str == "vocabulary" — same unified registry, kind=vocabulary.
+                    if !crate::data_models::registry::data_model_exists(
                         &state.store,
                         &state.base_url,
                         &registry_id,
                     ) {
-                        if let Err(e) = crate::vocabularies::registry::insert_vocabulary(
+                        if let Err(e) = crate::data_models::registry::insert_data_model(
                             &state.store,
                             &state.base_url,
                             &registry_id,
@@ -3418,6 +3418,15 @@ pub async fn update_dataset_role(
                             tracing::warn!(
                                 "failed to auto-register vocabulary for dataset {dataset_id}: {e}"
                             );
+                        } else if let Err(e) = crate::data_models::registry::set_data_model_kind(
+                            &state.store,
+                            &state.base_url,
+                            &registry_id,
+                            crate::kind_detector::RegistryKind::Vocabulary,
+                        ) {
+                            tracing::warn!(
+                                "failed to set vocabulary kind for dataset {dataset_id}: {e}"
+                            );
                         }
                     }
                 }
@@ -3432,8 +3441,8 @@ pub async fn update_dataset_role(
 }
 
 /// URL-safe slug derived from a free-form title — same shape that
-/// `create_data_model` / `create_vocabulary` mint when the user creates one
-/// from scratch, so the auto-registered id collides with an existing one
+/// `create_data_model` mints when the user creates an entry from scratch, so
+/// the auto-registered id collides with an existing one
 /// rather than producing a duplicate when the user already created it manually.
 fn slugify(s: &str) -> String {
     s.to_lowercase()

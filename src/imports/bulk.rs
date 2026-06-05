@@ -4,9 +4,9 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::{GraphName, NamedNode, Quad};
 use serde::{Deserialize, Serialize};
 
+use crate::data_models::upload::{format_from_filename, format_from_media_type, parse_quads};
 use crate::kind_detector;
 use crate::store::TripleStore;
-use crate::vocabularies::upload::{format_from_filename, format_from_media_type, parse_quads};
 
 /// One uploaded file plus the routing decision for its quads.
 #[derive(Debug)]

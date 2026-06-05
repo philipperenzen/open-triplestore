@@ -418,7 +418,7 @@
 
     <!-- Branches -->
     {#if model}
-      <BranchPanel kind="data-model" {id} {versions} canWrite={isPublisher} on:created={load} />
+      <BranchPanel {id} {versions} canWrite={isPublisher} on:created={load} />
     {/if}
 
     <!-- Commit history -->

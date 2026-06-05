@@ -22,7 +22,6 @@
     { label: () => $t('nav.datasets'), path: '/datasets', icon: Database, meta: () => $t('nav.datasetsMeta') },
     { label: () => $t('nav.organisations'), path: '/organisations', icon: Building2, meta: () => $t('nav.organisationsMeta') },
     { label: () => $t('components.searchBar.modelRegistry'), path: '/models', icon: BookOpen, meta: () => $t('components.searchBar.modelRegistryMeta') },
-    { label: () => $t('components.searchBar.vocabularyRegistry'), path: '/vocabularies', icon: BookOpen, meta: () => $t('components.searchBar.vocabularyRegistryMeta') },
   ];
 
   // Mock dataset suggestions (can be replaced with actual API call)

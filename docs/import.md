@@ -17,7 +17,7 @@ Every named graph carries a **graph role** that describes what kind of RDF conte
 | Role | What it contains | Where it lives | DL equivalent |
 |---|---|---|---|
 | Model | OWL/RDFS class and property definitions — the formal schema for your domain | [Model Registry](/docs/models) — versioned, draft → published lifecycle | T-Box |
-| Vocabulary | SKOS concept schemes and controlled vocabularies | [Vocabulary Registry](/docs/models) — versioned, draft → published lifecycle | T-Box |
+| Vocabulary | SKOS concept schemes and controlled vocabularies | [Model Registry](/docs/models) — versioned, draft → published lifecycle | T-Box |
 | Shapes | SHACL node and property shapes — validation constraints against a model | Model Registry (typically alongside the model they validate) | T-Box |
 | Instances | Individual facts and assertions — the actual data that conforms to a model | [Datasets](/docs/datasets) as named graphs with access control and SPARQL endpoints | A-Box |
 
@@ -34,5 +34,5 @@ The wizard auto-detects the role of each uploaded file from its content. A file 
 Files with no schema signals are classified as **Instances** and routed to a dataset named graph. When a file contains a mix of roles a **Mixed content** badge appears — the wizard offers to split the file into separate named graphs, one per role.
 
 - **What detection cannot do** — Heuristics work on raw text patterns; they do not parse the file. A model that uses only full IRIs (`<http://www.w3.org/2002/07/owl#Class>`) is also matched, but unusual encodings or heavily abbreviated JSON-LD contexts may fall through. Always verify the detected role before importing.
-- **Quad files preserve their own graph structure** — `.nq` and `.trig` files carry their own named graph IRIs and skip role auto-detection. If a quad file contains model content, upload it through the Model Registry or Vocabulary Registry instead.
+- **Quad files preserve their own graph structure** — `.nq` and `.trig` files carry their own named graph IRIs and skip role auto-detection. If a quad file contains model content, upload it through the Model Registry instead.
 - **Failed uploads create no resources** — New datasets and organisations are only created after the first file uploads successfully. If every file fails, the wizard leaves the catalog untouched.

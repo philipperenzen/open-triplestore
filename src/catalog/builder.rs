@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use crate::auth::db::AuthDb;
 use crate::data_models::registry as dm_registry;
+use crate::kind_detector::RegistryKind;
 use crate::store::TripleStore;
-use crate::vocabularies::registry as vocab_registry;
 
 const FORMATS: &[(&str, &str, &str)] = &[
     ("turtle", "text/turtle", "ttl"),
@@ -61,30 +61,10 @@ pub fn build_catalog_turtle(
                 .unwrap_or(false)
         })
         .collect();
-    let vocabs: Vec<_> = vocab_registry::list_vocabularies(store)
-        .into_iter()
-        .filter(|v| {
-            auth_db
-                .can_access_ontology(
-                    user_id,
-                    v.is_public,
-                    v.owner_type.as_deref(),
-                    v.owner_id.as_deref(),
-                )
-                .unwrap_or(false)
-        })
-        .collect();
-
     let dataset_iris: Vec<String> = data_models
         .iter()
         .filter(|d| d.latest_published.is_some())
         .map(|d| format!("{base_url}/data-model/{}", d.id))
-        .chain(
-            vocabs
-                .iter()
-                .filter(|v| v.latest_published.is_some())
-                .map(|v| format!("{base_url}/vocabulary/{}", v.id)),
-        )
         .collect();
 
     if dataset_iris.is_empty() {
@@ -111,11 +91,13 @@ pub fn build_catalog_turtle(
         if let Some(desc) = d.description.as_deref().filter(|s| !s.is_empty()) {
             writeln!(out, "    dct:description \"{}\"@en ;", esc_literal(desc)).unwrap();
         }
-        writeln!(
-            out,
-            "    dct:type <http://purl.org/adms/assettype/Ontology> ;"
-        )
-        .unwrap();
+        // An ontology is an ADMS Ontology asset; a SKOS vocabulary is a CodeList.
+        let asset_type = if d.kind == RegistryKind::Vocabulary {
+            "http://purl.org/adms/assettype/CodeList"
+        } else {
+            "http://purl.org/adms/assettype/Ontology"
+        };
+        writeln!(out, "    dct:type <{asset_type}> ;").unwrap();
         writeln!(out, "    foaf:page <{}> ;", d.namespace).unwrap();
         writeln!(
             out,
@@ -138,52 +120,8 @@ pub fn build_catalog_turtle(
 
         write_distributions(
             &mut out,
-            &format!("{base_url}/api/data-models/{}/latest/data", d.id),
+            &format!("{base_url}/api/models/{}/latest/data", d.id),
             &d.title,
-        );
-    }
-
-    // ── Vocabularies ─────────────────────────────────────────────────────
-    for v in vocabs.iter().filter(|v| v.latest_published.is_some()) {
-        let dataset_iri = format!("{base_url}/vocabulary/{}", v.id);
-        let version = v.latest_published.as_deref().unwrap_or("");
-        let triple_count = count_triples(store, &dataset_iri, version);
-
-        writeln!(out, "<{dataset_iri}> a dcat:Dataset, void:Dataset ;").unwrap();
-        writeln!(out, "    dct:identifier \"{}\" ;", esc_literal(&v.id)).unwrap();
-        writeln!(out, "    dct:title \"{}\"@en ;", esc_literal(&v.title)).unwrap();
-        if let Some(desc) = v.description.as_deref().filter(|s| !s.is_empty()) {
-            writeln!(out, "    dct:description \"{}\"@en ;", esc_literal(desc)).unwrap();
-        }
-        writeln!(
-            out,
-            "    dct:type <http://purl.org/adms/assettype/CodeList> ;"
-        )
-        .unwrap();
-        writeln!(out, "    foaf:page <{}> ;", v.namespace).unwrap();
-        writeln!(
-            out,
-            "    dcat:landingPage <{base_url}/vocabulary/{}> ;",
-            v.id
-        )
-        .unwrap();
-        writeln!(out, "    dcat:hasVersion \"{}\" ;", esc_literal(version)).unwrap();
-        if !v.created_at.is_empty() {
-            writeln!(
-                out,
-                "    dct:issued \"{}\"^^xsd:dateTime ;",
-                esc_literal(&v.created_at)
-            )
-            .unwrap();
-        }
-        if triple_count > 0 {
-            writeln!(out, "    void:triples {} ;", triple_count).unwrap();
-        }
-
-        write_distributions(
-            &mut out,
-            &format!("{base_url}/api/vocabularies/{}/latest/data", v.id),
-            &v.title,
         );
     }
 

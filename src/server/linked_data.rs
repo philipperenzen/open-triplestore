@@ -354,32 +354,6 @@ fn compute_dereference_allowed_graphs(
         }
     }
 
-    for v in crate::vocabularies::registry::list_vocabularies(&state.store) {
-        let can = state
-            .auth_db
-            .can_access_ontology(
-                user_id,
-                v.is_public,
-                v.owner_type.as_deref(),
-                v.owner_id.as_deref(),
-            )
-            .unwrap_or(false);
-        for ver in
-            crate::vocabularies::registry::list_versions(&state.store, &state.base_url, &v.id)
-        {
-            all_ontology_graphs.insert(ver.graph_iri.clone());
-            for g in &ver.sub_graphs {
-                all_ontology_graphs.insert(g.clone());
-            }
-            if can {
-                allowed.insert(ver.graph_iri.clone());
-                for g in &ver.sub_graphs {
-                    allowed.insert(g.clone());
-                }
-            }
-        }
-    }
-
     if let Ok(named) = state.store.named_graphs() {
         for nn in named {
             let iri = nn.as_str().to_string();

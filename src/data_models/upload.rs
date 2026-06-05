@@ -1,6 +1,6 @@
 //! Upload / import of RDF files into versioned named graphs.
 
-use oxigraph::io::{RdfFormat, RdfParser};
+use oxigraph::io::{JsonLdProfileSet, RdfFormat, RdfParser};
 use oxigraph::model::*;
 use std::collections::HashMap;
 use std::io::BufReader;
@@ -8,9 +8,39 @@ use std::io::BufReader;
 use crate::store::engine::StoreError;
 use crate::store::TripleStore;
 
-// Format detection delegates to the canonical helpers in `vocabularies::upload`
-// so every upload path agrees on the same extension/MIME → RdfFormat mapping.
-use crate::vocabularies::upload::{format_from_filename, format_from_media_type};
+/// Detect RDF format from MIME type. The canonical extension/MIME → `RdfFormat`
+/// mapping shared by every upload and bulk-import path.
+pub fn format_from_media_type(mime: &str) -> Option<RdfFormat> {
+    let mime = mime.split(';').next().unwrap_or(mime).trim();
+    match mime {
+        "text/turtle" | "application/turtle" => Some(RdfFormat::Turtle),
+        "application/n-triples" => Some(RdfFormat::NTriples),
+        "application/rdf+xml" => Some(RdfFormat::RdfXml),
+        "application/n-quads" => Some(RdfFormat::NQuads),
+        "application/trig" | "application/x-trig" => Some(RdfFormat::TriG),
+        "application/ld+json" | "application/json" => Some(RdfFormat::JsonLd {
+            profile: JsonLdProfileSet::empty(),
+        }),
+        _ => None,
+    }
+}
+
+/// Detect format from a filename/extension fallback.
+pub fn format_from_filename(name: &str) -> Option<RdfFormat> {
+    let ext = name.rsplit('.').next()?.to_lowercase();
+    match ext.as_str() {
+        "ttl" | "turtle" => Some(RdfFormat::Turtle),
+        "nt" | "ntriples" => Some(RdfFormat::NTriples),
+        // `.owl` is Protégé's RDF/XML export extension.
+        "rdf" | "xml" | "rdfxml" | "owl" => Some(RdfFormat::RdfXml),
+        "nq" | "nquads" => Some(RdfFormat::NQuads),
+        "trig" => Some(RdfFormat::TriG),
+        "jsonld" | "json" => Some(RdfFormat::JsonLd {
+            profile: JsonLdProfileSet::empty(),
+        }),
+        _ => None,
+    }
+}
 
 /// Try to detect `owl:versionInfo` from parsed quad subjects.
 fn extract_owl_version_info(quads: &[Quad]) -> Option<String> {
@@ -70,7 +100,7 @@ fn slugify_last_segment(iri: &str) -> String {
 }
 
 /// Parse bytes as RDF quads.
-fn parse_quads(bytes: &[u8], format: RdfFormat) -> Result<Vec<Quad>, String> {
+pub fn parse_quads(bytes: &[u8], format: RdfFormat) -> Result<Vec<Quad>, String> {
     let reader = BufReader::new(bytes);
     RdfParser::from_format(format)
         .for_reader(reader)
