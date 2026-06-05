@@ -307,13 +307,16 @@ async fn org_void_handler(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
-/// Compute the set of named graph IRIs the caller may read when dereferencing
-/// an IRI. Combines:
-///   - graphs registered to datasets the user can access,
-///   - version graphs of data-models / vocabularies the user can access,
-///   - "unmanaged" named graphs (not owned by any registered dataset or
-///     ontology), which are treated as public.
-/// System graphs (`urn:system:*`) are always excluded for non-admin callers.
+/// Compute the set of named graph IRIs a NON-ADMIN caller may read when
+/// dereferencing an IRI:
+///   - graphs registered to datasets the user can access, and
+///   - version graphs of data-models / vocabularies the user can access.
+///
+/// Unmanaged named graphs (registered to no dataset or ontology) and system
+/// graphs (`urn:system:*`) are deliberately NOT included: this mirrors the
+/// `/sparql` access boundary (`get_accessible_graph_iris`), so a graph is never
+/// anonymously readable here unless it is also visible via SPARQL. (Admins
+/// bypass this and see every graph — see the caller.)
 fn compute_dereference_allowed_graphs(
     state: &AppState,
     user_id: Option<&str>,
@@ -321,13 +324,7 @@ fn compute_dereference_allowed_graphs(
     use std::collections::HashSet;
 
     let cached_graphs = state.auth_db.get_accessible_graph_iris_cached(user_id)?;
-    let all_dataset_graphs = &cached_graphs.1;
-
     let mut allowed: HashSet<String> = cached_graphs.0.clone();
-
-    // Track every graph IRI owned by a data-model or vocabulary so we don't
-    // mistake a private one for an "unmanaged" public graph below.
-    let mut all_ontology_graphs: HashSet<String> = HashSet::new();
 
     for d in crate::data_models::registry::list_data_models(&state.store) {
         let can = state
@@ -339,31 +336,15 @@ fn compute_dereference_allowed_graphs(
                 d.owner_id.as_deref(),
             )
             .unwrap_or(false);
+        if !can {
+            continue;
+        }
         for ver in crate::data_models::registry::list_versions(&state.store, &state.base_url, &d.id)
         {
-            all_ontology_graphs.insert(ver.graph_iri.clone());
+            allowed.insert(ver.graph_iri.clone());
             for g in &ver.sub_graphs {
-                all_ontology_graphs.insert(g.clone());
+                allowed.insert(g.clone());
             }
-            if can {
-                allowed.insert(ver.graph_iri.clone());
-                for g in &ver.sub_graphs {
-                    allowed.insert(g.clone());
-                }
-            }
-        }
-    }
-
-    if let Ok(named) = state.store.named_graphs() {
-        for nn in named {
-            let iri = nn.as_str().to_string();
-            if iri.starts_with("urn:system:") {
-                continue;
-            }
-            if all_dataset_graphs.contains(&iri) || all_ontology_graphs.contains(&iri) {
-                continue;
-            }
-            allowed.insert(iri);
         }
     }
 

@@ -130,7 +130,12 @@ pub fn is_weak_jwt_secret(secret: &str) -> bool {
         "secret",
         "changemechangeme",
     ];
-    WEAK.contains(&secret.trim())
+    let s = secret.trim();
+    // Reject known placeholders AND anything too short to be a credible HS256
+    // signing key. 256 bits is the floor for HS256; ~32 chars is the usual
+    // minimum guidance (`openssl rand -hex 32` yields 64). A short/guessable
+    // secret makes every session token forgeable, so it is treated as weak.
+    WEAK.contains(&s) || s.len() < 32
 }
 
 #[cfg(test)]
@@ -201,5 +206,18 @@ mod jwt_security_tests {
         assert!(!is_weak_jwt_secret(
             "9f3c2a1be7d04f5a8c6b0e2d4a6f8c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5"
         ));
+    }
+
+    #[test]
+    fn short_secrets_are_flagged() {
+        // Below the 32-char floor → weak even when not a known placeholder.
+        assert!(is_weak_jwt_secret("short"));
+        assert!(is_weak_jwt_secret("0123456789abcdef0123456789abcde")); // 31 chars
+    }
+
+    #[test]
+    fn thirty_two_plus_chars_is_allowed() {
+        // The test/CI harness secrets are 32+ chars and must remain valid.
+        assert!(!is_weak_jwt_secret("test_secret_must_be_32_chars_abcd")); // 33 chars
     }
 }

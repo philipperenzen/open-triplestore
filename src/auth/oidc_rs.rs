@@ -11,7 +11,8 @@
 //! Everything is gated by env config and disabled by default, so existing
 //! password/PAT auth is unaffected until an IdP is wired up:
 //!   * `OIDC_ISSUER`         — issuer URL, e.g. `https://idp/realms/example` (enables this)
-//!   * `OIDC_AUDIENCE`       — expected `aud` (optional; audience check skipped if unset)
+//!   * `OIDC_AUDIENCE`       — expected `aud` (REQUIRED once `OIDC_ISSUER` is set;
+//!                              tokens are rejected until it is configured)
 //!   * `OIDC_DEFAULT_ROLE`   — role for newly provisioned users (default `user`)
 //!   * `ACCEPT_LEGACY_TOKENS`— keep accepting password-session JWTs + `ots_` PATs (default true)
 
@@ -107,6 +108,13 @@ impl AuthExt {
             .ok()
             .filter(|s| !s.trim().is_empty());
 
+        if issuer.is_some() && audience.is_none() {
+            tracing::warn!(
+                "OIDC_ISSUER is set but OIDC_AUDIENCE is not — OIDC bearer-token \
+                 verification will reject all tokens until OIDC_AUDIENCE is configured \
+                 (audience validation is mandatory)."
+            );
+        }
         let oidc = issuer.map(|iss| OidcVerifier::new(iss, audience));
         Self {
             oidc,
@@ -315,10 +323,20 @@ impl OidcVerifier {
         let key = DecodingKey::from_jwk(&jwk)?;
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[self.issuer.as_str()]);
-        match &self.audience {
-            Some(aud) => validation.set_audience(&[aud.as_str()]),
-            None => validation.validate_aud = false,
-        }
+        // Audience validation is MANDATORY. With no configured `aud` we would
+        // accept any token the IdP minted for *any* client of the same issuer
+        // (audience-confusion / token-redirection). Fail closed instead of
+        // disabling the check.
+        let aud = self.audience.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OIDC_AUDIENCE is not configured; refusing to verify IdP-issued token \
+                 (set OIDC_AUDIENCE to this service's expected `aud`)"
+            )
+        })?;
+        validation.set_audience(&[aud]);
+        // jsonwebtoken validates `exp` by default but not `nbf`; reject
+        // not-yet-valid tokens too.
+        validation.validate_nbf = true;
         let data = decode::<ExternalClaims>(token, &key, &validation)?;
         Ok(data.claims)
     }

@@ -459,10 +459,10 @@ pub async fn register(
             "Username must be 3-50 characters".to_string(),
         ));
     }
-    if req.password.len() < 8 {
+    if req.password.len() < 8 || req.password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
+            "Password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -953,10 +953,10 @@ pub async fn change_password(
         ));
     }
 
-    if req.new_password.len() < 8 {
+    if req.new_password.len() < 8 || req.new_password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "New password must be at least 8 characters".to_string(),
+            "New password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -1162,10 +1162,10 @@ pub async fn admin_create_user(
             "Username must be 3-50 characters".to_string(),
         ));
     }
-    if req.password.len() < 8 {
+    if req.password.len() < 8 || req.password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
+            "Password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -1462,10 +1462,10 @@ pub async fn admin_reset_password(
         ));
     }
 
-    if req.new_password.len() < 8 {
+    if req.new_password.len() < 8 || req.new_password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
+            "Password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -2399,7 +2399,7 @@ pub async fn create_dataset(
     State(state): State<AppState>,
     Json(req): Json<CreateDatasetRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let _current_user = require_user(user_opt)?;
+    let current_user = require_user(user_opt)?;
     let owner_type = OwnerType::from_str(&req.owner_type)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid owner_type".to_string()))?;
 
@@ -2409,6 +2409,30 @@ pub async fn create_dataset(
         .map(Visibility::from_str)
         .unwrap_or(Some(Visibility::Private))
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid visibility".to_string()))?;
+
+    // Authorization: a non-admin may only create datasets owned by themselves or
+    // by an organisation/group they belong to — otherwise `owner_id` could be
+    // forged to impersonate another principal or attribute data to a foreign
+    // catalogue. Publishing (visibility=public) additionally requires publisher
+    // rights, mirroring the visibility gate in `update_dataset`.
+    if !current_user.is_admin() {
+        if !db
+            .can_act_as_owner(&current_user.user_id, owner_type, &req.owner_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "You may only create datasets owned by yourself or an organisation/group you belong to"
+                    .to_string(),
+            ));
+        }
+        if visibility == Visibility::Public && !current_user.is_publisher() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Publisher access is required to create a public dataset".to_string(),
+            ));
+        }
+    }
 
     // Human-readable, unique slug id → IRI `{base}/dataset/{id}` reads semantically
     // (e.g. `…/dataset/bridge-inventory`) instead of exposing a raw UUID.
