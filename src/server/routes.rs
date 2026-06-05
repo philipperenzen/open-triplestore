@@ -3163,6 +3163,33 @@ async fn execute_dataset_query(
         }
     };
 
+    // Drop graphs flagged `private` for callers who cannot write the dataset, so a
+    // viewer (or anonymous user on a public dataset) cannot read a graph the owner
+    // marked private — matching the global /sparql path (get_accessible_graph_iris).
+    let can_write = match user {
+        Some(u) => state
+            .auth_db
+            .can_write_dataset(&u.user_id, &dataset)
+            .unwrap_or(false),
+        None => false,
+    };
+    let graphs: Vec<String> = if can_write {
+        graphs
+    } else {
+        let private: std::collections::HashSet<String> = state
+            .auth_db
+            .list_dataset_graph_entries(dataset_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.private)
+            .map(|e| e.graph_iri)
+            .collect();
+        graphs
+            .into_iter()
+            .filter(|g| !private.contains(g))
+            .collect()
+    };
+
     // Fast path: detect "list all non-empty named graphs" queries and answer from the
     // in-memory graph index.  The pattern `GRAPH ?g { ?s ?p ?o }` forces Oxigraph to
     // enumerate every triple in every accessible graph (O(total_triples)), whereas the

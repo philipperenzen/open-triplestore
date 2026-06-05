@@ -2695,6 +2695,34 @@ impl AuthDb {
         }
     }
 
+    /// Whether `user_id` may create/own a resource under the owner
+    /// (`owner_type`, `owner_id`): the user themselves, or an organisation/group
+    /// they belong to (directly, or via the group's parent org). Platform admins
+    /// bypass this at the call site. Prevents forging `owner_id` to impersonate
+    /// another user or attribute a resource to a foreign org/group.
+    pub fn can_act_as_owner(
+        &self,
+        user_id: &str,
+        owner_type: OwnerType,
+        owner_id: &str,
+    ) -> anyhow::Result<bool> {
+        match owner_type {
+            OwnerType::User => Ok(owner_id == user_id),
+            OwnerType::Organisation => Ok(self.get_org_membership(user_id, owner_id)?.is_some()),
+            OwnerType::Group => {
+                if self.get_group_membership(user_id, owner_id)?.is_some() {
+                    return Ok(true);
+                }
+                if let Some(group) = self.get_group(owner_id)? {
+                    if self.get_org_membership(user_id, &group.org_id)?.is_some() {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
     /// Compute the effective role a user holds on an ontology (data-model or
     /// vocabulary), or `None` for no access. Org members get a role derived
     /// from their membership; explicit per-resource grants and public
