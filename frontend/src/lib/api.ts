@@ -864,6 +864,10 @@ export async function uploadToGraph(graphIri, body, contentType, replace = false
  *   - `file`: the File/Blob (filename and content-type are read from it)
  *   - `targetGraph`: target graph IRI for triple-format files; for quad
  *      formats this only takes effect when `merge` is true.
+ *   - `graphRemap`: for quad formats (merge off), `{ embeddedIri: newTargetIri }`
+ *      re-homing each embedded graph to a different write target — used to move
+ *      embedded graphs under the dataset namespace so the server's per-graph
+ *      write boundary admits them (applied at write time, not a post-import MOVE).
  * `opts`:
  *   - `datasetId`: if set, every touched graph is registered with this dataset.
  *   - `replace`: drop touched graphs before insertion.
@@ -873,7 +877,7 @@ export async function uploadToGraph(graphIri, body, contentType, replace = false
  * Returns the server's BulkResponse (per-file status + aggregate counts).
  */
 export async function bulkImport(
-  entries: { file: File | Blob; filename?: string; targetGraph?: string; autoSplit?: boolean; replace?: boolean; graphRole?: string }[],
+  entries: { file: File | Blob; filename?: string; targetGraph?: string; autoSplit?: boolean; replace?: boolean; graphRole?: string; graphRemap?: Record<string, string> }[],
   opts: { datasetId?: string; replace?: boolean; merge?: boolean; defaultTargetGraph?: string; versionBump?: string } = {},
 ) {
   const fd = new FormData();
@@ -881,6 +885,7 @@ export async function bulkImport(
   const autoSplitFiles: string[] = [];
   const replaceFiles: string[] = [];
   const graphRoles: Record<string, string> = {};
+  const graphRemap: Record<string, Record<string, string>> = {};
   for (const e of entries) {
     const fname = e.filename || (e.file as File).name || 'upload.bin';
     fd.append('file', e.file, fname);
@@ -888,6 +893,7 @@ export async function bulkImport(
     if (e.autoSplit) autoSplitFiles.push(fname);
     if (e.replace) replaceFiles.push(fname);
     if (e.graphRole) graphRoles[fname] = e.graphRole;
+    if (e.graphRemap && Object.keys(e.graphRemap).length) graphRemap[fname] = e.graphRemap;
   }
   fd.append('meta', JSON.stringify({
     dataset_id: opts.datasetId,
@@ -898,6 +904,7 @@ export async function bulkImport(
     auto_split_files: autoSplitFiles,
     replace_files: replaceFiles,
     graph_roles: graphRoles,
+    graph_remap: graphRemap,
     version_bump: opts.versionBump,
   }));
 
