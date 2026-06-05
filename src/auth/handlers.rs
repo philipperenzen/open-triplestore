@@ -250,6 +250,10 @@ pub struct UpdateGroupRequest {
 pub struct DatasetView {
     #[serde(flatten)]
     pub dataset: crate::auth::models::Dataset,
+    /// Canonical dataset IRI (`{base_url}/dataset/{id}`). Clients mint graph IRIs
+    /// for this dataset under `{dataset_iri}/...`; the bulk-import write boundary
+    /// only admits targets registered to the dataset or under this namespace.
+    pub dataset_iri: String,
     pub can_write: bool,
     /// Whether the caller can manage this dataset's settings and access grants.
     pub can_manage: bool,
@@ -2488,13 +2492,26 @@ pub async fn create_dataset(
         ));
     }
 
-    Ok((StatusCode::CREATED, Json(dataset)))
+    // Surface the canonical dataset IRI alongside the raw fields so clients can
+    // immediately mint graph IRIs under `{dataset_iri}/...` (which the bulk-import
+    // write boundary admits) — important for the import wizard's lazy
+    // create-then-import flow, where the new id isn't known until now.
+    let mut body = serde_json::to_value(&dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "dataset_iri".to_string(),
+            serde_json::Value::String(dataset_graph::dataset_iri(&state.base_url, &dataset.id)),
+        );
+    }
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 /// GET /api/datasets
 pub async fn list_datasets(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(base_url): State<crate::server::BaseUrl>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id = user.as_ref().map(|u| u.user_id.as_str());
     let datasets = db
@@ -2516,8 +2533,10 @@ pub async fn list_datasets(
                     roles.push(r);
                 }
             }
+            let dataset_iri = dataset_graph::dataset_iri(&base_url.0, &ds.id);
             DatasetView {
                 dataset: ds,
+                dataset_iri,
                 can_write,
                 can_manage,
                 effective_role,
@@ -2533,6 +2552,7 @@ pub async fn list_datasets(
 pub async fn get_dataset(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(base_url): State<crate::server::BaseUrl>,
     Path(dataset_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let dataset = db
@@ -2568,8 +2588,10 @@ pub async fn get_dataset(
             roles.push(r);
         }
     }
+    let dataset_iri = dataset_graph::dataset_iri(&base_url.0, &dataset.id);
     Ok(Json(DatasetView {
         dataset,
+        dataset_iri,
         can_write,
         can_manage,
         effective_role,

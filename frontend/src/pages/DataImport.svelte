@@ -202,6 +202,10 @@ INTO GRAPH <http://example.org/import/loaded>`,
   let selectedOrgId = '';
   let datasetMode = 'existing';
   let selectedDatasetId = '';
+  // Canonical IRI ({base}/dataset/{id}) of the selected/created dataset. Default
+  // target graphs are minted under `{selectedDatasetIri}/...` so they pass the
+  // server's per-graph write boundary; empty when no dataset is chosen yet.
+  let selectedDatasetIri = '';
   let newDatasetName = '';
   let newDatasetDesc = '';
   let newDatasetVis = 'private';
@@ -362,9 +366,27 @@ INTO GRAPH <http://example.org/import/loaded>`,
     return [...iris];
   }
 
+  function graphSlug(filename) {
+    return filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').toLowerCase();
+  }
+
   function generateDefaultGraphIri(filename) {
-    const slug = filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').toLowerCase();
-    return `https://opentriplestore.org/graphs/${slug}`;
+    return `https://opentriplestore.org/graphs/${graphSlug(filename)}`;
+  }
+
+  // Re-home each file's auto-generated default target graph under the selected
+  // dataset's IRI namespace ({datasetIri}/{slug}). The server's bulk-import write
+  // boundary only admits graphs registered to the dataset or under this
+  // namespace, so an unqualified default like https://opentriplestore.org/graphs/x
+  // would be rejected. Only untouched auto-defaults are moved: user-edited targets
+  // (graphIriAutoDefault === false), content-detected graph IRIs, and quad-format
+  // files (which carry their own graph names) are left exactly as they are.
+  function namespaceTargets(fileList, datasetIri) {
+    if (!datasetIri) return fileList;
+    return fileList.map((f) => {
+      if (!f.graphIriAutoDefault) return f;
+      return { ...f, graphIri: `${datasetIri}/${graphSlug(f.file?.name || '')}` };
+    });
   }
 
   function addFile(f) {
@@ -380,6 +402,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
       const graphIriRenameMap = {};
       for (const iri of detected) graphIriRenameMap[iri] = iri;
       const graphIri = isQuad ? '' : (detected.length > 0 ? detected[0] : generateDefaultGraphIri(f.name));
+      // True only when graphIri is our generic auto-default (not detected from
+      // content, not a quad file) — i.e. safe to re-home under a dataset namespace.
+      const graphIriAutoDefault = !isQuad && detected.length === 0;
       let parsedPreview = null;
       if (isNt) {
         const partial = content.split('\n').slice(0, 500).join('\n');
@@ -391,7 +416,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
       const graphRoles = isQuad ? detectGraphRolesFromContent(f.name, content) : {};
       files = [...files, {
         file: f, content, format, detectedGraphIris: detected,
-        graphIri, graphIriRenameMap, showPreview: false, parsedPreview,
+        graphIri, graphIriAutoDefault, graphIriRenameMap, showPreview: false, parsedPreview,
         previewSearch: '',
         importDest: 'named-graph',
         detectedKind: kindResult.kind,
@@ -462,7 +487,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
   }
 
   function setFileGraphIri(idx, value) {
-    files = files.map((f, i) => i === idx ? { ...f, graphIri: value } : f);
+    // A manual edit pins the target: clear the auto-default flag so dataset
+    // selection no longer re-homes it under the dataset namespace.
+    files = files.map((f, i) => i === idx ? { ...f, graphIri: value, graphIriAutoDefault: false } : f);
   }
 
   function setQuadRename(idx, origIri, newValue) {
@@ -590,6 +617,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
       file: { name, size: content.length },
       content, format, fromUrl,
       detectedGraphIris: detected, graphIri: isQuad ? '' : graphIri,
+      graphIriAutoDefault: !isQuad,
       graphIriRenameMap, showPreview: false,
       parsedPreview: (isNt && rows) ? rows.slice(0, 20) : null,
       previewSearch: '',
@@ -613,6 +641,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     ownerType = 'personal';
     selectedOrgId = '';
     selectedDatasetId = '';
+    selectedDatasetIri = '';
     datasetMode = 'existing';
   }
 
@@ -621,6 +650,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     ownerType = 'org';
     selectedOrgId = orgId;
     selectedDatasetId = '';
+    selectedDatasetIri = '';
     datasetMode = 'existing';
   }
 
@@ -644,7 +674,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
     preValidationResult = null;
 
     const dsId = datasetMode === 'new' ? null : selectedDatasetId;
-    if (!dsId) { selectedDatasetShapesIri = ''; return; }
+    // A brand-new dataset's IRI isn't known until it's created at import time;
+    // namespacing for that case happens in runImport once the id exists.
+    if (!dsId) { selectedDatasetShapesIri = ''; selectedDatasetIri = ''; return; }
 
     loadingDatasetGraphs = true;
     try {
@@ -653,9 +685,14 @@ INTO GRAPH <http://example.org/import/loaded>`,
     try {
       const dsDetail = await getDataset(dsId);
       selectedDatasetShapesIri = dsDetail?.shapes_graph_iri || '';
+      // Re-home untouched default target graphs under the dataset's namespace so
+      // the review (and the import) show the IRIs the server will actually accept.
+      selectedDatasetIri = dsDetail?.dataset_iri || '';
+      if (selectedDatasetIri) files = namespaceTargets(files, selectedDatasetIri);
     } catch {
       // 403 on private dataset or network error — hide validation section
       selectedDatasetShapesIri = '';
+      selectedDatasetIri = '';
     } finally {
       loadingDatasetGraphs = false;
     }
@@ -738,6 +775,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
       if (selectedDatasetId || !pendingNewDataset) return selectedDatasetId;
       const ds = await createDataset(pendingNewDataset);
       selectedDatasetId = ds.id;
+      // The create response carries the canonical IRI so we can namespace targets
+      // for this just-created dataset (its slug-derived id wasn't known until now).
+      selectedDatasetIri = ds.dataset_iri || '';
       // Keep the local list in sync so the new dataset shows up as "existing"
       // without needing a full page reload.
       if (!datasets.some(d => d.id === ds.id)) datasets = [...datasets, ds];
@@ -752,6 +792,11 @@ INTO GRAPH <http://example.org/import/loaded>`,
         // Single multipart POST: parsed in parallel server-side, one bulk-insert.
         importProgress = { current: 0, total: files.length, currentFile: $i18nT('pages.import.filesCount', { values: { count: files.length } }) };
         await ensureDataset();
+        // Final safety net: re-home untouched default targets under the dataset
+        // namespace. Idempotent for existing datasets (already done in goToStep3)
+        // and essential for a just-created one. Without a dataset, leave targets
+        // as-is (admin-only unmanaged import).
+        if (selectedDatasetIri) files = namespaceTargets(files, selectedDatasetIri);
 
         const entries = files.map((f) => ({
           file: f.file,
@@ -853,6 +898,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     urlPreviewData = null;
     urlPreviewPage = 0;
     selectedDatasetId = '';
+    selectedDatasetIri = '';
     datasetMode = 'existing';
     selectedDatasetShapesIri = null;
     doValidate = false;

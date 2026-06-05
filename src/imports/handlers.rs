@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use super::bulk::{parse_and_load_bulk, BulkResult, GraphChange, InputFile};
+use super::bulk::{parse_and_load_bulk, BulkError, BulkResult, GraphChange, InputFile};
 use crate::auth::dataset_graph;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::data_models::upload::{format_from_filename, format_from_media_type, parse_quads};
@@ -223,6 +223,64 @@ pub async fn bulk_import(
         }
     }
 
+    // Per-graph write boundary (mirrors the Graph Store Protocol path). Passing
+    // `can_write_dataset` above only proves the caller may write *into the
+    // dataset*; it does NOT constrain which graph IRIs they name as targets.
+    // Without this gate a caller with write access to dataset A could set the
+    // target graph to one owned by another tenant's dataset B (or a
+    // `urn:system:*` graph) and, with `replace=true`, overwrite or wipe it.
+    //
+    // A dataset-scoped import may therefore only write a graph that is either
+    // (a) already registered to the dataset, or (b) under the dataset's own
+    // canonical IRI namespace `{base}/dataset/{id}/...`. Admins, and the
+    // admin-only no-`dataset_id` branch above, are unrestricted. The check runs
+    // against the fully-resolved graph set inside `parse_and_load_bulk` (see
+    // below), so it also covers graph names embedded in quad-format files.
+    let authz_is_admin = user.is_admin();
+    let authz_dataset_id = meta.dataset_id.clone();
+    let authz_db = state.auth_db.clone();
+    let authz_registered: std::collections::HashSet<String> = match authz_dataset_id.as_deref() {
+        Some(ds_id) if !authz_is_admin => authz_db
+            .list_dataset_graphs(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .into_iter()
+            .collect(),
+        _ => std::collections::HashSet::new(),
+    };
+    let authz_namespace = authz_dataset_id
+        .as_deref()
+        .map(|ds_id| format!("{}/", dataset_graph::dataset_iri(&state.base_url, ds_id)));
+    let authorize = move |graphs: &[String]| -> Result<(), String> {
+        // Admins and unmanaged (admin-only) imports may target any graph.
+        if authz_is_admin || authz_dataset_id.is_none() {
+            return Ok(());
+        }
+        let ds_id = authz_dataset_id.as_deref().unwrap_or_default();
+        let namespace = authz_namespace.as_deref().unwrap_or_default();
+        for g in graphs {
+            // In scope when the graph is registered to THIS dataset or lives under
+            // its IRI namespace…
+            let in_dataset =
+                authz_registered.contains(g) || (!namespace.is_empty() && g.starts_with(namespace));
+            // …and is not ALSO claimed by another dataset. The second clause closes
+            // a register-then-overwrite bypass: `POST /api/datasets/{id}/graphs`
+            // only checks dataset-write, so a caller could otherwise attach another
+            // tenant's graph IRI to their own dataset and then name it here. On a
+            // lookup error we fail closed (treat the graph as foreign).
+            let owned_by_other = authz_db
+                .graph_has_other_dataset_refs(g, ds_id)
+                .unwrap_or(true);
+            if owned_by_other || !in_dataset {
+                return Err(format!(
+                    "Target graph <{g}> is outside dataset '{ds_id}'. Bulk import may only write \
+                     graphs that belong solely to this dataset — registered to it or under its IRI \
+                     namespace <{namespace}>."
+                ));
+            }
+        }
+        Ok(())
+    };
+
     let inputs: Vec<InputFile> = raw_files
         .into_iter()
         .map(|(filename, content_type, bytes)| {
@@ -340,11 +398,16 @@ pub async fn bulk_import(
         Ok(())
     };
 
-    let result =
-        tokio::task::spawn_blocking(move || parse_and_load_bulk(&store, inputs, before_replace))
-            .await
-            .map_err(|e| AppError::Internal(format!("Bulk import task failed: {e}")))?
-            .map_err(AppError::BadRequest)?;
+    let result = tokio::task::spawn_blocking(move || {
+        parse_and_load_bulk(&store, inputs, authorize, before_replace)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("Bulk import task failed: {e}")))?
+    .map_err(|e| match e {
+        // A target graph outside the dataset's write scope ⇒ 403, not 400.
+        BulkError::Forbidden(m) => AppError::Forbidden(m),
+        BulkError::Failed(m) => AppError::BadRequest(m),
+    })?;
 
     // Best-effort: register newly-touched graphs against the dataset and
     // auto-detect + store graph_role for each.
