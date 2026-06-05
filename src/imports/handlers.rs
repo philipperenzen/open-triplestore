@@ -36,6 +36,14 @@ struct BulkMeta {
     /// Per-filename target graph overrides.
     #[serde(default)]
     targets: std::collections::HashMap<String, String>,
+    /// Per-filename map of embedded graph IRI → replacement target IRI, applied
+    /// to quad-format files so embedded graph names can be re-homed under the
+    /// dataset namespace at write time (instead of a post-import MOVE). Outer key
+    /// is the filename; inner map is `{ embedded_iri: new_target_iri }`. Only
+    /// consulted for quad formats with `merge=false`.
+    #[serde(default)]
+    graph_remap:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Filenames for which auto_split should be applied (triples split by role
     /// into `{target_graph}/model`, `{target_graph}/shapes`, etc.)
     #[serde(default)]
@@ -235,7 +243,10 @@ pub async fn bulk_import(
     // canonical IRI namespace `{base}/dataset/{id}/...`. Admins, and the
     // admin-only no-`dataset_id` branch above, are unrestricted. The check runs
     // against the fully-resolved graph set inside `parse_and_load_bulk` (see
-    // below), so it also covers graph names embedded in quad-format files.
+    // below), so it also covers graph names embedded in quad-format files — and,
+    // because `graph_remap` is applied during parsing *before* the set is
+    // resolved, it checks the re-homed targets (a remap pointing at a foreign
+    // graph is therefore still rejected on its final destination).
     let authz_is_admin = user.is_admin();
     let authz_dataset_id = meta.dataset_id.clone();
     let authz_db = state.auth_db.clone();
@@ -281,6 +292,18 @@ pub async fn bulk_import(
         Ok(())
     };
 
+    // Where DEFAULT-graph (and blank-node-graph) triples in a quad file go when the
+    // file names no target. A non-admin dataset-scoped import routes them into the
+    // dataset's own namespaced default graph so they fall under the authorize gate
+    // above (and stay out of the shared global default graph); admins and unmanaged
+    // (no-`dataset_id`) imports keep the legacy global-default behavior.
+    let unnamed_graph_target: Option<String> = match meta.dataset_id.as_deref() {
+        Some(ds_id) if !authz_is_admin => {
+            Some(dataset_graph::dataset_default_graph_iri(&state.base_url, ds_id))
+        }
+        _ => None,
+    };
+
     let inputs: Vec<InputFile> = raw_files
         .into_iter()
         .map(|(filename, content_type, bytes)| {
@@ -291,14 +314,17 @@ pub async fn bulk_import(
                 .or_else(|| meta.default_target_graph.clone());
             let auto_split = meta.auto_split_files.contains(&filename);
             let replace = meta.replace || meta.replace_files.contains(&filename);
+            let graph_remap = meta.graph_remap.get(&filename).cloned().unwrap_or_default();
             InputFile {
                 filename,
                 content_type,
                 bytes,
                 target_graph,
                 merge_into_target: meta.merge,
+                unnamed_graph_target: unnamed_graph_target.clone(),
                 auto_split,
                 replace,
+                graph_remap,
             }
         })
         .collect();

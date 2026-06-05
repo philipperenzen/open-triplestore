@@ -846,6 +846,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bulk_import_quad_remap_into_namespace_allowed() {
+        let state = two_tenant_state();
+        let alice = token("alice", "alice", "user");
+
+        // A quad file whose embedded graph is a foreign IRI (not under dsA's
+        // namespace) would normally be rejected. With `graph_remap` re-homing it
+        // under dsA's own namespace, the write lands there and passes the
+        // boundary — this is the happy path the wizard now drives.
+        let foreign = "http://foreign.example/g";
+        let target = "http://localhost:7878/dataset/dsA/data";
+        let nquads = format!("<urn:x:s> <urn:x:p> <urn:x:o> <{foreign}> .");
+        let meta =
+            format!(r#"{{"dataset_id":"dsA","graph_remap":{{"a.nq":{{"{foreign}":"{target}"}}}}}}"#);
+        let boundary = "BNDxt7";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("meta", "application/json", None, meta.as_bytes()),
+                (
+                    "file",
+                    "application/n-quads",
+                    Some("a.nq"),
+                    nquads.as_bytes(),
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a quad import remapped under the dataset's own namespace must be allowed"
+        );
+        // Data landed in the remapped (namespaced) graph, not the foreign one.
+        assert_eq!(state.store.count_graph(Some(target)).unwrap(), 1);
+        assert_eq!(state.store.count_graph(Some(foreign)).unwrap(), 0);
+        // …and the remapped graph was registered to dataset A by the handler.
+        assert!(
+            state
+                .auth_db
+                .list_dataset_graphs("dsA")
+                .unwrap()
+                .iter()
+                .any(|g| g == target),
+            "the remapped graph must be registered to dataset A after import"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_import_quad_default_graph_routed_into_namespace() {
+        let state = two_tenant_state();
+        let alice = token("alice", "alice", "user");
+
+        // A plain N-Quads file whose statement has NO graph label parses into the
+        // RDF default graph. Before the fix it bypassed the per-graph boundary
+        // entirely and was written to the store's shared global default graph
+        // (cross-tenant space). Now a non-admin dataset-scoped import routes it to
+        // the dataset's own namespaced default graph, where the boundary admits it
+        // and it stays inside the tenant.
+        let ns_default = "http://localhost:7878/dataset/dsA/default";
+        let nquads = "<urn:x:s> <urn:x:p> <urn:x:o> .";
+        let boundary = "BNDxtdg1";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                (
+                    "file",
+                    "application/n-quads",
+                    Some("a.nq"),
+                    nquads.as_bytes(),
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a dataset-scoped default-graph quad import is allowed once routed into the namespace"
+        );
+        // Landed in the dataset's namespaced default graph…
+        assert_eq!(state.store.count_graph(Some(ns_default)).unwrap(), 1);
+        // …and NEVER in the shared global default graph.
+        assert_eq!(
+            state.store.count_graph(None).unwrap(),
+            0,
+            "default-graph triples must never reach the shared global default graph"
+        );
+        // …and the routed graph was registered to dataset A by the handler.
+        assert!(
+            state
+                .auth_db
+                .list_dataset_graphs("dsA")
+                .unwrap()
+                .iter()
+                .any(|g| g == ns_default),
+            "the namespaced default graph must be registered to dataset A after import"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_import_trig_default_graph_routed_into_namespace() {
+        let state = two_tenant_state();
+        let alice = token("alice", "alice", "user");
+
+        // TriG triples written outside any `GRAPH {}` block are default-graph triples
+        // too; they take the same unnamed-graph arm and must likewise be routed into
+        // the dataset namespace rather than the shared global default graph.
+        let ns_default = "http://localhost:7878/dataset/dsA/default";
+        let trig = "<urn:x:s> <urn:x:p> <urn:x:o> .";
+        let boundary = "BNDxtdg2";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                ("file", "application/trig", Some("a.trig"), trig.as_bytes()),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(state.store.count_graph(Some(ns_default)).unwrap(), 1);
+        assert_eq!(
+            state.store.count_graph(None).unwrap(),
+            0,
+            "TriG default-graph triples must never reach the shared global default graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_import_quad_remap_to_foreign_graph_rejected() {
+        let state = two_tenant_state();
+        seed_b_graph(&state);
+        let alice = token("alice", "alice", "user");
+
+        // The remap is NOT an escape hatch: pointing it at dataset B's graph is
+        // still rejected on the final (remapped) destination, because the
+        // boundary runs on the resolved write set after the remap is applied.
+        let foreign = "http://foreign.example/g";
+        let nquads = format!("<urn:x:s> <urn:x:p> <urn:x:o> <{foreign}> .");
+        let meta = format!(
+            r#"{{"dataset_id":"dsA","replace":true,"graph_remap":{{"a.nq":{{"{foreign}":"{B_GRAPH}"}}}}}}"#
+        );
+        let boundary = "BNDxt8";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("meta", "application/json", None, meta.as_bytes()),
+                (
+                    "file",
+                    "application/n-quads",
+                    Some("a.nq"),
+                    nquads.as_bytes(),
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "remapping a quad's graph onto another tenant's graph must still be refused"
+        );
+        assert_eq!(
+            state.store.count_graph(Some(B_GRAPH)).unwrap(),
+            1,
+            "B's graph must be untouched after the rejected remap"
+        );
+    }
+
+    #[tokio::test]
     async fn bulk_import_system_graph_target_rejected() {
         let state = two_tenant_state();
         let alice = token("alice", "alice", "user");
