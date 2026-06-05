@@ -50,6 +50,12 @@ pub struct DataModelRecord {
     pub version_count: usize,
     pub created_at: String,
     pub created_by: Option<String>,
+    /// Logical kind of this entry — `data-model` (OWL/RDFS ontology) or
+    /// `vocabulary` (SKOS concept scheme), auto-detected from the uploaded RDF.
+    /// Drives the type badge/filter in the UI and the publish-time version
+    /// stamping (OWL `owl:versionIRI` vs DCAT/PAV/SKOS metadata).
+    #[serde(default)]
+    pub kind: crate::kind_detector::RegistryKind,
 }
 
 /// Metadata for a single data model version.
@@ -131,7 +137,7 @@ pub struct CreateDraftRequest {
     pub message: Option<String>,
 }
 
-/// Body for `POST /api/data-models/:id/branches` — start a named branch as a new
+/// Body for `POST /api/models/:id/branches` — start a named branch as a new
 /// draft derived from `from_version`.
 #[derive(Debug, Deserialize)]
 pub struct CreateBranchRequest {
@@ -148,7 +154,7 @@ pub struct CreateBranchRequest {
     pub message: Option<String>,
 }
 
-/// Body for `POST /api/data-models/:id/versions/:ver/rebase` — rebase a branch
+/// Body for `POST /api/models/:id/versions/:ver/rebase` — rebase a branch
 /// version onto a newer base (defaults to the latest published version).
 #[derive(Debug, Deserialize)]
 pub struct RebaseRequest {
@@ -198,7 +204,7 @@ pub struct PatchVersionRequest {
 }
 
 /// Body for per-subgraph lifecycle transitions
-/// (`POST /api/data-models/:id/versions/:ver/subgraph/{stage,publish,deprecate}`).
+/// (`POST /api/models/:id/versions/:ver/subgraph/{stage,publish,deprecate}`).
 #[derive(Debug, Deserialize)]
 pub struct SubGraphActionRequest {
     /// Subgraph IRI or trailing suffix identifying which subgraph to transition.

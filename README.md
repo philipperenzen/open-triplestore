@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** first public release **`0.1.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.2.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -56,7 +56,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | 🏠 **Overview** | Live triple & named-graph counts, suggested next steps, and quick links into every workflow |
 | ⌨️ **SPARQL workspace** | CodeMirror editor (`Ctrl+Enter` to run), Table / JSON / Graph result views, query history, CSV & JSON export, optional NL→SPARQL |
 | 🕸️ **Explore & visualize** | Facet triples by subject / predicate / object / graph, then expand resources visually to walk a graph's neighbourhood |
-| 📚 **Datasets · Models · Vocabularies** | DCAT metadata, per-dataset SHACL, ontology & vocabulary registries, and version diffs |
+| 📚 **Datasets · Models** | DCAT metadata, per-dataset SHACL, a unified model registry for ontologies & SKOS vocabularies, and version diffs |
 | ✅ **Validate** | SHACL (Core + Advanced) and ShEx, with per-dataset reports and severity filters |
 | 🔐 **Admin** | Users, roles, and graph-level ACLs |
 
@@ -178,7 +178,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.2.0"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare

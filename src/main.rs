@@ -39,7 +39,6 @@ mod svc_registry;
 mod swrl;
 #[cfg(feature = "text-search")]
 mod text_search;
-mod vocabularies;
 
 #[derive(Parser, Debug)]
 #[command(name = "open-triplestore")]

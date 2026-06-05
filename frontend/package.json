@@ -1,7 +1,7 @@
 {
   "name": "open-triplestore-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Web UI for Open Triplestore.",
   "author": "Philippe Renzen <philipperenzen@gmail.com>",
   "license": "SEE LICENSE IN LICENSE",

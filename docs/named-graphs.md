@@ -28,6 +28,6 @@ A named graph is an IRI that identifies a set of RDF triples in the triplestore.
 - **One graph per dataset** — Simple case: each dataset manages a single named graph. All triples for the dataset are stored there.
 - **Multiple graphs per dataset** — Advanced case: a dataset can span multiple named graphs — for example, separate graphs for base data, inferred data, and metadata.
 - **Graph versioning** — Create a new named graph for each version: `urn:datasets:products:v1`, `urn:datasets:products:v2`, and so on. Switch which graph a dataset points to for rollback.
-- **Model and vocabulary graphs** — Data models are stored in named graphs following the pattern `urn:data-model:<id>:v<version>`; vocabularies use `urn:vocabulary:<id>:v<version>`. Registry metadata lives in the corresponding system graphs.
+- **Model registry graphs** — Versioned models (OWL/RDFS ontologies and SKOS vocabularies, distinguished by the entry's `kind`) are stored in named graphs following the pattern `{base-url}/data-model/<id>/version/<version>`. Registry metadata lives in the corresponding system graph.
 
 See also: [Datasets](/docs/datasets), [Model & Vocabulary Versioning](/docs/models), [OWL Reasoning](/docs/reasoning).
