@@ -52,6 +52,24 @@ pub struct GraphChange {
     pub changed: bool,
 }
 
+/// Why a bulk load failed, so the caller can map it to the right HTTP status.
+#[derive(Debug)]
+pub enum BulkError {
+    /// A target graph fell outside the caller's permitted write scope. The
+    /// HTTP handler maps this to 403 Forbidden. No data was written.
+    Forbidden(String),
+    /// A parse, store, or archival failure (HTTP 400 from the bulk handler).
+    Failed(String),
+}
+
+impl std::fmt::Display for BulkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BulkError::Forbidden(m) | BulkError::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
 /// Aggregate result of a bulk import.
 #[derive(Debug, Serialize)]
 pub struct BulkResult {
@@ -181,13 +199,22 @@ fn live_triple_keys(
 /// distinguish a real change from an identical re-upload; it runs inside this
 /// blocking task, before any deletion.
 ///
+/// `authorize` is the per-graph write boundary. It is invoked once with the
+/// sorted set of *every* graph this batch would touch — triple targets,
+/// auto-split sub-graphs, and graph names embedded in quad-format files — after
+/// parsing resolves the final set but before any delete or insert. Returning
+/// `Err` aborts the load with `BulkError::Forbidden` and writes nothing, so a
+/// caller can confine an import to graphs the principal may actually write.
+///
 /// Per-file parse errors are recorded in the result without aborting siblings;
-/// only store-level errors propagate as `Err`.
+/// only store-level errors (`BulkError::Failed`) and authorization rejections
+/// (`BulkError::Forbidden`) propagate as `Err`.
 pub fn parse_and_load_bulk(
     store: &TripleStore,
     inputs: Vec<InputFile>,
+    authorize: impl FnOnce(&[String]) -> Result<(), String>,
     before_replace: impl FnOnce(&[GraphChange]) -> Result<(), String>,
-) -> Result<BulkResult, String> {
+) -> Result<BulkResult, BulkError> {
     use rayon::prelude::*;
 
     let total_files = inputs.len();
@@ -240,6 +267,13 @@ pub fn parse_and_load_bulk(
     let graph_list: Vec<String> = touched_graphs.into_iter().collect();
     let replace_list: Vec<String> = replace_graphs.into_iter().collect();
 
+    // Per-graph write boundary. `graph_list` is the complete, parse-resolved set
+    // of graphs this batch would write — so this single gate covers triple
+    // targets, auto-split sub-graphs and quad-format embedded graph names alike.
+    // It runs before the replace/delete and the insert, so a rejected target
+    // neither wipes existing data nor adds new triples.
+    authorize(&graph_list).map_err(BulkError::Forbidden)?;
+
     if !replace_list.is_empty() {
         // Compare each replace target's incoming triples against what is already
         // stored *before* anything is cleared, so the caller can tell an actual
@@ -254,20 +288,21 @@ pub fn parse_and_load_bulk(
                     changed: incoming != live,
                 })
             })
-            .collect::<Result<_, String>>()?;
+            .collect::<Result<_, String>>()
+            .map_err(BulkError::Failed)?;
         // Let the caller archive the soon-to-be-cleared graphs first.
-        before_replace(&changes)?;
+        before_replace(&changes).map_err(BulkError::Failed)?;
         let refs: Vec<&str> = replace_list.iter().map(|s| s.as_str()).collect();
         store
             .bulk_delete_graphs(&refs)
-            .map_err(|e| format!("Failed to clear target graphs: {e}"))?;
+            .map_err(|e| BulkError::Failed(format!("Failed to clear target graphs: {e}")))?;
     }
 
     let total_quads = all_quads.len();
     if !all_quads.is_empty() {
         store
             .bulk_insert_quads(all_quads, &graph_list)
-            .map_err(|e| format!("Failed to insert quads: {e}"))?;
+            .map_err(|e| BulkError::Failed(format!("Failed to insert quads: {e}")))?;
     }
 
     Ok(BulkResult {
@@ -324,10 +359,15 @@ mod tests {
             true,
         );
         let mut archived: Vec<GraphChange> = vec![];
-        parse_and_load_bulk(&store, vec![input], |graphs| {
-            archived = graphs.to_vec();
-            Ok(())
-        })
+        parse_and_load_bulk(
+            &store,
+            vec![input],
+            |_| Ok(()),
+            |graphs| {
+                archived = graphs.to_vec();
+                Ok(())
+            },
+        )
         .unwrap();
 
         // before_replace was handed exactly the graph about to be cleared, and
@@ -345,15 +385,20 @@ mod tests {
         let body = "<http://example.org/old> <http://example.org/p> <http://example.org/o> .";
         // Seed the graph with exactly what we are about to re-upload.
         let seed = ttl_input("seed.ttl", body, G, false);
-        parse_and_load_bulk(&store, vec![seed], |_| Ok(())).unwrap();
+        parse_and_load_bulk(&store, vec![seed], |_| Ok(()), |_| Ok(())).unwrap();
         assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
 
         let input = ttl_input("a.ttl", body, G, true);
         let mut changes: Vec<GraphChange> = vec![];
-        parse_and_load_bulk(&store, vec![input], |g| {
-            changes = g.to_vec();
-            Ok(())
-        })
+        parse_and_load_bulk(
+            &store,
+            vec![input],
+            |_| Ok(()),
+            |g| {
+                changes = g.to_vec();
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert_eq!(changes.len(), 1);
@@ -376,10 +421,15 @@ mod tests {
             false,
         );
         let mut archive_called = false;
-        parse_and_load_bulk(&store, vec![input], |_| {
-            archive_called = true;
-            Ok(())
-        })
+        parse_and_load_bulk(
+            &store,
+            vec![input],
+            |_| Ok(()),
+            |_| {
+                archive_called = true;
+                Ok(())
+            },
+        )
         .unwrap();
 
         // POST semantics: both old and new coexist; archive hook never fired.
@@ -407,14 +457,78 @@ mod tests {
             false,
         );
         let mut archived: Vec<String> = vec![];
-        parse_and_load_bulk(&store, vec![replace_f, merge_f], |graphs| {
-            archived = graphs.iter().map(|c| c.graph.clone()).collect();
-            Ok(())
-        })
+        parse_and_load_bulk(
+            &store,
+            vec![replace_f, merge_f],
+            |_| Ok(()),
+            |graphs| {
+                archived = graphs.iter().map(|c| c.graph.clone()).collect();
+                Ok(())
+            },
+        )
         .unwrap();
 
         assert_eq!(archived, vec![G.to_string()]);
         assert_eq!(store.count_graph(Some(G)).unwrap(), 1); // cleared + new
         assert_eq!(store.count_graph(Some(g_merge)).unwrap(), 2); // old + new2
+    }
+
+    #[test]
+    fn authorize_rejection_aborts_before_any_write() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, G); // pre-existing data in the replace target
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+
+        let input = ttl_input(
+            "a.ttl",
+            "<http://example.org/new> <http://example.org/p> <http://example.org/o> .",
+            G,
+            true, // replace
+        );
+        // The authorize gate rejects the target graph.
+        let err = parse_and_load_bulk(&store, vec![input], |_| Err("nope".to_string()), |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(err, BulkError::Forbidden(_)));
+        // The replace target was neither cleared nor appended to: a rejected
+        // import must touch nothing.
+        assert_eq!(
+            store.count_graph(Some(G)).unwrap(),
+            1,
+            "a rejected import must not clear or modify the target graph"
+        );
+    }
+
+    #[test]
+    fn authorize_sees_quad_embedded_graph_names() {
+        let store = TripleStore::in_memory().unwrap();
+        // N-Quads embed their own graph name; with merge off the embedded graph is
+        // the write target, so the authorize closure must see it (otherwise a
+        // quad file could bypass a target-graph-only check).
+        let embedded = "http://example.org/embedded";
+        let input = InputFile {
+            filename: "a.nq".to_string(),
+            content_type: "application/n-quads".to_string(),
+            bytes: format!("<http://e/s> <http://e/p> <http://e/o> <{embedded}> .").into_bytes(),
+            target_graph: None,
+            merge_into_target: false,
+            auto_split: false,
+            replace: false,
+        };
+        let mut seen: Vec<String> = vec![];
+        parse_and_load_bulk(
+            &store,
+            vec![input],
+            |graphs| {
+                seen = graphs.to_vec();
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![embedded.to_string()],
+            "authorize must receive graph names embedded in quad-format files"
+        );
     }
 }

@@ -314,6 +314,19 @@ impl axum::extract::FromRef<AppState> for Arc<AuthDb> {
     }
 }
 
+/// Extractor newtype for the linked-data base URL, so handlers that only take
+/// `State<Arc<AuthDb>>` can also obtain `base_url` (e.g. to surface a dataset's
+/// canonical IRI) without pulling in the whole `AppState`. A newtype is required
+/// because the orphan rule forbids `impl FromRef<AppState> for Arc<String>`.
+#[derive(Clone)]
+pub struct BaseUrl(pub Arc<String>);
+
+impl axum::extract::FromRef<AppState> for BaseUrl {
+    fn from_ref(state: &AppState) -> Self {
+        BaseUrl(state.base_url.clone())
+    }
+}
+
 impl axum::extract::FromRef<AppState> for Arc<crate::auth::audit::AuditLogger> {
     fn from_ref(state: &AppState) -> Self {
         state.audit.clone()
