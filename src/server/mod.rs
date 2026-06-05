@@ -351,6 +351,41 @@ impl axum::extract::FromRef<AppState> for Arc<crate::auth::oidc_rs::AuthExt> {
     }
 }
 
+/// Surface the LDP capability headers (`Accept-Post`, `Accept-Patch`, `Allow`) on
+/// `OPTIONS /ldp/*` responses even when the global CORS layer answers the preflight
+/// before the LDP handler runs.
+///
+/// tower-http's `CorsLayer` short-circuits CORS *preflight* requests (an `OPTIONS`
+/// carrying `Access-Control-Request-Method`) and replies directly, so the LDP
+/// `OPTIONS` handler never executes and its capability headers are lost. This
+/// middleware is layered just outside CORS, so it observes that short-circuited
+/// response and fills the headers in when they are missing. A plain (non-preflight)
+/// `OPTIONS` still reaches the handler, which sets them — `accept-post` is then
+/// already present and this is a no-op. The values match `ldp::handler::ldp_options`.
+async fn ldp_options_capabilities(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_ldp_options = req.method() == Method::OPTIONS && req.uri().path().starts_with("/ldp/");
+    let mut resp = next.run(req).await;
+    if is_ldp_options && !resp.headers().contains_key("accept-post") {
+        let headers = resp.headers_mut();
+        headers.insert(
+            axum::http::header::ALLOW,
+            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            HeaderName::from_static("accept-post"),
+            HeaderValue::from_static("text/turtle, application/ld+json"),
+        );
+        headers.insert(
+            HeaderName::from_static("accept-patch"),
+            HeaderValue::from_static("application/sparql-update"),
+        );
+    }
+    resp
+}
+
 /// Build the application router.
 ///
 /// Per-IP rate limiting is applied to three groups of endpoints, each with its own
@@ -1149,6 +1184,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // This can reduce SPARQL JSON payloads by 70–90 % (e.g. 50 MB → 5 MB).
         .layer(CompressionLayer::new())
         .layer(build_cors_layer(cors_origins))
+        // Re-attach the LDP capability headers that the CORS preflight short-circuit
+        // would otherwise drop. Must sit just outside the CORS layer so it runs on the
+        // preflight response CORS produced (see `ldp_options_capabilities`).
+        .layer(middleware::from_fn(ldp_options_capabilities))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
             csp_value,

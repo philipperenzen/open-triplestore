@@ -257,12 +257,16 @@ fn container_iri_for(base_url: &str, path: &str) -> String {
 // ─── GET ──────────────────────────────────────────────────────────────────────
 
 /// GET /ldp/*path — Fetch an LDP resource or list a container.
+///
+/// `path` is optional: the bare root container `/ldp/` has no `*path` segment, so
+/// it resolves to the empty path (the container IRI `{base}/ldp/`).
 pub async fn ldp_get(
     State(state): State<AppState>,
-    Path(path): Path<String>,
+    path: Option<Path<String>>,
     headers: HeaderMap,
     Query(params): Query<LdpPageParams>,
 ) -> Response {
+    let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
 
@@ -406,8 +410,10 @@ pub async fn ldp_get(
 
 // ─── HEAD ─────────────────────────────────────────────────────────────────────
 
-/// HEAD /ldp/*path — Headers only (no body).
-pub async fn ldp_head(State(state): State<AppState>, Path(path): Path<String>) -> Response {
+/// HEAD /ldp/*path — Headers only (no body). `path` is optional so the bare root
+/// container `/ldp/` (no `*path` segment) resolves to the empty path.
+pub async fn ldp_head(State(state): State<AppState>, path: Option<Path<String>>) -> Response {
+    let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
 
@@ -445,10 +451,11 @@ pub async fn ldp_head(State(state): State<AppState>, Path(path): Path<String>) -
 /// Indirect Container membership triple creation.
 pub async fn ldp_post(
     State(state): State<AppState>,
-    Path(path): Path<String>,
+    path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let container_iri = resource_iri(base, &path);
 
@@ -503,7 +510,9 @@ pub async fn ldp_post(
                 oxigraph::io::RdfFormat::Turtle
             };
 
-            if let Err(e) = state.store.load_str(text, fmt, None) {
+            // Parse with the new member's IRI as base so an idiomatic relative
+            // `<>` subject resolves to it instead of being rejected as schemeless.
+            if let Err(e) = state.store.load_str_with_base(text, fmt, &member_iri, None) {
                 return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
             }
         } else {
@@ -609,10 +618,11 @@ pub async fn ldp_post(
 /// Supports `If-Match` ETag for optimistic concurrency.
 pub async fn ldp_put(
     State(state): State<AppState>,
-    Path(path): Path<String>,
+    path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
 
@@ -683,10 +693,13 @@ pub async fn ldp_put(
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
-    // Ensure container relationship
+    // Ensure container relationship. A PUT to the root `/ldp/` has the resource and
+    // its parent container as the same IRI, so skip the self-membership triple.
     let container = container_iri_for(base, &path);
     let _ = container::ensure_container(&state.store, &container);
-    let _ = container::add_member(&state.store, &container, &iri);
+    if container != iri {
+        let _ = container::add_member(&state.store, &container, &iri);
+    }
 
     let new_body = container::describe_resource(&state.store, &iri).unwrap_or_default();
     let etag = container::compute_etag(&new_body);
@@ -707,10 +720,11 @@ pub async fn ldp_put(
 /// `Content-Type` must be `application/sparql-update`.
 pub async fn ldp_patch(
     State(state): State<AppState>,
-    Path(path): Path<String>,
+    path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
 
@@ -770,11 +784,16 @@ pub async fn ldp_patch(
 /// DELETE /ldp/*path — Remove an LDP resource and its containment triple.
 ///
 /// Also removes Direct / Indirect Container membership triples.
-pub async fn ldp_delete(State(state): State<AppState>, Path(path): Path<String>) -> Response {
+pub async fn ldp_delete(State(state): State<AppState>, path: Option<Path<String>>) -> Response {
+    let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
     let container = container_iri_for(base, &path);
 
+    // REVIEW: a DELETE to the bare root container `/ldp/` (empty path) wipes the
+    // root's own triples like any other container delete (it does not cascade to
+    // members). If the root should be undeletable, reject the empty path here with
+    // `StatusCode::METHOD_NOT_ALLOWED` instead of proceeding.
     if !container::resource_exists(&state.store, &iri) {
         return StatusCode::NOT_FOUND.into_response();
     }

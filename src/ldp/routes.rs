@@ -16,8 +16,14 @@ pub fn ldp_routes() -> Router<AppState> {
         .route("/ldp/*path", patch(handler::ldp_patch))
         .route("/ldp/*path", delete(handler::ldp_delete))
         .route("/ldp/*path", options(handler::ldp_options))
-        // Root container (no trailing wildcard path param)
+        // Root container (no trailing wildcard path param). The handlers take an
+        // `Option<Path>`, so the empty path resolves to the container IRI `{base}/ldp/`
+        // and the root behaves like any other container across all methods.
         .route("/ldp/", get(handler::ldp_get))
+        .route("/ldp/", head(handler::ldp_head))
         .route("/ldp/", post(handler::ldp_post))
+        .route("/ldp/", put(handler::ldp_put))
+        .route("/ldp/", patch(handler::ldp_patch))
+        .route("/ldp/", delete(handler::ldp_delete))
         .route("/ldp/", options(handler::ldp_options_root))
 }

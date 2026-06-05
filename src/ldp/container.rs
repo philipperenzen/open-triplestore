@@ -422,20 +422,26 @@ pub fn describe_resource(store: &TripleStore, iri: &str) -> Result<Vec<u8>, Stri
 }
 
 /// Load Turtle data about a resource into the default graph.
-pub fn load_resource_turtle(store: &TripleStore, _iri: &str, turtle: &str) -> Result<(), String> {
+///
+/// Relative IRIs resolve against `iri` so an idiomatic `<>` subject (LDP's way of
+/// referring to the resource being written) attaches to the resource itself.
+pub fn load_resource_turtle(store: &TripleStore, iri: &str, turtle: &str) -> Result<(), String> {
     store
-        .load_str(turtle, oxigraph::io::RdfFormat::Turtle, None)
+        .load_str_with_base(turtle, oxigraph::io::RdfFormat::Turtle, iri, None)
         .map_err(|e| e.to_string())
 }
 
 /// Load JSON-LD data about a resource into the default graph.
-pub fn load_resource_jsonld(store: &TripleStore, _iri: &str, jsonld: &str) -> Result<(), String> {
+///
+/// Relative IRIs resolve against `iri` (see [`load_resource_turtle`]).
+pub fn load_resource_jsonld(store: &TripleStore, iri: &str, jsonld: &str) -> Result<(), String> {
     store
-        .load_str(
+        .load_str_with_base(
             jsonld,
             oxigraph::io::RdfFormat::JsonLd {
                 profile: Default::default(),
             },
+            iri,
             None,
         )
         .map_err(|e| e.to_string())

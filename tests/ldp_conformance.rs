@@ -922,4 +922,225 @@ mod http_tests {
             )
         ));
     }
+
+    // ── Root container (`/ldp/`, no path segment) ─────────────────────────────
+
+    // POST to the bare LDP root container must create a member and return
+    // 201 + Location. Regression test: the handler used a required `Path<String>`
+    // extractor, which rejected the empty path with a 500 ("Wrong number of path
+    // arguments for `Path`. Expected 1 but got 0").
+    #[tokio::test]
+    async fn post_to_root_container_creates_member() {
+        let (router, _store) = make_router();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ldp/")
+                    .header("content-type", "text/turtle")
+                    .header("slug", "rootitem")
+                    .body(Body::from(
+                        "<http://example.org/x> <http://example.org/p> \"v\" .\n",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "POST /ldp/ (root container) must create with 201"
+        );
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.ends_with("/ldp/rootitem"),
+            "Location should point to the new root member, got: {location}"
+        );
+    }
+
+    // A POST body using the idiomatic relative `<>` subject is parsed with the new
+    // member's IRI as base, so `<>` resolves to it instead of being rejected with
+    // "No scheme found in an absolute IRI".
+    #[tokio::test]
+    async fn post_relative_subject_resolves_against_member_iri() {
+        let (router, _store) = make_router();
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ldp/relc/")
+                    .header("content-type", "text/turtle")
+                    .header("slug", "rel1")
+                    .body(Body::from("<> <http://example.org/p> \"relval\" .\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "POST with a relative <> subject must succeed"
+        );
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.ends_with("/ldp/relc/rel1"),
+            "Location should be the new member IRI, got: {location}"
+        );
+
+        // GET the new member: describe returns only triples whose subject is the
+        // member IRI, so seeing "relval" proves `<>` resolved to that IRI.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/ldp/relc/rel1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "GET of the new member must succeed"
+        );
+        let body = body_string(resp.into_body()).await;
+        assert!(
+            body.contains("example.org/p") && body.contains("relval"),
+            "member description must contain the base-resolved triple, got: {body}"
+        );
+    }
+
+    // The root container accepts every method, not just GET/POST/OPTIONS. Before the
+    // fix, HEAD/PUT/PATCH/DELETE on `/ldp/` were unrouted and returned 405.
+    #[tokio::test]
+    async fn root_container_supports_all_methods() {
+        let (router, _store) = make_router();
+
+        // PUT creates/replaces the root container representation.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/ldp/")
+                    .header("content-type", "text/turtle")
+                    .body(Body::from(
+                        "<> <http://purl.org/dc/terms/title> \"Root\" .\n",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "PUT /ldp/ must be routed, not 405"
+        );
+        assert!(
+            resp.status().is_success(),
+            "PUT /ldp/ should succeed, got: {}",
+            resp.status()
+        );
+
+        // HEAD resolves the now-existing root container.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/ldp/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "HEAD /ldp/ should be 200");
+
+        // PATCH applies a SPARQL update to the root container.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/ldp/")
+                    .header("content-type", "application/sparql-update")
+                    .body(Body::from(
+                        "INSERT DATA { <http://example.org/s> <http://example.org/p> \"x\" }",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "PATCH /ldp/ should be 204"
+        );
+
+        // DELETE removes the root container.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/ldp/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "DELETE /ldp/ should be 204"
+        );
+    }
+
+    // The global CORS layer answers CORS preflight (OPTIONS + Access-Control-Request-
+    // Method) before the LDP handler runs, so the `ldp_options_capabilities` middleware
+    // must re-attach Accept-Post / Accept-Patch / Allow to the preflight response. This
+    // drives the FULL `build_router` stack (with CORS), unlike the bare `ldp_routes()`
+    // used elsewhere in this module.
+    #[tokio::test]
+    async fn cors_preflight_surfaces_ldp_capabilities() {
+        use open_triplestore::server::build_router;
+        let store = TripleStore::in_memory().unwrap();
+        let state = AppState::test_default_with_store(store);
+        let app = build_router(state, "", vec![]);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/ldp/c1")
+                    .header("origin", "http://example.com")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.headers().contains_key("accept-post"),
+            "preflight OPTIONS /ldp/* must surface Accept-Post"
+        );
+        assert!(
+            resp.headers().contains_key("accept-patch"),
+            "preflight OPTIONS /ldp/* must surface Accept-Patch"
+        );
+        assert!(
+            resp.headers().contains_key("allow"),
+            "preflight OPTIONS /ldp/* must surface Allow"
+        );
+    }
 }
