@@ -19,7 +19,8 @@ const DCT: &str = "http://purl.org/dc/terms/";
 fn setup() -> (TripleStore, Arc<AuthDb>) {
     let store = TripleStore::in_memory().unwrap();
     let db = Arc::new(AuthDb::in_memory().unwrap());
-    db.create_organisation("o1", "Acme Data", "acme", None, None).unwrap();
+    db.create_organisation("o1", "Acme Data", "acme", None, None)
+        .unwrap();
     db.create_dataset(
         "d1",
         "Census 2020",
@@ -59,13 +60,25 @@ fn dcat_catalog_and_dataset() {
     let (store, db) = setup();
     let ttl = generate_dcat_catalog("http://localhost:7878", &store, &db, None);
     let s = parse(&ttl);
-    assert!(ask(&s, &format!("ASK {{ ?c a <{DCAT}Catalog> }}")), "must declare a dcat:Catalog");
-    assert!(ask(&s, &format!("ASK {{ ?d a <{DCAT}Dataset> }}")), "must declare a dcat:Dataset");
     assert!(
-        ask(&s, &format!("ASK {{ ?c a <{DCAT}Catalog> ; <{DCT}title> ?t }}")),
+        ask(&s, &format!("ASK {{ ?c a <{DCAT}Catalog> }}")),
+        "must declare a dcat:Catalog"
+    );
+    assert!(
+        ask(&s, &format!("ASK {{ ?d a <{DCAT}Dataset> }}")),
+        "must declare a dcat:Dataset"
+    );
+    assert!(
+        ask(
+            &s,
+            &format!("ASK {{ ?c a <{DCAT}Catalog> ; <{DCT}title> ?t }}")
+        ),
         "catalog has a dct:title"
     );
-    assert!(ttl.contains("Census 2020"), "dataset title appears in the catalog");
+    assert!(
+        ttl.contains("Census 2020"),
+        "dataset title appears in the catalog"
+    );
 }
 
 // The catalog links its datasets via dcat:dataset, and each dataset exposes at
@@ -76,11 +89,17 @@ fn dcat_dataset_membership_and_distribution() {
     let ttl = generate_dcat_catalog("http://localhost:7878", &store, &db, None);
     let s = parse(&ttl);
     assert!(
-        ask(&s, &format!("ASK {{ ?c a <{DCAT}Catalog> ; <{DCAT}dataset> ?d . ?d a <{DCAT}Dataset> }}")),
+        ask(
+            &s,
+            &format!("ASK {{ ?c a <{DCAT}Catalog> ; <{DCAT}dataset> ?d . ?d a <{DCAT}Dataset> }}")
+        ),
         "catalog dcat:dataset links to a dcat:Dataset"
     );
     assert!(
-        count(&s, &format!("SELECT ?dist WHERE {{ ?d <{DCAT}distribution> ?dist }}")) >= 1,
+        count(
+            &s,
+            &format!("SELECT ?dist WHERE {{ ?d <{DCAT}distribution> ?dist }}")
+        ) >= 1,
         "dataset has at least one dcat:Distribution"
     );
 }
@@ -91,7 +110,9 @@ fn dcat_void_statistics() {
     let (store, db) = setup();
     // Put some data into the dataset's graph so VoID stats are non-trivial.
     store
-        .update("INSERT DATA { GRAPH <urn:dataset:d1> { <http://ex/s> <http://ex/p> <http://ex/o> } }")
+        .update(
+            "INSERT DATA { GRAPH <urn:dataset:d1> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        )
         .unwrap();
     let ttl = generate_dcat_catalog("http://localhost:7878", &store, &db, None);
     let s = parse(&ttl);

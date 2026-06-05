@@ -59,8 +59,15 @@ async fn ldp_post_creates_member_with_location() {
     let (state, token) = admin_state();
     let app = test_app(state);
     let (st, hdrs) = post_member(&app, &token, "item1").await;
-    assert_eq!(st, StatusCode::CREATED, "POST must create with 201, got {st}");
-    assert!(hdrs.contains_key(header::LOCATION), "201 response must carry a Location header");
+    assert_eq!(
+        st,
+        StatusCode::CREATED,
+        "POST must create with 201, got {st}"
+    );
+    assert!(
+        hdrs.contains_key(header::LOCATION),
+        "201 response must carry a Location header"
+    );
 }
 
 // OPTIONS on an LDP resource advertises Allow + Accept-Post + Accept-Patch.
@@ -76,9 +83,18 @@ async fn ldp_options_advertises_capabilities() {
     let app: Router = ldp_routes().with_state(test_state());
     let (st, hdrs, _) = send(&app, Method::OPTIONS, "/ldp/c1", None, &[], "").await;
     assert!(st.is_success(), "OPTIONS must succeed, got {st}");
-    assert!(hdrs.contains_key("accept-post"), "OPTIONS must advertise Accept-Post");
-    assert!(hdrs.contains_key("accept-patch"), "OPTIONS must advertise Accept-Patch");
-    assert!(hdrs.contains_key(header::ALLOW), "OPTIONS must advertise Allow");
+    assert!(
+        hdrs.contains_key("accept-post"),
+        "OPTIONS must advertise Accept-Post"
+    );
+    assert!(
+        hdrs.contains_key("accept-patch"),
+        "OPTIONS must advertise Accept-Patch"
+    );
+    assert!(
+        hdrs.contains_key(header::ALLOW),
+        "OPTIONS must advertise Allow"
+    );
 }
 
 // Every LDP response carries the constrainedBy Link header.
@@ -123,7 +139,10 @@ async fn ldp_if_match_precondition_failed() {
         Method::PUT,
         "/ldp/res1",
         Some(&token),
-        &[("Content-Type", "text/turtle"), ("If-Match", "\"stale-etag\"")],
+        &[
+            ("Content-Type", "text/turtle"),
+            ("If-Match", "\"stale-etag\""),
+        ],
         "<http://example.org/res1> <http://example.org/p> \"v2\" .",
     )
     .await;

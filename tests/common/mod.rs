@@ -75,7 +75,13 @@ pub fn admin_state() -> (AppState, String) {
     let state = test_state();
     state
         .auth_db
-        .create_user("adm", "admin", "admin@test.com", "hash", SystemRole::SuperAdmin)
+        .create_user(
+            "adm",
+            "admin",
+            "admin@test.com",
+            "hash",
+            SystemRole::SuperAdmin,
+        )
         .unwrap();
     let token = mint_token("adm", "admin", "super_admin");
     (state, token)
