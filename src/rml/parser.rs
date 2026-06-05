@@ -258,27 +258,32 @@ fn parse_optional_term_map(
 }
 
 /// Get all object values for (subject, predicate) in the given graph context.
+///
+/// Resolves through the raw quad index (`objects_for_subject_in_graph`) rather
+/// than a SPARQL query, because `subject` may be a *stored* blank node — inline
+/// term maps written with the standard idiom (`rr:subjectMap [ … ]`,
+/// `rr:predicateObjectMap [ … ]`, `rr:objectMap [ … ]`). SPARQL surface syntax
+/// cannot name a specific stored blank node (`_:x` in a query is a fresh
+/// existential), so the old query form matched EVERY blank node carrying the
+/// predicate and cross-contaminated inline mappings. This mirrors the fix the
+/// SHACL shape loader already applies.
 fn get_objects(
     store: &TripleStore,
     subject: &str,
     predicate: &str,
     graph: Option<&str>,
 ) -> Vec<String> {
-    let (subj_pattern, graph_clause, graph_close) = if subject.starts_with("_:") {
-        // blank node subject — use a different format
-        let gc = graph.map(|g| format!("GRAPH <{g}> {{")).unwrap_or_default();
-        let gclose = if graph.is_some() { "}" } else { "" };
-        (subject.to_string(), gc, gclose.to_string())
-    } else {
-        let gc = graph.map(|g| format!("GRAPH <{g}> {{")).unwrap_or_default();
-        let gclose = if graph.is_some() { "}" } else { "" };
-        (format!("<{subject}>"), gc, gclose.to_string())
-    };
-
-    let q = format!(
-        "SELECT ?o WHERE {{ {graph_clause} {subj_pattern} <{predicate}> ?o {graph_close} }}"
-    );
-    query_col(store, &q, "o")
+    use oxigraph::model::Term;
+    store
+        .objects_for_subject_in_graph(subject, predicate, graph)
+        .into_iter()
+        .filter_map(|t| match t {
+            Term::NamedNode(n) => Some(n.as_str().to_string()),
+            Term::BlankNode(b) => Some(format!("_:{}", b.as_str())),
+            Term::Literal(l) => Some(l.value().to_string()),
+            Term::Triple(_) => None,
+        })
+        .collect()
 }
 
 /// Run a SELECT query and return a named column's values as strings.
