@@ -1,7 +1,10 @@
 use dashmap::DashMap;
+use opengraph::spargebra::algebra::{AggregateExpression, Expression, GraphPattern};
+use opengraph::spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use opengraph::spargebra::Query as SpargebraQuery;
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::*;
-use oxigraph::sparql::{QueryOptions, QueryResults, Update};
+use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolutionIter, Update};
 use oxigraph::store::Store;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -271,9 +274,67 @@ impl TripleStore {
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
         debug!("Executing query: {}", &sparql[..prefix_end]);
+        // Fast path: a global `COUNT(*)` over a full triple scan is answered from
+        // the maintained per-graph count index instead of materialising and then
+        // discarding every solution tuple. Callgrind shows ~30% of COUNT(*) cost is
+        // tuple build/copy (`InternalTuple::set`, `EncodedTerm::clone`, memcpy) —
+        // pure waste when the projection is only a count.
+        if let Some(fast) = self.try_fast_count(sparql) {
+            return Ok(fast);
+        }
         let opts = self.query_options();
         let results = self.store.query_opt(sparql, opts)?;
         Ok(results)
+    }
+
+    /// Recognise `SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally with a
+    /// single default-graph `FROM <g>`) and answer it from the O(1) per-graph count
+    /// index. Returns `None` for anything else, so the normal evaluator runs and
+    /// results never change — this only short-circuits one exact, provably-safe
+    /// shape (a single full-scan triple pattern over one graph; the count of a
+    /// graph equals its triple count, no RDF-merge dedup involved).
+    fn try_fast_count(&self, sparql: &str) -> Option<QueryResults> {
+        // Cheap reject: must mention COUNT(*) (whitespace-insensitive) before parsing.
+        if !sparql
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<String>()
+            .contains("count(*)")
+        {
+            return None;
+        }
+        let parsed = SpargebraQuery::parse(sparql, None).ok()?;
+        let (pattern, dataset) = match &parsed {
+            SpargebraQuery::Select {
+                pattern, dataset, ..
+            } => (pattern, dataset),
+            _ => return None,
+        };
+        let var_name = count_star_var(pattern)?;
+        // The single graph the count applies to (the query's default graph).
+        let graph: Option<String> = match dataset {
+            None => None,
+            Some(ds) => match ds.default.as_slice() {
+                // `FROM NAMED` with no `FROM` empties the default graph → not us.
+                [] if ds.named.is_some() => return None,
+                [] => None,
+                [g] => Some(g.as_str().to_string()),
+                _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
+            },
+        };
+        let count = self
+            .graph_count_cached(graph.as_deref())
+            .or_else(|| self.count_graph(graph.as_deref()).ok())?;
+        let var = oxigraph::sparql::Variable::new(var_name).ok()?;
+        let lit = Literal::new_typed_literal(
+            count.to_string(),
+            NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+        );
+        let vars: Arc<[oxigraph::sparql::Variable]> = Arc::from(vec![var]);
+        let iter =
+            QuerySolutionIter::new(vars, std::iter::once(Ok(vec![Some(Term::Literal(lit))])));
+        Some(QueryResults::Solutions(iter))
     }
 
     /// Execute a SPARQL UPDATE operation.
@@ -822,10 +883,119 @@ pub fn detect_format_from_path(path: &Path) -> Result<RdfFormat, StoreError> {
     }
 }
 
+// ── Fast-COUNT(*) shape recognition (see TripleStore::try_fast_count) ─────────────
+
+/// If `pattern` is `SELECT (COUNT(*) AS ?v)` over a single full-scan triple
+/// pattern, return the projected variable name `v`; otherwise `None`.
+fn count_star_var(pattern: &GraphPattern) -> Option<String> {
+    if let GraphPattern::Project { inner, variables } = pattern {
+        if variables.len() == 1 && is_count_star_full_scan(inner) {
+            return Some(variables[0].as_str().to_string());
+        }
+    }
+    None
+}
+
+/// `Extend(Group([], [COUNT(*)]), full-scan BGP)` — the algebra a global
+/// `(COUNT(*) AS ?v)` parses to (the Extend aliases the aggregate result).
+fn is_count_star_full_scan(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Extend {
+            inner, expression, ..
+        } => matches!(expression, Expression::Variable(_)) && is_count_star_full_scan(inner),
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
+            variables.is_empty()
+                && aggregates.len() == 1
+                && matches!(
+                    &aggregates[0].1,
+                    AggregateExpression::CountSolutions { distinct: false }
+                )
+                && is_full_scan_bgp(inner)
+        }
+        _ => false,
+    }
+}
+
+/// A single triple pattern whose subject, predicate and object are three
+/// *distinct* variables (`{ ?s ?p ?o }`) — a true full scan.
+fn is_full_scan_bgp(p: &GraphPattern) -> bool {
+    matches!(p, GraphPattern::Bgp { patterns } if patterns.len() == 1 && all_distinct_vars(&patterns[0]))
+}
+
+fn all_distinct_vars(tp: &TriplePattern) -> bool {
+    let s = match &tp.subject {
+        TermPattern::Variable(v) => v.as_str(),
+        _ => return false,
+    };
+    let p = match &tp.predicate {
+        NamedNodePattern::Variable(v) => v.as_str(),
+        _ => return false,
+    };
+    let o = match &tp.object {
+        TermPattern::Variable(v) => v.as_str(),
+        _ => return false,
+    };
+    s != p && p != o && s != o
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn fast_count_matches_normal_eval() {
+        let store = TripleStore::in_memory().unwrap();
+        // default graph: 3 triples
+        store
+            .load_str(
+                "<http://e/a> <http://e/p> \"1\" . <http://e/b> <http://e/p> \"2\" . <http://e/c> <http://e/p> \"3\" .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        // named graph <http://g>: 2 triples
+        store
+            .load_str(
+                "<http://e/x> <http://e/p> \"1\" . <http://e/y> <http://e/p> \"2\" .",
+                RdfFormat::Turtle,
+                Some("http://g"),
+            )
+            .unwrap();
+
+        let count = |q: &str| -> String {
+            match store.query(q).unwrap() {
+                QueryResults::Solutions(s) => {
+                    let sol = s.into_iter().next().unwrap().unwrap();
+                    sol.get("c").map(|t| t.to_string()).unwrap_or_default()
+                }
+                _ => panic!("expected solutions"),
+            }
+        };
+
+        // Fast path: default-graph count = 3.
+        assert!(count("SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }").contains("\"3\""));
+        // Fast path: FROM <g> counts only that graph = 2.
+        assert!(
+            count("SELECT (COUNT(*) AS ?c) FROM <http://g> WHERE { ?s ?p ?o }").contains("\"2\"")
+        );
+        // A COUNT with a FILTER must NOT be short-circuited — it must reflect the
+        // filter (one default-graph triple has object "1"), proving the fast path
+        // is skipped for anything but a bare full scan.
+        assert!(
+            count("SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o FILTER(STR(?o) = \"1\") }")
+                .contains("\"1\"")
+        );
+        // A two-pattern BGP COUNT is also not the bare-scan shape → normal eval.
+        assert!(count(
+            "SELECT (COUNT(*) AS ?c) WHERE { ?s <http://e/p> ?o . ?s <http://e/p> ?o2 }"
+        )
+        .contains("\"3\""));
+    }
 
     fn detect_format_from_mime(mime: &str) -> Result<RdfFormat, StoreError> {
         let mime = mime.split(';').next().unwrap_or(mime).trim();

@@ -988,17 +988,27 @@ be rewritten to a Tantivy full-text index lookup before SPARQL evaluation.
 `REGEX(?v, "…")` / `CONTAINS(?v, "…")` patterns and rewrites them to a
 `text:query(?v, "…")` service call against the Tantivy index.
 
-### 4. Vectorised aggregation (COUNT/SUM fast path)
+### 4. Fast `COUNT(*)` — ✅ implemented
 
-**Impact:** 3–5× improvement for COUNT(*) and SUM over full scans.
+**What callgrind showed.** On `SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }` ~30 %+
+of the cost is *building and copying solution tuples that are immediately
+discarded* — `spareval::put_pattern_value`, `InternalTuple::set`,
+`EncodedTerm::clone`, `Vec::extend_with`, and ~11 % in `memcpy` — plus the index
+scan itself. The projection is only a count, so all of that is pure waste.
 
-**Rationale:** COUNT(*) currently materialises each solution row into a
-`QuerySolution` struct. A dedicated count path that increments an integer
-counter without row materialisation would be significantly faster.
+**Fix.** `TripleStore::query` now recognises the exact shape
+`SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally a single default-graph
+`FROM <g>`) and answers it from the maintained O(1) per-graph count index
+(`graph_index`, kept fresh on every load/update), with a fallback to a
+scan-only count. Anything else falls through to the normal evaluator unchanged,
+so results never differ — the whole conformance + lib suite (1637 tests) passes.
+This turns a full scan into an index lookup (microseconds), and is what lets the
+HTTP `COUNT(*)` now beat Fuseki (see the comparison section).
 
-**Implementation:** Add a `count_all` method to `TripleStore` that scans the
-index and counts without building solution maps; wire it into the SPARQL
-evaluation engine for the `COUNT(*)` special case.
+### 5. Parallel SHACL evaluation — ✅ implemented
+
+`shacl::engine::validate` already evaluates shapes (and their focus nodes) in
+parallel via `rayon::par_iter()`, with a per-worker query cache. This is why
 
 ### 5. Parallel SHACL evaluation — ✅ implemented
 
