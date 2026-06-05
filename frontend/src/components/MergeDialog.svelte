@@ -4,18 +4,15 @@
   import { GitMerge, Loader2, X, CheckCircle } from 'lucide-svelte';
   import {
     previewDataModelMerge, mergeDataModel,
-    previewVocabularyMerge, mergeVocabulary,
   } from '../lib/api.js';
 
-  // 'data-model' | 'vocabulary'
-  export let kind = 'data-model';
   export let id;
   export let from;
   export let into;
 
   const dispatch = createEventDispatcher();
-  const previewFn = kind === 'vocabulary' ? previewVocabularyMerge : previewDataModelMerge;
-  const applyFn = kind === 'vocabulary' ? mergeVocabulary : mergeDataModel;
+  const previewFn = previewDataModelMerge;
+  const applyFn = mergeDataModel;
 
   let preview = null;
   let loading = true;

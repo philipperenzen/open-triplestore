@@ -3693,11 +3693,14 @@ mod visibility_leaks {
 
     #[tokio::test]
     async fn catalog_excludes_private_vocabularies_for_anon() {
-        use open_triplestore::vocabularies::registry as vr;
+        // Post-merge: vocabularies are model entries with kind=vocabulary, sharing
+        // the /data-model/ IRI scheme and typed as ADMS CodeList assets.
+        use open_triplestore::data_models::registry as dmr;
+        use open_triplestore::kind_detector::RegistryKind;
         let state = test_state();
         let base = state.base_url.as_str();
 
-        vr::insert_vocabulary(
+        dmr::insert_data_model(
             &state.store,
             base,
             "pub-voc",
@@ -3711,9 +3714,10 @@ mod visibility_leaks {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
-        vr::update_latest_published(&state.store, base, "pub-voc", "1.0").unwrap();
+        dmr::set_data_model_kind(&state.store, base, "pub-voc", RegistryKind::Vocabulary).unwrap();
+        dmr::update_latest_published(&state.store, base, "pub-voc", "1.0").unwrap();
 
-        vr::insert_vocabulary(
+        dmr::insert_data_model(
             &state.store,
             base,
             "priv-voc",
@@ -3727,7 +3731,8 @@ mod visibility_leaks {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
-        vr::update_latest_published(&state.store, base, "priv-voc", "1.0").unwrap();
+        dmr::set_data_model_kind(&state.store, base, "priv-voc", RegistryKind::Vocabulary).unwrap();
+        dmr::update_latest_published(&state.store, base, "priv-voc", "1.0").unwrap();
 
         let resp = test_app(state)
             .oneshot(
@@ -3743,11 +3748,15 @@ mod visibility_leaks {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_text(resp.into_body()).await;
         assert!(
-            body.contains("/vocabulary/pub-voc"),
+            body.contains("/data-model/pub-voc"),
             "Public vocabulary must be in anon catalog: {body}"
         );
         assert!(
-            !body.contains("/vocabulary/priv-voc"),
+            body.contains("assettype/CodeList"),
+            "Vocabulary-kind entry must be typed as a CodeList: {body}"
+        );
+        assert!(
+            !body.contains("/data-model/priv-voc"),
             "Private vocabulary must NOT be in anon catalog: {body}"
         );
         assert!(
@@ -3888,7 +3897,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/data-models/alice-model")
+                    .uri("/api/models/alice-model")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {bob_token}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -3938,7 +3947,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/data-models/alice-model")
+                    .uri("/api/models/alice-model")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {alice_token}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -3984,7 +3993,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/data-models/alice-model")
+                    .uri("/api/models/alice-model")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
                     .unwrap(),
@@ -4067,7 +4076,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/data-models/alice-model/versions/1.0/data")
+                    .uri("/api/models/alice-model/versions/1.0/data")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {bob_token}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -4141,7 +4150,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/data-models/m1/versions/1.0.0/draft")
+                    .uri("/api/models/m1/versions/1.0.0/draft")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::from(serde_json::to_string(&draft).unwrap()))
@@ -4159,7 +4168,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/data-models/m1/commits")
+                    .uri("/api/models/m1/commits")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -4256,7 +4265,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/data-models/m2/merge")
+                    .uri("/api/models/m2/merge")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -4274,7 +4283,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/data-models/m2/commits")
+                    .uri("/api/models/m2/commits")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -4367,7 +4376,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/data-models/m3/versions/feature/rebase")
+                    .uri("/api/models/m3/versions/feature/rebase")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -4385,7 +4394,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/data-models/m3/commits")
+                    .uri("/api/models/m3/commits")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -4406,11 +4415,13 @@ mod visibility_leaks {
         );
     }
 
-    /// The vocabulary registry records draft-creation commits too (kind=vocabulary).
+    /// A vocabulary-kind entry records draft-creation commits through the unified
+    /// model route (commit kind is `data-model` post-merge).
     #[tokio::test]
     async fn create_draft_records_commit_vocabulary() {
-        use open_triplestore::vocabularies::models::{VersionStatus, VocabularyVersion};
-        use open_triplestore::vocabularies::registry as vr;
+        use open_triplestore::data_models::models::{DataModelVersion, VersionStatus};
+        use open_triplestore::data_models::registry as dmr;
+        use open_triplestore::kind_detector::RegistryKind;
         let state = test_state();
         let base = state.base_url.to_string();
         state
@@ -4423,7 +4434,7 @@ mod visibility_leaks {
             .unwrap();
         let tok = mint_token("u_alice", "alice", "user");
 
-        vr::insert_vocabulary(
+        dmr::insert_data_model(
             &state.store,
             &base,
             "v1",
@@ -4437,14 +4448,15 @@ mod visibility_leaks {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
-        vr::insert_version(
+        dmr::set_data_model_kind(&state.store, &base, "v1", RegistryKind::Vocabulary).unwrap();
+        dmr::insert_version(
             &state.store,
             &base,
-            &VocabularyVersion {
-                vocabulary_id: "v1".into(),
+            &DataModelVersion {
+                data_model_id: "v1".into(),
                 version: "1.0.0".into(),
                 status: VersionStatus::Published,
-                graph_iri: format!("{base}/vocabulary/v1/version/1.0.0"),
+                graph_iri: format!("{base}/data-model/v1/version/1.0.0"),
                 sub_graphs: vec![],
                 created_at: "2026-01-01T00:00:00Z".into(),
                 created_by: None,
@@ -4461,7 +4473,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/vocabularies/v1/versions/1.0.0/draft")
+                    .uri("/api/models/v1/versions/1.0.0/draft")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::from(serde_json::to_string(&draft).unwrap()))
@@ -4479,7 +4491,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/api/vocabularies/v1/commits")
+                    .uri("/api/models/v1/commits")
                     .header(header::AUTHORIZATION, format!("Bearer {tok}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -4489,20 +4501,21 @@ mod visibility_leaks {
         let commits = body_json(resp.into_body()).await;
         let arr = commits.as_array().expect("commits array");
         assert!(
-            arr.iter().any(|c| c["kind"].as_str() == Some("vocabulary")
+            arr.iter().any(|c| c["kind"].as_str() == Some("data-model")
                 && c["version"].as_str() == Some("2.0.0")
                 && c["message"]
                     .as_str()
                     .unwrap_or("")
                     .contains("Created draft 2.0.0")),
-            "expected a vocab draft-creation commit, got: {commits}"
+            "expected a draft-creation commit, got: {commits}"
         );
     }
 
-    /// Symmetric for vocabularies.
+    /// Symmetric for a vocabulary-kind entry (unified model route).
     #[tokio::test]
     async fn non_owner_publisher_cannot_patch_vocabulary() {
-        use open_triplestore::vocabularies::registry as vr;
+        use open_triplestore::data_models::registry as dmr;
+        use open_triplestore::kind_detector::RegistryKind;
         let state = test_state();
         let base = state.base_url.as_str();
         state
@@ -4523,7 +4536,7 @@ mod visibility_leaks {
             .unwrap();
         let bob_token = mint_token("u_bob", "bob", "user");
 
-        vr::insert_vocabulary(
+        dmr::insert_data_model(
             &state.store,
             base,
             "alice-voc",
@@ -4537,13 +4550,15 @@ mod visibility_leaks {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
+        dmr::set_data_model_kind(&state.store, base, "alice-voc", RegistryKind::Vocabulary)
+            .unwrap();
 
         let body = serde_json::json!({ "title": "Hijacked" });
         let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/vocabularies/alice-voc")
+                    .uri("/api/models/alice-voc")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {bob_token}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -4603,7 +4618,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/data-models/org-model")
+                    .uri("/api/models/org-model")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {member_token}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))
@@ -4661,7 +4676,7 @@ mod visibility_leaks {
             .oneshot(
                 Request::builder()
                     .method(Method::PATCH)
-                    .uri("/api/data-models/org-model")
+                    .uri("/api/models/org-model")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
                     .body(Body::from(serde_json::to_string(&body).unwrap()))

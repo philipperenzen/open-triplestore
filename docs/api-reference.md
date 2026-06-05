@@ -12,7 +12,7 @@ The full machine-readable API specification is available as an OpenAPI 3 JSON do
 - `/api/{datasets|organisations|groups}/{id}/api-services/{slug}/run` — run a saved API service
 - `/resource/<path>` — content-negotiated IRI dereference
 - `/.well-known/void` — DCAT 2 / VoID dataset catalog (content-negotiated RDF)
-- `/api/data-models/{id}/versions` — list model versions
-- `/api/data-models/{id}/latest/data` — latest published model (content-negotiated RDF)
+- `/api/models/{id}/versions` — list model versions
+- `/api/models/{id}/latest/data` — latest published model (content-negotiated RDF)
 
-Use the **Copy URL** buttons on dataset, organisation, model, and vocabulary detail pages to quickly grab the correct endpoint URL for each resource.
+Use the **Copy URL** buttons on dataset, organisation, and model detail pages to quickly grab the correct endpoint URL for each resource.

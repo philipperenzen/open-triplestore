@@ -271,19 +271,16 @@ fn format_cases() -> Vec<FormatCase> {
 
 // ─── 1. Parser-level: the shared helper handles every format ─────────────────────
 //
-// Both the bulk-import and vocabulary/data-model upload paths funnel through
-// `vocabularies::upload::parse_rdf`, so proving it parses all 7 formats covers
+// Both the bulk-import and model-registry upload paths funnel through
+// `data_models::upload::parse_rdf`, so proving it parses all 7 formats covers
 // every upload surface at the parser layer.
 
 #[test]
 fn shared_parser_handles_all_formats() {
     for c in format_cases() {
-        let quads = open_triplestore::vocabularies::upload::parse_rdf(
-            c.body.as_bytes(),
-            c.mime,
-            c.filename,
-        )
-        .unwrap_or_else(|e| panic!("{}: parse failed: {e}", c.label));
+        let quads =
+            open_triplestore::data_models::upload::parse_rdf(c.body.as_bytes(), c.mime, c.filename)
+                .unwrap_or_else(|e| panic!("{}: parse failed: {e}", c.label));
         assert_eq!(
             quads.len(),
             3,
@@ -298,7 +295,7 @@ fn shared_parser_handles_all_formats() {
 fn extension_only_detection_for_owl_and_jsonld() {
     // No usable Content-Type: detection must fall back to the filename so that
     // a Protégé `.owl` (RDF/XML) and a `.jsonld` upload still parse.
-    let owl = open_triplestore::vocabularies::upload::parse_rdf(
+    let owl = open_triplestore::data_models::upload::parse_rdf(
         RDFXML.as_bytes(),
         "application/octet-stream",
         "ontology.owl",
@@ -306,7 +303,7 @@ fn extension_only_detection_for_owl_and_jsonld() {
     .expect(".owl must be detected by extension");
     assert_eq!(owl.len(), 3);
 
-    let jsonld = open_triplestore::vocabularies::upload::parse_rdf(
+    let jsonld = open_triplestore::data_models::upload::parse_rdf(
         JSONLD.as_bytes(),
         "application/octet-stream",
         "graph.jsonld",

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { navigate, Link } from '../lib/router/index.js';
-  import { BookOpen, Plus, Trash2, Search, Loader2, Tag, ChevronRight, Info, ChevronDown, Globe, Lock, CheckSquare, X, User, Building2 } from 'lucide-svelte';
+  import { BookOpen, Plus, Trash2, Search, Loader2, Tag, ChevronRight, Info, ChevronDown, Globe, Lock, CheckSquare, X, User, Building2, Library } from 'lucide-svelte';
   import { listDataModels, createDataModel, deleteDataModel, listPublicUsers, listOrganisations } from '../lib/api.js';
   import { isAdmin } from '../lib/stores.js';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -14,6 +14,7 @@
   let loading = false;
   let error = '';
   let search = '';
+  let kindFilter = 'all'; // 'all' | 'data-model' | 'vocabulary'
   let showInfo = false;
 
   let userMap = {};
@@ -118,8 +119,16 @@
     await load();
   }
 
+  // An entry's kind is "vocabulary" (SKOS) or "data-model" (OWL/RDFS); the
+  // backend auto-detects it on upload and persists it on the record.
+  function entryKind(m) {
+    return m.kind === 'vocabulary' ? 'vocabulary' : 'data-model';
+  }
+  $: modelCount = models.filter(m => entryKind(m) === 'data-model').length;
+  $: vocabCount = models.filter(m => entryKind(m) === 'vocabulary').length;
   $: filtered = models.filter(m =>
-    !search || m.title.toLowerCase().includes(search.toLowerCase()) || m.id.toLowerCase().includes(search.toLowerCase())
+    (kindFilter === 'all' || entryKind(m) === kindFilter)
+    && (!search || m.title.toLowerCase().includes(search.toLowerCase()) || m.id.toLowerCase().includes(search.toLowerCase()))
   );
 </script>
 
@@ -187,6 +196,19 @@
         <button class="filter-clear" on:click={() => search = ''} aria-label={$t('system.clear')}><X size={12} /></button>
       {/if}
     </div>
+    <div class="kind-chips" role="group" aria-label={$t('pages.modelRegistry.kindAll')}>
+      <button class="kind-chip" class:active={kindFilter === 'all'} on:click={() => kindFilter = 'all'}>
+        {$t('pages.modelRegistry.kindAll')}
+      </button>
+      <button class="kind-chip" class:active={kindFilter === 'data-model'} on:click={() => kindFilter = 'data-model'}>
+        <BookOpen size={12} /> {$t('pages.modelRegistry.kindModels')}
+        {#if modelCount}<span class="chip-count">{modelCount}</span>{/if}
+      </button>
+      <button class="kind-chip" class:active={kindFilter === 'vocabulary'} on:click={() => kindFilter = 'vocabulary'}>
+        <Library size={12} /> {$t('pages.modelRegistry.kindVocabularies')}
+        {#if vocabCount}<span class="chip-count">{vocabCount}</span>{/if}
+      </button>
+    </div>
     <span class="filter-count">{$t('pages.modelRegistry.filterCount', { values: { shown: filtered.length, total: models.length } })}</span>
   </div>
 
@@ -239,6 +261,11 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5 flex-wrap">
                 <h3 class="font-semibold text-[var(--ink-900)] truncate m-0">{model.title}</h3>
+                {#if entryKind(model) === 'vocabulary'}
+                  <span class="vis-badge kind-vocab"><Library size={9} /> {$t('pages.modelRegistry.kindBadgeVocabulary')}</span>
+                {:else}
+                  <span class="vis-badge kind-model"><BookOpen size={9} /> {$t('pages.modelRegistry.kindBadgeModel')}</span>
+                {/if}
                 {#if model.is_public}
                   <span class="vis-badge vis-public"><Globe size={9} /> {$t('pages.modelRegistry.public')}</span>
                 {:else}
@@ -532,6 +559,17 @@
   .vis-badge { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.65rem; font-weight: 600; padding: 0.1rem 0.4rem; border-radius: 999px; white-space: nowrap; }
   .vis-public { background: #dcfce7; color: #15803d; }
   .vis-private { background: #fef3c7; color: #92400e; }
+  .kind-model { background: #e0e7ff; color: #3730a3; }
+  .kind-vocab { background: #ede9fe; color: #6d28d9; }
+  .kind-chips { display: inline-flex; gap: 0.25rem; flex-wrap: wrap; }
+  .kind-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.35rem 0.6rem; border: 1px solid var(--line-soft); border-radius: 8px;
+    background: white; cursor: pointer; font-size: 0.8rem; color: var(--ink-600); transition: all 0.12s;
+  }
+  .kind-chip:hover { border-color: var(--brand-400); color: var(--brand-600); }
+  .kind-chip.active { border-color: var(--brand-400); background: var(--brand-50, #eef2ff); color: var(--brand-700); font-weight: 600; }
+  .chip-count { font-size: 0.7rem; background: rgba(0,0,0,0.07); border-radius: 999px; padding: 0 0.35rem; }
   .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .btn { display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.5rem 1rem; border-radius: 0.75rem; font-size: 0.875rem; font-weight: 500; cursor: pointer; border: none; transition: all 0.15s; }
   .btn-primary { background: var(--brand-500, #6366f1); color: white; }
@@ -569,4 +607,9 @@
   :global(:is([data-theme="dark"], .dark)) .create-error { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .vis-public { background: rgba(16,185,129,0.18); color: #6ee7b7; }
   :global(:is([data-theme="dark"], .dark)) .vis-private { background: rgba(245,158,11,0.18); color: #fcd34d; }
+  :global(:is([data-theme="dark"], .dark)) .kind-chip { background: var(--bg-soft); }
+  :global(:is([data-theme="dark"], .dark)) .kind-chip.active { background: var(--brand-100); }
+  :global(:is([data-theme="dark"], .dark)) .kind-model { background: rgba(99,102,241,0.2); color: #c7d2fe; }
+  :global(:is([data-theme="dark"], .dark)) .kind-vocab { background: rgba(139,92,246,0.2); color: #ddd6fe; }
+  :global(:is([data-theme="dark"], .dark)) .chip-count { background: rgba(255,255,255,0.12); }
 </style>

@@ -14,8 +14,8 @@
 //! - [`sparql`], [`geo`] — SPARQL evaluation helpers and GeoSPARQL functions.
 //! - [`reasoning`], [`shacl`], [`shaclc`], [`shex`], [`swrl`] — entailment
 //!   (RDFS, OWL 2 RL/EL/QL/DL) and shape/rule validation.
-//! - [`imports`], [`rml`], [`vocabularies`], [`data_models`] — bulk ingest,
-//!   RML mappings, and vocabulary / data-model management.
+//! - [`imports`], [`rml`], [`data_models`] — bulk ingest, RML mappings, and the
+//!   unified model registry (OWL/RDFS ontologies and SKOS vocabularies).
 //! - [`catalog`], [`dcat`], [`dataset_versions`], [`commit_log`] — dataset
 //!   cataloguing, DCAT metadata, versioning, and the append-only commit log.
 //! - [`prefixes`], [`kind_detector`], [`backup`], [`storage`], [`alerting`],
@@ -60,4 +60,3 @@ pub mod store;
 pub mod swrl;
 #[cfg(feature = "text-search")]
 pub mod text_search;
-pub mod vocabularies;

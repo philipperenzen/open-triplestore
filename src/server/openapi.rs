@@ -30,7 +30,7 @@ use crate::auth::middleware::AuthenticatedUser;
 - RML mapping from non-RDF sources, and a bulk import pipeline\n\
 - Datasets with Git-style versioning, branches, commits and staged publishing\n\
 - DCAT catalog, VoID descriptions and content-negotiated IRI dereferencing (Linked Data + LDP)\n\
-- Data-model and controlled-vocabulary registries with their own versioning\n\
+- A unified model registry (OWL/RDFS ontologies and SKOS vocabularies) with its own versioning\n\
 - Organisations, groups and users with role-based access control and per-resource grants\n\
 - JWT sessions and `ots_…` API tokens, with OAuth2 / SAML single sign-on\n\
 - An LLM-assisted natural-language → SPARQL bridge\n\n\
@@ -62,8 +62,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "Assets", description = "File asset management (S3 / local storage)"),
         (name = "Import", description = "Source analysis and bulk data import"),
         (name = "Catalog", description = "DCAT catalogue of datasets, models and vocabularies"),
-        (name = "Data Models", description = "Data-model (ontology) registry with versioning and merging"),
-        (name = "Vocabularies", description = "Controlled-vocabulary registry with versioning and merging"),
+        (name = "Models", description = "Model registry — OWL/RDFS ontologies and SKOS vocabularies — with versioning, branches and merging"),
         (name = "Search", description = "Full-text search index management"),
         (name = "Auth", description = "Registration, login, tokens, SSO and account management"),
         (name = "Users", description = "User directory and avatars"),
@@ -1970,26 +1969,17 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Data Models & Vocabularies (shared shape)
+    // Model registry (OWL/RDFS ontologies and SKOS vocabularies)
     // ═══════════════════════════════════════════════════════════════════════
-    // The two registries share an identical route shape; the only difference is
-    // the per-resource lookup endpoint (a model has `/term`, a vocabulary `/concept`).
-    for (tag, base, lookup, lookup_summary, lookup_desc) in [
-        (
-            "Data Models",
-            "/api/data-models",
-            "term",
-            "Look up a term",
-            "Resolve a class/property term within the model.",
-        ),
-        (
-            "Vocabularies",
-            "/api/vocabularies",
-            "concept",
-            "Look up a concept",
-            "Resolve a SKOS concept within the vocabulary.",
-        ),
-    ] {
+    // One unified registry. Each entry carries a `kind` (data-model | vocabulary)
+    // and is dereferenced per-term via `/term` (SKOS concepts included).
+    for (tag, base, lookup, lookup_summary, lookup_desc) in [(
+        "Models",
+        "/api/models",
+        "term",
+        "Look up a term",
+        "Resolve a class/property or SKOS concept within the model.",
+    )] {
         mount(
             paths,
             base,

@@ -2001,6 +2001,11 @@
       "object": "Object"
     },
     "modelRegistry": {
+      "kindAll": "Alles",
+      "kindModels": "Ontologieën",
+      "kindVocabularies": "Vocabulaires",
+      "kindBadgeModel": "Ontologie",
+      "kindBadgeVocabulary": "Vocabulaire",
       "heading": "Modelregister",
       "modelCount": "{count} model",
       "modelCountPlural": "{count} modellen",
