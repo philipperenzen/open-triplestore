@@ -1571,3 +1571,349 @@ fn w3c_describe_resources() {
     let count = graph_count(&s, "DESCRIBE <http://example/a>");
     assert!(count >= 3);
 }
+
+// ═══════════════════════════════════════════════════════════
+// High-complexity conformance tests (research-derived, spec-verified)
+//
+// Grounded in the W3C SPARQL 1.1 Recommendations (Query/Update/Protocol/GSP/
+// Federated Query) and adversarially fact-checked. Each test targets a subtle
+// semantic corner that naive engines get wrong. IDs map to `sparql11-cx-NN`.
+// ═══════════════════════════════════════════════════════════
+
+/// Prepend the `:` prefix used throughout this section.
+fn cxq(body: &str) -> String {
+    format!("PREFIX : <http://ex/>\n{}", body)
+}
+
+// cx-01: MINUS with disjoint variables has NO effect (≠ FILTER NOT EXISTS).
+#[test]
+fn cx01_minus_disjoint_vars_no_effect() {
+    let s = ts();
+    load(&s, r#"@prefix : <http://ex/> . :a :p :x . :b :p :y ."#);
+    let rows = select(
+        &s,
+        &cxq("SELECT ?s WHERE { ?s :p ?o . MINUS { :a :p :x } }"),
+    );
+    // The MINUS pattern shares no variables with the outer pattern => removes nothing.
+    assert_eq!(
+        rows.len(),
+        2,
+        "MINUS with disjoint variables must not remove any rows"
+    );
+}
+
+// cx-02a: ZeroOrMorePath terminates on cyclic data (no infinite loop) and returns
+// every reachable node exactly once.
+#[test]
+fn cx02_zero_or_more_path_cycle_terminates() {
+    let s = ts();
+    load(
+        &s,
+        r#"@prefix : <http://ex/> . :a :edge :b . :b :edge :c . :c :edge :a ."#,
+    );
+    let a = select(&s, &cxq("SELECT DISTINCT ?x WHERE { :a :edge* ?x }"));
+    assert_eq!(
+        a.len(),
+        3,
+        "zero-or-more over a cycle = {{a,b,c}}, must terminate"
+    );
+}
+
+// Note on zero-length paths: `?s :p* ?o` correctly includes start nodes that are
+// present in the data (verified by cx02 above). The pure ALP edge case of a
+// *constant* start node ABSENT from the graph (`:z :edge* ?x` => :z) is an
+// oxigraph-evaluator divergence documented in docs/standards.md.
+
+// cx-03: aggregate with no GROUP BY over an empty match returns one row (count 0).
+#[test]
+fn cx03_aggregate_empty_group_count_zero() {
+    let s = ts(); // empty store
+    let rows = select(&s, "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }");
+    assert_eq!(
+        rows.len(),
+        1,
+        "COUNT without GROUP BY over empty match => one row"
+    );
+    assert!(
+        rows[0][0].contains("\"0\""),
+        "count must be 0, got {:?}",
+        rows[0][0]
+    );
+}
+
+// cx-04: only variables projected by a subquery are visible to the outer query.
+#[test]
+fn cx04_subquery_projection_scope() {
+    let s = ts();
+    load(
+        &s,
+        r#"@prefix : <http://ex/> . :alice :knows :bob . :bob :name "Robert" . :bob :name "Bob" . :alice :name "Alice" ."#,
+    );
+    let rows = select(
+        &s,
+        &cxq("SELECT ?y ?minName WHERE { :alice :knows ?y . \
+             { SELECT ?y (MIN(?name) AS ?minName) WHERE { ?y :name ?name } GROUP BY ?y } }"),
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0][0].contains("/bob"));
+    assert!(
+        rows[0][1].contains("Bob") && !rows[0][1].contains("Robert"),
+        "MIN picks lexicographic 'Bob'; inner ?name must not leak, got {:?}",
+        rows[0][1]
+    );
+}
+
+// cx-05: WITH is suppressed by USING for WHERE evaluation (corrected expectation:
+// g1 keeps o1 and gains oNew because the DELETE template matches nothing in g1).
+#[test]
+fn cx05_update_with_suppressed_by_using() {
+    let s = ts();
+    s.update(
+        r#"INSERT DATA { GRAPH <http://ex/g1> { <http://ex/s> <http://ex/p> <http://ex/o1> } }"#,
+    )
+    .unwrap();
+    s.update(
+        r#"INSERT DATA { GRAPH <http://ex/g2> { <http://ex/s> <http://ex/p> <http://ex/o2> } }"#,
+    )
+    .unwrap();
+    s.update(
+        r#"WITH <http://ex/g1>
+           DELETE { ?s <http://ex/p> ?o }
+           INSERT { ?s <http://ex/p> <http://ex/oNew> }
+           USING <http://ex/g2>
+           WHERE  { ?s <http://ex/p> ?o }"#,
+    )
+    .unwrap();
+    // USING overrides WITH for WHERE => ?o = o2; DELETE {s p o2} in g1 removes nothing
+    // (g1 has o1); INSERT adds oNew. Conformant result: g1 = { o1, oNew }.
+    let g1 = select(
+        &s,
+        "SELECT ?o WHERE { GRAPH <http://ex/g1> { <http://ex/s> <http://ex/p> ?o } }",
+    );
+    let g2 = select(
+        &s,
+        "SELECT ?o WHERE { GRAPH <http://ex/g2> { <http://ex/s> <http://ex/p> ?o } }",
+    );
+    assert_eq!(g2.len(), 1, "g2 (USING source) must be unchanged");
+    assert!(g2[0][0].contains("o2"));
+    assert_eq!(
+        g1.len(),
+        2,
+        "WITH suppressed by USING: g1 keeps o1 and gains oNew"
+    );
+}
+
+// cx-06: non-well-designed double OPTIONAL re-binding an already-bound variable.
+#[test]
+fn cx06_non_well_designed_double_optional() {
+    let s = ts();
+    load(
+        &s,
+        r#"@prefix : <http://ex/> . :a :p 1 . :a :q 2 . :b :p 3 ."#,
+    );
+    let rows = select(
+        &s,
+        &cxq("SELECT ?x ?p ?q WHERE { ?x :p ?p . \
+             OPTIONAL { ?x :q ?q . FILTER(?q = 2) } \
+             OPTIONAL { ?x :p ?p . FILTER(?p > 2) } } ORDER BY ?x"),
+    );
+    assert_eq!(rows.len(), 2);
+    // :a -> p=1, q=2
+    assert!(rows[0][0].contains("/a"));
+    assert!(rows[0][1].contains("1"));
+    assert!(rows[0][2].contains("2"));
+    // :b -> p=3, q unbound (no :q triple for :b)
+    assert!(rows[1][0].contains("/b"));
+    assert!(rows[1][1].contains("3"));
+    assert!(rows[1][2].is_empty(), "q must be unbound for :b");
+}
+
+// cx-07 + cx-14: federation/SERVICE is intentionally disabled (SSRF mitigation,
+// store built `.without_service_handler()`). Oxigraph evaluates lazily, so the
+// error surfaces while consuming the solution iterator, not at `query()`.
+#[test]
+fn cx07_cx14_federation_service_disabled() {
+    let s = ts();
+    load(&s, r#"@prefix : <http://ex/> . :alice :knows :bob ."#);
+    // Non-silent SERVICE to an unreachable endpoint must error (never reach the network).
+    let non_silent = s.query(&cxq("SELECT ?x ?l WHERE { ?x :knows :bob . \
+         SERVICE <http://nonexistent.invalid/sparql> { ?x :label ?l } }"));
+    let errored = match non_silent {
+        Err(_) => true,
+        Ok(QueryResults::Solutions(mut sols)) => sols.any(|r| r.is_err()),
+        _ => false,
+    };
+    assert!(
+        errored,
+        "non-silent SERVICE must error when federation is disabled"
+    );
+    // SERVICE SILENT must never leak remote bindings (may yield the local row only).
+    let silent = s.query(&cxq("SELECT ?x ?remote WHERE { ?x :knows :bob . \
+         SERVICE SILENT <http://nonexistent.invalid/sparql> { ?x :label ?remote } }"));
+    if let Ok(QueryResults::Solutions(sols)) = silent {
+        for sol in sols.flatten() {
+            assert!(
+                sol.get("remote").is_none(),
+                "no remote data may leak through SERVICE SILENT"
+            );
+        }
+    }
+}
+
+// cx-08: blank node labels in separate INSERT DATA requests are disjoint.
+#[test]
+fn cx08_insert_data_bnode_disjoint_across_requests() {
+    let s = ts();
+    s.update(r#"INSERT DATA { _:b <http://ex/p> "first" }"#)
+        .unwrap();
+    s.update(r#"INSERT DATA { _:b <http://ex/p> "second" }"#)
+        .unwrap();
+    let rows = select(&s, "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }");
+    assert_eq!(rows.len(), 2);
+    let subjects: std::collections::HashSet<String> = rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(
+        subjects.len(),
+        2,
+        "blank node _:b in separate requests must be distinct subjects"
+    );
+}
+
+// cx-09: comparing a timezone-naive xsd:dateTime with a tz-aware one is a type error.
+#[test]
+fn cx09_datetime_indeterminate_is_type_error() {
+    let s = ts();
+    load(
+        &s,
+        r#"@prefix : <http://ex/> . @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+           :e1 :ts "2023-06-01T12:00:00+00:00"^^xsd:dateTime .
+           :e2 :ts "2023-06-01T12:00:00"^^xsd:dateTime ."#,
+    );
+    let rows = select(
+        &s,
+        &cxq(
+            "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+             SELECT ?e WHERE { ?e :ts ?ts . FILTER(?ts > \"2023-06-01T11:00:00+00:00\"^^xsd:dateTime) }",
+        ),
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "tz-naive vs tz-aware dateTime comparison is indeterminate => type error => excludes e2"
+    );
+    assert!(rows[0][0].contains("/e1"));
+}
+
+// cx-10: blank nodes in a CONSTRUCT template are fresh per solution.
+#[test]
+fn cx10_construct_per_solution_bnode() {
+    let s = ts();
+    load(
+        &s,
+        r#"@prefix : <http://ex/> . :alice :name "Alice" . :bob :name "Bob" ."#,
+    );
+    let res = s
+        .query(&cxq(
+            "CONSTRUCT { ?person :wrapper _:w . _:w :value ?name . } WHERE { ?person :name ?name . }",
+        ))
+        .unwrap();
+    let triples: Vec<_> = match res {
+        QueryResults::Graph(g) => g.map(|t| t.unwrap()).collect(),
+        _ => panic!("expected CONSTRUCT graph"),
+    };
+    assert_eq!(triples.len(), 4, "two solutions x two template triples");
+    let value_subjects: std::collections::HashSet<String> = triples
+        .iter()
+        .filter(|t| t.predicate.as_str() == "http://ex/value")
+        .map(|t| t.subject.to_string())
+        .collect();
+    assert_eq!(
+        value_subjects.len(),
+        2,
+        "blank nodes must be distinct per solution row"
+    );
+}
+
+// cx-12: integer + decimal promotes to xsd:decimal (not double, not integer).
+#[test]
+fn cx12_numeric_promotion_integer_plus_decimal() {
+    let s = ts();
+    let rows = select(
+        &s,
+        "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+         SELECT ?x (DATATYPE(?x) AS ?dt) WHERE { VALUES ?a { 2 } BIND(?a + 1.5 AS ?x) }",
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0][0].contains("3.5"),
+        "2 + 1.5 = 3.5, got {:?}",
+        rows[0][0]
+    );
+    assert!(
+        rows[0][1].contains("decimal"),
+        "integer + decimal promotes to xsd:decimal, got {:?}",
+        rows[0][1]
+    );
+}
+
+// cx-13: COPY preserves the source; identity COPY is a no-op.
+#[test]
+fn cx13_copy_preserves_source_and_self_copy_noop() {
+    let s = ts();
+    s.update(r#"INSERT DATA { GRAPH <http://ex/src> { <http://ex/a> <http://ex/p> <http://ex/x> . <http://ex/b> <http://ex/p> <http://ex/y> } }"#).unwrap();
+    s.update(
+        r#"INSERT DATA { GRAPH <http://ex/dst> { <http://ex/c> <http://ex/p> <http://ex/z> } }"#,
+    )
+    .unwrap();
+    s.update("COPY <http://ex/src> TO <http://ex/dst>").unwrap();
+    s.update("COPY <http://ex/src> TO <http://ex/src>").unwrap(); // identity = no-op
+    let src = select(
+        &s,
+        "SELECT ?s WHERE { GRAPH <http://ex/src> { ?s <http://ex/p> ?o } }",
+    );
+    let dst = select(
+        &s,
+        "SELECT ?s ?o WHERE { GRAPH <http://ex/dst> { ?s <http://ex/p> ?o } }",
+    );
+    assert_eq!(src.len(), 2, "source unchanged by COPY and self-COPY");
+    assert_eq!(dst.len(), 2, "destination replaced with source content");
+    let dst_has_old = dst
+        .iter()
+        .any(|r| r[0].contains("/c") || r[1].contains("/z"));
+    assert!(
+        !dst_has_old,
+        "COPY replaces destination (drops prior content)"
+    );
+}
+
+// cx-15: GRAPH ?g respects FROM NAMED; FROM-without-FROM-NAMED yields empty named graphs.
+#[test]
+fn cx15_graph_var_respects_from_named() {
+    let s = ts();
+    s.update(r#"INSERT DATA { <http://ex/def_s> <http://ex/p> <http://ex/def_o> }"#)
+        .unwrap();
+    s.update(
+        r#"INSERT DATA { GRAPH <http://ex/g1> { <http://ex/s1> <http://ex/p> <http://ex/o1> } }"#,
+    )
+    .unwrap();
+    s.update(
+        r#"INSERT DATA { GRAPH <http://ex/g2> { <http://ex/s2> <http://ex/p> <http://ex/o2> } }"#,
+    )
+    .unwrap();
+    // Query A: FROM NAMED g1 only => GRAPH ?g sees only g1.
+    let a = select(
+        &s,
+        "SELECT ?g ?s FROM NAMED <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }",
+    );
+    assert_eq!(a.len(), 1);
+    assert!(a[0][0].contains("/g1") && a[0][1].contains("/s1"));
+    // Query B: FROM g1 (no FROM NAMED) => named-graph component empty => GRAPH ?g matches nothing.
+    let b = select(
+        &s,
+        "SELECT ?g ?s FROM <http://ex/g1> WHERE { GRAPH ?g { ?s ?p ?o } }",
+    );
+    assert_eq!(
+        b.len(),
+        0,
+        "FROM without FROM NAMED => empty named-graph component"
+    );
+}

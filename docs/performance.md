@@ -38,6 +38,108 @@ baseline. The HTML report includes interactive plots.
 
 ---
 
+## Reproducible benchmark environment
+
+For results that are comparable across machines and over time, run the suite
+inside the project's Docker builder image (native builds also need GEOS +
+pkg-config). The image pins the Rust toolchain and all native dependencies, so
+the only variable is the host hardware.
+
+### Reference system (numbers in this doc, unless noted)
+
+| Component | Value |
+|---|---|
+| OS (host) | Windows 11 Pro 10.0.26200 |
+| Container runtime | Docker Desktop 28.5.1, WSL2 backend (kernel 6.6.87.2-microsoft-standard-WSL2) |
+| CPU | AMD Ryzen 9 7900X3D — 12 cores / 24 threads, 3D V-Cache |
+| CPU visible to Docker | 24 logical processors |
+| RAM visible to Docker | ~31 GiB |
+| Storage | NVMe SSD |
+| GPU | Not used — the triplestore has no GPU code path |
+| Rust | `ots-builder` image (rust:1.91-bookworm), `--release` |
+
+> GPUs are listed for completeness only; RDF/SPARQL/GeoSPARQL/SHACL workloads
+> here are CPU- and memory-bound, so the GPU has no effect on these numbers.
+
+### Maximising Docker resources (optional)
+
+Docker Desktop on WSL2 already exposes all logical CPUs and ~50–80% of host RAM
+by default — on the reference system that is **24 vCPU / ~31 GiB** with no
+configuration. To pin a larger, fixed allocation (more reproducible), create
+`%UserProfile%\.wslconfig` and restart WSL (`wsl --shutdown`):
+
+```ini
+[wsl2]
+processors=24
+memory=48GB          # leave headroom for Windows; set to host_RAM − 8GB
+swap=0               # disable swap so timings aren't perturbed by paging
+```
+
+Verify what the engine actually sees:
+
+```bash
+docker run --rm ots-builder bash -c 'nproc; grep MemTotal /proc/meminfo'
+```
+
+### Reproducible run command
+
+```bash
+# One-time: build the builder image with all native deps
+docker build --target builder -t ots-builder .
+
+# Run the full Criterion suite inside the image (release).
+# A named volume caches compiled artifacts between runs.
+docker run --rm \
+  -v "$PWD:/app" -v ots_target_rel:/app/target -w /app ots-builder \
+  cargo bench --bench performance --features full
+
+# Faster, lower-variance smoke run (fewer samples):
+docker run --rm \
+  -v "$PWD:/app" -v ots_target_rel:/app/target -w /app ots-builder \
+  cargo bench --bench performance --features full -- \
+    --sample-size 10 --warm-up-time 1 --measurement-time 3
+```
+
+Criterion writes a full HTML report to `target/criterion/report/index.html` and
+per-benchmark `estimates.json` files that can be diffed across runs or machines.
+
+### Measured results — reference system (AMD Ryzen 9 7900X3D)
+
+Measured on the reference system above (Docker/WSL2, release build) with a
+reduced-sample smoke run (`--sample-size 10 --measurement-time 3`). Times are
+Criterion's [low median high] estimate; treat as indicative, not definitive.
+A representative subset is shown (the full `cargo bench` run reproduces every
+group plus insert/query/path/update):
+
+```
+# GeoSPARQL (GEOS, per-binding)
+geosparql/distance/50                 124 µs        geosparql/distance/200          411 µs
+geosparql/sf_contains/200             447 µs        geosparql/sf_intersects/50      136 µs
+geosparql/sf_intersects/200           454 µs        geosparql/buffer/50            3.35 ms
+geosparql/buffer/200                13.76 ms
+geosparql/polygon_complexity/points/50    137 µs    .../polygons/50      186 µs  (~36% poly overhead)
+geosparql/polygon_complexity/points/200   501 µs    .../polygons/200     686 µs
+
+# SHACL validation (1 NodeShape, named property shapes)
+shacl/validate_clean/100             1.87 ms        shacl/validate_violations/100   1.89 ms
+shacl/validate_clean/500             2.34 ms        shacl/validate_violations/500   2.17 ms
+shacl/validate_clean/1000            2.63 ms        shacl/validate_violations/1000  2.74 ms
+
+# Concurrency (shared Arc<TripleStore>, 2-way join workload)
+concurrent/reads/threads=1            198 µs        concurrent/writes/threads=1     262 µs
+concurrent/reads/threads=2            263 µs        concurrent/writes/threads=2     346 µs
+concurrent/reads/threads=4            398 µs        concurrent/writes/threads=4     579 µs
+concurrent/reads/threads=8            635 µs        concurrent/mixed/4r_1w         5.55 ms
+```
+
+> Notes: SHACL validation now runs in parallel (rayon) across shapes; the ~1.9 ms
+> floor at 100 nodes is shapes-loading + target-resolution overhead. Concurrent
+> reads scale sublinearly here because each "read" already runs an internal
+> parallel join; the figures are aggregate wall-clock per iteration. The 3D
+> V-Cache on the 7900X3D notably benefits the index-scan-heavy query paths.
+
+---
+
 ## Benchmark Groups
 
 ### `insert/bulk_loader`

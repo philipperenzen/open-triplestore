@@ -768,3 +768,149 @@ fn dl_rl_equivalent_class() {
         )
     ));
 }
+
+// ═══════════════════════════════════════════════════════════
+// High-complexity OWL 2 DL tests (research-derived, spec-verified)
+//
+// The native reasoner is RL forward-chaining + DL-syntax extension rules. RL-
+// expressible entailments (property chains, inverse-functional, symmetric) are
+// materialized into the entailment graph. Full DL tableau reasoning (profile
+// validation, nominal/cardinality/datatype inconsistency, reflexive+irreflexive
+// contradiction) requires the external reasoner bridge and is documented as a
+// tracked gap. Verifier correction applied: the property chain (research
+// complex-05) is rewritten so the chain actually fires.
+// ═══════════════════════════════════════════════════════════
+
+const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
+
+// complex-05 (CORRECTED): hasParent ∘ hasBrother ⊑ hasUncle — a chain that fires.
+#[test]
+fn dl_cx_property_chain_entailment() {
+    let store = store_with(
+        r#"
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix ex:  <http://example.org/> .
+        ex:hasUncle owl:propertyChainAxiom ( ex:hasParent ex:hasBrother ) .
+        ex:John ex:hasParent ex:Mary .
+        ex:Mary ex:hasBrother ex:Bob .
+    "#,
+    );
+    Owl2DLReasoner::new(&store)
+        .with_target(TG)
+        .materialize()
+        .unwrap();
+    assert!(
+        ask_in_tg(
+            &store,
+            "http://example.org/John",
+            "http://example.org/hasUncle",
+            "http://example.org/Bob"
+        ),
+        "property chain hasParent∘hasBrother ⊑ hasUncle must entail John hasUncle Bob"
+    );
+}
+
+// complex-12: an inverse-functional property entails SameIndividual for a shared object.
+#[test]
+fn dl_cx_inverse_functional_same_individual() {
+    let store = store_with(
+        r#"
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix ex:  <http://example.org/> .
+        ex:isMotherOf a owl:InverseFunctionalProperty .
+        ex:MarySmith ex:isMotherOf ex:John .
+        ex:MaryJones ex:isMotherOf ex:John .
+    "#,
+    );
+    Owl2DLReasoner::new(&store)
+        .with_target(TG)
+        .materialize()
+        .unwrap();
+    let fwd = ask_in_tg(
+        &store,
+        "http://example.org/MarySmith",
+        OWL_SAME_AS,
+        "http://example.org/MaryJones",
+    );
+    let rev = ask_in_tg(
+        &store,
+        "http://example.org/MaryJones",
+        OWL_SAME_AS,
+        "http://example.org/MarySmith",
+    );
+    assert!(
+        fwd || rev,
+        "inverse-functional property must entail SameIndividual(MarySmith, MaryJones)"
+    );
+}
+
+// complex-07 (positive half): a symmetric property entails the reverse assertion.
+#[test]
+fn dl_cx_symmetric_property_entailment() {
+    let store = store_with(
+        r#"
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix ex:  <http://example.org/> .
+        ex:marriedTo a owl:SymmetricProperty .
+        ex:Alice ex:marriedTo ex:Bob .
+    "#,
+    );
+    Owl2DLReasoner::new(&store)
+        .with_target(TG)
+        .materialize()
+        .unwrap();
+    assert!(
+        ask_in_tg(
+            &store,
+            "http://example.org/Bob",
+            "http://example.org/marriedTo",
+            "http://example.org/Alice"
+        ),
+        "symmetric property must entail the reverse assertion"
+    );
+}
+
+// Tracked gaps: full OWL 2 DL tableau reasoning is not performed natively. Profile
+// violations and tableau-only inconsistencies are NOT detected (materialization
+// succeeds) — they require the external reasoner bridge.
+#[test]
+fn dl_cx_full_dl_reasoning_is_a_gap() {
+    // (a) Reflexive + Irreflexive on one property is a DL inconsistency the native
+    // reasoner does not detect.
+    let store = store_with(
+        r#"
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix ex:  <http://example.org/> .
+        ex:knows a owl:ReflexiveProperty , owl:IrreflexiveProperty .
+        ex:x a owl:Thing .
+    "#,
+    );
+    assert!(
+        Owl2DLReasoner::new(&store)
+            .with_target(TG)
+            .materialize()
+            .is_ok(),
+        "native reasoner does not detect reflexive+irreflexive inconsistency (DL-tableau gap)"
+    );
+
+    // (b) A non-simple (transitive) property in a cardinality restriction is an OWL 2 DL
+    // profile violation the native reasoner does not flag.
+    let store2 = store_with(
+        r#"
+        @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix ex:   <http://example.org/> .
+        ex:part a owl:TransitiveProperty ; rdfs:subPropertyOf ex:hasPart .
+        ex:Wheel rdfs:subClassOf [ a owl:Restriction ;
+            owl:onProperty ex:hasPart ; owl:maxQualifiedCardinality 4 ;
+            owl:onClass ex:Spoke ] .
+    "#,
+    );
+    assert!(
+        Owl2DLReasoner::new(&store2)
+            .with_target(TG)
+            .materialize()
+            .is_ok(),
+        "native reasoner does not flag non-simple-property profile violations (DL-profile gap)"
+    );
+}
