@@ -8,6 +8,16 @@ pub fn dataset_metadata_graph_iri(dataset_id: &str) -> String {
     format!("urn:system:metadata:dataset:{}", dataset_id)
 }
 
+/// Canonical dataset IRI per the styleguide (§3.3): `{base}/dataset/{id}`
+/// (singular). This is the single source of truth for the dataset's own IRI and
+/// the prefix of its owned graph namespace (`{base}/dataset/{id}/...`). It MUST
+/// match the catalogue, version registry and API-service registry; the bulk
+/// import write boundary also keys off this prefix, so any divergence would let
+/// a caller's "namespaced" target graph fall outside the gate.
+pub fn dataset_iri(base_url: &str, dataset_id: &str) -> String {
+    format!("{}/dataset/{}", base_url.trim_end_matches('/'), dataset_id)
+}
+
 /// Write (or overwrite) the DCAT/ADMS/VoID/VCARD metadata named graph for a dataset.
 /// Silently ignores errors so that metadata graph failures never abort the main operation.
 ///
@@ -56,7 +66,7 @@ pub fn build_dataset_metadata_ttl(
     // (singular). This MUST match the catalogue (`dcat/catalog.rs`), the version
     // registry and the API-service registry, otherwise a dataset's descriptive
     // metadata splits across two IRIs and its node renders incomplete when browsed.
-    let dataset_iri = format!("{}/dataset/{}", base_url.trim_end_matches('/'), dataset.id);
+    let dataset_iri = dataset_iri(base_url, &dataset.id);
     let mut ttl = String::new();
 
     ttl.push_str("@prefix dcat: <http://www.w3.org/ns/dcat#> .\n");

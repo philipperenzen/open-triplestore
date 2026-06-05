@@ -15,7 +15,7 @@ mod tests {
 
     use crate::auth::db::AuthDb;
     use crate::auth::jwt::{issue_access_token, JwtConfig};
-    use crate::auth::models::{ApiScope, SystemRole};
+    use crate::auth::models::{ApiScope, OwnerType, SystemRole, Visibility};
     use crate::prefixes::PrefixRegistry;
     use crate::server::{build_router, AppState};
     use crate::storage::ObjectStore;
@@ -654,6 +654,358 @@ mod tests {
             status,
             StatusCode::CREATED,
             "a read-only pipeline with no write surface must still be allowed"
+        );
+    }
+
+    // ─── HIGH: bulk-import cross-tenant write/IDOR (per-graph write boundary) ──
+    // POST /api/import/bulk gates only on `can_write_dataset(dataset_id)`, but the
+    // target graph IRIs are caller-supplied (`default_target_graph`, `targets`,
+    // and quad-format embedded graph names). Without a per-graph boundary a
+    // principal who owns dataset A can name dataset B's graph (or a `urn:system:*`
+    // graph) as the target and, with `replace=true`, overwrite or wipe it. A
+    // dataset-scoped import may therefore only write graphs registered to the
+    // dataset or under its canonical `{base}/dataset/{id}/` namespace.
+
+    /// Build a `multipart/form-data` body. Each part: (name, content-type,
+    /// optional filename, bytes).
+    fn multipart_body(boundary: &str, parts: &[(&str, &str, Option<&str>, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, content_type, filename, bytes) in parts {
+            out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            match filename {
+                Some(f) => out.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\n"
+                    )
+                    .as_bytes(),
+                ),
+                None => out.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes(),
+                ),
+            }
+            out.extend_from_slice(format!("Content-Type: {content_type}\r\n\r\n").as_bytes());
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        out
+    }
+
+    async fn bulk_import(
+        app: axum::Router,
+        token: &str,
+        boundary: &str,
+        body: Vec<u8>,
+    ) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/import/bulk")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    /// A graph owned by dataset B (a second tenant). `base_url` in the test state
+    /// is `http://localhost:7878`, so this IRI is NOT under dataset A's namespace.
+    const B_GRAPH: &str = "http://localhost:7878/dataset/dsB/secret";
+
+    /// Two non-admin tenants: alice owns dataset A, bob owns dataset B. Both own
+    /// `OwnerType::User` datasets, so each can write their own but is a platform
+    /// non-admin (so the per-graph boundary applies).
+    fn two_tenant_state() -> AppState {
+        let state = test_state();
+        state
+            .auth_db
+            .create_user("alice", "alice", "alice@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_user("bob", "bob", "bob@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_dataset(
+                "dsA",
+                "Alice DS",
+                None,
+                OwnerType::User,
+                "alice",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        state
+            .auth_db
+            .create_dataset(
+                "dsB",
+                "Bob DS",
+                None,
+                OwnerType::User,
+                "bob",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        state
+    }
+
+    /// Register and seed a data-bearing graph for dataset B.
+    fn seed_b_graph(state: &AppState) {
+        state.auth_db.add_dataset_graph("dsB", B_GRAPH).unwrap();
+        state
+            .store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{B_GRAPH}> {{ <urn:b:s> <urn:b:p> \"bob-secret\" }} }}"
+            ))
+            .unwrap();
+        assert_eq!(state.store.count_graph(Some(B_GRAPH)).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_import_cross_tenant_target_graph_rejected() {
+        let state = two_tenant_state();
+        seed_b_graph(&state);
+        let alice = token("alice", "alice", "user");
+
+        // alice owns dataset A (passes can_write_dataset) but names dataset B's
+        // graph as the replace target.
+        let boundary = "BNDxt1";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    B_GRAPH.as_bytes(),
+                ),
+                ("replace", "text/plain", None, b"true"),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<urn:x:s> <urn:x:p> <urn:x:o> .",
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "owner of dataset A must not replace a graph owned by dataset B"
+        );
+        // Critically: the rejected import wiped nothing — B's data is intact.
+        assert_eq!(
+            state.store.count_graph(Some(B_GRAPH)).unwrap(),
+            1,
+            "B's graph must be untouched after the rejected import"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_import_cross_tenant_quad_embedded_graph_rejected() {
+        let state = two_tenant_state();
+        seed_b_graph(&state);
+        let alice = token("alice", "alice", "user");
+
+        // N-Quads carry their own graph name; with merge off it is preserved, so a
+        // target-graph-only check would miss it. The boundary runs on the fully
+        // resolved graph set, so the embedded graph is still caught.
+        let nquads = format!("<urn:x:s> <urn:x:p> <urn:x:o> <{B_GRAPH}> .");
+        let boundary = "BNDxt2";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                ("replace", "text/plain", None, b"true"),
+                (
+                    "file",
+                    "application/n-quads",
+                    Some("a.nq"),
+                    nquads.as_bytes(),
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a quad-format file must not smuggle another tenant's graph past the boundary"
+        );
+        assert_eq!(state.store.count_graph(Some(B_GRAPH)).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_import_system_graph_target_rejected() {
+        let state = two_tenant_state();
+        let alice = token("alice", "alice", "user");
+
+        // `urn:system:*` graphs are never registered to a dataset and never under a
+        // dataset namespace, so a non-admin import can never target one — not even
+        // the caller's own dataset metadata graph.
+        let boundary = "BNDxt3";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    b"urn:system:metadata:dataset:dsA",
+                ),
+                ("replace", "text/plain", None, b"true"),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<urn:x:s> <urn:x:p> <urn:x:o> .",
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a non-admin must not target a urn:system:* graph via bulk import"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_import_into_dataset_namespace_allowed() {
+        let state = two_tenant_state();
+        let alice = token("alice", "alice", "user");
+
+        // A brand-new graph under dataset A's OWN namespace is allowed even though
+        // it is not yet registered (the normal first-import workflow); the boundary
+        // admits it structurally and the handler registers it afterwards.
+        let target = "http://localhost:7878/dataset/dsA/data";
+        let boundary = "BNDxt4";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    target.as_bytes(),
+                ),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<urn:x:s> <urn:x:p> <urn:x:o> .",
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an import into the dataset's own IRI namespace must be allowed"
+        );
+        assert_eq!(state.store.count_graph(Some(target)).unwrap(), 1);
+        assert!(
+            state
+                .auth_db
+                .list_dataset_graphs("dsA")
+                .unwrap()
+                .iter()
+                .any(|g| g == target),
+            "the namespaced graph must be registered to dataset A after import"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_import_into_preregistered_graph_allowed() {
+        let state = two_tenant_state();
+        let alice = token("alice", "alice", "user");
+
+        // A graph already registered to dataset A is writable even with an IRI
+        // outside the dataset namespace (e.g. a legacy or externally-named graph).
+        let target = "http://legacy.example/g";
+        state.auth_db.add_dataset_graph("dsA", target).unwrap();
+        let boundary = "BNDxt5";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    target.as_bytes(),
+                ),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<urn:x:s> <urn:x:p> <urn:x:o> .",
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an import into a graph already registered to the dataset must be allowed"
+        );
+        assert_eq!(state.store.count_graph(Some(target)).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn bulk_import_register_then_overwrite_bypass_rejected() {
+        let state = two_tenant_state();
+        seed_b_graph(&state);
+        let alice = token("alice", "alice", "user");
+
+        // The bypass: `POST /api/datasets/{id}/graphs` only checks dataset-write,
+        // so alice attaches dataset B's graph to her own dataset A. It is now
+        // "registered to A" — but the write boundary must still refuse it because
+        // it remains owned by dataset B.
+        state.auth_db.add_dataset_graph("dsA", B_GRAPH).unwrap();
+
+        let boundary = "BNDxt6";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("dataset_id", "text/plain", None, b"dsA"),
+                (
+                    "default_target_graph",
+                    "text/plain",
+                    None,
+                    B_GRAPH.as_bytes(),
+                ),
+                ("replace", "text/plain", None, b"true"),
+                (
+                    "file",
+                    "text/turtle",
+                    Some("a.ttl"),
+                    b"<urn:x:s> <urn:x:p> <urn:x:o> .",
+                ),
+            ],
+        );
+        let status = bulk_import(test_app(state.clone()), &alice, boundary, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "registering another tenant's graph to your dataset must not unlock writing it"
+        );
+        assert_eq!(
+            state.store.count_graph(Some(B_GRAPH)).unwrap(),
+            1,
+            "B's graph must be untouched after the rejected bypass attempt"
         );
     }
 }
