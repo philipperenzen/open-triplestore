@@ -43,13 +43,16 @@
 //! | Optimisation | Module | Status |
 //! |---|---|---|
 //! | Cost-based BGP reordering | [`optimizer`] | usable (query rewriting) |
+//! | Parallel (subject-sharded) execution | [`parallel`] | usable (decomposable queries) |
 //! | Hash join | [`hash_join`] | prototype |
 //! | RocksDB tuning | [`rocksdb_config`] | prototype |
 //! | MVCC read snapshots | [`mvcc`] | prototype |
 //!
-//! These operate at the query-rewriting and post-processing levels; native join
-//! strategies will require forking `spareval`/`sparopt` once upstream exposes
-//! pluggable execution.
+//! Most operate at the query-rewriting and post-processing levels. [`parallel`]
+//! adds genuine multi-core query execution by splitting the dataset across shards
+//! (by subject) and evaluating shard-decomposable queries concurrently; native
+//! intra-query join parallelism will still require forking `spareval`/`sparopt`
+//! once upstream exposes pluggable execution.
 //!
 //! [Oxigraph]: https://crates.io/crates/oxigraph
 
@@ -61,6 +64,7 @@ pub mod skolem;
 pub mod hash_join;
 pub mod mvcc;
 pub mod optimizer;
+pub mod parallel;
 pub mod rocksdb_config;
 
 // Convenience re-exports for the durable blank-node API.

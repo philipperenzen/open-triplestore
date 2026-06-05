@@ -3583,6 +3583,7 @@ dependencies = [
  "hex",
  "oxigraph",
  "oxrdf",
+ "rayon",
  "sha2",
  "spargebra",
  "tracing",

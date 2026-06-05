@@ -91,5 +91,32 @@
       {"label": "500 nodes", "value": 226},
       {"label": "1000 nodes", "value": 286}
     ]
+  },
+  {
+    "file": "parallel-scaling.svg",
+    "title": "Subject-sharded parallel query latency (600k triples)",
+    "subtitle": "opengraph::parallel::ParallelStore — 1 shard = single-store (one core) baseline; lower is better",
+    "unit": "ms", "lower_is_better": true,
+    "series": ["COUNT(*)", "2-way join COUNT", "FILTER COUNT"],
+    "bars": [
+      {"label": "1 shard", "values": [77.0, 152.3, 46.0]},
+      {"label": "2 shards", "values": [42.9, 75.8, 26.4]},
+      {"label": "4 shards", "values": [22.4, 39.7, 13.1]},
+      {"label": "8 shards", "values": [15.4, 22.6, 7.9]},
+      {"label": "16 shards", "values": [9.4, 13.3, 4.9]}
+    ]
+  },
+  {
+    "file": "concurrent-throughput.svg",
+    "title": "Concurrent query throughput vs threads (2-way join, 10k persons)",
+    "subtitle": "shared store, lock-free reads; large-result workload (memory-bandwidth bound); higher is better",
+    "unit": "q/s", "higher_is_better": true,
+    "bars": [
+      {"label": "1 thread", "value": 128},
+      {"label": "2 threads", "value": 168},
+      {"label": "4 threads", "value": 373},
+      {"label": "8 threads", "value": 383},
+      {"label": "16 threads", "value": 535}
+    ]
   }
 ]

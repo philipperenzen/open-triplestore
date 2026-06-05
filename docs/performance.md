@@ -282,6 +282,74 @@ GraphDB, Virtuoso or RDF4J on your own hardware for an apples-to-apples result.
 
 ---
 
+## Parallel & multi-core execution
+
+A single SPARQL query in Oxigraph runs on **one thread** — its evaluator has no
+intra-query parallelism, so a large scan or aggregation uses one core regardless
+of how many the host has. (The criterion suite measures single-query *latency*,
+so most of a run is single-core by design; the multi-core activity is in the
+`concurrent/*`, `shacl/*` and bulk-load groups.) Two layers address this.
+
+### 1. Concurrent throughput (already in the server)
+
+The server runs a multi-threaded runtime and Oxigraph **reads are lock-free**, so
+*independent* queries run on different cores. `concurrent/throughput` measures it
+— `N` threads each running a 2-way join:
+
+![concurrent throughput vs threads](benchmarks/concurrent-throughput.svg)
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
+|---|--:|--:|--:|--:|--:|
+| Throughput (queries/s) | 128 | 168 | 373 | 383 | 535 |
+
+Throughput scales to ~4× by 16 threads. It is **sublinear** here because this
+query returns 10 000 rows per call, so it is bound by result materialization and
+allocator contention rather than the index scan. Aggregation queries (tiny
+results) scale far better — see below.
+
+### 2. Subject-sharded parallel query execution (new — `opengraph::parallel`)
+
+To make a *single* query use many cores, OpenGraph adds data-parallel execution
+([`opengraph::parallel::ParallelStore`](../opengraph/src/parallel.rs)): the
+dataset is split into `N` shards by a stable hash of each triple's **subject**,
+and a shard-decomposable query is evaluated on every shard concurrently (Rayon),
+then the partials are merged. Because every triple of a subject co-locates in one
+shard, **subject-star joins, row-local `FILTER`, global non-distinct `COUNT`,
+`ASK` and `DISTINCT`** decompose correctly; anything that could join *across*
+subjects (object→subject joins, property paths, grouped `AVG`-style aggregates,
+`ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`) is detected and **not** decomposed
+— the caller falls back to single-store evaluation. The classifier is deliberately
+conservative; a test suite asserts every parallel path matches the single-store
+result *and* that unsafe shapes are rejected.
+
+![subject-sharded parallel scaling](benchmarks/parallel-scaling.svg)
+
+Latency on **600 000 triples** — 1 shard is today's single-store (one-core) baseline:
+
+| Query | 1 shard | 2 | 4 | 8 | 16 | speedup @16 |
+|---|--:|--:|--:|--:|--:|--:|
+| `COUNT(*)` | 77.0 ms | 42.9 | 22.4 | 15.4 | 9.4 ms | **8.2×** |
+| 2-way join `COUNT` | 152 ms | 75.8 | 39.7 | 22.6 | 13.3 ms | **11.4×** |
+| `FILTER` + `COUNT` | 46.0 ms | 26.4 | 13.1 | 7.9 | 4.9 ms | **9.3×** |
+
+Near-linear to 8 shards, ~8–11× by 16 (the falloff past the core count is memory
+bandwidth + merge overhead). Reproduce with `cargo bench -p opengraph --bench parallel`.
+
+### Roadmap
+
+This is increment 1 — a tested, benchmarked capability beside the engine. Next:
+
+* **Wire it into `TripleStore`** so the live `/sparql` path shards storage and uses
+  this automatically for decomposable queries (the ACL-scoped multi-graph case
+  already partitions naturally by graph).
+* **Mergeable grouped aggregates** — rewrite `AVG`→(`SUM`,`COUNT`) and combine
+  per-shard partials so `GROUP BY` decomposes too.
+* **Fast `COUNT(*)`** (optimization #4 below) pairs with sharded counting.
+* **Intra-query join parallelism** would require forking `spareval`/`sparopt`
+  (Oxigraph's evaluator) once it exposes pluggable execution — a larger effort.
+
+---
+
 ## Benchmark Groups
 
 ### `insert/bulk_loader`
