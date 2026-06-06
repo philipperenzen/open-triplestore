@@ -279,30 +279,30 @@ run (`RATE_LIMIT_DISABLED=1`) so it measures the engine, not the limiter.
 
 | Query (~501k triples, over HTTP) | Open&nbsp;Triplestore | Fuseki&nbsp;(TDB2) | QLever |
 |---|--:|--:|--:|
-| `COUNT(*)` over all triples | **3.2 ms** | 70 ms | 3.4 ms |
-| 2-way join + `COUNT` | **15 ms** | 197 ms | 14 ms |
-| `FILTER` + `COUNT` (≈30 % selectivity) | **8.1 ms** | 65 ms | 7.8 ms |
-| `GROUP BY` + `COUNT` | **7.8 ms** | 39 ms | 6.3 ms |
-| `GROUP BY` + `AVG` (over a join) | 163 ms | 284 ms | **11 ms** |
-| `COUNT(DISTINCT …)` | 45 ms | 37 ms | **5.5 ms** |
+| `COUNT(*)` over all triples | **3.0 ms** | 61 ms | 3.4 ms |
+| 2-way join + `COUNT` | **15 ms** | 191 ms | 13 ms |
+| `FILTER` + `COUNT` (≈30 % selectivity) | **8.1 ms** | 65 ms | 7.4 ms |
+| `GROUP BY` + `COUNT` | **7.4 ms** | 40 ms | 6.2 ms |
+| `GROUP BY` + `AVG` (over a join) | **17 ms** | 282 ms | 10 ms |
+| `COUNT(DISTINCT …)` | 44 ms | 36 ms | **5.2 ms** |
 
 **Reading these honestly.** Open Triplestore now **beats Fuseki on every query**
-(3–25×) and is **within ~1.0–1.3× of QLever** on `COUNT(*)`, the join-`COUNT`,
-`FILTER` and `GROUP BY`-`COUNT` — the queries the in-memory subject-sharded mirror
-accelerates. Two cases still favour QLever, and it's worth saying why:
+(3–20×) and is **within ~1.1–1.7× of QLever** on five of the six — `COUNT(*)`, the
+join-`COUNT`, `FILTER`, `GROUP BY`-`COUNT` *and now `GROUP BY`+`AVG`*, all the shapes
+the in-memory subject-sharded mirror accelerates. Only one case still clearly favours
+QLever:
 
-* **`GROUP BY` + `AVG` over a join (163 ms — this HTTP figure predates the sharded-
-  `AVG` work).** Originally this ran single-threaded on the unsharded full copy (the
-  163 ms above; it had already fixed a brutal **6466 ms** RocksDB regression, where the
+* **`GROUP BY` + `AVG` over a join — `163 ms → 17 ms`.** This is the headline of the
+  grouped-aggregate work. It used to run single-threaded on the unsharded full copy
+  (163 ms — which had itself fixed a brutal **6466 ms** RocksDB regression, where the
   store answers a multi-pattern join with one point lookup *per result row*). It now
-  **decomposes across the shards** — each shard computes `SUM`+`COUNT` per group and
-  the partials re-merge through the engine — measured in-process at **137 ms → 13.9 ms
-  (9.9×)** on the 16-shard mirror (§3 below), byte-identical for `xsd:integer`/`decimal`
-  and declined to the persistent store for `xsd:double`/`float`. That puts the live
-  engine compute next to QLever's 11 ms; QLever's edge on the *cold* number is **merge
-  joins over sorted permutations** (no per-row lookups), a storage/evaluator design
-  Oxigraph doesn't share. The HTTP row here will refresh on the next full 3-way run.
-* **`COUNT(DISTINCT)` (45 ms).** Distinct isn't sum-safe across subject shards, so
+  **decomposes across the shards** — each shard computes `SUM`+`COUNT` per group and the
+  partials re-merge through the engine — **17 ms over HTTP** (9.6×; in-process 137 ms →
+  13.9 ms), byte-identical for `xsd:integer`/`decimal` and declined to the persistent
+  store for `xsd:double`/`float` (IEEE-754 is order-dependent). That brings it from 15×
+  behind QLever to **within 1.7×**. QLever's remaining edge is **merge joins over sorted
+  permutations** (no per-row lookups), a storage/evaluator design Oxigraph doesn't share.
+* **`COUNT(DISTINCT)` (44 ms).** Distinct isn't sum-safe across subject shards, so
   it too uses the full copy; QLever's columnar dictionary IDs make distinct counting
   near-free.
 
@@ -317,8 +317,8 @@ hundreds-of-ms / multi-second to single-digit / ~150 ms.
 `TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE`, on by default): a
 repeated *deterministic* query — the bulk of real traffic — collapses from full
 evaluation to a µs-scale LRU lookup, so a re-run of *any* row of the table collapses
-to the **HTTP floor (~2.8 ms measured)** regardless of its cold cost: the 163 ms
-`GROUP BY`+`AVG` and the 45 ms `COUNT(DISTINCT)` both return in ~2.8 ms when repeated,
+to the **HTTP floor (~2.8 ms measured)** regardless of its cold cost: the 44 ms
+`COUNT(DISTINCT)` and 17 ms `GROUP BY`+`AVG` both return in ~2.8 ms when repeated,
 matching or beating QLever's warm numbers. It is invalidated on every write (generation
 counter), keyed by the already-ACL-scoped query string (so no tenant ever reads
 another's cached result), and never caches non-deterministic queries
