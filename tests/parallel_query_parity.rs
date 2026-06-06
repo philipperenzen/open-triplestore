@@ -159,6 +159,23 @@ fn parity_default_graph_join_count() {
 }
 
 #[test]
+fn parity_group_by_count() {
+    let data = persons(600, G);
+    // GROUP BY ?type with COUNT — the object key spans shards but its count sums.
+    assert_parity(
+        &data,
+        &format!("SELECT ?t (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t }} GROUP BY ?t"),
+    );
+    // GROUP BY over a subject-star join + filter.
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (COUNT(?n) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}name> ?n FILTER(?n != \"x\") }} GROUP BY ?t"
+        ),
+    );
+}
+
+#[test]
 fn mirror_invalidates_after_write() {
     let store = store(true, 8, 100_000_000, &persons(300, G));
     let q = format!("SELECT (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}name> ?n }}");

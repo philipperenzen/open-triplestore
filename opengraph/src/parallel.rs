@@ -46,7 +46,7 @@ use spargebra::term::{TermPattern, TriplePattern};
 use spargebra::Query;
 
 /// How a query's per-shard partial results combine into the global answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Merge {
     /// Concatenate solution rows from every shard (optionally global-dedup).
     Concat { distinct: bool },
@@ -54,6 +54,17 @@ enum Merge {
     SumCount,
     /// Logical-OR of `ASK` booleans.
     OrAsk,
+    /// Mergeable `GROUP BY`: each shard produces grouped rows; merge them by the
+    /// group key, summing the (integer) non-distinct `COUNT` columns. Only `COUNT`
+    /// is mergeable this way without re-deriving SPARQL's numeric-promotion rules,
+    /// so `SUM`/`AVG`/`MIN`/`MAX` grouped aggregates are deliberately *not*
+    /// classified here (they fall back to single-store evaluation).
+    GroupCount {
+        /// Projected group-key columns to merge on.
+        key_vars: Vec<Variable>,
+        /// Projected non-distinct `COUNT` columns to sum.
+        count_vars: Vec<Variable>,
+    },
 }
 
 /// A merged answer produced by [`ParallelStore::query`].
@@ -166,10 +177,10 @@ impl ParallelStore {
         let partials: Vec<ShardPartial> = self
             .shards
             .par_iter()
-            .map(|s| run_shard(s, sparql, merge, &options))
+            .map(|s| run_shard(s, sparql, &merge, &options))
             .collect::<Result<_, _>>()?;
 
-        Ok(Some(combine(partials, merge)))
+        Ok(Some(combine(partials, &merge)))
     }
 }
 
@@ -203,7 +214,7 @@ pub fn classify(sparql: &str) -> Option<ParClass> {
     let query = Query::parse(sparql, None).ok()?;
     Some(match plan(&query)? {
         Merge::Concat { .. } => ParClass::Rows,
-        Merge::SumCount | Merge::OrAsk => ParClass::Aggregate,
+        Merge::SumCount | Merge::OrAsk | Merge::GroupCount { .. } => ParClass::Aggregate,
     })
 }
 
@@ -225,39 +236,45 @@ enum ShardPartial {
 fn run_shard(
     store: &Store,
     sparql: &str,
-    merge: Merge,
+    merge: &Merge,
     options: &QueryOptions,
 ) -> Result<ShardPartial, String> {
     let results = store
         .query_opt(sparql, options.clone())
         .map_err(|e| e.to_string())?;
-    match (results, merge) {
-        (QueryResults::Boolean(b), Merge::OrAsk) => Ok(ShardPartial::Bool(b)),
-        (QueryResults::Solutions(sols), Merge::SumCount) => {
-            let vars: Vec<Variable> = sols.variables().to_vec();
-            let var = vars.first().cloned();
-            let mut total: i128 = 0;
-            for sol in sols {
-                let sol = sol.map_err(|e| e.to_string())?;
-                if let Some(v) = vars.first() {
-                    if let Some(Term::Literal(lit)) = sol.get(v) {
-                        total += lit.value().parse::<i128>().unwrap_or(0);
+    let mismatch = || "parallel: result shape did not match the planned merge".to_string();
+    match results {
+        QueryResults::Boolean(b) if matches!(merge, Merge::OrAsk) => Ok(ShardPartial::Bool(b)),
+        QueryResults::Solutions(sols) => match merge {
+            Merge::SumCount => {
+                let vars: Vec<Variable> = sols.variables().to_vec();
+                let var = vars.first().cloned();
+                let mut total: i128 = 0;
+                for sol in sols {
+                    let sol = sol.map_err(|e| e.to_string())?;
+                    if let Some(v) = vars.first() {
+                        if let Some(Term::Literal(lit)) = sol.get(v) {
+                            total += lit.value().parse::<i128>().unwrap_or(0);
+                        }
                     }
                 }
+                Ok(ShardPartial::Count { var, value: total })
             }
-            Ok(ShardPartial::Count { var, value: total })
-        }
-        (QueryResults::Solutions(sols), Merge::Concat { .. }) => {
-            let vars: Vec<Variable> = sols.variables().to_vec();
-            let rows = collect_rows(sols, &vars)?;
-            Ok(ShardPartial::Rows {
-                variables: vars,
-                rows,
-            })
-        }
+            // `GroupCount` collects the per-shard grouped rows exactly like
+            // `Concat`; the per-group sum happens in `combine`.
+            Merge::Concat { .. } | Merge::GroupCount { .. } => {
+                let vars: Vec<Variable> = sols.variables().to_vec();
+                let rows = collect_rows(sols, &vars)?;
+                Ok(ShardPartial::Rows {
+                    variables: vars,
+                    rows,
+                })
+            }
+            _ => Err(mismatch()),
+        },
         // Shape/strategy mismatch should never happen given the classifier, but
         // surface it rather than guess.
-        _ => Err("parallel: result shape did not match the planned merge".into()),
+        _ => Err(mismatch()),
     }
 }
 
@@ -273,7 +290,7 @@ fn collect_rows(
     Ok(rows)
 }
 
-fn combine(partials: Vec<ShardPartial>, merge: Merge) -> ParAnswer {
+fn combine(partials: Vec<ShardPartial>, merge: &Merge) -> ParAnswer {
     match merge {
         Merge::OrAsk => {
             let any = partials
@@ -320,12 +337,95 @@ fn combine(partials: Vec<ShardPartial>, merge: Merge) -> ParAnswer {
                     rows.extend(r);
                 }
             }
-            if distinct {
+            if *distinct {
                 let mut seen = std::collections::HashSet::new();
                 rows.retain(|row| seen.insert(row_key(row)));
             }
             ParAnswer::Solutions { variables, rows }
         }
+        Merge::GroupCount {
+            key_vars,
+            count_vars,
+        } => combine_group_count(partials, key_vars, count_vars),
+    }
+}
+
+/// Merge per-shard grouped rows: group by the key columns and sum the (integer)
+/// `COUNT` columns. The output header and column order are the projection's, taken
+/// from the shards' result variables. First-seen group order is preserved (SPARQL
+/// is unordered without `ORDER BY`, so any deterministic order is conformant).
+fn combine_group_count(
+    partials: Vec<ShardPartial>,
+    key_vars: &[Variable],
+    count_vars: &[Variable],
+) -> ParAnswer {
+    use std::collections::HashMap;
+
+    let header: Vec<Variable> = partials
+        .iter()
+        .find_map(|p| match p {
+            ShardPartial::Rows { variables, .. } => Some(variables.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let key_idx: Vec<usize> = header
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| key_vars.contains(v))
+        .map(|(i, _)| i)
+        .collect();
+    let count_idx: Vec<usize> = header
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| count_vars.contains(v))
+        .map(|(i, _)| i)
+        .collect();
+
+    // key string -> (representative row for the key columns, per-count running sum)
+    let mut groups: HashMap<String, (Vec<Option<Term>>, Vec<i128>)> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for p in &partials {
+        if let ShardPartial::Rows { rows, .. } = p {
+            for row in rows {
+                let mut key = String::new();
+                for &i in &key_idx {
+                    match row.get(i).and_then(|c| c.as_ref()) {
+                        Some(t) => key.push_str(&t.to_string()),
+                        None => key.push('\u{1}'),
+                    }
+                    key.push('\u{2}');
+                }
+                let entry = groups.entry(key.clone()).or_insert_with(|| {
+                    order.push(key.clone());
+                    (row.clone(), vec![0i128; count_idx.len()])
+                });
+                for (j, &i) in count_idx.iter().enumerate() {
+                    if let Some(Some(Term::Literal(lit))) = row.get(i) {
+                        entry.1[j] += lit.value().parse::<i128>().unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out_rows: Vec<Vec<Option<Term>>> = Vec::with_capacity(order.len());
+    for key in &order {
+        let (template, sums) = &groups[key];
+        let mut row: Vec<Option<Term>> = vec![None; header.len()];
+        for &i in &key_idx {
+            row[i] = template.get(i).cloned().flatten();
+        }
+        for (j, &i) in count_idx.iter().enumerate() {
+            let lit =
+                oxrdf::Literal::new_typed_literal(sums[j].to_string(), oxrdf::vocab::xsd::INTEGER);
+            row[i] = Some(Term::Literal(lit));
+        }
+        out_rows.push(row);
+    }
+
+    ParAnswer::Solutions {
+        variables: header,
+        rows: out_rows,
     }
 }
 
@@ -361,7 +461,14 @@ fn plan(query: &Query) -> Option<Merge> {
 
 fn plan_select(pattern: &GraphPattern, distinct: bool) -> Option<Merge> {
     match pattern {
-        GraphPattern::Project { inner, .. } => plan_select(inner, distinct),
+        GraphPattern::Project { inner, variables } => {
+            // A mergeable GROUP BY (keys + non-distinct COUNTs) is the one shape
+            // where the projection list matters, so handle it before recursing.
+            if let Some(merge) = plan_group_count(variables, inner) {
+                return Some(merge);
+            }
+            plan_select(inner, distinct)
+        }
         GraphPattern::Distinct { inner } => plan_select(inner, true),
         GraphPattern::Reduced { inner } => plan_select(inner, distinct),
         // `(COUNT(*) AS ?c)` parses to Extend(Group, ?c, Variable(internal)). A
@@ -392,6 +499,88 @@ fn plan_select(pattern: &GraphPattern, distinct: bool) -> Option<Merge> {
         }
         _ => None,
     }
+}
+
+/// Classify a mergeable `GROUP BY`: `Project { keys + COUNT aliases }` over
+/// `Extend*(Group { keys, [(internal, COUNT)…] })` — the shape SPARQL parses
+/// `SELECT ?k (COUNT(*) AS ?c) … GROUP BY ?k` into. Every projected column must be
+/// a group key or alias a non-distinct `COUNT` (so per-group summing is exact),
+/// every key must be projected (so the merge can group on it), and the grouped
+/// pattern must be shard-local. Returns `None` for anything else — including
+/// `SUM`/`AVG`/`MIN`/`MAX` grouped aggregates, which need SPARQL's numeric-promotion
+/// rules to merge correctly and so stay single-store.
+fn plan_group_count(proj_vars: &[Variable], inner: &GraphPattern) -> Option<Merge> {
+    use std::collections::{HashMap, HashSet};
+
+    // Walk the Extend chain that aliases internal aggregate vars to user names.
+    let mut alias: HashMap<String, String> = HashMap::new(); // user name -> internal name
+    let mut node = inner;
+    let (keys, aggregates, g_inner) = loop {
+        match node {
+            GraphPattern::Extend {
+                inner,
+                variable,
+                expression,
+            } => {
+                match expression {
+                    Expression::Variable(v) => {
+                        alias.insert(variable.as_str().to_string(), v.as_str().to_string());
+                    }
+                    // A computed expression over an aggregate isn't sum-mergeable.
+                    _ => return None,
+                }
+                node = inner;
+            }
+            GraphPattern::Group {
+                inner,
+                variables,
+                aggregates,
+            } => break (variables, aggregates, inner),
+            _ => return None,
+        }
+    };
+
+    if keys.is_empty() {
+        return None; // empty keys = the global SumCount case, handled elsewhere
+    }
+    if !shard_local_rows(g_inner) {
+        return None;
+    }
+    // Every aggregate must be a non-distinct COUNT (binding an internal var).
+    let mut count_internal: HashSet<String> = HashSet::new();
+    for (var, agg) in aggregates {
+        if !is_nondistinct_count(agg) {
+            return None;
+        }
+        count_internal.insert(var.as_str().to_string());
+    }
+
+    // Classify every projected column as a key or a COUNT alias.
+    let key_set: HashSet<&str> = keys.iter().map(|v| v.as_str()).collect();
+    let mut key_vars: Vec<Variable> = Vec::new();
+    let mut count_vars: Vec<Variable> = Vec::new();
+    for pv in proj_vars {
+        if key_set.contains(pv.as_str()) {
+            key_vars.push(pv.clone());
+        } else if let Some(internal) = alias.get(pv.as_str()) {
+            if count_internal.contains(internal) {
+                count_vars.push(pv.clone());
+            } else {
+                return None; // aliases a non-COUNT aggregate
+            }
+        } else {
+            return None; // a projected column that is neither key nor COUNT
+        }
+    }
+    // All keys must be projected (so the merge can group on them), and there must
+    // be at least one COUNT column (else this is just a plain projection).
+    if key_vars.len() != keys.len() || count_vars.is_empty() {
+        return None;
+    }
+    Some(Merge::GroupCount {
+        key_vars,
+        count_vars,
+    })
 }
 
 fn is_nondistinct_count(agg: &AggregateExpression) -> bool {
@@ -608,6 +797,36 @@ mod tests {
         assert_matches(&q, "ASK { ?s <http://example.org/name> \"Nobody\" }");
     }
 
+    #[test]
+    fn group_by_count_decomposes() {
+        // COUNT per group is mergeable: each shard counts its subjects per ?t and
+        // the per-group counts sum (the same type spans shards, but its count is a
+        // sum of per-shard counts).
+        let q = persons(500);
+        assert_matches(
+            &q,
+            "SELECT ?t (COUNT(*) AS ?c) WHERE { ?s <http://example.org/type> ?t } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn group_by_count_subject_star_decomposes() {
+        let q = persons(500);
+        assert_matches(
+            &q,
+            "SELECT ?t (COUNT(?n) AS ?c) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/name> ?n } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn group_by_count_filtered_decomposes() {
+        let q = persons(500);
+        assert_matches(
+            &q,
+            "SELECT ?t (COUNT(*) AS ?c) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a FILTER(?a >= 40) } GROUP BY ?t",
+        );
+    }
+
     // ── Negative cases: must be classified NON-decomposable (query → None) ──
 
     fn assert_not_decomposable(sparql: &str) {
@@ -629,9 +848,22 @@ mod tests {
 
     #[test]
     fn grouped_aggregate_is_rejected() {
-        // GROUP BY a non-subject + AVG cannot be merged by summing.
+        // GROUP BY + AVG cannot be merged by summing (avg of avgs ≠ overall avg);
+        // only non-distinct COUNT is mergeable, so AVG stays single-store.
         assert_not_decomposable(
             "SELECT ?t (AVG(?a) AS ?avg) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn grouped_sum_and_distinct_count_are_rejected() {
+        // SUM/MIN/MAX would need SPARQL's numeric-promotion rules to merge, and a
+        // grouped COUNT(DISTINCT) is not sum-safe across shards — all rejected.
+        assert_not_decomposable(
+            "SELECT ?t (SUM(?a) AS ?s) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a } GROUP BY ?t",
+        );
+        assert_not_decomposable(
+            "SELECT ?t (COUNT(DISTINCT ?n) AS ?c) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/name> ?n } GROUP BY ?t",
         );
     }
 
