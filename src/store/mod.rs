@@ -1,7 +1,9 @@
 pub mod engine;
+pub mod parallel_mirror;
 pub mod path_cache;
 
 pub use engine::{StoreError, TripleStore};
+pub use parallel_mirror::ParallelMirror;
 
 /// Percent-encode the characters that are illegal inside a SPARQL `IRIREF`
 /// (the `<...>` form): `<>"{}|^`\` plus any control/space char (≤ 0x20).

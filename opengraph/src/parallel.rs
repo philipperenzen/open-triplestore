@@ -37,7 +37,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use oxigraph::sparql::{QueryResults, QuerySolution};
+use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolution};
 use oxigraph::store::Store;
 use oxrdf::{Quad, Term, Variable};
 use rayon::prelude::*;
@@ -142,6 +142,18 @@ impl ParallelStore {
     /// caller should fall back to single-store evaluation); `Err` only on a real
     /// evaluation error inside a shard.
     pub fn query(&self, sparql: &str) -> Result<Option<ParAnswer>, String> {
+        self.query_with_options(sparql, QueryOptions::default())
+    }
+
+    /// Like [`Self::query`], but evaluates each shard with the caller-supplied
+    /// [`QueryOptions`] — so custom functions (GeoSPARQL, RDF 1.2, …) registered
+    /// on the live store apply identically per shard, keeping the parallel result
+    /// bit-for-bit equal to the single-store one. `options` is cloned per shard.
+    pub fn query_with_options(
+        &self,
+        sparql: &str,
+        options: QueryOptions,
+    ) -> Result<Option<ParAnswer>, String> {
         let query = match Query::parse(sparql, None) {
             Ok(q) => q,
             Err(_) => return Ok(None),
@@ -154,11 +166,45 @@ impl ParallelStore {
         let partials: Vec<ShardPartial> = self
             .shards
             .par_iter()
-            .map(|s| run_shard(s, sparql, merge))
+            .map(|s| run_shard(s, sparql, merge, &options))
             .collect::<Result<_, _>>()?;
 
         Ok(Some(combine(partials, merge)))
     }
+}
+
+/// True iff `sparql` is provably shard-decomposable — a cheap parse + classify
+/// with no store access. The live query path uses this to skip building (or
+/// consulting) the subject-sharded mirror for queries it cannot accelerate.
+pub fn is_decomposable(sparql: &str) -> bool {
+    Query::parse(sparql, None)
+        .ok()
+        .and_then(|q| plan(&q))
+        .is_some()
+}
+
+/// Coarse classification of *how* a decomposable query merges, for callers that
+/// want to accelerate only **order-insensitive** shapes. A row-returning SELECT
+/// (`Rows`) is concatenated shard-by-shard, so its order differs from the
+/// single-store order — fine for SPARQL (unordered without `ORDER BY`) but a
+/// reason a server may choose to keep it single-core. Aggregates and `ASK`
+/// (`Aggregate`) return a scalar/boolean/grouped set where merge order is
+/// irrelevant, so they are always safe to parallelize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParClass {
+    /// Global or grouped aggregate, or `ASK`: result is a scalar/set.
+    Aggregate,
+    /// Row-returning SELECT: concat-merged, so shard order is observable.
+    Rows,
+}
+
+/// Classify a query's parallel shape, or `None` if it is not decomposable.
+pub fn classify(sparql: &str) -> Option<ParClass> {
+    let query = Query::parse(sparql, None).ok()?;
+    Some(match plan(&query)? {
+        Merge::Concat { .. } => ParClass::Rows,
+        Merge::SumCount | Merge::OrAsk => ParClass::Aggregate,
+    })
 }
 
 /// Per-shard partial result, shaped by the merge strategy.
@@ -167,16 +213,29 @@ enum ShardPartial {
         variables: Vec<Variable>,
         rows: Vec<Vec<Option<Term>>>,
     },
-    Count(i128),
+    Count {
+        /// The query's projection variable (e.g. `?n` in `COUNT(*) AS ?n`), kept so
+        /// the merged answer carries the caller's actual name, not a fixed one.
+        var: Option<Variable>,
+        value: i128,
+    },
     Bool(bool),
 }
 
-fn run_shard(store: &Store, sparql: &str, merge: Merge) -> Result<ShardPartial, String> {
-    let results = store.query(sparql).map_err(|e| e.to_string())?;
+fn run_shard(
+    store: &Store,
+    sparql: &str,
+    merge: Merge,
+    options: &QueryOptions,
+) -> Result<ShardPartial, String> {
+    let results = store
+        .query_opt(sparql, options.clone())
+        .map_err(|e| e.to_string())?;
     match (results, merge) {
         (QueryResults::Boolean(b), Merge::OrAsk) => Ok(ShardPartial::Bool(b)),
         (QueryResults::Solutions(sols), Merge::SumCount) => {
             let vars: Vec<Variable> = sols.variables().to_vec();
+            let var = vars.first().cloned();
             let mut total: i128 = 0;
             for sol in sols {
                 let sol = sol.map_err(|e| e.to_string())?;
@@ -186,7 +245,7 @@ fn run_shard(store: &Store, sparql: &str, merge: Merge) -> Result<ShardPartial, 
                     }
                 }
             }
-            Ok(ShardPartial::Count(total))
+            Ok(ShardPartial::Count { var, value: total })
         }
         (QueryResults::Solutions(sols), Merge::Concat { .. }) => {
             let vars: Vec<Variable> = sols.variables().to_vec();
@@ -226,11 +285,19 @@ fn combine(partials: Vec<ShardPartial>, merge: Merge) -> ParAnswer {
             let total: i128 = partials
                 .iter()
                 .map(|p| match p {
-                    ShardPartial::Count(c) => *c,
+                    ShardPartial::Count { value, .. } => *value,
                     _ => 0,
                 })
                 .sum();
-            let var = Variable::new("c").unwrap_or_else(|_| Variable::new_unchecked("c"));
+            // Preserve the query's real projection variable (e.g. `?n`), not a
+            // fixed `?c`, so the caller reads the count by the name it asked for.
+            let var = partials
+                .iter()
+                .find_map(|p| match p {
+                    ShardPartial::Count { var: Some(v), .. } => Some(v.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Variable::new_unchecked("c"));
             let lit =
                 oxrdf::Literal::new_typed_literal(total.to_string(), oxrdf::vocab::xsd::INTEGER);
             ParAnswer::Solutions {
