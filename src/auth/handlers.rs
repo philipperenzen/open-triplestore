@@ -2885,6 +2885,32 @@ pub async fn add_dataset_graph(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
+    // Per-graph registration boundary. `can_write_dataset` only proves the caller
+    // may write *into this dataset*; it does not constrain which graph IRI they
+    // attach to it. Without this gate a writer could register another tenant's
+    // private graph IRI to their own dataset and then read it, since
+    // `get_accessible_graph_iris` makes any graph registered to an accessible
+    // dataset readable (cross-tenant read — the IDOR the bulk-import path already
+    // defends against). Admins are unrestricted.
+    if !current_user.is_admin() {
+        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
+            &db,
+            &state.base_url,
+            &dataset_id,
+            &req.graph_iri,
+        ) {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_graph",
+                &dataset_id,
+                "register_graph",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
+        }
+    }
+
     db.add_dataset_graph(&dataset_id, &req.graph_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

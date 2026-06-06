@@ -250,8 +250,9 @@ backend**, streaming the dataset from an N-Triples file. Wall-clock median
 ¹ `GROUP BY` over a 100M-triple join materialises ~20M intermediate solutions. On
 the earlier 30.9 GiB allocation this OOM'd; with the **54.9 GiB** allocation used
 here (see Reference system) it completes in ~105 s. The other ops are index-only /
-streaming and are unaffected by the size. Decomposing grouped aggregates across
-shards (parallel roadmap) would bring this down further.
+streaming and are unaffected by the size. Grouped-aggregate shard decomposition
+(§3 — `AVG`→merge `SUM`+`COUNT`) brings this down sharply for datasets *within* the
+in-memory mirror cap, but this 100M tier exceeds it and runs on the persistent store.
 
 **Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
 100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
@@ -261,49 +262,80 @@ smaller tiers).
 
 ---
 
-## Comparison with Apache Jena Fuseki
+## Comparison with Apache Jena Fuseki and QLever
 
 A direct, **same-hardware HTTP head-to-head** against
 [Apache Jena Fuseki](https://jena.apache.org/documentation/fuseki2/)
-(`stain/jena-fuseki@sha256:b1d0c96…`, TDB2 backend, ~Jena 4.x) — the most widely
-deployed open-source SPARQL server. Both servers load the **identical
-500k-triple** dataset (the same deterministic 100k-person generator the criterion
-suite uses) and answer the **identical** queries over HTTP on the reference
-machine. Latency is the **median of 9 paced runs** of compute-bound queries that
-return ≤10 rows, so the timing reflects engine work rather than result transfer.
+(`stain/jena-fuseki@sha256:b1d0c96…`, TDB2 backend) — the most widely deployed
+open-source SPARQL server — and [QLever](https://github.com/ad-freiburg/qlever)
+(`adfreiburg/qlever`), a C++ engine built for extreme scale and speed. All three
+load the **identical 501k-triple** `gen_persons` dataset and answer the
+**identical** queries over HTTP on the reference machine (Ryzen 9 7900X3D). Latency
+is the **median of 9 warm runs** returning ≤10 rows, so the timing reflects engine
+work, not result transfer. Open Triplestore is queried through a dataset's SPARQL
+**service endpoint** (so the ACL layer scopes to that one graph, like Fuseki's
+`/ds` and QLever's single dataset); the per-IP rate limiter is disabled for the
+run (`RATE_LIMIT_DISABLED=1`) so it measures the engine, not the limiter.
 
-![Open Triplestore vs Fuseki — query latency on 500k triples](benchmarks/compare-vs-fuseki.svg)
+| Query (~501k triples, over HTTP) | Open&nbsp;Triplestore | Fuseki&nbsp;(TDB2) | QLever |
+|---|--:|--:|--:|
+| `COUNT(*)` over all triples | **3.0 ms** | 60 ms | 3.3 ms |
+| 2-way join + `COUNT` | **15 ms** | 197 ms | 13 ms |
+| `FILTER` + `COUNT` (≈30 % selectivity) | **8.0 ms** | 64 ms | 7.4 ms |
+| `GROUP BY` + `COUNT` | **7.7 ms** | 41 ms | 6.5 ms |
+| `GROUP BY` + `AVG` (over a join) | **17 ms** | 279 ms | 10 ms |
+| `COUNT(DISTINCT …)` | **8.1 ms** | 38 ms | 5.4 ms |
 
-| Query (500k triples, over HTTP) | Open Triplestore | Fuseki (TDB2) |
-|---|--:|--:|
-| `COUNT(*)` over all triples | 117 ms | 55 ms |
-| 2-way join + `COUNT` | 271 ms | 118 ms |
-| `GROUP BY` + `AVG` | 272 ms | 224 ms |
-| `FILTER` + `COUNT` (≈30 % selectivity) | 29 ms | 42 ms |
-| `COUNT(DISTINCT …)` | 25 ms | 23 ms |
-| Bulk load 500k (GSP `PUT`) | ~5.0 s | ~4.4 s |
+**Reading these honestly.** Open Triplestore now **beats Fuseki on every query**
+(4–20×) and is **within ~1.1–1.7× of QLever on all six** — there is no longer a query
+where QLever decisively wins. Every shape in the table is accelerated by the in-memory
+subject-sharded mirror; the last two to close were the grouped and distinct aggregates:
 
-**Reading these honestly.** Open Triplestore is faster on the selective
-`FILTER`/`COUNT(*)`-of-a-scan and within ~20 % on `GROUP BY`/`DISTINCT`/load,
-while Fuseki is ~2× faster on full `COUNT(*)` and the join-`COUNT`. Two factors
-explain the gap and are worth stating plainly:
+* **`GROUP BY` + `AVG` over a join — `163 ms → 17 ms` (9.6×).** It used to run
+  single-threaded on the unsharded full copy (the 163 ms — which had itself fixed a
+  brutal **6466 ms** RocksDB regression, where the store answers a multi-pattern join
+  with one point lookup *per result row*). It now **decomposes across the shards** —
+  each shard computes `SUM`+`COUNT` per group, the partials re-merge through the engine
+  (in-process 137 ms → 13.9 ms), byte-identical for `xsd:integer`/`decimal` and declined
+  to the persistent store for `xsd:double`/`float` (IEEE-754 is order-dependent). From
+  15× behind QLever to **within 1.7×**.
+* **`COUNT(DISTINCT)` — `44 ms → 8.1 ms` (5.4×).** A distinct count *is* decomposable,
+  by **set union**: each shard computes its DISTINCT values in parallel and the small
+  per-shard sets are re-deduped through the engine and counted — the expensive scan/hash
+  runs `N`-way, and the merge sees only the distinct set, not the raw scan. From 8.5×
+  behind QLever to **within 1.5×**. (Blank-node distinct values decline to the full copy,
+  where `COUNT` is relabel-invariant — still exact.)
 
-1. **This measures the full multi-tenant HTTP stack, not the raw engine.** Every
-   Open Triplestore query is rewritten by the ACL layer to scope to the caller's
-   readable graphs (`FROM` injection) and runs through Axum plus a per-IP rate
-   limiter; Fuseki's `/ds/query` has none of that. The **in-process** numbers
-   above (e.g. `COUNT(*)` over 500k in ~66 ms with no HTTP/ACL) are the engine's
-   true speed — roughly 2× faster than the same query over our HTTP path.
-2. **No fast `COUNT(*)` path yet.** Our aggregation materialises solution rows
-   (see optimization #4 below); TDB2 has a cardinality short-cut. This is the
-   single biggest contributor to the `COUNT`/join-`COUNT` gap.
+QLever's remaining sub-2× edge across the board comes from its columnar dictionary IDs
+and sorted-permutation merge joins — a storage/evaluator design Oxigraph doesn't share;
+closing it entirely would need an evaluator fork.
 
-**Reproduce it.** Run both servers as containers on one Docker network, load
-`data.nt` into each (Fuseki via GSP with `-u admin:admin`; Open Triplestore by
-registering a public dataset and `PUT`ting to its graph), then time identical
-queries with `curl -w %{time_total}`, pacing requests below Open Triplestore's
-default SPARQL rate limit. The generator, queries and client scripts mirror the
-criterion `gen_persons` workload.
+**The full in-memory copy is the headline fix.** Within the cap, `TripleStore`
+keeps *both* the subject-hash shards (parallel decomposable aggregates — every row in
+the table above) **and** an unsharded in-memory copy that serves everything else
+(row-returning joins, ordered/limited results, large `SELECT`s, `CONSTRUCT`). RocksDB
+stays the durable source of truth and answers anything over the cap. This is why the
+join/`GROUP BY` numbers dropped from hundreds-of-ms / multi-second to single-digit /
+~150 ms.
+
+**The numbers above are cold (cache-off) engine compute.** On top of the engine,
+`TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE`, on by default): a
+repeated *deterministic* query — the bulk of real traffic — collapses from full
+evaluation to a µs-scale LRU lookup, so a re-run of *any* row of the table collapses
+to the **HTTP floor (~2.8 ms measured)** regardless of its cold cost: the 17 ms
+`GROUP BY`+`AVG` and 15 ms join-`COUNT` both return in ~2.8 ms when repeated,
+matching or beating QLever's warm numbers. It is invalidated on every write (generation
+counter), keyed by the already-ACL-scoped query string (so no tenant ever reads
+another's cached result), and never caches non-deterministic queries
+(`RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE`) — fidelity is never traded. The table is
+reported cache-off precisely so it reflects engine work rather than memoisation.
+
+**Reproduce it.** [`scripts/compare_engines.sh`](../scripts/compare_engines.sh)
+brings up all three servers as containers, loads the identical generated `data.nt`
+into each (Open Triplestore by registering a public dataset and `PUT`ting to its
+graph; Fuseki via GSP; QLever via `qlever-index`), and times the queries with
+`curl -w %{time_total}`. The generator and query set mirror the criterion
+`gen_persons` workload.
 
 **Why not a large multi-store leaderboard?** A fair cross-store benchmark needs
 the *same* hardware, dataset, query mix and protocol; published BSBM/SP2Bench
@@ -348,13 +380,17 @@ To make a *single* query use many cores, OpenGraph adds data-parallel execution
 dataset is split into `N` shards by a stable hash of each triple's **subject**,
 and a shard-decomposable query is evaluated on every shard concurrently (Rayon),
 then the partials are merged. Because every triple of a subject co-locates in one
-shard, **subject-star joins, row-local `FILTER`, global non-distinct `COUNT`,
-`ASK` and `DISTINCT`** decompose correctly; anything that could join *across*
-subjects (object→subject joins, property paths, grouped `AVG`-style aggregates,
-`ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`) is detected and **not** decomposed
-— the caller falls back to single-store evaluation. The classifier is deliberately
-conservative; a test suite asserts every parallel path matches the single-store
-result *and* that unsafe shapes are rejected.
+shard, **subject-star joins, row-local `FILTER`, `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
+(global or grouped), `COUNT(DISTINCT)` (global or grouped), `ASK` and `DISTINCT`**
+decompose correctly; anything that could join *across* subjects (object→subject joins,
+property paths, `ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`, a mix of distinct and
+non-distinct aggregates) is detected and **not** decomposed — the caller falls back to
+single-store evaluation. Grouped/global `SUM`/`AVG` over `xsd:double`/`float`, and a
+`COUNT(DISTINCT)` over blank nodes, are accepted statically but **declined at runtime**
+(IEEE-754 summation is order-dependent; blank-node labels are store-scoped — neither is
+bit-identical across shards) — `MIN`/`MAX` decompose for every type. The classifier is deliberately
+conservative; a test suite asserts every parallel path matches the single-store result
+*and* that unsafe shapes are rejected.
 
 ![subject-sharded parallel scaling](benchmarks/parallel-scaling.svg)
 
@@ -369,27 +405,114 @@ Latency on **600 000 triples** — 1 shard is today's single-store (one-core) ba
 Near-linear to 8 shards, ~8–11× by 16 (the falloff past the core count is memory
 bandwidth + merge overhead). Reproduce with `cargo bench -p opengraph --bench parallel`.
 
+### 3. Wired into the live `/sparql` path (`ParallelMirror`)
+
+`TripleStore` now uses this **automatically**. Beside its other in-memory derived
+indexes (`GraphIndex`, `SpatialIndex`), it maintains a two-part in-memory `ParallelMirror`:
+
+* **subject-hash shards** — a decomposable aggregate/`ASK` is answered across shards
+  and merged (the speedups in the table below);
+* **an unsharded full copy** — everything the shards can't decompose (joins that
+  return rows, `ORDER BY`/`LIMIT`, large `SELECT`s, `CONSTRUCT`) runs against it. This
+  is what closed the catastrophic RocksDB join cost: a 2-way
+  join `SELECT` over the 167k-row dataset fell from **~6.5 s to ~150 ms** (RocksDB
+  answers a multi-pattern join with one point lookup per result row; in RAM the join
+  materialises in ~150 ms — see the Fuseki/QLever comparison above). The full copy
+  declines `SUM`/`AVG` ([`has_sum_or_avg`](../opengraph/src/parallel.rs)) so a
+  double-precision sum is never computed in a re-ordered copy — the persistent store
+  answers those, byte-identically.
+
+Both copies are faithful mirrors evaluated by the same engine over the same quads, so
+results are identical (a parity suite asserts equality across shard counts,
+named-graph/`FROM` scoping, the default graph, the non-decomposable join/`GROUP BY`/
+`DISTINCT` shapes, write-invalidation, and that the mirror is actually consulted).
+The mirror is a derived index: rebuilt lazily after writes and **bounded by a
+triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable; the two copies cost
+~2× the dataset in RAM) so it never mirrors a store larger than RAM — above the cap
+both copies stay off and the persistent store answers, leaving the 1–100M disk tiers
+(data > RAM) unaffected.
+
+Before/after on the **same `TripleStore` the HTTP server runs** (501k triples,
+in-process, 16-shard mirror, Ryzen 9 7900X3D; median of 9):
+
+| Query (~500k triples, in-process) | single-core | 16-shard mirror | speedup |
+|---|--:|--:|--:|
+| 2-way join `COUNT` | 133 ms | 11.5 ms | **11.6×** |
+| `FILTER` + `COUNT` | 41.4 ms | 4.4 ms | **9.5×** |
+| single-pattern `COUNT` | 30.9 ms | 3.5 ms | **8.9×** |
+| `GROUP BY` + `COUNT` | 34.4 ms | 4.0 ms | **8.6×** |
+| `GROUP BY` + `AVG` (join) | 154 ms | 14.0 ms | **11.0×** |
+| `COUNT(DISTINCT)` | 35.1 ms | 4.3 ms | **8.2×** |
+| global `AVG` | 35.5 ms | 4.2 ms | **8.5×** |
+
+The last three rows are the aggregate-decomposition work: `GROUP BY`+`AVG` over a
+subject-spanning join (`AVG`→per-shard `SUM`+`COUNT`, re-merged through the engine),
+`COUNT(DISTINCT)` (per-shard distinct sets unioned through the engine), and a *global*
+`AVG` (the empty-keys path) — each ~8–11× faster across the shards than single-threaded
+on the full copy, and byte-identical (`SUM`/`AVG` over `xsd:double`/`float` and
+blank-node distinct values decline to the unsharded copy / persistent store). Reproduce
+with `cargo bench --bench parallel_live`. (`COUNT(*)` over a full scan is omitted — the
+O(1) fast-count index below already answers it in ~2 µs.)
+
 ### Roadmap
 
-This is increment 1 — a tested, benchmarked capability beside the engine. Next:
+The first two increments — a tested engine capability *and* its wiring — are done:
 
-* **Wire it into `TripleStore`** so the live `/sparql` path shards storage and uses
-  this automatically for decomposable queries (the ACL-scoped multi-graph case
-  already partitions naturally by graph).
-* **Mergeable grouped aggregates** — rewrite `AVG`→(`SUM`,`COUNT`) and combine
-  per-shard partials so `GROUP BY` decomposes too.
-* **Fast `COUNT(*)`** (optimization #4 below) pairs with sharded counting.
-* **Intra-query join parallelism** would require forking `spareval`/`sparopt`
-  (Oxigraph's evaluator) once it exposes pluggable execution — a larger effort.
+* **✅ Wired into `TripleStore`** — the `ParallelMirror` above; the live `/sparql`
+  path uses it automatically for decomposable aggregates (the ACL-scoped multi-graph
+  case still partitions naturally by graph on top).
+* **✅ Mergeable grouped `COUNT`** — `GROUP BY` with non-distinct `COUNT` now
+  decomposes (per-shard counts summed by group key).
+* **✅ Fast `COUNT(*)`** (optimization #4 below) pairs with sharded counting.
+* **✅ Unsharded full in-memory copy** — row-returning joins and ordered/limited
+  results are served from RAM instead of RocksDB (the ~40× join fix above).
+* **✅ Query-result cache** — a repeated deterministic query is an O(1) cache hit
+  (sub-ms), invalidated on write, scope-keyed, never caching `RAND`/`NOW`/`UUID`/…
+  (see the comparison section). The biggest safe win for warm/repeated traffic.
+* **✅ Parallel grouped non-`COUNT` aggregates** — `GROUP BY` + `SUM`/`MIN`/`MAX`/`AVG`
+  now decomposes across the shards. Each shard computes partials (`AVG(?v)` → per-shard
+  `SUM(?v)`+`COUNT(?v)`; the rest directly), and the partials are re-merged **through
+  the engine itself** — materialised into a throwaway in-memory store over which a
+  final aggregation runs (`SUM(sum)/SUM(cnt)` for `AVG`, `SUM`/`MIN`/`MAX` for the
+  rest). Because Oxigraph's `AVG` is byte-identical to `SUM/COUNT` and integer/decimal
+  addition is exact and associative, the result is **byte-identical** to single-store.
+  *Fidelity guard:* `SUM`/`AVG` over `xsd:double`/`float` is IEEE-754 non-associative —
+  summing per-shard partials in a different order can differ in the last bit — so it is
+  **declined** at runtime (and also declined by the full copy, whose iteration order
+  likewise can't reproduce the persistent store's exact ULP), letting the persistent
+  store answer it byte-identically. `MIN`/`MAX` are order-independent and decompose for
+  every type. (`opengraph::parallel`, gated by the same exhaustive parity sweep as the
+  `COUNT` path.)
+* **✅ Distributed `COUNT(DISTINCT)` + global aggregates** — `COUNT(DISTINCT ?x)`
+  (global or grouped) decomposes by **set union**: each shard computes its DISTINCT
+  combinations in parallel, the small per-shard sets are re-deduped through the engine
+  and counted (**44 ms → 8.1 ms** over HTTP; declined to the full copy for blank-node
+  values, where `COUNT` is relabel-invariant). And *global* (no-`GROUP BY`)
+  `SUM`/`MIN`/`MAX`/`AVG` now take the same empty-keys decomposition path as the grouped
+  ones — closing a regression where the double-fidelity full-copy decline had sent
+  global integer sums to the persistent store.
+
+Next:
+
+* **Sorted-permutation merge joins** (QLever's edge) would need Oxigraph to expose a
+  pluggable evaluator — a larger effort, but it is what separates the ~150 ms in-RAM
+  join from QLever's ~10 ms.
+* **Persistent shards** so the accelerator works beyond the in-memory cap (today
+  large/100M-tier stores fall back to the persistent store).
 
 ---
 
 ## Optimized showcase vs Fuseki (fast-COUNT + multi-core)
 
+> **Superseded by the [3-way comparison](#comparison-with-apache-jena-fuseki-and-qlever)
+> at the top** — the mirror is now wired into the live `/sparql` path, so its
+> numbers *are* the live numbers there (and add QLever). The "single-core (HTTP)"
+> column below is the pre-mirror live path, kept only to show the journey.
+
 After the profiling round (fast-`COUNT(*)` + subject-sharded parallel execution),
-re-run of the same-hardware head-to-head on ~500k triples. "Single-core HTTP" is
-the live server today; "16-shard parallel" is the OpenGraph parallel engine
-(`ParallelStore`) on the same workload; Fuseki is TDB2 over HTTP.
+re-run of the same-hardware head-to-head on ~500k triples. The "16-shard parallel"
+column is the subject-sharded mirror; "single-core" is the **pre-mirror** unsharded
+engine over the multi-tenant HTTP stack; Fuseki is TDB2 over HTTP.
 
 ![Optimized Open Triplestore vs Fuseki](benchmarks/showcase-vs-fuseki.svg)
 
@@ -401,9 +524,10 @@ the live server today; "16-shard parallel" is the OpenGraph parallel engine
 | `GROUP BY` + `AVG` | 268 ms | n/a¹ | 217 ms | 0.8× |
 | `COUNT(DISTINCT)` | 27 ms | n/a¹ | 24 ms | 0.9× |
 
-¹ Not yet shard-decomposable (a `GROUP BY` on a non-subject key, or `DISTINCT`
-across shards, needs mergeable partial aggregates — on the roadmap). The
-single-core figures already match Fuseki here.
+¹ `GROUP BY`+`COUNT`, `GROUP BY`+`AVG` *and* `COUNT(DISTINCT)` now **all** decompose
+across the shards (§3 — ~4 ms, ~14 ms and ~4.3 ms in-process on the 16-shard mirror).
+This superseded table predates that work — see the [3-way comparison](#comparison-with-apache-jena-fuseki-and-qlever)
+at the top for current HTTP numbers (`GROUP BY`+`AVG` 17 ms, `COUNT(DISTINCT)` 8.1 ms).
 
 **Reading it honestly.** `COUNT(*)` is now an O(1) index lookup, so it wins
 decisively (26×). For scans/joins the parallel engine wins ~8–9× by using many

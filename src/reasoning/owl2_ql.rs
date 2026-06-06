@@ -14,10 +14,18 @@
 //! and manipulation, avoiding the fragile string-level approach.
 //!
 //! # Usage
-//! ```rust,ignore
+//! ```no_run
+//! # use open_triplestore::reasoning::owl2_ql::QLQueryRewriter;
+//! # use open_triplestore::store::TripleStore;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let store = TripleStore::in_memory()?;
+//! # let sparql_str = "SELECT ?s WHERE { ?s a <http://example.org/C> }";
 //! let rewriter = QLQueryRewriter::new(&store);
 //! let rewritten = rewriter.rewrite_query(sparql_str)?;
 //! // execute `rewritten` against the store
+//! # let _ = rewritten;
+//! # Ok(())
+//! # }
 //! ```
 
 use spargebra::algebra::GraphPattern;

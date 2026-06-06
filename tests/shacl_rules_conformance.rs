@@ -12,16 +12,19 @@
 //!     list every lookup (target resolution, SPARQL-rule `WHERE`, `INSERT`)
 //!     evaluates against the default graph, so the rule pipeline is internally
 //!     consistent. (Named-graph target resolution is covered by the HTTP tests.)
-//!   * A `sh:SPARQLRule`'s `sh:construct` is executed as a SPARQL **Update** with
-//!     the literal `$this` substituted by the focus node IRI — i.e. the
-//!     `INSERT { … } WHERE { … }` form drives focus-aware inference.
-//!   * `infer` re-resolves targets every iteration and runs to a fixed point, so
-//!     rules chain transitively.
+//!   * A `sh:SPARQLRule`'s `sh:construct` accepts both the spec CONSTRUCT-template
+//!     form (`CONSTRUCT { … } WHERE { … }`) and the `INSERT { … } WHERE { … }`
+//!     convenience form, with `$this` substituted by the focus node IRI.
+//!   * A `sh:TripleRule` binds `sh:this` to each focus node.
+//!   * `infer` re-resolves targets every iteration and runs to the true fixed
+//!     point — measured by the store's triple-count delta per round — so rules
+//!     chain transitively and the reported inferred-triple count is exact.
 //!
-//! Two genuine spec gaps are pinned by `limitation_*` sentinel tests (they assert
-//! *current* behaviour and are tracked for the perf/correctness follow-up):
-//!   1. `sh:construct` does not accept the spec CONSTRUCT-template query form.
-//!   2. `sh:TripleRule` does not bind the focus node (`sh:this`).
+//! The two spec features below were gaps pinned by `limitation_*` sentinels on the
+//! standards branch; this branch implements them and the tests now assert the
+//! correct behaviour:
+//!   1. `sh:construct` CONSTRUCT-template query form (`construct_query_form_materialises`).
+//!   2. `sh:TripleRule` focus-node binding via `sh:this` (`triple_rule_binds_focus_node`).
 
 use open_triplestore::shacl::infer;
 use open_triplestore::store::TripleStore;
@@ -270,14 +273,44 @@ fn no_focus_nodes_infers_nothing() {
     assert!(!ask(&store, "ASK { ?s ex:x true }"));
 }
 
-// ───────────────────── Documented limitations (sentinels) ─────────────────────
-
-/// LIMITATION: `sh:construct` is executed as a SPARQL **Update**; the spec
-/// CONSTRUCT-template query form is rejected by the update parser and produces no
-/// triples. Use the `INSERT { … } WHERE { … }` form. Tracked for the follow-up
-/// branch — flip this assertion once the CONSTRUCT-template form is supported.
+/// The reported count is the EXACT number of newly-materialised triples, not
+/// inflated by the fixed-point iteration cap. Regression for the convergence bug
+/// where `apply_rule` returned 1 per (rule × focus) every round, so the count was
+/// ~100× the focus-node count and the loop never early-exited.
 #[test]
-fn limitation_construct_query_form_not_materialised() {
+fn inferred_count_is_exact_not_inflated() {
+    let shapes = r#"
+        ex:AdultShape a sh:NodeShape ;
+            sh:targetClass ex:Person ;
+            sh:rule [ a sh:SPARQLRule ;
+                sh:construct "INSERT { $this <http://example.org/category> <http://example.org/Adult> } WHERE { $this <http://example.org/age> ?a . FILTER(?a >= 18) }" ] ."#;
+    // Three adults + one minor ⇒ exactly three derived `ex:category ex:Adult`.
+    let data = r#"
+        ex:alice a ex:Person ; ex:age 30 .
+        ex:bob   a ex:Person ; ex:age 40 .
+        ex:carol a ex:Person ; ex:age 21 .
+        ex:dan   a ex:Person ; ex:age 12 ."#;
+    let store = store_with(shapes, data);
+
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert_eq!(
+        n, 3,
+        "exactly three classifications inferred — count must not be inflated by the iteration cap",
+    );
+    assert_eq!(
+        rows(&store, "SELECT ?s WHERE { ?s ex:category ex:Adult }"),
+        3,
+    );
+}
+
+// ──────────────── SHACL-AF features implemented on this branch ────────────────
+
+/// `sh:construct` accepts the spec **CONSTRUCT-template** query form
+/// (`CONSTRUCT { template } WHERE { pattern }`), materialising its output exactly
+/// like the `INSERT { … } WHERE { … }` convenience form. (Was the
+/// `limitation_construct_query_form_not_materialised` sentinel.)
+#[test]
+fn construct_query_form_materialises() {
     let shapes = r#"
         ex:CShape a sh:NodeShape ;
             sh:targetClass ex:Person ;
@@ -288,17 +321,17 @@ fn limitation_construct_query_form_not_materialised() {
 
     infer(&store, "urn:shapes", &[]).unwrap();
     assert!(
-        !ask(&store, "ASK { ex:alice ex:x true }"),
-        "CURRENT behaviour: CONSTRUCT-template form does not materialise",
+        ask(&store, "ASK { ex:alice ex:x true }"),
+        "CONSTRUCT-template form must materialise the derived triple",
     );
 }
 
-/// LIMITATION: a `sh:TripleRule` does not bind the focus node — `sh:subject sh:this`
-/// is inserted verbatim as the `sh:this` IRI rather than substituted per focus
-/// node. Use a SPARQL rule with `$this` for focus-aware triples. Tracked for the
-/// follow-up branch.
+/// A `sh:TripleRule` binds the focus node: `sh:subject sh:this` is substituted by
+/// each focus node (SHACL-AF §4.3), so the derived triple is focus-aware rather
+/// than the literal `sh:this` IRI. (Was the
+/// `limitation_triple_rule_does_not_bind_focus_node` sentinel.)
 #[test]
-fn limitation_triple_rule_does_not_bind_focus_node() {
+fn triple_rule_binds_focus_node() {
     let shapes = r#"
         ex:SelfShape a sh:NodeShape ;
             sh:targetClass ex:Person ;
@@ -311,12 +344,38 @@ fn limitation_triple_rule_does_not_bind_focus_node() {
 
     infer(&store, "urn:shapes", &[]).unwrap();
     assert!(
-        !ask(&store, "ASK { ex:alice ex:self ex:marker }"),
-        "CURRENT behaviour: focus node is NOT substituted in triple rules",
+        ask(&store, "ASK { ex:alice ex:self ex:marker }"),
+        "focus node must be substituted for sh:this in the triple rule",
     );
     assert!(
-        ask(&store, "ASK { sh:this ex:self ex:marker }"),
-        "CURRENT behaviour: sh:this is inserted as a literal IRI",
+        !ask(&store, "ASK { sh:this ex:self ex:marker }"),
+        "the literal sh:this IRI must NOT be inserted",
+    );
+}
+
+/// A `sh:TripleRule` with `sh:this` as the **object** also binds the focus node,
+/// and a per-focus self-edge is materialised once per focus node.
+#[test]
+fn triple_rule_binds_focus_node_in_object_position() {
+    let shapes = r#"
+        ex:RegSelf a sh:NodeShape ;
+            sh:targetClass ex:Person ;
+            sh:rule [ a sh:TripleRule ;
+                sh:subject ex:Registry ;
+                sh:predicate ex:member ;
+                sh:object sh:this ] ."#;
+    let data = r#"
+        ex:alice a ex:Person .
+        ex:bob   a ex:Person ."#;
+    let store = store_with(shapes, data);
+
+    infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:Registry ex:member ex:alice }"));
+    assert!(ask(&store, "ASK { ex:Registry ex:member ex:bob }"));
+    assert_eq!(
+        rows(&store, "SELECT ?m WHERE { ex:Registry ex:member ?m }"),
+        2,
+        "one membership edge per focus node",
     );
 }
 
