@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectGraphRolesFromContent, normalizeGraphRole, graphRoleLabel, contentKindToRole, graphResultsToElements, shortenIRI } from '../rdf-utils.js';
+import { detectGraphRolesFromContent, normalizeGraphRole, graphRoleLabel, contentKindToRole, graphResultsToElements, shortenIRI, expandPrefix, parseNTriplesToBindings, detectRdfFormat } from '../rdf-utils.js';
 
 describe('normalizeGraphRole', () => {
   it('folds legacy/singular spellings onto canonical tokens', () => {
@@ -174,5 +174,75 @@ describe('shortenIRI', () => {
     expect(() => shortenIRI(undefined as unknown as string)).not.toThrow();
     expect(shortenIRI(null as unknown as string)).toBe('');
     expect(typeof shortenIRI({ subject: {} } as unknown as string)).toBe('string');
+  });
+});
+
+describe('expandPrefix', () => {
+  it('expands a known prefixed name to its full IRI', () => {
+    expect(expandPrefix('rdf:type')).toBe('http://www.w3.org/1999/02/22-rdf-syntax-ns#type');
+  });
+
+  it('round-trips with shortenIRI for a well-known term', () => {
+    const full = expandPrefix('rdf:type')!;
+    expect(shortenIRI(full)).toBe('rdf:type');
+  });
+
+  it('honours caller-supplied extra prefixes', () => {
+    expect(expandPrefix('ex:Thing', { ex: 'http://example.org/' })).toBe('http://example.org/Thing');
+  });
+
+  it('returns null for an unknown prefix or a non-prefixed string', () => {
+    expect(expandPrefix('zzz:foo')).toBeNull();
+    expect(expandPrefix('no-colon')).toBeNull();
+  });
+});
+
+describe('detectRdfFormat', () => {
+  it('maps each RDF serialization extension to its media type', () => {
+    expect(detectRdfFormat('data.ttl').contentType).toBe('text/turtle');
+    expect(detectRdfFormat('data.nt').contentType).toBe('application/n-triples');
+    expect(detectRdfFormat('data.nq').contentType).toBe('application/n-quads');
+    expect(detectRdfFormat('data.trig').contentType).toBe('application/trig');
+    expect(detectRdfFormat('ontology.rdf').contentType).toBe('application/rdf+xml');
+    expect(detectRdfFormat('ontology.owl').contentType).toBe('application/rdf+xml');
+    expect(detectRdfFormat('graph.jsonld').contentType).toBe('application/ld+json');
+  });
+
+  it('is case-insensitive and falls back to Turtle for unknown extensions', () => {
+    expect(detectRdfFormat('DATA.TTL').contentType).toBe('text/turtle');
+    expect(detectRdfFormat('mystery.bin').label).toMatch(/Turtle/);
+  });
+});
+
+describe('parseNTriplesToBindings', () => {
+  it('parses IRIs, language tags and typed literals into SPARQL-JSON bindings', () => {
+    const nt = [
+      '<http://ex/Ada> <http://www.w3.org/2000/01/rdf-schema#label> "Ada"@en .',
+      '<http://ex/Ada> <http://ex/age> "36"^^<http://www.w3.org/2001/XMLSchema#integer> .',
+    ].join('\n');
+    const res = parseNTriplesToBindings(nt);
+    expect(res.head.vars).toEqual(['s', 'p', 'o']);
+    expect(res.results.bindings).toHaveLength(2);
+
+    const [label, age] = res.results.bindings;
+    expect(label.s).toEqual({ type: 'uri', value: 'http://ex/Ada' });
+    expect(label.o.type).toBe('literal');
+    expect(label.o.value).toBe('Ada');
+    expect(label.o.language).toBe('en');
+    expect(age.o.datatype).toBe('http://www.w3.org/2001/XMLSchema#integer');
+  });
+
+  it('skips comments and blank lines, and parses blank-node terms', () => {
+    const nt = '# a comment\n\n_:b0 <http://ex/p> <http://ex/o> .';
+    const res = parseNTriplesToBindings(nt);
+    expect(res.results.bindings).toHaveLength(1);
+    expect(res.results.bindings[0].s).toEqual({ type: 'bnode', value: 'b0' });
+  });
+
+  it('drops the implicit xsd:string datatype on plain literals', () => {
+    const nt = '<http://ex/s> <http://ex/p> "plain"^^<http://www.w3.org/2001/XMLSchema#string> .';
+    const o = parseNTriplesToBindings(nt).results.bindings[0].o;
+    expect(o.value).toBe('plain');
+    expect(o.datatype).toBeUndefined();
   });
 });

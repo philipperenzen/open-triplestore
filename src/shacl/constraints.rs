@@ -115,11 +115,20 @@ pub fn evaluate_constraint(
         Constraint::Class(class_iri) => {
             let values = get_values(store, focus_node, path, data_graphs);
             if values.is_empty() && path.is_none() {
-                // Node shape class constraint: check if focus node is instance of class
+                // Node shape class constraint: check if focus node is instance of class.
+                // Scope to the data graphs — the instance triple lives there, not in
+                // the (unscoped) default graph; an unscoped ASK made every class check
+                // fail for datasets that use named graphs (e.g. sh:qualifiedValueShape).
                 let query = format!(
-                    "ASK {{ <{}> a <{}> }}",
-                    escape_sparql_iri(focus_node),
-                    escape_sparql_iri(class_iri)
+                    "ASK {{ {} }}",
+                    super::engine::graph_scoped(
+                        data_graphs,
+                        &format!(
+                            "<{}> a <{}>",
+                            escape_sparql_iri(focus_node),
+                            escape_sparql_iri(class_iri)
+                        )
+                    )
                 );
                 if let Ok(oxigraph::sparql::QueryResults::Boolean(is_instance)) =
                     store.query(&query)
@@ -143,9 +152,15 @@ pub fn evaluate_constraint(
                         || value.starts_with("urn:")
                     {
                         let query = format!(
-                            "ASK {{ <{}> a <{}> }}",
-                            escape_sparql_iri(value),
-                            escape_sparql_iri(class_iri)
+                            "ASK {{ {} }}",
+                            super::engine::graph_scoped(
+                                data_graphs,
+                                &format!(
+                                    "<{}> a <{}>",
+                                    escape_sparql_iri(value),
+                                    escape_sparql_iri(class_iri)
+                                )
+                            )
                         );
                         if let Ok(oxigraph::sparql::QueryResults::Boolean(is_instance)) =
                             store.query(&query)
@@ -460,8 +475,13 @@ pub fn evaluate_constraint(
         }
 
         Constraint::SparqlConstraint { select, message } => {
-            // SHACL-AF: Execute SPARQL SELECT, each result row is a violation
-            let query = select.replace("$this", &format!("<{}>", focus_node));
+            // SHACL-SPARQL: execute the SELECT with $this PRE-BOUND to the focus
+            // node; each result row is a violation. $this must be bound (not
+            // textually replaced by `<iri>`), otherwise it cannot appear in the
+            // SELECT projection or GROUP BY of an aggregate query — `SELECT <iri>`
+            // / `GROUP BY <iri>` is invalid SPARQL. We therefore rewrite `$this`
+            // to `?this` and inject `VALUES ?this { <focus> }` into the WHERE block.
+            let query = bind_this(select, focus_node, data_graphs);
             if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
                 for solution in solutions.filter_map(|s| s.ok()) {
                     let msg = message.as_deref().unwrap_or("SPARQL constraint violated");
@@ -826,6 +846,40 @@ pub fn evaluate_constraint(
     }
 
     results
+}
+
+/// Pre-bind SHACL's `$this` to the focus node for a SPARQL-based constraint.
+///
+/// `$this`/`?this` is rewritten to `?this` and bound via a `VALUES` clause
+/// injected at the start of the outermost `WHERE { … }` block, so it works in the
+/// SELECT projection and `GROUP BY` of aggregate validators — unlike textual
+/// `<iri>` substitution, which yields invalid SPARQL (`SELECT <iri>` /
+/// `GROUP BY <iri>`).
+fn bind_this(select: &str, focus_node: &str, data_graphs: &[String]) -> String {
+    let with_var = select.replace("$this", "?this");
+    let upper = with_var.to_uppercase();
+    let (where_pos, brace_at) = match upper
+        .find("WHERE")
+        .and_then(|wp| with_var[wp..].find('{').map(|br| (wp, wp + br + 1)))
+    {
+        Some(v) => v,
+        // No WHERE block to rewrite into: fall back to textual IRI substitution.
+        None => return select.replace("$this", &format!("<{}>", focus_node)),
+    };
+    // `FROM <g>` makes the data graphs the query's default graph — SHACL-SPARQL
+    // evaluates the constraint against the data graph, so default-graph patterns
+    // like `?this ex:p ?v` must resolve there rather than the (empty) default graph.
+    let from: String = data_graphs.iter().map(|g| format!("FROM <{g}> ")).collect();
+    // `VALUES` pre-binds $this to the focus node (usable in SELECT/GROUP BY).
+    let values = format!("VALUES ?this {{ <{}> }} ", focus_node);
+    let mut q = String::with_capacity(with_var.len() + from.len() + values.len() + 2);
+    q.push_str(&with_var[..where_pos]);
+    q.push_str(&from);
+    q.push_str(&with_var[where_pos..brace_at]);
+    q.push(' ');
+    q.push_str(&values);
+    q.push_str(&with_var[brace_at..]);
+    q
 }
 
 /// Get the string values for a focus node along a property path.
