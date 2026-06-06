@@ -177,21 +177,26 @@ Single `INSERT DATA` is 72 µs/triple (~14 K/s); batching 10 triples per stateme
 drops that to 27 µs/triple (~37 K/s, **2.6×**). Use the bulk loader for ingestion
 (~0.5–0.9 M triples/s).
 
-#### GeoSPARQL (GEOS, per candidate binding)
+#### GeoSPARQL (GEOS, per candidate binding) — with the WKT→WKB parse cache
 
 ![GeoSPARQL points vs polygons](benchmarks/geosparql.svg)
 
-| Function | 50 | 200 |
-|---|--:|--:|
-| `geof:sfContains` | 119 µs | 411 µs |
-| `geof:sfIntersects` | 124 µs | 413 µs |
-| `geof:distance` | 114 µs | 390 µs |
-| `geof:buffer` (constructive) | 2.95 ms | 11.9 ms |
-| polygon_complexity — points | 123 µs | 413 µs |
-| polygon_complexity — polygons | 164 µs | 618 µs |
+Measured **after** the WKT-parse cache landed (see optimization #2). The cache
+memoises each geometry's parse as WKB, so repeated bindings/queries skip the
+`strtod`/tokeniser hot path:
 
-5-vertex polygons cost ~33–50 % more than points for the same DE-9IM relation;
-`buffer` is far heavier because it materialises a new geometry per row.
+| Function | 50 | 200 | vs before cache |
+|---|--:|--:|--:|
+| `geof:sfContains` | 74 µs | 233 µs | **−43%** |
+| `geof:sfIntersects` | 79 µs | 234 µs | **−45%** |
+| `geof:distance` | 92 µs | 300 µs | −23% |
+| `geof:buffer` (constructive) | 2.98 ms | 11.8 ms | ~0% (compute-bound) |
+| polygon_complexity — points | 79 µs | 236 µs | −43% |
+| polygon_complexity — polygons | 82 µs | 263 µs | **−57%** |
+
+Relation queries drop 35–57% — polygons (more coordinates → more `strtod`)
+benefit most. `buffer` is constructive (builds a new geometry per row), so it is
+compute-bound and the parse cache doesn't help it.
 
 #### SHACL validation
 
@@ -224,6 +229,33 @@ Writes serialize on the store's write lock. Mixed 4-reader + 1-writer: 5.47 ms.
 
 > The 7900X3D's 3D V-Cache notably helps the index-scan-heavy paths. GPUs are
 > irrelevant — every path here is CPU/memory-bound.
+
+#### Extra-large scaling — 1M to 100M triples (persistent store)
+
+The criterion figures above are in-memory (tiny→large, ≤500k triples). At 1M–100M
+an in-memory store would exhaust RAM, so this tier uses the **persistent (RocksDB)
+backend**, streaming the dataset from an N-Triples file. Wall-clock median
+(harness: [`examples/scale.rs`](../examples/scale.rs)):
+
+| Operation | 1M | 10M | 100M |
+|---|--:|--:|--:|
+| Bulk load (RocksDB) | 7.1 s | 59 s | 676 s |
+| → load throughput | 0.14 Mt/s | 0.17 Mt/s | 0.15 Mt/s |
+| `COUNT(*)` (fast-count) | **0.002 ms** | **0.002 ms** | **0.002 ms** |
+| lookup + `LIMIT 1000` | 1.4 ms | 2.2 ms | 6.2 ms |
+| `FILTER` `COUNT` (full scan) | 54 ms | 593 ms | 6.1 s |
+| `GROUP BY` + `AVG` (join+agg) | 0.72 s | 9.2 s | OOM¹ |
+
+¹ `GROUP BY` over a 100M-triple join materialises ~20M intermediate solutions and
+exceeded the 30 GiB box; the other ops are index-only / streaming and complete
+fine at 100M. With more RAM — or once grouped aggregates decompose across shards
+(parallel roadmap) — it completes.
+
+**Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
+100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
+termination). Full scans grow linearly (~60 ms per 1M triples). RocksDB load is
+~0.15 Mt/s here (disk-bound; the in-memory bulk loader is ~0.5–0.9 Mt/s at the
+smaller tiers).
 
 ---
 
@@ -381,20 +413,22 @@ parallel numbers show engine scaling, not an HTTP-identical comparison.
 
 ### Standards-workload query times (Open Triplestore)
 
-**GeoSPARQL** (GEOS, per candidate binding; in-process median):
+**GeoSPARQL** (GEOS, per candidate binding; in-process median; **with the WKT→WKB
+parse cache**):
 
 | Function | 50 features | 200 features | per-feature |
 |---|--:|--:|--:|
-| `geof:sfContains` | 119 µs | 411 µs | ~2 µs |
-| `geof:sfIntersects` | 124 µs | 413 µs | ~2 µs |
-| `geof:distance` | 114 µs | 390 µs | ~2 µs |
-| `geof:buffer` (constructive) | 2.95 ms | 11.9 ms | ~60 µs |
+| `geof:sfContains` | 74 µs | 233 µs | ~1.2 µs |
+| `geof:sfIntersects` | 79 µs | 234 µs | ~1.2 µs |
+| `geof:distance` | 92 µs | 300 µs | ~1.5 µs |
+| `geof:buffer` (constructive) | 2.98 ms | 11.8 ms | ~60 µs |
 
-Profiling note: GeoSPARQL relation cost is dominated by **WKT parsing** (`strtod`
-per coordinate + GEOS tokeniser), not the geometric computation — a parsed-geometry
-cache is the next geo win (deferred: GEOS geometries are tied to a thread-local
-GEOS context, so a naive thread-local cache aborts on thread teardown; a
-query-scoped or load-time precomputed cache is the safe path).
+Profiling found GeoSPARQL relation cost was dominated by **WKT parsing** (`strtod`
+per coordinate + GEOS tokeniser), not the geometric computation. The implemented
+fix (optimization #2) memoises each geometry's parse as **WKB bytes** — robustly
+safe because a `Vec<u8>` carries no GEOS context (caching the `geos::Geometry`
+itself aborts at thread teardown). This cut relation queries **35–57%** vs the
+pre-cache numbers; `buffer` is compute-bound and unchanged.
 
 **SHACL** (Core + Advanced/`sh:sparql`; shapes evaluated in parallel via rayon):
 
@@ -635,204 +669,6 @@ read-throughput degradation under write-lock contention.
 
 ---
 
-## Illustrative results — second machine (Apple M3 Pro, 18 GB, macOS, Rust 1.85)
-
-> The **authoritative, current** numbers are the reference-system results above
-> (AMD Ryzen 9 7900X3D, full run). The figures below are retained only as an
-> illustration on different hardware — useful for the *relative ratios* between
-> groups, not for absolute comparison, and predate some of the engine fixes.
-
-### Data Ingestion
-
-```
-insert/bulk_loader/100       time: [910 µs  930 µs  955 µs]   throughput: 1.05 Mt/s
-insert/bulk_loader/1000      time: [1.28 ms 1.31 ms 1.34 ms]  throughput: 763 Kt/s
-insert/bulk_loader/10000     time: [11.1 ms 11.5 ms 11.9 ms]  throughput: 870 Kt/s
-insert/bulk_loader/100000    time: [95 ms   98 ms   101 ms ]   throughput: 1.02 Mt/s
-
-insert/sparql_update         time: [39 µs   42 µs   46 µs  ]   per-triple: ~24 Kt/s
-insert/sparql_update_batch   time: [52 µs   55 µs   59 µs  ]   per-triple: ~182 Kt/s  ← 7× batch gain
-
-insert/named_graph/1000      time: [2.8 ms  2.9 ms  3.0 ms ]   throughput: ~1 Mt/s (3 triples×1K)
-insert/named_graph/10000     time: [27 ms   28 ms   29 ms  ]   throughput: ~1 Mt/s
-insert/named_graph/100000    time: [270 ms  280 ms  290 ms ]   throughput: ~1 Mt/s
-```
-
-**Insight:** The bulk loader averages ~900 K–1 Mt/s with LTO regardless of
-whether loading into the default or named graphs. Batching SPARQL UPDATE to
-10 triples per statement reduces per-triple cost by ~7× by amortising the
-SPARQL parser overhead.
-
-### Simple Lookup
-
-```
-query/simple_lookup/100      time: [38 µs   42 µs   47 µs ]
-query/simple_lookup/1000     time: [115 µs  120 µs  126 µs]
-query/simple_lookup/10000    time: [950 µs  980 µs  1.02 ms]
-query/simple_lookup/100000   time: [9.2 ms  9.4 ms  9.7 ms]
-```
-
-**Insight:** Lookup latency is O(n) in the dataset size — there is no
-predicate index shortcutting a full scan for unbound subjects. If you query a
-known subject, bind it: `SELECT ?name WHERE { <http://ex/alice> ex:name ?name }`
-which becomes a constant-time index probe.
-
-### Joins and Aggregation
-
-```
-query/join_2way/1000         time: [175 µs  182 µs  190 µs]
-query/join_2way/10000        time: [1.74 ms 1.82 ms 1.91 ms]
-query/join_3way/1000         time: [240 µs  252 µs  265 µs]
-query/join_3way/10000        time: [2.41 ms 2.52 ms 2.66 ms]
-query/filter/10000           time: [1.08 ms 1.12 ms 1.17 ms]
-query/regex_filter/10000     time: [7.9 ms  8.2 ms  8.6 ms ]
-query/optional/10000         time: [1.85 ms 1.93 ms 2.02 ms]
-query/count_star/10000       time: [1.35 ms 1.41 ms 1.48 ms]
-query/count_star/100000      time: [13.5 ms 14.1 ms 14.8 ms]
-query/group_by/1000          time: [300 µs  312 µs  326 µs]
-query/group_by/10000         time: [2.98 ms 3.10 ms 3.24 ms]
-query/group_concat/1000      time: [350 µs  365 µs  382 µs]
-query/group_concat/10000     time: [3.4 ms  3.6 ms  3.8 ms ]
-query/subquery/10000         time: [3.71 ms 3.84 ms 3.99 ms]
-```
-
-**Insight:** REGEX adds ~7× overhead over numeric filters. GROUP_CONCAT is
-~15% slower than COUNT/AVG GROUP BY due to string allocation per row.
-
-### SPARQL 1.1 Operators
-
-```
-query/values/1000            time: [185 µs  192 µs  200 µs]    ← ~5% faster than 2-way join
-query/values/10000           time: [1.85 ms 1.92 ms 2.00 ms]
-query/bind/1000              time: [130 µs  135 µs  141 µs]
-query/bind/10000             time: [1.25 ms 1.31 ms 1.37 ms]
-query/minus/1000             time: [210 µs  218 µs  228 µs]
-query/minus/10000            time: [2.05 ms 2.13 ms 2.23 ms]
-query/not_exists/1000        time: [410 µs  425 µs  441 µs]    ← ~2× slower than MINUS
-query/not_exists/10000       time: [4.1 ms  4.2 ms  4.4 ms ]
-query/construct/1000         time: [310 µs  322 µs  335 µs]
-query/construct/10000        time: [3.0 ms  3.1 ms  3.2 ms ]
-query/named_graph/1000       time: [560 µs  581 µs  604 µs]    (unbound GRAPH ?g)
-query/named_graph/10000      time: [5.4 ms  5.6 ms  5.8 ms ]
-```
-
-**Insight:** VALUES is ~5% faster than an equivalent 2-way join because it
-avoids a nested-loop probe and generates one index lookup per value. MINUS is
-~2× faster than NOT EXISTS at 10K triples because MINUS builds a hash set once
-while NOT EXISTS re-evaluates its inner pattern per outer row.
-
-### Property Paths
-
-```
-query/transitive_path/50     time: [365 µs  382 µs  401 µs]
-query/transitive_path/100    time: [695 µs  714 µs  736 µs]
-query/transitive_path/200    time: [1.45 ms 1.51 ms 1.58 ms]
-query/alternative_path/10000 time: [2.03 ms 2.12 ms 2.22 ms]
-
-path/zero_or_more/50         time: [390 µs  407 µs  425 µs]    ← ~7% over +
-path/zero_or_more/100        time: [740 µs  763 µs  788 µs]
-path/zero_or_more/200        time: [1.52 ms 1.58 ms 1.65 ms]
-path/sequence/100            time: [85 µs   88 µs   92 µs ]    ← join-equivalent cost
-path/sequence/500            time: [385 µs  400 µs  416 µs]
-path/sequence/1000           time: [760 µs  788 µs  819 µs]
-path/inverse/100             time: [88 µs   92 µs   96 µs ]    ← same as forward
-path/inverse/1000            time: [800 µs  828 µs  859 µs]
-path/inverse/10000           time: [7.9 ms  8.1 ms  8.4 ms ]
-path/negated_property_set/1000  time: [1.05 ms 1.09 ms 1.14 ms]
-path/negated_property_set/10000 time: [10.1 ms 10.5 ms 10.9 ms]
-```
-
-**Insight:** Zero-or-more (`*`) is ~7% slower than transitive-only (`+`)
-because it must also emit identity (0-hop) solutions. Sequence paths compile
-to joins and match direct 2-way join performance. Inverse paths use the
-O-P-S index and match forward-path performance — no extra cost for traversal
-direction reversal. Negated property sets are O(n × predicates) because they
-scan all triples and filter predicates.
-
-### SPARQL UPDATE
-
-```
-update/insert_where/100      time: [98 µs   103 µs  108 µs]
-update/insert_where/1000     time: [930 µs  965 µs  1.01 ms]
-update/insert_where/10000    time: [9.2 ms  9.5 ms  9.9 ms ]
-update/delete_where/100      time: [62 µs   65 µs   68 µs ]
-update/delete_where/1000     time: [580 µs  601 µs  624 µs]
-update/delete_where/10000    time: [5.7 ms  5.9 ms  6.1 ms ]
-```
-
-**Insight:** INSERT WHERE is ~60% slower than DELETE WHERE at the same
-cardinality because it must both read and write, while DELETE WHERE is
-read-dominated (few deletions at 10% selectivity).
-
-### GeoSPARQL
-
-```
-geosparql/sf_contains/50     time: [4.65 ms 4.82 ms 5.01 ms]
-geosparql/sf_contains/200    time: [18.4 ms 19.1 ms 19.9 ms]
-geosparql/distance/50        time: [2.18 ms 2.31 ms 2.45 ms]
-geosparql/distance/200       time: [8.78 ms 9.11 ms 9.47 ms]
-geosparql/sf_intersects/50   time: [3.8 ms  3.9 ms  4.1 ms ]   ← ~19% faster than sfContains
-geosparql/sf_intersects/200  time: [15.1 ms 15.7 ms 16.3 ms]
-geosparql/polygon_complexity/points/50    time: [3.9 ms  4.0 ms  4.2 ms]
-geosparql/polygon_complexity/polygons/50  time: [5.8 ms  6.0 ms  6.3 ms]   ← ~50% overhead per polygon
-geosparql/buffer/50          time: [3.5 ms  3.6 ms  3.8 ms ]
-geosparql/buffer/200         time: [14.0 ms 14.5 ms 15.1 ms]
-```
-
-**Insight:** GeoSPARQL relation checks call GEOS once per candidate binding.
-sfIntersects is ~19% faster than sfContains because Intersects has a more
-permissive early-exit condition. Polygon geometries (5 vertices) add ~50%
-overhead vs. points for the same cardinality. Buffer (constructive function)
-is slightly cheaper than Contains because it avoids a boolean DE-9IM check.
-Pre-filter by bounding box using a numeric FILTER on stored min/max
-coordinates before applying the full relation check to reduce GEOS calls
-by ~90% on large datasets.
-
-### SHACL Validation
-
-```
-shacl/validate_clean/100     time: [705 µs  718 µs  730 µs]
-shacl/validate_clean/500     time: [700 µs  706 µs  714 µs]
-shacl/validate_clean/1000    time: [703 µs  714 µs  726 µs]
-shacl/validate_violations/100    time: [715 µs  722 µs  732 µs]
-shacl/validate_violations/500    time: [718 µs  728 µs  737 µs]
-shacl/validate_violations/1000   time: [725 µs  733 µs  746 µs]
-```
-
-**Insight:** SHACL validation cost is dominated by shapes loading and
-target-resolution overhead (~700 µs fixed cost), not data cardinality for
-this simple shape. The violation-accumulation overhead is small (~2%)
-for a single shape with one optional property. For shapes with many
-constraints or large target classes, cost scales as O(focus_nodes × shapes × constraints).
-
-### Concurrent Reads
-
-```
-concurrent/reads/threads=1   time: [548 µs  561 µs  576 µs]
-concurrent/reads/threads=2   time: [298 µs  308 µs  319 µs]   speedup: 1.82×
-concurrent/reads/threads=4   time: [159 µs  165 µs  172 µs]   speedup: 3.40×
-concurrent/reads/threads=8   time: [87 µs   90 µs   94 µs ]   speedup: 6.23×
-```
-
-**Insight:** Concurrent reads scale near-linearly up to 8 threads on the M3
-Pro (6 performance + 2 efficiency cores). Contention on the shared `RwLock`
-becomes visible at higher thread counts on machines with fewer cores.
-
-### Concurrent Writes and Mixed
-
-```
-concurrent/writes/threads=1  time: [42 µs   44 µs   46 µs ]   (10 triples total)
-concurrent/writes/threads=2  time: [84 µs   88 µs   92 µs ]   no speedup (write lock)
-concurrent/writes/threads=4  time: [165 µs  172 µs  180 µs]   ~linear overhead
-concurrent/mixed/4r_1w       time: [190 µs  197 µs  205 µs]   ← ~3.5× slower than 4r no-write
-```
-
-**Insight:** Writes are serialised by the RwLock — concurrent writers show
-linear overhead with thread count. A single writer thread degrading 4 readers
-causes ~3.5× slowdown vs. read-only workloads, reflecting the exclusive write
-lock blocking all readers while the write commits.
-
----
 
 ## Performance Tips
 
@@ -850,7 +686,8 @@ store.update("INSERT DATA { … }")?;
 
 Each `store.update()` call acquires and releases the write lock and runs the
 full SPARQL parser. Batching multiple triples into one INSERT DATA statement
-reduces this overhead by 3–7×:
+amortises that — measured **≈2.6×** lower per-triple cost (72 µs/triple single
+vs 27 µs/triple at 10 per statement):
 
 ```sparql
 -- Slow: 1 lock acquisition + 1 parse per triple
@@ -896,8 +733,8 @@ MINUS { ?s ex:type ex:Type0 }
 ```
 
 Use NOT EXISTS only when the inner pattern depends on variables not bound in
-the outer (correlated existence check). For simple exclusion, MINUS is ~2×
-faster.
+the outer (correlated existence check). For simple exclusion, MINUS is measured
+**≈2.6× faster** (3.11 ms vs 8.06 ms at 10k triples).
 
 ### Bind the named graph when known
 
@@ -1023,18 +860,22 @@ that have the `ex:name` predicate, rather than iterating all SPO entries.
 family with `(predicate, subject, object)` key ordering and wiring it into
 Oxigraph's iterator chain.
 
-### 2. Spatial R-tree index
+### 2. GeoSPARQL geometry caching — ✅ WKT→WKB parse cache implemented; R-tree pruning still open
 
-**Impact:** ~100× improvement for `sfContains` / `sfIntersects` over 10K+
-features.
+**Done (parse cache).** Profiling showed relation queries were dominated by WKT
+parsing, not GEOS computation. `geo::datatypes::parse_wkt_literal` now memoises
+each geometry's parse as **WKB bytes** in a process-wide `DashMap` (WKB carries no
+GEOS context, so it drops safely on any thread — caching the `geos::Geometry`
+itself aborts at thread teardown). Measured **−35–57%** on `sfContains` /
+`sfIntersects` / `relate` (polygons benefit most); `buffer` is compute-bound and
+unchanged.
 
-**Rationale:** GeoSPARQL currently calls GEOS once per candidate binding
-(O(n)). An R-tree index over WKT bounding boxes would prune candidates to
-O(log n + k) before GEOS evaluation.
-
-**Implementation:** Build an `rstar::RTree` (already in Cargo.toml as a dep)
-at load time over extracted bounding boxes; store in memory alongside the
-triple store. Invalidate on writes.
+**Still open (R-tree pruning).** GEOS is still called once per candidate binding
+(O(n)). An `rstar::RTree` over bounding boxes (rstar is already a dep; a
+`SpatialIndex` scaffold exists but isn't wired into the query plan) would prune
+candidates to O(log n + k) before GEOS — a further ~100× on large feature sets.
+Needs a magic-property / query-rewrite access path (the per-binding custom
+function can't see the index), like the existing `text:search` push-down.
 
 ### 3. REGEX → Tantivy push-down
 

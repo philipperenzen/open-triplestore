@@ -60,13 +60,13 @@
   },
   {
     "file": "geosparql.svg",
-    "title": "GeoSPARQL relation cost: points vs polygons",
-    "subtitle": "geof:sfIntersects per candidate via GEOS; lower is better",
+    "title": "GeoSPARQL relation cost: points vs polygons (with WKT→WKB cache)",
+    "subtitle": "geof:sfIntersects per candidate via GEOS; lower is better; −43% (points) / −57% (polygons) vs pre-cache",
     "unit": "µs", "lower_is_better": true,
     "series": ["points (2 coords)", "polygons (5 vertices)"],
     "bars": [
-      {"label": "50 features", "values": [123.1, 164.2]},
-      {"label": "200 features", "values": [412.9, 617.6]}
+      {"label": "50 features", "values": [79.2, 81.7]},
+      {"label": "200 features", "values": [235.5, 263.0]}
     ]
   },
   {
