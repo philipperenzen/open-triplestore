@@ -1215,7 +1215,14 @@ mod tests {
             .unwrap();
         state
             .auth_db
-            .set_resource_grant("dataset", "dsA", "user", "bob", ResourceRole::Editor, "alice")
+            .set_resource_grant(
+                "dataset",
+                "dsA",
+                "user",
+                "bob",
+                ResourceRole::Editor,
+                "alice",
+            )
             .unwrap();
 
         // Precondition: bob can write dsA but cannot manage it.

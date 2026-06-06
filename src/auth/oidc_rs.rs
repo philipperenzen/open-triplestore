@@ -708,8 +708,7 @@ mod tests {
         // A verifier with an http (non-loopback) issuer must refuse to fetch
         // discovery/JWKS — failing closed *before* any network I/O, so a cleartext
         // issuer can never serve forged keys. `force=true` skips the cache.
-        let verifier =
-            OidcVerifier::new("http://idp.example".to_string(), Some("aud".to_string()));
+        let verifier = OidcVerifier::new("http://idp.example".to_string(), Some("aud".to_string()));
         let err = verifier
             .jwks(true)
             .await
