@@ -3,6 +3,7 @@
   import { t as i18nT } from 'svelte-i18n';
   import { detectValueKind, shortenIri, parseWktGeometry, geometryCoords, datatypeLabel } from '../../lib/ontology/valueType.js';
   import { shortenIRI } from '../../lib/rdf-utils.js';
+  import { safeImageUrl } from '../../lib/safeUrl.js';
   import { ExternalLink, Play, Copy, Check, Image as ImageIcon, ChevronRight, ChevronDown, Braces, MapPin } from 'lucide-svelte';
   import RdfTerm from '../RdfTerm.svelte';
   import { sanitizeHtml } from '../../lib/ontology/sanitizeHtml.js';
@@ -110,11 +111,12 @@
     </div>
   {/if}
 {:else if detection.kind === 'image'}
+  {@const safeImg = safeImageUrl(term.value)}
   <div class="img-wrap">
-    <a href={term.value} target="_blank" rel="noopener">
-      <img src={term.value} alt="" loading="lazy" on:error={(e) => { /** @type {HTMLImageElement} */ (e.currentTarget).style.display='none'; }} />
+    <a href={safeImg} target="_blank" rel="noopener">
+      <img src={safeImg} alt="" loading="lazy" on:error={(e) => { /** @type {HTMLImageElement} */ (e.currentTarget).style.display='none'; }} />
     </a>
-    <a class="img-link" href={term.value} target="_blank" rel="noopener" title={term.value}>
+    <a class="img-link" href={safeImg} target="_blank" rel="noopener" title={term.value}>
       <ImageIcon size={11} /> {shortenIri(term.value)}
     </a>
   </div>

@@ -1833,6 +1833,38 @@ pub async fn get_organisation(
     Ok(Json(org))
 }
 
+/// Schemes permitted in stored DCAT / vCard URL metadata. Mirrors the frontend
+/// `safeExternalUrl` allowlist (frontend/src/lib/safeUrl.ts): `mailto:` is kept
+/// for contact URLs, everything dangerous (`javascript:`, `data:`, `file:`, …)
+/// is rejected.
+const SAFE_METADATA_URL_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// Reject DCAT / vCard URL metadata that does not use a safe web scheme.
+///
+/// These fields are later rendered as `<a href>` on public (and anonymously
+/// viewable) pages, so a `javascript:`/`data:` value would be stored XSS in
+/// waiting. The frontend gates the href as defence-in-depth; this is the
+/// root-cause fix that keeps such values out of storage entirely. An empty /
+/// `None` value clears the field and is always allowed.
+fn validate_metadata_url(field: &str, value: Option<&str>) -> Result<(), (StatusCode, String)> {
+    if let Some(raw) = value {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let scheme_ok = url::Url::parse(trimmed)
+            .map(|u| SAFE_METADATA_URL_SCHEMES.contains(&u.scheme()))
+            .unwrap_or(false);
+        if !scheme_ok {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{field} must be an http(s) or mailto URL"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// PUT /api/organisations/:org_id
 pub async fn update_organisation(
     user_opt: Option<Extension<AuthenticatedUser>>,
@@ -1851,6 +1883,11 @@ pub async fn update_organisation(
             _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
         }
     }
+
+    // Reject unsafe URL schemes before they reach storage (these surface as
+    // <a href> on the org's public page).
+    validate_metadata_url("homepage", req.homepage.as_deref())?;
+    validate_metadata_url("contact_url", req.contact_url.as_deref())?;
 
     // Resolve and validate the requested parent (empty string clears it).
     let existing = db
@@ -2675,6 +2712,13 @@ pub async fn update_dataset(
             "Manage access required to change visibility".to_string(),
         ));
     }
+
+    // Reject unsafe URL schemes before they reach storage (these surface as
+    // <a href> on the dataset's public DCAT metadata page).
+    validate_metadata_url("license", req.license.as_deref())?;
+    validate_metadata_url("spatial", req.spatial.as_deref())?;
+    validate_metadata_url("landing_page", req.landing_page.as_deref())?;
+    validate_metadata_url("contact_url", req.contact_url.as_deref())?;
 
     db.update_dataset(
         &dataset_id,
@@ -4196,4 +4240,42 @@ pub async fn get_dataset_banner(
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Banner not found".to_string()))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, content_type)], data).into_response())
+}
+
+#[cfg(test)]
+mod metadata_url_security_tests {
+    use super::{validate_metadata_url, StatusCode};
+
+    #[test]
+    fn allows_safe_or_empty_urls() {
+        for v in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("https://example.org/landing"),
+            Some("http://example.org"),
+            Some("mailto:admin@example.org"),
+        ] {
+            assert!(
+                validate_metadata_url("field", v).is_ok(),
+                "should allow {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dangerous_schemes_stored_xss() {
+        // Each of these would otherwise round-trip into an <a href> on a public page.
+        for v in [
+            "javascript:alert(document.cookie)",
+            "JavaScript:alert(1)", // scheme is case-insensitive
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "vbscript:msgbox(1)",
+        ] {
+            let err = validate_metadata_url("homepage", Some(v))
+                .expect_err(&format!("should reject {v}"));
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+    }
 }
