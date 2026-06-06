@@ -39,11 +39,14 @@ awk -v ex="$EX" -v n="$N_PERSONS" 'BEGIN{
 echo "generated $(wc -l < data.nt) triples"
 
 # ---- 2. Open Triplestore: register a public dataset, PUT data to its graph ----
+# Throwaway credentials for the local benchmark instance, generated per run (never
+# hardcoded — keeps secret scanners happy and avoids a reusable literal).
+PW="${BENCH_PASSWORD:-$(openssl rand -hex 12)}"
 TOKEN=$(curl -s -X POST "$OTS_BASE/api/auth/register" -H "Content-Type: application/json" \
-  -d '{"username":"bench","email":"bench@local","password":"benchpass12345"}' \
+  -d "{\"username\":\"bench\",\"email\":\"bench@local\",\"password\":\"$PW\"}" \
   | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 [ -z "$TOKEN" ] && TOKEN=$(curl -s -X POST "$OTS_BASE/api/auth/login" -H "Content-Type: application/json" \
-  -d '{"username":"bench","password":"benchpass12345"}' | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+  -d "{\"username\":\"bench\",\"password\":\"$PW\"}" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 AID=$(curl -s -H "Authorization: Bearer $TOKEN" "$OTS_BASE/api/auth/me" | sed -n 's/.*"\(id\|user_id\)":"\([^"]*\)".*/\2/p' | head -1)
 curl -s -X POST "$OTS_BASE/api/datasets" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d "{\"name\":\"Bench\",\"owner_type\":\"user\",\"owner_id\":\"$AID\",\"visibility\":\"public\"}" >/dev/null
