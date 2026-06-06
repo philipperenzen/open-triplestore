@@ -7,6 +7,7 @@ use axum::{
 use std::sync::Arc;
 
 use super::acl::check_endpoint_acl;
+use super::audit::{AuditEventBuilder, AuditEventType, AuditLogger, AuditOutcome};
 use super::db::AuthDb;
 use super::jwt::{hash_token, verify_token, JwtConfig};
 use super::models::{AccessLevel, SystemRole};
@@ -211,11 +212,73 @@ async fn authenticate(
     Err((StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response())
 }
 
+/// Marker inserted into a `403` response's extensions by a guard that has
+/// already emitted its own `permission_denied` audit event (e.g.
+/// [`endpoint_acl_guard`]). The `require_auth`/`optional_auth` denial-audit pass
+/// skips any response carrying it, so a single denial is never logged twice.
+#[derive(Clone, Copy)]
+struct DenialAudited;
+
+/// Identity + endpoint context captured *before* the request is consumed by the
+/// inner service, so a `403` produced downstream can be attributed in the audit
+/// log (who, from where, which endpoint).
+struct DenialContext {
+    method: String,
+    path: String,
+    actor_id: Option<String>,
+    actor_role: Option<String>,
+    ip: Option<String>,
+    request_id: Option<String>,
+}
+
+impl DenialContext {
+    fn capture(req: &Request) -> Self {
+        let user = req.extensions().get::<AuthenticatedUser>();
+        Self {
+            method: req.method().as_str().to_string(),
+            path: req.uri().path().to_string(),
+            actor_id: user.map(|u| u.user_id.clone()),
+            actor_role: user.map(|u| u.role.as_str().to_string()),
+            ip: super::audit::client_ip(req.headers(), None),
+            request_id: req
+                .extensions()
+                .get::<crate::server::RequestId>()
+                .map(|r| r.0.clone()),
+        }
+    }
+}
+
+/// Emit a `permission_denied` audit event when the downstream service answered
+/// with `403 Forbidden`. This is the broad net that captures the per-dataset /
+/// per-graph authorization denials individual handlers return inline
+/// (`can_*_dataset(..) -> 403`), which would otherwise leave cross-tenant probe
+/// attempts with no audit trail. Anonymous (unauthenticated) denials are logged
+/// too — they are exactly the probe attempts worth recording.
+fn audit_forbidden(audit: &AuditLogger, ctx: &DenialContext, resp: &Response) {
+    if resp.status() != StatusCode::FORBIDDEN {
+        return;
+    }
+    // A guard that already logged its own denial marks the response; skip it
+    // here so the event isn't recorded twice.
+    if resp.extensions().get::<DenialAudited>().is_some() {
+        return;
+    }
+    let mut b = AuditEventBuilder::new(AuditEventType::PermissionDenied, AuditOutcome::Denied)
+        .resource("endpoint", &ctx.path)
+        .action(&ctx.method);
+    b.actor_id = ctx.actor_id.clone();
+    b.actor_role = ctx.actor_role.clone();
+    b.ip_address = ctx.ip.clone();
+    b.request_id = ctx.request_id.clone();
+    audit.log(b);
+}
+
 /// Middleware that requires a valid JWT or API token. Returns 401 if missing or invalid.
 pub async fn require_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
     State(auth_ext): State<Arc<AuthExt>>,
+    State(audit): State<Arc<AuditLogger>>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
@@ -227,7 +290,12 @@ pub async fn require_auth(
     enforce_write_scope_for_mutation(&req, &user)?;
     req.extensions_mut().insert(user);
 
-    Ok(next.run(req).await)
+    // Capture identity/endpoint context, then audit if the handler (or an inner
+    // guard) denies with 403 (see `audit_forbidden`).
+    let ctx = DenialContext::capture(&req);
+    let resp = next.run(req).await;
+    audit_forbidden(&audit, &ctx, &resp);
+    Ok(resp)
 }
 
 /// Middleware that optionally extracts auth. If present and valid, sets the
@@ -236,6 +304,7 @@ pub async fn optional_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
     State(auth_ext): State<Arc<AuthExt>>,
+    State(audit): State<Arc<AuditLogger>>,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -250,7 +319,12 @@ pub async fn optional_auth(
         }
     }
 
-    next.run(req).await
+    // Audit any downstream 403 — including anonymous cross-tenant read probes on
+    // visibility-scoped routes that this middleware lets through unauthenticated.
+    let ctx = DenialContext::capture(&req);
+    let resp = next.run(req).await;
+    audit_forbidden(&audit, &ctx, &resp);
+    resp
 }
 
 /// Middleware that requires admin privileges. Must be used after `require_auth`.
@@ -323,7 +397,6 @@ pub async fn endpoint_acl_guard(
         .map(|r| r.0.clone());
 
     if !check_endpoint_acl(user.as_ref(), &method, &path, &auth_db) {
-        use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
         let mut b = AuditEventBuilder::new(AuditEventType::PermissionDenied, AuditOutcome::Denied)
             .resource("endpoint", &path)
             .action(&method);
@@ -333,11 +406,15 @@ pub async fn endpoint_acl_guard(
         }
         b.request_id = request_id;
         audit_log.log(b);
-        return Err((
+        // Mark the response so the outer auth-middleware denial-audit pass does
+        // not record this same 403 a second time.
+        let mut resp = (
             StatusCode::FORBIDDEN,
             "Access denied by endpoint ACL policy",
         )
-            .into_response());
+            .into_response();
+        resp.extensions_mut().insert(DenialAudited);
+        return Err(resp);
     }
 
     Ok(next.run(req).await)
