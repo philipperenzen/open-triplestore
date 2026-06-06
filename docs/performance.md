@@ -52,8 +52,8 @@ the only variable is the host hardware.
 | OS (host) | Windows 11 Pro 10.0.26200 |
 | Container runtime | Docker Desktop 28.5.1, WSL2 backend (kernel 6.6.87.2-microsoft-standard-WSL2) |
 | CPU | AMD Ryzen 9 7900X3D — 12 cores / 24 threads, 3D V-Cache |
-| CPU visible to Docker | 24 logical processors |
-| RAM visible to Docker | 30.9 GiB |
+| CPU visible to Docker | 24 logical processors (`nproc` = 24) |
+| RAM visible to Docker | 54.9 GiB (`MemTotal`, pinned via `.wslconfig`) |
 | Storage | NVMe SSD |
 | GPU | Not used — the triplestore has no GPU code path |
 | Engine | Oxigraph 0.4.11 (oxrdf 0.2.4) · GEOS 11.0.1 · Axum 0.7.9 |
@@ -65,18 +65,19 @@ the only variable is the host hardware.
 ### Maximising Docker resources (optional)
 
 Docker Desktop on WSL2 already exposes all logical CPUs and ~50–80% of host RAM
-by default — on the reference system that is **24 vCPU / ~31 GiB** with no
-configuration. To pin a larger, fixed allocation (more reproducible), create
+by default. The numbers in this doc were captured with a **pinned** allocation
+(more reproducible, and large enough that the 100M tier no longer pages); create
 `%UserProfile%\.wslconfig` and restart WSL (`wsl --shutdown`):
 
 ```ini
 [wsl2]
 processors=24
-memory=48GB          # leave headroom for Windows; set to host_RAM − 8GB
+memory=56GB          # leave headroom for Windows; set to host_RAM − 8GB
 swap=0               # disable swap so timings aren't perturbed by paging
 ```
 
-Verify what the engine actually sees:
+Verify what the engine actually sees — on the reference system this reports
+`24` and `57579588 kB` (**54.9 GiB**):
 
 ```bash
 docker run --rm ots-builder bash -c 'nproc; grep MemTotal /proc/meminfo'
@@ -239,17 +240,18 @@ backend**, streaming the dataset from an N-Triples file. Wall-clock median
 
 | Operation | 1M | 10M | 100M |
 |---|--:|--:|--:|
-| Bulk load (RocksDB) | 7.1 s | 59 s | 676 s |
-| → load throughput | 0.14 Mt/s | 0.17 Mt/s | 0.15 Mt/s |
+| Bulk load (RocksDB) | 7.1 s | 59 s | 734 s |
+| → load throughput | 0.14 Mt/s | 0.17 Mt/s | 0.14 Mt/s |
 | `COUNT(*)` (fast-count) | **0.002 ms** | **0.002 ms** | **0.002 ms** |
-| lookup + `LIMIT 1000` | 1.4 ms | 2.2 ms | 6.2 ms |
-| `FILTER` `COUNT` (full scan) | 54 ms | 593 ms | 6.1 s |
-| `GROUP BY` + `AVG` (join+agg) | 0.72 s | 9.2 s | OOM¹ |
+| lookup + `LIMIT 1000` | 1.4 ms | 2.2 ms | 2.0 ms |
+| `FILTER` `COUNT` (full scan) | 54 ms | 593 ms | 6.3 s |
+| `GROUP BY` + `AVG` (join+agg) | 0.72 s | 9.2 s | 104.5 s¹ |
 
-¹ `GROUP BY` over a 100M-triple join materialises ~20M intermediate solutions and
-exceeded the 30 GiB box; the other ops are index-only / streaming and complete
-fine at 100M. With more RAM — or once grouped aggregates decompose across shards
-(parallel roadmap) — it completes.
+¹ `GROUP BY` over a 100M-triple join materialises ~20M intermediate solutions. On
+the earlier 30.9 GiB allocation this OOM'd; with the **54.9 GiB** allocation used
+here (see Reference system) it completes in ~105 s. The other ops are index-only /
+streaming and are unaffected by the size. Decomposing grouped aggregates across
+shards (parallel roadmap) would bring this down further.
 
 **Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
 100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
