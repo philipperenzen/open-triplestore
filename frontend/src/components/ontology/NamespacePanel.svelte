@@ -2,6 +2,7 @@
   import { t } from 'svelte-i18n';
   import type { SchemaModel } from '../../lib/ontology/schema-model';
   import { shortenIRI } from '../../lib/rdf-utils';
+  import { safeExternalUrl } from '../../lib/safeUrl';
 
   export let model: SchemaModel | null = null;
   export let onOpen: (_iri: string) => void = () => {};
@@ -39,7 +40,7 @@
     {#if imports.length}
       <div class="imports">
         <strong>owl:imports:</strong>
-        {#each imports as i}<a class="ich" href={i} target="_blank" rel="noopener">{shortenIRI(i)}</a>{/each}
+        {#each imports as i}<a class="ich" href={safeExternalUrl(i)} target="_blank" rel="noopener">{shortenIRI(i)}</a>{/each}
       </div>
     {/if}
     {#if rows.length === 0}
