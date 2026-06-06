@@ -38,9 +38,11 @@
 //! back to single-store evaluation. The classifier is deliberately conservative —
 //! it never trades correctness for parallelism.
 //!
-//! This is increment 1 of the parallel-execution roadmap: a self-contained,
-//! tested, benchmarked capability. Wiring it into `TripleStore`'s live query
-//! path (so the server shards its storage) is the next step.
+//! This is wired into the live `/sparql` path: the server's `TripleStore` keeps a
+//! subject-hash mirror of its persistent store (`src/store/parallel_mirror.rs`) and
+//! routes every decomposable aggregate here automatically, falling back to
+//! single-store evaluation for everything else. See `docs/performance.md` for the
+//! measured before/after (8–11× on the aggregate shapes) and the 3-way HTTP comparison.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
