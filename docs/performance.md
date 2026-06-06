@@ -349,12 +349,13 @@ dataset is split into `N` shards by a stable hash of each triple's **subject**,
 and a shard-decomposable query is evaluated on every shard concurrently (Rayon),
 then the partials are merged. Because every triple of a subject co-locates in one
 shard, **subject-star joins, row-local `FILTER`, global non-distinct `COUNT`,
-`ASK` and `DISTINCT`** decompose correctly; anything that could join *across*
-subjects (object→subject joins, property paths, grouped `AVG`-style aggregates,
-`ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`) is detected and **not** decomposed
-— the caller falls back to single-store evaluation. The classifier is deliberately
-conservative; a test suite asserts every parallel path matches the single-store
-result *and* that unsafe shapes are rejected.
+`GROUP BY` with non-distinct `COUNT`, `ASK` and `DISTINCT`** decompose correctly;
+anything that could join *across* subjects (object→subject joins, property paths,
+grouped `AVG`/`SUM`-style aggregates, `COUNT(DISTINCT)`, `ORDER BY`/`LIMIT`,
+`OPTIONAL`/`UNION`/`MINUS`) is detected and **not** decomposed — the caller falls
+back to single-store evaluation. The classifier is deliberately conservative; a
+test suite asserts every parallel path matches the single-store result *and* that
+unsafe shapes are rejected.
 
 ![subject-sharded parallel scaling](benchmarks/parallel-scaling.svg)
 
@@ -369,16 +370,50 @@ Latency on **600 000 triples** — 1 shard is today's single-store (one-core) ba
 Near-linear to 8 shards, ~8–11× by 16 (the falloff past the core count is memory
 bandwidth + merge overhead). Reproduce with `cargo bench -p opengraph --bench parallel`.
 
+### 3. Wired into the live `/sparql` path (`ParallelMirror`)
+
+`TripleStore` now uses this **automatically**. Beside its other in-memory derived
+indexes (`GraphIndex`, `SpatialIndex`), it maintains a subject-sharded **mirror** of
+the store; a decomposable aggregate/`ASK` is answered across shards and merged,
+while everything else falls through to single-store evaluation — so the result is
+identical (a parity suite asserts equality across shard counts, named-graph/`FROM`
+scoping and the default graph, plus write-invalidation and that the mirror is
+actually consulted). The mirror is a derived index: rebuilt lazily after writes and
+**bounded by a triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable) so it
+never mirrors a store larger than RAM — above the cap it stays disabled and the
+single store answers, leaving the 1–100M disk tiers unaffected.
+
+Before/after on the **same `TripleStore` the HTTP server runs** (501k triples,
+in-process, 16-shard mirror, Ryzen 9 7900X3D; median of 9):
+
+| Query (~500k triples, in-process) | single-core | 16-shard mirror | speedup |
+|---|--:|--:|--:|
+| 2-way join `COUNT` | 134 ms | 12.6 ms | **10.6×** |
+| `FILTER` + `COUNT` | 42.4 ms | 4.7 ms | **9.1×** |
+| single-pattern `COUNT` | 31.6 ms | 3.8 ms | **8.4×** |
+| `GROUP BY` + `COUNT` | 41.6 ms | 5.5 ms | **7.6×** |
+
+Reproduce with `cargo bench --bench parallel_live`. (`COUNT(*)` over a full scan is
+omitted — the O(1) fast-count index below already answers it in ~2 µs.)
+
 ### Roadmap
 
-This is increment 1 — a tested, benchmarked capability beside the engine. Next:
+The first two increments — a tested engine capability *and* its wiring — are done:
 
-* **Wire it into `TripleStore`** so the live `/sparql` path shards storage and uses
-  this automatically for decomposable queries (the ACL-scoped multi-graph case
-  already partitions naturally by graph).
-* **Mergeable grouped aggregates** — rewrite `AVG`→(`SUM`,`COUNT`) and combine
-  per-shard partials so `GROUP BY` decomposes too.
-* **Fast `COUNT(*)`** (optimization #4 below) pairs with sharded counting.
+* **✅ Wired into `TripleStore`** — the `ParallelMirror` above; the live `/sparql`
+  path uses it automatically for decomposable aggregates (the ACL-scoped multi-graph
+  case still partitions naturally by graph on top).
+* **✅ Mergeable grouped `COUNT`** — `GROUP BY` with non-distinct `COUNT` now
+  decomposes (per-shard counts summed by group key).
+* **✅ Fast `COUNT(*)`** (optimization #4 below) pairs with sharded counting.
+
+Next:
+
+* **More mergeable grouped aggregates** — `GROUP BY` + `SUM`/`AVG`/`MIN`/`MAX` needs
+  the partials combined under SPARQL's numeric-promotion rules (e.g. `AVG`→merge
+  `SUM`+`COUNT`); only non-distinct `COUNT` is done so the parity guarantee holds.
+* **Persistent shards** so the accelerator works beyond the in-memory cap (today
+  large/100M-tier stores fall back to single-core).
 * **Intra-query join parallelism** would require forking `spareval`/`sparopt`
   (Oxigraph's evaluator) once it exposes pluggable execution — a larger effort.
 
@@ -387,9 +422,10 @@ This is increment 1 — a tested, benchmarked capability beside the engine. Next
 ## Optimized showcase vs Fuseki (fast-COUNT + multi-core)
 
 After the profiling round (fast-`COUNT(*)` + subject-sharded parallel execution),
-re-run of the same-hardware head-to-head on ~500k triples. "Single-core HTTP" is
-the live server today; "16-shard parallel" is the OpenGraph parallel engine
-(`ParallelStore`) on the same workload; Fuseki is TDB2 over HTTP.
+re-run of the same-hardware head-to-head on ~500k triples. The "16-shard parallel"
+column is the subject-sharded mirror — **now wired into the live `/sparql` path**
+(§3 has the in-process before/after on the real `TripleStore`); "single-core" is the
+unsharded engine over the multi-tenant HTTP stack; Fuseki is TDB2 over HTTP.
 
 ![Optimized Open Triplestore vs Fuseki](benchmarks/showcase-vs-fuseki.svg)
 
@@ -401,9 +437,10 @@ the live server today; "16-shard parallel" is the OpenGraph parallel engine
 | `GROUP BY` + `AVG` | 268 ms | n/a¹ | 217 ms | 0.8× |
 | `COUNT(DISTINCT)` | 27 ms | n/a¹ | 24 ms | 0.9× |
 
-¹ Not yet shard-decomposable (a `GROUP BY` on a non-subject key, or `DISTINCT`
-across shards, needs mergeable partial aggregates — on the roadmap). The
-single-core figures already match Fuseki here.
+¹ `GROUP BY` + **`COUNT`** now decomposes (§3 — ~5.5 ms in-process on the 16-shard
+mirror); the `GROUP BY` + `AVG` and `COUNT(DISTINCT)` rows here do **not** yet (they
+need mergeable partial aggregates under SPARQL's numeric rules — on the roadmap), so
+their single-core figures, which already match Fuseki, stand.
 
 **Reading it honestly.** `COUNT(*)` is now an O(1) index lookup, so it wins
 decisively (26×). For scans/joins the parallel engine wins ~8–9× by using many
