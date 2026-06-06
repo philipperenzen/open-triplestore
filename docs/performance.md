@@ -310,6 +310,18 @@ aggregates, large `SELECT`s). RocksDB stays the durable source of truth and answ
 anything over the cap. This is why the join/`GROUP BY` numbers dropped from
 hundreds-of-ms / multi-second to single-digit / ~150 ms.
 
+**The numbers above are cold (cache-off) engine compute.** On top of the engine,
+`TripleStore` has a **query-result cache** (`OTS_QUERY_CACHE`, on by default): a
+repeated *deterministic* query — the bulk of real traffic — collapses from full
+evaluation to a µs-scale LRU lookup, so a re-run of *any* row of the table collapses
+to the **HTTP floor (~2.8 ms measured)** regardless of its cold cost: the 163 ms
+`GROUP BY`+`AVG` and the 45 ms `COUNT(DISTINCT)` both return in ~2.8 ms when repeated,
+matching or beating QLever's warm numbers. It is invalidated on every write (generation
+counter), keyed by the already-ACL-scoped query string (so no tenant ever reads
+another's cached result), and never caches non-deterministic queries
+(`RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE`) — fidelity is never traded. The table is
+reported cache-off precisely so it reflects engine work rather than memoisation.
+
 **Reproduce it.** [`scripts/compare_engines.sh`](../scripts/compare_engines.sh)
 brings up all three servers as containers, loads the identical generated `data.nt`
 into each (Open Triplestore by registering a public dataset and `PUT`ting to its
@@ -431,14 +443,22 @@ The first two increments — a tested engine capability *and* its wiring — are
 * **✅ Fast `COUNT(*)`** (optimization #4 below) pairs with sharded counting.
 * **✅ Unsharded full in-memory copy** — joins, grouped non-`COUNT` aggregates and
   `COUNT(DISTINCT)` are served from RAM instead of RocksDB (the ~40× join fix above).
+* **✅ Query-result cache** — a repeated deterministic query is an O(1) cache hit
+  (sub-ms), invalidated on write, scope-keyed, never caching `RAND`/`NOW`/`UUID`/…
+  (see the comparison section). The biggest safe win for warm/repeated traffic.
 
 Next:
 
 * **Parallel grouped non-`COUNT` aggregates** — decompose `GROUP BY` + `SUM`/`AVG`/
-  `MIN`/`MAX` across the shards (e.g. `AVG`→merge `SUM`+`COUNT`, combined under
-  SPARQL's numeric-promotion rules) to bring the 163 ms `GROUP BY`+`AVG` toward the
-  ~10 ms QLever number; today only non-distinct `COUNT` is sharded (the rest use the
-  full copy), so the parity guarantee holds.
+  `MIN`/`MAX` across the shards to bring the 163 ms cold `GROUP BY`+`AVG` toward the
+  ~10 ms QLever number. **Feasibility confirmed:** Oxigraph's `AVG` is byte-identical
+  to `SUM/COUNT`, so `AVG`→merge `SUM`+`COUNT` is exact for `xsd:integer`/`decimal`.
+  The catch that keeps it a careful follow-up rather than a drop-in: `SUM`/`AVG` over
+  `xsd:double`/`float` is IEEE-754 non-associative, so summing per-shard partials in a
+  different order can differ in the last bit — a *fully* fidelity-preserving version
+  must detect a `double` aggregate at runtime and fall back to the full copy. (The
+  result cache already makes the *repeated* `GROUP BY`+`AVG` sub-ms, so this is a
+  cold-path optimisation.)
 * **Sorted-permutation merge joins** (QLever's edge) would need Oxigraph to expose a
   pluggable evaluator — a larger effort, but it is what separates the ~150 ms in-RAM
   join from QLever's ~10 ms.
