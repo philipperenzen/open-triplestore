@@ -31,6 +31,7 @@
   import { navigate } from '../lib/router/index.js';
   import { isAdmin, user as userStore } from '../lib/stores.js';
   import { VISIBILITIES } from '../lib/permissions.js';
+  import { safeExternalUrl } from '../lib/safeUrl.js';
   import { Plus, Trash2, X, UserPlus, Terminal, Database, Network, Rows3, Activity, Edit2, ShieldCheck, Loader2, Upload, Copy, CheckCheck, Users, Building2, Globe, Mail, Link as LinkIcon, ChevronRight, Info, Hash, Bookmark } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import OrganisationMetadataDialog from '../components/OrganisationMetadataDialog.svelte';
@@ -527,7 +528,7 @@
     {#if org.homepage}
       <div class="meta-item">
         <dt>{$t('pages.orgDetail.fieldHomepage')}</dt>
-        <dd><a href={org.homepage} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {org.homepage}</a></dd>
+        <dd><a href={safeExternalUrl(org.homepage)} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {org.homepage}</a></dd>
       </div>
     {/if}
 
@@ -537,7 +538,7 @@
         <dd class="contact-dd">
           {#if org.contact_name}<span class="contact-name">{org.contact_name}</span>{/if}
           {#if org.contact_email}<a href="mailto:{org.contact_email}" class="md-link"><Mail size={11} /> {org.contact_email}</a>{/if}
-          {#if org.contact_url}<a href={org.contact_url} target="_blank" rel="noopener" class="md-link"><LinkIcon size={11} /> {org.contact_url}</a>{/if}
+          {#if org.contact_url}<a href={safeExternalUrl(org.contact_url)} target="_blank" rel="noopener" class="md-link"><LinkIcon size={11} /> {org.contact_url}</a>{/if}
         </dd>
       </div>
     {/if}

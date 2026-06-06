@@ -3,6 +3,7 @@
   import { navigate } from '../lib/router/index.js';
   import { location } from '../lib/locationStore.js';
   import { shortenIRI, graphResultsToElements } from '../lib/rdf-utils.js';
+  import { safeExternalUrl, safeImageUrl } from '../lib/safeUrl.js';
   import RdfTerm from '../components/RdfTerm.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
@@ -667,8 +668,9 @@
           <h3><ImageIcon size={14} /> {$i18nT('pages.resource.images')}</h3>
           <div class="img-strip">
             {#each featuredImages as src}
-              <a href={src} target="_blank" rel="noopener" title={src}>
-                <img src={src} alt="" loading="lazy" on:error={(e) => { /** @type {HTMLElement} */ (e.currentTarget).style.display = 'none'; }} />
+              {@const safeSrc = safeImageUrl(src)}
+              <a href={safeSrc} target="_blank" rel="noopener" title={src}>
+                <img src={safeSrc} alt="" loading="lazy" on:error={(e) => { /** @type {HTMLElement} */ (e.currentTarget).style.display = 'none'; }} />
               </a>
             {/each}
           </div>
@@ -680,7 +682,7 @@
           <h3><Link2 size={14} /> {$i18nT('pages.resource.links')}</h3>
           <div class="link-chips">
             {#each featuredLinks as href}
-              <a class="link-chip" href={href} target="_blank" rel="noopener" title={href}>
+              <a class="link-chip" href={safeExternalUrl(href)} target="_blank" rel="noopener" title={href}>
                 {shortenIRI(href)}
               </a>
             {/each}

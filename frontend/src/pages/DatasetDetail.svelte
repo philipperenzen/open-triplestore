@@ -49,6 +49,7 @@
   import { Link, navigate } from '../lib/router/index.js';
   import { isAuthenticated, user } from '../lib/stores.js';
   import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
+  import { safeExternalUrl } from '../lib/safeUrl.js';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
@@ -1254,7 +1255,7 @@
             <span class="md-sub">{LICENSE_CATEGORY_LABEL[mdLicense.category]}</span>
             {#if mdLicense.url}<a class="md-ext" href={mdLicense.url} target="_blank" rel="noopener"><LinkIcon size={11} /></a>{/if}
           {:else}
-            <a href={dataset.license} target="_blank" rel="noopener" class="md-link">{dataset.license}</a>
+            <a href={safeExternalUrl(dataset.license)} target="_blank" rel="noopener" class="md-link">{dataset.license}</a>
           {/if}
         </dd>
       </div>
@@ -1301,14 +1302,14 @@
     {#if dataset.spatial}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.spatialCoverage')}</dt>
-        <dd><a href={dataset.spatial} target="_blank" rel="noopener" class="md-link">{dataset.spatial}</a></dd>
+        <dd><a href={safeExternalUrl(dataset.spatial)} target="_blank" rel="noopener" class="md-link">{dataset.spatial}</a></dd>
       </div>
     {/if}
 
     {#if dataset.landing_page}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.landingPage')}</dt>
-        <dd><a href={dataset.landing_page} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {dataset.landing_page}</a></dd>
+        <dd><a href={safeExternalUrl(dataset.landing_page)} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {dataset.landing_page}</a></dd>
       </div>
     {/if}
 
@@ -1325,7 +1326,7 @@
         <dd class="contact-dd">
           {#if dataset.contact_name}<span class="contact-name">{dataset.contact_name}</span>{/if}
           {#if dataset.contact_email}<a href="mailto:{dataset.contact_email}" class="md-link">{dataset.contact_email}</a>{/if}
-          {#if dataset.contact_url}<a href={dataset.contact_url} target="_blank" rel="noopener" class="md-link">{dataset.contact_url}</a>{/if}
+          {#if dataset.contact_url}<a href={safeExternalUrl(dataset.contact_url)} target="_blank" rel="noopener" class="md-link">{dataset.contact_url}</a>{/if}
         </dd>
       </div>
     {/if}
