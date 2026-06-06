@@ -5497,6 +5497,31 @@ pub async fn execute_rml_mapping(
         .cloned()
         .unwrap_or_else(|| format!("urn:dataset:{}:rml-output", dataset_id));
 
+    // Cross-tenant write boundary (fail fast, before any work). `can_write_dataset`
+    // only authorizes writing *into this dataset*, not which graph the RML output
+    // targets. A non-admin may therefore only write the dataset's own namespaced
+    // graphs: gate the `?graph=` target here, and every `rml:graphMap` override at
+    // execution. Without this a writer of any dataset could inject triples into
+    // another tenant's graph. Admins are unrestricted.
+    if !current_user.is_admin() {
+        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            &target_graph,
+        ) {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_graph",
+                &dataset_id,
+                "rml_execute",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
+        }
+    }
+
     // Parse multipart: collect mapping override and source files
     let mut mapping_turtle_override: Option<String> = None;
     let mut source_data: std::collections::HashMap<String, String> =
@@ -5569,9 +5594,32 @@ pub async fn execute_rml_mapping(
         .into_response());
     }
 
-    // Execute into the real store
-    let count = crate::rml::execute(&mapping, &source_data, &state.store, Some(&target_graph))
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Execute into the real store, enforcing the same boundary on every effective
+    // (graphMap-overridden) destination graph — a mapping's `rml:graphMap` can name
+    // a target other than `?graph=`, so the gate must cover the resolved set too.
+    let is_admin = current_user.is_admin();
+    let authz_base = state.base_url.clone();
+    let authz_db = state.auth_db.clone();
+    let authz_ds = dataset_id.clone();
+    let count = crate::rml::execute_authorized(
+        &mapping,
+        &source_data,
+        &state.store,
+        Some(&target_graph),
+        move |g: &str| {
+            if is_admin {
+                Ok(())
+            } else {
+                crate::auth::dataset_graph::authorize_dataset_graph_target(
+                    &authz_db,
+                    &authz_base,
+                    &authz_ds,
+                    g,
+                )
+            }
+        },
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Register target graph in dataset
     let _ = state.auth_db.add_dataset_graph(&dataset_id, &target_graph);

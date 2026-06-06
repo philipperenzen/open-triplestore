@@ -43,9 +43,24 @@ jobs:
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
-      # obvious in the CI summary.
+      # obvious in the CI summary. The `security` filter yields a "0 passed; N
+      # filtered out" line for every binary that has no security tests (the
+      # conformance suites, etc.) — that is expected. What is NOT acceptable is the
+      # filter matching *nothing at all* (e.g. after a rename), which `cargo test`
+      # would still exit 0 on. The guard below fails the job if too few security
+      # tests actually ran, so the suite can never be silently skipped.
       - name: Security regression tests
-        run: cargo test --all-features --locked security
+        shell: bash
+        run: |
+          set -o pipefail
+          out=$(cargo test --all-features --locked security 2>&1)
+          echo "$out"
+          passed=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
+          echo "==> security-named tests passed across all binaries: $passed"
+          if [ "$passed" -lt 40 ]; then
+            echo "::error::Expected at least 40 security tests to run, but only $passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
+            exit 1
+          fi
 
   conformance:
     name: Conformance suites

@@ -14,6 +14,8 @@ use tracing::{debug, info};
 
 use crate::geo::functions as geo_fns;
 use crate::geo::spatial_index::SpatialIndex;
+use crate::store::parallel_mirror::ParallelMirror;
+use crate::store::query_cache::QueryCache;
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -173,6 +175,14 @@ pub struct TripleStore {
     store: Arc<Store>,
     graph_index: GraphIndex,
     spatial_index: SpatialIndex,
+    /// In-memory subject-sharded read accelerator: a decomposable aggregate/ASK is
+    /// answered across cores instead of on one. Derived from `store`, rebuilt
+    /// lazily after writes, and bounded by a triple-count cap (see
+    /// [`ParallelMirror`]).
+    parallel_mirror: ParallelMirror,
+    /// Memoises small query results (invalidated on every write); a repeated query
+    /// is answered without re-evaluation. See [`QueryCache`].
+    query_cache: QueryCache,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
@@ -192,6 +202,8 @@ impl TripleStore {
             store: Arc::new(store),
             graph_index,
             spatial_index,
+            parallel_mirror: ParallelMirror::from_env(),
+            query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
         })
     }
@@ -205,6 +217,8 @@ impl TripleStore {
             store: Arc::new(store),
             graph_index,
             spatial_index,
+            parallel_mirror: ParallelMirror::from_env(),
+            query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
         })
     }
@@ -213,6 +227,29 @@ impl TripleStore {
     pub fn with_blank_node_mode(mut self, mode: BlankNodeMode) -> Self {
         self.blank_node_mode = mode;
         self
+    }
+
+    /// Override the parallel-query mirror configuration (builder style) instead of
+    /// reading it from the environment. `enabled` toggles the accelerator,
+    /// `shards` is the subject-hash shard count (clamped to 1..=16), and
+    /// `max_triples` is the memory cap above which it stays disabled.
+    pub fn with_parallel_query(mut self, enabled: bool, shards: usize, max_triples: usize) -> Self {
+        self.parallel_mirror = ParallelMirror::new(enabled, shards, max_triples);
+        self
+    }
+
+    /// Override the query-result cache configuration (builder style; tests).
+    pub fn with_query_cache(mut self, enabled: bool, max_entries: usize, max_rows: usize) -> Self {
+        self.query_cache = QueryCache::new(enabled, max_entries, max_rows);
+        self
+    }
+
+    /// Record a write: invalidate the in-memory mirror (mark for rebuild) and the
+    /// result cache (bump its generation). Called by every mutating path so reads
+    /// never see stale derived state.
+    fn note_write(&self) {
+        self.parallel_mirror.mark_dirty();
+        self.query_cache.invalidate();
     }
 
     /// The blank-node durability policy currently in effect.
@@ -269,6 +306,18 @@ impl TripleStore {
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
     pub fn query(&self, sparql: &str) -> Result<QueryResults, StoreError> {
+        // Result cache: a repeated, *deterministic* query is answered from a small
+        // LRU keyed by the (already ACL-scoped) query string and invalidated on
+        // every write — so a hit is the exact result the engine would compute.
+        if let Some(cached) = self.query_cache.get(sparql) {
+            return Ok(cached);
+        }
+        let results = self.query_uncached(sparql)?;
+        Ok(self.query_cache.put(sparql, results))
+    }
+
+    /// The evaluation pipeline behind [`Self::query`], without the result cache.
+    fn query_uncached(&self, sparql: &str) -> Result<QueryResults, StoreError> {
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -281,6 +330,29 @@ impl TripleStore {
         // pure waste when the projection is only a count.
         if let Some(fast) = self.try_fast_count(sparql) {
             return Ok(fast);
+        }
+        // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
+        // subject-hash shards (the in-memory mirror) and merged, using every core
+        // instead of one. Returns `None` — falling through to the single-store
+        // evaluator below — for anything not provably safe, an over-cap store, or a
+        // shard error, so results are identical to single-store evaluation.
+        if let Some(parallel) = self
+            .parallel_mirror
+            .try_query(&self.store, sparql, || self.query_options())
+        {
+            return Ok(parallel);
+        }
+        // In-memory full mirror: everything the shards can't decompose (joins,
+        // grouped non-COUNT aggregates, large SELECTs) is served from an unsharded
+        // RAM copy within the cap. RocksDB answers a multi-pattern join with one
+        // point lookup per row — ~40x slower than the same join in memory — so this
+        // is the biggest win for non-aggregate reads. Identical engine + data, so
+        // results match; `None` (over cap / error) falls through to RocksDB.
+        if let Some(full) = self
+            .parallel_mirror
+            .try_full_query(&self.store, sparql, || self.query_options())
+        {
+            return Ok(full);
         }
         let opts = self.query_options();
         let results = self.store.query_opt(sparql, opts)?;
@@ -347,6 +419,7 @@ impl TripleStore {
         let update = Update::parse(sparql, None)?;
         self.store.update_opt(update, self.query_options())?;
         self.graph_index.rebuild(&self.store);
+        self.note_write();
         Ok(())
     }
 
@@ -376,6 +449,7 @@ impl TripleStore {
             self.graph_index
                 .recount_specific_graphs(&self.store, &graphs);
         }
+        self.note_write();
         Ok(())
     }
 
@@ -410,6 +484,7 @@ impl TripleStore {
 
         // Rebuild graph index once for the entire batch
         self.graph_index.rebuild(&self.store);
+        self.note_write();
         Ok(results)
     }
 
@@ -446,6 +521,7 @@ impl TripleStore {
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
+            self.note_write();
             return Ok(());
         }
 
@@ -475,6 +551,7 @@ impl TripleStore {
         info!("Data loaded successfully");
         self.graph_index.rebuild(&self.store);
         self.spatial_index.mark_dirty();
+        self.note_write();
         Ok(())
     }
 
@@ -635,6 +712,7 @@ impl TripleStore {
             self.store.remove_named_graph(&nn)?;
         }
         self.graph_index.remove(graph_iri);
+        self.note_write();
         Ok(())
     }
 
@@ -668,6 +746,7 @@ impl TripleStore {
         for iri in graph_iris {
             self.graph_index.remove(Some(iri));
         }
+        self.note_write();
         Ok(())
     }
 
@@ -689,6 +768,7 @@ impl TripleStore {
         // Register (or recount) only the affected graphs in the index.
         let iris: Vec<Option<String>> = affected_graphs.iter().map(|s| Some(s.clone())).collect();
         self.graph_index.recount_specific_graphs(&self.store, &iris);
+        self.note_write();
         Ok(())
     }
 
@@ -717,6 +797,7 @@ impl TripleStore {
     /// Insert a single quad into the store.
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
         self.store.insert(&quad)?;
+        self.note_write();
         Ok(())
     }
 
@@ -766,6 +847,7 @@ impl TripleStore {
     /// Rebuild the graph index (e.g. after external writes).
     pub fn rebuild_graph_index(&self) {
         self.graph_index.rebuild(&self.store);
+        self.note_write();
     }
 
     /// Access the spatial R-tree index for GeoSPARQL pre-filtering.
