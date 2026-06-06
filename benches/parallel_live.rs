@@ -99,6 +99,14 @@ fn main() {
                 "SELECT ?t (AVG(?a) AS ?v) WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
             ),
         ),
+        (
+            "`COUNT(DISTINCT)`",
+            format!("SELECT (COUNT(DISTINCT ?t) AS ?c) WHERE {{ ?s <{EX}type> ?t }}"),
+        ),
+        (
+            "global `AVG`",
+            format!("SELECT (AVG(?a) AS ?v) WHERE {{ ?s <{EX}age> ?a }}"),
+        ),
     ];
 
     println!(
