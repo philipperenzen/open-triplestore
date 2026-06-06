@@ -55,7 +55,10 @@ fn median_ms(store: &TripleStore, q: &str, runs: usize) -> f64 {
 fn build(enabled: bool, shards: usize, data: &str) -> TripleStore {
     let store = TripleStore::in_memory()
         .unwrap()
-        .with_parallel_query(enabled, shards, 100_000_000);
+        .with_parallel_query(enabled, shards, 100_000_000)
+        // Measure *engine compute*, not the result cache — otherwise the warm-up call
+        // populates the cache and every timed run is a ~0 ms cache hit.
+        .with_query_cache(false, 256, 10_000);
     store.load_str(data, RdfFormat::NTriples, None).unwrap();
     store
 }

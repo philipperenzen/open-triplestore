@@ -21,14 +21,18 @@
 //!   join never crosses a shard boundary;
 //! * row-local `FILTER`, `DISTINCT` and projection over the above;
 //! * a global, non-distinct `COUNT` over a shard-local pattern (sum the partials);
-//! * `ASK` over a shard-local pattern (logical OR of the partials).
+//! * `ASK` over a shard-local pattern (logical OR of the partials);
+//! * a mergeable `GROUP BY` over a shard-local pattern — `COUNT` (sum the per-group
+//!   partials) and, via a rewrite-and-re-merge through the engine itself,
+//!   `SUM`/`MIN`/`MAX`/`AVG` (`AVG` → per-shard `SUM`+`COUNT`). This is exact for
+//!   `xsd:integer`/`decimal`; `SUM`/`AVG` over `xsd:double`/`float` is declined at
+//!   runtime (IEEE-754 is non-associative) — see the grouped-aggregate section below.
 //!
 //! Anything that could join *across* subjects (object→subject joins, property
-//! paths, `SERVICE`, `OPTIONAL`/`UNION`/`MINUS`, grouped/`AVG`-style aggregates,
-//! `ORDER BY`/`LIMIT`) is **not** decomposed: [`ParallelStore::query`] returns
-//! `Ok(None)` so the caller can fall back to single-store evaluation. The
-//! classifier is deliberately conservative — it never trades correctness for
-//! parallelism.
+//! paths, `SERVICE`, `OPTIONAL`/`UNION`/`MINUS`, `ORDER BY`/`LIMIT`) is **not**
+//! decomposed: [`ParallelStore::query`] returns `Ok(None)` so the caller can fall
+//! back to single-store evaluation. The classifier is deliberately conservative —
+//! it never trades correctness for parallelism.
 //!
 //! This is increment 1 of the parallel-execution roadmap: a self-contained,
 //! tested, benchmarked capability. Wiring it into `TripleStore`'s live query
@@ -39,7 +43,7 @@ use std::hash::{Hash, Hasher};
 
 use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolution};
 use oxigraph::store::Store;
-use oxrdf::{Quad, Term, Variable};
+use oxrdf::{BlankNode, GraphName, NamedNode, Quad, Term, Variable};
 use rayon::prelude::*;
 use spargebra::algebra::{AggregateExpression, AggregateFunction, Expression, GraphPattern};
 use spargebra::term::{TermPattern, TriplePattern};
@@ -54,11 +58,12 @@ enum Merge {
     SumCount,
     /// Logical-OR of `ASK` booleans.
     OrAsk,
-    /// Mergeable `GROUP BY`: each shard produces grouped rows; merge them by the
-    /// group key, summing the (integer) non-distinct `COUNT` columns. Only `COUNT`
-    /// is mergeable this way without re-deriving SPARQL's numeric-promotion rules,
-    /// so `SUM`/`AVG`/`MIN`/`MAX` grouped aggregates are deliberately *not*
-    /// classified here (they fall back to single-store evaluation).
+    /// Mergeable `GROUP BY` of pure non-distinct `COUNT`s: each shard produces
+    /// grouped rows; merge them by the group key, summing the (integer) `COUNT`
+    /// columns in a single pass. This is the lightweight path for `COUNT`-only
+    /// grouped queries; grouped `SUM`/`MIN`/`MAX`/`AVG` (and mixes with `COUNT`) take
+    /// the more general [`plan_group_aggregate`] path instead, which rewrites the
+    /// per-shard query and re-merges through the engine.
     GroupCount {
         /// Projected group-key columns to merge on.
         key_vars: Vec<Variable>,
@@ -169,6 +174,12 @@ impl ParallelStore {
             Ok(q) => q,
             Err(_) => return Ok(None),
         };
+        // A mergeable grouped SUM/MIN/MAX/AVG needs a *rewritten* per-shard query
+        // (partials) and an engine-driven merge, so try it before the strategies
+        // that run the identical query on every shard.
+        if let Some(gplan) = plan_group_aggregate(&query) {
+            return self.run_group_aggregate(&query, &gplan, &options);
+        }
         let Some(merge) = plan(&query) else {
             return Ok(None);
         };
@@ -182,6 +193,39 @@ impl ParallelStore {
 
         Ok(Some(combine(partials, &merge)))
     }
+
+    /// Evaluate a mergeable grouped aggregate (`SUM`/`MIN`/`MAX`/`AVG`, possibly
+    /// alongside `COUNT`s) by running the per-shard *partial* query concurrently and
+    /// merging the partials **through the engine itself** — see [`merge_group_agg`].
+    ///
+    /// Returns `Ok(None)` to **decline** when the partials sum `xsd:double`/`float`
+    /// (IEEE-754 addition is non-associative, so a cross-shard sum is not bit-exact):
+    /// the caller then evaluates on the unsharded copy, keeping the answer identical
+    /// to single-store. Decomposition is exact for `xsd:integer`/`decimal` (addition
+    /// is associative) and for `MIN`/`MAX` of any type (order-independent).
+    fn run_group_aggregate(
+        &self,
+        orig: &Query,
+        plan: &GroupAggPlan,
+        options: &QueryOptions,
+    ) -> Result<Option<ParAnswer>, String> {
+        let Some(partial_sparql) = build_partial_query(orig, plan) else {
+            return Ok(None);
+        };
+        // Per-shard partials, concurrently. Custom functions in the WHERE apply
+        // identically per shard via the caller-supplied options.
+        let per_shard: Vec<Vec<Vec<Option<Term>>>> = self
+            .shards
+            .par_iter()
+            .map(|s| run_partial_shard(s, &partial_sparql, &plan.partial_proj, options))
+            .collect::<Result<_, _>>()?;
+        let rows: Vec<Vec<Option<Term>>> = per_shard.into_iter().flatten().collect();
+        // Fidelity guard: a summed double/float cannot be merged bit-exactly.
+        if rows_have_double(&rows, plan) {
+            return Ok(None);
+        }
+        Ok(Some(merge_group_agg(&rows, plan)?))
+    }
 }
 
 /// True iff `sparql` is provably shard-decomposable — a cheap parse + classify
@@ -190,8 +234,8 @@ impl ParallelStore {
 pub fn is_decomposable(sparql: &str) -> bool {
     Query::parse(sparql, None)
         .ok()
-        .and_then(|q| plan(&q))
-        .is_some()
+        .map(|q| plan(&q).is_some() || plan_group_aggregate(&q).is_some())
+        .unwrap_or(false)
 }
 
 /// Coarse classification of *how* a decomposable query merges, for callers that
@@ -212,10 +256,77 @@ pub enum ParClass {
 /// Classify a query's parallel shape, or `None` if it is not decomposable.
 pub fn classify(sparql: &str) -> Option<ParClass> {
     let query = Query::parse(sparql, None).ok()?;
+    // A mergeable grouped non-COUNT aggregate is an order-insensitive set result.
+    if plan_group_aggregate(&query).is_some() {
+        return Some(ParClass::Aggregate);
+    }
     Some(match plan(&query)? {
         Merge::Concat { .. } => ParClass::Rows,
         Merge::SumCount | Merge::OrAsk | Merge::GroupCount { .. } => ParClass::Aggregate,
     })
+}
+
+/// True iff `sparql` contains a `SUM` or `AVG` aggregate anywhere — the *order-
+/// sensitive* aggregates, since IEEE-754 addition is non-associative for
+/// `xsd:double`/`xsd:float` (summing the same values in a different order can differ
+/// in the last bit). A second in-memory copy of the data iterates quads in a
+/// different order than the persistent store, so a `SUM`/`AVG` over doubles evaluated
+/// on the copy can differ from the persistent store's own result in the last ULP.
+///
+/// The mirror uses this to keep its **byte-identical** guarantee: such queries are
+/// declined by the full in-memory copy so the persistent store answers them itself.
+/// `MIN`/`MAX`/`COUNT` are order-independent and unaffected; grouped int/decimal
+/// `SUM`/`AVG` are served exactly (and in parallel) by the subject shards *before* the
+/// full copy is consulted, so this only defers the `SUM`/`AVG` shapes the shards do
+/// not decompose (global, computed-expression, or otherwise complex ones).
+pub fn has_sum_or_avg(sparql: &str) -> bool {
+    let Ok(query) = Query::parse(sparql, None) else {
+        return false;
+    };
+    let pattern = match &query {
+        Query::Select { pattern, .. }
+        | Query::Construct { pattern, .. }
+        | Query::Describe { pattern, .. }
+        | Query::Ask { pattern, .. } => pattern,
+    };
+    pattern_has_sum_or_avg(pattern)
+}
+
+/// Recursively search a graph pattern for a `SUM`/`AVG` aggregate. Aggregates live
+/// only in `Group` nodes, reached through the standard container patterns.
+fn pattern_has_sum_or_avg(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Group {
+            inner, aggregates, ..
+        } => {
+            aggregates.iter().any(|(_, a)| {
+                matches!(
+                    a,
+                    AggregateExpression::FunctionCall {
+                        name: AggregateFunction::Sum | AggregateFunction::Avg,
+                        ..
+                    }
+                )
+            }) || pattern_has_sum_or_avg(inner)
+        }
+        GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::Filter { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Service { inner, .. }
+        | GraphPattern::Graph { inner, .. } => pattern_has_sum_or_avg(inner),
+        GraphPattern::Join { left, right }
+        | GraphPattern::LeftJoin { left, right, .. }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right } => {
+            pattern_has_sum_or_avg(left) || pattern_has_sum_or_avg(right)
+        }
+        // Bgp / Path / Values carry no aggregates.
+        _ => false,
+    }
 }
 
 /// Per-shard partial result, shaped by the merge strategy.
@@ -643,6 +754,415 @@ fn subject_local(patterns: &[TriplePattern]) -> bool {
     true
 }
 
+// ─── Mergeable grouped non-COUNT aggregates (SUM / MIN / MAX / AVG) ──────────────
+//
+// A more general grouped path than `GroupCount`. `SUM`/`MIN`/`MAX`/`AVG` over
+// subject shards are decomposable when the per-shard partials are merged exactly the
+// way the engine itself would — so the merge is *done by the engine*: each shard
+// computes partials (`AVG(?v)` → `SUM(?v)` + `COUNT(?v)`; the others directly), the
+// partials are materialised into a throwaway in-memory store, and one final
+// aggregation query re-merges them (`SUM(sum)/SUM(cnt)` for AVG, `SUM`/`MIN`/`MAX`
+// for the rest). Because Oxigraph's `AVG` is byte-identical to `SUM/COUNT` and
+// integer/decimal addition is exact and associative, the result is identical to
+// single-store evaluation.
+//
+// The one exception is IEEE-754: `SUM`/`AVG` over `xsd:double`/`xsd:float` is
+// non-associative — summing per-shard partials in a different order can differ in the
+// last bit — so when any summed partial is double/float the decomposition is DECLINED
+// at runtime (`run_group_aggregate` returns `Ok(None)`) and the caller falls back to
+// the unsharded copy. `MIN`/`MAX` are order-independent (min-of-mins = global min
+// under SPARQL's total order) and pass the selected term through unchanged, so they
+// decompose for every type, doubles included.
+
+/// `xsd:double`/`xsd:float`: datatypes whose summation is not associative, so a
+/// cross-shard `SUM`/`AVG` merge is not bit-exact and must fall back.
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+/// Predicate base for the materialised partial columns (throwaway merge store).
+const GACOL: &str = "http://ots.invalid/gacol/";
+
+/// How one output column of a mergeable grouped aggregate is produced from the
+/// per-shard partials.
+#[derive(Clone)]
+enum AggCol {
+    /// A group key — passes through unchanged.
+    Key(Variable),
+    /// `COUNT` or `SUM`: the global value is the SUM of the per-shard partials.
+    SumOf { out: Variable, partial: Variable },
+    /// `MIN`: the MIN of the per-shard partials.
+    MinOf { out: Variable, partial: Variable },
+    /// `MAX`: the MAX of the per-shard partials.
+    MaxOf { out: Variable, partial: Variable },
+    /// `AVG`: total SUM / total COUNT (Oxigraph's AVG ≡ SUM/COUNT, bit-for-bit).
+    AvgOf {
+        out: Variable,
+        sum: Variable,
+        cnt: Variable,
+    },
+}
+
+/// A plan for decomposing a mergeable grouped aggregate across subject shards.
+struct GroupAggPlan {
+    /// Group-by key variables (also the leading columns of the partial query).
+    keys: Vec<Variable>,
+    /// The grouped pattern (the WHERE), reused verbatim per shard.
+    group_inner: GraphPattern,
+    /// Per-shard partial aggregates: `(binding var, aggregate)`.
+    partials: Vec<(Variable, AggregateExpression)>,
+    /// The partial query's projection — `keys` then every partial var, in order.
+    partial_proj: Vec<Variable>,
+    /// Output columns, in the original projection order.
+    outputs: Vec<AggCol>,
+    /// Partial vars carrying a `SUM` (a `SUM` aggregate, or an `AVG`'s sum half) —
+    /// the ones whose values must not be `xsd:double`/`float` for an exact merge.
+    sum_partials: Vec<Variable>,
+}
+
+/// Fresh internal variable for a partial aggregate column.
+fn agg_var(n: usize) -> Variable {
+    Variable::new_unchecked(format!("__pa{n}"))
+}
+
+/// Append a `(fresh var, FunctionCall)` partial and return the fresh var.
+fn push_partial(
+    partials: &mut Vec<(Variable, AggregateExpression)>,
+    next: &mut usize,
+    name: AggregateFunction,
+    arg: &Expression,
+) -> Variable {
+    let v = agg_var(*next);
+    *next += 1;
+    partials.push((
+        v.clone(),
+        AggregateExpression::FunctionCall {
+            name,
+            expr: arg.clone(),
+            distinct: false,
+        },
+    ));
+    v
+}
+
+/// Classify a mergeable `GROUP BY` carrying at least one `SUM`/`MIN`/`MAX`/`AVG`
+/// (alongside any `COUNT`s) — the shape `GroupCount` deliberately rejects. Returns a
+/// plan, or `None` for anything not provably mergeable: a distinct aggregate,
+/// `GROUP_CONCAT`/`SAMPLE`, an aggregate over a computed expression (only a plain
+/// variable, or `COUNT(*)`, is taken), a non-projected key, or a non-shard-local
+/// pattern. A statically-accepted plan can still be DECLINED at runtime if it sums
+/// doubles (see [`rows_have_double`]).
+fn plan_group_aggregate(query: &Query) -> Option<GroupAggPlan> {
+    use std::collections::{HashMap, HashSet};
+
+    let Query::Select { pattern, .. } = query else {
+        return None;
+    };
+    // Unwrap to the projection variables and the node directly below Project.
+    let (proj_vars, mut node): (&[Variable], &GraphPattern) = match pattern {
+        GraphPattern::Project { inner, variables } => (variables, inner),
+        GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
+            match inner.as_ref() {
+                GraphPattern::Project { inner, variables } => (variables, inner),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    // Walk the Extend chain (internal aggregate var → user name), reach the Group.
+    let mut alias: HashMap<String, String> = HashMap::new();
+    let (keys, aggregates, group_inner) = loop {
+        match node {
+            GraphPattern::Extend {
+                inner,
+                variable,
+                expression,
+            } => {
+                match expression {
+                    Expression::Variable(v) => {
+                        alias.insert(variable.as_str().to_string(), v.as_str().to_string());
+                    }
+                    _ => return None, // computed expression over an aggregate
+                }
+                node = inner;
+            }
+            GraphPattern::Group {
+                inner,
+                variables,
+                aggregates,
+            } => break (variables, aggregates, inner),
+            _ => return None,
+        }
+    };
+    if keys.is_empty() || !shard_local_rows(group_inner) {
+        return None;
+    }
+    let agg_by_internal: HashMap<&str, &AggregateExpression> =
+        aggregates.iter().map(|(v, a)| (v.as_str(), a)).collect();
+    let key_set: HashSet<&str> = keys.iter().map(|v| v.as_str()).collect();
+
+    let mut partials: Vec<(Variable, AggregateExpression)> = Vec::new();
+    let mut outputs: Vec<AggCol> = Vec::new();
+    let mut sum_partials: Vec<Variable> = Vec::new();
+    let mut next = 0usize;
+    let mut has_non_count = false;
+
+    for pv in proj_vars {
+        if key_set.contains(pv.as_str()) {
+            outputs.push(AggCol::Key(pv.clone()));
+            continue;
+        }
+        // A non-key column must alias an aggregate the Group binds.
+        let internal = alias.get(pv.as_str())?;
+        match *agg_by_internal.get(internal.as_str())? {
+            AggregateExpression::CountSolutions { distinct: false } => {
+                let p = agg_var(next);
+                next += 1;
+                partials.push((
+                    p.clone(),
+                    AggregateExpression::CountSolutions { distinct: false },
+                ));
+                outputs.push(AggCol::SumOf {
+                    out: pv.clone(),
+                    partial: p,
+                });
+            }
+            AggregateExpression::FunctionCall {
+                name,
+                expr: Expression::Variable(arg),
+                distinct: false,
+            } => {
+                // Only a plain-variable argument (keeps the partial query simple and
+                // the aggregated value bound by the required shard-local pattern).
+                let arg = Expression::Variable(arg.clone());
+                match name {
+                    AggregateFunction::Count => {
+                        let p =
+                            push_partial(&mut partials, &mut next, AggregateFunction::Count, &arg);
+                        outputs.push(AggCol::SumOf {
+                            out: pv.clone(),
+                            partial: p,
+                        });
+                    }
+                    AggregateFunction::Sum => {
+                        let p =
+                            push_partial(&mut partials, &mut next, AggregateFunction::Sum, &arg);
+                        sum_partials.push(p.clone());
+                        outputs.push(AggCol::SumOf {
+                            out: pv.clone(),
+                            partial: p,
+                        });
+                        has_non_count = true;
+                    }
+                    AggregateFunction::Min => {
+                        let p =
+                            push_partial(&mut partials, &mut next, AggregateFunction::Min, &arg);
+                        outputs.push(AggCol::MinOf {
+                            out: pv.clone(),
+                            partial: p,
+                        });
+                        has_non_count = true;
+                    }
+                    AggregateFunction::Max => {
+                        let p =
+                            push_partial(&mut partials, &mut next, AggregateFunction::Max, &arg);
+                        outputs.push(AggCol::MaxOf {
+                            out: pv.clone(),
+                            partial: p,
+                        });
+                        has_non_count = true;
+                    }
+                    AggregateFunction::Avg => {
+                        let s =
+                            push_partial(&mut partials, &mut next, AggregateFunction::Sum, &arg);
+                        let c =
+                            push_partial(&mut partials, &mut next, AggregateFunction::Count, &arg);
+                        sum_partials.push(s.clone());
+                        outputs.push(AggCol::AvgOf {
+                            out: pv.clone(),
+                            sum: s,
+                            cnt: c,
+                        });
+                        has_non_count = true;
+                    }
+                    _ => return None, // GroupConcat, Sample
+                }
+            }
+            _ => return None, // distinct aggregate, or non-variable argument
+        }
+    }
+
+    // Every group key must be projected (so the merge can group on it), and there
+    // must be a non-COUNT aggregate (pure COUNT goes through the lighter path).
+    let projected_keys = outputs
+        .iter()
+        .filter(|o| matches!(o, AggCol::Key(_)))
+        .count();
+    if projected_keys != keys.len() || !has_non_count {
+        return None;
+    }
+
+    let mut partial_proj = keys.clone();
+    partial_proj.extend(partials.iter().map(|(v, _)| v.clone()));
+
+    Some(GroupAggPlan {
+        keys: keys.clone(),
+        group_inner: group_inner.as_ref().clone(),
+        partials,
+        partial_proj,
+        outputs,
+        sum_partials,
+    })
+}
+
+/// Serialise the per-shard partial query from the plan, reusing the original
+/// `FROM`/base IRI. Built from the algebra (not string surgery) so the WHERE
+/// round-trips exactly. spargebra serialises `Project{keys+partials, Group{…}}` as an
+/// outer pass-through `SELECT` over the grouping subquery, e.g.
+/// `SELECT ?t ?__pa0 ?__pa1 FROM <g> WHERE { {SELECT (SUM(?a) AS ?__pa0)
+/// (COUNT(?a) AS ?__pa1) ?t WHERE { <inner> } GROUP BY ?t} }` — valid SPARQL whose
+/// columns are exactly `partial_proj`.
+fn build_partial_query(orig: &Query, plan: &GroupAggPlan) -> Option<String> {
+    let Query::Select {
+        dataset, base_iri, ..
+    } = orig
+    else {
+        return None;
+    };
+    let group = GraphPattern::Group {
+        inner: Box::new(plan.group_inner.clone()),
+        variables: plan.keys.clone(),
+        aggregates: plan.partials.clone(),
+    };
+    let project = GraphPattern::Project {
+        inner: Box::new(group),
+        variables: plan.partial_proj.clone(),
+    };
+    let q = Query::Select {
+        dataset: dataset.clone(),
+        pattern: project,
+        base_iri: base_iri.clone(),
+    };
+    Some(q.to_string())
+}
+
+/// Run the partial query on one shard, collecting each solution's values in
+/// `partial_proj` (key then partial) column order.
+fn run_partial_shard(
+    store: &Store,
+    sparql: &str,
+    proj: &[Variable],
+    options: &QueryOptions,
+) -> Result<Vec<Vec<Option<Term>>>, String> {
+    match store
+        .query_opt(sparql, options.clone())
+        .map_err(|e| e.to_string())?
+    {
+        QueryResults::Solutions(sols) => collect_rows(sols, proj),
+        _ => Err("group-aggregate partial query did not return solutions".into()),
+    }
+}
+
+/// True if any summed partial (a `SUM` aggregate or an `AVG`'s sum half) is
+/// `xsd:double`/`xsd:float` — values whose cross-shard summation is not bit-exact, so
+/// the decomposition must be declined and the caller uses the unsharded copy.
+fn rows_have_double(rows: &[Vec<Option<Term>>], plan: &GroupAggPlan) -> bool {
+    let sum_idx: Vec<usize> = plan
+        .sum_partials
+        .iter()
+        .filter_map(|sp| plan.partial_proj.iter().position(|v| v == sp))
+        .collect();
+    for row in rows {
+        for &i in &sum_idx {
+            if let Some(Term::Literal(lit)) = row.get(i).and_then(|c| c.as_ref()) {
+                let dt = lit.datatype().as_str();
+                if dt == XSD_DOUBLE || dt == XSD_FLOAT {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Merge per-shard partial rows by materialising them into a throwaway in-memory
+/// store and running the final aggregation ([`build_merge_query`]) over them — so the
+/// engine itself does every sum/division/min/max, byte-for-byte as single-store would.
+fn merge_group_agg(rows: &[Vec<Option<Term>>], plan: &GroupAggPlan) -> Result<ParAnswer, String> {
+    let store = Store::new().map_err(|e| e.to_string())?;
+    let mut quads: Vec<Quad> = Vec::with_capacity(rows.len() * plan.partial_proj.len());
+    for (ri, row) in rows.iter().enumerate() {
+        let subj = BlankNode::new_unchecked(format!("r{ri}"));
+        for (ci, cell) in row.iter().enumerate() {
+            if let Some(term) = cell {
+                quads.push(Quad::new(
+                    subj.clone(),
+                    NamedNode::new_unchecked(format!("{GACOL}{ci}")),
+                    term.clone(),
+                    GraphName::DefaultGraph,
+                ));
+            }
+        }
+    }
+    store
+        .bulk_loader()
+        .load_quads(quads)
+        .map_err(|e| e.to_string())?;
+    let merge_sparql = build_merge_query(plan);
+    match store.query(&merge_sparql).map_err(|e| e.to_string())? {
+        QueryResults::Solutions(sols) => {
+            let variables: Vec<Variable> = sols.variables().to_vec();
+            let rows = collect_rows(sols, &variables)?;
+            Ok(ParAnswer::Solutions { variables, rows })
+        }
+        _ => Err("group-aggregate merge did not return solutions".into()),
+    }
+}
+
+/// The final aggregation query over the materialised partials. Each partial row is a
+/// blank node with one `<…/gacol/i>` triple per bound column; this groups by the key
+/// columns and re-aggregates: `SUM` for COUNT/SUM, `MIN`/`MAX` direct,
+/// `SUM(sum)/SUM(cnt)` for AVG. The SELECT uses the original output names and order.
+fn build_merge_query(plan: &GroupAggPlan) -> String {
+    let where_parts: Vec<String> = plan
+        .partial_proj
+        .iter()
+        .enumerate()
+        .map(|(i, v)| format!("<{GACOL}{i}> ?{}", v.as_str()))
+        .collect();
+    let select_items: Vec<String> = plan
+        .outputs
+        .iter()
+        .map(|o| match o {
+            AggCol::Key(v) => format!("?{}", v.as_str()),
+            AggCol::SumOf { out, partial } => {
+                format!("(SUM(?{}) AS ?{})", partial.as_str(), out.as_str())
+            }
+            AggCol::MinOf { out, partial } => {
+                format!("(MIN(?{}) AS ?{})", partial.as_str(), out.as_str())
+            }
+            AggCol::MaxOf { out, partial } => {
+                format!("(MAX(?{}) AS ?{})", partial.as_str(), out.as_str())
+            }
+            AggCol::AvgOf { out, sum, cnt } => format!(
+                "(SUM(?{}) / SUM(?{}) AS ?{})",
+                sum.as_str(),
+                cnt.as_str(),
+                out.as_str()
+            ),
+        })
+        .collect();
+    let group_by: Vec<String> = plan
+        .keys
+        .iter()
+        .map(|v| format!("?{}", v.as_str()))
+        .collect();
+    format!(
+        "SELECT {} WHERE {{ ?r {} . }} GROUP BY {}",
+        select_items.join(" "),
+        where_parts.join(" ; "),
+        group_by.join(" ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,7 +1351,7 @@ mod tests {
 
     fn assert_not_decomposable(sparql: &str) {
         let ps = ParallelStore::new(4);
-        ps.load_quads(persons(50).into_iter()).unwrap();
+        ps.load_quads(persons(50)).unwrap();
         assert!(
             ps.query(sparql).unwrap().is_none(),
             "must NOT be decomposed (could be wrong across subject shards): {sparql}"
@@ -847,21 +1367,149 @@ mod tests {
     }
 
     #[test]
-    fn grouped_aggregate_is_rejected() {
-        // GROUP BY + AVG cannot be merged by summing (avg of avgs ≠ overall avg);
-        // only non-distinct COUNT is mergeable, so AVG stays single-store.
-        assert_not_decomposable(
+    fn grouped_avg_decomposes() {
+        // AVG per group ≡ SUM/COUNT; the per-shard (SUM, COUNT) merge is byte-
+        // identical for xsd:integer/decimal (exact, associative addition). Ages are
+        // integers → the AVG is a decimal, exercising integer→decimal division.
+        let q = persons(500);
+        assert_matches(
+            &q,
             "SELECT ?t (AVG(?a) AS ?avg) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a } GROUP BY ?t",
         );
     }
 
     #[test]
-    fn grouped_sum_and_distinct_count_are_rejected() {
-        // SUM/MIN/MAX would need SPARQL's numeric-promotion rules to merge, and a
-        // grouped COUNT(DISTINCT) is not sum-safe across shards — all rejected.
-        assert_not_decomposable(
-            "SELECT ?t (SUM(?a) AS ?s) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a } GROUP BY ?t",
+    fn grouped_sum_min_max_decompose() {
+        let q = persons(500);
+        for agg in ["SUM", "MIN", "MAX"] {
+            assert_matches(
+                &q,
+                &format!(
+                    "SELECT ?t ({agg}(?a) AS ?v) WHERE {{ ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a }} GROUP BY ?t"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn grouped_mixed_aggregates_decompose() {
+        // COUNT + SUM + MIN + MAX + AVG together in one grouped query, all merged.
+        let q = persons(500);
+        assert_matches(
+            &q,
+            "SELECT ?t (COUNT(*) AS ?c) (SUM(?a) AS ?s) (MIN(?a) AS ?lo) (MAX(?a) AS ?hi) (AVG(?a) AS ?avg) \
+             WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/age> ?a } GROUP BY ?t",
         );
+    }
+
+    #[test]
+    fn grouped_avg_sum_decimal_decompose() {
+        // xsd:decimal measure: AVG/SUM over decimals must stay byte-identical (exact
+        // fixed-point addition is associative, so the cross-shard merge matches).
+        let ex = "http://example.org/";
+        let mut quads = Vec::new();
+        for i in 0..300usize {
+            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            quads.push(Quad::new(
+                s.clone(),
+                iri(&format!("{ex}type")),
+                Term::NamedNode(iri(&format!("{ex}T{}", i % 7))),
+                GraphName::DefaultGraph,
+            ));
+            quads.push(Quad::new(
+                s,
+                iri(&format!("{ex}score")),
+                Term::Literal(Literal::new_typed_literal(
+                    format!("{}.{:02}", i % 50, i % 100),
+                    oxrdf::vocab::xsd::DECIMAL,
+                )),
+                GraphName::DefaultGraph,
+            ));
+        }
+        assert_matches(
+            &quads,
+            "SELECT ?t (AVG(?v) AS ?a) (SUM(?v) AS ?s) WHERE { ?x <http://example.org/type> ?t . ?x <http://example.org/score> ?v } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn grouped_min_max_strings_decompose() {
+        // MIN/MAX are order-independent (min-of-mins) and pass the term through, so
+        // they decompose for non-numeric types too.
+        let ex = "http://example.org/";
+        let mut quads = Vec::new();
+        for i in 0..200usize {
+            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            quads.push(Quad::new(
+                s.clone(),
+                iri(&format!("{ex}type")),
+                Term::NamedNode(iri(&format!("{ex}T{}", i % 5))),
+                GraphName::DefaultGraph,
+            ));
+            quads.push(Quad::new(
+                s,
+                iri(&format!("{ex}label")),
+                Term::Literal(Literal::new_simple_literal(format!(
+                    "label-{:04}",
+                    (i * 7) % 200
+                ))),
+                GraphName::DefaultGraph,
+            ));
+        }
+        assert_matches(
+            &quads,
+            "SELECT ?t (MIN(?l) AS ?lo) (MAX(?l) AS ?hi) WHERE { ?x <http://example.org/type> ?t . ?x <http://example.org/label> ?l } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn grouped_double_sum_avg_declined_minmax_ok() {
+        // xsd:double SUM is IEEE-754 non-associative across shards, so SUM/AVG must be
+        // DECLINED at runtime (→ None; the caller uses the unsharded copy). MIN/MAX
+        // over doubles is order-independent and still decomposes.
+        let ex = "http://example.org/";
+        let mut quads = Vec::new();
+        for i in 0..200usize {
+            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            quads.push(Quad::new(
+                s.clone(),
+                iri(&format!("{ex}type")),
+                Term::NamedNode(iri(&format!("{ex}T{}", i % 5))),
+                GraphName::DefaultGraph,
+            ));
+            quads.push(Quad::new(
+                s,
+                iri(&format!("{ex}m")),
+                Term::Literal(Literal::new_typed_literal(
+                    format!("{}.5e0", i),
+                    oxrdf::vocab::xsd::DOUBLE,
+                )),
+                GraphName::DefaultGraph,
+            ));
+        }
+        let ps = ParallelStore::new(4);
+        ps.load_quads(quads.iter().cloned()).unwrap();
+        for agg in ["AVG", "SUM"] {
+            assert!(
+                ps.query(&format!(
+                    "SELECT ?t ({agg}(?v) AS ?a) WHERE {{ ?x <http://example.org/type> ?t . ?x <http://example.org/m> ?v }} GROUP BY ?t"
+                ))
+                .unwrap()
+                .is_none(),
+                "{agg} over xsd:double must be declined (IEEE-754 non-associative)"
+            );
+        }
+        // MIN/MAX over the same doubles must still decompose, exactly.
+        assert_matches(
+            &quads,
+            "SELECT ?t (MIN(?v) AS ?lo) (MAX(?v) AS ?hi) WHERE { ?x <http://example.org/type> ?t . ?x <http://example.org/m> ?v } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn grouped_distinct_count_is_rejected() {
+        // A grouped COUNT(DISTINCT) is not sum-safe across shards (a value can recur
+        // in several shards), so it stays single-store.
         assert_not_decomposable(
             "SELECT ?t (COUNT(DISTINCT ?n) AS ?c) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/name> ?n } GROUP BY ?t",
         );

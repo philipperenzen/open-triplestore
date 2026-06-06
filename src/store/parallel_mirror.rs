@@ -7,22 +7,29 @@
 //! lazily after writes (a dirty flag, like `SpatialIndex`):
 //!
 //! 1. **Subject-hash shards** — for a *decomposable aggregate* (global non-distinct
-//!    `COUNT`/`SUM`, subject-star join `COUNT`, row-local `FILTER` `COUNT`, mergeable
-//!    `GROUP BY`, `ASK`, classified conservatively by [`opengraph::parallel`]) the
-//!    query runs on `N` shards concurrently (Rayon) and the partials merge, turning a
-//!    single-core scan into an `N`-core one ([`Self::try_query`]).
+//!    `COUNT`, subject-star join `COUNT`, row-local `FILTER` `COUNT`, a mergeable
+//!    `GROUP BY` — `COUNT` and, via a per-shard rewrite re-merged through the engine,
+//!    `SUM`/`MIN`/`MAX`/`AVG` — and `ASK`, classified conservatively by
+//!    [`opengraph::parallel`]) the query runs on `N` shards concurrently (Rayon) and
+//!    the partials merge, turning a single-core scan into an `N`-core one
+//!    ([`Self::try_query`]).
 //! 2. **An unsharded full copy** — for everything the shards can't decompose (joins,
-//!    `GROUP BY` with non-`COUNT` aggregates, large `SELECT`s, `CONSTRUCT`), the query
-//!    runs against a single in-memory `Store` ([`Self::try_full_query`]). This is the
-//!    bigger surprise win: the persistent (RocksDB) store answers a multi-pattern
-//!    join with one point lookup *per result row*, so a 2-way join over 500k triples
-//!    that takes ~150 ms in RAM takes **~6 s** on RocksDB. Serving it from the full
-//!    copy closes that ~40x gap.
+//!    large `SELECT`s, `COUNT(DISTINCT)`, ordered/limited results, `CONSTRUCT`), the
+//!    query runs against a single in-memory `Store` ([`Self::try_full_query`]). This
+//!    is the bigger surprise win: the persistent (RocksDB) store answers a
+//!    multi-pattern join with one point lookup *per result row*, so a 2-way join over
+//!    500k triples that takes ~150 ms in RAM takes **~6 s** on RocksDB. Serving it
+//!    from the full copy closes that ~40x gap.
 //!
 //! Both copies are faithful mirrors evaluated by the same engine over the same
 //! quads, so results are byte-identical to single-store evaluation — parallelism and
-//! the RAM copy are never traded for correctness. Anything not provably safe, or a
-//! shard error, falls back; over the cap, both copies stay off and RocksDB answers.
+//! the RAM copy are never traded for correctness. The one subtlety is IEEE-754:
+//! `SUM`/`AVG` over `xsd:double`/`float` is non-associative, and neither a shard
+//! merge nor a re-ordered copy can reproduce the persistent store's exact last bit,
+//! so those are declined by **both** layers (the shards by datatype at runtime, the
+//! full copy via [`opengraph::parallel::has_sum_or_avg`]) and the persistent store
+//! answers them itself — still byte-identical. Anything not provably safe, or a shard
+//! error, falls back; over the cap, both copies stay off and RocksDB answers.
 //!
 //! ## Why it is bounded
 //!
@@ -57,9 +64,9 @@ struct Inner {
     /// Used for decomposable aggregates (parallel across cores).
     shards: RwLock<Option<Arc<ParallelStore>>>,
     /// An **unsharded** in-memory copy of the whole store, used for everything the
-    /// shards can't decompose (joins, `GROUP BY` with non-`COUNT` aggregates, large
-    /// `SELECT`s). RocksDB answers a multi-pattern join with one point lookup per
-    /// row — ~40× slower than the same join in RAM — so serving these reads from
+    /// shards can't decompose (joins, `COUNT(DISTINCT)`, ordered/limited results,
+    /// large `SELECT`s). RocksDB answers a multi-pattern join with one point lookup
+    /// per row — ~40× slower than the same join in RAM — so serving these reads from
     /// this copy is the single biggest win for non-aggregate queries.
     full: RwLock<Option<Arc<Store>>>,
     /// Set on every write; the next query rebuilds before using either copy.
@@ -202,6 +209,15 @@ impl ParallelMirror {
         F: FnOnce() -> QueryOptions,
     {
         if !self.inner.enabled {
+            return None;
+        }
+        // Fidelity: `SUM`/`AVG` over `xsd:double`/`float` is IEEE-754 non-associative,
+        // and the full copy iterates quads in a different order than the persistent
+        // store, so it could differ in the last ULP. Decline these so the persistent
+        // store answers them itself — byte-identical to single-store evaluation.
+        // (Grouped int/decimal `SUM`/`AVG` are already served exactly by the shards in
+        // [`Self::try_query`] before this point; this only defers global/complex ones.)
+        if parallel::has_sum_or_avg(sparql) {
             return None;
         }
         self.get_or_build(store)?; // ensures both copies are built (None if over cap)

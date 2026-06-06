@@ -15,6 +15,8 @@ use oxigraph::sparql::QueryResults;
 const G: &str = "http://example.org/g";
 const EX: &str = "http://example.org/";
 const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DEC: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 
 /// `[from, to)` persons (name/age/type) as N-Quads in graph `graph`.
 fn persons_range(from: usize, to: usize, graph: &str) -> String {
@@ -37,6 +39,25 @@ fn persons_range(from: usize, to: usize, graph: &str) -> String {
 
 fn persons(n: usize, graph: &str) -> String {
     persons_range(0, n, graph)
+}
+
+/// `n` persons, each with a `type` (10 groups) and a typed `measure` literal whose
+/// lexical form is `lit(i)` and datatype is `datatype`, in `graph`. Used to exercise
+/// grouped non-COUNT aggregates over xsd:decimal (exact, decomposed) and xsd:double
+/// (IEEE-754, declined → full copy).
+fn persons_measure(n: usize, graph: &str, datatype: &str, lit: impl Fn(usize) -> String) -> String {
+    let mut s = String::new();
+    for i in 0..n {
+        s.push_str(&format!(
+            "<{EX}p{i}> <{EX}type> <{EX}Type{}> <{graph}> .\n",
+            i % 10
+        ));
+        s.push_str(&format!(
+            "<{EX}p{i}> <{EX}m> \"{}\"^^<{datatype}> <{graph}> .\n",
+            lit(i)
+        ));
+    }
+    s
 }
 
 fn store(enabled: bool, shards: usize, cap: usize, data: &str) -> TripleStore {
@@ -148,6 +169,19 @@ fn persons_default(n: usize) -> String {
     s
 }
 
+/// Persons in the default graph with a `type` (10 groups) and integer `age`.
+fn persons_default_typed(n: usize) -> String {
+    let mut s = String::new();
+    for i in 0..n {
+        s.push_str(&format!("<{EX}p{i}> <{EX}type> <{EX}Type{}> .\n", i % 10));
+        s.push_str(&format!(
+            "<{EX}p{i}> <{EX}age> \"{}\"^^<{XSD_INT}> .\n",
+            18 + i % 65
+        ));
+    }
+    s
+}
+
 #[test]
 fn parity_default_graph_join_count() {
     // Data loaded into the default graph (no FROM) — the common single-dataset case.
@@ -177,22 +211,10 @@ fn parity_group_by_count() {
 
 #[test]
 fn full_mirror_serves_nondecomposable_reads() {
-    // Joins, GROUP BY with non-COUNT aggregates, ordered/limited row results — none
-    // shard-decomposable — are served by the unsharded in-memory full mirror and
-    // must equal the single store exactly (same engine + data, just in RAM).
+    // Joins, COUNT(DISTINCT), ordered/limited row results — none shard-decomposable —
+    // are served by the unsharded in-memory full mirror and must equal the single
+    // store exactly (same engine + data, just in RAM).
     let data = persons(400, G);
-    assert_parity(
-        &data,
-        &format!(
-            "SELECT ?t (AVG(?a) AS ?avg) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
-        ),
-    );
-    assert_parity(
-        &data,
-        &format!(
-            "SELECT ?t (SUM(?a) AS ?s) (MIN(?a) AS ?mn) (MAX(?a) AS ?mx) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
-        ),
-    );
     assert_parity(
         &data,
         &format!("SELECT (COUNT(DISTINCT ?t) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t }}"),
@@ -201,6 +223,85 @@ fn full_mirror_serves_nondecomposable_reads() {
         &data,
         &format!(
             "SELECT ?n ?a FROM <{G}> WHERE {{ ?s <{EX}name> ?n . ?s <{EX}age> ?a }} ORDER BY ?a ?n LIMIT 40"
+        ),
+    );
+}
+
+#[test]
+fn parity_group_by_noncount_aggregates() {
+    // AVG/SUM/MIN/MAX grouped over xsd:integer now decompose across shards (the
+    // engine-driven merge: AVG→SUM/COUNT, others direct). The sharded result must be
+    // byte-identical to single-store, including the mixed-aggregate query.
+    let data = persons(600, G);
+    for agg in [
+        "AVG(?a) AS ?v",
+        "SUM(?a) AS ?v",
+        "MIN(?a) AS ?v",
+        "MAX(?a) AS ?v",
+    ] {
+        assert_parity(
+            &data,
+            &format!(
+                "SELECT ?t ({agg}) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+            ),
+        );
+    }
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (COUNT(*) AS ?c) (SUM(?a) AS ?s) (MIN(?a) AS ?lo) (MAX(?a) AS ?hi) (AVG(?a) AS ?avg) \
+             FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+        ),
+    );
+    // Also over the default graph (no FROM) — the common single-dataset case.
+    let dg = persons_default_typed(500);
+    assert_parity(
+        &dg,
+        &format!(
+            "SELECT ?t (AVG(?a) AS ?v) WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+        ),
+    );
+}
+
+#[test]
+fn parity_group_by_aggregates_decimal_decomposed() {
+    // xsd:decimal SUM/AVG: exact fixed-point addition is associative, so the
+    // cross-shard merge stays byte-identical to single-store.
+    let data = persons_measure(500, G, XSD_DEC, |i| {
+        format!("{}.{:02}", i % 50, (i * 7) % 100)
+    });
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (AVG(?m) AS ?v) (SUM(?m) AS ?s) (MIN(?m) AS ?lo) (MAX(?m) AS ?hi) \
+             FROM <{G}> WHERE {{ ?x <{EX}type> ?t . ?x <{EX}m> ?m }} GROUP BY ?t"
+        ),
+    );
+}
+
+#[test]
+fn parity_group_by_aggregates_double_falls_back() {
+    // xsd:double SUM/AVG is IEEE-754 non-associative across shards, so the sharded
+    // path DECLINES and the unsharded full copy serves it — the end-to-end answer must
+    // still match single-store exactly. This is the fidelity guarantee for doubles.
+    let data = persons_measure(500, G, XSD_DOUBLE, |i| format!("{}.{}e0", i % 97, i % 10));
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (AVG(?m) AS ?v) FROM <{G}> WHERE {{ ?x <{EX}type> ?t . ?x <{EX}m> ?m }} GROUP BY ?t"
+        ),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (SUM(?m) AS ?s) FROM <{G}> WHERE {{ ?x <{EX}type> ?t . ?x <{EX}m> ?m }} GROUP BY ?t"
+        ),
+    );
+    // MIN/MAX over doubles is order-independent → stays on the sharded path, exact.
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (MIN(?m) AS ?lo) (MAX(?m) AS ?hi) FROM <{G}> WHERE {{ ?x <{EX}type> ?t . ?x <{EX}m> ?m }} GROUP BY ?t"
         ),
     );
 }

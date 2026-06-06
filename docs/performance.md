@@ -250,8 +250,9 @@ backend**, streaming the dataset from an N-Triples file. Wall-clock median
 ¹ `GROUP BY` over a 100M-triple join materialises ~20M intermediate solutions. On
 the earlier 30.9 GiB allocation this OOM'd; with the **54.9 GiB** allocation used
 here (see Reference system) it completes in ~105 s. The other ops are index-only /
-streaming and are unaffected by the size. Decomposing grouped aggregates across
-shards (parallel roadmap) would bring this down further.
+streaming and are unaffected by the size. Grouped-aggregate shard decomposition
+(§3 — `AVG`→merge `SUM`+`COUNT`) brings this down sharply for datasets *within* the
+in-memory mirror cap, but this 100M tier exceeds it and runs on the persistent store.
 
 **Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
 100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
@@ -290,15 +291,17 @@ run (`RATE_LIMIT_DISABLED=1`) so it measures the engine, not the limiter.
 `FILTER` and `GROUP BY`-`COUNT` — the queries the in-memory subject-sharded mirror
 accelerates. Two cases still favour QLever, and it's worth saying why:
 
-* **`GROUP BY` + `AVG` over a join (163 ms).** This shape is *not* shard-
-  decomposable (averaging a value across subjects that span shards), so it runs on
-  the unsharded in-memory full copy (see below). That fixed a brutal regression —
-  on the persistent RocksDB store the same query took **6466 ms**, because RocksDB
-  answers a multi-pattern join with one point lookup *per result row*; in RAM the
-  167k-row join materialises in ~150 ms. QLever's 11 ms comes from **merge joins
-  over sorted permutations** (no per-row lookups) — a storage/evaluator design
-  Oxigraph doesn't share. Parallelising this via the shards (`AVG`→merge
-  `SUM`+`COUNT`) is the next step on the roadmap below.
+* **`GROUP BY` + `AVG` over a join (163 ms — this HTTP figure predates the sharded-
+  `AVG` work).** Originally this ran single-threaded on the unsharded full copy (the
+  163 ms above; it had already fixed a brutal **6466 ms** RocksDB regression, where the
+  store answers a multi-pattern join with one point lookup *per result row*). It now
+  **decomposes across the shards** — each shard computes `SUM`+`COUNT` per group and
+  the partials re-merge through the engine — measured in-process at **137 ms → 13.9 ms
+  (9.9×)** on the 16-shard mirror (§3 below), byte-identical for `xsd:integer`/`decimal`
+  and declined to the persistent store for `xsd:double`/`float`. That puts the live
+  engine compute next to QLever's 11 ms; QLever's edge on the *cold* number is **merge
+  joins over sorted permutations** (no per-row lookups), a storage/evaluator design
+  Oxigraph doesn't share. The HTTP row here will refresh on the next full 3-way run.
 * **`COUNT(DISTINCT)` (45 ms).** Distinct isn't sum-safe across subject shards, so
   it too uses the full copy; QLever's columnar dictionary IDs make distinct counting
   near-free.
@@ -373,13 +376,15 @@ dataset is split into `N` shards by a stable hash of each triple's **subject**,
 and a shard-decomposable query is evaluated on every shard concurrently (Rayon),
 then the partials are merged. Because every triple of a subject co-locates in one
 shard, **subject-star joins, row-local `FILTER`, global non-distinct `COUNT`,
-`GROUP BY` with non-distinct `COUNT`, `ASK` and `DISTINCT`** decompose correctly;
-anything that could join *across* subjects (object→subject joins, property paths,
-grouped `AVG`/`SUM`-style aggregates, `COUNT(DISTINCT)`, `ORDER BY`/`LIMIT`,
-`OPTIONAL`/`UNION`/`MINUS`) is detected and **not** decomposed — the caller falls
-back to single-store evaluation. The classifier is deliberately conservative; a
-test suite asserts every parallel path matches the single-store result *and* that
-unsafe shapes are rejected.
+`GROUP BY` with `COUNT`/`SUM`/`MIN`/`MAX`/`AVG`, `ASK` and `DISTINCT`** decompose
+correctly; anything that could join *across* subjects (object→subject joins, property
+paths, `COUNT(DISTINCT)`, `ORDER BY`/`LIMIT`, `OPTIONAL`/`UNION`/`MINUS`) is detected
+and **not** decomposed — the caller falls back to single-store evaluation. Grouped
+`SUM`/`AVG` over `xsd:double`/`float` is accepted statically but **declined at
+runtime** (IEEE-754 summation is order-dependent, so it would not be bit-identical
+across shards) — `MIN`/`MAX` decompose for every type. The classifier is deliberately
+conservative; a test suite asserts every parallel path matches the single-store result
+*and* that unsafe shapes are rejected.
 
 ![subject-sharded parallel scaling](benchmarks/parallel-scaling.svg)
 
@@ -401,12 +406,15 @@ indexes (`GraphIndex`, `SpatialIndex`), it maintains a two-part in-memory `Paral
 
 * **subject-hash shards** — a decomposable aggregate/`ASK` is answered across shards
   and merged (the speedups in the table below);
-* **an unsharded full copy** — everything the shards can't decompose (joins,
-  `GROUP BY` with non-`COUNT` aggregates, `COUNT(DISTINCT)`, large `SELECT`s,
-  `CONSTRUCT`) runs against it. This is what closed the catastrophic RocksDB join
-  cost: a `GROUP BY`+`AVG` over a join fell from **6466 ms to 163 ms** over HTTP
-  (RocksDB answers a multi-pattern join with one point lookup per result row; in RAM
-  the 167k-row join is ~150 ms — see the Fuseki/QLever comparison above).
+* **an unsharded full copy** — everything the shards can't decompose (joins that
+  return rows, `COUNT(DISTINCT)`, `ORDER BY`/`LIMIT`, large `SELECT`s, `CONSTRUCT`)
+  runs against it. This is what closed the catastrophic RocksDB join cost: a 2-way
+  join `SELECT` over the 167k-row dataset fell from **~6.5 s to ~150 ms** (RocksDB
+  answers a multi-pattern join with one point lookup per result row; in RAM the join
+  materialises in ~150 ms — see the Fuseki/QLever comparison above). The full copy
+  declines `SUM`/`AVG` ([`has_sum_or_avg`](../opengraph/src/parallel.rs)) so a
+  double-precision sum is never computed in a re-ordered copy — the persistent store
+  answers those, byte-identically.
 
 Both copies are faithful mirrors evaluated by the same engine over the same quads, so
 results are identical (a parity suite asserts equality across shard counts,
@@ -423,12 +431,18 @@ in-process, 16-shard mirror, Ryzen 9 7900X3D; median of 9):
 
 | Query (~500k triples, in-process) | single-core | 16-shard mirror | speedup |
 |---|--:|--:|--:|
-| 2-way join `COUNT` | 134 ms | 12.6 ms | **10.6×** |
-| `FILTER` + `COUNT` | 42.4 ms | 4.7 ms | **9.1×** |
-| single-pattern `COUNT` | 31.6 ms | 3.8 ms | **8.4×** |
-| `GROUP BY` + `COUNT` | 41.6 ms | 5.5 ms | **7.6×** |
+| 2-way join `COUNT` | 129 ms | 11.9 ms | **10.8×** |
+| `FILTER` + `COUNT` | 42.2 ms | 4.3 ms | **9.7×** |
+| single-pattern `COUNT` | 31.5 ms | 3.6 ms | **8.8×** |
+| `GROUP BY` + `COUNT` | 35.5 ms | 3.9 ms | **9.1×** |
+| `GROUP BY` + `AVG` (join) | 137 ms | 13.9 ms | **9.9×** |
 
-Reproduce with `cargo bench --bench parallel_live`. (`COUNT(*)` over a full scan is
+The last row is the grouped-aggregate decomposition: `AVG` over a subject-spanning
+join now runs across all shards (`AVG`→per-shard `SUM`+`COUNT`, re-merged through the
+engine) instead of single-threaded on the full copy — **137 ms → 13.9 ms**, byte-
+identical for `xsd:integer`/`decimal` (and declined to the persistent store for
+`xsd:double`/`float`, whose IEEE-754 sum is order-dependent). Reproduce with
+`cargo bench --bench parallel_live`. (`COUNT(*)` over a full scan is
 omitted — the O(1) fast-count index below already answers it in ~2 µs.)
 
 ### Roadmap
@@ -446,19 +460,23 @@ The first two increments — a tested engine capability *and* its wiring — are
 * **✅ Query-result cache** — a repeated deterministic query is an O(1) cache hit
   (sub-ms), invalidated on write, scope-keyed, never caching `RAND`/`NOW`/`UUID`/…
   (see the comparison section). The biggest safe win for warm/repeated traffic.
+* **✅ Parallel grouped non-`COUNT` aggregates** — `GROUP BY` + `SUM`/`MIN`/`MAX`/`AVG`
+  now decomposes across the shards. Each shard computes partials (`AVG(?v)` → per-shard
+  `SUM(?v)`+`COUNT(?v)`; the rest directly), and the partials are re-merged **through
+  the engine itself** — materialised into a throwaway in-memory store over which a
+  final aggregation runs (`SUM(sum)/SUM(cnt)` for `AVG`, `SUM`/`MIN`/`MAX` for the
+  rest). Because Oxigraph's `AVG` is byte-identical to `SUM/COUNT` and integer/decimal
+  addition is exact and associative, the result is **byte-identical** to single-store.
+  *Fidelity guard:* `SUM`/`AVG` over `xsd:double`/`float` is IEEE-754 non-associative —
+  summing per-shard partials in a different order can differ in the last bit — so it is
+  **declined** at runtime (and also declined by the full copy, whose iteration order
+  likewise can't reproduce the persistent store's exact ULP), letting the persistent
+  store answer it byte-identically. `MIN`/`MAX` are order-independent and decompose for
+  every type. (`opengraph::parallel`, gated by the same exhaustive parity sweep as the
+  `COUNT` path.)
 
 Next:
 
-* **Parallel grouped non-`COUNT` aggregates** — decompose `GROUP BY` + `SUM`/`AVG`/
-  `MIN`/`MAX` across the shards to bring the 163 ms cold `GROUP BY`+`AVG` toward the
-  ~10 ms QLever number. **Feasibility confirmed:** Oxigraph's `AVG` is byte-identical
-  to `SUM/COUNT`, so `AVG`→merge `SUM`+`COUNT` is exact for `xsd:integer`/`decimal`.
-  The catch that keeps it a careful follow-up rather than a drop-in: `SUM`/`AVG` over
-  `xsd:double`/`float` is IEEE-754 non-associative, so summing per-shard partials in a
-  different order can differ in the last bit — a *fully* fidelity-preserving version
-  must detect a `double` aggregate at runtime and fall back to the full copy. (The
-  result cache already makes the *repeated* `GROUP BY`+`AVG` sub-ms, so this is a
-  cold-path optimisation.)
 * **Sorted-permutation merge joins** (QLever's edge) would need Oxigraph to expose a
   pluggable evaluator — a larger effort, but it is what separates the ~150 ms in-RAM
   join from QLever's ~10 ms.
@@ -489,10 +507,10 @@ engine over the multi-tenant HTTP stack; Fuseki is TDB2 over HTTP.
 | `GROUP BY` + `AVG` | 268 ms | n/a¹ | 217 ms | 0.8× |
 | `COUNT(DISTINCT)` | 27 ms | n/a¹ | 24 ms | 0.9× |
 
-¹ `GROUP BY` + **`COUNT`** now decomposes (§3 — ~5.5 ms in-process on the 16-shard
-mirror); the `GROUP BY` + `AVG` and `COUNT(DISTINCT)` rows here do **not** yet (they
-need mergeable partial aggregates under SPARQL's numeric rules — on the roadmap), so
-their single-core figures, which already match Fuseki, stand.
+¹ Both `GROUP BY` + **`COUNT`** *and* + **`AVG`** now decompose across the shards
+(§3 — ~3.9 ms and ~13.9 ms in-process on the 16-shard mirror; this table predates the
+sharded-`AVG` work). `COUNT(DISTINCT)` still does not (a value can recur across subject
+shards), so its single-core figure, which already matches Fuseki, stands.
 
 **Reading it honestly.** `COUNT(*)` is now an O(1) index lookup, so it wins
 decisively (26×). For scans/joins the parallel engine wins ~8–9× by using many
