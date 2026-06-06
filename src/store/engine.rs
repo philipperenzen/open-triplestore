@@ -310,6 +310,18 @@ impl TripleStore {
         {
             return Ok(parallel);
         }
+        // In-memory full mirror: everything the shards can't decompose (joins,
+        // grouped non-COUNT aggregates, large SELECTs) is served from an unsharded
+        // RAM copy within the cap. RocksDB answers a multi-pattern join with one
+        // point lookup per row — ~40x slower than the same join in memory — so this
+        // is the biggest win for non-aggregate reads. Identical engine + data, so
+        // results match; `None` (over cap / error) falls through to RocksDB.
+        if let Some(full) = self
+            .parallel_mirror
+            .try_full_query(&self.store, sparql, || self.query_options())
+        {
+            return Ok(full);
+        }
         let opts = self.query_options();
         let results = self.store.query_opt(sparql, opts)?;
         Ok(results)

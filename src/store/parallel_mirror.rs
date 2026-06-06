@@ -1,27 +1,37 @@
-//! In-memory subject-sharded read accelerator over the persistent store.
+//! In-memory read accelerator over the persistent store — two RAM copies of the
+//! data that, within a triple-count cap, serve the live `/sparql` path far faster
+//! than RocksDB.
 //!
-//! `TripleStore` already keeps in-memory derived indexes over its single
-//! persistent Oxigraph store (`GraphIndex`, `SpatialIndex`); this is one more.
-//! A *decomposable aggregate* query (a global non-distinct `COUNT`/`SUM`, a
-//! subject-star join `COUNT`, a row-local `FILTER` `COUNT`, a mergeable `GROUP BY`,
-//! or an `ASK` — classified conservatively by [`opengraph::parallel`]) is
-//! evaluated on `N` subject-hash shards concurrently (Rayon) and merged, turning a
-//! single-core scan into an `N`-core one. Anything the classifier cannot prove
-//! safe — and every row-returning `SELECT` (whose shard-concat order would differ
-//! from the single store) — falls back to single-store evaluation, so the result
-//! is always identical; parallelism is never traded for correctness.
+//! `TripleStore` already keeps in-memory derived indexes over its single persistent
+//! Oxigraph store (`GraphIndex`, `SpatialIndex`); this adds two more, both rebuilt
+//! lazily after writes (a dirty flag, like `SpatialIndex`):
 //!
-//! ## Why a mirror, and why it is bounded
+//! 1. **Subject-hash shards** — for a *decomposable aggregate* (global non-distinct
+//!    `COUNT`/`SUM`, subject-star join `COUNT`, row-local `FILTER` `COUNT`, mergeable
+//!    `GROUP BY`, `ASK`, classified conservatively by [`opengraph::parallel`]) the
+//!    query runs on `N` shards concurrently (Rayon) and the partials merge, turning a
+//!    single-core scan into an `N`-core one ([`Self::try_query`]).
+//! 2. **An unsharded full copy** — for everything the shards can't decompose (joins,
+//!    `GROUP BY` with non-`COUNT` aggregates, large `SELECT`s, `CONSTRUCT`), the query
+//!    runs against a single in-memory `Store` ([`Self::try_full_query`]). This is the
+//!    bigger surprise win: the persistent (RocksDB) store answers a multi-pattern
+//!    join with one point lookup *per result row*, so a 2-way join over 500k triples
+//!    that takes ~150 ms in RAM takes **~6 s** on RocksDB. Serving it from the full
+//!    copy closes that ~40x gap.
 //!
-//! Oxigraph evaluates one query on one thread, so the live `/sparql` path leaves
-//! every other core idle on a large scan/aggregation. Subject-hash sharding gives
-//! true `1/N`-per-core work, but only physical partitioning delivers that — hence
-//! a mirror. It is **gated by a triple-count cap** (default 2M, configurable): the
-//! mirror is never built for a store larger than the cap, so it cannot exhaust
-//! memory on the large/100M tiers — it simply stays disabled and the single store
-//! answers. It is rebuilt lazily after writes (a dirty flag, exactly like
-//! `SpatialIndex`), so a read-heavy analytic workload pays the build once and then
-//! reuses warm shards.
+//! Both copies are faithful mirrors evaluated by the same engine over the same
+//! quads, so results are byte-identical to single-store evaluation — parallelism and
+//! the RAM copy are never traded for correctness. Anything not provably safe, or a
+//! shard error, falls back; over the cap, both copies stay off and RocksDB answers.
+//!
+//! ## Why it is bounded
+//!
+//! The two copies cost ~2x the dataset in RAM, so the accelerator is **gated by a
+//! triple-count cap** (default 2M, `OTS_PARALLEL_QUERY_MAX_TRIPLES`): above it the
+//! mirror is never built — it stays disabled and the persistent store answers,
+//! leaving the large/100M tiers (data > RAM, the reason the store is persistent at
+//! all) on their normal path. A read-heavy workload within the cap pays the one-time
+//! build after a write, then reuses warm copies.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -43,9 +53,16 @@ pub struct ParallelMirror {
 }
 
 struct Inner {
-    /// The warm shards, or `None` before the first build / when over the cap.
+    /// The warm subject-hash shards, or `None` before the first build / over cap.
+    /// Used for decomposable aggregates (parallel across cores).
     shards: RwLock<Option<Arc<ParallelStore>>>,
-    /// Set on every write; the next aggregate query rebuilds before using shards.
+    /// An **unsharded** in-memory copy of the whole store, used for everything the
+    /// shards can't decompose (joins, `GROUP BY` with non-`COUNT` aggregates, large
+    /// `SELECT`s). RocksDB answers a multi-pattern join with one point lookup per
+    /// row — ~40× slower than the same join in RAM — so serving these reads from
+    /// this copy is the single biggest win for non-aggregate queries.
+    full: RwLock<Option<Arc<Store>>>,
+    /// Set on every write; the next query rebuilds before using either copy.
     dirty: AtomicBool,
     /// Serializes (re)builds so concurrent queries don't each rebuild.
     build_lock: Mutex<()>,
@@ -88,6 +105,7 @@ impl ParallelMirror {
         Self {
             inner: Arc::new(Inner {
                 shards: RwLock::new(None),
+                full: RwLock::new(None),
                 dirty: AtomicBool::new(true),
                 build_lock: Mutex::new(()),
                 built_len: AtomicUsize::new(0),
@@ -149,6 +167,7 @@ impl ParallelMirror {
         if total == 0 || total > self.inner.max_triples {
             // Over the cap (or empty): keep the accelerator off for this state.
             *self.inner.shards.write().ok()? = None;
+            *self.inner.full.write().ok()? = None;
             self.inner.built_len.store(0, Ordering::Release);
             self.inner.dirty.store(false, Ordering::Release);
             debug!(
@@ -157,15 +176,37 @@ impl ParallelMirror {
             );
             return None;
         }
+        // Build both copies before publishing either, so a build error leaves the
+        // previous (or empty) state untouched.
         let ps = Arc::new(build_from_store(store, self.inner.shard_count)?);
+        let full = Arc::new(build_full_store(store)?);
         *self.inner.shards.write().ok()? = Some(ps.clone());
+        *self.inner.full.write().ok()? = Some(full);
         self.inner.built_len.store(total, Ordering::Release);
         self.inner.dirty.store(false, Ordering::Release);
         debug!(
-            "parallel mirror built: {total} triples across {} shards",
+            "parallel mirror built: {total} triples ({} shards + 1 full copy)",
             self.inner.shard_count
         );
         Some(ps)
+    }
+
+    /// Try to answer `sparql` from the **unsharded** in-memory copy — the path for
+    /// reads the shards can't decompose (joins, `GROUP BY` with non-`COUNT`
+    /// aggregates, large `SELECT`s). The copy is a faithful mirror of the persistent
+    /// store evaluated by the same engine, so results are identical; it is just in
+    /// RAM, avoiding RocksDB's per-row join lookups. Returns `None` (→ persistent
+    /// store) for a disabled mirror, an over-cap store, or any evaluation error.
+    pub fn try_full_query<F>(&self, store: &Store, sparql: &str, options: F) -> Option<QueryResults>
+    where
+        F: FnOnce() -> QueryOptions,
+    {
+        if !self.inner.enabled {
+            return None;
+        }
+        self.get_or_build(store)?; // ensures both copies are built (None if over cap)
+        let full = self.inner.full.read().ok()?.clone()?;
+        full.query_opt(sparql, options()).ok()
     }
 }
 
@@ -182,6 +223,16 @@ fn build_from_store(store: &Store, shards: usize) -> Option<ParallelStore> {
     let ps = ParallelStore::new(shards);
     ps.load_quads(store.iter().filter_map(Result::ok)).ok()?;
     Some(ps)
+}
+
+/// Build an unsharded in-memory `Store` holding every quad of `store` (all graphs
+/// preserved, so `FROM`/default-graph scoping evaluates identically).
+fn build_full_store(store: &Store) -> Option<Store> {
+    let full = Store::new().ok()?;
+    full.bulk_loader()
+        .load_quads(store.iter().filter_map(Result::ok))
+        .ok()?;
+    Some(full)
 }
 
 /// Convert a merged parallel answer back into Oxigraph `QueryResults`, so the

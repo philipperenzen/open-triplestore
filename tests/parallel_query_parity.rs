@@ -176,6 +176,36 @@ fn parity_group_by_count() {
 }
 
 #[test]
+fn full_mirror_serves_nondecomposable_reads() {
+    // Joins, GROUP BY with non-COUNT aggregates, ordered/limited row results — none
+    // shard-decomposable — are served by the unsharded in-memory full mirror and
+    // must equal the single store exactly (same engine + data, just in RAM).
+    let data = persons(400, G);
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (AVG(?a) AS ?avg) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+        ),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (SUM(?a) AS ?s) (MIN(?a) AS ?mn) (MAX(?a) AS ?mx) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+        ),
+    );
+    assert_parity(
+        &data,
+        &format!("SELECT (COUNT(DISTINCT ?t) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t }}"),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?n ?a FROM <{G}> WHERE {{ ?s <{EX}name> ?n . ?s <{EX}age> ?a }} ORDER BY ?a ?n LIMIT 40"
+        ),
+    );
+}
+
+#[test]
 fn mirror_invalidates_after_write() {
     let store = store(true, 8, 100_000_000, &persons(300, G));
     let q = format!("SELECT (COUNT(*) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}name> ?n }}");

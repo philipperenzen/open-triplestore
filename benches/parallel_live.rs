@@ -90,6 +90,12 @@ fn main() {
             "`GROUP BY` + `COUNT`",
             format!("SELECT ?t (COUNT(*) AS ?c) WHERE {{ ?s <{EX}type> ?t }} GROUP BY ?t"),
         ),
+        (
+            "`GROUP BY` + `AVG` (join)",
+            format!(
+                "SELECT ?t (AVG(?a) AS ?v) WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+            ),
+        ),
     ];
 
     println!(
