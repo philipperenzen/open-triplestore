@@ -8,10 +8,16 @@
 //! than inserting triples.
 //!
 //! # Usage
-//! ```rust,ignore
+//! ```no_run
+//! # use open_triplestore::reasoning::owl2_rl::Owl2RLReasoner;
+//! # use open_triplestore::store::TripleStore;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let store = TripleStore::in_memory()?;
 //! let report = Owl2RLReasoner::new(&store)
 //!     .with_target("urn:entailment:owl2-rl")
 //!     .materialize()?;
+//! # Ok(())
+//! # }
 //! ```
 #![allow(dead_code)]
 

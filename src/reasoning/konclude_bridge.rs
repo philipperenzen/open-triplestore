@@ -11,14 +11,18 @@
 //! - Tested with Konclude v0.6.2 (the current Apache-licensed release).
 //!
 //! # Usage
-//! ```rust,ignore
+//! ```no_run
 //! use open_triplestore::reasoning::konclude_bridge::KoncludeReasoner;
 //! use open_triplestore::reasoning::owl2_dl::ExternalReasonerBridge;
-//!
+//! # use open_triplestore::store::TripleStore;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let store = TripleStore::in_memory()?;
 //! let konclude = KoncludeReasoner::new(); // finds "Konclude" in PATH
 //! let bridge   = ExternalReasonerBridge::new(Box::new(konclude));
 //! let report   = bridge.materialize(&store, &[], "urn:entailment:owl2-dl")?;
 //! println!("Inferred {} triples", report.triples_added);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Format notes

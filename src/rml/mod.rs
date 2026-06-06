@@ -17,5 +17,5 @@ pub mod model;
 pub mod parser;
 pub mod sources;
 
-pub use executor::execute;
+pub use executor::{execute, execute_authorized};
 pub use parser::parse_rml;

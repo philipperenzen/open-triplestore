@@ -191,6 +191,10 @@ percent-encoding = "2"
 name = "performance"
 harness = false
 
+[[bench]]
+name = "parallel_live"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

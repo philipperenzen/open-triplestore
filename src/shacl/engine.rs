@@ -128,30 +128,32 @@ pub fn infer(
 
     let mut total_inferred: usize = 0;
 
-    // Iterate until fixed point (no new triples produced)
+    // Iterate until fixed point. Convergence is measured by the store's *real*
+    // triple-count delta across a full round: a `sh:rule` whose materialisation
+    // is already present inserts nothing (RDF set semantics), so it does not grow
+    // the store. Once a whole round adds zero triples we are at the fixed point.
+    // This both terminates early — instead of always running the full iteration
+    // cap whenever any rule has a focus node — and reports an accurate count.
     for iteration in 0..100 {
-        let mut inferred_this_round = 0usize;
+        let before = store.len().map_err(|e| e.to_string())?;
 
         for (_shape_iri, targets, rule_type, rule_body) in &rules {
             let focus_nodes = resolve_rule_targets(store, targets, data_graphs);
 
             for focus_node in &focus_nodes {
-                let count = apply_rule(store, focus_node, rule_type, rule_body)?;
-                inferred_this_round += count;
+                apply_rule(store, focus_node, rule_type, rule_body)?;
             }
         }
 
-        if inferred_this_round == 0 {
+        let after = store.len().map_err(|e| e.to_string())?;
+        let delta = after.saturating_sub(before);
+        total_inferred += delta;
+        debug!("Iteration {}: inferred {} triples", iteration + 1, delta);
+
+        if delta == 0 {
             debug!("Fixed point reached after {} iterations", iteration + 1);
             break;
         }
-
-        total_inferred += inferred_this_round;
-        debug!(
-            "Iteration {}: inferred {} triples",
-            iteration + 1,
-            inferred_this_round
-        );
     }
 
     info!("Total inferred triples: {}", total_inferred);
@@ -782,9 +784,9 @@ fn load_rules(
                 Some(oxigraph::model::Term::NamedNode(nn)) => nn.as_str().to_string(),
                 _ => continue,
             };
-            let subject = term_to_string(solution.get("subject"));
-            let predicate = term_to_string(solution.get("predicate"));
-            let object = term_to_string(solution.get("object"));
+            let subject = triple_rule_term(solution.get("subject"));
+            let predicate = triple_rule_term(solution.get("predicate"));
+            let object = triple_rule_term(solution.get("object"));
 
             let body = format!("{} {} {}", subject, predicate, object);
             let targets = load_targets(store, shapes_graph, &shape_iri).unwrap_or_default();
@@ -813,36 +815,81 @@ fn resolve_rule_targets(
     resolve_targets(store, &dummy_shape, data_graphs)
 }
 
+/// Apply one rule to one focus node. The number of *new* triples is not measured
+/// here — `infer` tracks it via the store's count delta per round (see there), so
+/// a rule whose output already exists costs nothing and the fixed point is exact.
+///
+/// A single malformed/erroring rule is logged and skipped rather than failing the
+/// whole inference run; because it materialises nothing, it cannot prevent
+/// convergence.
 fn apply_rule(
     store: &TripleStore,
     focus_node: &str,
     rule_type: &RuleType,
     rule_body: &str,
-) -> Result<usize, String> {
-    match rule_type {
+) -> Result<(), String> {
+    let update = match rule_type {
         RuleType::SparqlRule => {
-            // Replace $this with the focus node IRI
-            let construct = rule_body.replace("$this", &format!("<{}>", focus_node));
-            match store.update(&construct) {
-                Ok(()) => Ok(1), // Approximate; CONSTRUCT UPDATE not trivially counted
-                Err(e) => {
-                    warn!("SPARQL rule error: {}", e);
-                    Ok(0)
-                }
-            }
+            // Bind the focus node, then accept either the spec CONSTRUCT-template
+            // form (`CONSTRUCT { t } WHERE { p }`) or the convenience
+            // `INSERT { t } WHERE { p }` form — both materialise into the store.
+            let bound = rule_body.replace("$this", &format!("<{}>", focus_node));
+            construct_to_update(&bound)
         }
         RuleType::TripleRule => {
+            // `$this` (from `sh:this`, mapped in `load_rules`) binds to the focus.
             let body = rule_body.replace("$this", &format!("<{}>", focus_node));
-            let update = format!("INSERT DATA {{ {} }}", body);
-            match store.update(&update) {
-                Ok(()) => Ok(1),
-                Err(e) => {
-                    warn!("Triple rule error: {}", e);
-                    Ok(0)
-                }
+            format!("INSERT DATA {{ {} }}", body)
+        }
+    };
+    if let Err(e) = store.update(&update) {
+        warn!("SHACL rule application error: {}", e);
+    }
+    Ok(())
+}
+
+/// Translate a `sh:construct` rule body into an executable SPARQL UPDATE.
+///
+/// SHACL-AF's `sh:construct` carries a SPARQL **CONSTRUCT** query
+/// (`CONSTRUCT { template } WHERE { pattern }`); its output is materialised by
+/// running it as `INSERT { template } WHERE { pattern }`. The convenience
+/// `INSERT { … } WHERE { … }` form is already an update and is passed through
+/// unchanged. `$this` is expected to be already substituted.
+///
+/// Only the leading `CONSTRUCT` query keyword is rewritten — the template and
+/// `WHERE` clause are kept verbatim. A `PREFIX`/`BASE` prologue is skipped first
+/// so a `construct` substring inside a prefix IRI is never mistaken for it.
+fn construct_to_update(body: &str) -> String {
+    let mut rest = body.trim_start();
+    loop {
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == '<' || c == '{')
+            .next()
+            .unwrap_or("");
+        if token.eq_ignore_ascii_case("prefix") || token.eq_ignore_ascii_case("base") {
+            match rest.find('>') {
+                Some(gt) => rest = rest[gt + 1..].trim_start(),
+                None => return body.to_string(),
             }
+        } else if token.eq_ignore_ascii_case("construct") {
+            let head_len = body.len() - rest.len();
+            return format!("{}INSERT{}", &body[..head_len], &rest[token.len()..]);
+        } else {
+            return body.to_string();
         }
     }
+}
+
+/// Stringify a triple-rule term, mapping `sh:this` to the `$this` placeholder so
+/// `apply_rule` binds it to each focus node (SHACL-AF §4.3 — `sh:this` denotes the
+/// focus node, not the literal `sh:this` IRI).
+fn triple_rule_term(term: Option<&oxigraph::model::Term>) -> String {
+    if let Some(oxigraph::model::Term::NamedNode(nn)) = term {
+        if nn.as_str() == "http://www.w3.org/ns/shacl#this" {
+            return "$this".to_string();
+        }
+    }
+    term_to_string(term)
 }
 
 // ---------------------------------------------------------------------------

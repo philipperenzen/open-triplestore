@@ -26,6 +26,26 @@ pub fn execute(
     store: &TripleStore,
     target_graph: Option<&str>,
 ) -> Result<usize, String> {
+    execute_authorized(mapping, source_data, store, target_graph, |_| Ok(()))
+}
+
+/// Like [`execute`], but `authorize` gates **every effective target graph** before
+/// any write. A `rml:graphMap` (TriplesMap- or POM-level) overrides
+/// `target_graph` per triple, so a caller-supplied mapping can name an arbitrary
+/// destination graph; the dataset-scoped HTTP path passes an `authorize` that
+/// keeps those targets inside the dataset's own graph boundary (preventing a
+/// cross-tenant write). Authorization runs over the full resolved set *before*
+/// the first insert, so a rejected mapping writes nothing.
+pub fn execute_authorized<A>(
+    mapping: &RmlMapping,
+    source_data: &HashMap<String, String>,
+    store: &TripleStore,
+    target_graph: Option<&str>,
+    authorize: A,
+) -> Result<usize, String>
+where
+    A: Fn(&str) -> Result<(), String>,
+{
     // Triples keyed by their target named graph (None = default/target_graph).
     let mut triples_by_graph: HashMap<Option<String>, Vec<String>> = HashMap::new();
     let mut bnode_counter: usize = 0;
@@ -60,6 +80,22 @@ pub fn execute(
 
     if triples_by_graph.is_empty() {
         return Ok(0);
+    }
+
+    // Authorize every effective destination graph up front, so a mapping whose
+    // `rml:graphMap` targets a foreign graph is rejected before anything is
+    // written (all-or-nothing).
+    for (graph_key, triples) in &triples_by_graph {
+        if triples.is_empty() {
+            continue;
+        }
+        let effective_graph: Option<&str> = match graph_key {
+            Some(g) => Some(g.as_str()),
+            None => target_graph,
+        };
+        if let Some(g) = effective_graph {
+            authorize(g)?;
+        }
     }
 
     let mut total = 0;

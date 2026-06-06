@@ -29,9 +29,13 @@
 //!
 //! # Connecting a real reasoner
 //!
-//! ```rust,ignore
+//! Implement [`ExternalReasoner`] for your reasoner process and hand it to the
+//! bridge (sketch — see [`konclude_bridge`](crate::reasoning::konclude_bridge) for a
+//! complete, compiling implementation):
+//!
+//! ```text
 //! struct HermitBridge { process: std::process::Child }
-//! impl ExternalReasoner for HermitBridge { … }
+//! impl ExternalReasoner for HermitBridge { ... }
 //!
 //! let bridge = ExternalReasonerBridge::new(Box::new(HermitBridge::start()?));
 //! let report = bridge.materialize(&store, &[], "urn:entailment:owl2-dl")?;
@@ -553,14 +557,24 @@ impl ExternalReasonerBridge {
                 combined
             };
 
-            let inferred_ttl = self.reasoner.get_inferences(&ontology_ttl)?;
-            store
-                .load_str(
-                    &inferred_ttl,
-                    oxigraph::io::RdfFormat::Turtle,
-                    Some(target_graph),
-                )
-                .map_err(|e| ReasoningError::Store(e.to_string()))?;
+            // A real external reasoner does full SROIQ(D) reasoning the native rules
+            // cannot. Reject an inconsistent ontology first, then load both the
+            // classified subsumption hierarchy and the complete inference set (loads
+            // are idempotent where they overlap).
+            if !self.reasoner.check_consistency(&ontology_ttl)? {
+                return Err(ReasoningError::Inconsistency(format!(
+                    "external reasoner {} reported the ontology inconsistent",
+                    self.reasoner.name()
+                )));
+            }
+            for ttl in [
+                self.reasoner.classify(&ontology_ttl)?,
+                self.reasoner.get_inferences(&ontology_ttl)?,
+            ] {
+                store
+                    .load_str(&ttl, oxigraph::io::RdfFormat::Turtle, Some(target_graph))
+                    .map_err(|e| ReasoningError::Store(e.to_string()))?;
+            }
         }
 
         let count = count_graph(store, target_graph)?;
