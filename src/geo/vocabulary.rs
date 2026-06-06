@@ -60,6 +60,7 @@ pub const UNION: &str = "http://www.opengis.net/def/function/geosparql/union";
 pub const DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/distance";
 pub const GET_SRID: &str = "http://www.opengis.net/def/function/geosparql/getSRID";
 pub const AREA: &str = "http://www.opengis.net/def/function/geosparql/area";
+pub const RELATE: &str = "http://www.opengis.net/def/function/geosparql/relate";
 
 // ─── Spatial Measure Units ───
 

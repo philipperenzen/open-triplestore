@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="362" font-family="ui-sans-serif,system-ui,Segoe UI,Roboto,Arial" font-size="12">
+<rect width="760" height="362" fill="#ffffff"/>
+<text x="16" y="24" font-size="15" font-weight="700" fill="#0f172a">HTTP query latency: Open Triplestore vs Apache Jena Fuseki</text>
+<text x="16" y="42" font-size="11" fill="#64748b">500k triples, same host (Ryzen 9 7900X3D), median of 9 paced runs, compute-bound queries</text>
+<line x1="168.0" y1="52" x2="168.0" y2="328" stroke="#eef2f7"/>
+<text x="168.0" y="342" font-size="9" fill="#94a3b8" text-anchor="middle">0.00 ms</text>
+<line x1="293.0" y1="52" x2="293.0" y2="328" stroke="#eef2f7"/>
+<text x="293.0" y="342" font-size="9" fill="#94a3b8" text-anchor="middle">68.1 ms</text>
+<line x1="418.0" y1="52" x2="418.0" y2="328" stroke="#eef2f7"/>
+<text x="418.0" y="342" font-size="9" fill="#94a3b8" text-anchor="middle">136 ms</text>
+<line x1="543.0" y1="52" x2="543.0" y2="328" stroke="#eef2f7"/>
+<text x="543.0" y="342" font-size="9" fill="#94a3b8" text-anchor="middle">204 ms</text>
+<line x1="668.0" y1="52" x2="668.0" y2="328" stroke="#eef2f7"/>
+<text x="668.0" y="342" font-size="9" fill="#94a3b8" text-anchor="middle">272 ms</text>
+<text x="160" y="81" text-anchor="end" fill="#334155" font-size="11">COUNT(*) all</text>
+<rect x="168" y="58" width="215.4" height="17" rx="2" fill="#2563eb"/>
+<text x="388.4" y="71" font-size="10" fill="#475569">117 ms</text>
+<rect x="168" y="79" width="100.4" height="17" rx="2" fill="#ea580c"/>
+<text x="273.4" y="92" font-size="10" fill="#475569">54.7 ms</text>
+<text x="160" y="135" text-anchor="end" fill="#334155" font-size="11">2-way join COUNT</text>
+<rect x="168" y="112" width="498.3" height="17" rx="2" fill="#2563eb"/>
+<text x="671.3" y="125" font-size="10" fill="#475569">271 ms</text>
+<rect x="168" y="133" width="215.9" height="17" rx="2" fill="#ea580c"/>
+<text x="388.9" y="146" font-size="10" fill="#475569">118 ms</text>
+<text x="160" y="189" text-anchor="end" fill="#334155" font-size="11">GROUP BY + AVG</text>
+<rect x="168" y="166" width="500.0" height="17" rx="2" fill="#2563eb"/>
+<text x="673.0" y="179" font-size="10" fill="#475569">272 ms</text>
+<rect x="168" y="187" width="411.5" height="17" rx="2" fill="#ea580c"/>
+<text x="584.5" y="200" font-size="10" fill="#475569">224 ms</text>
+<text x="160" y="243" text-anchor="end" fill="#334155" font-size="11">FILTER COUNT</text>
+<rect x="168" y="220" width="53.3" height="17" rx="2" fill="#2563eb"/>
+<text x="226.3" y="233" font-size="10" fill="#475569">29.0 ms</text>
+<rect x="168" y="241" width="77.9" height="17" rx="2" fill="#ea580c"/>
+<text x="250.9" y="254" font-size="10" fill="#475569">42.4 ms</text>
+<text x="160" y="297" text-anchor="end" fill="#334155" font-size="11">COUNT DISTINCT</text>
+<rect x="168" y="274" width="46.6" height="17" rx="2" fill="#2563eb"/>
+<text x="219.6" y="287" font-size="10" fill="#475569">25.4 ms</text>
+<rect x="168" y="295" width="41.9" height="17" rx="2" fill="#ea580c"/>
+<text x="214.9" y="308" font-size="10" fill="#475569">22.8 ms</text>
+<rect x="168" y="347" width="10" height="10" rx="2" fill="#2563eb"/>
+<text x="182" y="356" font-size="10" fill="#475569">Open Triplestore</text>
+<rect x="297.2" y="347" width="10" height="10" rx="2" fill="#ea580c"/>
+<text x="311.2" y="356" font-size="10" fill="#475569">Fuseki (TDB2)</text>
+<text x="748" y="20" font-size="10" fill="#94a3b8" text-anchor="end">lower is better</text>
+</svg>

@@ -1435,6 +1435,55 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure query THROUGHPUT under concurrency — `N` threads each run `K` join
+/// queries against a shared `Arc<TripleStore>`.
+///
+/// Unlike `concurrent/reads` (one query per thread), this saturates cores: a
+/// *single* SPARQL query is single-threaded in Oxigraph, but reads are lock-free,
+/// so aggregate throughput (queries/s) scales with core count. This is the
+/// realistic way to use all 24 cores — concurrent requests, not one big query.
+fn bench_concurrent_throughput(c: &mut Criterion) {
+    let store = Arc::new(fresh_store());
+    store
+        .load_str(&gen_persons_ttl(10_000), RdfFormat::Turtle, None)
+        .unwrap();
+
+    let mut group = c.benchmark_group("concurrent/throughput");
+    group.sample_size(10);
+    group.sampling_mode(SamplingMode::Flat);
+
+    const PER_THREAD: usize = 8;
+    let query = "SELECT ?name ?age WHERE { \
+                   ?s <http://example.org/name> ?name . \
+                   ?s <http://example.org/age>  ?age \
+                 }";
+
+    for &threads in &[1usize, 2, 4, 8, 16, 24] {
+        group.throughput(Throughput::Elements((threads * PER_THREAD) as u64));
+        group.bench_with_input(BenchmarkId::new("threads", threads), &threads, |b, &t| {
+            b.iter(|| {
+                let handles: Vec<_> = (0..t)
+                    .map(|_| {
+                        let s = Arc::clone(&store);
+                        std::thread::spawn(move || {
+                            let mut total = 0usize;
+                            for _ in 0..PER_THREAD {
+                                total += consume_solutions(s.query(query).unwrap());
+                            }
+                            total
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .sum::<usize>()
+            });
+        });
+    }
+    group.finish();
+}
+
 // ─── Criterion registration ───────────────────────────────────────────────────
 
 criterion_group!(
@@ -1515,7 +1564,8 @@ criterion_group!(
     targets =
         bench_concurrent_reads,
         bench_concurrent_writes,
-        bench_concurrent_mixed
+        bench_concurrent_mixed,
+        bench_concurrent_throughput
 );
 
 criterion_main!(insert, query, paths, update, geosparql, shacl, concurrent);

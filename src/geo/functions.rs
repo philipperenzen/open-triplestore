@@ -66,6 +66,7 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::DISTANCE, fn_distance),
         make_fn(vocab::AREA, fn_area),
         make_fn(vocab::GET_SRID, fn_get_srid),
+        make_fn(vocab::RELATE, fn_relate),
     ]
 }
 
@@ -157,6 +158,23 @@ fn relates_pattern(g1: &GeosGeometry, g2: &GeosGeometry, pattern: &str) -> Optio
     g1.relate_pattern(g2, pattern).ok()
 }
 
+/// geof:relate(g1, g2, pattern) — true iff the DE-9IM intersection matrix of g1
+/// and g2 matches the 9-character `pattern` (chars from the set T/F/*/0/1/2).
+/// OGC GeoSPARQL Requirement 44 (Geometry Extension).
+fn fn_relate(args: &[Term]) -> Option<Term> {
+    if args.len() < 3 {
+        return None;
+    }
+    let g1 = parse_wkt_literal(&args[0])?;
+    let g2 = parse_wkt_literal(&args[1])?;
+    let pattern = match &args[2] {
+        Term::Literal(l) => l.value().to_string(),
+        _ => return None,
+    };
+    let result = g1.relate_pattern(&g2, &pattern).ok()?;
+    Some(boolean_literal(result))
+}
+
 fn eh_contains(args: &[Term]) -> Option<Term> {
     let (g1, g2) = parse_two_geoms(args)?;
     // Egenhofer contains: T*TFF*FF*
@@ -240,20 +258,28 @@ fn rcc8_po(args: &[Term]) -> Option<Term> {
 }
 
 fn rcc8_tppi(args: &[Term]) -> Option<Term> {
-    // Tangential proper part inverse = covers ∧ ¬equals
+    // Tangential proper part inverse = (covers ∧ ¬equals) ∧ ¬(non-tangential inverse).
+    // Without the ¬ntppi guard, TPPi would also match the non-tangential case (NTPPi),
+    // violating RCC8's requirement that its eight base relations be mutually exclusive.
     let (g1, g2) = parse_two_geoms(args)?;
     let covers = relates_pattern(&g1, &g2, "T*TFT*FF*")?;
     let equals = relates_pattern(&g1, &g2, "TFFFTFFFT")?;
-    Some(boolean_literal(covers && !equals))
+    // NTPPi uses the Egenhofer "contains" mask.
+    let ntppi = relates_pattern(&g1, &g2, "T*TFF*FF*")?;
+    Some(boolean_literal(covers && !equals && !ntppi))
 }
 
 fn rcc8_tpp(args: &[Term]) -> Option<Term> {
-    // Tangential proper part = coveredBy ∧ ¬equals
-    // Use native GEOS operations to correctly handle boundary-sharing geometries.
+    // Tangential proper part = (coveredBy ∧ ¬equals) ∧ ¬(non-tangential proper part).
+    // Without the ¬ntpp guard, TPP would also match the non-tangential case (NTPP),
+    // violating RCC8's requirement that its eight base relations be mutually exclusive.
+    // Native GEOS covered_by/equals handle boundary-sharing and mixed types correctly.
     let (g1, g2) = parse_two_geoms(args)?;
     let covered_by = g1.covered_by(&g2).ok()?;
     let equals = g1.equals(&g2).ok()?;
-    Some(boolean_literal(covered_by && !equals))
+    // NTPP uses the Egenhofer "inside" mask.
+    let ntpp = relates_pattern(&g1, &g2, "TFF*FFT**")?;
+    Some(boolean_literal(covered_by && !equals && !ntpp))
 }
 
 fn rcc8_ntpp(args: &[Term]) -> Option<Term> {

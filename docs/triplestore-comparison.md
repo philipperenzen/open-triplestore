@@ -78,6 +78,20 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 
 ### 2.3 Caveats
 
+- **Verified conformance status (read this first).** The "Local" / "Open Triplestore"
+  columns in the standards matrices below mark *feature presence*. A golden-standard
+  conformance pass (see [`docs/standards.md`](standards.md) and the `tests/*_conformance.rs`
+  suites) found that several are **Partial**, not Full: **SHACL Core** silently ignores
+  blank-node property shapes (the standard idiom) — use named shapes (HIGH-severity, fix
+  pending); **GeoSPARQL 1.1** lacks `geof:relate`/`metricDistance`/`metricArea`/`transform`/
+  `aggUnion` and GML/GeoJSON literals (WKT only); **OWL 2 DL** runs RL+extension rules in
+  process with full tableau only via the optional Konclude bridge; **SPARQL 1.2 / RDF-star**
+  is the CG `<< >>` model, not the RDF 1.2 triple-term draft. The ✅ marks in §4/§10/§11
+  predate that pass and should be read with `docs/standards.md` as the source of truth.
+- **Reference system.** Local-store performance figures in this document were measured on an
+  **Apple M3 Pro**. Reproducible numbers for the documented reference system (AMD Ryzen 9
+  7900X3D, Docker/WSL2) and the exact `cargo bench` command live in
+  [`docs/performance.md`](performance.md#reproducible-benchmark-environment).
 - Numbers across different hardware and benchmark suites are **not directly comparable**. They
   indicate orders of magnitude and relative strengths.
 - Commercial vendors (Stardog, GraphDB) control their own benchmark configurations; treat

@@ -468,10 +468,10 @@ fn load_constraints(
     }
 
     // sh:closed + sh:ignoredProperties
-    let is_closed = ask(
-        store,
-        &format!("ASK {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}closed> true }} }}"),
-    );
+    let is_closed = store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}closed"), Some(shapes_graph))
+        .iter()
+        .any(|t| term_to_lexical(t) == "true");
     if is_closed {
         let ignored = load_rdf_list(
             store,
@@ -566,50 +566,22 @@ fn load_constraints(
         });
     }
 
-    // SHACL-AF: sh:sparql constraints
-    let sparql_constraints = execute_select_single(
-        store,
-        &format!(
-            r#"
-            PREFIX sh: <{SH}>
-            SELECT ?select ?message WHERE {{
-                GRAPH <{shapes_graph}> {{
-                    <{shape_iri}> sh:sparql ?sparql .
-                    ?sparql sh:select ?select .
-                    OPTIONAL {{ ?sparql sh:message ?message }}
-                }}
-            }}
-            "#,
-        ),
-        "select",
-    )?;
-
-    // For SPARQL constraints we also need the messages - use a second query
-    if !sparql_constraints.is_empty() {
-        let query = format!(
-            r#"
-            PREFIX sh: <{SH}>
-            SELECT ?select ?message WHERE {{
-                GRAPH <{shapes_graph}> {{
-                    <{shape_iri}> sh:sparql ?sparql .
-                    ?sparql sh:select ?select .
-                    OPTIONAL {{ ?sparql sh:message ?message }}
-                }}
-            }}
-            "#,
-        );
-        if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
-            for solution in solutions.filter_map(|s| s.ok()) {
-                let select = match solution.get("select") {
-                    Some(oxigraph::model::Term::Literal(lit)) => lit.value().to_string(),
-                    _ => continue,
-                };
-                let message = solution.get("message").and_then(|v| match v {
-                    oxigraph::model::Term::Literal(lit) => Some(lit.value().to_string()),
-                    _ => None,
-                });
-                constraints.push(Constraint::SparqlConstraint { select, message });
-            }
+    // SHACL-AF: sh:sparql constraints. Resolve through the raw quad index so this
+    // works whether the shape — and the SPARQLConstraint node — is named or a blank
+    // node. The previous form interpolated `<{shape_iri}>` into a SPARQL query; for
+    // a blank-node shape that produced `<_:bn>` (invalid IRI syntax), which made the
+    // whole query error and, via `?`, dropped the entire shape — silently disabling
+    // every blank-node-authored shape.
+    for sparql_node in store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}sparql"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        if let Some(select) =
+            single_value(store, shapes_graph, &sparql_node, &format!("{SH}select"))
+        {
+            let message = single_value(store, shapes_graph, &sparql_node, &format!("{SH}message"));
+            constraints.push(Constraint::SparqlConstraint { select, message });
         }
     }
 
@@ -649,13 +621,13 @@ fn load_property_shapes_inner(
     shapes_graph: &str,
     shape_iri: &str,
 ) -> Result<Vec<PropertyShape>, String> {
-    let ps_iris = execute_select_single(
-        store,
-        &format!(
-            "SELECT ?ps WHERE {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}property> ?ps }} }}"
-        ),
-        "ps",
-    )?;
+    // Use the raw quad index so a blank-node parent (an inline `sh:node` /
+    // `sh:qualifiedValueShape` body) can have its property shapes dereferenced.
+    let ps_iris: Vec<String> = store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}property"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+        .collect();
 
     let mut result = Vec::new();
 
@@ -908,12 +880,17 @@ fn single_value(
     subject: &str,
     predicate: &str,
 ) -> Option<String> {
-    let query = format!(
-        "SELECT ?v WHERE {{ GRAPH <{shapes_graph}> {{ <{subject}> <{predicate}> ?v }} }} LIMIT 1"
-    );
-    execute_select_single(store, &query, "v")
-        .ok()
-        .and_then(|v| v.into_iter().next())
+    // Resolve through the raw quad index so blank-node subjects are dereferenced
+    // correctly. The standard SHACL idiom uses blank nodes for property shapes
+    // (`sh:property [ … ]`), inline `sh:node`/`sh:qualifiedValueShape`/`sh:not`
+    // shapes, and SPARQL-constraint nodes; SPARQL surface syntax cannot re-address
+    // a stored blank node via `<_:bn>`, so the old query-based form silently
+    // matched nothing and left those constraints unenforced.
+    store
+        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
+        .into_iter()
+        .next()
+        .map(|t| term_to_lexical(&t))
 }
 
 fn multi_values(
@@ -922,9 +899,11 @@ fn multi_values(
     subject: &str,
     predicate: &str,
 ) -> Vec<String> {
-    let query =
-        format!("SELECT ?v WHERE {{ GRAPH <{shapes_graph}> {{ <{subject}> <{predicate}> ?v }} }}");
-    execute_select_single(store, &query, "v").unwrap_or_default()
+    store
+        .objects_for_subject_in_graph(subject, predicate, Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+        .collect()
 }
 
 fn ask(store: &TripleStore, query: &str) -> bool {
