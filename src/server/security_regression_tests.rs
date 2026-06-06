@@ -1177,4 +1177,165 @@ mod tests {
             "B's graph must be untouched after the rejected bypass attempt"
         );
     }
+
+    // ─── LOW: dataset access-management requires manage (owner/admin), not editor ─
+    // grant_access / revoke_access / list_access previously gated on
+    // `can_write_dataset`, so a mere editor could grant access to arbitrary users
+    // and enumerate the access list. They must require `can_manage_dataset`,
+    // matching the role-based grant endpoints.
+
+    #[tokio::test]
+    async fn security_dataset_access_management_requires_manage_not_editor() {
+        use crate::auth::models::ResourceRole;
+        let state = test_state();
+        // alice owns dsA; bob holds an EDITOR grant (write, not manage); carol is the grantee.
+        state
+            .auth_db
+            .create_user("alice", "alice", "alice@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_user("bob", "bob", "bob@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_user("carol", "carol", "carol@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_dataset(
+                "dsA",
+                "Alice DS",
+                None,
+                OwnerType::User,
+                "alice",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        state
+            .auth_db
+            .set_resource_grant(
+                "dataset",
+                "dsA",
+                "user",
+                "bob",
+                ResourceRole::Editor,
+                "alice",
+            )
+            .unwrap();
+
+        // Precondition: bob can write dsA but cannot manage it.
+        let ds = state.auth_db.get_dataset("dsA").unwrap().unwrap();
+        assert!(state.auth_db.can_write_dataset("bob", &ds).unwrap());
+        assert!(!state.auth_db.can_manage_dataset("bob", &ds).unwrap());
+
+        let bob = token("bob", "bob", "user");
+        let alice = token("alice", "alice", "user");
+
+        let grant_req = |tok: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/datasets/dsA/access")
+                .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"user_id":"carol"}"#))
+                .unwrap()
+        };
+
+        // Editor bob must NOT be able to grant access…
+        let r = test_app(state.clone())
+            .oneshot(grant_req(&bob))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::FORBIDDEN,
+            "a dataset editor must not be able to grant access"
+        );
+
+        // …nor enumerate the access list.
+        let r = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/datasets/dsA/access")
+                    .header(header::AUTHORIZATION, format!("Bearer {bob}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::FORBIDDEN,
+            "a dataset editor must not be able to list the access grants"
+        );
+
+        // Positive control: the owner (manage) can still grant access, and it takes effect.
+        let r = test_app(state.clone())
+            .oneshot(grant_req(&alice))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::CREATED,
+            "the dataset owner must still be able to grant access"
+        );
+        assert!(
+            state
+                .auth_db
+                .list_dataset_access_users("dsA")
+                .unwrap()
+                .iter()
+                .any(|u| u.id == "carol"),
+            "carol must have access after the owner's grant"
+        );
+    }
+
+    // ─── LOW/MEDIUM: cross-tenant authorization denials are audit-logged ──────
+    // A denied per-dataset access (403) must leave an audit trail attributed to
+    // the caller, so cross-tenant probe attempts are forensically visible. The
+    // denial-audit pass lives in the require_auth/optional_auth middleware.
+
+    #[tokio::test]
+    async fn security_denied_cross_tenant_access_is_audit_logged() {
+        let state = two_tenant_state(); // alice owns dsA (private), bob owns dsB (private)
+        let bob = token("bob", "bob", "user");
+
+        // bob holds no role on alice's dataset → managing its access is denied (403).
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/datasets/dsA/access")
+                    .header(header::AUTHORIZATION, format!("Bearer {bob}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"user_id":"bob"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "bob must not be able to manage alice's dataset"
+        );
+
+        // The denial is recorded in the append-only audit log, attributed to bob.
+        let events = state
+            .audit
+            .list(100, 0, Some("permission_denied"), Some("bob"), None)
+            .unwrap();
+        assert!(
+            events.iter().any(|e| {
+                e.action.as_deref() == Some("POST")
+                    && e.resource_id.as_deref() == Some("/api/datasets/dsA/access")
+            }),
+            "a permission_denied audit event for bob's cross-tenant probe must be recorded; \
+             got {} event(s): {:?}",
+            events.len(),
+            events
+        );
+    }
 }

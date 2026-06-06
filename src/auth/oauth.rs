@@ -98,6 +98,15 @@ pub async fn begin_oidc_flow(
         .discovery_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Provider '{}' has no discovery_url", provider.slug))?;
+    // Never fetch IdP metadata over cleartext (MITM → forged identity/tokens):
+    // require https, with a loopback http exception for local dev.
+    if !super::oidc_rs::is_secure_idp_url(discovery_url) {
+        anyhow::bail!(
+            "OIDC provider '{}' discovery_url must use https (refusing to fetch IdP \
+             metadata over cleartext): {discovery_url}",
+            provider.slug
+        );
+    }
 
     let client_id = provider
         .client_id
@@ -204,6 +213,15 @@ pub async fn complete_oidc_flow(
         .discovery_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Provider has no discovery_url"))?;
+    // Never fetch IdP metadata / exchange the code against an issuer reached over
+    // cleartext (MITM → forged identity/tokens): require https (loopback http ok for dev).
+    if !super::oidc_rs::is_secure_idp_url(discovery_url) {
+        anyhow::bail!(
+            "OIDC provider '{}' discovery_url must use https (refusing to fetch IdP \
+             metadata over cleartext): {discovery_url}",
+            provider.slug
+        );
+    }
 
     let issuer = IssuerUrl::new(
         discovery_url
