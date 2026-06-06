@@ -211,18 +211,22 @@ fn parity_group_by_count() {
 
 #[test]
 fn full_mirror_serves_nondecomposable_reads() {
-    // Joins, COUNT(DISTINCT), ordered/limited row results — none shard-decomposable —
+    // Row-returning joins and ordered/limited row results — not shard-decomposable —
     // are served by the unsharded in-memory full mirror and must equal the single
-    // store exactly (same engine + data, just in RAM).
+    // store exactly (same engine + data, just in RAM). (COUNT(DISTINCT) is now
+    // decomposed across shards — see parity_count_distinct.)
     let data = persons(400, G);
-    assert_parity(
-        &data,
-        &format!("SELECT (COUNT(DISTINCT ?t) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t }}"),
-    );
     assert_parity(
         &data,
         &format!(
             "SELECT ?n ?a FROM <{G}> WHERE {{ ?s <{EX}name> ?n . ?s <{EX}age> ?a }} ORDER BY ?a ?n LIMIT 40"
+        ),
+    );
+    // A row-returning subject-star join (no aggregate) — full copy, not shards.
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?s ?n ?a FROM <{G}> WHERE {{ ?s <{EX}name> ?n . ?s <{EX}age> ?a }} ORDER BY ?s LIMIT 100"
         ),
     );
 }
@@ -303,6 +307,99 @@ fn parity_group_by_aggregates_double_falls_back() {
         &format!(
             "SELECT ?t (MIN(?m) AS ?lo) (MAX(?m) AS ?hi) FROM <{G}> WHERE {{ ?x <{EX}type> ?t . ?x <{EX}m> ?m }} GROUP BY ?t"
         ),
+    );
+}
+
+#[test]
+fn parity_count_distinct() {
+    // COUNT(DISTINCT ?x) decomposes by set union (per-shard distinct → engine re-dedup
+    // → count): global low/high cardinality, grouped, multiple, and filtered.
+    let data = persons(600, G);
+    assert_parity(
+        &data,
+        &format!("SELECT (COUNT(DISTINCT ?t) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t }}"),
+    );
+    assert_parity(
+        &data,
+        &format!("SELECT (COUNT(DISTINCT ?n) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}name> ?n }}"),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (COUNT(DISTINCT ?a) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+        ),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (COUNT(DISTINCT ?a) AS ?ca) (COUNT(DISTINCT ?n) AS ?cn) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a . ?s <{EX}name> ?n }} GROUP BY ?t"
+        ),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT (COUNT(DISTINCT ?a) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}age> ?a FILTER(?a >= 40) }}"
+        ),
+    );
+}
+
+#[test]
+fn parity_global_aggregates() {
+    // Global (no GROUP BY) SUM/MIN/MAX/AVG over integers now shard (empty-keys path),
+    // closing the regression where they fell to the persistent store.
+    let data = persons(600, G);
+    for agg in [
+        "SUM(?a) AS ?v",
+        "MIN(?a) AS ?v",
+        "MAX(?a) AS ?v",
+        "AVG(?a) AS ?v",
+    ] {
+        assert_parity(
+            &data,
+            &format!("SELECT ({agg}) FROM <{G}> WHERE {{ ?s <{EX}age> ?a }}"),
+        );
+    }
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT (COUNT(*) AS ?c) (SUM(?a) AS ?s) (MIN(?a) AS ?lo) (MAX(?a) AS ?hi) (AVG(?a) AS ?avg) FROM <{G}> WHERE {{ ?s <{EX}age> ?a }}"
+        ),
+    );
+}
+
+#[test]
+fn parity_combined_distinct_with_plain_aggregates() {
+    // COUNT(DISTINCT) mixed with non-distinct aggregates is NOT shard-decomposable
+    // (distinct rows lose multiplicity) → it falls to the full copy and must still be
+    // exact. The combined shape end-to-end.
+    let data = persons(600, G);
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT ?t (COUNT(*) AS ?n) (COUNT(DISTINCT ?a) AS ?da) FROM <{G}> WHERE {{ ?s <{EX}type> ?t . ?s <{EX}age> ?a }} GROUP BY ?t"
+        ),
+    );
+    assert_parity(
+        &data,
+        &format!(
+            "SELECT (SUM(?a) AS ?s) (COUNT(DISTINCT ?a) AS ?da) FROM <{G}> WHERE {{ ?s <{EX}age> ?a }}"
+        ),
+    );
+}
+
+#[test]
+fn parity_count_distinct_blank_falls_back() {
+    // COUNT(DISTINCT ?blank): the sharded path declines (store-scoped labels), the full
+    // copy answers — COUNT is relabel-invariant, so it matches single-store exactly.
+    let mut data = String::new();
+    for i in 0..400usize {
+        data.push_str(&format!("<{EX}p{i}> <{EX}ref> _:b{i} <{G}> .\n"));
+        // Some labels reused by a second subject (still one distinct blank node each).
+        data.push_str(&format!("<{EX}q{i}> <{EX}ref> _:b{} <{G}> .\n", i % 40));
+    }
+    assert_parity(
+        &data,
+        &format!("SELECT (COUNT(DISTINCT ?x) AS ?c) FROM <{G}> WHERE {{ ?s <{EX}ref> ?x }}"),
     );
 }
 

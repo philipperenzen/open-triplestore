@@ -6,15 +6,15 @@
 //! Oxigraph store (`GraphIndex`, `SpatialIndex`); this adds two more, both rebuilt
 //! lazily after writes (a dirty flag, like `SpatialIndex`):
 //!
-//! 1. **Subject-hash shards** — for a *decomposable aggregate* (global non-distinct
-//!    `COUNT`, subject-star join `COUNT`, row-local `FILTER` `COUNT`, a mergeable
-//!    `GROUP BY` — `COUNT` and, via a per-shard rewrite re-merged through the engine,
-//!    `SUM`/`MIN`/`MAX`/`AVG` — and `ASK`, classified conservatively by
-//!    [`opengraph::parallel`]) the query runs on `N` shards concurrently (Rayon) and
-//!    the partials merge, turning a single-core scan into an `N`-core one
-//!    ([`Self::try_query`]).
-//! 2. **An unsharded full copy** — for everything the shards can't decompose (joins,
-//!    large `SELECT`s, `COUNT(DISTINCT)`, ordered/limited results, `CONSTRUCT`), the
+//! 1. **Subject-hash shards** — for a *decomposable aggregate* (non-distinct `COUNT`
+//!    — global, subject-star join or grouped; `SUM`/`MIN`/`MAX`/`AVG` — global or
+//!    grouped — via a per-shard rewrite re-merged through the engine; `COUNT(DISTINCT)`
+//!    via per-shard distinct sets unioned through the engine; and `ASK` — classified
+//!    conservatively by [`opengraph::parallel`]) the query runs on `N` shards
+//!    concurrently (Rayon) and the partials merge, turning a single-core scan into an
+//!    `N`-core one ([`Self::try_query`]).
+//! 2. **An unsharded full copy** — for everything the shards can't decompose (joins
+//!    that return rows, ordered/limited results, large `SELECT`s, `CONSTRUCT`), the
 //!    query runs against a single in-memory `Store` ([`Self::try_full_query`]). This
 //!    is the bigger surprise win: the persistent (RocksDB) store answers a
 //!    multi-pattern join with one point lookup *per result row*, so a 2-way join over

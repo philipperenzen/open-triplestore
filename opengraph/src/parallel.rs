@@ -20,13 +20,17 @@
 //!   `{ ?s :name ?n ; :age ?a }`) — the join key is the partition key, so the
 //!   join never crosses a shard boundary;
 //! * row-local `FILTER`, `DISTINCT` and projection over the above;
-//! * a global, non-distinct `COUNT` over a shard-local pattern (sum the partials);
+//! * a non-distinct `COUNT` over a shard-local pattern — global (sum the partials) or
+//!   grouped (sum per group key);
 //! * `ASK` over a shard-local pattern (logical OR of the partials);
-//! * a mergeable `GROUP BY` over a shard-local pattern — `COUNT` (sum the per-group
-//!   partials) and, via a rewrite-and-re-merge through the engine itself,
-//!   `SUM`/`MIN`/`MAX`/`AVG` (`AVG` → per-shard `SUM`+`COUNT`). This is exact for
-//!   `xsd:integer`/`decimal`; `SUM`/`AVG` over `xsd:double`/`float` is declined at
-//!   runtime (IEEE-754 is non-associative) — see the grouped-aggregate section below.
+//! * `SUM`/`MIN`/`MAX`/`AVG`, global or grouped, over a shard-local pattern — via a
+//!   rewrite-and-re-merge through the engine itself (`AVG` → per-shard `SUM`+`COUNT`).
+//!   Exact for `xsd:integer`/`decimal`; `SUM`/`AVG` over `xsd:double`/`float` is
+//!   declined at runtime (IEEE-754 is non-associative) — see the grouped-aggregate
+//!   section below;
+//! * `COUNT(DISTINCT ?x)`, global or grouped, over a shard-local pattern — each shard
+//!   computes its DISTINCT set, the sets are unioned (re-deduped through the engine)
+//!   and counted; declined when a distinct value is a blank node (store-scoped labels).
 //!
 //! Anything that could join *across* subjects (object→subject joins, property
 //! paths, `SERVICE`, `OPTIONAL`/`UNION`/`MINUS`, `ORDER BY`/`LIMIT`) is **not**
@@ -174,11 +178,14 @@ impl ParallelStore {
             Ok(q) => q,
             Err(_) => return Ok(None),
         };
-        // A mergeable grouped SUM/MIN/MAX/AVG needs a *rewritten* per-shard query
-        // (partials) and an engine-driven merge, so try it before the strategies
-        // that run the identical query on every shard.
+        // A mergeable grouped/global SUM/MIN/MAX/AVG, or a COUNT(DISTINCT), needs a
+        // *rewritten* per-shard query and an engine-driven merge, so try those before
+        // the strategies that run the identical query on every shard.
         if let Some(gplan) = plan_group_aggregate(&query) {
             return self.run_group_aggregate(&query, &gplan, &options);
+        }
+        if let Some(cdplan) = plan_count_distinct(&query) {
+            return self.run_count_distinct(&query, &cdplan, &options);
         }
         let Some(merge) = plan(&query) else {
             return Ok(None);
@@ -226,6 +233,34 @@ impl ParallelStore {
         }
         Ok(Some(merge_group_agg(&rows, plan)?))
     }
+
+    /// Evaluate a `COUNT(DISTINCT ?x)` (global or grouped) by collecting each shard's
+    /// DISTINCT combinations in parallel and re-deduping + counting through the engine
+    /// — see the [distributed COUNT(DISTINCT)](self) note. Returns `Ok(None)` to
+    /// **decline** when a distinct value is a blank node (store-scoped labels can't be
+    /// unioned across shards), so the caller uses the unsharded copy.
+    fn run_count_distinct(
+        &self,
+        orig: &Query,
+        plan: &CountDistinctPlan,
+        options: &QueryOptions,
+    ) -> Result<Option<ParAnswer>, String> {
+        let Some(partial_sparql) = build_count_distinct_partial(orig, plan) else {
+            return Ok(None);
+        };
+        let per_shard: Vec<Vec<Vec<Option<Term>>>> = self
+            .shards
+            .par_iter()
+            .map(|s| run_partial_shard(s, &partial_sparql, &plan.partial_proj, options))
+            .collect::<Result<_, _>>()?;
+        let rows: Vec<Vec<Option<Term>>> = per_shard.into_iter().flatten().collect();
+        // Fidelity guard: blank-node distinct values can't be unioned across shards.
+        if rows_have_blank(&rows) {
+            return Ok(None);
+        }
+        let store = materialize_partials(&rows, plan.partial_proj.len())?;
+        run_temp_merge(&store, &build_count_distinct_merge_query(plan)).map(Some)
+    }
 }
 
 /// True iff `sparql` is provably shard-decomposable — a cheap parse + classify
@@ -234,7 +269,11 @@ impl ParallelStore {
 pub fn is_decomposable(sparql: &str) -> bool {
     Query::parse(sparql, None)
         .ok()
-        .map(|q| plan(&q).is_some() || plan_group_aggregate(&q).is_some())
+        .map(|q| {
+            plan(&q).is_some()
+                || plan_group_aggregate(&q).is_some()
+                || plan_count_distinct(&q).is_some()
+        })
         .unwrap_or(false)
 }
 
@@ -256,8 +295,9 @@ pub enum ParClass {
 /// Classify a query's parallel shape, or `None` if it is not decomposable.
 pub fn classify(sparql: &str) -> Option<ParClass> {
     let query = Query::parse(sparql, None).ok()?;
-    // A mergeable grouped non-COUNT aggregate is an order-insensitive set result.
-    if plan_group_aggregate(&query).is_some() {
+    // A mergeable grouped/global non-COUNT aggregate or a COUNT(DISTINCT) is an
+    // order-insensitive scalar/set result.
+    if plan_group_aggregate(&query).is_some() || plan_count_distinct(&query).is_some() {
         return Some(ParClass::Aggregate);
     }
     Some(match plan(&query)? {
@@ -892,7 +932,9 @@ fn plan_group_aggregate(query: &Query) -> Option<GroupAggPlan> {
             _ => return None,
         }
     };
-    if keys.is_empty() || !shard_local_rows(group_inner) {
+    // Empty keys are allowed: a *global* SUM/MIN/MAX/AVG (no GROUP BY) decomposes the
+    // same way — one partial row per shard, re-merged through the engine.
+    if !shard_local_rows(group_inner) {
         return None;
     }
     let agg_by_internal: HashMap<&str, &AggregateExpression> =
@@ -1087,8 +1129,16 @@ fn rows_have_double(rows: &[Vec<Option<Term>>], plan: &GroupAggPlan) -> bool {
 /// store and running the final aggregation ([`build_merge_query`]) over them — so the
 /// engine itself does every sum/division/min/max, byte-for-byte as single-store would.
 fn merge_group_agg(rows: &[Vec<Option<Term>>], plan: &GroupAggPlan) -> Result<ParAnswer, String> {
+    let store = materialize_partials(rows, plan.partial_proj.len())?;
+    run_temp_merge(&store, &build_merge_query(plan))
+}
+
+/// Materialise per-shard partial rows into a throwaway in-memory store: one blank
+/// node per row, one `<…/gacol/i>` triple per bound column. Shared by the grouped-
+/// aggregate and COUNT(DISTINCT) merges.
+fn materialize_partials(rows: &[Vec<Option<Term>>], n_cols: usize) -> Result<Store, String> {
     let store = Store::new().map_err(|e| e.to_string())?;
-    let mut quads: Vec<Quad> = Vec::with_capacity(rows.len() * plan.partial_proj.len());
+    let mut quads: Vec<Quad> = Vec::with_capacity(rows.len() * n_cols);
     for (ri, row) in rows.iter().enumerate() {
         let subj = BlankNode::new_unchecked(format!("r{ri}"));
         for (ci, cell) in row.iter().enumerate() {
@@ -1106,14 +1156,18 @@ fn merge_group_agg(rows: &[Vec<Option<Term>>], plan: &GroupAggPlan) -> Result<Pa
         .bulk_loader()
         .load_quads(quads)
         .map_err(|e| e.to_string())?;
-    let merge_sparql = build_merge_query(plan);
-    match store.query(&merge_sparql).map_err(|e| e.to_string())? {
+    Ok(store)
+}
+
+/// Run a final merge query over a materialised temp store and collect the result.
+fn run_temp_merge(store: &Store, sparql: &str) -> Result<ParAnswer, String> {
+    match store.query(sparql).map_err(|e| e.to_string())? {
         QueryResults::Solutions(sols) => {
             let variables: Vec<Variable> = sols.variables().to_vec();
             let rows = collect_rows(sols, &variables)?;
             Ok(ParAnswer::Solutions { variables, rows })
         }
-        _ => Err("group-aggregate merge did not return solutions".into()),
+        _ => Err("temp-store merge did not return solutions".into()),
     }
 }
 
@@ -1150,17 +1204,216 @@ fn build_merge_query(plan: &GroupAggPlan) -> String {
             ),
         })
         .collect();
-    let group_by: Vec<String> = plan
-        .keys
-        .iter()
-        .map(|v| format!("?{}", v.as_str()))
-        .collect();
+    let group_by = group_by_clause(&plan.keys);
     format!(
-        "SELECT {} WHERE {{ ?r {} . }} GROUP BY {}",
+        "SELECT {} WHERE {{ ?r {} . }}{}",
         select_items.join(" "),
         where_parts.join(" ; "),
-        group_by.join(" ")
+        group_by
     )
+}
+
+/// `" GROUP BY ?k0 ?k1"`, or `""` for a global aggregate (no keys) — a trailing
+/// empty `GROUP BY` is invalid SPARQL.
+fn group_by_clause(keys: &[Variable]) -> String {
+    if keys.is_empty() {
+        String::new()
+    } else {
+        let cols: Vec<String> = keys.iter().map(|v| format!("?{}", v.as_str())).collect();
+        format!(" GROUP BY {}", cols.join(" "))
+    }
+}
+
+// ─── Distributed COUNT(DISTINCT …) ──────────────────────────────────────────────
+//
+// `COUNT(DISTINCT ?x)` — global or grouped — decomposes by SET UNION: each shard
+// computes, in parallel, the DISTINCT combinations of (group keys + the distinct
+// variables) it holds; the small per-shard distinct sets are re-deduped through the
+// engine (materialised into a temp store over which the original `COUNT(DISTINCT)` is
+// re-run) and counted. The result is an integer, identical to single-store regardless
+// of order — and because each shard pre-dedups, the merge sees only the (typically
+// tiny) distinct set, not the raw scan, so the expensive part runs `N`-way parallel.
+//
+// Declined when any distinct value is a BLANK NODE: a blank node's label is scoped to
+// its store, so two genuinely-distinct blank nodes in different shards could share a
+// label and collide in the merge — the unsharded full copy counts those exactly.
+
+/// One output column of a decomposable `COUNT(DISTINCT)` query.
+#[derive(Clone)]
+enum CDCol {
+    /// A group key — passes through.
+    Key(Variable),
+    /// `COUNT(DISTINCT ?var)` — counted over the unioned per-shard distinct values.
+    CountDistinct { out: Variable, var: Variable },
+}
+
+struct CountDistinctPlan {
+    keys: Vec<Variable>,
+    group_inner: GraphPattern,
+    /// The per-shard `SELECT DISTINCT` projection: keys then the distinct variables.
+    partial_proj: Vec<Variable>,
+    /// Output columns in projection order.
+    outputs: Vec<CDCol>,
+}
+
+/// Classify a query whose every aggregate is `COUNT(DISTINCT ?var)` (one or more,
+/// global or grouped) over a shard-local pattern. Returns `None` for anything else:
+/// `COUNT(DISTINCT *)`, a distinct aggregate over a computed expression, a mix with
+/// non-distinct aggregates, an unprojected key, or a cross-subject pattern.
+fn plan_count_distinct(query: &Query) -> Option<CountDistinctPlan> {
+    use std::collections::{HashMap, HashSet};
+
+    let Query::Select { pattern, .. } = query else {
+        return None;
+    };
+    let (proj_vars, mut node): (&[Variable], &GraphPattern) = match pattern {
+        GraphPattern::Project { inner, variables } => (variables, inner),
+        GraphPattern::Distinct { inner } | GraphPattern::Reduced { inner } => {
+            match inner.as_ref() {
+                GraphPattern::Project { inner, variables } => (variables, inner),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let mut alias: HashMap<String, String> = HashMap::new();
+    let (keys, aggregates, group_inner) = loop {
+        match node {
+            GraphPattern::Extend {
+                inner,
+                variable,
+                expression,
+            } => {
+                match expression {
+                    Expression::Variable(v) => {
+                        alias.insert(variable.as_str().to_string(), v.as_str().to_string());
+                    }
+                    _ => return None,
+                }
+                node = inner;
+            }
+            GraphPattern::Group {
+                inner,
+                variables,
+                aggregates,
+            } => break (variables, aggregates, inner),
+            _ => return None,
+        }
+    };
+    if !shard_local_rows(group_inner) {
+        return None;
+    }
+    // Every aggregate must be COUNT(DISTINCT ?var); map its internal binding → ?var.
+    let mut distinct_internal: HashMap<&str, Variable> = HashMap::new();
+    for (v, a) in aggregates {
+        match a {
+            AggregateExpression::FunctionCall {
+                name: AggregateFunction::Count,
+                expr: Expression::Variable(arg),
+                distinct: true,
+            } => {
+                distinct_internal.insert(v.as_str(), arg.clone());
+            }
+            _ => return None, // non-distinct, COUNT(DISTINCT *), or computed argument
+        }
+    }
+    if distinct_internal.is_empty() {
+        return None;
+    }
+    let key_set: HashSet<&str> = keys.iter().map(|v| v.as_str()).collect();
+
+    let mut outputs: Vec<CDCol> = Vec::new();
+    let mut distinct_vars: Vec<Variable> = Vec::new();
+    for pv in proj_vars {
+        if key_set.contains(pv.as_str()) {
+            outputs.push(CDCol::Key(pv.clone()));
+            continue;
+        }
+        let internal = alias.get(pv.as_str())?;
+        let var = distinct_internal.get(internal.as_str())?.clone();
+        if !distinct_vars.iter().any(|v| v == &var) {
+            distinct_vars.push(var.clone());
+        }
+        outputs.push(CDCol::CountDistinct {
+            out: pv.clone(),
+            var,
+        });
+    }
+    if outputs
+        .iter()
+        .filter(|o| matches!(o, CDCol::Key(_)))
+        .count()
+        != keys.len()
+    {
+        return None;
+    }
+
+    let mut partial_proj = keys.clone();
+    partial_proj.extend(distinct_vars.iter().cloned());
+
+    Some(CountDistinctPlan {
+        keys: keys.clone(),
+        group_inner: group_inner.as_ref().clone(),
+        partial_proj,
+        outputs,
+    })
+}
+
+/// Per-shard `SELECT DISTINCT <keys ++ distinct-vars> WHERE <inner>` — the distinct
+/// combinations each shard holds. Built from the algebra so the WHERE round-trips.
+fn build_count_distinct_partial(orig: &Query, plan: &CountDistinctPlan) -> Option<String> {
+    let Query::Select {
+        dataset, base_iri, ..
+    } = orig
+    else {
+        return None;
+    };
+    let project = GraphPattern::Project {
+        inner: Box::new(plan.group_inner.clone()),
+        variables: plan.partial_proj.clone(),
+    };
+    let q = Query::Select {
+        dataset: dataset.clone(),
+        pattern: GraphPattern::Distinct {
+            inner: Box::new(project),
+        },
+        base_iri: base_iri.clone(),
+    };
+    Some(q.to_string())
+}
+
+/// The merge query over the materialised distinct combinations: re-dedup globally and
+/// count distinct per group, using the original output names and order.
+fn build_count_distinct_merge_query(plan: &CountDistinctPlan) -> String {
+    let where_parts: Vec<String> = plan
+        .partial_proj
+        .iter()
+        .enumerate()
+        .map(|(i, v)| format!("<{GACOL}{i}> ?{}", v.as_str()))
+        .collect();
+    let select_items: Vec<String> = plan
+        .outputs
+        .iter()
+        .map(|o| match o {
+            CDCol::Key(v) => format!("?{}", v.as_str()),
+            CDCol::CountDistinct { out, var } => {
+                format!("(COUNT(DISTINCT ?{}) AS ?{})", var.as_str(), out.as_str())
+            }
+        })
+        .collect();
+    format!(
+        "SELECT {} WHERE {{ ?r {} . }}{}",
+        select_items.join(" "),
+        where_parts.join(" ; "),
+        group_by_clause(&plan.keys)
+    )
+}
+
+/// True if any cell is a blank node — blank-node labels are store-scoped, so a
+/// cross-shard union/merge can't reliably tell two apart (see the module note).
+fn rows_have_blank(rows: &[Vec<Option<Term>>]) -> bool {
+    rows.iter()
+        .any(|row| row.iter().any(|c| matches!(c, Some(Term::BlankNode(_)))))
 }
 
 #[cfg(test)]
@@ -1507,19 +1760,80 @@ mod tests {
     }
 
     #[test]
-    fn grouped_distinct_count_is_rejected() {
-        // A grouped COUNT(DISTINCT) is not sum-safe across shards (a value can recur
-        // in several shards), so it stays single-store.
-        assert_not_decomposable(
-            "SELECT ?t (COUNT(DISTINCT ?n) AS ?c) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/name> ?n } GROUP BY ?t",
+    fn distinct_count_global_decomposes() {
+        // COUNT(DISTINCT ?x): each shard's distinct set is unioned (re-deduped through
+        // the engine) and counted — exact however values span shards. Low cardinality
+        // (10 types) and high (every name unique).
+        let q = persons(500);
+        assert_matches(
+            &q,
+            "SELECT (COUNT(DISTINCT ?t) AS ?c) WHERE { ?s <http://example.org/type> ?t }",
+        );
+        assert_matches(
+            &q,
+            "SELECT (COUNT(DISTINCT ?n) AS ?c) WHERE { ?s <http://example.org/name> ?n }",
         );
     }
 
     #[test]
-    fn distinct_count_is_rejected() {
-        // COUNT(DISTINCT ?t) is not sum-safe (a type spans shards).
-        assert_not_decomposable(
-            "SELECT (COUNT(DISTINCT ?t) AS ?c) WHERE { ?s <http://example.org/type> ?t }",
+    fn distinct_count_grouped_and_multiple_decompose() {
+        let q = persons(500);
+        // Grouped: distinct names per type.
+        assert_matches(
+            &q,
+            "SELECT ?t (COUNT(DISTINCT ?n) AS ?c) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/name> ?n } GROUP BY ?t",
+        );
+        // Two distinct counts at once (distinct names and ages per type).
+        assert_matches(
+            &q,
+            "SELECT ?t (COUNT(DISTINCT ?n) AS ?cn) (COUNT(DISTINCT ?a) AS ?ca) WHERE { ?s <http://example.org/type> ?t . ?s <http://example.org/name> ?n . ?s <http://example.org/age> ?a } GROUP BY ?t",
+        );
+    }
+
+    #[test]
+    fn global_aggregates_decompose() {
+        // Global (no GROUP BY) SUM/MIN/MAX/AVG over integers — the empty-keys path.
+        let q = persons(500);
+        for agg in [
+            "SUM(?a) AS ?v",
+            "MIN(?a) AS ?v",
+            "MAX(?a) AS ?v",
+            "AVG(?a) AS ?v",
+        ] {
+            assert_matches(
+                &q,
+                &format!("SELECT ({agg}) WHERE {{ ?s <http://example.org/age> ?a }}"),
+            );
+        }
+        // Global mixed aggregates in one query.
+        assert_matches(
+            &q,
+            "SELECT (COUNT(*) AS ?c) (SUM(?a) AS ?s) (MIN(?a) AS ?lo) (MAX(?a) AS ?hi) (AVG(?a) AS ?avg) WHERE { ?s <http://example.org/age> ?a }",
+        );
+    }
+
+    #[test]
+    fn distinct_count_over_blank_node_is_declined() {
+        // COUNT(DISTINCT ?x) where ?x is a blank node: store-scoped labels can't be
+        // unioned across shards, so the decomposition declines (→ None) and the caller
+        // uses the unsharded copy.
+        let ex = "http://example.org/";
+        let mut quads = Vec::new();
+        for i in 0..100usize {
+            quads.push(Quad::new(
+                Subject::NamedNode(iri(&format!("{ex}p{i}"))),
+                iri(&format!("{ex}ref")),
+                Term::BlankNode(BlankNode::new_unchecked(format!("b{i}"))),
+                GraphName::DefaultGraph,
+            ));
+        }
+        let ps = ParallelStore::new(4);
+        ps.load_quads(quads).unwrap();
+        assert!(
+            ps.query("SELECT (COUNT(DISTINCT ?x) AS ?c) WHERE { ?s <http://example.org/ref> ?x }")
+                .unwrap()
+                .is_none(),
+            "COUNT(DISTINCT ?blank) must be declined (blank-node labels are store-scoped)"
         );
     }
 
