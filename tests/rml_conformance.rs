@@ -289,6 +289,163 @@ fn rml_inline_blank_node_mapping() {
     );
 }
 
+// Multi-variable subject template: the IRI is assembled from two columns.
+#[test]
+fn rml_multivariable_template_subject() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/p/{first}-{last}" .
+      ex:POM rr:predicate foaf:name ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "first" ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "first,last\nAda,Lovelace\n")]);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?n WHERE { <http://example.org/p/Ada-Lovelace> foaf:name ?n }"
+        ),
+        1,
+        "subject IRI must combine both template variables"
+    );
+}
+
+// rr:termType rr:IRI on an object map turns a column VALUE into an IRI object.
+#[test]
+fn rml_object_term_type_iri() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:POM rr:predicate foaf:homepage ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "url" ; rr:termType rr:IRI ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id,url\n1,http://ada.example\n")]);
+    let hp = first(
+        &store,
+        "SELECT ?h WHERE { <http://example.org/r/1> foaf:homepage ?h }",
+    )
+    .unwrap_or_default();
+    assert!(
+        hp.starts_with('<') && hp.contains("ada.example"),
+        "object must be an IRI, got {hp:?}"
+    );
+}
+
+// rr:template on an object map builds a (literal) object from a column.
+#[test]
+fn rml_object_template_literal() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:POM rr:predicate ex:greeting ; rr:objectMap ex:Obj .
+      ex:Obj rr:template "Hello {name}" ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id,name\n1,Sam\n")]);
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?g WHERE { <http://example.org/r/1> ex:greeting ?g }"
+        )
+        .as_deref(),
+        Some("\"Hello Sam\"")
+    );
+}
+
+// rr:graphMap routes the generated triples into a named graph.
+#[test]
+fn rml_graph_map_routes_to_named_graph() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM ;
+        rr:graphMap ex:GM .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/r/{id}" .
+      ex:POM rr:predicate foaf:name ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "name" .
+      ex:GM rr:constant ex:G1 ."#;
+    let (store, _) = run_rml(mapping, &[("d.csv", "id,name\n1,Al\n2,Bo\n")]);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?s WHERE { GRAPH ex:G1 { ?s foaf:name ?n } }"
+        ),
+        2,
+        "triples must land in the rr:graphMap-named graph"
+    );
+    assert_eq!(
+        count(&store, "SELECT ?s WHERE { ?s foaf:name ?n }"),
+        0,
+        "and NOT in the default graph"
+    );
+}
+
+// Two independent triples maps in one document each contribute their triples.
+#[test]
+fn rml_multiple_triples_maps() {
+    let mapping = r#"
+      ex:M1 a rr:TriplesMap ;
+        rml:logicalSource ex:S1 ; rr:subjectMap ex:Su1 ; rr:predicateObjectMap ex:P1 .
+      ex:S1 rml:source "a.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Su1 rr:template "http://example.org/a/{id}" .
+      ex:P1 rr:predicate ex:p1 ; rr:objectMap ex:O1 . ex:O1 rml:reference "v" .
+      ex:M2 a rr:TriplesMap ;
+        rml:logicalSource ex:S2 ; rr:subjectMap ex:Su2 ; rr:predicateObjectMap ex:P2 .
+      ex:S2 rml:source "b.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Su2 rr:template "http://example.org/b/{id}" .
+      ex:P2 rr:predicate ex:p2 ; rr:objectMap ex:O2 . ex:O2 rml:reference "v" ."#;
+    let (store, n) = run_rml(
+        mapping,
+        &[("a.csv", "id,v\n1,X\n"), ("b.csv", "id,v\n1,Y\n")],
+    );
+    assert_eq!(n, 2, "one triple from each of two triples maps");
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?v WHERE { <http://example.org/a/1> ex:p1 ?v }"
+        )
+        .as_deref(),
+        Some("\"X\"")
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?v WHERE { <http://example.org/b/1> ex:p2 ?v }"
+        )
+        .as_deref(),
+        Some("\"Y\"")
+    );
+}
+
+// A blank-node subject (rr:termType rr:BlankNode) is shared across the row's
+// predicate-object maps, so both properties hang off the same blank node.
+#[test]
+fn rml_blank_node_subject_shared_across_poms() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:P1, ex:P2 .
+      ex:Src rml:source "d.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "node{id}" ; rr:termType rr:BlankNode .
+      ex:P1 rr:predicate foaf:name ; rr:objectMap ex:O1 . ex:O1 rml:reference "name" .
+      ex:P2 rr:predicate foaf:age ; rr:objectMap ex:O2 . ex:O2 rml:reference "age" ."#;
+    let (store, n) = run_rml(mapping, &[("d.csv", "id,name,age\n1,Al,30\n")]);
+    assert_eq!(n, 2, "two POMs over one row");
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?s WHERE { ?s foaf:name \"Al\" ; foaf:age \"30\" . FILTER(isBlank(?s)) }"
+        ),
+        1,
+        "both properties must share one blank-node subject"
+    );
+}
+
 // Tracked gap: referencing object maps (rr:parentTriplesMap joins) are not modelled.
 #[test]
 fn rml_referencing_object_map_join_is_gap() {
