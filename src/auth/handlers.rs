@@ -3545,11 +3545,14 @@ pub async fn grant_access(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Managing who may access a dataset is an owner/admin capability, not an
+    // editor one — a mere editor (write grant) must not be able to grant access
+    // to arbitrary users. Mirrors the role-based grant endpoints below.
     if !db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     let user_id = req["user_id"]
@@ -3573,11 +3576,12 @@ pub async fn revoke_access(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Revoking access is an owner/admin (manage) capability, not an editor one.
     if !db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     db.revoke_dataset_access(&dataset_id, &user_id)
@@ -3597,11 +3601,13 @@ pub async fn list_access(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Enumerating who has access is an owner/admin (manage) capability — an
+    // editor must not be able to read the access list.
     if !db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     let users = db
