@@ -106,10 +106,10 @@
   $: fGraphs = (facets.graphs || []).filter((g) => match(shortenIRI(g.iri), g.iri));
 
   // Active-state lookups against current chips.
-  $: classSel = new Set(chips.filter((c) => c.field === 'object' && c.mode === 'exact').map((c) => c.value));
-  $: propSel = new Set(chips.filter((c) => c.field === 'predicate' && c.mode === 'exact').map((c) => c.value));
-  $: graphSel = new Set(chips.filter((c) => c.field === 'graph' && c.mode === 'exact').map((c) => c.value));
-  $: vocabSel = new Set(chips.filter((c) => c.field === 'vocabulary').map((c) => c.value));
+  $: classSel = new Set(chips.filter((c) => c.field === 'object' && c.mode === 'exact' && !c.neg).map((c) => c.value));
+  $: propSel = new Set(chips.filter((c) => c.field === 'predicate' && c.mode === 'exact' && !c.neg).map((c) => c.value));
+  $: graphSel = new Set(chips.filter((c) => c.field === 'graph' && c.mode === 'exact' && !c.neg).map((c) => c.value));
+  $: vocabSel = new Set(chips.filter((c) => c.field === 'vocabulary' && !c.neg).map((c) => c.value));
 
   const pickClass = (iri) => dispatch('addchips', [{ field: 'object', value: iri, mode: 'exact' }]);
   const pickProp = (iri) => dispatch('addchips', [{ field: 'predicate', value: iri, mode: 'exact' }]);

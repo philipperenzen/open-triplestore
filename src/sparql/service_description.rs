@@ -8,8 +8,32 @@
 /// `default_graph_triples` is the `void:triples` count for the default graph.
 /// `named_graphs` pairs each named-graph IRI with its own triple count, emitted
 /// as `sd:graph [ a sd:Graph ; void:triples N ]` per the SPARQL 1.1 Service
-/// Description recommendation.
-pub fn generate(default_graph_triples: usize, named_graphs: &[(&str, usize)]) -> String {
+/// Description recommendation. `datasets` lists the registry datasets the caller
+/// may access (each with its accessible graphs) as `void:Dataset` entries.
+pub struct DatasetDesc {
+    pub iri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub public: bool,
+    pub graphs: Vec<String>,
+}
+
+/// Escape a string for a Turtle double-quoted literal.
+fn ttl_lit(s: &str) -> String {
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    )
+}
+
+pub fn generate(
+    default_graph_triples: usize,
+    named_graphs: &[(&str, usize)],
+    datasets: &[DatasetDesc],
+) -> String {
     let mut desc = String::new();
 
     desc.push_str(
@@ -20,6 +44,7 @@ pub fn generate(default_graph_triples: usize, named_graphs: &[(&str, usize)]) ->
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dct: <http://purl.org/dc/terms/> .
 
 <> a sd:Service ;
     sd:endpoint <sparql> ;
@@ -116,6 +141,33 @@ pub fn generate(default_graph_triples: usize, named_graphs: &[(&str, usize)]) ->
 
     desc.push_str("\n    ] .\n");
 
+    // Registry datasets the caller may access, each grouping its accessible named
+    // graphs. Surfaces the platform's datasets (public or auth-scoped) to RDF/SPARQL
+    // clients exploring the endpoint, alongside the raw graph list above.
+    for d in datasets {
+        desc.push_str(&format!(
+            "\n<{}> a void:Dataset, sd:Dataset ;\n    rdfs:label {} ;\n",
+            d.iri,
+            ttl_lit(&d.name)
+        ));
+        if let Some(text) = &d.description {
+            if !text.is_empty() {
+                desc.push_str(&format!("    dct:description {} ;\n", ttl_lit(text)));
+            }
+        }
+        desc.push_str(&format!(
+            "    rdfs:comment \"{} dataset\"",
+            if d.public { "Public" } else { "Private" }
+        ));
+        for g in &d.graphs {
+            desc.push_str(&format!(
+                " ;\n    sd:namedGraph [ a sd:NamedGraph ; sd:name <{}> ]",
+                g
+            ));
+        }
+        desc.push_str(" .\n");
+    }
+
     desc
 }
 
@@ -125,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_generate_basic() {
-        let desc = generate(42, &[]);
+        let desc = generate(42, &[], &[]);
         assert!(desc.contains("sd:Service"));
         assert!(desc.contains("sd:SPARQL11Query"));
         assert!(desc.contains("void:triples 42"));
@@ -135,9 +187,26 @@ mod tests {
 
     #[test]
     fn test_generate_with_named_graphs() {
-        let desc = generate(100, &[("http://example.org/graph1", 7)]);
+        let desc = generate(100, &[("http://example.org/graph1", 7)], &[]);
         assert!(desc.contains("http://example.org/graph1"));
         assert!(desc.contains("sd:namedGraph"));
+    }
+
+    #[test]
+    fn test_generate_with_datasets() {
+        let ds = DatasetDesc {
+            iri: "http://x/dataset/d1".into(),
+            name: "My DS".into(),
+            description: Some("a demo".into()),
+            public: true,
+            graphs: vec!["http://x/g1".into()],
+        };
+        let desc = generate(0, &[], std::slice::from_ref(&ds));
+        assert!(desc.contains("<http://x/dataset/d1> a void:Dataset"));
+        assert!(desc.contains("My DS"));
+        assert!(desc.contains("Public dataset"));
+        assert!(desc.contains("a demo"));
+        assert!(desc.contains("<http://x/g1>"));
     }
 
     #[test]
@@ -148,6 +217,7 @@ mod tests {
                 ("http://example.org/g1", 42),
                 ("http://example.org/g2", 1000),
             ],
+            &[],
         );
         // Default graph count.
         assert!(desc.contains("void:triples 5"));
