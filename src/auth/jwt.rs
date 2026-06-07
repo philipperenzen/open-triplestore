@@ -35,6 +35,13 @@ pub struct Claims {
     pub iat: u64,
     /// Expiration (Unix timestamp)
     pub exp: u64,
+    /// Unique token id (nonce). Makes every minted token distinct even when two
+    /// are issued for the same user in the same second, so their SHA-256 hashes
+    /// can't collide on the `refresh_tokens.token_hash` UNIQUE index (a collision
+    /// makes the second login within a second fail with a 500). Optional on decode
+    /// so tokens minted before this field existed still verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 /// Issue a short-lived access token.
@@ -52,6 +59,7 @@ pub fn issue_access_token(
         token_type: "access".to_string(),
         iat: now,
         exp: now + config.access_expiry_minutes * 60,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
     };
 
     let token = encode(
@@ -78,6 +86,7 @@ pub fn issue_refresh_token(
         token_type: "refresh".to_string(),
         iat: now,
         exp: now + config.refresh_expiry_days * 86400,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
     };
 
     let token = encode(
@@ -167,6 +176,23 @@ mod tests {
         let config = JwtConfig::new("test-secret-key".to_string(), 30, 30);
         let result = verify_token(&config, "invalid.token.here");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn refresh_tokens_are_unique_per_issue() {
+        // Two refresh tokens for the same user issued back-to-back (same second)
+        // must differ so their SHA-256 hashes can't collide on the UNIQUE
+        // refresh_tokens.token_hash index — otherwise a second login within the
+        // same second (e.g. right after a password change) 500s.
+        let config = JwtConfig::new("test-secret-key".to_string(), 30, 30);
+        let t1 = issue_refresh_token(&config, "user-123", "alice", "user").unwrap();
+        let t2 = issue_refresh_token(&config, "user-123", "alice", "user").unwrap();
+        assert_ne!(t1, t2, "refresh tokens must be unique per issuance");
+        assert_ne!(
+            hash_token(&t1),
+            hash_token(&t2),
+            "refresh token hashes must differ"
+        );
     }
 
     #[test]
