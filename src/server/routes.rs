@@ -1300,10 +1300,40 @@ async fn graph_store_delete(
 // ─── Management endpoints ─────────────────────────────────────────────────────
 
 /// GET / — Service Description (Turtle), filtered to caller-accessible graphs
+/// True when the client prefers HTML (a browser) over RDF — used so the root route
+/// serves the web UI to browsers while RDF/SPARQL clients still get the service
+/// description.
+fn prefers_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|a| a.contains("text/html"))
+        .unwrap_or(false)
+}
+
+/// Mirrors the server's frontend gate (`SERVE_FRONTEND`, default on) so the root
+/// route only serves the SPA shell when the web UI is actually being served.
+fn serve_frontend_enabled() -> bool {
+    !matches!(
+        std::env::var("SERVE_FRONTEND").ok().as_deref(),
+        Some("false") | Some("0") | Some("no")
+    )
+}
+
 async fn service_description_handler(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    // Content negotiation: a browser (Accept: text/html) gets the web UI; RDF/SPARQL
+    // clients get the service description. The explicit `/` route shadows the SPA
+    // fallback, so without this a browser at the root only ever sees Turtle.
+    if serve_frontend_enabled() && prefers_html(&headers) {
+        if let Ok(html) = std::fs::read_to_string("frontend/dist/index.html") {
+            return Ok(axum::response::Html(html).into_response());
+        }
+    }
+
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
     let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
 
@@ -1340,7 +1370,37 @@ async fn service_description_handler(
             (iri.as_str(), count)
         })
         .collect();
-    let desc = service_description::generate(default_graph_count, &named_graph_counts);
+    // Registry datasets the caller can access, each with its accessible graphs.
+    // Private graphs are filtered out for non-admins so the description can't leak
+    // them (datasets themselves are already scoped by list_accessible_datasets).
+    let accessible_set: std::collections::HashSet<&str> =
+        accessible_graph_iris.iter().map(|s| s.as_str()).collect();
+    let base = state.base_url.trim_end_matches('/');
+    let dataset_descs: Vec<service_description::DatasetDesc> = state
+        .auth_db
+        .list_accessible_datasets(user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| {
+            let graphs = state
+                .auth_db
+                .list_dataset_graphs(&d.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|g| is_admin || accessible_set.contains(g.as_str()))
+                .collect();
+            service_description::DatasetDesc {
+                iri: format!("{base}/dataset/{}", d.id),
+                name: d.name,
+                description: d.description,
+                public: matches!(d.visibility, crate::auth::models::Visibility::Public),
+                graphs,
+            }
+        })
+        .collect();
+
+    let desc =
+        service_description::generate(default_graph_count, &named_graph_counts, &dataset_descs);
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }
