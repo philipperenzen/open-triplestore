@@ -7,6 +7,7 @@
   import { createEventDispatcher } from 'svelte';
   import { shortenIRI, toNTriples } from '../lib/rdf-utils.js';
   import RdfTerm from './RdfTerm.svelte';
+  import TermPopover from './ontology/TermPopover.svelte';
   import { Copy } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
 
@@ -114,14 +115,22 @@
               <RdfTerm term={tr.subject} graph={tr.graph?.value || ''} />
             </td>
             <td class="pred-cell">
-              <span
-                class="predicate"
-                title={tr.predicate?.value}
-                style="color:{predicateColor(tr.predicate?.value)}; background:{predicateBg(tr.predicate?.value)}"
-              >{shortenIRI(tr.predicate?.value || '')}</span>
+              <TermPopover iri={tr.predicate?.value || ''} variant="rich">
+                <span
+                  class="predicate"
+                  title={tr.predicate?.value}
+                  style="color:{predicateColor(tr.predicate?.value)}; background:{predicateBg(tr.predicate?.value)}"
+                >{shortenIRI(tr.predicate?.value || '')}</span>
+              </TermPopover>
             </td>
             <td class="term-cell">
-              <RdfTerm term={tr.object} graph={tr.graph?.value || ''} />
+              {#if tr.object?.type === 'uri' || tr.object?.type === 'iri'}
+                <TermPopover iri={tr.object.value} variant="compact" trigger="hover">
+                  <RdfTerm term={tr.object} graph={tr.graph?.value || ''} />
+                </TermPopover>
+              {:else}
+                <RdfTerm term={tr.object} graph={tr.graph?.value || ''} />
+              {/if}
             </td>
             <td class="graph-cell">
               {#if tr.graph?.value}

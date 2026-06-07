@@ -520,16 +520,22 @@
         node.data('hovered', true);
       });
       const { x1, y1 } = node.renderedBoundingBox();
+      // A node shows the "+" badge (and so can be expanded by double-click) when it
+      // is a URI, or a blank node with a parent edge to anchor on — and isn't already
+      // expanded/exhausted. Surface that as a tooltip hint so the affordance is discoverable.
+      const ntype = node.data('nodeType') || 'uri';
+      const expandable = ntype === 'uri' || (ntype === 'bnode' && node.indegree(false) > 0);
       tooltip = {
         visible: true,
         x: x1 + node.renderedWidth() / 2,
         y: y1 - 8,
         label: node.data('label') || node.id(),
-        type: node.data('nodeType') || 'uri',
+        type: ntype,
         iri: node.data('fullIri') || '',
         value: node.data('isLiteral') ? String(node.data('literalValue') ?? '') : '',
         datatype: node.data('datatype') || '',
         language: node.data('language') || '',
+        expandHint: expandable && !node.data('expanded') && !node.data('exhausted'),
       };
     });
 
@@ -1365,6 +1371,9 @@
             : $t('pages.graphViz.typeUriExplain')}
         </span>
       {/if}
+      {#if tooltip.expandHint}
+        <span class="tt-expand">{$t('pages.graphViz.dblclickExpand')}</span>
+      {/if}
     </div>
   {/if}
 
@@ -2179,6 +2188,16 @@
     margin-top: 2px;
     max-width: 260px;
   }
+  .tt-expand {
+    font-size: 10px;
+    font-weight: 600;
+    color: #93c5fd;
+    margin-top: 3px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .tt-expand::before { content: '＋'; font-weight: 700; }
 
   /* ── Node inspector panel ── */
   .inspector-panel {

@@ -1,0 +1,55 @@
+# XML Schema Datatypes (http://www.w3.org/2001/XMLSchema#) used as RDF literal
+# datatypes. There is no normative Turtle vocabulary for XSD, so this compact
+# file declares the datatypes commonly seen in RDF data as rdfs:Datatype with a
+# short description, so they render in the term-definition card.
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+xsd:string a rdfs:Datatype ; rdfs:label "string"@en ;
+  rdfs:comment "A finite sequence of characters."@en .
+xsd:boolean a rdfs:Datatype ; rdfs:label "boolean"@en ;
+  rdfs:comment "The values true and false."@en .
+xsd:decimal a rdfs:Datatype ; rdfs:label "decimal"@en ;
+  rdfs:comment "Arbitrary-precision decimal numbers."@en .
+xsd:integer a rdfs:Datatype ; rdfs:subClassOf xsd:decimal ; rdfs:label "integer"@en ;
+  rdfs:comment "The standard mathematical concept of the integer numbers."@en .
+xsd:int a rdfs:Datatype ; rdfs:label "int"@en ;
+  rdfs:comment "A signed 32-bit integer (−2147483648 … 2147483647)."@en .
+xsd:long a rdfs:Datatype ; rdfs:label "long"@en ;
+  rdfs:comment "A signed 64-bit integer."@en .
+xsd:short a rdfs:Datatype ; rdfs:label "short"@en ;
+  rdfs:comment "A signed 16-bit integer."@en .
+xsd:nonNegativeInteger a rdfs:Datatype ; rdfs:label "non-negative integer"@en ;
+  rdfs:comment "Integers greater than or equal to zero."@en .
+xsd:positiveInteger a rdfs:Datatype ; rdfs:label "positive integer"@en ;
+  rdfs:comment "Integers greater than zero."@en .
+xsd:float a rdfs:Datatype ; rdfs:label "float"@en ;
+  rdfs:comment "IEEE single-precision 32-bit floating point."@en .
+xsd:double a rdfs:Datatype ; rdfs:label "double"@en ;
+  rdfs:comment "IEEE double-precision 64-bit floating point."@en .
+xsd:date a rdfs:Datatype ; rdfs:label "date"@en ;
+  rdfs:comment "A Gregorian calendar date: year, month and day."@en .
+xsd:dateTime a rdfs:Datatype ; rdfs:label "dateTime"@en ;
+  rdfs:comment "A specific instant: date and time of day, optionally with a timezone."@en .
+xsd:dateTimeStamp a rdfs:Datatype ; rdfs:subClassOf xsd:dateTime ; rdfs:label "dateTimeStamp"@en ;
+  rdfs:comment "A dateTime that is required to carry a timezone."@en .
+xsd:time a rdfs:Datatype ; rdfs:label "time"@en ;
+  rdfs:comment "An instant of time that recurs every day."@en .
+xsd:duration a rdfs:Datatype ; rdfs:label "duration"@en ;
+  rdfs:comment "A duration of time as defined by ISO 8601."@en .
+xsd:gYear a rdfs:Datatype ; rdfs:label "gYear"@en ;
+  rdfs:comment "A Gregorian calendar year."@en .
+xsd:gYearMonth a rdfs:Datatype ; rdfs:label "gYearMonth"@en ;
+  rdfs:comment "A specific Gregorian month in a specific Gregorian year."@en .
+xsd:anyURI a rdfs:Datatype ; rdfs:label "anyURI"@en ;
+  rdfs:comment "An Internationalized Resource Identifier (IRI)."@en .
+xsd:base64Binary a rdfs:Datatype ; rdfs:label "base64Binary"@en ;
+  rdfs:comment "Base64-encoded arbitrary binary data."@en .
+xsd:hexBinary a rdfs:Datatype ; rdfs:label "hexBinary"@en ;
+  rdfs:comment "Hex-encoded arbitrary binary data."@en .
+xsd:language a rdfs:Datatype ; rdfs:label "language"@en ;
+  rdfs:comment "A language identifier as defined by BCP 47."@en .
+xsd:normalizedString a rdfs:Datatype ; rdfs:subClassOf xsd:string ; rdfs:label "normalizedString"@en ;
+  rdfs:comment "A string without carriage return, line feed or tab characters."@en .
+xsd:token a rdfs:Datatype ; rdfs:subClassOf xsd:normalizedString ; rdfs:label "token"@en ;
+  rdfs:comment "A tokenized string: no leading/trailing/space runs of whitespace."@en .

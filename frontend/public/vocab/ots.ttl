@@ -1,0 +1,122 @@
+# Open Triplestore (OTS) vocabulary — describes the project's own model terms so
+# they render with full definitions in the term-definition card, exactly like the
+# bundled standard vocabularies (DCAT, OWL, SKOS, …). Hand-authored; the term IRIs
+# match those emitted by the backend (src/auth/dataset_graph.rs, src/dcat/catalog.rs,
+# src/shacl_studio/seed_standards.rs).
+@prefix otso: <https://opentriplestore.org/ontology/> .
+@prefix ots:  <https://opentriplestore.org/ns#> .
+@prefix otsa: <https://opentriplestore.org/ns/asset#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix void: <http://rdfs.org/ns/void#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+otso: a owl:Ontology ;
+  rdfs:label "Open Triplestore ontology"@en ;
+  rdfs:label "Open Triplestore-ontologie"@nl ;
+  rdfs:comment "Terms that describe how Open Triplestore organises datasets, named graphs and standards."@en ;
+  owl:versionInfo "1.0" .
+
+# ── Graph roles ────────────────────────────────────────────────────────────────
+
+otso:GraphRole a owl:Class ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "Graph role"@en ;
+  rdfs:label "Graafrol"@nl ;
+  rdfs:comment "The role a named graph plays within a dataset (instances, model, vocabulary, shapes, entailment or system)."@en ;
+  skos:definition "A classification of a named graph by the kind of content it holds within its dataset."@en ;
+  skos:definition "Een classificatie van een benoemde graaf naar het soort inhoud dat hij binnen zijn dataset bevat."@nl .
+
+otso:graphRole a owl:ObjectProperty ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "graph role"@en ;
+  rdfs:label "graafrol"@nl ;
+  rdfs:comment "Links a named graph to the role it plays in its dataset."@en ;
+  skos:definition "Relates a named graph to the GraphRole that classifies its content."@en ;
+  rdfs:range otso:GraphRole .
+
+otso:auditStatus a owl:AnnotationProperty ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "audit status"@en ;
+  rdfs:label "auditstatus"@nl ;
+  rdfs:comment "Records the access-control audit state of a dataset or graph."@en ;
+  skos:definition "The current audit state recorded for a dataset or graph by the access-management system."@en .
+
+otso:Instances a otso:GraphRole ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "Instances"@en ;
+  rdfs:label "Instanties"@nl ;
+  rdfs:comment "The graph holding the dataset's instance data (the actual records)."@en ;
+  skos:definition "Named graph that contains a dataset's instance data — the asserted facts, as opposed to schema, shapes or vocabulary."@en .
+
+otso:Model a otso:GraphRole ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "Model"@en ;
+  rdfs:label "Model"@nl ;
+  rdfs:comment "The graph holding the dataset's ontology / schema (classes and properties)."@en ;
+  skos:definition "Named graph that contains a dataset's ontology or schema: its class and property definitions."@en .
+
+otso:Vocabulary a otso:GraphRole ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "Vocabulary"@en ;
+  rdfs:label "Vocabulaire"@nl ;
+  rdfs:comment "The graph holding controlled vocabularies / code lists (e.g. SKOS concept schemes)."@en ;
+  skos:definition "Named graph that contains controlled vocabularies or code lists used by the dataset, such as SKOS concept schemes."@en .
+
+otso:Shapes a otso:GraphRole ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "Shapes"@en ;
+  rdfs:label "Vormen"@nl ;
+  rdfs:comment "The graph holding the dataset's SHACL shapes used for validation."@en ;
+  skos:definition "Named graph that contains the SHACL shapes used to validate the dataset's instance data."@en .
+
+otso:Entailment a otso:GraphRole ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "Entailment"@en ;
+  rdfs:label "Gevolgtrekking"@nl ;
+  rdfs:comment "The graph holding inferred (entailed) triples produced by a reasoning regime."@en ;
+  skos:definition "Named graph that contains triples inferred from the dataset under an entailment regime (RDFS, OWL 2 RL/EL/QL)."@en .
+
+otso:System a otso:GraphRole ;
+  rdfs:isDefinedBy otso: ;
+  rdfs:label "System"@en ;
+  rdfs:label "Systeem"@nl ;
+  rdfs:comment "A system graph holding internal metadata (registry, versions, catalogue)."@en ;
+  skos:definition "Named graph reserved for Open Triplestore's internal metadata, such as the dataset registry, version history and DCAT catalogue."@en .
+
+# ── Standards registry (ots: namespace) ────────────────────────────────────────
+
+ots:Standard a owl:Class ;
+  rdfs:isDefinedBy ots: ;
+  rdfs:label "Standard"@en ;
+  rdfs:label "Standaard"@nl ;
+  rdfs:comment "A specification that the triplestore advertises conformance to (e.g. SPARQL 1.1, DCAT, SHACL)."@en ;
+  skos:definition "A published specification or standard that an Open Triplestore deployment declares its conformance to."@en .
+
+ots:conformance a owl:ObjectProperty ;
+  rdfs:isDefinedBy ots: ;
+  rdfs:label "conformance"@en ;
+  rdfs:label "conformiteit"@nl ;
+  rdfs:comment "The conformance level a Standard declares (e.g. full, partial)."@en ;
+  skos:definition "Relates a Standard to the conformance level the deployment claims against it."@en ;
+  rdfs:domain ots:Standard .
+
+# ── Asset statistics (asset# namespace) ────────────────────────────────────────
+
+otsa:rowCount a owl:DatatypeProperty ;
+  rdfs:isDefinedBy otsa: ;
+  rdfs:label "row count"@en ;
+  rdfs:label "aantal rijen"@nl ;
+  rdfs:comment "Number of data rows in a tabular asset (CSV, spreadsheet)."@en ;
+  skos:definition "The number of data rows detected in a tabular asset such as a CSV or spreadsheet distribution."@en ;
+  rdfs:range xsd:integer .
+
+otsa:pointCount a owl:DatatypeProperty ;
+  rdfs:isDefinedBy otsa: ;
+  rdfs:label "point count"@en ;
+  rdfs:label "aantal punten"@nl ;
+  rdfs:comment "Number of geometries / points in a spatial asset (GeoJSON, shapefile)."@en ;
+  skos:definition "The number of geometries detected in a spatial asset such as a GeoJSON or shapefile distribution."@en ;
+  rdfs:range xsd:integer .

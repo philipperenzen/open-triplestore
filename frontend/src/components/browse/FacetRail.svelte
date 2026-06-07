@@ -8,7 +8,6 @@
   // { classes:[{iri,count}], properties:[{iri,count}], graphs:[{iri,count,role,roleLabel}] }
   export let facets = { classes: [], properties: [], graphs: [] };
   export let loading = false;
-  export let uiMode = 'simple';
   export let chips = [];            // active chips, to mark facets as selected
   export let collapsed = false;
 
@@ -126,7 +125,7 @@
 {:else}
   <aside class="rail">
     <div class="rail-head">
-      <span class="rail-title">{uiMode === 'simple' ? $t('components.facetRail.whatsInHere') : $t('components.facetRail.facetsInScope')}</span>
+      <span class="rail-title">{$t('components.facetRail.termsInScope')}</span>
       <button class="rail-collapse" on:click={() => (collapsed = true)} title={$t('components.facetRail.hideFacets')}><PanelLeftClose size={15} /></button>
     </div>
 

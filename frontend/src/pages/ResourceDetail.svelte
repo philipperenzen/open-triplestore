@@ -7,6 +7,8 @@
   import RdfTerm from '../components/RdfTerm.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
+  import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
+  import { lookupTerm } from '../lib/ontology/termDictionary.js';
   import GeoPreview from '../components/GeoPreview.svelte';
   import Select from '../components/Select.svelte';
   import { t as i18nT } from 'svelte-i18n';
@@ -75,6 +77,18 @@
 
   let iri = '';
   let graphScope = '';
+
+  // Bundled vocabulary definition for this IRI (DCAT/OWL/SKOS/…/OTS) — shown as a
+  // prominent card when the resource is a known linked-data term, even if the
+  // user's own data does not carry the vocabulary triples. Null otherwise.
+  let vocabMeta = null;
+  async function loadVocabMeta(i) {
+    vocabMeta = null;
+    if (!i || i.startsWith('_:')) return;
+    const m = await lookupTerm(i);
+    if (i === iri) vocabMeta = m;
+  }
+  $: loadVocabMeta(iri);
   let data = null;
   let error = '';
   let loading = false;
@@ -601,6 +615,12 @@
   {#if loading}
     <div class="card"><p class="loading-text">{$i18nT('pages.resource.loadingResource')}</p></div>
   {:else if data}
+    {#if vocabMeta}
+      <div class="card vocab-def-card">
+        <h3 class="vocab-def-title">{$i18nT('pages.resource.vocabularyDefinition')}</h3>
+        <TermDefinitionCard {iri} meta={vocabMeta} variant="rich" />
+      </div>
+    {/if}
     <!-- Tabs -->
     <div class="tabs">
       <button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => (activeTab = 'overview')}>
@@ -1057,6 +1077,8 @@
 
   /* Header card */
   .resource-header { background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%); }
+  .vocab-def-card { border-left: 3px solid #6366f1; }
+  .vocab-def-title { margin: 0 0 0.5rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #6366f1; }
   .header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .min-w-0 { min-width: 0; }
   .short-iri { font-size: 0.8rem; color: #6a5acd; margin-bottom: 0.25rem; font-weight: 500; }
