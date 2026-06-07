@@ -491,9 +491,16 @@ export const browseTriples = (params) => {
   const qs = new URLSearchParams(params).toString();
   return request('GET', `/api/browse/triples?${qs}`);
 };
-export const browseResource = (iri, graph) => {
+// `opts` may be a bare graph IRI (back-compat) or an object carrying the same
+// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
+// Scope lets the graph view expand a resource within the active browse scope
+// (dataset/org + version pins) instead of the broad accessible set.
+export const browseResource = (iri, opts = {}) => {
   const qs = new URLSearchParams({ iri });
-  if (graph) qs.set('graph', graph);
+  const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
+  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
+    if (o[k]) qs.set(k, o[k]);
+  }
   return request('GET', `/api/browse/resource?${qs.toString()}`);
 };
 export const browseStats = () => request('GET', '/api/browse/stats');

@@ -1969,6 +1969,18 @@ pub struct BrowseTripleParams {
 pub struct BrowseResourceParams {
     pub iri: String,
     pub graph: Option<String>,
+    /// Scope to all named graphs belonging to this dataset ID. Mirrors
+    /// `BrowseTripleParams` so the graph view can expand a resource within the
+    /// same scope as the initial browse load. `graph` takes precedence.
+    pub dataset_id: Option<String>,
+    /// Comma-separated dataset IDs; union of their named graphs. Takes
+    /// precedence over `dataset_id`.
+    pub dataset_ids: Option<String>,
+    /// Scope to all datasets owned by this organisation ID.
+    pub org_id: Option<String>,
+    /// Per-dataset version pins (comma-separated `datasetId:version`). A pinned
+    /// dataset is read from its version snapshot graphs instead of live graphs.
+    pub versions: Option<String>,
 }
 
 /// GET /api/browse/graphs — list named graphs accessible to the caller
@@ -2697,6 +2709,48 @@ pub async fn browse_resource(
             }
         }
         vec![graph.clone()]
+    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
+    {
+        // Honour the browse scope (dataset/org + version pins), mirroring
+        // browse_triples → resolve_scope_graphs, so expanding a resource in the
+        // graph view reads the same (possibly version-snapshot) graphs as the
+        // initial scoped load — not the broad accessible set. Access control is
+        // enforced inside scope_dataset_graphs.
+        let versions_map = params
+            .versions
+            .as_deref()
+            .map(parse_versions_map)
+            .unwrap_or_default();
+        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
+            ids_csv
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        } else if let Some(ref org_id) = params.org_id {
+            state
+                .auth_db
+                .list_datasets_by_org(org_id)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter()
+                .map(|ds| ds.id.to_string())
+                .collect()
+        } else {
+            vec![params.dataset_id.clone().unwrap()]
+        };
+        let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
+        if scoped.is_empty() {
+            return Ok(Json(serde_json::json!({
+                "iri": iri,
+                "label": null,
+                "outgoing": [],
+                "incoming": [],
+                "bnodes": {},
+                "reason": "no_accessible_graphs",
+            })));
+        }
+        scoped
     } else {
         let cached_graphs = state
             .auth_db
