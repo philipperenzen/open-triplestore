@@ -1562,6 +1562,11 @@ struct BrowseFilterChip {
     /// `regex` (case-insensitive SPARQL REGEX over the term's string form).
     #[serde(default)]
     mode: Option<String>,
+    /// When true the chip is negated: rows that MATCH the clause are excluded
+    /// (`FILTER(!(…))`). Negated chips AND together — each is an independent
+    /// exclusion — unlike positive chips on the same field, which OR together.
+    #[serde(default)]
+    neg: Option<bool>,
 }
 
 /// Validate a regex pattern before embedding it in a SPARQL string literal.
@@ -2245,29 +2250,48 @@ pub async fn browse_triples(
     let mut obj_clauses: Vec<String> = Vec::new();
     let mut graph_clauses: Vec<String> = Vec::new();
     let mut vocab_clauses: Vec<String> = Vec::new();
+    // Negated chips (`neg: true`): rows matching the clause are excluded. Each
+    // exclusion ANDs independently (drop the row if it matches ANY of them), so
+    // they share one list and emit one FILTER each — unlike the OR-ed positive
+    // buckets above.
+    let mut neg_clauses: Vec<String> = Vec::new();
     for chip in &chips {
         if chip.value.is_empty() {
             continue;
         }
         let mode = chip.mode.as_deref().unwrap_or("contains");
-        match chip.field.as_str() {
-            "subject" => subj_clauses.push(chip_clause("s", &chip.value, mode, false)?),
-            "predicate" => pred_clauses.push(chip_clause("p", &chip.value, mode, false)?),
-            "object" => obj_clauses.push(chip_clause("o", &chip.value, mode, true)?),
-            "graph" => graph_clauses.push(chip_clause("g", &chip.value, mode, false)?),
-            "vocabulary" => vocab_clauses.push(vocab_clause(&chip.value, mode)?),
+        let clause = match chip.field.as_str() {
+            "subject" => chip_clause("s", &chip.value, mode, false)?,
+            "predicate" => chip_clause("p", &chip.value, mode, false)?,
+            "object" => chip_clause("o", &chip.value, mode, true)?,
+            "graph" => chip_clause("g", &chip.value, mode, false)?,
+            "vocabulary" => vocab_clause(&chip.value, mode)?,
             _ => {
                 return Err(AppError::BadRequest(
                     "filter field must be subject, predicate, object, graph, or vocabulary"
                         .to_string(),
                 ))
             }
+        };
+        if chip.neg.unwrap_or(false) {
+            neg_clauses.push(format!("!({clause})"));
+            continue;
+        }
+        match chip.field.as_str() {
+            "subject" => subj_clauses.push(clause),
+            "predicate" => pred_clauses.push(clause),
+            "object" => obj_clauses.push(clause),
+            "graph" => graph_clauses.push(clause),
+            "vocabulary" => vocab_clauses.push(clause),
+            _ => unreachable!("field validated above"),
         }
     }
     // Graph chips scan/bind ?g, which the single-graph fast path doesn't expose,
-    // so any graph chip forces a ?g-binding branch (ACL still enforced by the
-    // candidate ?g set in every branch).
-    let has_graph_chips = !graph_clauses.is_empty();
+    // so any graph chip — positive or negated — forces a ?g-binding branch (ACL
+    // still enforced by the candidate ?g set in every branch).
+    let has_graph_chips = chips
+        .iter()
+        .any(|c| c.field == "graph" && !c.value.is_empty());
 
     // In exact mode the graph filter is bound directly via `GRAPH <iri>` and is
     // ACL-checked here. In contains mode the same access check is enforced by
@@ -2364,6 +2388,10 @@ pub async fn browse_triples(
     }
     if !vocab_clauses.is_empty() {
         filters.push(format!("FILTER({})", vocab_clauses.join(" || ")));
+    }
+    // Negated chips: each is excluded independently (AND), so one FILTER apiece.
+    for nc in &neg_clauses {
+        filters.push(format!("FILTER({nc})"));
     }
 
     let filter_clause = filters.join("\n");

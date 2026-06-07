@@ -8,6 +8,7 @@
   import { shortenIRI, toNTriples } from '../lib/rdf-utils.js';
   import RdfTerm from './RdfTerm.svelte';
   import { Copy } from 'lucide-svelte';
+  import { t } from 'svelte-i18n';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -41,8 +42,9 @@
   // ── shared ──────────────────────────────────────────────────────────────────
   /** Show a subtle loading veil over the table body. */
   export let loading = false;
-  /** Message shown when there are no rows (and we're not loading). */
-  export let emptyText = 'No results.';
+  /** Message shown when there are no rows (and we're not loading). Falls back to
+   * a localized default when the parent doesn't supply one. */
+  export let emptyText = '';
   /** Max height of the scroll viewport; the header stays sticky above it. */
   export let maxHeight = '65vh';
 
@@ -89,12 +91,19 @@
 <div class="table-scroll" style="max-height: {maxHeight}" class:is-loading={loading}>
   {#if mode === 'triples'}
     <table>
+      <colgroup>
+        <col style="width: 28%" />
+        <col style="width: 18%" />
+        <col style="width: 28%" />
+        <col style="width: 16%" />
+        <col style="width: 34px" />
+      </colgroup>
       <thead>
         <tr>
-          <th>Subject</th>
-          <th>Predicate</th>
-          <th>Object</th>
-          <th>Graph</th>
+          <th>{$t('components.dataTable.subject')}</th>
+          <th>{$t('components.dataTable.predicate')}</th>
+          <th>{$t('components.dataTable.object')}</th>
+          <th>{$t('components.dataTable.graph')}</th>
           <th class="actions-col-header"></th>
         </tr>
       </thead>
@@ -118,11 +127,11 @@
               {#if tr.graph?.value}
                 <span class="graph-tag" title={tr.graph.value}>{shortenIRI(tr.graph.value)}</span>
               {:else}
-                <span class="graph-default">default</span>
+                <span class="graph-default">{$t('components.dataTable.defaultGraph')}</span>
               {/if}
             </td>
             <td class="actions-col">
-              <button class="row-action" title="Copy as N-Triple" on:click={() => copyTriple(tr)}>
+              <button class="row-action" title={$t('components.dataTable.copyNTriple')} on:click={() => copyTriple(tr)}>
                 <Copy size={13} />
               </button>
             </td>
@@ -154,7 +163,7 @@
   {/if}
 
   {#if isEmpty && !loading}
-    <p class="empty-state">{emptyText}</p>
+    <p class="empty-state">{emptyText || $t('components.dataTable.noResults')}</p>
   {/if}
 </div>
 
@@ -163,7 +172,7 @@
   /* Lifted from TripleBrowser.svelte (~1937-1972) — the most complete of the two
      table looks — so both the SPARQL results and the browser are a drop-in match. */
   .table-scroll { overflow-x: auto; overflow-y: auto; position: relative; }
-  table { border-collapse: collapse; width: 100%; }
+  table { border-collapse: collapse; width: 100%; table-layout: fixed; }
   th {
     background: #f8fafc; font-size: 0.68rem; font-weight: 700;
     text-transform: uppercase; color: #94a3b8; letter-spacing: 0.5px;

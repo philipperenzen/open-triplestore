@@ -241,9 +241,9 @@
   .hero-inner {
     position: relative;
     z-index: 1;
-    background: rgba(255, 255, 255, 0.07);
-    backdrop-filter: blur(12px) saturate(135%);
-    -webkit-backdrop-filter: blur(12px) saturate(135%);
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(6px) saturate(130%);
+    -webkit-backdrop-filter: blur(6px) saturate(130%);
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 16px;
     padding: clamp(1.25rem, 3vw, 2rem);

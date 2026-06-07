@@ -17,10 +17,11 @@
   import type { PlatformPrefix } from '../lib/api.js';
   import { kindOf } from '../lib/ontology/vocabularies.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
+  import { t } from 'svelte-i18n';
 
   /** Prefix labels already declared in the target — shown as "Added"/disabled. */
   export let existing: Set<string> | string[] = [];
-  export let placeholder = 'Search prefixes & vocabularies…';
+  export let placeholder = '';
   export let autofocus = false;
   /** Cap on rendered results. */
   export let limit = 30;
@@ -94,16 +95,20 @@
     dispatch('add', { prefix: c.prefix, namespace: c.namespace });
   }
 
-  const SOURCE_LABEL: Record<PrefixSource, string> = {
-    builtin: 'built-in',
+  // Reactive so the source badges re-translate when the locale changes.
+  $: SOURCE_LABEL = {
+    builtin: $t('components.prefixSearch.sourceBuiltin'),
     'prefix.cc': 'prefix.cc',
-    platform: 'platform',
-  };
+    platform: $t('components.prefixSearch.sourcePlatform'),
+  } as Record<PrefixSource, string>;
 
-  // The vocabulary "kind" to show next to the description.
-  function kindLabel(c: PrefixCandidate): string {
+  // The vocabulary "kind" to show next to the description. `tr` (the $t store) is
+  // passed in so the template call re-runs on locale change.
+  function kindLabel(c: PrefixCandidate, tr: (_id: string) => string): string {
     if (c.source === 'platform') {
-      return (c as PlatformPrefix).kind === 'vocabulary' ? 'vocabulary' : 'data model';
+      return (c as PlatformPrefix).kind === 'vocabulary'
+        ? tr('components.prefixSearch.kindVocabulary')
+        : tr('components.prefixSearch.kindDataModel');
     }
     const k = kindOf(c.namespace);
     return k === 'custom' ? '' : k;
@@ -117,15 +122,15 @@
       bind:this={inputEl}
       type="text"
       class="ps-input"
-      {placeholder}
+      placeholder={placeholder || $t('components.prefixSearch.placeholder')}
       bind:value={query}
       on:input={onInput}
-      aria-label="Search prefixes and vocabularies"
+      aria-label={$t('components.prefixSearch.ariaSearch')}
     />
     {#if loading}
       <Loader2 size={14} class="animate-spin ps-spin" />
     {:else if query}
-      <button class="ps-clear" on:click={clear} title="Clear" aria-label="Clear search">
+      <button class="ps-clear" on:click={clear} title={$t('components.prefixSearch.clear')} aria-label={$t('components.prefixSearch.clearSearch')}>
         <X size={13} />
       </button>
     {/if}
@@ -133,19 +138,19 @@
 
   <div class="ps-results" role="list">
     {#if loading && results.length === 0}
-      <div class="ps-state"><Loader2 size={16} class="animate-spin" /> Searching…</div>
+      <div class="ps-state"><Loader2 size={16} class="animate-spin" /> {$t('components.prefixSearch.searching')}</div>
     {:else if results.length === 0}
       <div class="ps-state">
         {#if searched && query}
-          No prefixes match “{query}”.
+          {$t('components.prefixSearch.noMatch', { values: { query } })}
         {:else}
-          Type to find a prefix from the built-ins, prefix.cc or your registered vocabularies.
+          {$t('components.prefixSearch.hint')}
         {/if}
       </div>
     {:else}
       {#each results as c (c.source + ':' + c.prefix)}
         {@const added = isAdded(c.prefix)}
-        {@const kind = kindLabel(c)}
+        {@const kind = kindLabel(c, $t)}
         {@const home = safeExternalUrl(c.homepage)}
         <div class="ps-row" role="listitem">
           <div class="ps-main">
@@ -154,7 +159,7 @@
               <span class="ps-badge ps-src-{c.source.replace('.', '-')}">{SOURCE_LABEL[c.source]}</span>
               {#if kind}<span class="ps-kind">{kind}</span>{/if}
               {#if home}
-                <a class="ps-home" href={home} target="_blank" rel="noopener noreferrer" title="Open vocabulary homepage">
+                <a class="ps-home" href={home} target="_blank" rel="noopener noreferrer" title={$t('components.prefixSearch.openHomepage')}>
                   <ExternalLink size={11} />
                 </a>
               {/if}
@@ -172,12 +177,12 @@
             class:ps-added={added}
             disabled={added}
             on:click={() => add(c)}
-            title={added ? 'Already declared' : `Add ${c.prefix}: prefix`}
+            title={added ? $t('components.prefixSearch.alreadyDeclared') : $t('components.prefixSearch.addPrefix', { values: { prefix: c.prefix } })}
           >
             {#if added}
-              <Check size={13} /> Added
+              <Check size={13} /> {$t('components.prefixSearch.added')}
             {:else}
-              <Plus size={13} /> Add
+              <Plus size={13} /> {$t('components.prefixSearch.add')}
             {/if}
           </button>
         </div>

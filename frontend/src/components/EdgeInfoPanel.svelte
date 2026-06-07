@@ -19,6 +19,7 @@
   import { shortenIRI } from '../lib/rdf-utils.js';
   import { NAMESPACES, VOCAB, kindOf } from '../lib/ontology/vocabularies.js';
   import { prefixForNamespace } from '../lib/ontology/prefixService.js';
+  import { t } from 'svelte-i18n';
 
   /**
    * @typedef {Object} EdgeModel
@@ -67,9 +68,9 @@
   // Human label for a node's rdf:type/kind, used for the domain/range hints.
   function endpointType(ep) {
     if (!ep) return null;
-    if (ep.rdfType) return ep.rdfType;            // e.g. "owl:Class"
-    if (ep.nodeType === 'literal') return 'Literal';
-    if (ep.nodeType === 'bnode') return 'Blank node';
+    if (ep.rdfType) return ep.rdfType;            // e.g. "owl:Class" — raw data
+    if (ep.nodeType === 'literal') return '@literal'; // i18n token, see drLabel
+    if (ep.nodeType === 'bnode') return '@bnode';
     return null;                                   // plain URI with no asserted type
   }
 
@@ -107,16 +108,24 @@
     };
   }
 
-  // Friendly name for the predicate's role, from the curated term kind.
-  function roleLabel(termKind) {
+  // i18n key for the predicate's role, from the curated term kind.
+  function roleKey(termKind) {
     switch (termKind) {
-      case 'object': return 'Object property';
-      case 'datatype': return 'Datatype property';
-      case 'annotation': return 'Annotation property';
-      case 'property': return 'Property';
-      case 'class': return 'Class';
-      default: return 'Predicate';
+      case 'object': return 'components.edgeInfo.roleObject';
+      case 'datatype': return 'components.edgeInfo.roleDatatype';
+      case 'annotation': return 'components.edgeInfo.roleAnnotation';
+      case 'property': return 'components.edgeInfo.roleProperty';
+      case 'class': return 'components.edgeInfo.roleClass';
+      default: return 'components.edgeInfo.rolePredicate';
     }
+  }
+  // Translate a domain/range value: raw rdf:type IRIs pass through unchanged; the
+  // literal / blank-node tokens from endpointType resolve to localized labels.
+  function drLabel(v, tr) {
+    if (!v) return '—';
+    if (v === '@literal') return tr('components.edgeInfo.literal');
+    if (v === '@bnode') return tr('components.edgeInfo.blankNode');
+    return v;
   }
 
   // Whether the namespace looks like a recognised vocabulary (not 'custom').
@@ -127,8 +136,8 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="edge-panel" on:click|stopPropagation on:keydown|stopPropagation>
     <div class="edge-header">
-      <span class="edge-type">Predicate</span>
-      <button class="edge-close" on:click={() => dispatch('close')} aria-label="Close panel" title="Close panel">
+      <span class="edge-type">{$t('components.edgeInfo.predicateBadge')}</span>
+      <button class="edge-close" on:click={() => dispatch('close')} aria-label={$t('components.edgeInfo.closePanel')} title={$t('components.edgeInfo.closePanel')}>
         <X size={14} />
       </button>
     </div>
@@ -136,10 +145,7 @@
     <div class="edge-body">
       <h4 class="edge-title">{model.short}</h4>
 
-      <p class="edge-explain">
-        The relationship (predicate) that connects the two nodes — it states how the
-        subject relates to the object.
-      </p>
+      <p class="edge-explain">{$t('components.edgeInfo.explain')}</p>
 
       <!-- subject ─pred→ object, using the live endpoints -->
       {#if model.sourceLabel || model.targetLabel}
@@ -153,7 +159,7 @@
       {#if model.iri}
         <div class="edge-iri-row">
           <code class="edge-iri" title={model.iri}>{model.iri}</code>
-          <button class="edge-mini-btn" on:click={() => copy(model.iri)} title="Copy IRI">
+          <button class="edge-mini-btn" on:click={() => copy(model.iri)} title={$t('components.edgeInfo.copyIri')}>
             {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
           </button>
         </div>
@@ -165,55 +171,55 @@
           <span class="edge-chip vocab" title={model.ns}>{model.prefix}</span>
         {/if}
         {#if model.termKind}
-          <span class="edge-chip">{roleLabel(model.termKind)}</span>
+          <span class="edge-chip">{$t(roleKey(model.termKind))}</span>
         {/if}
       </div>
 
       {#if model.comment}
         <div class="edge-section">
-          <div class="edge-section-head"><BookOpen size={12} /> Description</div>
+          <div class="edge-section-head"><BookOpen size={12} /> {$t('components.edgeInfo.description')}</div>
           <p class="edge-desc">{model.comment}</p>
         </div>
       {/if}
 
       <!-- Vocabulary block -->
       <div class="edge-section">
-        <div class="edge-section-head">Vocabulary</div>
+        <div class="edge-section-head">{$t('components.edgeInfo.vocabulary')}</div>
         {#if knownVocab && model.prefix}
           <p class="edge-vocab-line">
             <strong>{model.prefix}</strong> — <code class="edge-ns" title={model.ns}>{model.ns}</code>
           </p>
         {:else if model.ns}
           <p class="edge-vocab-line edge-vocab-custom">
-            Custom / unrecognised namespace
+            {$t('components.edgeInfo.customNamespace')}
             <code class="edge-ns" title={model.ns}>{model.ns}</code>
           </p>
         {:else}
-          <p class="edge-empty">No namespace could be resolved for this predicate.</p>
+          <p class="edge-empty">{$t('components.edgeInfo.noNamespace')}</p>
         {/if}
       </div>
 
       <!-- Domain / range inferred from the connected nodes -->
       {#if model.domain || model.range}
         <div class="edge-section">
-          <div class="edge-section-head">Domain &amp; range <span class="edge-hint-tag">inferred</span></div>
+          <div class="edge-section-head">{$t('components.edgeInfo.domainRange')} <span class="edge-hint-tag">{$t('components.edgeInfo.inferred')}</span></div>
           <div class="edge-dr">
             <div class="edge-dr-row">
-              <span class="edge-dr-key"><ArrowDownLeft size={11} /> Domain</span>
-              <span class="edge-dr-val">{model.domain || '—'}</span>
+              <span class="edge-dr-key"><ArrowDownLeft size={11} /> {$t('components.edgeInfo.domain')}</span>
+              <span class="edge-dr-val">{drLabel(model.domain, $t)}</span>
             </div>
             <div class="edge-dr-row">
-              <span class="edge-dr-key"><ArrowUpRight size={11} /> Range</span>
-              <span class="edge-dr-val">{model.range || '—'}</span>
+              <span class="edge-dr-key"><ArrowUpRight size={11} /> {$t('components.edgeInfo.range')}</span>
+              <span class="edge-dr-val">{drLabel(model.range, $t)}</span>
             </div>
           </div>
-          <p class="edge-hint">Inferred from the two connected nodes, not the vocabulary's declared rdfs:domain / rdfs:range.</p>
+          <p class="edge-hint">{$t('components.edgeInfo.inferredHint')}</p>
         </div>
       {/if}
 
       {#if model.iri}
         <button class="edge-open-btn" on:click={() => dispatch('openPredicate', { iri: model.iri, label: model.short })}>
-          <ArrowUpRight size={13} /> Open predicate
+          <ArrowUpRight size={13} /> {$t('components.edgeInfo.openPredicate')}
         </button>
       {/if}
     </div>

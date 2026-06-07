@@ -957,20 +957,20 @@
     graph: $i18nT('pages.tripleBrowser.graphFilterPlaceholder'), vocabulary: $i18nT('pages.tripleBrowser.vocabularyPlaceholder'),
   };
   const emptyFieldFilters = () => ({
-    subject:    { value: '', mode: 'contains' },
-    predicate:  { value: '', mode: 'contains' },
-    object:     { value: '', mode: 'contains' },
-    graph:      { value: '', mode: 'contains' },
-    vocabulary: { value: '', mode: 'contains' },
+    subject:    { value: '', mode: 'contains', neg: false },
+    predicate:  { value: '', mode: 'contains', neg: false },
+    object:     { value: '', mode: 'contains', neg: false },
+    graph:      { value: '', mode: 'contains', neg: false },
+    vocabulary: { value: '', mode: 'contains', neg: false },
   });
   let fieldFilters = emptyFieldFilters();
   // Facets are a multi-select: each selected facet contributes a chip here, and
   // these merge with the typed form fields. Clicking a facet toggles its chip.
   let facetChips = [];
-  const chipEq = (a, b) => a.field === b.field && a.value === b.value && a.mode === b.mode;
+  const chipEq = (a, b) => a.field === b.field && a.value === b.value && a.mode === b.mode && !!a.neg === !!b.neg;
   const chipsFromFields = (ff) => FILTER_FIELDS
     .filter((f) => ff[f].value && ff[f].value.trim())
-    .map((f) => ({ field: f, value: ff[f].value.trim(), mode: ff[f].mode }));
+    .map((f) => ({ field: f, value: ff[f].value.trim(), mode: ff[f].mode, neg: !!ff[f].neg }));
   function combineChips(ff = fieldFilters, fc = facetChips) {
     const merged = chipsFromFields(ff);
     for (const c of fc) if (!merged.some((x) => chipEq(x, c))) merged.push(c);
@@ -1027,6 +1027,14 @@
   function cycleFieldMode(field) {
     const cur = fieldFilters[field].mode;
     fieldFilters[field].mode = FILTER_MODES[(FILTER_MODES.indexOf(cur) + 1) % FILTER_MODES.length];
+    fieldFilters = { ...fieldFilters };
+    if (fieldFilters[field].value.trim()) refetchResults();
+  }
+  // Toggle a field's negation. When on, rows that MATCH the value are excluded
+  // (the backend wraps the clause in `!(…)`), turning any mode into a "not
+  // equal" / "not contains" / "not matching" exclusion to filter elements out.
+  function toggleFieldNeg(field) {
+    fieldFilters[field].neg = !fieldFilters[field].neg;
     fieldFilters = { ...fieldFilters };
     if (fieldFilters[field].value.trim()) refetchResults();
   }
@@ -1151,7 +1159,8 @@
     const byVar = { subject: 's', predicate: 'p', object: 'o', graph: 'g' };
     const lines = ['SELECT ?s ?p ?o ?g WHERE {', '  GRAPH ?g { ?s ?p ?o .'];
     for (const c of activeChips) {
-      lines.push(`    FILTER(${c.field === 'vocabulary' ? vocabExpr(c) : chipExpr(byVar[c.field], c)})`);
+      const e = c.field === 'vocabulary' ? vocabExpr(c) : chipExpr(byVar[c.field], c);
+      lines.push(`    FILTER(${c.neg ? `!(${e})` : e})`);
     }
     const q = tableSearch.trim();
     if (q) {
@@ -1550,6 +1559,12 @@
                 title={`${$i18nT('pages.tripleBrowser.matchPrefix')}: ${MODE_LABEL[fieldFilters[f].mode]} — ${$i18nT('pages.tripleBrowser.clickToChange')}`}>
                 {MODE_GLYPH[fieldFilters[f].mode]}
               </button>
+              <button type="button" class="ff-neg" class:ff-neg-on={fieldFilters[f].neg}
+                on:click={() => toggleFieldNeg(f)}
+                aria-pressed={fieldFilters[f].neg}
+                title={fieldFilters[f].neg ? $i18nT('pages.tripleBrowser.negOnHint') : $i18nT('pages.tripleBrowser.negOffHint')}>
+                {$i18nT('pages.tripleBrowser.modeNot')}
+              </button>
               <div class="ff-input-wrap">
                 <Combobox
                   class="ff-input"
@@ -1566,7 +1581,7 @@
             </div>
           {/each}
           <p class="ff-hint">
-            {$i18nT('pages.tripleBrowser.ffHintPart1')} <b>AND</b>. {$i18nT('pages.tripleBrowser.ffHintPart2')} <b>{MODE_GLYPH.contains}/{MODE_GLYPH.exact}/{MODE_GLYPH.regex}</b> {$i18nT('pages.tripleBrowser.ffHintPart3')}
+            {$i18nT('pages.tripleBrowser.ffHintPart1')} <b>AND</b>. {$i18nT('pages.tripleBrowser.ffHintPart2')} <b>{MODE_GLYPH.contains}/{MODE_GLYPH.exact}/{MODE_GLYPH.regex}</b> {$i18nT('pages.tripleBrowser.ffHintPart3')} {$i18nT('pages.tripleBrowser.ffHintNeg')}
           </p>
         </div>
       {/if}
@@ -1614,7 +1629,7 @@
       {/if}
 
       <!-- Facet rail (left) + the active view (right) -->
-      <div class="browser-body">
+      <div class="browser-body" class:body-graph={viewMode === 'graph'}>
         <FacetRail
           facets={facets}
           loading={facetsLoading}
@@ -1889,6 +1904,15 @@
   .ff-mode-exact { background: #eef2ff; border: 1px solid #c7d2fe; color: #4f46e5; }
   .ff-mode-regex { background: #f5f3ff; border: 1px solid #ddd6fe; color: #7c3aed; }
   .ff-mode:hover { filter: brightness(0.97); }
+  /* NOT toggle — off: ghost; on: red, marking the field as an exclusion filter. */
+  .ff-neg {
+    flex: 0 0 auto; height: 26px; padding: 0 7px; border-radius: 6px; cursor: pointer;
+    font-weight: 700; font-size: 0.64rem; letter-spacing: 0.04em;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: #fff; border: 1px dashed #cbd5e1; color: #94a3b8;
+  }
+  .ff-neg:hover { border-color: #fca5a5; color: #ef4444; }
+  .ff-neg-on { background: #fef2f2; border: 1px solid #fca5a5; color: #dc2626; }
   .ff-input-wrap { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
   .ff-input {
     width: 100%; box-sizing: border-box;
@@ -1949,7 +1973,11 @@
   .sh-link:hover { text-decoration: underline; }
 
   .browser-body { display: flex; align-items: stretch; min-height: 0; }
-  .view-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  /* Graph view: bound the row to the viewport so the facet rail and the graph
+     both fill the available height — the rail then scrolls internally and the
+     graph grows to take the rest of the space (rather than a fixed 62vh box). */
+  .browser-body.body-graph { height: calc(100vh - 235px); min-height: 460px; }
+  .view-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
   /* ─── View toggle ────────────────────────────────────────────────────────── */
   .view-toggle {
@@ -2262,6 +2290,8 @@
   }
 
   .graph-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; }
+  /* Inside the viewport-bounded body the graph fills the remaining height. */
+  .body-graph .graph-area { height: auto; flex: 1 1 auto; min-height: 0; }
   .graph-loading, .graph-empty {
     position: absolute; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -2367,6 +2397,8 @@
   :global(:is([data-theme="dark"], .dark)) .ff-mode-contains { background: var(--bg-strong); border-color: var(--line-strong); color: var(--ink-600); }
   :global(:is([data-theme="dark"], .dark)) .ff-mode-exact { background: rgba(99,102,241,0.18); border-color: rgba(99,102,241,0.45); color: #a5b4fc; }
   :global(:is([data-theme="dark"], .dark)) .ff-mode-regex { background: rgba(124,58,237,0.18); border-color: rgba(124,58,237,0.45); color: #c4b5fd; }
+  :global(:is([data-theme="dark"], .dark)) .ff-neg { background: var(--bg-strong); border-color: var(--line-strong); color: var(--ink-600); }
+  :global(:is([data-theme="dark"], .dark)) .ff-neg-on { background: rgba(220,38,38,0.20); border-color: rgba(248,113,113,0.5); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .ff-input,
   :global(:is([data-theme="dark"], .dark)) .table-search-input { background: var(--bg-strong); border-color: var(--line-strong); color: var(--ink-900); }
   :global(:is([data-theme="dark"], .dark)) .ff-input:focus { background: var(--bg-strong); border-color: var(--brand-500); }

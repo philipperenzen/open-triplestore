@@ -1147,15 +1147,15 @@
   .org-header {
     position: relative;
     z-index: 1;
-    width: 100%;
+    width: min(640px, 100%);
     display: flex;
     justify-content: space-between;
     align-items: flex-end;
     gap: 1rem;
     flex-wrap: wrap;
-    background: rgba(10, 24, 30, 0.42);
-    backdrop-filter: blur(12px) saturate(130%);
-    -webkit-backdrop-filter: blur(12px) saturate(130%);
+    background: rgba(10, 24, 30, 0.46);
+    backdrop-filter: blur(6px) saturate(125%);
+    -webkit-backdrop-filter: blur(6px) saturate(125%);
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 12px;
     padding: 0.85rem 1.05rem;
