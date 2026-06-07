@@ -1,11 +1,12 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { sparqlQuery, datasetSparqlQuery, listDatasets, listOrganisations, listServices, listDatasetGraphs, listServiceGraphs, listDatasetVersions, getDataset, getOrganisation, browseGraphs, nlToSparql, sendLlmFeedback, llmHealth } from '../lib/api.js';
+  import { sparqlQuery, datasetSparqlQuery, listDatasets, listOrganisations, listServices, listDatasetGraphs, listDatasetVersions, getDataset, getOrganisation, nlToSparql, sendLlmFeedback, llmHealth } from '../lib/api.js';
   import { graphResultsToElements, resultsToCsv, downloadFile, parseNTriplesToBindings } from '../lib/rdf-utils.js';
-  import RdfTerm from '../components/RdfTerm.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import SparqlEditorCM from '../components/SparqlEditorCM.svelte';
   import Select from '../components/Select.svelte';
+  import DataTable from '../components/DataTable.svelte';
+  import PrefixSearchPanel from '../components/PrefixSearchPanel.svelte';
   import { t as i18nT } from 'svelte-i18n';
   import { Play, Loader2, Clock, Download, Check, X as XIcon, Trash2, FileCode, BookOpen, Layers, Wand2, ThumbsUp, ThumbsDown, LayoutList, Building2, Database, Plus, Lock } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
@@ -61,6 +62,32 @@ LIMIT 25`;
   let loading = false;
   let elapsed = 0;
   let activeTab = 'table'; // 'table' | 'json' | 'graph'
+
+  // ── Working-state memory (sessionStorage) ──────────────────────────────────
+  // Persist the editor's working state — query, scope (datasets/orgs + selected
+  // graphs) and active result tab — so a browser back/forward (Alt+←) returns to
+  // the editor as the user left it instead of resetting. Keyed per route so the
+  // global editor and a dataset/org-scoped editor don't share state. Result sets
+  // are intentionally NOT persisted (quota / size).
+  $: routeKey = datasetId ? `dataset:${datasetId}` : orgId ? `org:${orgId}` : 'global';
+  $: stateKey = `ots:sparqlEditor:${routeKey}`;
+  let persistReady = false; // gate writes until after the initial restore
+
+  function persistState() {
+    if (!persistReady) return;
+    try {
+      sessionStorage.setItem(stateKey, JSON.stringify({
+        query,
+        scopeItems,
+        selectedGraphs: [...selectedGraphIris],
+        activeTab,
+      }));
+    } catch {}
+  }
+  // Re-persist whenever any tracked piece of working state changes. Listing the
+  // dependencies keeps Svelte's reactivity tracking them; the guard inside
+  // persistState() suppresses writes until the initial restore has run.
+  $: persistReady, query, scopeItems, selectedGraphIris, activeTab, persistState();
 
   // ── NL → SPARQL ("lookup triples with LLM") ──────────────────────────────────
   let nlQuestion = '';
@@ -136,11 +163,12 @@ LIMIT 25`;
   function handleOutsideClick(e) {
     if (!e.target.closest('.history-wrapper')) showHistory = false;
     if (!e.target.closest('.templates-wrapper')) showTemplates = false;
-    if (!e.target.closest('.graph-picker-wrapper')) graphPickerOpen = false;
     if (!e.target.closest('.scope-picker-wrap')) scopePickerOpen = false;
+    if (!e.target.closest('.graph-scope-wrap')) graphScopeOpen = false;
+    if (!e.target.closest('.prefix-add-wrap')) prefixSearchOpen = false;
   }
   function handleKey(e) {
-    if (e.key === 'Escape') { showHistory = false; showTemplates = false; graphPickerOpen = false; scopePickerOpen = false; }
+    if (e.key === 'Escape') { showHistory = false; showTemplates = false; scopePickerOpen = false; graphScopeOpen = false; prefixSearchOpen = false; }
   }
 
   function insertMissingPrefixes() {
@@ -167,6 +195,16 @@ LIMIT 25`;
   function removePrefix(p) {
     const re = new RegExp(`^\\s*PREFIX\\s+${p}\\s*:\\s*<[^>]+>\\s*\\n?`, 'mi');
     query = query.replace(re, '');
+  }
+
+  // ── Prefix search panel (richer "Add prefix" affordance) ───────────────────
+  let prefixSearchOpen = false;
+  // Insert a PREFIX declaration chosen from the search panel, unless that prefix
+  // label is already declared (mirrors insertMissingPrefixes' prepend approach).
+  function addPrefixFromSearch(prefix, namespace) {
+    if (!prefix || !namespace) return;
+    if (declaredPrefixes[prefix]) return; // already declared — no-op
+    query = `PREFIX ${prefix}: <${namespace}>\n` + query;
   }
 
   function useTemplate(tpl) {
@@ -198,6 +236,9 @@ LIMIT 25`;
     const endpoint = selectedEndpoint || 'main';
     if (versionActive && scopeDatasetId) {
       return datasetSparqlQuery(scopeDatasetId, serviceSlugFor(scopeDatasetId), q, selectedVersion);
+    }
+    if (selectedGraphList.length > 0) {
+      return sparqlQuery(injectFromClauses(q, selectedGraphList));
     }
     if (scopeActive) {
       const iris = scopedFromIris();
@@ -269,6 +310,75 @@ LIMIT 25`;
     return [...iris];
   }
 
+  // ── Named-graph scope: which datasets' graphs are selectable ────────────────
+  // Works in all three contexts: a locked dataset (its own graphs), a locked org
+  // (its datasets' graphs), or the global editor (every dataset in scope).
+  $: graphScopeDatasets = (() => {
+    if (datasetId) return [{ id: datasetId, name: contextName ?? datasetId }];
+    if (orgId) {
+      return allDatasets
+        .filter(d => d.owner_type === 'organisation' && String(d.owner_id) === String(orgId))
+        .map(d => ({ id: d.id, name: d.name ?? d.id }));
+    }
+    return scopedDatasetIds.map(id => {
+      const d = allDatasets.find(x => String(x.id) === String(id));
+      return { id, name: d?.name ?? id };
+    });
+  })();
+  $: graphScopeDatasetIds = graphScopeDatasets.map(d => String(d.id));
+
+  // Lazily fetch the full graph list (graph_iri/private/triple_count) of every
+  // dataset that became selectable, so the GRAPHS section can list named graphs.
+  $: ensureScopeGraphs(graphScopeDatasetIds);
+  async function ensureScopeGraphs(ids) {
+    const missing = ids.filter(id => !(id in datasetGraphObjsById));
+    if (!missing.length) return;
+    graphScopeLoading = true;
+    await Promise.all(missing.map(async (id) => {
+      try {
+        datasetGraphObjsById[id] = await listDatasetGraphs(id);
+      } catch {
+        datasetGraphObjsById[id] = [];
+      }
+    }));
+    datasetGraphObjsById = { ...datasetGraphObjsById };
+    graphScopeLoading = false;
+  }
+
+  // Flattened, de-duplicated list of selectable named graphs across scoped
+  // datasets: [{ graph_iri, datasets: [name], private, triple_count }].
+  $: availableGraphs = (() => {
+    const byIri = new Map();
+    for (const ds of graphScopeDatasets) {
+      for (const g of (datasetGraphObjsById[String(ds.id)] ?? [])) {
+        if (!g?.graph_iri) continue;
+        const existing = byIri.get(g.graph_iri);
+        if (existing) existing.datasets.push(ds.name);
+        else byIri.set(g.graph_iri, { graph_iri: g.graph_iri, datasets: [ds.name], private: g.private, triple_count: g.triple_count });
+      }
+    }
+    return [...byIri.values()];
+  })();
+  // Whether the GRAPHS section is shown at all: only once a dataset is in scope.
+  $: graphScopeAvailable = graphScopeDatasetIds.length > 0;
+
+  // Prune selections that left the available set (scope shrank). Only once the
+  // in-scope datasets' graphs have actually been fetched, so a restored selection
+  // isn't wiped while availableGraphs is still empty mid-load.
+  $: graphScopeResolved = !graphScopeLoading && graphScopeDatasetIds.every(id => id in datasetGraphObjsById);
+  $: if (graphScopeResolved && selectedGraphIris.size) {
+    const avail = new Set(availableGraphs.map(g => g.graph_iri));
+    const kept = [...selectedGraphIris].filter(iri => avail.has(iri));
+    if (kept.length !== selectedGraphIris.size) selectedGraphIris = new Set(kept);
+  }
+
+  function toggleGraphScope(iri) {
+    if (selectedGraphIris.has(iri)) selectedGraphIris.delete(iri);
+    else selectedGraphIris.add(iri);
+    selectedGraphIris = new Set(selectedGraphIris);
+  }
+  $: selectedGraphList = [...selectedGraphIris];
+
   function addScopeItem(item) {
     if (!scopeItems.some(s => s.type === item.type && s.id === item.id)) {
       scopeItems = [...scopeItems, item];
@@ -279,18 +389,16 @@ LIMIT 25`;
   function removeScopeItem(item) {
     scopeItems = scopeItems.filter(s => !(s.type === item.type && s.id === item.id));
   }
-  function clearDatasetScope() { scopeItems = []; }
+  function clearDatasetScope() { scopeItems = []; selectedGraphIris = new Set(); }
 
-  // Named-graph picker for main store
-  let mainStoreGraphs = [];
-  let mainStoreGraphsLoading = false;
-  let mainStoreGraphsLoaded = false;
-
-  // Graph subset picker for service endpoints
-  let serviceGraphs = []; // all graph IRIs registered for the selected service
-  let selectedGraphs = new Set(); // user-chosen subset (empty = all)
-  let graphPickerOpen = false;
-  let serviceGraphsLoading = false;
+  // ── Named-graph scope (folded into the scope filter) ───────────────────────
+  // When one or more datasets are in scope (explicit chips, an org's datasets, or
+  // the locked dataset/org context), the user can narrow execution to specific
+  // named graphs. Selected IRIs are injected as FROM clauses in executeQuery.
+  let datasetGraphObjsById = {}; // dsId -> DatasetGraph[] ({graph_iri, private, triple_count})
+  let selectedGraphIris = new Set(); // user-chosen named-graph IRIs (empty = all in-scope graphs)
+  let graphScopeOpen = false; // the graphs picker popover
+  let graphScopeLoading = false;
 
   // ── Version scoping ──────────────────────────────────────────────────────
   // A query can target a dataset's version snapshot instead of its live data.
@@ -359,56 +467,12 @@ LIMIT 25`;
     return 'sparql';
   }
 
-  // When the selected endpoint changes, load that service's graphs
-  $: if (selectedEndpoint) loadServiceGraphs(selectedEndpoint);
-
-  async function loadServiceGraphs(ep) {
-    serviceGraphs = [];
-    selectedGraphs = new Set();
-    graphPickerOpen = false;
-    if (ep === 'main') {
-      // Lazily load named graphs accessible from the main store
-      if (!mainStoreGraphsLoaded && !mainStoreGraphsLoading) {
-        mainStoreGraphsLoading = true;
-        try {
-          const graphs = await browseGraphs();
-          const list = Array.isArray(graphs) ? graphs : (graphs?.graphs || []);
-          mainStoreGraphs = list.map(g => (typeof g === 'string' ? g : g.iri ?? g.graph_iri ?? g.graph)).filter(Boolean);
-          mainStoreGraphsLoaded = true;
-        } catch {}
-        mainStoreGraphsLoading = false;
-      }
-      return;
-    }
-    if (!ep || ep === 'dataset-default') return;
-    const slash = ep.indexOf('/');
-    if (slash === -1) return;
-    const dsId = ep.slice(0, slash);
-    const svcSlug = ep.slice(slash + 1);
-    // Find the service id for this slug
-    const svcs = datasetServices[dsId] ?? [];
-    const svc = svcs.find(s => s.slug === svcSlug);
-    if (!svc) return;
-    serviceGraphsLoading = true;
-    try {
-      serviceGraphs = await listServiceGraphs(dsId, svc.id);
-    } catch {}
-    serviceGraphsLoading = false;
-  }
-
-  function toggleGraphSubset(iri) {
-    if (selectedGraphs.has(iri)) selectedGraphs.delete(iri);
-    else selectedGraphs.add(iri);
-    selectedGraphs = new Set(selectedGraphs);
-  }
-
-  $: activeSubset = selectedGraphs.size > 0 ? [...selectedGraphs] : null;
-
-  // The graph list shown in the picker — service graphs or main-store graphs
-  $: activeGraphList = selectedEndpoint === 'main' ? mainStoreGraphs : serviceGraphs;
-  $: graphPickerLoading = selectedEndpoint === 'main' ? mainStoreGraphsLoading : serviceGraphsLoading;
-
   onMount(async () => {
+    // Track whether an explicit source (handoff / URL) already set the query or
+    // scope, so the sessionStorage restore below doesn't override an intentful
+    // deep-link or "open in editor" handoff.
+    let queryFromExternal = false;
+    let scopeFromUrl = false;
     // A saved query opened "in the SPARQL editor" hands its text off here so
     // anyone (including anonymous users on public data) can edit and run it.
     try {
@@ -416,11 +480,12 @@ LIMIT 25`;
       if (loaded) {
         sessionStorage.removeItem('ots_sparql_load');
         query = loaded;
+        queryFromExternal = true;
       } else {
         // Call sites like TripleBrowser's "Open in editor" hand the query off via
         // ?query= rather than the sessionStorage path, so honour it here too.
         const urlQuery = new URLSearchParams(window.location.search).get('query');
-        if (urlQuery) query = urlQuery;
+        if (urlQuery) { query = urlQuery; queryFromExternal = true; }
       }
     } catch {}
     // A return link (set when opened from an API service) lets the user get back
@@ -439,17 +504,31 @@ LIMIT 25`;
         const orgParam = sp2.get('org');
         if (dsParam) {
           scopeItems = [{ type: 'dataset', id: dsParam, name: dsParam }];
+          scopeFromUrl = true;
           getDataset(dsParam)
             .then(d => { scopeItems = scopeItems.map(s => (s.type === 'dataset' && s.id === dsParam) ? { ...s, name: d?.name ?? dsParam } : s); })
             .catch(() => {});
         } else if (orgParam) {
           scopeItems = [{ type: 'org', id: orgParam, name: orgParam }];
+          scopeFromUrl = true;
           getOrganisation(orgParam)
             .then(o => { scopeItems = scopeItems.map(s => (s.type === 'org' && s.id === orgParam) ? { ...s, name: o?.name ?? orgParam } : s); })
             .catch(() => {});
         }
       }
     } catch {}
+    // Restore the editor's working state for this route, but never clobber a
+    // query/scope that an explicit handoff or deep-link just set above.
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(stateKey) || 'null');
+      if (saved) {
+        if (!queryFromExternal && typeof saved.query === 'string') query = saved.query;
+        if (!scopeFromUrl && !datasetId && !orgId && Array.isArray(saved.scopeItems)) scopeItems = saved.scopeItems;
+        if (Array.isArray(saved.selectedGraphs)) selectedGraphIris = new Set(saved.selectedGraphs);
+        if (saved.activeTab) activeTab = saved.activeTab;
+      }
+    } catch {}
+    persistReady = true;
     // Probe LLM service availability for the health badge (best-effort, non-blocking).
     llmHealth().then(s => { llmStatus = s; }).catch(() => {});
     // Load query history (migrate legacy string[] format)
@@ -487,6 +566,7 @@ LIMIT 25`;
         relevantDatasets = all.filter(
           (d) => d.owner_type === 'organisation' && d.owner_id === orgId
         );
+        allDatasets = relevantDatasets; // lets the GRAPHS scope section enumerate the org's datasets
       } else {
         // Global: all accessible datasets, plus the user's organisations for grouping labels.
         const [dsList, orgs] = await Promise.all([
@@ -606,12 +686,20 @@ LIMIT 25`;
     const start = performance.now();
     // Default to main if endpoint selection hasn't loaded yet
     const endpoint = selectedEndpoint || 'main';
+    // A named-graph selection in the scope filter narrows execution to exactly
+    // those graphs (FROM-injected), superseding the broader endpoint/scope set.
+    const graphSubset = selectedGraphList;
     try {
       if (versionActive && scopeDatasetId) {
         // Version-scoped: route through the dataset service endpoint, which
         // resolves the version's snapshot graphs server-side (a graph subset is
         // ignored here — the version pin defines the graph set).
         results = await datasetSparqlQuery(scopeDatasetId, serviceSlugFor(scopeDatasetId), query, selectedVersion);
+      } else if (graphSubset.length > 0) {
+        // Explicit named-graph selection (any context): FROM-union over exactly
+        // the chosen graphs. These are live graphs, so the main /sparql endpoint
+        // (which authorises live data via FROM) resolves them.
+        results = await sparqlQuery(injectFromClauses(query, graphSubset));
       } else if (scopeActive) {
         // Scope bar: FROM-union over the live graphs of every dataset in scope.
         // (A single dataset pinned to a version is handled by the branch above.)
@@ -621,8 +709,7 @@ LIMIT 25`;
         const scoped = injectFromClauses(query, iris.length ? iris : ['urn:ots:empty-scope']);
         results = await sparqlQuery(scoped);
       } else if (endpoint === 'main') {
-        const subsetIris = activeSubset;
-        results = await sparqlQuery(subsetIris?.length ? injectFromClauses(query, subsetIris) : query);
+        results = await sparqlQuery(query);
       } else if (endpoint === 'dataset-default') {
         // Scope query to dataset graphs by injecting FROM clauses
         const scopedQuery = injectFromClauses(query, datasetGraphIris);
@@ -635,13 +722,7 @@ LIMIT 25`;
         const slash = endpoint.indexOf('/');
         const dsId = endpoint.slice(0, slash);
         const svcSlug = endpoint.slice(slash + 1);
-        // If the user picked a graph subset, inject FROM clauses rather than querying via the service
-        const subsetIris = activeSubset;
-        if (subsetIris && subsetIris.length > 0) {
-          results = await sparqlQuery(injectFromClauses(query, subsetIris));
-        } else {
-          results = await datasetSparqlQuery(dsId, svcSlug, query);
-        }
+        results = await datasetSparqlQuery(dsId, svcSlug, query);
       }
       elapsed = Math.round(performance.now() - start);
       addToHistory(query);
@@ -753,43 +834,6 @@ LIMIT 25`;
             </button>
           {/if}
           <Link to={`/datasets/${datasetId}/api-services`} class="btn btn-sm btn-ghost">{$i18nT('pages.sparql.apiServices')}</Link>
-        {/if}
-
-        <!-- Graph subset picker — shown when service endpoint has registered graphs, or when main store graphs are loaded -->
-        {#if !scopeActive && activeGraphList.length > 0}
-          <div class="graph-picker-wrapper">
-            <button class="btn btn-sm btn-ghost" class:graph-picker-active={selectedGraphs.size > 0}
-              on:click|stopPropagation={() => { graphPickerOpen = !graphPickerOpen; showTemplates = false; showHistory = false; }}
-              title={$i18nT('pages.sparql.selectGraphSubset')}>
-              {#if graphPickerLoading}<Loader2 size={14} class="animate-spin" />{:else}<Layers size={14} />{/if}
-              {$i18nT('pages.sparql.graphs')}{selectedGraphs.size > 0 ? ` (${selectedGraphs.size}/${activeGraphList.length})` : ''}
-            </button>
-            {#if graphPickerOpen}
-              <div class="dropdown graph-picker-dropdown" role="presentation" on:click|stopPropagation on:keydown|stopPropagation>
-                <div class="dd-head">
-                  <span class="dd-head-label">{$i18nT('pages.sparql.filterGraphsForQuery')}</span>
-                  <div style="display:flex;gap:0.25rem">
-                    <button class="btn btn-sm btn-ghost" on:click={() => { selectedGraphs = new Set(activeGraphList); selectedGraphs = selectedGraphs; }}>{$i18nT('pages.sparql.graphsAll')}</button>
-                    <button class="btn btn-sm btn-ghost" on:click={() => { selectedGraphs = new Set(); }}>{$i18nT('pages.sparql.graphsNone')}</button>
-                  </div>
-                </div>
-                <div class="graph-picker-list">
-                  {#each activeGraphList as iri}
-                    <label class="graph-picker-item">
-                      <input type="checkbox" checked={selectedGraphs.size === 0 || selectedGraphs.has(iri)}
-                        on:change={() => toggleGraphSubset(iri)} />
-                      <code class="graph-picker-iri">{iri}</code>
-                    </label>
-                  {/each}
-                </div>
-                {#if selectedGraphs.size > 0}
-                  <div class="graph-picker-hint">{$i18nT('pages.sparql.queryingSubset', { values: { selected: selectedGraphs.size, total: activeGraphList.length } })}</div>
-                {:else}
-                  <div class="graph-picker-hint">{$i18nT('pages.sparql.queryingAll', { values: { total: activeGraphList.length } })}</div>
-                {/if}
-              </div>
-            {/if}
-          </div>
         {/if}
 
         <!-- Templates -->
@@ -905,6 +949,43 @@ LIMIT 25`;
           <span class="scope-hint">{$i18nT('pages.sparql.allDatasetsHint')}</span>
         {/if}
       {/if}
+
+      <!-- Named-graph subset of the scope. Shown once a dataset is in scope
+           (explicit chips, an org's datasets, or the locked dataset/org context).
+           Selected graphs narrow execution to exactly those graphs. -->
+      {#if graphScopeAvailable}
+        <span class="graph-scope-sep" aria-hidden="true"></span>
+        <Layers size={13} />
+        {#each selectedGraphList as iri}
+          <span class="dataset-scope-chip graph-chip" title={iri}>
+            {iri.replace(/^https?:\/\//, '')}
+            <button class="dataset-scope-x" on:click={() => toggleGraphScope(iri)} title={$i18nT('pages.sparql.removeScope')}><XIcon size={11} /></button>
+          </span>
+        {/each}
+        <div class="graph-scope-wrap">
+          <button class="scope-add-btn" on:click|stopPropagation={() => { graphScopeOpen = !graphScopeOpen; scopePickerOpen = false; }}>
+            {#if graphScopeLoading}<Loader2 size={12} class="animate-spin" />{:else}<Layers size={12} />{/if}
+            {$i18nT('pages.sparql.graphs')}{selectedGraphIris.size > 0 ? ` (${selectedGraphIris.size})` : ''}
+          </button>
+          {#if graphScopeOpen}
+            <div class="scope-picker graph-scope-picker" role="presentation" on:click|stopPropagation on:keydown|stopPropagation>
+              {#if availableGraphs.length === 0}
+                <div class="scope-empty">{graphScopeLoading ? $i18nT('system.loading') : $i18nT('pages.sparql.noResultsShort')}</div>
+              {:else}
+                {#each availableGraphs as g}
+                  <label class="graph-scope-item">
+                    <input type="checkbox" checked={selectedGraphIris.has(g.graph_iri)} on:change={() => toggleGraphScope(g.graph_iri)} />
+                    <code class="graph-scope-iri" title={g.graph_iri}>{g.graph_iri}</code>
+                  </label>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
+        {#if selectedGraphIris.size > 0}
+          <button class="scope-clear-all" on:click={() => selectedGraphIris = new Set()}>{$i18nT('pages.sparql.clearAll')}</button>
+        {/if}
+      {/if}
     </div>
 
     <!-- Natural-language → SPARQL -->
@@ -949,6 +1030,43 @@ LIMIT 25`;
       <div class="nl-error">{nlError}</div>
     {/if}
 
+    <!-- Prefixes bar — declared chips (with remove), missing chips (with
+         "Add missing"), and a search affordance to add any prefix/vocabulary.
+         Sits between the AI input and the editor so prefix wrangling reads
+         top-to-bottom with the query. -->
+    <div class="prefix-bar">
+      <FileCode size={13} class="prefix-bar-icon" />
+      {#each Object.entries(declaredPrefixes) as [p, ns]}
+        <span class="chip chip-ok" title={ns}>
+          {p}:
+          <button class="chip-x" on:click={() => removePrefix(p)} title={$i18nT('pages.sparql.removePrefix')}>×</button>
+        </span>
+      {/each}
+      {#each missingPrefixes as p}
+        <span class="chip chip-miss" title={$i18nT('pages.sparql.notDeclared')}>{p}:?</span>
+      {/each}
+      {#if missingPrefixes.length > 0}
+        <button class="btn btn-sm btn-ghost" on:click={insertMissingPrefixes} title={$i18nT('pages.sparql.insertMissingPrefixes')}>
+          <FileCode size={12} /> {$i18nT('pages.sparql.addMissing', { values: { count: missingPrefixes.length } })}
+        </button>
+      {/if}
+      <!-- Add-prefix affordance (richer search across built-ins / prefix.cc / platform). -->
+      <div class="prefix-add-wrap">
+        <button class="scope-add-btn" on:click|stopPropagation={() => { prefixSearchOpen = !prefixSearchOpen; }} title={$i18nT('pages.sparql.insertMissingPrefixes')}>
+          <Plus size={12} /> {$i18nT('system.add')}
+        </button>
+        {#if prefixSearchOpen}
+          <div class="prefix-search-pop" role="presentation" on:click|stopPropagation on:keydown|stopPropagation>
+            <PrefixSearchPanel
+              existing={Object.keys(declaredPrefixes)}
+              autofocus
+              on:add={(e) => addPrefixFromSearch(e.detail.prefix, e.detail.namespace)}
+            />
+          </div>
+        {/if}
+      </div>
+    </div>
+
     <SparqlEditorCM
       bind:query
       on:execute={executeQuery}
@@ -957,25 +1075,6 @@ LIMIT 25`;
       sparqlFetcher={hoverFetcher}
       graphIris={selectedEndpoint === 'dataset-default' ? datasetGraphIris : null}
     />
-
-    {#if Object.keys(declaredPrefixes).length > 0 || missingPrefixes.length > 0}
-      <div class="prefix-bar">
-        {#each Object.entries(declaredPrefixes) as [p, ns]}
-          <span class="chip chip-ok" title={ns}>
-            {p}:
-            <button class="chip-x" on:click={() => removePrefix(p)} title={$i18nT('pages.sparql.removePrefix')}>×</button>
-          </span>
-        {/each}
-        {#each missingPrefixes as p}
-          <span class="chip chip-miss" title={$i18nT('pages.sparql.notDeclared')}>{p}:?</span>
-        {/each}
-        {#if missingPrefixes.length > 0}
-          <button class="btn btn-sm btn-ghost" on:click={insertMissingPrefixes} title={$i18nT('pages.sparql.insertMissingPrefixes')}>
-            <FileCode size={12} /> {$i18nT('pages.sparql.addMissing', { values: { count: missingPrefixes.length } })}
-          </button>
-        {/if}
-      </div>
-    {/if}
 
     <div class="toolbar">
       <button class="btn" on:click={executeQuery} disabled={loading}>
@@ -1031,28 +1130,14 @@ LIMIT 25`;
             </span>
           </div>
         {:else if results.results}
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  {#each results.head.vars as v}
-                    <th>?{v}</th>
-                  {/each}
-                </tr>
-              </thead>
-              <tbody>
-                {#each results.results.bindings as row}
-                  <tr>
-                    {#each results.head.vars as v}
-                      <td>
-                        <RdfTerm term={row[v] || null} />
-                      </td>
-                    {/each}
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            mode="bindings"
+            vars={results.head?.vars ?? []}
+            bindings={results.results.bindings}
+            loading={loading}
+            emptyText={$i18nT('pages.sparql.noTabular')}
+            maxHeight="500px"
+          />
         {:else}
           <p class="no-results">{$i18nT('pages.sparql.noTabular')}</p>
         {/if}
@@ -1216,9 +1301,18 @@ LIMIT 25`;
 
   .prefix-bar {
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
-    margin-top: 0.5rem; padding: 0.4rem 0.5rem;
+    margin-bottom: 0.6rem; padding: 0.4rem 0.5rem;
     background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 4px;
     font-size: 0.75rem;
+  }
+  .prefix-bar :global(.prefix-bar-icon) { color: #94a3b8; flex-shrink: 0; }
+  /* Add-prefix affordance: an unobtrusive button that drops the shared
+     PrefixSearchPanel as a popover anchored to the prefix bar. */
+  .prefix-add-wrap { position: relative; margin-left: auto; }
+  .prefix-search-pop {
+    position: absolute; top: calc(100% + 5px); right: 0; z-index: 40;
+    width: 420px; max-width: 90vw;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.14); border-radius: 10px;
   }
   .chip {
     display: inline-flex; align-items: center; gap: 3px;
@@ -1308,19 +1402,6 @@ LIMIT 25`;
     gap: 0.4rem;
   }
 
-  .table-scroll {
-    overflow-x: auto;
-    max-height: 500px;
-    overflow-y: auto;
-  }
-
-  td {
-    max-width: 400px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .boolean-result {
     padding: 1.5rem;
     display: flex;
@@ -1355,51 +1436,6 @@ LIMIT 25`;
     padding: 2rem;
   }
 
-  .graph-picker-wrapper { position: relative; }
-  .graph-picker-active {
-    background: #eff6ff;
-    border-color: #93c5fd;
-    color: #1d4ed8;
-  }
-  .graph-picker-dropdown {
-    min-width: 340px;
-    max-width: 480px;
-  }
-  .graph-picker-list {
-    max-height: 240px;
-    overflow-y: auto;
-    padding: 0.25rem 0;
-  }
-  .graph-picker-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.3rem 0.75rem;
-    cursor: pointer;
-    font-size: 0.8rem;
-  }
-  .graph-picker-item:hover { background: #f3f4f6; }
-  .graph-picker-iri {
-    font-size: 0.75rem;
-    color: #374151;
-    word-break: break-all;
-    white-space: normal;
-  }
-  .graph-picker-hint {
-    font-size: 0.75rem;
-    color: #6b7280;
-    padding: 0.4rem 0.75rem;
-    border-top: 1px solid #e5e7eb;
-    background: #f9fafb;
-  }
-  .dd-head-label {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: #6b7280;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
   /* ── Dark mode: page-scoped light islands → design tokens / desaturated tints.
      The `:is()` ancestor matches either signal set by lib/theme.ts on <html>. */
   :global(:is([data-theme="dark"], .dark)) .svc-context {
@@ -1427,8 +1463,7 @@ LIMIT 25`;
   :global(:is([data-theme="dark"], .dark)) .dd-item { border-bottom-color: var(--line-soft); }
   :global(:is([data-theme="dark"], .dark)) .dd-item:hover { background: var(--bg-soft); }
   :global(:is([data-theme="dark"], .dark)) .dd-title { color: var(--ink-800); }
-  :global(:is([data-theme="dark"], .dark)) .dd-sub,
-  :global(:is([data-theme="dark"], .dark)) .dd-head-label { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .dd-sub { color: var(--ink-500); }
 
   :global(:is([data-theme="dark"], .dark)) .history-empty,
   :global(:is([data-theme="dark"], .dark)) .no-results,
@@ -1506,19 +1541,6 @@ LIMIT 25`;
   :global(:is([data-theme="dark"], .dark)) .bool-false { background: rgba(220, 38, 38, 0.2); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .json-view { background: var(--bg-soft); color: var(--ink-800); }
 
-  :global(:is([data-theme="dark"], .dark)) .graph-picker-active {
-    background: rgba(59, 130, 246, 0.18);
-    border-color: rgba(59, 130, 246, 0.5);
-    color: #93c5fd;
-  }
-  :global(:is([data-theme="dark"], .dark)) .graph-picker-item:hover { background: var(--bg-soft); }
-  :global(:is([data-theme="dark"], .dark)) .graph-picker-iri { color: var(--ink-700); }
-  :global(:is([data-theme="dark"], .dark)) .graph-picker-hint {
-    color: var(--ink-500);
-    background: var(--bg-soft);
-    border-top-color: var(--line-soft);
-  }
-
   /* ── Dataset / organisation scope bar (ported from the Triple Browser) ──── */
   .dataset-scope-bar {
     display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem;
@@ -1593,6 +1615,26 @@ LIMIT 25`;
   .dataset-scope-chip.locked :global(svg:last-child) { opacity: 0.6; margin-left: 0.1rem; }
   .scope-hint { color: #64748b; font-size: 0.74rem; font-style: italic; }
 
+  /* ── Named-graph subset within the scope bar ───────────────────────────────── */
+  .graph-scope-sep {
+    width: 1px; align-self: stretch; margin: 0 0.15rem;
+    background: #bfdbfe;
+  }
+  .graph-scope-wrap { position: relative; }
+  .graph-scope-picker { min-width: 280px; }
+  .graph-scope-item {
+    display: flex; align-items: center; gap: 0.45rem;
+    padding: 0.3rem 0.45rem; border-radius: 6px;
+    cursor: pointer; font-size: 0.8rem;
+  }
+  .graph-scope-item:hover { background: #f1f5f9; }
+  .graph-scope-iri {
+    font-family: 'SF Mono', monospace; font-size: 0.72rem;
+    color: #374151; word-break: break-all; white-space: normal;
+  }
+  /* Graph chips reuse .dataset-scope-chip; clamp very long IRIs. */
+  .graph-chip { max-width: 16rem; overflow: hidden; white-space: nowrap; }
+
   :global(:is([data-theme="dark"], .dark)) .scope-picker { background: var(--bg-strong); border-color: var(--line-strong); }
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-bar { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.3); color: #93c5fd; }
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-chip { background: rgba(59,130,246,0.2); color: #bfdbfe; }
@@ -1607,4 +1649,7 @@ LIMIT 25`;
   :global(:is([data-theme="dark"], .dark)) .scope-item:hover { background: rgba(255,255,255,0.06); }
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-chip.locked { background: rgba(59,130,246,0.22); color: #bfdbfe; }
   :global(:is([data-theme="dark"], .dark)) .scope-hint { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .graph-scope-sep { background: rgba(59,130,246,0.35); }
+  :global(:is([data-theme="dark"], .dark)) .graph-scope-item:hover { background: rgba(255,255,255,0.06); }
+  :global(:is([data-theme="dark"], .dark)) .graph-scope-iri { color: var(--ink-700); }
 </style>

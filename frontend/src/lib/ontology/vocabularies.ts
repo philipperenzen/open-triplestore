@@ -279,6 +279,110 @@ VOCAB.geo = [
   mk(P.geo, 'sfIntersects', 'sfIntersects', 'object'),
 ];
 
+// ---------------------------------------------------------------------------
+// Vocabulary "about" metadata — short, human-readable descriptions for the
+// built-in NAMESPACES. Powers the prefix/vocabulary search panel so a user can
+// see what a vocabulary is for before adding its prefix. Keys are prefix labels
+// and line up 1:1 with NAMESPACES.
+// ---------------------------------------------------------------------------
+
+export interface VocabInfo {
+  /** Human title, e.g. "RDF Schema". */
+  title: string;
+  /** One or two sentence description of what the vocabulary covers. */
+  description: string;
+  /** Canonical homepage / spec URL, when there is a stable one. */
+  homepage?: string;
+}
+
+export const VOCAB_INFO: Record<string, VocabInfo> = {
+  rdf: {
+    title: 'RDF',
+    description: 'The core RDF vocabulary — types, properties and list terms that underpin every RDF graph (rdf:type, rdf:Property, rdf:List).',
+    homepage: 'https://www.w3.org/TR/rdf11-concepts/',
+  },
+  rdfs: {
+    title: 'RDF Schema',
+    description: 'Lightweight schema vocabulary for describing classes and properties, with rdfs:subClassOf, rdfs:label and rdfs:comment.',
+    homepage: 'https://www.w3.org/TR/rdf-schema/',
+  },
+  owl: {
+    title: 'Web Ontology Language',
+    description: 'Richer ontology constructs on top of RDFS — classes, restrictions, equivalences and property characteristics for formal modelling.',
+    homepage: 'https://www.w3.org/TR/owl2-overview/',
+  },
+  sh: {
+    title: 'SHACL',
+    description: 'Shapes Constraint Language for validating RDF graphs against a set of conditions (node and property shapes, constraints, reports).',
+    homepage: 'https://www.w3.org/TR/shacl/',
+  },
+  xsd: {
+    title: 'XML Schema Datatypes',
+    description: 'The standard literal datatypes used by RDF for typed values — xsd:string, xsd:integer, xsd:dateTime, xsd:boolean and friends.',
+    homepage: 'https://www.w3.org/TR/xmlschema11-2/',
+  },
+  skos: {
+    title: 'SKOS',
+    description: 'Simple Knowledge Organization System for thesauri, taxonomies and controlled vocabularies (concepts, schemes, broader/narrower).',
+    homepage: 'https://www.w3.org/TR/skos-reference/',
+  },
+  foaf: {
+    title: 'FOAF',
+    description: 'Friend of a Friend — describes people, organisations and their relationships, accounts and online presence.',
+    homepage: 'http://xmlns.com/foaf/spec/',
+  },
+  schema: {
+    title: 'Schema.org',
+    description: 'Broad cross-domain vocabulary for things on the web — people, places, events, creative works, products and datasets.',
+    homepage: 'https://schema.org/',
+  },
+  dct: {
+    title: 'Dublin Core Terms',
+    description: 'General-purpose metadata terms for any resource — title, description, creator, dates, license, subject and relations.',
+    homepage: 'https://www.dublincore.org/specifications/dublin-core/dcmi-terms/',
+  },
+  dcat: {
+    title: 'DCAT',
+    description: 'Data Catalog Vocabulary for publishing catalogs of datasets and their distributions, services and access endpoints.',
+    homepage: 'https://www.w3.org/TR/vocab-dcat/',
+  },
+  prov: {
+    title: 'PROV-O',
+    description: 'Provenance ontology for recording how data came to be — entities, the activities that produced them, and responsible agents.',
+    homepage: 'https://www.w3.org/TR/prov-o/',
+  },
+  geo: {
+    title: 'GeoSPARQL',
+    description: 'OGC vocabulary for geospatial RDF — features, geometries, WKT literals and topological relations queryable from SPARQL.',
+    homepage: 'https://www.ogc.org/standard/geosparql/',
+  },
+  time: {
+    title: 'OWL-Time',
+    description: 'Vocabulary for temporal concepts — instants, intervals and their durations and orderings.',
+    homepage: 'https://www.w3.org/TR/owl-time/',
+  },
+  void: {
+    title: 'VoID',
+    description: 'Vocabulary of Interlinked Datasets describing RDF datasets — statistics, example resources, linksets and access methods.',
+    homepage: 'https://www.w3.org/TR/void/',
+  },
+  vann: {
+    title: 'VANN',
+    description: 'A small vocabulary for annotating other vocabularies — preferred prefix and namespace, usage notes and examples.',
+    homepage: 'https://vocab.org/vann/',
+  },
+  org: {
+    title: 'Organization Ontology',
+    description: 'Describes organisational structures — formal organisations, sub-units, memberships, roles and reporting relationships.',
+    homepage: 'https://www.w3.org/TR/vocab-org/',
+  },
+  qb: {
+    title: 'RDF Data Cube',
+    description: 'Vocabulary for publishing multi-dimensional statistical data — datasets, observations, dimensions, measures and attributes.',
+    homepage: 'https://www.w3.org/TR/vocab-data-cube/',
+  },
+};
+
 /** Flat array of all built-in terms across all namespaces. */
 export function allBuiltinTerms() {
   const out = [];

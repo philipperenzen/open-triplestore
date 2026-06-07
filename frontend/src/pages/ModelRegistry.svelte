@@ -56,6 +56,10 @@
   }
 
   onMount(async () => {
+    // Deep-link: /models?kind=vocabulary|data-model pre-selects the kind filter, so a
+    // "vocabulary registry" link lands on the unified registry already filtered.
+    const k = new URLSearchParams(window.location.search).get('kind');
+    if (k === 'vocabulary' || k === 'data-model') kindFilter = k;
     await load();
     const [users, orgs] = await Promise.all([
       listPublicUsers().catch(() => []),

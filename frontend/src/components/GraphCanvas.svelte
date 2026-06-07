@@ -10,6 +10,7 @@
   import ValueRenderer from './ontology/ValueRenderer.svelte';
   import RdfTerm from './RdfTerm.svelte';
   import GeoPreview from './GeoPreview.svelte';
+  import EdgeInfoPanel from './EdgeInfoPanel.svelte';
   import { X, Copy, Check, ArrowUpRight, MapPin, ArrowRight, ArrowDownLeft } from 'lucide-svelte';
 
   export let nodes = [];
@@ -57,6 +58,10 @@
   // Node inspector panel state — see buildInspector().
   let inspected = null;       // built model for the tapped node, or null when closed
   let inspectedId = null;     // its node id, so we can rebuild on graph changes
+  // Edge / predicate info panel state — see buildEdgeInspector(). Mutually
+  // exclusive with the node inspector (only one panel is ever open).
+  let inspectedEdge = null;   // built model for the tapped edge, or null when closed
+  let inspectedEdgeId = null; // its edge id, so we can rebuild / clear on graph changes
   let inspectorIncomingLimit = 25;
   let copiedInspector = false;
   let inspectorAutoExpanded = new Set(); // blank-node ids we've asked the host to load
@@ -101,8 +106,8 @@
         'min-zoomed-font-size': Math.max(5, settings.textSize * 0.6),
       });
       cy.edges().style({
-        'font-size': `${Math.max(7, settings.textSize - 2)}px`,
-        'min-zoomed-font-size': Math.max(4, (settings.textSize - 2) * 0.6),
+        'font-size': `${Math.max(8, settings.textSize - 1)}px`,
+        'min-zoomed-font-size': Math.max(4, (settings.textSize - 1) * 0.55),
         'width': settings.edgeWidth,
       });
     });
@@ -259,14 +264,81 @@
 
   // ─── Layout options ──────────────────────────────────────────────────────────
 
+  // Per-edge ideal length: longer edges between bigger / more-connected nodes so
+  // dense hubs push their neighbours out and stay readable instead of collapsing
+  // into a hairball. length = base + k·(sizeA+sizeB) + m·(degA+degB), clamped so
+  // the user's edge-length slider still anchors the scale.
+  //   base  ← the slider value (settings.edgeLength)
+  //   k     ← how much the two endpoints' rendered sizes stretch the edge
+  //   m     ← how much the two endpoints' degrees stretch the edge
+  // Used as a function for the built-in 'cose' layout (which supports a function
+  // idealEdgeLength); cose-bilkent only takes a number, so for that layout we
+  // feed a single value scaled by the graph's average endpoint weight instead.
+  function endpointWeight(node) {
+    if (!node || !node.data) return { size: 30, deg: 1 };
+    const deg = (typeof node.degree === 'function' ? node.degree(false) : node.data('degree')) || 1;
+    return { size: nodeSize(node), deg };
+  }
+  function edgeIdealLength(edge) {
+    const base = settings.edgeLength;
+    const a = endpointWeight(edge.source());
+    const b = endpointWeight(edge.target());
+    const k = 0.9;   // size contribution
+    const m = 4;     // degree contribution
+    const len = base + k * (a.size + b.size) + m * (a.deg + b.deg);
+    // Keep it sane: never shorter than the slider, never absurdly long.
+    return Math.round(Math.min(base * 6 + 600, Math.max(base, len)));
+  }
+
+  // cose-bilkent takes a *number* for idealEdgeLength, so derive one that scales
+  // with the average node size + degree across the current graph — this spreads
+  // dense graphs proportionally even though we can't vary length per edge there.
+  function scaledGlobalEdgeLength() {
+    const base = settings.edgeLength;
+    if (!cy || cy.nodes().length === 0) return base;
+    const ns = cy.nodes();
+    let sizeSum = 0, degSum = 0;
+    ns.forEach((n) => { sizeSum += nodeSize(n); degSum += (n.degree(false) || 1); });
+    const avgSize = sizeSum / ns.length;
+    const avgDeg = degSum / ns.length;
+    // Two endpoints per edge → roughly 2× the per-node averages.
+    const len = base + 0.9 * (2 * avgSize) + 4 * (2 * avgDeg);
+    return Math.round(Math.min(base * 4 + 400, Math.max(base, len)));
+  }
+
   function getLayoutOptions(name) {
     const eLen = settings.edgeLength;
-    const base = { padding: 50, animate: true, animationDuration: 500 };
+    // STATIC: no entrance animation — nodes appear in their final positions
+    // immediately (the user reported an off-putting left→zoom-in reveal). This
+    // also means no animated fit/zoom runs as part of layout on initial load.
+    const base = { padding: 50, animate: false, fit: true };
     switch (name) {
       case 'cose-bilkent':
-        return { name: 'cose-bilkent', ...base, nodeRepulsion: 9000, idealEdgeLength: eLen, nodeDimensionsIncludeLabels: true, gravityRange: 3.8 };
+        // Higher repulsion + label-aware sizing keeps every node clearly
+        // separated; the scaled global edge length spreads dense hubs. We also
+        // pass the per-edge function (harmless if cose-bilkent ignores it).
+        return {
+          name: 'cose-bilkent', ...base,
+          nodeRepulsion: 18000,
+          idealEdgeLength: scaledGlobalEdgeLength(),
+          edgeElasticity: 0.45,
+          nodeDimensionsIncludeLabels: true,
+          gravity: 0.25,
+          gravityRange: 3.8,
+          tile: true,
+        };
       case 'cose':
-        return { name: 'cose', ...base, nodeRepulsion: 6000, idealEdgeLength: eLen * 0.67 };
+        // Built-in cose DOES support idealEdgeLength as a function of the edge,
+        // so this branch gives true per-edge lengths driven by both endpoints.
+        return {
+          name: 'cose', ...base,
+          nodeRepulsion: 400000,
+          idealEdgeLength: (edge) => edgeIdealLength(edge),
+          nodeOverlap: 24,
+          nodeDimensionsIncludeLabels: true,
+          gravity: 40,
+          componentSpacing: 120,
+        };
       case 'breadthfirst':
         return { name: 'breadthfirst', ...base, directed: false, spacingFactor: 1.8 };
       case 'grid':
@@ -276,7 +348,15 @@
       case 'concentric':
         return { name: 'concentric', ...base, minNodeSpacing: eLen * 0.33 };
       default:
-        return { name: 'cose', ...base };
+        return {
+          name: 'cose', ...base,
+          nodeRepulsion: 400000,
+          idealEdgeLength: (edge) => edgeIdealLength(edge),
+          nodeOverlap: 24,
+          nodeDimensionsIncludeLabels: true,
+          gravity: 40,
+          componentSpacing: 120,
+        };
     }
   }
 
@@ -403,10 +483,12 @@
 
     cy.on('tap', 'edge', (evt) => {
       dispatch('edgeClick', evt.target.data());
+      if (inspector) openEdgeInspector(evt.target);
     });
 
-    // Tap on empty canvas closes the inspector (node taps set evt.target to the node).
-    cy.on('tap', (evt) => { if (evt.target === cy) closeInspector(); });
+    // Tap on empty canvas closes whichever panel is open (node taps set
+    // evt.target to the node, edge taps to the edge).
+    cy.on('tap', (evt) => { if (evt.target === cy) { closeInspector(); closeEdgeInspector(); } });
 
     // Context menu (right-click)
     cy.on('cxttap', 'node', (evt) => {
@@ -605,19 +687,21 @@
           'target-arrow-shape': 'triangle',
           'curve-style': 'bezier',
           'label': 'data(label)',
-          'font-size': `${Math.max(7, settings.textSize - 2)}px`,
-          'font-weight': '600',
+          // Predicate labels: slightly larger + bolder + higher-contrast colour
+          // and a more opaque pill so they stay legible at the default zoom.
+          'font-size': `${Math.max(8, settings.textSize - 1)}px`,
+          'font-weight': '700',
           'font-family': 'IBM Plex Sans, system-ui, sans-serif',
-          'color': dark ? '#cbd5e1' : '#334155',
+          'color': dark ? '#e2e8f0' : '#1e293b',
           'text-rotation': 'autorotate',
           'text-margin-y': -7,
           'text-outline-color': dark ? '#0b1220' : '#ffffff',
-          'text-outline-width': 2,
-          'min-zoomed-font-size': Math.max(4, (settings.textSize - 2) * 0.6),
-          'text-background-color': dark ? 'rgba(15,23,42,0.85)' : 'rgba(255,255,255,0.82)',
+          'text-outline-width': 2.5,
+          'min-zoomed-font-size': Math.max(4, (settings.textSize - 1) * 0.55),
+          'text-background-color': dark ? 'rgba(15,23,42,0.92)' : 'rgba(255,255,255,0.92)',
           'text-background-opacity': 1,
           'text-background-shape': 'round-rectangle',
-          'text-background-padding': '2px',
+          'text-background-padding': '3px',
         }
       },
       {
@@ -818,6 +902,8 @@
 
   function openInspector(node) {
     if (!inspector || !node) return;
+    // Node and edge panels are mutually exclusive — opening one closes the other.
+    closeEdgeInspector();
     inspectedId = node.id();
     inspectorIncomingLimit = 25;
     inspectorAutoExpanded = new Set();
@@ -864,6 +950,69 @@
       copiedInspector = true;
       setTimeout(() => (copiedInspector = false), 1200);
     } catch { /* clipboard unavailable */ }
+  }
+
+  // ─── Edge / predicate inspector ─────────────────────────────────────────────
+  // Builds a model describing the *predicate* (relationship) behind a tapped
+  // edge: its IRI + short form, plus the two endpoints' labels/types so the
+  // EdgeInfoPanel can infer domain/range and resolve the vocabulary. The panel
+  // itself does the vocab/description resolution via the read-only ontology libs.
+
+  function edgeEndpoint(node) {
+    if (!node || node.length === 0) return { label: '', iri: null, rdfType: null, nodeType: 'uri' };
+    return {
+      label: node.data('label') || node.id(),
+      iri: node.data('fullIri') || null,
+      rdfType: node.data('rdfType') || null,
+      nodeType: node.data('nodeType') || 'uri',
+    };
+  }
+
+  function buildEdgeInspector(edge) {
+    if (!edge || edge.length === 0) return null;
+    return {
+      id: edge.id(),
+      predicate: edge.data('predicate') || '',
+      label: edge.data('label') || shortenIRI(edge.data('predicate') || ''),
+      source: edgeEndpoint(edge.source()),
+      target: edgeEndpoint(edge.target()),
+    };
+  }
+
+  function openEdgeInspector(edge) {
+    if (!inspector || !edge) return;
+    // Mutually exclusive with the node inspector. Clear the node panel + its
+    // node selection, but DON'T touch the just-tapped edge's selection so its
+    // highlight stays (closeInspector() would unselect everything, edge too).
+    inspected = null;
+    inspectedId = null;
+    if (cy) cy.$('node:selected').unselect();
+    inspectedEdgeId = edge.id();
+    inspectedEdge = buildEdgeInspector(edge);
+  }
+
+  // Rebuild after graph changes so the open edge panel stays in sync (e.g. an
+  // endpoint gained an rdf:type), or close it if the edge is gone.
+  function refreshEdgeInspector() {
+    if (!inspectedEdgeId || !cy) return;
+    const e = cy.getElementById(inspectedEdgeId);
+    if (e && e.length) inspectedEdge = buildEdgeInspector(e);
+    else { inspectedEdge = null; inspectedEdgeId = null; }
+  }
+
+  function closeEdgeInspector() {
+    inspectedEdge = null;
+    inspectedEdgeId = null;
+    if (cy) cy.$('edge:selected').unselect();
+  }
+
+  // The EdgeInfoPanel's "Open predicate" → reuse the node-open dispatch so the
+  // host (TripleBrowser) can navigate to the predicate's resource page just like
+  // it does for nodes, without needing a new event contract.
+  function openPredicateResource(detail) {
+    if (detail?.iri) {
+      dispatch('nodeOpen', { id: detail.iri, fullIri: detail.iri, nodeType: 'uri', label: detail.label || detail.iri });
+    }
   }
 
   // Compute effective highlight set: external prop takes priority, then internal search
@@ -973,6 +1122,7 @@
     }
     scheduleMinimapRender();
     refreshInspector();
+    refreshEdgeInspector();
   }
 
   // ─── Keyboard ────────────────────────────────────────────────────────────────
@@ -1456,6 +1606,17 @@
         {/if}
       </div>
     </div>
+  {/if}
+
+  <!-- Predicate / edge info panel — opens on edge click. Mirrors the node
+       inspector's position/style and is mutually exclusive with it. Explains the
+       predicate (vocabulary, description, inferred domain/range). -->
+  {#if inspector && inspectedEdge}
+    <EdgeInfoPanel
+      edge={inspectedEdge}
+      on:close={closeEdgeInspector}
+      on:openPredicate={(e) => openPredicateResource(e.detail)}
+    />
   {/if}
 </div>
 

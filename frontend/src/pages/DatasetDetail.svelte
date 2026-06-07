@@ -1316,7 +1316,7 @@
     {#if dataset.conforms_to_ontology}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
-        <dd><a href="/data-models/{dataset.conforms_to_ontology}" class="md-link">{dataset.conforms_to_ontology}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
+        <dd><a href="/models/{dataset.conforms_to_ontology}" class="md-link">{dataset.conforms_to_ontology}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
       </div>
     {/if}
 

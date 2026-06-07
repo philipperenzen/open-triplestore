@@ -3029,6 +3029,114 @@ mod browse {
         );
     }
 
+    /// Negated filter chips (`neg: true`) exclude rows that MATCH the clause, on
+    /// both the `contains` and `exact` paths. Guards the `browse_triples`
+    /// NOT-filter (each negated clause is wrapped in `!(…)` and AND-ed).
+    #[tokio::test]
+    async fn browse_triples_negated_chip_excludes_matches() {
+        let state = test_state();
+        state
+            .auth_db
+            .create_user("u1", "alice", "a@t.com", "h", SystemRole::User)
+            .unwrap();
+        state
+            .auth_db
+            .create_organisation("o1", "Acme", "acme", None, None)
+            .unwrap();
+        state
+            .auth_db
+            .create_dataset(
+                "d1",
+                "Pub",
+                None,
+                OwnerType::Organisation,
+                "o1",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        state
+            .auth_db
+            .add_dataset_graph("d1", "http://has.ex.org/g")
+            .unwrap();
+        state
+            .store
+            .update(
+                "INSERT DATA { GRAPH <http://has.ex.org/g> { \
+                 <s:a> <p:keep> <o:1> . <s:a> <p:keep> <o:2> . <s:a> <p:drop> <o:9> . } }",
+            )
+            .unwrap();
+
+        // Percent-encode the JSON `filters` value so it survives the query string.
+        fn pct(s: &str) -> String {
+            s.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        }
+
+        // Negated predicate "contains drop" → the <p:drop> triple is excluded.
+        let filters = r#"[{"field":"predicate","value":"drop","mode":"contains","neg":true}]"#;
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/browse/triples?filters={}", pct(filters)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp.into_body()).await;
+        let triples = json["triples"].as_array().unwrap();
+        assert_eq!(
+            triples.len(),
+            2,
+            "Negated contains chip must drop the matching row: {json}"
+        );
+        let body = json.to_string();
+        assert!(
+            !body.contains("p:drop"),
+            "Excluded predicate must not appear: {json}"
+        );
+        assert!(
+            !body.contains("o:9"),
+            "Row matched by the negated chip must be gone: {json}"
+        );
+
+        // Negated object exact (literal string form) → the <o:1> row is excluded,
+        // the other two remain. Exercises negation on the exact-match path.
+        let filters2 = r#"[{"field":"object","value":"o:1","mode":"exact","neg":true}]"#;
+        let resp2 = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/browse/triples?filters={}", pct(filters2)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2.into_body()).await;
+        let triples2 = json2["triples"].as_array().unwrap();
+        assert_eq!(
+            triples2.len(),
+            2,
+            "Negated exact chip drops exactly the matching row: {json2}"
+        );
+        assert!(
+            !json2.to_string().contains("o:1"),
+            "Object o:1 must be excluded by the negated exact chip: {json2}"
+        );
+    }
+
     #[tokio::test]
     async fn browse_triples_has_more_false_when_done() {
         let state = test_state();

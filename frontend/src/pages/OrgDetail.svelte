@@ -36,6 +36,7 @@
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import OrganisationMetadataDialog from '../components/OrganisationMetadataDialog.svelte';
   import Avatar from '../components/Avatar.svelte';
+  import LinkedDataBackground from '../components/LinkedDataBackground.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
 
@@ -455,30 +456,22 @@
 
 <div class="card">
   {#if org}
-    {#if bannerKey}
-      <img
-        src="{getOrgBannerUrl(id)}?v={bannerVersion}"
-        alt={$t('pages.orgDetail.bannerAlt', { values: { name: org?.name } })}
-        class="page-banner"
-        on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-      />
-    {/if}
-    <div class="org-header">
-      <div class="org-left">
-        {#if imageKey}
-          <img
-            src="{getOrgImageUrl(id)}?v={imageVersion}"
-            alt={$t('pages.orgDetail.logoAlt', { values: { name: org?.name } })}
-            class="org-image"
-            on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-          />
-        {/if}
+    <div class="org-cover" class:has-banner={!!bannerKey}>
+      {#if bannerKey}
+        <img
+          src="{getOrgBannerUrl(id)}?v={bannerVersion}"
+          alt={$t('pages.orgDetail.bannerAlt', { values: { name: org?.name } })}
+          class="cover-img"
+          on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
+        />
+      {/if}
+      <LinkedDataBackground color="170, 230, 225" intensity={bannerKey ? 0.5 : 0.9} />
+      <div class="org-header glass">
         <div class="org-info">
           <h2 class="org-title">{org.name}</h2>
           {#if org.description}<p class="meta org-desc">{org.description}</p>{/if}
         </div>
-      </div>
-      <div class="org-actions">
+        <div class="org-actions">
         {#if canManageOrg}
           <button class="btn btn-sm btn-ghost" on:click={() => { metadataError = ''; metadataDialogOpen = true; }}>
             <Edit2 size={13} /> {$t('pages.orgDetail.pageSettings')}
@@ -491,6 +484,7 @@
           {#if copiedSparql}<CheckCheck size={13} /> {$t('system.copied')}{:else}<Copy size={13} /> {$t('pages.orgDetail.copyUrl')}{/if}
         </button>
       </div>
+    </div>
     </div>
   {:else if error}
     <p class="error">{error}</p>
@@ -1059,13 +1053,15 @@
     font-size: 1.6rem;
     font-weight: 700;
     margin: 0 0 0.35rem 0;
-    color: var(--ink-900);
+    color: #fff;
     line-height: 1.2;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   }
   .org-desc {
     font-size: 0.93rem;
-    color: var(--ink-600);
+    color: rgba(255, 255, 255, 0.88);
     margin: 0;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   }
 
   /* About / metadata */
@@ -1125,38 +1121,53 @@
   .meta { color: #666; }
   .header { display: flex; justify-content: space-between; align-items: center; }
 
-  .org-header {
+  /* Org cover: banner image (or a fallback gradient) behind an animated
+     linked-data layer, with a liquid-glass header panel floating on top. */
+  .org-cover {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border-radius: 14px;
+    min-height: 188px;
+    padding: 14px;
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1rem;
-  }
-  .org-left {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.85rem;
-    flex: 1;
-    min-width: 0;
-  }
-  .org-image {
-    width: 56px;
-    height: 56px;
-    object-fit: cover;
-    border-radius: 12px;
+    align-items: flex-end;
     border: 1px solid var(--line-soft);
-    flex-shrink: 0;
-  }
-  .org-info { flex: 1; min-width: 0; }
-  .org-actions { display: flex; gap: 0.4rem; flex-shrink: 0; align-items: flex-start; }
-  .page-banner {
-    display: block;
-    width: 100%;
-    height: 160px;
-    object-fit: cover;
-    border-radius: 12px;
-    border: 1px solid var(--line-soft);
+    background: linear-gradient(135deg, #0f2a33 0%, #1e5663 55%, #2f7a8c 100%);
     margin-bottom: 1rem;
   }
+  .cover-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 0;
+  }
+  .org-header {
+    position: relative;
+    z-index: 1;
+    width: min(640px, 100%);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 1rem;
+    flex-wrap: wrap;
+    background: rgba(10, 24, 30, 0.46);
+    backdrop-filter: blur(6px) saturate(125%);
+    -webkit-backdrop-filter: blur(6px) saturate(125%);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    padding: 0.85rem 1.05rem;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 8px 24px rgba(0, 0, 0, 0.22);
+  }
+  .org-info { flex: 1; min-width: 0; }
+  .org-actions { display: flex; gap: 0.4rem; flex-shrink: 0; align-items: flex-end; flex-wrap: wrap; }
+  /* Buttons sit on the dark glass — lift their contrast. */
+  .org-header :global(.btn-ghost) { color: rgba(255, 255, 255, 0.92); }
+  .org-header :global(.btn-ghost:hover) { background: rgba(255, 255, 255, 0.14); }
 
   :global(.org-actions a.btn), :global(.org-actions .btn) {
     display: inline-flex;
