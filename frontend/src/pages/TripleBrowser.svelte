@@ -1,12 +1,13 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { autofocus } from '../lib/actions/autofocus.js';
-  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, sparqlQuery, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
+  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
   import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
   import DataTable from '../components/DataTable.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import FacetRail from '../components/browse/FacetRail.svelte';
+  import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import { t as i18nT } from 'svelte-i18n';
   import {
     Download, Copy, ChevronLeft, ChevronRight, Search, X,
@@ -120,6 +121,14 @@
   let browseExpandedDirs = new Map();
   // IRI currently being expanded (for loading indicator in GraphCanvas)
   let browseExpandingUri = null;
+  // Transient hint shown over the graph (e.g. a blank node with nothing to expand in scope).
+  let browseGraphHint = '';
+  let browseGraphHintTimer = null;
+  function flashGraphHint(msg) {
+    browseGraphHint = msg;
+    clearTimeout(browseGraphHintTimer);
+    browseGraphHintTimer = setTimeout(() => { browseGraphHint = ''; }, 4000);
+  }
   // Reactive set of currently expanded IRIs for GraphCanvas badge
   $: browseExpandedIris = new Set(browseExpandedUris.keys());
   // Reactive set of fully-exhausted IRIs (both in + out queried) — hides + badge
@@ -236,62 +245,34 @@
         return;
       }
 
-      const outBindings = [], inBindings = [];
-      // Run outgoing + incoming queries concurrently. Previously these awaited
-      // sequentially, doubling the round-trip latency on every "expand both"
-      // (the default) and on every "expand" of a fresh node from the graph view.
+      // Fetch the node's neighbourhood through the SAME scoped browse endpoint as
+      // the initial load, so dataset/org/version scope is honoured. (The global
+      // /sparql endpoint ignores the browse scope, which is why expansion loaded
+      // nothing when scoped to a dataset or pinned to a version.) Outgoing = exact
+      // subject match, incoming = exact object match; run concurrently for "both".
+      const scope = buildExpandScopeParams();
       const outPromise = (direction === 'both' || direction === 'out')
-        ? sparqlQuery(`SELECT ?p ?o WHERE { <${uri}> ?p ?o } LIMIT 80`)
+        ? browseTriples({ limit: '120', offset: '0', ...scope, filters: JSON.stringify([{ field: 'subject', value: uri, mode: 'exact' }]) })
         : Promise.resolve(null);
       const inPromise  = (direction === 'both' || direction === 'in')
-        ? sparqlQuery(`SELECT ?s ?p WHERE { ?s ?p <${uri}> } LIMIT 30`)
+        ? browseTriples({ limit: '40', offset: '0', ...scope, filters: JSON.stringify([{ field: 'object', value: uri, mode: 'exact' }]) })
         : Promise.resolve(null);
       const [outRes, inRes] = await Promise.all([outPromise, inPromise]);
-      if (outRes) {
-        for (const row of (outRes?.results?.bindings || []))
-          outBindings.push({ s: { type: 'uri', value: uri }, p: row.p, o: row.o });
-      }
-      if (inRes) {
-        for (const row of (inRes?.results?.bindings || []))
-          inBindings.push({ s: row.s, p: row.p, o: { type: 'uri', value: uri } });
-      }
-      const { nodes: newNodes, edges: newEdges } = graphResultsToElements([...outBindings, ...inBindings]);
+      const rows = [...(outRes?.triples || []), ...(inRes?.triples || [])];
+      const { nodes: newNodes, edges: newEdges } = graphResultsToElements(rows, 'subject', 'predicate', 'object', 300);
       browseExpansionCache = new Map(browseExpansionCache).set(cacheKey, { nodes: newNodes, edges: newEdges });
       applyExpansion(uri, dirsToAdd, newNodes, newEdges);
     } catch {}
     finally { browseExpandingUri = null; }
   }
 
-  // A blank node can't be referenced by its label in SPARQL (a `_:x` in a query is a
-  // fresh variable, not a reference to a stored node). So we address it by the property
-  // path from its nearest non-blank ancestor — walking parent edges already in the graph
-  // — then keep only the rows whose endpoint is this exact blank node (labels are stable).
+  // A blank node can't be referenced by its label in SPARQL (a `_:x` there is a
+  // fresh variable, not a reference to a stored node), but the scoped
+  // /api/browse/resource endpoint resolves a stored blank node natively via the
+  // quad store. Pass the browse scope so dataset/version-snapshot blank nodes
+  // resolve in the same scope as the initial load.
   async function browseExpandBnode(bnodeId) {
     if (!bnodeId) return;
-
-    // Walk up parent edges to the nearest URI/named ancestor, recording the predicate chain.
-    const typeById = new Map(graphNodes.map(n => [n.data.id, n.data.nodeType]));
-    const incoming = new Map(); // target id → parent edge (prefer a non-blank source)
-    for (const e of graphEdges) {
-      const cur = incoming.get(e.data.target);
-      const srcIsNamed = typeById.get(e.data.source) !== 'bnode';
-      if (!cur || (srcIsNamed && typeById.get(cur.source) === 'bnode')) incoming.set(e.data.target, e.data);
-    }
-    const preds = [];
-    let current = bnodeId, anchor = null;
-    const seen = new Set([bnodeId]);
-    for (let depth = 0; depth < 15; depth++) {
-      const inEdge = incoming.get(current);
-      if (!inEdge) break;
-      preds.unshift(inEdge.predicate);
-      const src = inEdge.source;
-      if (typeById.get(src) !== 'bnode') { anchor = src; break; }
-      if (seen.has(src)) break; // cycle guard
-      seen.add(src);
-      current = src;
-    }
-    if (!anchor || !preds.length) return; // no loaded named ancestor → not addressable
-
     browseExpandingUri = bnodeId;
     try {
       const cacheKey = `bnode::${bnodeId}`;
@@ -300,14 +281,19 @@
         applyExpansion(bnodeId, ['in', 'out'], nodes, edges);
         return;
       }
-      const pathExpr = preds.map(p => `<${p}>`).join('/');
-      const res = await sparqlQuery(`SELECT ?e ?p ?o WHERE { <${anchor}> ${pathExpr} ?e . ?e ?p ?o } LIMIT 500`);
-      const bindings = [];
-      for (const row of (res?.results?.bindings || [])) {
-        if (row.e?.type === 'bnode' && row.e.value === bnodeId)
-          bindings.push({ s: { type: 'bnode', value: bnodeId }, p: row.p, o: row.o });
-      }
-      const { nodes, edges } = graphResultsToElements(bindings);
+      const res = await browseResource(`_:${bnodeId}`, buildExpandScopeParams());
+      // Mirror ResourceDetail.buildGraph: anchor each row on this blank node and
+      // include its nested blank-node descriptions so they don't dead-end.
+      const rows = [];
+      for (const row of (res?.outgoing || []))
+        rows.push({ s: { type: 'bnode', value: bnodeId }, p: row.p, o: row.o });
+      for (const row of (res?.incoming || []))
+        rows.push({ s: row.s, p: row.p, o: { type: 'bnode', value: bnodeId } });
+      for (const [id, brows] of Object.entries(res?.bnodes || {}))
+        for (const row of (brows || []))
+          rows.push({ s: { type: 'bnode', value: id }, p: row.p, o: row.o });
+      const { nodes, edges } = graphResultsToElements(rows);
+      if (!nodes.length) { flashGraphHint($i18nT('pages.tripleBrowser.expandBnodeEmpty')); return; }
       browseExpansionCache = new Map(browseExpansionCache).set(cacheKey, { nodes, edges });
       applyExpansion(bnodeId, ['in', 'out'], nodes, edges);
     } catch {}
@@ -351,6 +337,15 @@
   function handleBrowseNodeExpand(e) {
     if (e.detail.fullIri) browseExpandUri(e.detail.fullIri);
     else if (e.detail.nodeType === 'bnode') browseExpandBnode(e.detail.id);
+  }
+
+  // Clicking an edge surfaces the FULL predicate definition — richer than a node
+  // click (which just opens the inspector). Predicates are where the vocabulary
+  // semantics live (dcat:mediaType, owl:*, …), so this is the priority surface.
+  let browseEdgePredicate = null;
+  function handleBrowseEdgeClick(e) {
+    const iri = e?.detail?.predicate;
+    if (iri) browseEdgePredicate = iri;
   }
 
   // Inspector panel "Open resource" → open the full resource page.
@@ -940,6 +935,15 @@
       .filter(id => isPinned(dsVersions[id]))
       .map(id => `${id}:${dsVersions[id]}`);
     if (verPairs.length) params.versions = verPairs.join(',');
+    return params;
+  }
+
+  // Scope-only params for graph expansion: dataset/org + version pins (+ single-graph
+  // drill-down). Deliberately omits the user's content chips and quick-search, so
+  // expanding a node reveals ALL of its edges within scope rather than re-narrowing it.
+  function buildExpandScopeParams() {
+    const params = buildScopeParams();
+    if (filterGraph) params.graph = filterGraph;
     return params;
   }
 
@@ -1633,7 +1637,6 @@
         <FacetRail
           facets={facets}
           loading={facetsLoading}
-          {uiMode}
           chips={activeChips}
           bind:collapsed={railCollapsed}
           on:addchips={handleFacetAdd}
@@ -1747,9 +1750,19 @@
             exhaustedNodes={browseExhaustedIris}
             on:nodeExpand={handleBrowseNodeExpand}
             on:nodeOpen={handleBrowseNodeOpen}
+            on:edgeClick={handleBrowseEdgeClick}
             on:nodeContextMenu={handleBrowseNodeContextMenu}
             on:canvasContextMenu={handleBrowseCanvasContextMenu}
           />
+        {/if}
+        {#if browseGraphHint}
+          <div class="graph-hint" role="status">{browseGraphHint}</div>
+        {/if}
+        {#if browseEdgePredicate}
+          <div class="edge-card">
+            <button class="edge-card-x" on:click={() => (browseEdgePredicate = null)} title={$i18nT('system.close')} aria-label={$i18nT('system.close')}>✕</button>
+            <TermDefinitionCard iri={browseEdgePredicate} variant="rich" />
+          </div>
         {/if}
       </div>
 
@@ -1972,11 +1985,14 @@
   .sh-link { font-size: 0.74rem; color: #2563eb; text-decoration: none; font-weight: 600; }
   .sh-link:hover { text-decoration: underline; }
 
-  .browser-body { display: flex; align-items: stretch; min-height: 0; }
+  /* Table view: cap the body so a long facet list scrolls inside the rail (whose
+     .rail-body is overflow-y:auto) instead of stretching the rail past the table. */
+  .browser-body { display: flex; align-items: stretch; min-height: 0; max-height: 72vh; }
   /* Graph view: bound the row to the viewport so the facet rail and the graph
      both fill the available height — the rail then scrolls internally and the
-     graph grows to take the rest of the space (rather than a fixed 62vh box). */
-  .browser-body.body-graph { height: calc(100vh - 235px); min-height: 460px; }
+     graph grows to take the rest of the space (rather than a fixed 62vh box).
+     Reset the table-mode max-height so the graph can grow taller than 72vh. */
+  .browser-body.body-graph { height: calc(100vh - 235px); min-height: 460px; max-height: none; }
   .view-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
   /* ─── View toggle ────────────────────────────────────────────────────────── */
@@ -2292,6 +2308,25 @@
   .graph-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; }
   /* Inside the viewport-bounded body the graph fills the remaining height. */
   .body-graph .graph-area { height: auto; flex: 1 1 auto; min-height: 0; }
+  .graph-hint {
+    position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.92); color: #f1f5f9; font-size: 0.78rem;
+    padding: 0.4rem 0.8rem; border-radius: 8px; pointer-events: none; z-index: 5;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  }
+  /* Edge-click predicate detail — anchored top-right of the graph, scrollable. */
+  .edge-card {
+    position: absolute; top: 12px; right: 12px; width: 340px; max-width: calc(100% - 24px);
+    max-height: calc(100% - 24px); overflow: auto; z-index: 6;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+    box-shadow: 0 8px 30px rgba(15, 23, 42, 0.18); padding: 0.7rem 0.8rem;
+  }
+  .edge-card-x {
+    position: absolute; top: 6px; right: 8px; background: none; border: none;
+    color: #94a3b8; cursor: pointer; font-size: 0.9rem; line-height: 1; padding: 2px;
+  }
+  .edge-card-x:hover { color: #475569; }
+  :global(html.dark) .edge-card { background: #0f172a; border-color: #1e293b; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
   .graph-loading, .graph-empty {
     position: absolute; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;

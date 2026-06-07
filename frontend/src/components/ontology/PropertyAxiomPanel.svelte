@@ -3,6 +3,7 @@
   import { renderChain } from '../../lib/ontology/dl-render';
   import { shortenIRI } from '../../lib/rdf-utils';
   import { t } from 'svelte-i18n';
+  import TermDefinitionCard from './TermDefinitionCard.svelte';
 
   export let properties: PropertyEntry[] = [];
   export let onOpen: (_iri: string) => void = () => {};
@@ -106,6 +107,7 @@
           </section>
         {/if}
       </div>
+      <TermDefinitionCard iri={selected.iri} variant="rich" hideEmpty {onOpen} />
     {/if}
   </div>
 </div>

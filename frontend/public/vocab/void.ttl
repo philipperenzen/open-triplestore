@@ -1,0 +1,131 @@
+# VoID — Vocabulary of Interlinked Datasets (http://rdfs.org/ns/void#).
+# Hand-authored compact edition: the terms Open Triplestore emits in its DCAT
+# catalogue (triples, distinctSubjects/Objects, properties, classPartition,
+# propertyPartition, subset, …) plus the common dataset-description terms, with
+# the official English labels and definitions. The canonical vocabulary is not
+# available as Turtle/RDF from a stable URL, so it is bundled here directly.
+@prefix void: <http://rdfs.org/ns/void#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+void: a owl:Ontology ;
+  rdfs:label "VoID — Vocabulary of Interlinked Datasets"@en ;
+  owl:versionInfo "2011-03-06" .
+
+void:Dataset a owl:Class ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "Dataset"@en ;
+  rdfs:comment "A set of RDF triples that are published, maintained or aggregated by a single provider."@en ;
+  skos:definition "A set of RDF triples that are published, maintained or aggregated by a single provider."@en .
+
+void:Linkset a owl:Class ;
+  rdfs:isDefinedBy void: ;
+  rdfs:subClassOf void:Dataset ;
+  rdfs:label "Linkset"@en ;
+  rdfs:comment "A collection of RDF links between two datasets."@en .
+
+void:DatasetDescription a owl:Class ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "Dataset Description"@en ;
+  rdfs:comment "A web resource whose foaf:primaryTopic or foaf:topics include void:Datasets."@en .
+
+void:triples a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "triples"@en ;
+  rdfs:comment "The total number of triples contained in a dataset."@en ;
+  skos:definition "The total number of triples contained in a dataset."@en .
+
+void:entities a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "entities"@en ;
+  rdfs:comment "The total number of entities that are described in a dataset."@en .
+
+void:classes a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "classes"@en ;
+  rdfs:comment "The total number of distinct classes in a dataset."@en .
+
+void:properties a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "properties"@en ;
+  rdfs:comment "The total number of distinct properties in a dataset."@en .
+
+void:distinctSubjects a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "distinct subjects"@en ;
+  rdfs:comment "The total number of distinct subjects in a dataset."@en ;
+  skos:definition "The total number of distinct subjects in a dataset."@en .
+
+void:distinctObjects a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "distinct objects"@en ;
+  rdfs:comment "The total number of distinct objects in a dataset."@en ;
+  skos:definition "The total number of distinct objects in a dataset."@en .
+
+void:documents a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "documents"@en ;
+  rdfs:comment "The total number of documents, for datasets that are published as a set of individual documents."@en .
+
+void:subset a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "subset"@en ;
+  rdfs:comment "A subset of a void:Dataset."@en ;
+  rdfs:domain void:Dataset ;
+  rdfs:range void:Dataset .
+
+void:classPartition a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "class partition"@en ;
+  rdfs:comment "A subset of a dataset that contains only the entities of a certain rdfs:Class."@en .
+
+void:propertyPartition a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "property partition"@en ;
+  rdfs:comment "A subset of a dataset that contains only the triples of a certain property."@en .
+
+void:class a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "class"@en ;
+  rdfs:comment "The rdfs:Class that is the rdf:type of all entities in a class-based partition."@en .
+
+void:property a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "property"@en ;
+  rdfs:comment "The property that is used in all triples of a property-based partition."@en .
+
+void:dataDump a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "data dump"@en ;
+  rdfs:comment "An RDF dump, partial or complete, of a void:Dataset."@en .
+
+void:sparqlEndpoint a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "SPARQL endpoint"@en ;
+  rdfs:comment "A SPARQL protocol endpoint that allows SPARQL query access to a void:Dataset."@en .
+
+void:uriSpace a owl:DatatypeProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "URI space"@en ;
+  rdfs:comment "A URI that is a common string prefix of all the entity URIs in a void:Dataset."@en .
+
+void:vocabulary a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "vocabulary"@en ;
+  rdfs:comment "A vocabulary that is used in the dataset."@en .
+
+void:exampleResource a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "example resource"@en ;
+  rdfs:comment "An example entity that is representative for the entities described in a void:Dataset."@en .
+
+void:rootResource a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "root resource"@en ;
+  rdfs:comment "A top concept or entry point for a void:Dataset that is structured in a tree-like fashion."@en .
+
+void:feature a owl:ObjectProperty ;
+  rdfs:isDefinedBy void: ;
+  rdfs:label "feature"@en ;
+  rdfs:comment "A technical feature of a void:Dataset, such as a supported RDF serialization format."@en .
