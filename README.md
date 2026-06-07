@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** current release **`0.2.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.2.1`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -178,7 +178,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.2.0"}
+# {"status":"ok","version":"0.2.1"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
@@ -812,6 +812,23 @@ npm run build             # production build
 docker build -t open-triplestore .
 docker run --rm -p 7878:7878 -v ./data:/data open-triplestore
 ```
+
+---
+
+## Versioning & releases
+
+Open Triplestore follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+with a [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) — see
+[`CHANGELOG.md`](CHANGELOG.md). Branch model: **`develop`** is active development,
+**`main`** is the latest stable release (tagged `vX.Y.Z`), and **`release/X.Y`**
+branches carry maintenance fixes. Releases are tag-driven and publish a GHCR image:
+
+```bash
+docker pull ghcr.io/philipperenzen/open-triplestore:latest
+```
+
+See [`docs/release-process.md`](docs/release-process.md) for the full release flow and
+[`SECURITY.md`](SECURITY.md) for supported versions and vulnerability reporting.
 
 ---
 

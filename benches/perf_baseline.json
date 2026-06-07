@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "default_tolerance_ratio": 1.25,
+  "tolerances": {
+    "concurrent/": 1.5
+  },
+  "generator": {
+    "commit": "bootstrap",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "runner": "placeholder",
+    "cpu": "unknown",
+    "command": "cargo bench --bench performance --features full",
+    "criterion_metric": "median.point_estimate",
+    "unit": "ns",
+    "note": "Bootstrap placeholder. The gate runs green (every measured benchmark is a soft 'not in baseline' warning) until the perf-baseline workflow (manual dispatch or a v* tag) populates real numbers on a controlled Linux runner. Refresh ONLY via that workflow — never edit by hand or from a PR run."
+  },
+  "benchmarks": {}
+}

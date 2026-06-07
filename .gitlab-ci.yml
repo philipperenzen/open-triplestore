@@ -1,16 +1,22 @@
 # GitLab CI/CD for Open Triplestore.
 #
-# Mirrors the GitHub Actions workflows (.github/workflows/ci.yml + e2e.yml) so a
-# fork hosted on any GitLab instance (gitlab.com or self-managed) gets the same
-# gates: rustfmt + clippy + build + test (incl. conformance & security suites),
-# the frontend lint/test/build, the cargo-deny supply-chain audit (advisories,
-# bans, sources, licenses), an npm production-dependency audit, and a gitleaks
-# secret scan. Commands and versions are kept identical to the GitHub jobs.
+# Mirrors the GitHub Actions workflows (.github/workflows/ci.yml, perf.yml,
+# perf-baseline.yml, release.yml + e2e.yml) so a fork hosted on any GitLab
+# instance (gitlab.com or self-managed) gets the same gates: rustfmt + clippy +
+# build + test (incl. conformance & security suites), the frontend
+# lint/test/build, the cargo-deny supply-chain audit (advisories, bans, sources,
+# licenses), an npm production-dependency audit, a gitleaks secret scan, the
+# performance-regression gate, and a tag-driven release. Commands and versions
+# are kept identical to the GitHub jobs (the sole intentional difference is that
+# the GitLab perf jobs install python3, which the rust image lacks but the
+# GitHub ubuntu-latest runner already ships — see the perf job below).
 
 stages:
   - check
   - test
+  - perf
   - audit
+  - release
 
 variables:
   CARGO_TERM_COLOR: always
@@ -41,6 +47,65 @@ rust:
     - cargo clippy --all-targets --all-features
     - cargo build --all-features --locked
     - cargo test --all-features --locked
+
+# ── Performance-regression GATE (mirrors .github/workflows/perf.yml) ──────────
+# Subset Criterion bench + a comparison against the committed baseline. Runs on
+# merge requests and on pushes to main/develop/release/*. Sample sizes are
+# hard-coded in benches/performance.rs, so the name filter (not --sample-size)
+# controls runtime.
+perf:
+  stage: perf
+  image: rust:1.88-bookworm
+  cache:
+    key: "rust-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\//'
+  before_script:
+    # GEOS + the usual native deps, matching the GitHub backend job, PLUS python3:
+    # the rust:1.88-bookworm image has no python3, whereas the GitHub
+    # ubuntu-latest runner does. This added `python3` is the one intentional
+    # GitHub/GitLab difference (the perf script is invoked the same way on both).
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
+  script:
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - python3 scripts/perf_regression.py check --criterion-dir target/criterion --baseline benches/perf_baseline.json --github-summary
+
+# ── Performance baseline refresh (mirrors .github/workflows/perf-baseline.yml) ─
+# Full Criterion suite → regenerated baseline as a CI artifact. Runs on `v*`
+# tags and on manual/web triggers. Committing the baseline back to the repo
+# needs a project access token, so GitLab keeps this artifact-only — GitHub is
+# the canonical source that opens the baseline-refresh PR.
+perf-baseline:
+  stage: perf
+  image: rust:1.88-bookworm
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  cache:
+    key: "rust-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  before_script:
+    # Same native deps as the perf job, plus python3 (absent from the rust image).
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
+  script:
+    - cargo bench --bench performance --features full
+    - python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --runner "gitlab-ci/$CI_RUNNER_DESCRIPTION" --keep-tolerances
+  artifacts:
+    paths:
+      - benches/perf_baseline.json
+    expire_in: 90 days
 
 # ── Frontend: lint, test, build ───────────────────────────────────────────────
 frontend:
@@ -117,3 +182,31 @@ e2e:
     - npm ci
     - npx playwright install --with-deps chromium
     - npm run e2e
+
+# ── Release (mirrors .github/workflows/release.yml) ───────────────────────────
+# On a `v*` tag, extract the matching CHANGELOG section and publish a GitLab
+# Release. Container images are published from the GitHub workflow (GHCR); GitLab
+# stays release-notes-only here for parity. CI_COMMIT_TAG is e.g. "v0.2.1"; the
+# bare version (stripped "v") is what the "## [X.Y.Z]" headers use.
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v/'
+  script:
+    - ver="${CI_COMMIT_TAG#v}"
+    - echo "Extracting notes for version $ver"
+    - |
+      hdr="## [$ver]"
+      # Fixed-string match (index, not regex): portable across awk implementations.
+      awk -v hdr="$hdr" '
+        index($0, hdr) == 1               { capture = 1; next }
+        capture && index($0, "## [") == 1 { exit }
+        capture                           { print }
+      ' CHANGELOG.md > release_notes.md
+    - test -s release_notes.md || { echo "No CHANGELOG section for [$ver]"; exit 1; }
+    - cat release_notes.md
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "Open Triplestore $CI_COMMIT_TAG"
+    description: release_notes.md

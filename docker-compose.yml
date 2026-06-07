@@ -1,6 +1,9 @@
 services:
   triplestore:
     build: .
+    # Prefer a pre-built release over a local build: comment out `build: .` above
+    # and uncomment the line below to pull the published image from GHCR instead.
+    # image: ghcr.io/philipperenzen/open-triplestore:latest  # pull the published image instead of building
     container_name: open-triplestore
     ports:
       # Bind to loopback only: the triplestore must sit behind a TLS-terminating reverse proxy in
