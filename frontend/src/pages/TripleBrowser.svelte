@@ -1,9 +1,9 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, sparqlQuery, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
   import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
-  import RdfTerm from '../components/RdfTerm.svelte';
+  import DataTable from '../components/DataTable.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import FacetRail from '../components/browse/FacetRail.svelte';
@@ -20,25 +20,6 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
   import Combobox from '../components/Combobox.svelte';
-
-  // Hash-based predicate namespace → hue (matches GraphCanvas edge coloring)
-  function strHue(str) {
-    let h = 0;
-    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) & 0xffffffff;
-    return Math.abs(h) % 360;
-  }
-  function predicateColor(iri) {
-    if (!iri) return '#6d28d9';
-    const h = iri.lastIndexOf('#'); const s = iri.lastIndexOf('/');
-    const ns = iri.slice(0, Math.max(h, s) + 1) || iri;
-    return `hsl(${strHue(ns)},52%,38%)`;
-  }
-  function predicateBg(iri) {
-    if (!iri) return '#ede9fe';
-    const h = iri.lastIndexOf('#'); const s = iri.lastIndexOf('/');
-    const ns = iri.slice(0, Math.max(h, s) + 1) || iri;
-    return `hsl(${strHue(ns)},65%,95%)`;
-  }
 
   // ─── View mode ────────────────────────────────────────────────────────────
   let viewMode = 'table'; // 'table' | 'graph'
@@ -614,12 +595,284 @@
     refetchAll();
   }
 
+  // ── Named-graph scope narrowing ──────────────────────────────────────────
+  // When one or more datasets are in scope, the user can narrow the browse to a
+  // subset of their named graphs. Selected graphs are sent to the backend as
+  // exact `graph` filter chips (OR-ed together) in buildFilterParams().
+  let scopeGraphs = [];       // selected graph IRIs (subset of availableScopeGraphs)
+  let graphsByDs = {};        // dsId -> DatasetGraph[] — present ONLY once loaded
+  let graphsInFlight = new Set(); // dsIds currently being fetched (dedupe guard)
+  let scopeGraphsLoading = false;
+  let graphScopeOpen = false; // graph picker dropdown open
+
+  async function ensureDsGraphs(id) {
+    // Already loaded or in-flight → nothing to do.
+    if (Array.isArray(graphsByDs[id]) || graphsInFlight.has(id)) return;
+    graphsInFlight.add(id);
+    scopeGraphsLoading = true;
+    try {
+      const gs = await listDatasetGraphs(id);
+      graphsByDs = { ...graphsByDs, [id]: gs || [] };
+    } catch {
+      graphsByDs = { ...graphsByDs, [id]: [] };
+    } finally {
+      graphsInFlight.delete(id);
+      scopeGraphsLoading = graphsInFlight.size > 0;
+    }
+  }
+  // Fetch graphs for every scoped dataset (deduped, cached per dataset).
+  $: scopedDatasetIds.forEach(id => ensureDsGraphs(id));
+
+  // Distinct named graphs available across all scoped datasets, with the
+  // triple count summed and a private flag if any dataset marks it private.
+  $: availableScopeGraphs = (() => {
+    const byIri = new Map();
+    for (const id of scopedDatasetIds) {
+      for (const g of (graphsByDs[id] || [])) {
+        if (!g.graph_iri) continue;
+        const cur = byIri.get(g.graph_iri) || { graph_iri: g.graph_iri, triple_count: 0, private: false };
+        cur.triple_count += g.triple_count || 0;
+        cur.private = cur.private || !!g.private;
+        byIri.set(g.graph_iri, cur);
+      }
+    }
+    return [...byIri.values()].sort((a, b) => a.graph_iri.localeCompare(b.graph_iri));
+  })();
+
+  // Drop any selected graph that left scope (e.g. its dataset was removed). Only
+  // prune once every scoped dataset's graph list has loaded — otherwise a restore
+  // (which sets scopeGraphs before the async lists arrive) would be wiped, and the
+  // guard keeps this effect from looping when nothing changed.
+  $: {
+    const allLoaded = scopedDatasetIds.length > 0
+      && scopedDatasetIds.every(id => Array.isArray(graphsByDs[id]));
+    if (allLoaded) {
+      const avail = new Set(availableScopeGraphs.map(g => g.graph_iri));
+      const pruned = scopeGraphs.filter(iri => avail.has(iri));
+      if (pruned.length !== scopeGraphs.length) scopeGraphs = pruned;
+    }
+  }
+
+  function toggleScopeGraph(iri) {
+    scopeGraphs = scopeGraphs.includes(iri)
+      ? scopeGraphs.filter(g => g !== iri)
+      : [...scopeGraphs, iri];
+    refetchResults();
+  }
+  function removeScopeGraph(iri) {
+    scopeGraphs = scopeGraphs.filter(g => g !== iri);
+    refetchResults();
+  }
+  function clearScopeGraphs() {
+    if (!scopeGraphs.length) return;
+    scopeGraphs = [];
+    refetchResults();
+  }
+
+
+  // ── Working-state persistence (sessionStorage) ────────────────────────────
+  // The browser back button (Alt+←) re-mounts this page from scratch, which used
+  // to wipe the table page AND the laid-out graph (forcing a full re-fetch and
+  // re-layout). We snapshot the working state per route into sessionStorage and
+  // restore it on mount so returning lands exactly where the user left off.
+  const STATE_VERSION = 1;
+  // Persisting the full graph can be large; cap the element count and the
+  // serialized size. Past the cap we save everything EXCEPT the graph payload
+  // and fall back to a normal fetch when the graph view is reopened.
+  const GRAPH_ELEMENT_CAP = 4000;       // nodes + edges
+  const STATE_BYTE_CAP = 1_500_000;     // ~1.5 MB serialized
+
+  function stateKey() {
+    const path = (typeof window !== 'undefined' && window.location?.pathname) || '/browse';
+    return `ots:tripleBrowser:${path}`;
+  }
+
+  // Map<uri,{nodeIds:Set,edgeIds:Set}> → plain object for JSON.
+  function serializeExpandedUris(m) {
+    const o = {};
+    for (const [k, v] of m) o[k] = { nodeIds: [...v.nodeIds], edgeIds: [...v.edgeIds] };
+    return o;
+  }
+  function deserializeExpandedUris(o) {
+    const m = new Map();
+    for (const k of Object.keys(o || {})) {
+      m.set(k, { nodeIds: new Set(o[k].nodeIds || []), edgeIds: new Set(o[k].edgeIds || []) });
+    }
+    return m;
+  }
+  // Map<uri,Set<'in'|'out'>> → plain object.
+  function serializeExpandedDirs(m) {
+    const o = {};
+    for (const [k, v] of m) o[k] = [...v];
+    return o;
+  }
+  function deserializeExpandedDirs(o) {
+    const m = new Map();
+    for (const k of Object.keys(o || {})) m.set(k, new Set(o[k] || []));
+    return m;
+  }
+
+  function buildStateSnapshot() {
+    const snap = {
+      v: STATE_VERSION,
+      scopeItems,
+      dsVersions,
+      scopeGraphs,
+      fieldFilters,
+      facetChips,
+      filterGraph,
+      tableSearch,
+      page,
+      pageSize,
+      viewMode,
+      // Table rows so the page renders instantly without a fetch.
+      triples,
+      total,
+      hasMore,
+      backDatasetId,
+      backOrgId,
+      backContextName,
+    };
+    // Attach the graph only when it fits the caps (otherwise re-fetch on demand).
+    const elementCount = graphNodes.length + graphEdges.length;
+    if (elementCount > 0 && elementCount <= GRAPH_ELEMENT_CAP) {
+      snap.graph = {
+        nodes: graphNodes,
+        edges: graphEdges,
+        offset: graphOffset,
+        hasMore: graphHasMore,
+        expandedUris: serializeExpandedUris(browseExpandedUris),
+        expandedDirs: serializeExpandedDirs(browseExpandedDirs),
+      };
+    }
+    return snap;
+  }
+
+  let _saveDebounce = null;
+  function saveState() {
+    if (typeof sessionStorage === 'undefined') return;
+    if (_saveDebounce) clearTimeout(_saveDebounce);
+    _saveDebounce = setTimeout(flushSaveState, 250);
+  }
+  function flushSaveState() {
+    if (typeof sessionStorage === 'undefined') return;
+    if (_saveDebounce) { clearTimeout(_saveDebounce); _saveDebounce = null; }
+    try {
+      let snap = buildStateSnapshot();
+      let json = JSON.stringify(snap);
+      if (json.length > STATE_BYTE_CAP && snap.graph) {
+        // Too big with the graph — drop it and keep the rest.
+        delete snap.graph;
+        json = JSON.stringify(snap);
+      }
+      if (json.length > STATE_BYTE_CAP) return; // still too big — skip silently
+      sessionStorage.setItem(stateKey(), json);
+    } catch { /* quota / serialization errors are non-fatal */ }
+  }
+
+  function loadSavedState() {
+    if (typeof sessionStorage === 'undefined') return null;
+    try {
+      const raw = sessionStorage.getItem(stateKey());
+      if (!raw) return null;
+      const snap = JSON.parse(raw);
+      if (!snap || snap.v !== STATE_VERSION) return null;
+      return snap;
+    } catch { return null; }
+  }
+
+  // Restore the snapshot into reactive state. Returns true on success.
+  function restoreState(snap) {
+    scopeItems = snap.scopeItems || [];
+    dsVersions = snap.dsVersions || {};
+    scopeGraphs = snap.scopeGraphs || [];
+    fieldFilters = snap.fieldFilters || emptyFieldFilters();
+    facetChips = snap.facetChips || [];
+    filterGraph = snap.filterGraph || '';
+    tableSearch = snap.tableSearch || '';
+    page = snap.page || 0;
+    pageSize = snap.pageSize || pageSize;
+    viewMode = snap.viewMode || 'table';
+    triples = snap.triples || [];
+    total = typeof snap.total === 'number' ? snap.total : null;
+    hasMore = !!snap.hasMore;
+    backDatasetId = snap.backDatasetId ?? null;
+    backOrgId = snap.backOrgId ?? null;
+    backContextName = snap.backContextName ?? null;
+    if (snap.graph) {
+      graphNodes = snap.graph.nodes || [];
+      graphEdges = snap.graph.edges || [];
+      graphOffset = snap.graph.offset || 0;
+      graphHasMore = !!snap.graph.hasMore;
+      browseExpandedUris = deserializeExpandedUris(snap.graph.expandedUris);
+      browseExpandedDirs = deserializeExpandedDirs(snap.graph.expandedDirs);
+    }
+    return true;
+  }
+
+  // Reactively re-snapshot whenever any persisted slice changes. Touch every
+  // dependency so Svelte re-runs this block; the debounced write coalesces bursts.
+  // Skipped until the initial mount settles to avoid clobbering a restore.
+  let _persistReady = false;
+  $: if (_persistReady) {
+    void (scopeItems, dsVersions, scopeGraphs, fieldFilters, facetChips, filterGraph,
+     tableSearch, page, pageSize, viewMode, triples, total, hasMore,
+     graphNodes, graphEdges, browseExpandedUris, browseExpandedDirs);
+    saveState();
+  }
+
+  // Persist synchronously when the page is being hidden/unloaded (e.g. the user
+  // hits back before the debounce fires) so the snapshot is always current.
+  function flushOnHide() { if (_persistReady) flushSaveState(); }
+  onMount(() => {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('pagehide', flushOnHide);
+    document.addEventListener('visibilitychange', flushOnHide);
+  });
+  onDestroy(() => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pagehide', flushOnHide);
+      document.removeEventListener('visibilitychange', flushOnHide);
+    }
+    flushOnHide(); // client-side route change unmounts us — capture final state
+  });
 
   onMount(async () => {
     // Load prefix.cc prefixes in background (non-blocking)
     loadPrefixCcPrefixes();
 
     const params = new URLSearchParams(window.location.search);
+    // Deep-link params override any saved state — a link should always win so it
+    // lands on the requested scope/filter, not a stale snapshot. `view` alone is
+    // NOT overriding: switchView() keeps it in the URL via replaceState, so a
+    // restored graph session legitimately carries ?view=graph.
+    const OVERRIDE_PARAMS = ['graph', 'subject', 'predicate', 'object', 'dataset', 'org', 'version'];
+    const hasOverride = OVERRIDE_PARAMS.some(p => params.get(p));
+
+    // ── Restore path: no overriding deep-link + a saved snapshot for this route.
+    const saved = hasOverride ? null : loadSavedState();
+    if (saved && restoreState(saved)) {
+      // Sync the URL's ?view to the restored mode (switchView normally owns this).
+      syncViewToUrl(viewMode);
+      // Load the picker inventories + the rail facets (scope-derived, cheap, and
+      // not part of the persisted snapshot). Crucially we DON'T re-fetch triples,
+      // the count, or the graph — those were restored from the snapshot, so the
+      // table page and the laid-out graph appear immediately.
+      listDatasets().then(ds => { allDatasets = ds || []; }).catch(() => {});
+      listOrganisations().then(os => { allOrgs = os || []; }).catch(() => {});
+      fetchFacets();
+      loadGraphRoles();
+      if (uiMode === 'advanced') llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
+      // If the graph view was active but the snapshot dropped the (too-large)
+      // graph payload, fall back to a fresh fetch so the view isn't empty.
+      if (viewMode === 'graph' && graphNodes.length === 0 && graphEdges.length === 0) {
+        fetchGraphData();
+      }
+      _persistReady = true; // begin saving on subsequent changes
+      return;
+    }
+
+    // ── Normal path (fresh load or deep-link) ───────────────────────────────
     // A ?graph= drill-down stays a dedicated single-graph scope; subject/
     // predicate/object deep-links become exact filter chips.
     if (params.get('graph')) filterGraph = params.get('graph');
@@ -662,6 +915,7 @@
     loadGraphRoles();
     if (uiMode === 'advanced') llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
     if (viewMode === 'graph') fetchGraphData();
+    _persistReady = true; // start persisting once the initial load is in flight
   });
 
   // Build the params common to both the page fetch and the count fetch so the
@@ -729,7 +983,12 @@
     const params = {};
     Object.assign(params, buildScopeParams());
     if (filterGraph) params.graph = filterGraph;
-    const active = currentChips();
+    // Scope-graph selection → exact `graph` filter chips. The backend ORs chips
+    // on the same field, so multiple selected graphs narrow the browse to their
+    // union; they AND against the user's typed/facet chips. ACL is enforced
+    // server-side (a graph chip forces the ?g-binding, access-checked branch).
+    const graphChips = scopeGraphs.map(iri => ({ field: 'graph', value: iri, mode: 'exact' }));
+    const active = [...currentChips(), ...graphChips];
     if (active.length) params.filters = JSON.stringify(active);
     const q = tableSearch.trim();
     if (q) params.q = q;
@@ -964,16 +1223,45 @@
     fieldSuggestions = { subject: [], predicate: [], object: [], graph: [], vocabulary: [] };
     filterGraph = '';
     tableSearch = '';
+    scopeGraphs = []; // graph narrowing is part of the active filter set
     refetchResults();
+  }
+
+  // Dataset IDs implied by a given scope-item array (datasets + org-owned). Mirrors
+  // the reactive `scopedDatasetIds` but for an arbitrary `items` snapshot, so scope
+  // mutations can prune selected graphs synchronously before refetching.
+  function datasetIdsForScope(items) {
+    const ids = new Set();
+    for (const s of items) {
+      if (s.type === 'dataset') ids.add(s.id);
+      else if (s.type === 'org') {
+        for (const d of allDatasets) {
+          if (d.owner_type === 'organisation' && String(d.owner_id) === String(s.id)) ids.add(d.id);
+        }
+      }
+    }
+    return [...ids];
+  }
+  // Keep only selected graphs that still belong to one of `dsIds`. Skip pruning
+  // while any target dataset's graph list is still loading — the reactive prune
+  // ($: block) finishes the job once everything has arrived, so we never drop a
+  // still-valid graph on stale (unloaded) data.
+  function pruneScopeGraphsTo(dsIds) {
+    if (dsIds.some(id => !Array.isArray(graphsByDs[id]))) return;
+    const avail = new Set();
+    for (const id of dsIds) for (const g of (graphsByDs[id] || [])) if (g.graph_iri) avail.add(g.graph_iri);
+    scopeGraphs = scopeGraphs.filter(iri => avail.has(iri));
   }
 
   function clearDatasetScope() {
     scopeItems = [];
+    scopeGraphs = []; // no scope → no graph narrowing
     refetchAll();
   }
 
   function removeScopeItem(item) {
     scopeItems = scopeItems.filter(s => !(s.type === item.type && s.id === item.id));
+    pruneScopeGraphsTo(datasetIdsForScope(scopeItems)); // drop graphs that left scope
     refetchAll();
   }
 
@@ -1010,27 +1298,8 @@
   }
 
   $: totalPages = total != null ? Math.max(1, Math.ceil(total / pageSize)) : null;
-  $: hasFilters = activeChips.length > 0 || !!filterGraph;
+  $: hasFilters = activeChips.length > 0 || !!filterGraph || scopeGraphs.length > 0;
   $: hasActiveFilters = hasFilters || !!tableSearch.trim();
-
-  // Copy whole triple as N-Triples line
-  function tripleLine(t) {
-    const s = (t.subject?.type === 'uri' || t.subject?.type === 'iri') ? `<${t.subject.value}>` : `_:${t.subject?.value}`;
-    const p = `<${t.predicate?.value}>`;
-    let o = '';
-    if (t.object?.type === 'uri' || t.object?.type === 'iri') o = `<${t.object.value}>`;
-    else if (t.object?.type === 'literal') {
-      const esc = (t.object.value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
-      o = t.object.language ? `"${esc}"@${t.object.language}`
-        : t.object.datatype ? `"${esc}"^^<${t.object.datatype}>`
-        : `"${esc}"`;
-    } else o = `_:${t.object?.value}`;
-    return `${s} ${p} ${o} .`;
-  }
-
-  function copyTriple(t) {
-    navigator.clipboard.writeText(tripleLine(t)).catch(() => {});
-  }
 </script>
 
 <div class="browser">
@@ -1167,6 +1436,49 @@
           </div>
           {#if scopeItems.length > 0}
             <button class="scope-clear-all" on:click={clearDatasetScope}>{$i18nT('pages.tripleBrowser.clearAll')}</button>
+          {/if}
+
+          <!-- GRAPHS: narrow the browse to named graphs of the scoped datasets. -->
+          {#if scopedDatasetIds.length > 0 && (availableScopeGraphs.length > 0 || scopeGraphs.length > 0 || scopeGraphsLoading)}
+            <div class="scope-graph-row">
+              <Network size={13} />
+              <span class="dataset-scope-label">{$i18nT('pages.tripleBrowser.graph')}:</span>
+              {#each scopeGraphs as iri}
+                <span class="dataset-scope-chip graph-scope-chip" title={iri}>
+                  <Network size={11} />
+                  {shortenIRI(iri)}
+                  <button class="dataset-scope-x" on:click={() => removeScopeGraph(iri)} title={$i18nT('pages.tripleBrowser.removeScope')}><X size={11} /></button>
+                </span>
+              {/each}
+              {#if availableScopeGraphs.length > 0}
+                <div class="scope-picker-wrap" use:clickOutside={() => { graphScopeOpen = false; }}>
+                  <button class="scope-add-btn" on:click|stopPropagation={() => { graphScopeOpen = !graphScopeOpen; }}>
+                    <Plus size={12} /> {$i18nT('system.add')}
+                  </button>
+                  {#if graphScopeOpen}
+                    <div class="scope-picker" transition:slide={{ duration: 120 }}>
+                      <div class="scope-group-label">{$i18nT('pages.tripleBrowser.graph')}</div>
+                      {#each availableScopeGraphs as g}
+                        <button class="scope-item graph-scope-item" class:graph-scope-selected={scopeGraphs.includes(g.graph_iri)}
+                          on:click|stopPropagation={() => toggleScopeGraph(g.graph_iri)} title={g.graph_iri}>
+                          <span class="gsi-check">{scopeGraphs.includes(g.graph_iri) ? '✓' : ''}</span>
+                          <Network size={12} />
+                          <span class="gsi-name">{shortenIRI(g.graph_iri)}</span>
+                          {#if typeof g.triple_count === 'number' && g.triple_count > 0}
+                            <span class="gsi-count">{g.triple_count.toLocaleString()}</span>
+                          {/if}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {:else if scopeGraphsLoading}
+                <span class="scope-empty">{$i18nT('system.loading')}</span>
+              {/if}
+              {#if scopeGraphs.length > 0}
+                <button class="scope-clear-all" on:click={clearScopeGraphs}>{$i18nT('pages.tripleBrowser.clearAll')}</button>
+              {/if}
+            </div>
           {/if}
         </div>
       {:else}
@@ -1347,48 +1659,12 @@
           {/if}
         </div>
       {:else}
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>{$i18nT('pages.tripleBrowser.subject')}</th>
-                <th>{$i18nT('pages.tripleBrowser.predicate')}</th>
-                <th>{$i18nT('pages.tripleBrowser.object')}</th>
-                <th>{$i18nT('pages.tripleBrowser.graph')}</th>
-                <th class="actions-col-header"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each filteredTriples as tr}
-                <tr class="triple-row">
-                  <td class="term-cell">
-                    <RdfTerm term={tr.subject} graph={tr.graph?.value || ''} />
-                  </td>
-                  <td class="pred-cell">
-                    <span class="predicate" title={tr.predicate?.value}
-                      style="color:{predicateColor(tr.predicate?.value)}; background:{predicateBg(tr.predicate?.value)}"
-                    >{shortenIRI(tr.predicate?.value || '')}</span>
-                  </td>
-                  <td class="term-cell">
-                    <RdfTerm term={tr.object} graph={tr.graph?.value || ''} />
-                  </td>
-                  <td class="graph-cell">
-                    {#if tr.graph?.value}
-                      <span class="graph-tag" title={tr.graph.value}>{shortenIRI(tr.graph.value)}</span>
-                    {:else}
-                      <span class="graph-default">{$i18nT('pages.tripleBrowser.default')}</span>
-                    {/if}
-                  </td>
-                  <td class="actions-col">
-                    <button class="row-action" title={$i18nT('pages.tripleBrowser.copyNTriple')}
-                      on:click={() => copyTriple(tr)}
-                    ><Copy size={13} /></button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          mode="triples"
+          triples={filteredTriples}
+          loading={loading}
+          emptyText={$i18nT('pages.tripleBrowser.noMatchFilters')}
+        />
 
         <div class="pagination">
           {#if totalPages != null && totalPages > 1}
@@ -1793,6 +2069,25 @@
   }
   .dataset-scope-x:hover { opacity: 1; color: #1d4ed8; }
 
+  /* GRAPHS sub-row inside the scope bar — wraps to its own line. */
+  .scope-graph-row {
+    flex-basis: 100%;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem;
+    padding-top: 0.3rem; margin-top: 0.2rem;
+    border-top: 1px dashed #bfdbfe;
+  }
+  .graph-scope-chip { background: #e0e7ff; color: #3730a3; }
+  .graph-scope-chip .dataset-scope-x { color: #6366f1; }
+  .graph-scope-chip .dataset-scope-x:hover { color: #3730a3; }
+  .graph-scope-item { justify-content: flex-start; gap: 0.4rem; }
+  .gsi-check { width: 0.9em; flex: 0 0 auto; color: #4f46e5; font-weight: 700; text-align: center; }
+  .gsi-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gsi-count {
+    flex: 0 0 auto; font-size: 0.68rem; color: #94a3b8;
+    background: #f1f5f9; border-radius: 8px; padding: 0 6px; font-variant-numeric: tabular-nums;
+  }
+  .graph-scope-selected { background: #eef2ff; }
+
   /* Scope picker */
   .scope-picker-wrap { position: relative; }
   .scope-add-btn {
@@ -1933,43 +2228,7 @@
   }
   .af-iri-switch:hover { background: #fff7ed; }
 
-  /* ─── Table ──────────────────────────────────────────────────────────────── */
-  .table-scroll { overflow-x: auto; overflow-y: auto; max-height: 65vh; }
-  table { border-collapse: collapse; width: 100%; }
-  th {
-    background: #f8fafc; font-size: 0.68rem; font-weight: 700;
-    text-transform: uppercase; color: #94a3b8; letter-spacing: 0.5px;
-    padding: 0.5rem 0.75rem; border-bottom: 2px solid #e2e8f0;
-    position: sticky; top: 0; z-index: 1;
-  }
-  td {
-    padding: 0.4rem 0.75rem; border-bottom: 1px solid #f0f0f0;
-    vertical-align: middle; max-width: 280px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .triple-row:hover td { background: #f8faff; }
-
-  .term-cell { max-width: 280px; }
-  .pred-cell { max-width: 180px; }
-  .graph-cell { max-width: 140px; }
-  .actions-col-header { width: 30px; }
-  .actions-col { width: 30px; padding: 0; text-align: center; }
-
-  .predicate {
-    font-size: 0.78rem; font-weight: 600; padding: 1px 6px;
-    border-radius: 4px; white-space: nowrap; display: inline-block;
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
-  }
-  .graph-tag { font-size: 0.75rem; color: #888; background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-family: monospace; }
-  .graph-default { font-size: 0.75rem; color: #bbb; font-style: italic; }
-
-  .row-action {
-    background: none; border: none; cursor: pointer; color: #bbb;
-    font-size: 0.82rem; padding: 2px 4px; border-radius: 3px;
-    opacity: 0; transition: opacity 0.1s, color 0.1s;
-  }
-  .triple-row:hover .row-action { opacity: 1; }
-  .row-action:hover { color: #4a90d9; background: #e8f2fc; }
+  /* Table rendering now lives in the shared DataTable component. */
 
   /* ─── Pagination ─────────────────────────────────────────────────────────── */
   .pagination {
@@ -2143,6 +2402,12 @@
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-chip { background: rgba(59,130,246,0.2); color: #bfdbfe; }
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-x { color: #60a5fa; }
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-x:hover { color: #93c5fd; }
+  :global(:is([data-theme="dark"], .dark)) .scope-graph-row { border-top-color: rgba(59,130,246,0.3); }
+  :global(:is([data-theme="dark"], .dark)) .graph-scope-chip { background: rgba(99,102,241,0.22); color: #c7d2fe; }
+  :global(:is([data-theme="dark"], .dark)) .graph-scope-chip .dataset-scope-x { color: #a5b4fc; }
+  :global(:is([data-theme="dark"], .dark)) .gsi-check { color: #a5b4fc; }
+  :global(:is([data-theme="dark"], .dark)) .gsi-count { background: rgba(255,255,255,0.06); color: var(--ink-600); }
+  :global(:is([data-theme="dark"], .dark)) .graph-scope-selected { background: rgba(99,102,241,0.16); }
   :global(:is([data-theme="dark"], .dark)) .scope-add-btn { color: #60a5fa; border-color: rgba(59,130,246,0.45); }
   :global(:is([data-theme="dark"], .dark)) .scope-add-btn:hover { background: rgba(59,130,246,0.18); }
   :global(:is([data-theme="dark"], .dark)) .scope-group-label,
@@ -2169,13 +2434,7 @@
   :global(:is([data-theme="dark"], .dark)) .af-iri-switch { border-color: rgba(249,115,22,0.5); color: #fdba74; }
   :global(:is([data-theme="dark"], .dark)) .af-iri-switch:hover { background: rgba(249,115,22,0.12); }
 
-  :global(:is([data-theme="dark"], .dark)) th { border-bottom-color: var(--line-strong); }
-  :global(:is([data-theme="dark"], .dark)) td { border-bottom-color: var(--line-soft); }
-  :global(:is([data-theme="dark"], .dark)) .triple-row:hover td { background: rgba(126,214,208,0.06); }
-  :global(:is([data-theme="dark"], .dark)) .graph-tag { color: var(--ink-600); background: rgba(255,255,255,0.06); }
-  :global(:is([data-theme="dark"], .dark)) .graph-default { color: var(--ink-500); }
-  :global(:is([data-theme="dark"], .dark)) .row-action { color: var(--ink-500); }
-  :global(:is([data-theme="dark"], .dark)) .row-action:hover { color: #60a5fa; background: rgba(59,130,246,0.15); }
+  /* Dark table overrides moved to DataTable. */
 
   :global(:is([data-theme="dark"], .dark)) .pagination { border-top-color: var(--line-soft); }
   :global(:is([data-theme="dark"], .dark)) .page-info { color: var(--ink-600); }

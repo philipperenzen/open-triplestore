@@ -1070,6 +1070,71 @@ export function isLoggedIn() {
 // Each entry carries a `kind` ("data-model" | "vocabulary"), auto-detected on upload.
 
 export const listDataModels = () => request('GET', '/api/models');
+
+// A prefix candidate derived from an on-platform registered model/vocabulary.
+// Shape lines up with PrefixCandidate in prefixService so the search panel can
+// merge these straight into its result list.
+export type PlatformPrefix = {
+  prefix: string;
+  namespace: string;
+  title?: string;
+  description?: string;
+  source: 'platform';
+  kind?: 'data-model' | 'vocabulary';
+};
+
+// Turn a model title (or id) into a short, valid prefix label: lowercase,
+// alnum/underscore, must start with a letter. Falls back to "ns" if nothing usable.
+function slugifyPrefix(raw: string): string {
+  const base = (raw || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const trimmed = base.replace(/^[^a-z]+/, '');
+  return (trimmed || base || 'ns').slice(0, 24);
+}
+
+/**
+ * On-platform prefixes derived from the model registry. For every registered
+ * model/vocabulary that declares a `namespace`, yields a prefix candidate whose
+ * label is slugified from the model title (falling back to its id). Best-effort:
+ * returns [] if the registry can't be loaded (e.g. anonymous user). De-duplicates
+ * by namespace and disambiguates colliding prefix labels with a numeric suffix.
+ */
+export async function listPlatformPrefixes(): Promise<PlatformPrefix[]> {
+  let models: any[];
+  try {
+    models = await listDataModels();
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(models)) return [];
+
+  const out: PlatformPrefix[] = [];
+  const seenNs = new Set<string>();
+  const usedPrefixes = new Set<string>();
+  for (const m of models) {
+    const namespace = (m?.namespace || '').trim();
+    if (!namespace || seenNs.has(namespace)) continue;
+    seenNs.add(namespace);
+
+    let prefix = slugifyPrefix(m?.title || m?.id || '');
+    if (usedPrefixes.has(prefix)) {
+      let i = 2;
+      while (usedPrefixes.has(`${prefix}${i}`)) i++;
+      prefix = `${prefix}${i}`;
+    }
+    usedPrefixes.add(prefix);
+
+    out.push({
+      prefix,
+      namespace,
+      title: m?.title || undefined,
+      description: m?.description || undefined,
+      source: 'platform',
+      kind: m?.kind === 'vocabulary' ? 'vocabulary' : 'data-model',
+    });
+  }
+  return out;
+}
+
 export const createDataModel = (data) => request('POST', '/api/models', data);
 export const getDataModel = (id) => request('GET', `/api/models/${id}`);
 export const deleteDataModel = (id) => request('DELETE', `/api/models/${id}`);
