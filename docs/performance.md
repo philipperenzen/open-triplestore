@@ -36,6 +36,138 @@ held constant. It collects a configurable number of samples, computes median
 and mean latency, standard deviation, and regression vs. the previous
 baseline. The HTML report includes interactive plots.
 
+> The `--save-baseline main` / `--baseline main` flow above is Criterion's own
+> *local* A/B comparison — handy for measuring a change on your own machine. It
+> is unrelated to the committed regression gate, which compares against
+> [`benches/perf_baseline.json`](../benches/perf_baseline.json) instead (next
+> section).
+
+---
+
+## Performance regression gate
+
+To stop silent performance regressions from landing, the repo ships an
+automated gate built on a small checker,
+[`scripts/perf_regression.py`](../scripts/perf_regression.py), plus a committed
+baseline at [`benches/perf_baseline.json`](../benches/perf_baseline.json). It
+runs in two places:
+
+- **CI (authoritative).** [`.github/workflows/perf.yml`](../.github/workflows/perf.yml)
+  is the PR/push gate. It builds natively on Linux, runs a representative
+  *subset* of the suite, then fails the job if any benchmark regressed past its
+  tolerance. (A mirrored GitLab gate is kept in sync — see *Gotchas*.)
+- **Local pre-push hook (opt-in).** `make install-hooks` installs a pre-push
+  hook that runs the same checker before you push, so you catch regressions
+  before CI does.
+
+### The committed baseline
+
+[`benches/perf_baseline.json`](../benches/perf_baseline.json) records the
+**median latency in nanoseconds** for each benchmark id (the same
+`median.point_estimate` Criterion writes to `target/criterion/**/new/estimates.json`),
+plus its provenance in a `generator` block (runner name, CPU, timestamp). It
+lives under `benches/` rather than next to the Criterion output because
+`target/` is gitignored.
+
+The checker compares each fresh run against the baseline and flags any
+benchmark whose median exceeds `baseline × tolerance`. The default tolerance is
+`default_tolerance_ratio` = **1.25** (i.e. +25 % is allowed before the gate
+trips). The bar is deliberately generous because the gate runs on **shared CI
+runners**, whose timings are noisy — a tighter bar would produce false failures
+on unrelated PRs.
+
+Tolerances can be tuned per benchmark or per prefix in the `tolerances` map.
+Precedence is: an exact per-benchmark key, then the **longest matching prefix
+key ending in `/`**, then `default_tolerance_ratio`. For example, the
+concurrency benchmarks are the noisiest, so loosen the whole group at once:
+
+```jsonc
+{
+  "default_tolerance_ratio": 1.25,
+  "tolerances": {
+    "concurrent/": 1.6,                 // whole group: allow +60 %
+    "query/simple_lookup/100000": 1.15  // one hot path: tighten to +15 %
+  }
+}
+```
+
+Benchmarks present in the run but missing from the baseline (and vice-versa)
+are **soft warnings**, not failures — so the gate stays green before the
+baseline is first populated, and when the PR gate runs only a subset of the
+suite.
+
+### Subset (PR gate) vs full suite
+
+The PR gate runs only a representative slice for speed and to limit noise:
+
+```bash
+cargo bench --bench performance --features full -- 'query|path|geosparql'
+```
+
+The full suite runs only on tags / manual dispatch (see *Refreshing the
+baseline*). Two reasons for the split:
+
+- **Why a subset on PRs.** The full suite is slow, and every extra benchmark on
+  a shared runner adds variance — a representative subset gives a fast, stable
+  signal on each PR; the exhaustive run is reserved for the controlled baseline
+  job.
+- **Why a name filter, not `--sample-size`.** Sample sizes are **hard-coded**
+  per group in [`benches/performance.rs`](../benches/performance.rs) via
+  `sample_size(...)`, so Criterion's `--sample-size` CLI flag is **ignored**.
+  Scope and speed are therefore controlled by the benchmark-**name filter**
+  (`query|path|geosparql`), not by trimming sample count.
+
+### Refreshing the baseline (bootstrap and updates)
+
+The committed baseline starts as a placeholder with an empty `benchmarks` map
+(so the gate is green until it is first populated). To refresh it:
+
+1. Go to **GitHub → Actions → the perf-baseline workflow**
+   ([`.github/workflows/perf-baseline.yml`](../.github/workflows/perf-baseline.yml))
+   and **Run** it on the `develop` branch — or push a `v*` tag, which triggers
+   the same job.
+2. It runs the **full** suite natively on Linux, runs
+   `perf_regression.py update`, uploads the baseline as an artifact, and opens a
+   PR to `develop` with the refreshed `benches/perf_baseline.json`.
+3. Review that PR — check the `generator` provenance (runner / CPU / timestamp)
+   matches the controlled runner — and merge.
+
+The baseline is **never** refreshed from PR runs (anti-drift: a slow PR can't
+quietly raise the bar). Because absolute timings are **hardware-specific**, only
+refresh from that one controlled runner — a baseline captured elsewhere would
+make the tolerances meaningless.
+
+### Local usage
+
+| Command | What it does |
+|---|---|
+| `make perf-check` | Build + run the subset, then check against the baseline (Linux/macOS, or Docker on Windows). |
+| `make bench-baseline` | Run the full suite locally and refresh your *local* baseline copy. |
+| `make perf-check-selftest` | Validate the checker against the `scripts/testdata/` fixtures — **no build**, so it works on Windows too. |
+| `make install-hooks` | Install the opt-in pre-push hook. |
+
+The pre-push hook can be skipped per push with `SKIP_PERF=1 git push` or
+`git push --no-verify`; set `OTS_PERF_FULL=1` to run the strict subset+check
+instead of the quick path.
+
+On Windows, native `cargo bench` fails (GEOS / pkg-config), so run the
+benchmarks inside the Docker `builder` stage — reuse the
+[reproducible run command](#reproducible-run-command) above (same
+`ots-builder` image and cached `target` volume) and then run the checker.
+
+### Gotchas
+
+- **`new/` vs `base/`.** Criterion always writes the latest run under
+  `target/criterion/**/new/`, and only writes `base/` when you pass
+  `--baseline`. The checker reads `new/`, so it does **not** require a Criterion
+  baseline to be saved.
+- **Why the baseline lives in `benches/`.** `target/` is gitignored, so the
+  committed baseline can't sit next to the Criterion output — hence
+  `benches/perf_baseline.json`.
+- **GitHub and GitLab in sync.** The two CI gates run the same command and
+  checker; the only difference is the GitLab `rust` image needs `python3`
+  apt-installed first.
+
 ---
 
 ## Reproducible benchmark environment

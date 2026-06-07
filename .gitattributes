@@ -28,6 +28,9 @@ Dockerfile      text eol=lf
 .env            text eol=lf
 .env.example    text eol=lf
 *.env           text eol=lf
+*.py            text eol=lf
+# Extensionless shell scripts (git hooks) — must be LF so bash can run them.
+scripts/hooks/* text eol=lf
 
 # ── RDF fixtures: loaded by the server and byte-compared in conformance tests,
 #    so keep them LF on every platform. ──

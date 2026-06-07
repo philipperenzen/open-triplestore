@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# pre-push — lightweight, opt-in performance smoke gate for open-triplestore.
+#
+# This is the *tracked* hook logic; `scripts/install-git-hooks.sh` drops a thin
+# shim into .git/hooks/pre-push that execs this file. It is deliberately
+# forgiving: it NEVER hard-blocks the push because of an environment problem
+# (no cargo, Windows without GEOS, no Docker). It blocks ONLY when a perf code
+# path genuinely fails to build/run, or — under OTS_PERF_FULL=1 — when the
+# Criterion regression check reports a real regression. CI remains the
+# authoritative gate.
+#
+# Escape hatches (always available):
+#   SKIP_PERF=1 git push        — skip just this perf check
+#   git push --no-verify        — bypass ALL git hooks
+#
+# Knobs:
+#   OTS_PERF_FULL=1   — run the Criterion subset + regression check (stricter)
+#   OTS_PERF_DOCKER=1 — on Windows, run the bench inside Docker (needs docker)
+# ═══════════════════════════════════════════════════════════════════════════
+set -euo pipefail
+
+# ─── Opt-out short-circuit ───
+# (`git push --no-verify` skips hooks entirely before we even get here.)
+if [ -n "${SKIP_PERF:-}" ]; then
+  echo "perf pre-push skipped (SKIP_PERF set)"
+  exit 0
+fi
+
+# Resolve the repo root so we can find scripts/benches regardless of CWD.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$repo_root"
+
+# Print the escape hatches on the way out, no matter how we got here.
+print_skip_hint() {
+  echo ""
+  echo "  (to skip: SKIP_PERF=1 git push   —   to bypass all hooks: git push --no-verify)"
+}
+trap print_skip_hint EXIT
+
+# Pick a Python interpreter that actually RUNS — on Windows `python3` is often a
+# Microsoft Store stub that's on PATH but errors, so probe execution, not mere
+# presence (mirrors scripts/perf_selftest.sh).
+detect_python() {
+  local cand
+  if [ -n "${PYTHON:-}" ] && "$PYTHON" -c 'import sys' >/dev/null 2>&1; then
+    printf '%s' "$PYTHON"
+    return 0
+  fi
+  for cand in python3 python py; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'import sys' >/dev/null 2>&1; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+echo "═══ perf pre-push smoke check ═══"
+
+# ─── Platform detection ───
+uname_s="$(uname -s 2>/dev/null || echo unknown)"
+case "$uname_s" in
+  MINGW*|MSYS*|CYGWIN*)
+    # Windows: native cargo bench can't run (missing GEOS / pkg-config). The
+    # only local option is Docker, and only when explicitly requested.
+    if command -v docker >/dev/null 2>&1 && [ "${OTS_PERF_DOCKER:-}" = "1" ]; then
+      echo "Windows detected — running Docker-based perf smoke check (OTS_PERF_DOCKER=1)…"
+      # Build the compile stage from the repo Dockerfile, then run the fast
+      # in-process parallel bench inside that image against the working tree.
+      docker build --target builder -t ots-perf-builder "$repo_root"
+      docker run --rm -v "$repo_root":/work -w /work ots-perf-builder \
+        cargo bench --bench parallel_live
+      echo "Docker perf smoke check passed."
+      exit 0
+    fi
+    cat <<'EOF'
+Native benchmarks can't run on Windows (they need GEOS + pkg-config, which
+aren't available on the maintainer's Windows toolchain).
+
+  • The authoritative perf gate runs in CI on every push — nothing to do here.
+  • To check locally anyway, use Docker:
+        docker build --target builder -t ots-perf-builder .
+        docker run --rm -v "$PWD":/work -w /work ots-perf-builder \
+            cargo bench --bench parallel_live
+    or simply set OTS_PERF_DOCKER=1 and push again to let this hook do it.
+
+Skipping local perf check (not blocking the push).
+EOF
+    exit 0
+    ;;
+esac
+
+# ─── Capable host (Linux / macOS) ───
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo not found; skipping perf pre-push check (CI is authoritative)"
+  exit 0
+fi
+
+if [ "${OTS_PERF_FULL:-}" = "1" ]; then
+  # Stricter path: run a representative Criterion subset, then compare against
+  # the committed baseline. A real regression blocks the push.
+  echo "OTS_PERF_FULL=1 — running Criterion subset + regression check…"
+  PY="$(detect_python || true)"
+  if [ -z "$PY" ]; then
+    echo "No working python3/python/py on PATH — cannot run the regression check."
+    echo "Skipping (CI is authoritative); unset OTS_PERF_FULL or install Python to gate locally."
+    exit 0
+  fi
+  if ! cargo bench --bench performance --features full -- 'query|path|geosparql'; then
+    echo "✗ Benchmark subset failed to build/run — blocking push." >&2
+    exit 1
+  fi
+  if ! "$PY" scripts/perf_regression.py check \
+        --criterion-dir target/criterion \
+        --baseline benches/perf_baseline.json; then
+    echo "✗ Performance regression detected against benches/perf_baseline.json — blocking push." >&2
+    exit 1
+  fi
+  echo "✓ No performance regression detected."
+  exit 0
+fi
+
+# Default path: a quick in-process smoke bench. It exercises the live query
+# path and prints a speedup table. We only block if it ERRORS (a perf path that
+# won't even build/run) — never on timing.
+echo "Running quick perf smoke bench (cargo bench --bench parallel_live)…"
+echo "  (set OTS_PERF_FULL=1 for the stricter Criterion + regression check)"
+if ! cargo bench --bench parallel_live; then
+  echo "✗ Perf smoke bench failed to build/run — blocking push." >&2
+  exit 1
+fi
+echo "✓ Perf smoke bench ran cleanly."
+exit 0

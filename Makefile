@@ -1,4 +1,4 @@
-.PHONY: up down restart dev build release logs
+.PHONY: up down restart dev build release logs bench bench-baseline perf-check perf-check-selftest install-hooks
 
 PORT ?= 7878
 
@@ -43,3 +43,31 @@ dev:
 ## Build the optimised release binary with all standards enabled
 release:
 	cargo build --release --features "$(FEATURES)"
+
+## Run the full Criterion benchmark suite
+# Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
+# Docker instead. See docs/performance.md.
+bench:
+	cargo bench --bench performance --features "$(FEATURES)"
+
+## Re-record the committed perf baseline from a fresh full bench run
+# Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
+# Docker instead. See docs/performance.md.
+bench-baseline:
+	cargo bench --bench performance --features "$(FEATURES)"
+	python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --keep-tolerances
+
+## Run the fast benchmark subset and check it against the perf baseline
+# Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
+# Docker instead. See docs/performance.md.
+perf-check:
+	cargo bench --bench performance --features "$(FEATURES)" -- 'query|path|geosparql'
+	python3 scripts/perf_regression.py check --criterion-dir target/criterion --baseline benches/perf_baseline.json
+
+## Self-test the perf regression checker against fixtures (no build; works on Windows)
+perf-check-selftest:
+	bash scripts/perf_selftest.sh
+
+## Install the opt-in perf pre-push git hook
+install-hooks:
+	bash scripts/install-git-hooks.sh

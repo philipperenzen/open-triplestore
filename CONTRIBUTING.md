@@ -8,9 +8,10 @@ founder and maintainer, **Philippe Renzen**. Contributions are welcome through
 
 - **Outside contributors do not get push access.** The way to contribute is to
   **fork** the repository, push to a branch on your fork, and open a **pull
-  request** against `main`.
-- Direct pushes to `main` are blocked. Every change lands through a PR that is
-  **reviewed and merged by the maintainer** (`CODEOWNERS` review is required).
+  request** against **`develop`** (the active development branch — see
+  [Branching, promotion & releases](#branching-promotion--releases)).
+- Direct pushes to `develop` and `main` are blocked. Every change lands through a PR
+  that is **reviewed and merged by the maintainer** (`CODEOWNERS` review is required).
 - Write access / collaborator invitations are granted by the maintainer alone, at
   their discretion.
 
@@ -29,6 +30,34 @@ git commit -s -m "Your message"
 
 This appends a `Signed-off-by: Your Name <you@example.com>` line. Commits without a
 sign-off may be asked to amend.
+
+## Branching, promotion & releases
+
+Open Triplestore uses a development-trunk model. The short version:
+
+- **`develop`** is the active development branch and the repository default. **Open
+  your PRs against `develop`, not `main`.** Full CI and the performance-regression
+  gate run here.
+- **`main`** is the latest **stable release**. It only advances when `develop` is
+  merged in at release time, and every release is an annotated `vX.Y.Z` tag on `main`.
+  The Docker `latest` image tracks it.
+- **`release/X.Y`** branches carry maintenance/patch releases for older supported
+  lines (security and critical fixes).
+
+Name your branch `<area>/<topic>`, for example:
+
+- `fix/refresh-token-collision` — a bug fix
+- `security/oidc-https-pin` — a security fix
+- `frontend/dataset-filters` — a web-UI change
+
+**Releases are tag-driven and maintainer-only.** A release bumps `Cargo.toml` and
+`CHANGELOG.md`, merges `develop` → `main` via PR, and is tagged `vX.Y.Z`; pushing the
+tag publishes a GitHub Release and a GHCR Docker image. Contributors don't cut
+releases — the full process is in
+[`docs/release-process.md`](docs/release-process.md).
+
+Remember the **DCO**: sign off **every** commit with `-s`, including version-bump and
+changelog commits.
 
 ## Licensing of contributions
 
