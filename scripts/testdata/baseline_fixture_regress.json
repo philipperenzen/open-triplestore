@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "default_tolerance_ratio": 1.25,
+  "tolerances": {
+    "concurrent/": 1.5
+  },
+  "generator": {
+    "commit": "fixture",
+    "note": "Self-test fixture (regression case). simple_lookup (2.75x) and sf_contains (1.48x) exceed the 1.25 default -> 2 REGRESSIONs -> exit 1. concurrent/throughput is 1.43x but the 'concurrent/' prefix tolerance is 1.5, so it must NOT be flagged (exercises prefix-tolerance suppression)."
+  },
+  "benchmarks": {
+    "query/simple_lookup/1000": 100000.0,
+    "query/join/1000": 1200000.0,
+    "geosparql/sf_contains/50": 50000.0,
+    "path/inverse/100": 33000.0,
+    "concurrent/throughput/8": 3500000.0
+  }
+}

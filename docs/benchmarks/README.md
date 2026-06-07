@@ -19,6 +19,18 @@ docker run --rm -v "$PWD:/app" -v ots_target_rel:/app/target -w /app ots-builder
 concurrent. Criterion writes `target/criterion/**/estimates.json` (machine
 readable) and an HTML report at `target/criterion/report/index.html`.
 
+### Regression gate
+
+Those `estimates.json` medians feed an automated regression gate:
+[`scripts/perf_regression.py`](../../scripts/perf_regression.py) compares a run
+against the committed baseline
+[`benches/perf_baseline.json`](../../benches/perf_baseline.json) and fails on a
+regression past tolerance. Validate the checker itself (no build) against the
+[`scripts/testdata/`](../../scripts/testdata/) fixtures with
+`make perf-check-selftest`. Full description — CI gate, tolerances, subset vs
+full suite, baseline refresh — is in
+[`docs/performance.md#performance-regression-gate`](../performance.md#performance-regression-gate).
+
 ## 2. Cross-store comparison (Open Triplestore vs Apache Jena Fuseki)
 
 Same host, same 500k-triple dataset, identical SPARQL over HTTP. Files here:

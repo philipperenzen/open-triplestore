@@ -4,7 +4,45 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Convention.** Released sections SHOULD list the standard groups in the order
+> `Added, Changed, Deprecated, Removed, Fixed, Security`, and SHOULD always include
+> `### Deprecated` and `### Security` — writing `None.` when there is nothing to
+> report. The annotated release tag and the published GitHub Release carry the
+> section verbatim, so this keeps each release's security and deprecation posture
+> explicit. See [`docs/release-process.md`](docs/release-process.md).
+
 ## [Unreleased]
+
+### Deprecated
+- None.
+
+### Security
+- None.
+
+## [0.2.1] — 2026-06-07
+
+### Added
+- Golden-standard conformance and high-complexity test suites spanning 11 standards across the engine, HTTP API, and web UI (#58).
+- A performance-regression CI gate plus an opt-in pre-push hook, both checking against a committed benchmark baseline (this change).
+- Tag-driven releases: pushing an annotated `vX.Y.Z` tag now publishes a GitHub Release and a GHCR Docker image (this change).
+- A documented OSS versioning and release process — branch model, release and security-hotfix flows, and support policy (this change).
+
+### Changed
+- Multi-core `/sparql` query execution on the persistent backend via a subject-sharded parallel mirror — 8–11× faster on aggregate/COUNT-heavy queries (#60).
+- Web UI overhaul: redesigned SPARQL editor, triple browser, and graph view ("liquid-glass" styling), unified model/vocabulary registry views, and expanded internationalisation (#64).
+
+### Deprecated
+- None.
+
+### Fixed
+- LDP root-container methods, relative-IRI request bodies, and CORS preflight headers (#59).
+- SHACL Advanced-Features (SHACL-AF) fixes (#60).
+- Authentication: give JWTs a unique `jti` so tokens minted in the same second no longer collide on the refresh-token unique index — fixes intermittent login failures after a password change or rapid re-login (#63).
+
+### Security
+- Fixed cross-tenant graph IDOR (read via add-dataset-graph, write via RML execute) (#60).
+- Fixed three LOW-severity authentication findings from the 2026-06 follow-up audit (#61).
+- Reject unsafe URL schemes in metadata to prevent stored XSS (#62).
 
 ## [0.2.0] — 2026-06-05
 
@@ -37,6 +75,7 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/philipperenzen/open-triplestore/releases/tag/v0.1.0
