@@ -7,6 +7,7 @@
 
   import { t } from 'svelte-i18n';
   import { Upload, Rows3, Terminal, ShieldCheck, ArrowRight } from 'lucide-svelte';
+  import LinkedDataBackground from '../components/LinkedDataBackground.svelte';
 
   const WORKFLOWS = [
     { href: '/import', kickerKey: 'pages.home.workflows.importKicker', titleKey: 'pages.home.workflows.importTitle', descKey: 'pages.home.workflows.importDesc', ctaKey: 'pages.home.workflows.importCta', icon: Upload },
@@ -74,23 +75,26 @@
 <div class="home">
   <section class="hero-grid">
     <div class="card hero-card">
-      <div class="eyebrow hero-eyebrow">{$t('pages.home.heroEyebrow')}</div>
-      <h2>{$t('pages.home.heroTitle')}</h2>
-      <p class="hero-copy">{$t('pages.home.heroCopy')}</p>
+      <LinkedDataBackground color="126, 214, 208" intensity={0.95} />
+      <div class="hero-inner">
+        <div class="eyebrow hero-eyebrow">{$t('pages.home.heroEyebrow')}</div>
+        <h2>{$t('pages.home.heroTitle')}</h2>
+        <p class="hero-copy">{$t('pages.home.heroCopy')}</p>
 
-      <form class="hero-search" on:submit|preventDefault={doSearch}>
-        <input
-          bind:value={searchQuery}
-          placeholder={$t('pages.home.searchPlaceholder')}
-          aria-label={$t('pages.home.searchPlaceholder')}
-        />
-        <button class="btn" type="submit" disabled={!searchQuery.trim()}>{$t('search.open')}</button>
-      </form>
+        <form class="hero-search" on:submit|preventDefault={doSearch}>
+          <input
+            bind:value={searchQuery}
+            placeholder={$t('pages.home.searchPlaceholder')}
+            aria-label={$t('pages.home.searchPlaceholder')}
+          />
+          <button class="btn" type="submit" disabled={!searchQuery.trim()}>{$t('search.open')}</button>
+        </form>
 
-      <div class="capability-strip">
-        {#each CAPABILITIES as capability}
-          <span class="capability-pill">{capability}</span>
-        {/each}
+        <div class="capability-strip">
+          {#each CAPABILITIES as capability}
+            <span class="capability-pill">{capability}</span>
+          {/each}
+        </div>
       </div>
     </div>
 
@@ -219,6 +223,9 @@
   }
 
   .hero-card {
+    position: relative;
+    isolation: isolate;
+    padding: 14px;
     background:
       radial-gradient(circle at 85% -10%, rgba(126, 214, 208, 0.45), transparent 40%),
       radial-gradient(circle at -10% 110%, rgba(255, 255, 255, 0.08), transparent 40%),
@@ -228,6 +235,22 @@
     border: 1px solid rgba(255, 255, 255, 0.08);
   }
   .hero-card h2 { color: white; }
+
+  /* Liquid-glass panel floating over the animated linked-data background. The
+     14px frame on .hero-card lets the drifting nodes peek around the panel. */
+  .hero-inner {
+    position: relative;
+    z-index: 1;
+    background: rgba(255, 255, 255, 0.07);
+    backdrop-filter: blur(12px) saturate(135%);
+    -webkit-backdrop-filter: blur(12px) saturate(135%);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 16px;
+    padding: clamp(1.25rem, 3vw, 2rem);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      0 10px 30px rgba(0, 0, 0, 0.18);
+  }
 
   .hero-eyebrow {
     color: rgba(255, 255, 255, 0.68);
