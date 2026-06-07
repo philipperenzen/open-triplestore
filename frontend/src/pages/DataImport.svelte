@@ -1773,7 +1773,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
                   <div class="flex gap-1.5 shrink-0">
                     <button
                       class="btn btn-sm {dominantKind === 'vocabulary' ? 'bg-purple-600 hover:bg-purple-700 text-white border-0' : 'bg-amber-600 hover:bg-amber-700 text-white border-0'}"
-                      on:click={() => navigate(dominantKind === 'vocabulary' ? '/vocabularies' : '/models')}
+                      on:click={() => navigate(dominantKind === 'vocabulary' ? '/models?kind=vocabulary' : '/models')}
                     >
                       {dominantKind === 'vocabulary' ? $i18nT('pages.import.goToVocabularyRegistry') : $i18nT('pages.import.goToModelRegistry')}
                     </button>
