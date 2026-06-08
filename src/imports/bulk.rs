@@ -264,6 +264,7 @@ pub fn parse_and_load_bulk(
     let total_files = inputs.len();
 
     // Parse in parallel — pure CPU, no store access. Order matches `inputs`.
+    #[allow(clippy::type_complexity)] // (quads, graphs)-or-error per file; clear inline
     let parsed: Vec<Result<(Vec<Quad>, Vec<String>), String>> =
         inputs.par_iter().map(parse_one).collect();
 

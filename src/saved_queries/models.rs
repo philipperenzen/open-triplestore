@@ -41,10 +41,12 @@ impl QueryScope {
 /// the SPARQL text (see [`crate::saved_queries::params`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum ParamType {
     /// An absolute IRI, rendered as `<iri>`.
     Iri,
     /// A plain string literal, rendered as an escaped `"..."`.
+    #[default]
     String,
     Integer,
     Decimal,
@@ -53,12 +55,6 @@ pub enum ParamType {
     Date,
     /// `xsd:dateTime` (ISO-8601).
     DateTime,
-}
-
-impl Default for ParamType {
-    fn default() -> Self {
-        ParamType::String
-    }
 }
 
 /// One typed variable a saved query exposes when run as an API.

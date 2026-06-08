@@ -350,7 +350,7 @@ pub fn evaluate_constraint(
                     "ASK {{ FILTER(REGEX(\"{}\", \"{}\", \"{}\")) }}",
                     esc(value),
                     esc(pattern),
-                    regex_flags.replace('\\', "").replace('"', "")
+                    regex_flags.replace(['\\', '"'], "")
                 );
                 if let Ok(oxigraph::sparql::QueryResults::Boolean(matches)) = store.query(&query) {
                     if !matches {
