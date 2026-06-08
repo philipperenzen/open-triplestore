@@ -258,6 +258,7 @@ pub struct AuthDb {
     /// Short-lived cache for `get_accessible_graph_iris`, keyed by user_id
     /// (`None` = anonymous). /browse hits this path many times per second; the
     /// uncached path does two SELECTs + a HashSet join each call.
+    #[allow(clippy::type_complexity)] // a cache tuple; a type alias would obscure it
     accessible_graphs_cache: Mutex<HashMap<Option<String>, (Instant, Arc<AccessibleGraphs>)>>,
 }
 
@@ -1054,6 +1055,7 @@ impl AuthDb {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // flat profile fields; a struct adds churn
     pub fn update_user_profile(
         &self,
         id: &str,
@@ -2027,6 +2029,7 @@ impl AuthDb {
 
     // ─── Dataset CRUD ─────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)] // flat dataset columns; a struct adds churn
     pub fn create_dataset(
         &self,
         id: &str,

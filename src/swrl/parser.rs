@@ -401,11 +401,9 @@ fn update_last_literal(atom: &mut AtomBuilder, text: &str) {
         AtomBuilder::Class { ref mut arg, .. } => update(arg),
         AtomBuilder::Property { ref mut arg2, .. } => update(arg2),
         AtomBuilder::Builtin { ref mut args, .. } => {
-            if let Some(last) = args.last_mut() {
-                if let SwrlArg::Literal { ref mut value, .. } = last {
-                    if value.is_empty() {
-                        *value = text.to_string();
-                    }
+            if let Some(SwrlArg::Literal { ref mut value, .. }) = args.last_mut() {
+                if value.is_empty() {
+                    *value = text.to_string();
                 }
             }
         }

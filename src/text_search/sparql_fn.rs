@@ -269,12 +269,12 @@ fn try_pushdown_filter(sparql: &str, filter_type: &str, index: &TextIndex) -> St
     let var_name = &var_part[1..];
 
     // Extract search string (between double quotes)
-    let search_term = if literal_part.starts_with('"') {
-        let end_quote = match literal_part[1..].find('"') {
-            Some(p) => p + 1,
+    let search_term = if let Some(rest) = literal_part.strip_prefix('"') {
+        let end_quote = match rest.find('"') {
+            Some(p) => p,
             None => return sparql.to_string(),
         };
-        &literal_part[1..end_quote]
+        &rest[..end_quote]
     } else {
         return sparql.to_string();
     };
@@ -345,7 +345,7 @@ fn find_subject_for_object_var<'a>(sparql: &'a str, obj_var: &str) -> Option<&'a
         }
         // Check if this line contains our variable as an object
         if trimmed.ends_with(&format!("{} .", target))
-            || trimmed.ends_with(&format!("{}", target))
+            || trimmed.ends_with(&target.to_string())
             || trimmed.contains(&format!("{} .", target))
             || trimmed.contains(&format!("{} ;", target))
         {

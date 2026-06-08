@@ -202,7 +202,7 @@ impl<'a> ShExParser<'a> {
                     .remaining()
                     .as_bytes()
                     .get(2)
-                    .map_or(true, |b| b.is_ascii_whitespace())
+                    .is_none_or(|b| b.is_ascii_whitespace())
             {
                 self.advance(2);
                 self.skip_ws();
@@ -228,7 +228,7 @@ impl<'a> ShExParser<'a> {
                     .remaining()
                     .as_bytes()
                     .get(3)
-                    .map_or(true, |b| b.is_ascii_whitespace())
+                    .is_none_or(|b| b.is_ascii_whitespace())
             {
                 self.advance(3);
                 self.skip_ws();
@@ -251,7 +251,7 @@ impl<'a> ShExParser<'a> {
                 .remaining()
                 .as_bytes()
                 .get(3)
-                .map_or(true, |b| b.is_ascii_whitespace())
+                .is_none_or(|b| b.is_ascii_whitespace())
         {
             self.advance(3);
             self.skip_ws();
@@ -456,7 +456,7 @@ impl<'a> ShExParser<'a> {
             Some('.') => {
                 // Check it's not a prefixed name containing a dot
                 let after_dot = self.remaining().chars().nth(1);
-                if after_dot.map_or(true, |c| {
+                if after_dot.is_none_or(|c| {
                     c.is_whitespace()
                         || c == ';'
                         || c == '}'
@@ -558,7 +558,7 @@ impl<'a> ShExParser<'a> {
         for (kw, nk) in &keywords {
             if self.starts_with_ci(kw) {
                 let after = self.remaining().as_bytes().get(kw.len());
-                if after.map_or(true, |b| !b.is_ascii_alphanumeric() && *b != b'_') {
+                if after.is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_') {
                     self.advance(kw.len());
                     return Some(NodeConstraint {
                         node_kind: Some(nk.clone()),
@@ -596,7 +596,7 @@ impl<'a> ShExParser<'a> {
                     .remaining()
                     .as_bytes()
                     .get(7)
-                    .map_or(true, |b| b.is_ascii_whitespace())
+                    .is_none_or(|b| b.is_ascii_whitespace())
             {
                 self.advance(7);
                 self.skip_ws();
@@ -608,7 +608,7 @@ impl<'a> ShExParser<'a> {
                     .remaining()
                     .as_bytes()
                     .get(9)
-                    .map_or(true, |b| b.is_ascii_whitespace())
+                    .is_none_or(|b| b.is_ascii_whitespace())
             {
                 self.advance(9);
                 self.skip_ws();
@@ -620,7 +620,7 @@ impl<'a> ShExParser<'a> {
                     .remaining()
                     .as_bytes()
                     .get(9)
-                    .map_or(true, |b| b.is_ascii_whitespace())
+                    .is_none_or(|b| b.is_ascii_whitespace())
             {
                 self.advance(9);
                 self.skip_ws();
@@ -632,7 +632,7 @@ impl<'a> ShExParser<'a> {
                     .remaining()
                     .as_bytes()
                     .get(6)
-                    .map_or(true, |b| b.is_ascii_whitespace())
+                    .is_none_or(|b| b.is_ascii_whitespace())
             {
                 self.advance(6);
                 self.skip_ws();

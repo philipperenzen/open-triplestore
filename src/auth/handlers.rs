@@ -2190,7 +2190,7 @@ pub async fn update_org_member_role(
 
     let role = req["role"]
         .as_str()
-        .and_then(|r| Role::from_str(r))
+        .and_then(Role::from_str)
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,

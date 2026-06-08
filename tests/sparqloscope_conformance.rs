@@ -1235,6 +1235,7 @@ fn scope_rdfstar_in_graph() {
 fn scope_numeric_all_functions() {
     let s = ts();
 
+    #[allow(clippy::type_complexity)] // (query, assertion-fn) test table; clear inline
     let tests: &[(&str, fn(&str) -> bool)] = &[
         ("SELECT (ABS(-42) AS ?v) WHERE {}", |r| r.contains("42")),
         ("SELECT (CEIL(4.1) AS ?v) WHERE {}", |r| r.contains("5")),

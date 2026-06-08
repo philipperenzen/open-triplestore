@@ -19,6 +19,7 @@ pub struct SwrlRule {
 
 /// An atom in a SWRL rule.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)] // variant names mirror the W3C SWRL atom types
 pub enum Atom {
     /// Class membership: Class(?x) → ?x rdf:type Class
     ClassAtom { class_iri: String, arg: SwrlArg },
