@@ -292,6 +292,11 @@ pub struct RefreshToken {
     pub expires_at: String,
     pub created_at: String,
     pub revoked: bool,
+    /// Session/"family" id shared by every token in one rotation chain (one login →
+    /// one family). Reuse-detection revokes only the offending family, so a rotation
+    /// race in one browser/tab can't log the user out of their other sessions.
+    /// `None` for legacy rows created before this column existed.
+    pub family_id: Option<String>,
 }
 
 // ─── Organisation ────────────────────────────────────────────────────────────

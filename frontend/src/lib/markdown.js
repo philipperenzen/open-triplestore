@@ -66,13 +66,15 @@ function rewriteDocHref(href) {
 /**
  * Render a markdown string to sanitized HTML and a heading TOC.
  * @param {string} md - markdown source
+ * @param {{ breaks?: boolean }} [opts] - `breaks: true` renders a single newline as
+ *   a line break (chat-friendly); the default (false) is standard markdown for docs.
  * @returns {{ html: string, headings: Array<{ id: string, text: string, level: number }> }}
  */
-export function renderMarkdown(md) {
+export function renderMarkdown(md, opts = {}) {
   const source = String(md || '');
   if (!source.trim()) return { html: '', headings: [] };
 
-  const dirty = marked.parse(source);
+  const dirty = marked.parse(source, { breaks: !!opts.breaks });
   const clean = DOMPurify.sanitize(dirty, { USE_PROFILES: { html: true }, ADD_ATTR: ['target'] });
 
   // Outside a DOM (SSR / non-jsdom): return sanitized HTML without a TOC.

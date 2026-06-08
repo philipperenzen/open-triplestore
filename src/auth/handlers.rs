@@ -385,10 +385,16 @@ fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
     headers
 }
 
+/// Mint an access+refresh token pair and persist the refresh token's hash under
+/// `family_id` (the session/rotation chain it belongs to). A fresh login passes a
+/// brand-new family id; a rotation passes the family of the token being rotated,
+/// so every token from one login shares a family and reuse-detection can be scoped
+/// to that single session.
 fn issue_tokens(
     jwt_config: &JwtConfig,
     auth_db: &AuthDb,
     user: &User,
+    family_id: &str,
 ) -> Result<(String, String, u64), (StatusCode, String)> {
     let access_token =
         jwt::issue_access_token(jwt_config, &user.id, &user.username, user.role.as_str())
@@ -409,11 +415,27 @@ fn issue_tokens(
             &user.id,
             &refresh_hash,
             &expires_at.to_rfc3339(),
+            family_id,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let expires_in = jwt_config.access_expiry_minutes * 60;
     Ok((access_token, refresh_token, expires_in))
+}
+
+/// Window during which a just-rotated refresh token may still be replayed by a
+/// legitimate client (a second tab / the browser session-restore herd that hasn't
+/// observed the new cookie yet) without being treated as token theft.
+const REFRESH_ROTATION_GRACE_SECS: i64 = 30;
+
+/// True if `created_at` (RFC 3339) is within the rotation grace window of now.
+fn within_rotation_grace(created_at: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds()
+                <= REFRESH_ROTATION_GRACE_SECS
+        })
+        .unwrap_or(false)
 }
 
 // ─── Linked-data graph helpers ────────────────────────────────────────────────
@@ -528,7 +550,10 @@ pub async fn register(
         });
     }
 
-    let (access_token, refresh_token, expires_in) = issue_tokens(&jwt_config, &db, &user)?;
+    // Registration auto-logs the new user in — a fresh session family.
+    let family_id = uuid::Uuid::new_v4().to_string();
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
 
     let cookie_headers = auth_cookie_headers(
         &access_token,
@@ -632,7 +657,11 @@ pub async fn login(
     // Successful authentication — reset the failure counter.
     let _ = db.clear_login_attempts(&req.username);
 
-    let (access_token, refresh_token, expires_in) = issue_tokens(&jwt_config, &db, &user)?;
+    // A fresh login starts a new session family — independent from any other
+    // browser/device the user is already signed in on.
+    let family_id = uuid::Uuid::new_v4().to_string();
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
 
     {
         let mut b = AuditEventBuilder::new(AuditEventType::LoginSuccess, AuditOutcome::Success)
@@ -715,9 +744,9 @@ pub async fn refresh(
         ));
     }
 
-    // Check refresh token hash exists in DB and is not revoked
+    // Check refresh token hash exists in DB
     let token_hash = hash_token(&refresh_token_str);
-    let stored = db
+    let mut stored = db
         .get_refresh_token_by_hash(&token_hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| {
@@ -728,20 +757,54 @@ pub async fn refresh(
         })?;
 
     if stored.revoked {
-        // Refresh-token REUSE: a token that was already rotated (or explicitly
-        // revoked) is being replayed. Per RFC 6819 / refresh-token-rotation
-        // guidance this signals theft of the token chain, so we revoke EVERY
-        // refresh token for the user, forcing full re-authentication of both the
-        // legitimate user and the attacker.
-        tracing::warn!(
-            user_id = %claims.sub,
-            "refresh-token reuse detected; revoking all refresh tokens for user"
-        );
-        let _ = db.revoke_all_user_refresh_tokens(&claims.sub);
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "Refresh token has been revoked".to_string(),
-        ));
+        // The presented token was already rotated away. This is EITHER a benign
+        // concurrent-refresh race (a second tab / the browser session-restore herd
+        // replaying the just-rotated cookie before it saw the new one) OR genuine
+        // token-chain theft (RFC 6819 §5.2.2.3). We tell them apart by the family:
+        //
+        // - If this token's session family still has a live, recently-issued head,
+        //   the session is plainly still in use, so we rotate from that head and let
+        //   the caller through — no false logout for honest multi-tab clients.
+        // - Otherwise the whole chain is already dead (or aged out of the grace
+        //   window): treat it as reuse and revoke ONLY this session family. Crucially
+        //   we do NOT revoke every token for the user — that was the old behaviour and
+        //   it logged people out of all their other browsers/devices the moment one
+        //   session glitched.
+        let live_head = stored
+            .family_id
+            .as_deref()
+            .and_then(|fid| db.get_active_family_head(fid).ok().flatten())
+            .filter(|head| within_rotation_grace(&head.created_at));
+
+        match live_head {
+            Some(head) => {
+                stored = head; // rotate from the session's current head instead
+            }
+            None => {
+                match stored.family_id.as_deref() {
+                    Some(fid) => {
+                        tracing::warn!(
+                            user_id = %claims.sub,
+                            "refresh-token reuse detected; revoking session family"
+                        );
+                        let _ = db.revoke_refresh_token_family(fid);
+                    }
+                    None => {
+                        // Legacy token with no family (pre-migration): fall back to the
+                        // conservative blast radius so theft is still contained.
+                        tracing::warn!(
+                            user_id = %claims.sub,
+                            "refresh-token reuse detected on familyless token; revoking all user tokens"
+                        );
+                        let _ = db.revoke_all_user_refresh_tokens(&claims.sub);
+                    }
+                }
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
+        }
     }
 
     // Revoke the old refresh token (rotation)
@@ -761,8 +824,14 @@ pub async fn refresh(
         ));
     }
 
-    // Issue new token pair
-    let (access_token, refresh_token, expires_in) = issue_tokens(&jwt_config, &db, &user)?;
+    // Issue new token pair within the SAME session family so the whole chain stays
+    // revocable as one unit. (Legacy familyless rows adopt a fresh family here.)
+    let family_id = stored
+        .family_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
 
     let cookie_headers = auth_cookie_headers(
         &access_token,

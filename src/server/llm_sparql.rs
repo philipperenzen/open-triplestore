@@ -33,9 +33,19 @@ use super::routes::{resolve_prefixes, scope_query_to_authorized};
 use super::AppState;
 
 const SYSTEM_PROMPT: &str =
-    "You are a SPARQL generation assistant. Translate the natural-language \
-question into a single valid SPARQL query using the provided ontology prefixes. Reply with ONLY \
-the SPARQL query.";
+    "You are a SPARQL generation assistant. Translate the natural-language question into a single, \
+complete, valid SPARQL query.\n\
+- Declare EVERY prefix you use with a `PREFIX` line at the top of the query (for example \
+`PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>`). Never use a prefix you have not declared.\n\
+- Prefer the prefixes and vocabulary the user provides.\n\
+- If the user gives a \"Current query\", EDIT and extend that query to satisfy the request, keeping \
+the parts that are still correct, instead of starting from scratch.\n\
+- Reply with ONLY the SPARQL query — no explanation and no markdown code fences.";
+
+/// Output-token budget for a generated SPARQL query (prefix block + body). Large
+/// enough that a query with several PREFIX lines is never cut off mid-statement —
+/// a truncated query is invalid and would only force the repair round-trip.
+const SPARQL_MAX_TOKENS: u32 = 1024;
 
 /// Base URL of the OpenAI-compatible LLM endpoint (`LLM_GATEWAY_URL`). Defaults to a
 /// local server on :8000; if nothing runs there, the AI features show as unavailable.
@@ -335,6 +345,10 @@ pub struct NlSparqlRequest {
     /// Optional ontology / prefix context to ground the generation (classes, predicates, prefixes).
     #[serde(default)]
     pub schema_hint: Option<String>,
+    /// The query currently in the editor. When present the model edits/extends it in
+    /// place (a refinement) rather than always generating a brand-new query.
+    #[serde(default)]
+    pub current_query: Option<String>,
     /// Override the model; defaults to the configured model (see `LLM_SPARQL_MODEL` / `LLM_MODEL`).
     #[serde(default)]
     pub model: Option<String>,
@@ -346,29 +360,85 @@ pub struct NlSparqlResponse {
     pub model: String,
 }
 
-/// POST /api/llm/sparql  { question, schema_hint?, model? } -> { sparql, model }
+/// POST /api/llm/sparql  { question, schema_hint?, current_query?, model? } -> { sparql, model }
 async fn nl_to_sparql(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<NlSparqlRequest>,
 ) -> Result<Json<NlSparqlResponse>, AppError> {
     if req.question.trim().is_empty() {
         return Err(AppError::BadRequest("question is required".to_string()));
     }
-    let model = req.model.unwrap_or_else(sparql_model);
+    let model = req.model.clone().unwrap_or_else(sparql_model);
+    let user_content = build_sparql_prompt(&req);
 
-    let user_content = match req.schema_hint.as_deref() {
-        Some(h) if !h.trim().is_empty() => {
-            format!(
-                "{}\n\nOntology / prefixes:\n{}",
-                req.question.trim(),
-                h.trim()
-            )
+    // Generate, then make the query actually runnable: inject any prefixes the model
+    // forgot to declare (resolved from the prefix registry), then verify it parses.
+    // If it doesn't, give the model ONE chance to repair its own output before we
+    // hand it back — so the editor receives a checked, complete query, not a fragment.
+    let raw = chat_completion(&model, SYSTEM_PROMPT, &user_content, SPARQL_MAX_TOKENS).await?;
+    let mut sparql = finalize_sparql(&state, raw).await;
+
+    if let Err(err) = validate_sparql(&sparql) {
+        let repair = format!(
+            "This SPARQL query is not valid ({err}):\n\n{sparql}\n\n\
+             Return a corrected, complete query. Declare every PREFIX you use. Reply with ONLY the SPARQL.",
+        );
+        if let Ok(fixed) = chat_completion(&model, SYSTEM_PROMPT, &repair, SPARQL_MAX_TOKENS).await {
+            let fixed = finalize_sparql(&state, fixed).await;
+            // Keep the repair only if it now parses; otherwise return the first attempt
+            // so the user still has something concrete to edit.
+            if validate_sparql(&fixed).is_ok() {
+                sparql = fixed;
+            }
         }
-        _ => req.question.trim().to_string(),
-    };
+    }
 
-    let sparql = chat_completion(&model, SYSTEM_PROMPT, &user_content, 512).await?;
     Ok(Json(NlSparqlResponse { sparql, model }))
+}
+
+/// Assemble the NL→SPARQL user prompt from the question plus any ontology hint and
+/// the query currently in the editor (so the model can refine it in place).
+fn build_sparql_prompt(req: &NlSparqlRequest) -> String {
+    let mut s = req.question.trim().to_string();
+    if let Some(h) = req
+        .schema_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        s.push_str("\n\nOntology / prefixes:\n");
+        s.push_str(h);
+    }
+    if let Some(q) = req
+        .current_query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+    {
+        s.push_str("\n\nCurrent query (edit this if the request refines it, otherwise replace it):\n");
+        s.push_str(q);
+    }
+    s
+}
+
+/// Inject any prefixes used-but-not-declared (resolved from the prefix registry /
+/// prefix.cc), so a `PREFIX` line the model forgot never makes the query fail. A
+/// no-op when every prefix is already declared.
+async fn finalize_sparql(state: &AppState, sparql: String) -> String {
+    let sparql = sparql.trim().to_string();
+    match resolve_prefixes(state, &sparql).await {
+        Some(with_prefixes) => with_prefixes,
+        None => sparql,
+    }
+}
+
+/// Parse-check a query string with the same grammar the engine uses, returning the
+/// parser's message on failure. Undeclared prefixes fail here — which is exactly why
+/// [`finalize_sparql`] runs first.
+fn validate_sparql(sparql: &str) -> Result<(), String> {
+    spargebra::Query::parse(sparql, None)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// POST /api/llm/feedback  <TrainingExample> -> endpoint `/v1/signals`
@@ -429,6 +499,9 @@ const MAX_SERVICES_IN_CONTEXT: usize = 40;
 const MAX_GRAPHS_IN_CONTEXT: usize = 40;
 /// Cap rows returned from a chat-issued SPARQL query (both to the model and the UI).
 const MAX_CHAT_QUERY_ROWS: usize = 50;
+/// Output-token budget per chat turn. The previous 700 cut longer answers off
+/// mid-sentence; this gives the model room to finish. Short answers still stop early.
+const CHAT_MAX_TOKENS: u32 = 2048;
 
 #[derive(Deserialize)]
 pub struct ChatMessage {
@@ -496,7 +569,7 @@ async fn llm_chat(
     }
 
     // Planning turn: answer directly, or emit `SPARQL:` to fetch data.
-    let first = chat_completion_messages(&model, msgs.clone(), 700).await?;
+    let first = chat_completion_messages(&model, msgs.clone(), CHAT_MAX_TOKENS).await?;
 
     let Some(query) = extract_sparql_directive(&first) else {
         return Ok(Json(ChatResponse {
@@ -523,7 +596,7 @@ async fn llm_chat(
                      in clear natural language. Do not output SPARQL."
                 ),
             }));
-            let answer = chat_completion_messages(&model, msgs, 700)
+            let answer = chat_completion_messages(&model, msgs, CHAT_MAX_TOKENS)
                 .await
                 .unwrap_or_else(|_| format!("Here are the results of the query:\n\n{table}"));
             Ok(Json(ChatResponse {
@@ -851,7 +924,20 @@ fn strip_code_fence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_sparql_directive, find_ci, strip_code_fence, truncate};
+    use super::{extract_sparql_directive, find_ci, strip_code_fence, truncate, validate_sparql};
+
+    #[test]
+    fn validate_sparql_accepts_valid_and_rejects_invalid() {
+        assert!(validate_sparql(
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+             SELECT ?s WHERE { ?s rdfs:label ?l }"
+        )
+        .is_ok());
+        assert!(validate_sparql("this is not sparql").is_err());
+        // An undeclared prefix must fail to parse — this is exactly why the server
+        // injects forgotten prefixes (finalize_sparql) before validating.
+        assert!(validate_sparql("SELECT ?s WHERE { ?s foaf:name ?n }").is_err());
+    }
 
     #[test]
     fn extracts_sparql_directive_with_fence() {
