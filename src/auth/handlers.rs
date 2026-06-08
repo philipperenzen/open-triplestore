@@ -3465,86 +3465,26 @@ pub async fn update_dataset_role(
     db.update_dataset_graphs_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Auto-register the dataset in the model / vocabulary registry so it shows
-    // up in those listings. Idempotent: skip if a record with this id already exists.
+    // Promote the dataset into the model / vocabulary registry so it shows up in
+    // those listings *with its data* — a published 1.0.0 version whose graphs hold
+    // a copy of the dataset's graphs, not just an empty metadata tag. Idempotent;
+    // best-effort (logged, never fails the role update).
     if let Some(role) = graph_role {
         let role_str = role.as_str();
         if role_str == "model" || role_str == "vocabulary" {
             let registry_id = slugify(&dataset.name);
             if !registry_id.is_empty() {
-                let now = chrono::Utc::now().to_rfc3339();
-                let owner_type = match dataset.owner_type {
-                    OwnerType::User => "user",
-                    OwnerType::Organisation => "organisation",
-                    OwnerType::Group => "group",
-                };
-                let owner_id = dataset.owner_id.as_str();
-                let creator = format!("{}/users/{}", state.base_url, current_user.user_id);
-                let title = if dataset.name.is_empty() {
-                    dataset_id.as_str()
-                } else {
-                    dataset.name.as_str()
-                };
-                let description = dataset.description.as_deref();
-
-                if role_str == "model" {
-                    if !crate::data_models::registry::data_model_exists(
-                        &state.store,
-                        &state.base_url,
-                        &registry_id,
-                    ) {
-                        if let Err(e) = crate::data_models::registry::insert_data_model(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            title,
-                            "", // namespace unknown — user can edit later
-                            description,
-                            false, // is_public — keep private until user opts in
-                            Some(owner_type),
-                            Some(owner_id),
-                            Some(&creator),
-                            &now,
-                        ) {
-                            tracing::warn!(
-                                "failed to auto-register data model for dataset {dataset_id}: {e}"
-                            );
-                        }
-                    }
-                } else {
-                    // role_str == "vocabulary" — same unified registry, kind=vocabulary.
-                    if !crate::data_models::registry::data_model_exists(
-                        &state.store,
-                        &state.base_url,
-                        &registry_id,
-                    ) {
-                        if let Err(e) = crate::data_models::registry::insert_data_model(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            title,
-                            "",
-                            description,
-                            false,
-                            Some(owner_type),
-                            Some(owner_id),
-                            Some(&creator),
-                            &now,
-                        ) {
-                            tracing::warn!(
-                                "failed to auto-register vocabulary for dataset {dataset_id}: {e}"
-                            );
-                        } else if let Err(e) = crate::data_models::registry::set_data_model_kind(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            crate::kind_detector::RegistryKind::Vocabulary,
-                        ) {
-                            tracing::warn!(
-                                "failed to set vocabulary kind for dataset {dataset_id}: {e}"
-                            );
-                        }
-                    }
+                if let Err(e) = promote_dataset_to_registry(
+                    &state,
+                    &dataset,
+                    &dataset_id,
+                    &registry_id,
+                    role_str,
+                    &current_user.user_id,
+                ) {
+                    tracing::warn!(
+                        "failed to promote dataset {dataset_id} into the {role_str} registry: {e}"
+                    );
                 }
             }
         }
@@ -3554,6 +3494,95 @@ pub async fn update_dataset_role(
     refresh_dataset_metadata(&state, &dataset_id);
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Promote a dataset whose graph role was set to `model`/`vocabulary` into the
+/// model registry: ensure a registry entry exists and a published `1.0.0` version
+/// holds a COPY of the dataset's graphs. Idempotent — only creates what's missing,
+/// and never clobbers an existing version's data.
+fn promote_dataset_to_registry(
+    state: &AppState,
+    dataset: &crate::auth::models::Dataset,
+    dataset_id: &str,
+    registry_id: &str,
+    role_str: &str,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    use crate::data_models::models::{DataModelVersion, VersionStatus};
+    use crate::data_models::{registry, upload};
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let owner_type = match dataset.owner_type {
+        OwnerType::User => "user",
+        OwnerType::Organisation => "organisation",
+        OwnerType::Group => "group",
+    };
+    let creator = format!("{}/users/{}", state.base_url, user_id);
+    let title = if dataset.name.is_empty() {
+        dataset_id
+    } else {
+        dataset.name.as_str()
+    };
+    let kind = if role_str == "vocabulary" {
+        crate::kind_detector::RegistryKind::Vocabulary
+    } else {
+        crate::kind_detector::RegistryKind::DataModel
+    };
+
+    // 1. Ensure the registry entry exists (kept private until the user opts in).
+    if !registry::data_model_exists(&state.store, &state.base_url, registry_id) {
+        registry::insert_data_model(
+            &state.store,
+            &state.base_url,
+            registry_id,
+            title,
+            "", // namespace unknown — user can edit later
+            dataset.description.as_deref(),
+            false,
+            Some(owner_type),
+            Some(dataset.owner_id.as_str()),
+            Some(&creator),
+            &now,
+        )?;
+        registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+    }
+
+    // 2. Ensure a published 1.0.0 version with the dataset's data exists — the
+    //    actual "move" the role assignment was missing.
+    if !registry::version_exists(&state.store, &state.base_url, registry_id, "1.0.0") {
+        let src_graphs: Vec<String> = state
+            .auth_db
+            .list_dataset_graph_entries(dataset_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.graph_iri)
+            .collect();
+        let sub_graphs = upload::copy_graphs_into_version(
+            &state.store,
+            &state.base_url,
+            registry_id,
+            "1.0.0",
+            &src_graphs,
+        )?;
+        let graph_iri = format!("{}/data-model/{}/version/1.0.0", state.base_url, registry_id);
+        let record = DataModelVersion {
+            data_model_id: registry_id.to_string(),
+            version: "1.0.0".to_string(),
+            status: VersionStatus::Published,
+            graph_iri,
+            sub_graphs,
+            created_at: now,
+            created_by: Some(creator),
+            derived_from: None,
+            notes: Some(format!("Imported from dataset {dataset_id}")),
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        registry::insert_version(&state.store, &state.base_url, &record)?;
+        registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+        registry::update_latest_published(&state.store, &state.base_url, registry_id, "1.0.0")?;
+    }
+    Ok(())
 }
 
 /// URL-safe slug derived from a free-form title — same shape that
