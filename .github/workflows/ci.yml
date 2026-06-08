@@ -8,13 +8,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Linking the many `--all-features` test binaries with full debuginfo has
-  # intermittently crashed the linker on CI runners ("ld terminated with signal 7
-  # [Bus error]" — out-of-memory/disk during link). Line-tables-only debuginfo
-  # keeps file:line in backtraces while cutting object/binary size (and the
-  # linker's peak memory) enough to avoid the crash.
+  # The `--all-features` debug build of every test binary fills the runner's small
+  # disk ("No space left on device"; the "ld terminated with signal 7 [Bus error]"
+  # crash is the same thing — a bus error from mmap on a full disk). Shrink target/:
+  # line-tables-only debuginfo (keeps file:line in backtraces) and no incremental
+  # artifacts. The heavy jobs additionally reclaim ~25 GB of preinstalled runner
+  # tooling in a "Free up disk space" step.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   backend:
@@ -22,6 +24,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Reclaim ~25 GB of preinstalled tooling the Rust build doesn't need, so the
+      # `--all-features` build of all test binaries doesn't run the disk out.
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
 
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
@@ -74,6 +87,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Reclaim ~25 GB of preinstalled tooling so the `--all-features` conformance
+      # test binaries don't run the disk out (see the backend job).
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
 
       - name: Install system dependencies
         run: |
