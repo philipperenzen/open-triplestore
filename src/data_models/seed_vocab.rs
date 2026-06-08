@@ -29,30 +29,125 @@ struct StdVocab {
 /// file (`src/data_models/`), so they reach the shared web-UI vocab assets. The
 /// Docker builder stage copies `frontend/public/vocab/` for this reason.
 const VOCABS: &[StdVocab] = &[
-    StdVocab { id: "rdf", title: "RDF 1.1", namespace: "http://www.w3.org/1999/02/22-rdf-syntax-ns#", ttl: include_str!("../../frontend/public/vocab/rdf.ttl") },
-    StdVocab { id: "rdfs", title: "RDF Schema 1.1", namespace: "http://www.w3.org/2000/01/rdf-schema#", ttl: include_str!("../../frontend/public/vocab/rdfs.ttl") },
-    StdVocab { id: "owl", title: "OWL 2", namespace: "http://www.w3.org/2002/07/owl#", ttl: include_str!("../../frontend/public/vocab/owl.ttl") },
-    StdVocab { id: "xsd", title: "XML Schema Datatypes", namespace: "http://www.w3.org/2001/XMLSchema#", ttl: include_str!("../../frontend/public/vocab/xsd.ttl") },
-    StdVocab { id: "skos", title: "SKOS", namespace: "http://www.w3.org/2004/02/skos/core#", ttl: include_str!("../../frontend/public/vocab/skos.ttl") },
-    StdVocab { id: "dcterms", title: "DCMI Metadata Terms", namespace: "http://purl.org/dc/terms/", ttl: include_str!("../../frontend/public/vocab/dcterms.ttl") },
-    StdVocab { id: "dcat", title: "DCAT 2", namespace: "http://www.w3.org/ns/dcat#", ttl: include_str!("../../frontend/public/vocab/dcat.ttl") },
-    StdVocab { id: "prov", title: "PROV-O", namespace: "http://www.w3.org/ns/prov#", ttl: include_str!("../../frontend/public/vocab/prov.ttl") },
-    StdVocab { id: "foaf", title: "FOAF", namespace: "http://xmlns.com/foaf/0.1/", ttl: include_str!("../../frontend/public/vocab/foaf.ttl") },
-    StdVocab { id: "org", title: "Organization Ontology", namespace: "http://www.w3.org/ns/org#", ttl: include_str!("../../frontend/public/vocab/org.ttl") },
-    StdVocab { id: "qb", title: "RDF Data Cube", namespace: "http://purl.org/linked-data/cube#", ttl: include_str!("../../frontend/public/vocab/qb.ttl") },
-    StdVocab { id: "schema", title: "Schema.org", namespace: "https://schema.org/", ttl: include_str!("../../frontend/public/vocab/schema.ttl") },
-    StdVocab { id: "shacl", title: "SHACL", namespace: "http://www.w3.org/ns/shacl#", ttl: include_str!("../../frontend/public/vocab/shacl.ttl") },
-    StdVocab { id: "time", title: "OWL-Time", namespace: "http://www.w3.org/2006/time#", ttl: include_str!("../../frontend/public/vocab/time.ttl") },
-    StdVocab { id: "vann", title: "VANN", namespace: "http://purl.org/vocab/vann/", ttl: include_str!("../../frontend/public/vocab/vann.ttl") },
-    StdVocab { id: "void", title: "VoID", namespace: "http://rdfs.org/ns/void#", ttl: include_str!("../../frontend/public/vocab/void.ttl") },
-    StdVocab { id: "geosparql", title: "GeoSPARQL", namespace: "http://www.opengis.net/ont/geosparql#", ttl: include_str!("../../frontend/public/vocab/geosparql.ttl") },
-    StdVocab { id: "ots", title: "Open Triplestore Vocabulary", namespace: "https://opentriplestore.org/ns#", ttl: include_str!("../../frontend/public/vocab/ots.ttl") },
+    StdVocab {
+        id: "rdf",
+        title: "RDF 1.1",
+        namespace: "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+        ttl: include_str!("../../frontend/public/vocab/rdf.ttl"),
+    },
+    StdVocab {
+        id: "rdfs",
+        title: "RDF Schema 1.1",
+        namespace: "http://www.w3.org/2000/01/rdf-schema#",
+        ttl: include_str!("../../frontend/public/vocab/rdfs.ttl"),
+    },
+    StdVocab {
+        id: "owl",
+        title: "OWL 2",
+        namespace: "http://www.w3.org/2002/07/owl#",
+        ttl: include_str!("../../frontend/public/vocab/owl.ttl"),
+    },
+    StdVocab {
+        id: "xsd",
+        title: "XML Schema Datatypes",
+        namespace: "http://www.w3.org/2001/XMLSchema#",
+        ttl: include_str!("../../frontend/public/vocab/xsd.ttl"),
+    },
+    StdVocab {
+        id: "skos",
+        title: "SKOS",
+        namespace: "http://www.w3.org/2004/02/skos/core#",
+        ttl: include_str!("../../frontend/public/vocab/skos.ttl"),
+    },
+    StdVocab {
+        id: "dcterms",
+        title: "DCMI Metadata Terms",
+        namespace: "http://purl.org/dc/terms/",
+        ttl: include_str!("../../frontend/public/vocab/dcterms.ttl"),
+    },
+    StdVocab {
+        id: "dcat",
+        title: "DCAT 2",
+        namespace: "http://www.w3.org/ns/dcat#",
+        ttl: include_str!("../../frontend/public/vocab/dcat.ttl"),
+    },
+    StdVocab {
+        id: "prov",
+        title: "PROV-O",
+        namespace: "http://www.w3.org/ns/prov#",
+        ttl: include_str!("../../frontend/public/vocab/prov.ttl"),
+    },
+    StdVocab {
+        id: "foaf",
+        title: "FOAF",
+        namespace: "http://xmlns.com/foaf/0.1/",
+        ttl: include_str!("../../frontend/public/vocab/foaf.ttl"),
+    },
+    StdVocab {
+        id: "org",
+        title: "Organization Ontology",
+        namespace: "http://www.w3.org/ns/org#",
+        ttl: include_str!("../../frontend/public/vocab/org.ttl"),
+    },
+    StdVocab {
+        id: "qb",
+        title: "RDF Data Cube",
+        namespace: "http://purl.org/linked-data/cube#",
+        ttl: include_str!("../../frontend/public/vocab/qb.ttl"),
+    },
+    StdVocab {
+        id: "schema",
+        title: "Schema.org",
+        namespace: "https://schema.org/",
+        ttl: include_str!("../../frontend/public/vocab/schema.ttl"),
+    },
+    StdVocab {
+        id: "shacl",
+        title: "SHACL",
+        namespace: "http://www.w3.org/ns/shacl#",
+        ttl: include_str!("../../frontend/public/vocab/shacl.ttl"),
+    },
+    StdVocab {
+        id: "time",
+        title: "OWL-Time",
+        namespace: "http://www.w3.org/2006/time#",
+        ttl: include_str!("../../frontend/public/vocab/time.ttl"),
+    },
+    StdVocab {
+        id: "vann",
+        title: "VANN",
+        namespace: "http://purl.org/vocab/vann/",
+        ttl: include_str!("../../frontend/public/vocab/vann.ttl"),
+    },
+    StdVocab {
+        id: "void",
+        title: "VoID",
+        namespace: "http://rdfs.org/ns/void#",
+        ttl: include_str!("../../frontend/public/vocab/void.ttl"),
+    },
+    StdVocab {
+        id: "geosparql",
+        title: "GeoSPARQL",
+        namespace: "http://www.opengis.net/ont/geosparql#",
+        ttl: include_str!("../../frontend/public/vocab/geosparql.ttl"),
+    },
+    StdVocab {
+        id: "ots",
+        title: "Open Triplestore Vocabulary",
+        namespace: "https://opentriplestore.org/ns#",
+        ttl: include_str!("../../frontend/public/vocab/ots.ttl"),
+    },
 ];
 
 /// Seed every standard vocabulary that isn't already in the registry.
 pub fn seed_standard_vocabularies(state: &AppState) {
     let disabled = std::env::var("SEED_STANDARD_VOCABS")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        })
         .unwrap_or(false);
     if disabled {
         return;

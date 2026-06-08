@@ -388,19 +388,27 @@ mod copy_tests {
         let subs =
             copy_graphs_into_version(&store, "http://base", "m1", "1.0.0", &[src.to_string()])
                 .unwrap();
-        assert_eq!(subs, vec!["http://base/data-model/m1/version/1.0.0/g1".to_string()]);
+        assert_eq!(
+            subs,
+            vec!["http://base/data-model/m1/version/1.0.0/g1".to_string()]
+        );
 
         let nn = NamedNodeRef::new(&subs[0]).unwrap();
-        let quads = store
-            .quads_for_graph(GraphNameRef::NamedNode(nn))
-            .unwrap();
-        assert_eq!(quads.len(), 2, "both source triples copied into the version graph");
+        let quads = store.quads_for_graph(GraphNameRef::NamedNode(nn)).unwrap();
+        assert_eq!(
+            quads.len(),
+            2,
+            "both source triples copied into the version graph"
+        );
     }
 
     #[test]
     fn empty_source_yields_the_base_version_graph() {
         let store = TripleStore::in_memory().unwrap();
         let subs = copy_graphs_into_version(&store, "http://base", "m1", "1.0.0", &[]).unwrap();
-        assert_eq!(subs, vec!["http://base/data-model/m1/version/1.0.0".to_string()]);
+        assert_eq!(
+            subs,
+            vec!["http://base/data-model/m1/version/1.0.0".to_string()]
+        );
     }
 }

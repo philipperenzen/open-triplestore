@@ -3564,7 +3564,10 @@ fn promote_dataset_to_registry(
             "1.0.0",
             &src_graphs,
         )?;
-        let graph_iri = format!("{}/data-model/{}/version/1.0.0", state.base_url, registry_id);
+        let graph_iri = format!(
+            "{}/data-model/{}/version/1.0.0",
+            state.base_url, registry_id
+        );
         let record = DataModelVersion {
             data_model_id: registry_id.to_string(),
             version: "1.0.0".to_string(),
