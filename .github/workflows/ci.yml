@@ -8,6 +8,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Linking the many `--all-features` test binaries with full debuginfo has
+  # intermittently crashed the linker on CI runners ("ld terminated with signal 7
+  # [Bus error]" — out-of-memory/disk during link). Line-tables-only debuginfo
+  # keeps file:line in backtraces while cutting object/binary size (and the
+  # linker's peak memory) enough to avoid the crash.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   backend:
