@@ -4267,7 +4267,12 @@ fn is_valid_banner_preset_id(id: &str) -> bool {
 fn resolve_banner_preset_key(
     body: &BannerPresetBody,
 ) -> Result<Option<String>, (StatusCode, String)> {
-    match body.preset.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    match body
+        .preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(id) => {
             if !is_valid_banner_preset_id(id) {
                 return Err((
@@ -4363,13 +4368,17 @@ mod banner_preset_tests {
 
     #[test]
     fn resolve_maps_to_sentinel_or_clears() {
-        let apply = BannerPresetBody { preset: Some("aurora-rose".into()) };
+        let apply = BannerPresetBody {
+            preset: Some("aurora-rose".into()),
+        };
         assert_eq!(
             resolve_banner_preset_key(&apply).unwrap(),
             Some("preset:aurora-rose".to_string())
         );
         // trims whitespace
-        let padded = BannerPresetBody { preset: Some("  aurora-teal  ".into()) };
+        let padded = BannerPresetBody {
+            preset: Some("  aurora-teal  ".into()),
+        };
         assert_eq!(
             resolve_banner_preset_key(&padded).unwrap(),
             Some("preset:aurora-teal".to_string())
@@ -4380,7 +4389,9 @@ mod banner_preset_tests {
             assert_eq!(resolve_banner_preset_key(&body).unwrap(), None);
         }
         // malformed → 400
-        let bad = BannerPresetBody { preset: Some("Bad Id".into()) };
+        let bad = BannerPresetBody {
+            preset: Some("Bad Id".into()),
+        };
         assert!(resolve_banner_preset_key(&bad).is_err());
     }
 }
