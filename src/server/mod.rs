@@ -731,6 +731,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/organisations/:org_id/banner",
             put(handlers::upload_org_banner).get(handlers::get_org_banner),
         )
+        .route(
+            "/api/organisations/:org_id/banner-preset",
+            put(handlers::set_org_banner_preset),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -743,6 +747,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/:dataset_id/banner",
             put(handlers::upload_dataset_banner).get(handlers::get_dataset_banner),
+        )
+        .route(
+            "/api/datasets/:dataset_id/banner-preset",
+            put(handlers::set_dataset_banner_preset),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());

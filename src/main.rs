@@ -285,8 +285,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Auth database at {:?}", db_path);
 
-    // Initialize the store
-    let store = store::TripleStore::open(&cli.data_dir)?;
+    // Initialize the store, auto-recovering from RocksDB corruption (e.g. an
+    // unclean shutdown that left "SST file is ahead of WALs") so the service comes
+    // back instead of crash-looping. See store::recovery.
+    let backup_dir = std::env::var("BACKUP_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| cli.data_dir.join("backups"));
+    let store = store::recovery::open_store_with_recovery(&cli.data_dir, &backup_dir)?;
     info!("Store opened at {:?}", cli.data_dir);
 
     // Load initial data if specified
