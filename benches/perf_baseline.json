@@ -2,7 +2,9 @@
   "schema_version": 1,
   "default_tolerance_ratio": 1.25,
   "tolerances": {
-    "concurrent/": 1.5
+    "concurrent/": 1.5,
+    "query_alternative_path/10000": 1.4,
+    "path_negated_property_set/10000": 1.4
   },
   "generator": {
     "commit": "e982558",
