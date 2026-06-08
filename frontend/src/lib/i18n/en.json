@@ -881,6 +881,7 @@
       "versionPickerTitle": "View a snapshot version of this dataset",
       "liveCurrent": "Live (current)",
       "pageSettings": "Page settings",
+      "editPage": "Edit page",
       "aboutThisDataset": "About this dataset",
       "editMetadata": "Edit metadata",
       "role": "Role",
@@ -1214,6 +1215,7 @@
       "bannerAlt": "{name} banner",
       "logoAlt": "{name} logo",
       "pageSettings": "Page settings",
+      "editPage": "Edit page",
       "copySparqlUrlTitle": "Copy SPARQL endpoint URL",
       "copyUrl": "Copy URL",
       "about": "About",
@@ -2766,6 +2768,11 @@
       "convertInPlaceModelPrefix": "You can convert this dataset's graph role to",
       "modelWord": "Model",
       "stepUploadModelPortion": "Upload the model portion of this graph as a version."
+    },
+    "bannerPicker": {
+      "uploadOwn": "Upload",
+      "uploaded": "Uploaded image",
+      "removeBanner": "Use default"
     },
     "datasetMetadataDialog": {
       "dialogTitle": "Page settings — Dataset",

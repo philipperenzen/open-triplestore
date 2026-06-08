@@ -4242,6 +4242,160 @@ pub async fn get_dataset_banner(
     Ok((StatusCode::OK, [(CONTENT_TYPE, content_type)], data).into_response())
 }
 
+/// Request body for the banner-preset endpoints: a preset id to apply, or
+/// null/empty to clear the banner.
+#[derive(Deserialize)]
+pub struct BannerPresetBody {
+    #[serde(default)]
+    pub preset: Option<String>,
+}
+
+/// Banner preset ids are short url-safe slugs (`[a-z0-9-]`). The frontend
+/// `banners.ts` registry is the source of truth for which ids actually render;
+/// here we only guard the shape so the stored `preset:<id>` sentinel can never
+/// carry arbitrary text.
+fn is_valid_banner_preset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 40
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Resolve a request body into the `banner_key` to store: `Some("preset:<id>")`
+/// for a valid id, or `None` to clear. Rejects malformed ids.
+fn resolve_banner_preset_key(
+    body: &BannerPresetBody,
+) -> Result<Option<String>, (StatusCode, String)> {
+    match body
+        .preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => {
+            if !is_valid_banner_preset_id(id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid banner preset id".to_string(),
+                ));
+            }
+            Ok(Some(format!("preset:{id}")))
+        }
+        None => Ok(None),
+    }
+}
+
+/// PUT /api/datasets/:dataset_id/banner-preset — select a built-in animated
+/// banner preset (stored as `banner_key = "preset:<id>"`) or clear it. Mirrors
+/// the write-access check of `upload_dataset_banner`.
+pub async fn set_dataset_banner_preset(
+    user_opt: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Json(body): Json<BannerPresetBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = require_user(user_opt)?;
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    if !state
+        .auth_db
+        .can_write_dataset(&current_user.user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+    let new_key = resolve_banner_preset_key(&body)?;
+    state
+        .auth_db
+        .update_dataset_banner(&dataset_id, new_key.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "banner_key": new_key })))
+}
+
+/// PUT /api/organisations/:org_id/banner-preset — same as above for an
+/// organisation. Mirrors the admin/org-admin check of `upload_org_banner`.
+pub async fn set_org_banner_preset(
+    user_opt: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(org_id): Path<String>,
+    Json(body): Json<BannerPresetBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = require_user(user_opt)?;
+    if !current_user.is_admin() {
+        match state
+            .auth_db
+            .get_org_membership(&current_user.user_id, &org_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            Some(Role::Admin) => {}
+            _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
+        }
+    }
+    let new_key = resolve_banner_preset_key(&body)?;
+    state
+        .auth_db
+        .update_org_banner(&org_id, new_key.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "banner_key": new_key })))
+}
+
+#[cfg(test)]
+mod banner_preset_tests {
+    use super::{is_valid_banner_preset_id, resolve_banner_preset_key, BannerPresetBody};
+
+    #[test]
+    fn accepts_slug_ids_and_rejects_junk() {
+        for ok in ["aurora-teal", "gradient-dusk", "a", "x0123456789"] {
+            assert!(is_valid_banner_preset_id(ok), "{ok} should be valid");
+        }
+        let too_long = "z".repeat(41);
+        for bad in [
+            "",
+            "Aurora",
+            "has space",
+            "semi;colon",
+            "preset:teal",
+            "../x",
+            too_long.as_str(),
+        ] {
+            assert!(!is_valid_banner_preset_id(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn resolve_maps_to_sentinel_or_clears() {
+        let apply = BannerPresetBody {
+            preset: Some("aurora-rose".into()),
+        };
+        assert_eq!(
+            resolve_banner_preset_key(&apply).unwrap(),
+            Some("preset:aurora-rose".to_string())
+        );
+        // trims whitespace
+        let padded = BannerPresetBody {
+            preset: Some("  aurora-teal  ".into()),
+        };
+        assert_eq!(
+            resolve_banner_preset_key(&padded).unwrap(),
+            Some("preset:aurora-teal".to_string())
+        );
+        // null / empty clears
+        for clear in [None, Some(String::new()), Some("   ".into())] {
+            let body = BannerPresetBody { preset: clear };
+            assert_eq!(resolve_banner_preset_key(&body).unwrap(), None);
+        }
+        // malformed → 400
+        let bad = BannerPresetBody {
+            preset: Some("Bad Id".into()),
+        };
+        assert!(resolve_banner_preset_key(&bad).is_err());
+    }
+}
+
 #[cfg(test)]
 mod metadata_url_security_tests {
     use super::{validate_metadata_url, StatusCode};
