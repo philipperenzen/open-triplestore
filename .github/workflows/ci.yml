@@ -1,9 +1,20 @@
 name: CI
 
 on:
+  # `develop` is intentionally NOT in this push list: every change reaches it via a
+  # PR that already runs CI, and the develop→main release PR runs it again — keeping
+  # `develop` here would fire a second, identical run on every push while that PR is
+  # open. PRs (below) cover all branches.
   push:
-    branches: [main, master, develop, 'release/**']
+    branches: [main, master, 'release/**']
   pull_request:
+
+# Collapse superseded runs: a new push/PR-update on the same ref cancels the
+# in-flight one. push (refs/heads/*) and PR (refs/pull/*/merge) have distinct refs,
+# so a push never cancels a PR's required check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
