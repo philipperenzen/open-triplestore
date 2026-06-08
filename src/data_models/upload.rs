@@ -150,9 +150,31 @@ pub fn parse_and_load(
         .or_else(|| format_from_filename(filename))
         .ok_or_else(|| format!("Cannot detect RDF format from content-type '{content_type}' or filename '{filename}'"))?;
 
-    // 2. Parse all quads
-    let mut quads = parse_quads(bytes, format)?;
+    // 2. Parse all quads, then hand off to the shared loader. Callers that already
+    //    hold parsed quads (e.g. vocab seeding, which parses once for kind detection)
+    //    call `load_parsed` directly to avoid a second parse of the same bytes.
+    let quads = parse_quads(bytes, format)?;
+    load_parsed(
+        store,
+        base_url,
+        data_model_id,
+        version_override,
+        quads,
+        merge,
+    )
+}
 
+/// Load already-parsed quads into versioned named graphs (steps 3–5 of
+/// `parse_and_load`). Split out so a caller that already parsed the input for
+/// another reason — vocab seeding parses once for kind detection — doesn't reparse.
+pub fn load_parsed(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version_override: Option<&str>,
+    mut quads: Vec<Quad>,
+    merge: bool,
+) -> Result<LoadResult, String> {
     // 3. Determine version
     let file_has_version_info = extract_owl_version_info(&quads).is_some();
     let version = version_override

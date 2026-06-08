@@ -57,11 +57,31 @@ pub fn open_store_with_recovery(data_dir: &Path, backup_dir: &Path) -> anyhow::R
                     "restored RDF from the newest backup {} (auth DB untouched; demo seeds fill gaps)",
                     path.display()
                 ),
-                Ok(None) => warn!(
-                    "no restorable (unencrypted) backup in {}; starting fresh — startup seeds will \
-                     repopulate the bundled demo data",
-                    backup_dir.display()
-                ),
+                Ok(None) => {
+                    // Distinguish "genuinely no backup" from "only encrypted backups,
+                    // which this node cannot auto-decrypt" — the age private key is held
+                    // by the operator and never on disk (see backup::init_backup_encryption).
+                    // The latter is NOT a benign empty start: restorable data exists and the
+                    // operator must act, so surface it loudly with the quarantine path instead
+                    // of the reassuring "starting fresh" line.
+                    if encrypted_backup_exists(backup_dir) {
+                        tracing::error!(
+                            "store was quarantined to {} and rebuilt EMPTY: encrypted backups \
+                             (rdf.nq.gz.age) exist in {} but cannot be auto-restored (the age \
+                             private key is held off-box). Restore manually — decrypt the newest \
+                             backup with your age identity and load it, or recover the quarantined \
+                             RocksDB files. Set STORE_AUTO_RECOVER=false to fail fast instead.",
+                            quarantine.display(),
+                            backup_dir.display(),
+                        );
+                    } else {
+                        warn!(
+                            "no restorable (unencrypted) backup in {}; starting fresh — startup \
+                             seeds will repopulate the bundled demo data",
+                            backup_dir.display()
+                        );
+                    }
+                }
                 Err(e3) => warn!(
                     "backup restore failed ({e3}); starting fresh — startup seeds will repopulate \
                      the bundled demo data"
@@ -164,6 +184,27 @@ fn restore_latest_backup(
     Ok(Some(path))
 }
 
+/// Whether any encrypted RDF backup (`rdf.nq.gz.age`) exists under `dir`. Lets
+/// recovery tell "genuinely no backup" apart from "backups exist but are encrypted
+/// and can't be auto-restored" (the age private key is never on disk), so it can
+/// warn loudly instead of silently coming up empty.
+fn encrypted_backup_exists(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if encrypted_backup_exists(&path) {
+                return true;
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("rdf.nq.gz.age") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Recursively find `rdf.nq.gz` files (the unencrypted RDF dumps) under `dir`.
 fn collect_rdf_backups(dir: &Path, out: &mut Vec<(SystemTime, PathBuf)>) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -184,7 +225,11 @@ fn collect_rdf_backups(dir: &Path, out: &mut Vec<(SystemTime, PathBuf)>) -> anyh
 
 #[cfg(test)]
 mod tests {
-    use super::{is_rocksdb_file, message_indicates_corruption};
+    use super::{
+        encrypted_backup_exists, is_rocksdb_file, message_indicates_corruption,
+        restore_latest_backup,
+    };
+    use crate::store::TripleStore;
 
     #[test]
     fn matches_the_sst_ahead_of_wals_corruption() {
@@ -236,5 +281,65 @@ mod tests {
         ] {
             assert!(!is_rocksdb_file(f), "{f} must be spared");
         }
+    }
+
+    #[test]
+    fn encrypted_backup_exists_distinguishes_age_dumps() {
+        // Only an encrypted dump present (nested under a backup-* dir).
+        let enc = tempfile::tempdir().unwrap();
+        let eb = enc.path().join("backup-1");
+        std::fs::create_dir_all(&eb).unwrap();
+        std::fs::write(eb.join("rdf.nq.gz.age"), b"ciphertext").unwrap();
+        assert!(encrypted_backup_exists(enc.path()));
+
+        // Only an unencrypted dump present — must NOT be flagged as encrypted.
+        let plain = tempfile::tempdir().unwrap();
+        let pb = plain.path().join("backup-1");
+        std::fs::create_dir_all(&pb).unwrap();
+        std::fs::write(pb.join("rdf.nq.gz"), b"plain").unwrap();
+        assert!(!encrypted_backup_exists(plain.path()));
+
+        // Missing directory.
+        assert!(!encrypted_backup_exists(
+            &plain.path().join("does-not-exist")
+        ));
+    }
+
+    #[test]
+    fn restores_newest_unencrypted_backup_but_not_encrypted() {
+        use oxigraph::sparql::QueryResults;
+        use std::io::Write;
+
+        // A gzipped single-quad backup is restored into the store.
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path().join("backup-1");
+        std::fs::create_dir_all(&b).unwrap();
+        let nq = b"<http://ex/s> <http://ex/p> <http://ex/o> <http://ex/g> .\n";
+        let file = std::fs::File::create(b.join("rdf.nq.gz")).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        gz.write_all(nq).unwrap();
+        gz.finish().unwrap();
+
+        let store = TripleStore::in_memory().unwrap();
+        assert!(restore_latest_backup(&store, dir.path()).unwrap().is_some());
+        let present = matches!(
+            store
+                .query("ASK { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }")
+                .unwrap(),
+            QueryResults::Boolean(true)
+        );
+        assert!(present, "restored triple should be queryable");
+
+        // With ONLY an encrypted dump, restore is a no-op (the node can't decrypt it),
+        // but it is detectable so recovery can warn loudly instead of silently emptying.
+        let enc = tempfile::tempdir().unwrap();
+        let eb = enc.path().join("backup-1");
+        std::fs::create_dir_all(&eb).unwrap();
+        std::fs::write(eb.join("rdf.nq.gz.age"), b"ciphertext").unwrap();
+        let store2 = TripleStore::in_memory().unwrap();
+        assert!(restore_latest_backup(&store2, enc.path())
+            .unwrap()
+            .is_none());
+        assert!(encrypted_backup_exists(enc.path()));
     }
 }
