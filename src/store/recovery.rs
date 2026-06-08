@@ -25,10 +25,7 @@ use crate::store::{StoreError, TripleStore};
 /// `data_dir` is the RocksDB directory (which also holds `auth.db`, `jwt_secret`,
 /// `prefix_cache.json`, `backups/`). `backup_dir` is where timestamped backups
 /// live (`{backup_dir}/backup-*/rdf.nq.gz`).
-pub fn open_store_with_recovery(
-    data_dir: &Path,
-    backup_dir: &Path,
-) -> anyhow::Result<TripleStore> {
+pub fn open_store_with_recovery(data_dir: &Path, backup_dir: &Path) -> anyhow::Result<TripleStore> {
     match TripleStore::open(data_dir) {
         Ok(store) => Ok(store),
         Err(e) if is_corruption_error(&e) => {
@@ -203,7 +200,10 @@ mod tests {
             "SPARQL syntax error: unexpected token",
             "Graph not found: urn:x",
         ] {
-            assert!(!message_indicates_corruption(msg), "{msg:?} should not match");
+            assert!(
+                !message_indicates_corruption(msg),
+                "{msg:?} should not match"
+            );
         }
     }
 
