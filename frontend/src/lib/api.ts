@@ -565,14 +565,18 @@ export const datasetSparqlQuery = (datasetId, serviceSlug, query, version = null
 // Natural-language → SPARQL via any OpenAI-compatible LLM endpoint.
 // Generation only: the returned query is run through the normal scoped SPARQL endpoint,
 // so it passes the same authorization boundary as any user-typed query.
-export async function nlToSparql(question, schemaHint) {
+export async function nlToSparql(question, schemaHint, currentQuery = null) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${API_BASE}/api/llm/sparql`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ question, schema_hint: schemaHint || null }),
+    body: JSON.stringify({
+      question,
+      schema_hint: schemaHint || null,
+      current_query: (currentQuery && currentQuery.trim()) ? currentQuery : null,
+    }),
   });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
