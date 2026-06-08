@@ -12,5 +12,6 @@ pub mod merge;
 pub mod models;
 pub mod registry;
 pub mod routes;
+pub mod seed_vocab;
 pub mod upload;
 pub mod version_iri;
