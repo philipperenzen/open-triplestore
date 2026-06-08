@@ -178,7 +178,9 @@ fn zip_metadata(bytes: &[u8], meta: &mut AssetMetadata) {
 
 /// Zip-bomb heuristic: an uncompressed total is suspicious when it exceeds both an
 /// absolute floor (100 MB) and 1000× the compressed input. Pure so it is unit-testable
-/// without synthesizing a real bomb. (Always compiled; used by `zip_metadata`.)
+/// without synthesizing a real bomb. Compiled with `asset-archive` (its only caller,
+/// `zip_metadata`) or under `test`; otherwise it would be dead code (e.g. the e2e build).
+#[cfg(any(feature = "asset-archive", test))]
 pub(crate) fn zip_ratio_is_suspicious(uncompressed: u64, compressed: u64) -> bool {
     const RATIO_LIMIT: u64 = 1000;
     const ABS_FLOOR: u64 = 100_000_000;
@@ -243,7 +245,10 @@ pub fn make_thumbnail(bytes: &[u8], max_dim: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The outcome of an anti-virus / content scan on an uploaded asset.
+/// The outcome of an anti-virus / content scan on an uploaded asset. Compiled with
+/// `asset-clamav` (its only producer/consumer) or under `test`; otherwise dead code
+/// (e.g. the e2e build, which omits the asset features).
+#[cfg(any(feature = "asset-clamav", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanVerdict {
     /// Scanning is disabled (no scanner configured) — upload proceeds unscanned.
@@ -256,6 +261,7 @@ pub enum ScanVerdict {
     Error(String),
 }
 
+#[cfg(any(feature = "asset-clamav", test))]
 impl ScanVerdict {
     /// Whether an upload carrying this verdict may be stored. Only an explicit
     /// `Infected` blocks; Skipped/Clean/Error are allowed (fail-open on scanner

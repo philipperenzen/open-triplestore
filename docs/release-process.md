@@ -88,6 +88,24 @@ are DCO-signed (`git commit -s`), including the version bump.
    [How CI reacts to tags](#how-ci-reacts-to-tags)): a GitHub Release is published
    from the changelog section, and a GHCR image is built and pushed.
 
+### Automated tagging (optional)
+
+Step 4 can be automated. [`auto-tag.yml`](../.github/workflows/auto-tag.yml) tags a
+release **automatically when the `develop → main` PR is merged**, deriving the
+version from the bump level named in the **PR title** (`major`, `minor`, or
+`patch`, case-insensitive) applied to the latest `vX.Y.Z` tag. It refuses to tag
+unless the computed version matches the `Cargo.toml` version the release PR
+committed (steps 1–2 above are still required), and the tag message is the
+`CHANGELOG.md` section as usual. A merge whose title carries no bump keyword is
+ignored, so non-release merges into `main` are safe.
+
+> **Setup:** the tag is pushed with a `RELEASE_PAT` secret, **not** the default
+> `GITHUB_TOKEN` — a tag pushed by `GITHUB_TOKEN` does not trigger other workflows,
+> so `release.yml` would never fire. Create a fine-grained PAT with `contents:
+> write` on this repo and store it as the `RELEASE_PAT` secret. Without it the tag
+> is still created, but you must run the Release workflow (or re-push the tag with
+> a PAT) to publish.
+
 ## Security hotfix flow
 
 Security and other critical fixes do **not** wait for the next feature release; they
@@ -144,12 +162,21 @@ and are mirrored in [`.gitlab-ci.yml`](../.gitlab-ci.yml). Pushing a `v*` tag fi
   baseline is refreshed **only** here (and on manual dispatch), never from PR runs, so
   in-flight changes can't drift the reference the gate checks against.
 
-On every PR and on pushes to `main`/`develop`/`release/**`, the standing gates run:
+On every PR, and on pushes to `main`/`release/**`, the standing gates run:
 
 - **`ci.yml`** — build, Clippy, tests, conformance suites, the named **security**
   regression gate, a dependency audit (cargo-deny + `npm audit`), and a secret scan.
 - **`perf.yml`** — the performance-**regression gate**: a fast subset of the
   Criterion suite compared against the committed baseline; a regression fails the job.
+
+`develop` is deliberately **not** in the push lists: every change reaches it through a
+PR (which runs the gates), and the `develop → main` release PR runs them again — so a
+push trigger on `develop` would just fire a second, identical run on every push while
+that PR is open. Each workflow also sets `concurrency: cancel-in-progress` keyed by ref,
+so a new push or PR update supersedes the in-flight run for that ref (a push and a PR use
+distinct refs, so a push never cancels a PR's required check). This assumes branch
+protection **requires branches to be up to date before merging**, which is what makes a
+post-merge `develop` run redundant — keep that setting on.
 
 See [`performance.md`](performance.md) and
 [`benchmarks/README.md`](benchmarks/README.md) for the perf gate itself.

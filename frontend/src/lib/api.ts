@@ -1016,6 +1016,17 @@ export const getOrgBannerUrl = (orgId) => `${API_BASE}/api/organisations/${orgId
 export const uploadDatasetBanner = (datasetId, file) => uploadImage(`/api/datasets/${datasetId}/banner`, file);
 export const getDatasetBannerUrl = (datasetId) => `${API_BASE}/api/datasets/${datasetId}/banner`;
 
+// Banner presets — select a built-in animated/gradient banner instead of
+// uploading. Stored server-side as `banner_key = "preset:<id>"`; passing a
+// null/empty preset clears the banner.
+export const setOrgBannerPreset = (orgId, preset) =>
+  request('PUT', `/api/organisations/${orgId}/banner-preset`, { preset: preset ?? null });
+export const clearOrgBanner = (orgId) => setOrgBannerPreset(orgId, null);
+
+export const setDatasetBannerPreset = (datasetId, preset) =>
+  request('PUT', `/api/datasets/${datasetId}/banner-preset`, { preset: preset ?? null });
+export const clearDatasetBanner = (datasetId) => setDatasetBannerPreset(datasetId, null);
+
 // Assets
 export const listAssets = (datasetId) =>
   request('GET', `/api/datasets/${datasetId}/assets`);

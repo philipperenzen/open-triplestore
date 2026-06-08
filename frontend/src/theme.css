@@ -59,6 +59,11 @@
   --space-4: 1rem;
   --space-5: 1.5rem;
   --space-6: 2rem;
+
+  /* Glass / frosted surfaces (landing hero + page banners). Lower = crisper;
+     kept subtle so the animated banner reads through without smearing. */
+  --glass-blur: 3px;
+  --glass-blur-strong: 8px;
 }
 
 html, body, #app { min-height: 100%; }

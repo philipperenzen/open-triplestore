@@ -392,6 +392,7 @@ fn node_constraint_kw(input: &str) -> IResult<&str, NodeConstraint> {
 }
 
 /// A single item in a shape body: either a node-level constraint or a property constraint.
+#[allow(clippy::large_enum_variant)] // short-lived parser item; not stored in bulk
 enum ShapeBodyItem {
     Node(NodeConstraint),
     Property(PropertyDecl),

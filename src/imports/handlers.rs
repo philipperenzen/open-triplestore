@@ -130,7 +130,7 @@ pub async fn bulk_import(
                 }
                 let filename = field
                     .file_name()
-                    .map(|f| sanitize_filename(f))
+                    .map(sanitize_filename)
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| format!("upload-{}.bin", raw_files.len()));
                 let content_type = field

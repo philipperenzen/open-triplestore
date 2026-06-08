@@ -20,6 +20,8 @@
     uploadDatasetImage,
     getDatasetImageUrl,
     uploadDatasetBanner,
+    setDatasetBannerPreset,
+    clearDatasetBanner,
     getDatasetBannerUrl,
     listAssets,
     uploadAsset,
@@ -62,6 +64,7 @@
   import ContentKindWarning from '../components/ContentKindWarning.svelte';
   import DatasetMetadataDialog from '../components/DatasetMetadataDialog.svelte';
   import PageHeader from '../components/PageHeader.svelte';
+  import BannerBackdrop from '../components/BannerBackdrop.svelte';
   import CommitHistory from '../components/CommitHistory.svelte';
   import DatasetVersions from '../components/DatasetVersions.svelte';
   import Select from '../components/Select.svelte';
@@ -827,8 +830,36 @@
     if (!file) return;
     uploadingBanner = true;
     try {
-      await uploadDatasetBanner(id, file);
-      bannerKey = true;
+      const res = await uploadDatasetBanner(id, file);
+      bannerKey = res?.banner_key || true;
+      bannerVersion++;
+    } catch (e) {
+      dialogError = e.message;
+    } finally {
+      uploadingBanner = false;
+    }
+  }
+
+  async function doSetBannerPreset(preset) {
+    uploadingBanner = true;
+    dialogError = '';
+    try {
+      await setDatasetBannerPreset(id, preset);
+      bannerKey = `preset:${preset}`;
+      bannerVersion++;
+    } catch (e) {
+      dialogError = e.message;
+    } finally {
+      uploadingBanner = false;
+    }
+  }
+
+  async function doClearBanner() {
+    uploadingBanner = true;
+    dialogError = '';
+    try {
+      await clearDatasetBanner(id);
+      bannerKey = null;
       bannerVersion++;
     } catch (e) {
       dialogError = e.message;
@@ -1149,59 +1180,54 @@
 
 <div class="card">
   {#if dataset}
-    {#if bannerKey}
-      <img
-        src="{getDatasetBannerUrl(id)}?v={bannerVersion}"
-        alt={$i18nT('pages.datasetDetail.bannerAlt')}
-        class="page-banner"
-        on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-      />
-    {/if}
-    <div class="dataset-header">
-      <div class="ds-left">
-        {#if imageKey}
-          <img
-            src="{getDatasetImageUrl(id)}?v={imageVersion}"
-            alt={$i18nT('pages.datasetDetail.coverAlt')}
-            class="ds-image"
-            on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-          />
-        {/if}
-        <div>
-          <div class="ds-title-row">
-            <h2 class="ds-title">{dataset.name}</h2>
-            {#if pickerVersions.length}
-              <Select
-                class="version-picker{viewingVersion ? ' viewing' : ''}"
-                size="sm"
-                bind:value={selectedVersion}
-                on:change={onPickVersion}
-                title={$i18nT('pages.datasetDetail.versionPickerTitle')}
-                options={[
-                  { value: '', label: $i18nT('pages.datasetDetail.liveCurrent') },
-                  ...pickerVersions.map(v => ({ value: v.version, label: `v${v.version}${v.status && v.status !== 'published' ? ` · ${v.status}` : ''}` })),
-                ]}
-              />
-            {/if}
+    <div class="ds-cover">
+      <BannerBackdrop bannerKey={bannerKey} imageUrl="{getDatasetBannerUrl(id)}?v={bannerVersion}" seed={id} />
+      <div class="ds-hero glass">
+        <div class="ds-hero-main">
+          {#if imageKey}
+            <img
+              src="{getDatasetImageUrl(id)}?v={imageVersion}"
+              alt={$i18nT('pages.datasetDetail.coverAlt')}
+              class="ds-image"
+              on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
+            />
+          {/if}
+          <div class="ds-hero-text">
+            <div class="ds-title-row">
+              <h2 class="ds-title">{dataset.name}</h2>
+              {#if pickerVersions.length}
+                <Select
+                  class="version-picker{viewingVersion ? ' viewing' : ''}"
+                  size="sm"
+                  bind:value={selectedVersion}
+                  on:change={onPickVersion}
+                  title={$i18nT('pages.datasetDetail.versionPickerTitle')}
+                  options={[
+                    { value: '', label: $i18nT('pages.datasetDetail.liveCurrent') },
+                    ...pickerVersions.map(v => ({ value: v.version, label: `v${v.version}${v.status && v.status !== 'published' ? ` · ${v.status}` : ''}` })),
+                  ]}
+                />
+              {/if}
+            </div>
+            <p class="ds-hero-meta">
+              <span class="vis vis-{dataset.visibility}">{dataset.visibility}</span>
+              {#if datasetRole}
+                <span class="graph-role-badge role-{datasetRole}" title={ROLE_HINT[datasetRole] || ''}><Tag size={11} /> {datasetRoleLabel}</span>
+              {/if}
+            </p>
+            {#if dataset.description}<p class="ds-hero-desc">{dataset.description}</p>{/if}
           </div>
-          <p class="meta">
-            <span class="vis vis-{dataset.visibility}">{dataset.visibility}</span>
-            {#if datasetRole}
-              <span class="graph-role-badge role-{datasetRole}" title={ROLE_HINT[datasetRole] || ''}><Tag size={11} /> {datasetRoleLabel}</span>
-            {/if}
-            {#if dataset.description}<span class="meta-sep">—</span>{dataset.description}{/if}
-          </p>
         </div>
-      </div>
-      <div class="ds-header-actions">
-        {#if canWrite}
-          <button class="btn btn-sm btn-ghost" on:click={() => { dialogError = ''; metadataDialogOpen = true; }}>
-            <Edit2 size={13} /> {$i18nT('pages.datasetDetail.pageSettings')}
-          </button>
-        {/if}
-        <Link to="/datasets/{id}/sparql" class="btn btn-sm">
-          <Terminal size={13} /> {$i18nT('pages.datasetDetail.openSparql')}
-        </Link>
+        <div class="ds-hero-actions">
+          {#if canWrite}
+            <button class="btn btn-sm btn-ghost" on:click={() => { dialogError = ''; metadataDialogOpen = true; }}>
+              <Edit2 size={13} /> {$i18nT('pages.datasetDetail.editPage')}
+            </button>
+          {/if}
+          <Link to="/datasets/{id}/sparql" class="btn btn-sm">
+            <Terminal size={13} /> {$i18nT('pages.datasetDetail.openSparql')}
+          </Link>
+        </div>
       </div>
     </div>
   {:else if error}
@@ -1219,11 +1245,6 @@
       <Info size={15} />
       <h3>{$i18nT('pages.datasetDetail.aboutThisDataset')}</h3>
     </div>
-    {#if canWrite}
-      <button class="btn btn-sm btn-ghost" on:click={() => { dialogError = ''; metadataDialogOpen = true; }}>
-        <Edit2 size={13} /> {$i18nT('pages.datasetDetail.editMetadata')}
-      </button>
-    {/if}
   </div>
 
   {#if dataset.description}
@@ -1348,7 +1369,7 @@
   {#if !hasRichMetadata}
     <p class="about-empty">
       {$i18nT('pages.datasetDetail.noDescriptiveMetadata')}
-      {#if canWrite}{$i18nT('pages.datasetDetail.noDescriptiveMetadataHint1')}<strong>{$i18nT('pages.datasetDetail.editMetadata')}</strong>{$i18nT('pages.datasetDetail.noDescriptiveMetadataHint2')}{/if}
+      {#if canWrite}{$i18nT('pages.datasetDetail.noDescriptiveMetadataHint1')}<strong>{$i18nT('pages.datasetDetail.editPage')}</strong>{$i18nT('pages.datasetDetail.noDescriptiveMetadataHint2')}{/if}
     </p>
   {/if}
 </div>
@@ -2182,7 +2203,7 @@
   hasImage={!!imageKey}
   imageUrl={`${getDatasetImageUrl(id)}?v=${imageVersion}`}
   uploadingImage={uploadingImage}
-  hasBanner={!!bannerKey}
+  bannerKey={bannerKey}
   bannerUrl={`${getDatasetBannerUrl(id)}?v=${bannerVersion}`}
   uploadingBanner={uploadingBanner}
   deleting={deletingDataset}
@@ -2190,6 +2211,8 @@
   on:save={handleMetadataSave}
   on:uploadImage={(e) => doUploadImage(e.detail.file)}
   on:uploadBanner={(e) => doUploadBanner(e.detail.file)}
+  on:selectBannerPreset={(e) => doSetBannerPreset(e.detail.preset)}
+  on:clearBanner={() => doClearBanner()}
   on:delete={handleDeleteDataset}
 />
 
@@ -2412,19 +2435,77 @@
     font-size: 0.88rem;
     color: #92400e;
   }
-  .page-banner {
-    display: block;
-    width: 100%;
-    height: 180px;
-    object-fit: cover;
-    border-radius: 12px;
-    border: 1px solid var(--line-soft, #e5e7eb);
-    margin-bottom: 1rem;
+  /* Dataset hero: animated/preset/uploaded banner behind a liquid-glass header,
+     mirroring the organisation cover so the two page types feel consistent. */
+  .ds-cover {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border-radius: 14px;
+    min-height: 188px;
+    padding: 14px;
+    display: flex;
+    align-items: flex-end;
+    border: 1px solid var(--line-soft);
+    background: linear-gradient(135deg, #0f2a33 0%, #1e5663 55%, #2f7a8c 100%);
   }
-  .meta-sep {
-    color: var(--ink-400);
-    margin: 0 0.35rem;
-    font-weight: 400;
+  .ds-hero {
+    position: relative;
+    z-index: 1;
+    width: min(760px, 100%);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 1rem;
+    flex-wrap: wrap;
+    background: rgba(10, 24, 30, 0.46);
+    backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    padding: 0.85rem 1.05rem;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 8px 24px rgba(0, 0, 0, 0.22);
+  }
+  .ds-hero-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    flex: 1;
+    min-width: 0;
+  }
+  .ds-hero-text { min-width: 0; }
+  .ds-hero .ds-title { color: #fff; }
+  .ds-hero .ds-image { border-color: rgba(255, 255, 255, 0.25); }
+  .ds-hero-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin: 0.1rem 0 0;
+  }
+  .ds-hero-desc {
+    margin: 0.4rem 0 0;
+    color: rgba(255, 255, 255, 0.84);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    max-width: 64ch;
+  }
+  .ds-hero-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+  .ds-hero :global(.btn-ghost) { color: rgba(255, 255, 255, 0.92); }
+  .ds-hero :global(.btn-ghost:hover) { background: rgba(255, 255, 255, 0.14); }
+  :global(.ds-hero-actions a.btn), :global(.ds-hero-actions .btn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
   }
 
   h2 { margin-top: 0; }
@@ -2484,19 +2565,6 @@
     line-height: 1.5;
   }
 
-  .dataset-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1rem;
-  }
-  .ds-left {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.85rem;
-    flex: 1;
-    min-width: 0;
-  }
   .ds-image {
     width: 56px;
     height: 56px;
@@ -2504,18 +2572,6 @@
     border-radius: 12px;
     border: 1px solid var(--line-soft);
     flex-shrink: 0;
-  }
-  .ds-header-actions {
-    display: flex;
-    gap: 0.4rem;
-    flex-shrink: 0;
-    align-items: flex-start;
-  }
-  :global(.ds-header-actions a.btn), :global(.ds-header-actions .btn) {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    white-space: nowrap;
   }
   .conformance-row {
     display: flex;

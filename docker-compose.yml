@@ -56,6 +56,14 @@ services:
       # registry; fail-soft if absent.
       - LD_REGISTRY_URL=${LD_REGISTRY_URL:-http://host.docker.internal:8500}
       - LD_REGISTRY_TOKEN=${LD_REGISTRY_TOKEN:-}
+      # LLM / AI features (NL→SPARQL, SHACL assist, knowledge-graph chat). Defaults
+      # to the bundled `ollama` service below — start it with `--profile llm` (and
+      # the GPU override on an NVIDIA host: see docker-compose.gpu.yml). Prefer an
+      # external OpenAI-compatible API? Set LLM_GATEWAY_URL + LLM_API_KEY in .env and
+      # don't enable the `llm` profile. Unreachable endpoint = AI features just hide.
+      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
+      - LLM_API_KEY=${LLM_API_KEY:-}
     # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
     # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
     # adds the same hostname on plain Linux Docker so the config stays portable.
@@ -122,8 +130,46 @@ services:
         echo
     restart: "no"
 
+  # ── LLM (optional, profile: llm) ──────────────────────────────────────────
+  # A local OpenAI-compatible model server for the platform's AI features. Enable
+  # with `--profile llm`; on an NVIDIA host add `-f docker-compose.gpu.yml` to use
+  # the GPU. Prefer a hosted model? Skip this profile and point the triplestore's
+  # LLM_GATEWAY_URL / LLM_API_KEY at your endpoint instead.
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: triplestore-ollama
+    profiles: ["llm"]
+    ports:
+      # Loopback only — reached by the triplestore over the compose network.
+      - "${OLLAMA_BIND:-127.0.0.1}:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+  # One-shot: pull the default model into the ollama volume on first `up`, then
+  # exit. Cheap to re-run (already-present layers are skipped).
+  ollama-pull:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: triplestore-ollama-pull
+    profiles: ["llm"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    command: ["pull", "${LLM_MODEL:-qwen2.5:7b}"]
+    restart: "no"
+
 volumes:
   triplestore_data:
     driver: local
   minio_data:
+    driver: local
+  ollama_models:
     driver: local

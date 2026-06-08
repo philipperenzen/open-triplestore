@@ -21,6 +21,8 @@
     uploadOrgImage,
     getOrgImageUrl,
     uploadOrgBanner,
+    setOrgBannerPreset,
+    clearOrgBanner,
     getOrgBannerUrl,
     listDatasetGrants,
     setDatasetGrant,
@@ -36,7 +38,7 @@
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import OrganisationMetadataDialog from '../components/OrganisationMetadataDialog.svelte';
   import Avatar from '../components/Avatar.svelte';
-  import LinkedDataBackground from '../components/LinkedDataBackground.svelte';
+  import BannerBackdrop from '../components/BannerBackdrop.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
 
@@ -238,8 +240,36 @@
     if (!file) return;
     uploadingBanner = true;
     try {
-      await uploadOrgBanner(id, file);
-      bannerKey = true;
+      const res = await uploadOrgBanner(id, file);
+      bannerKey = res?.banner_key || true;
+      bannerVersion++;
+    } catch (e) {
+      metadataError = e.message;
+    } finally {
+      uploadingBanner = false;
+    }
+  }
+
+  async function doSetBannerPreset(preset) {
+    uploadingBanner = true;
+    metadataError = '';
+    try {
+      await setOrgBannerPreset(id, preset);
+      bannerKey = `preset:${preset}`;
+      bannerVersion++;
+    } catch (e) {
+      metadataError = e.message;
+    } finally {
+      uploadingBanner = false;
+    }
+  }
+
+  async function doClearBanner() {
+    uploadingBanner = true;
+    metadataError = '';
+    try {
+      await clearOrgBanner(id);
+      bannerKey = null;
       bannerVersion++;
     } catch (e) {
       metadataError = e.message;
@@ -456,16 +486,8 @@
 
 <div class="card">
   {#if org}
-    <div class="org-cover" class:has-banner={!!bannerKey}>
-      {#if bannerKey}
-        <img
-          src="{getOrgBannerUrl(id)}?v={bannerVersion}"
-          alt={$t('pages.orgDetail.bannerAlt', { values: { name: org?.name } })}
-          class="cover-img"
-          on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-        />
-      {/if}
-      <LinkedDataBackground color="170, 230, 225" intensity={bannerKey ? 0.5 : 0.9} />
+    <div class="org-cover">
+      <BannerBackdrop bannerKey={bannerKey} imageUrl="{getOrgBannerUrl(id)}?v={bannerVersion}" seed={id} />
       <div class="org-header glass">
         <div class="org-info">
           <h2 class="org-title">{org.name}</h2>
@@ -474,7 +496,7 @@
         <div class="org-actions">
         {#if canManageOrg}
           <button class="btn btn-sm btn-ghost" on:click={() => { metadataError = ''; metadataDialogOpen = true; }}>
-            <Edit2 size={13} /> {$t('pages.orgDetail.pageSettings')}
+            <Edit2 size={13} /> {$t('pages.orgDetail.editPage')}
           </button>
         {/if}
         <Link to="/organisations/{id}/sparql" class="btn btn-sm">
@@ -499,11 +521,6 @@
   <div class="explore-head">
     <Info size={15} />
     <h3>{$t('pages.orgDetail.about')}</h3>
-    {#if canManageOrg}
-      <button class="btn btn-sm btn-ghost" style="margin-left:auto" on:click={() => { metadataError = ''; metadataDialogOpen = true; }}>
-        <Edit2 size={13} /> {$t('pages.orgDetail.editMetadata')}
-      </button>
-    {/if}
   </div>
 
   <dl class="meta-grid">
@@ -546,7 +563,7 @@
   </dl>
 
   {#if !hasAboutMeta && canManageOrg}
-    <p class="about-empty">{$t('pages.orgDetail.aboutEmptyBefore')} <strong>{$t('pages.orgDetail.editMetadata')}</strong> {$t('pages.orgDetail.aboutEmptyAfter')}</p>
+    <p class="about-empty">{$t('pages.orgDetail.aboutEmptyBefore')} <strong>{$t('pages.orgDetail.editPage')}</strong> {$t('pages.orgDetail.aboutEmptyAfter')}</p>
   {/if}
 </div>
 
@@ -1027,13 +1044,15 @@
   hasImage={!!imageKey}
   imageUrl={`${getOrgImageUrl(id)}?v=${imageVersion}`}
   uploadingImage={uploadingImage}
-  hasBanner={!!bannerKey}
+  bannerKey={bannerKey}
   bannerUrl={`${getOrgBannerUrl(id)}?v=${bannerVersion}`}
   uploadingBanner={uploadingBanner}
   deleting={deletingOrg}
   on:save={handleMetadataSave}
   on:uploadImage={(e) => doUploadImage(e.detail.file)}
   on:uploadBanner={(e) => doUploadBanner(e.detail.file)}
+  on:selectBannerPreset={(e) => doSetBannerPreset(e.detail.preset)}
+  on:clearBanner={() => doClearBanner()}
   on:delete={doDeleteOrg}
   on:close={() => { if (!savingMetadata && !deletingOrg) metadataDialogOpen = false; }}
 />
@@ -1136,14 +1155,6 @@
     background: linear-gradient(135deg, #0f2a33 0%, #1e5663 55%, #2f7a8c 100%);
     margin-bottom: 1rem;
   }
-  .cover-img {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    z-index: 0;
-  }
   .org-header {
     position: relative;
     z-index: 1;
@@ -1154,8 +1165,8 @@
     gap: 1rem;
     flex-wrap: wrap;
     background: rgba(10, 24, 30, 0.46);
-    backdrop-filter: blur(6px) saturate(125%);
-    -webkit-backdrop-filter: blur(6px) saturate(125%);
+    backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(125%);
     border: 1px solid rgba(255, 255, 255, 0.14);
     border-radius: 12px;
     padding: 0.85rem 1.05rem;

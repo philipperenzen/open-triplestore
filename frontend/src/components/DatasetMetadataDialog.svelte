@@ -5,6 +5,7 @@
   import { LICENSES, LICENSE_CATEGORY_LABEL, findLicense, searchLicenses } from '../lib/vocab/licenses';
   import { findTheme, searchThemes, ADMS_STATUSES, findAdmsStatus } from '../lib/vocab/themes';
   import Select from './Select.svelte';
+  import BannerPicker from './BannerPicker.svelte';
 
   export let open = false;
   /** @type {Record<string, any> | null} */
@@ -16,8 +17,9 @@
   export let hasImage = false;
   export let uploadingImage = false;
   export let bannerUrl = '';
-  export let hasBanner = false;
   export let uploadingBanner = false;
+  /** Live banner_key so the picker can highlight the active preset/upload. */
+  export let bannerKey = null;
   /** Set by the parent while a delete is in flight. */
   export let deleting = false;
 
@@ -27,7 +29,6 @@
   let deleteArmed = false;
   let deleteConfirmText = '';
   let imageInputEl;
-  let bannerInputEl;
   $: deleteName = dataset?.name || '';
   $: canDelete = deleteArmed && deleteConfirmText.trim() === deleteName && !deleting;
 
@@ -36,10 +37,14 @@
     if (f) dispatch('uploadImage', { file: f });
     if (imageInputEl) imageInputEl.value = '';
   }
-  function onBannerPick(e) {
-    const f = e.target.files?.[0];
-    if (f) dispatch('uploadBanner', { file: f });
-    if (bannerInputEl) bannerInputEl.value = '';
+  function onBannerUpload(e) {
+    dispatch('uploadBanner', { file: e.detail.file });
+  }
+  function onBannerPreset(e) {
+    dispatch('selectBannerPreset', { preset: e.detail.preset });
+  }
+  function onBannerClear() {
+    dispatch('clearBanner');
   }
   function requestDelete() {
     if (canDelete) dispatch('delete');
@@ -300,20 +305,14 @@
               {$i18nT('components.datasetMetadataDialog.bannerLabel')}
               <span class="help" title={$i18nT('components.datasetMetadataDialog.bannerHelp')}><Info size={12} /></span>
             </span>
-            <div class="img-setting img-setting-banner">
-              <div class="img-thumb img-thumb-banner">
-                {#if hasBanner && bannerUrl}
-                  <img src={bannerUrl} alt={$i18nT('components.datasetMetadataDialog.bannerAlt')} />
-                {:else}
-                  <ImageIcon size={20} />
-                {/if}
-              </div>
-              <label class="btn btn-sm btn-ghost img-pick">
-                {#if uploadingBanner}<Loader2 size={13} class="animate-spin" />{:else}<ImagePlus size={13} />{/if}
-                {hasBanner ? $i18nT('components.datasetMetadataDialog.replaceBanner') : $i18nT('components.datasetMetadataDialog.uploadBanner')}
-                <input bind:this={bannerInputEl} type="file" accept="image/*" on:change={onBannerPick} style="display:none" />
-              </label>
-            </div>
+            <BannerPicker
+              bannerKey={bannerKey}
+              imageUrl={bannerUrl}
+              uploading={uploadingBanner}
+              on:selectPreset={onBannerPreset}
+              on:upload={onBannerUpload}
+              on:clear={onBannerClear}
+            />
           </div>
         </section>
 
@@ -782,7 +781,6 @@
     display: inline-flex; align-items: center; gap: 0.3rem;
   }
   .img-setting { display: flex; align-items: center; gap: 0.7rem; }
-  .img-setting-banner { align-items: stretch; }
   .img-thumb {
     flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
@@ -794,7 +792,6 @@
   }
   .img-thumb img { width: 100%; height: 100%; object-fit: cover; }
   .img-thumb-icon { width: 48px; height: 48px; }
-  .img-thumb-banner { width: 140px; height: 48px; }
   .img-pick { white-space: nowrap; }
 
   /* Danger zone */

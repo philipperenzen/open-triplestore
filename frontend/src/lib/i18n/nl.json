@@ -881,6 +881,7 @@
       "versionPickerTitle": "Bekijk een momentopname-versie van deze Dataset",
       "liveCurrent": "Live (huidig)",
       "pageSettings": "Pagina-instellingen",
+      "editPage": "Pagina bewerken",
       "aboutThisDataset": "Over deze Dataset",
       "editMetadata": "Metadata bewerken",
       "role": "Rol",
@@ -1214,6 +1215,7 @@
       "bannerAlt": "{name} banner",
       "logoAlt": "{name} logo",
       "pageSettings": "Pagina-instellingen",
+      "editPage": "Pagina bewerken",
       "copySparqlUrlTitle": "SPARQL-endpoint-URL kopiëren",
       "copyUrl": "URL kopiëren",
       "about": "Over",
@@ -2766,6 +2768,11 @@
       "convertInPlaceModelPrefix": "U kunt de graafrol van deze dataset omzetten naar",
       "modelWord": "Model",
       "stepUploadModelPortion": "Upload het modelgedeelte van deze graaf als versie."
+    },
+    "bannerPicker": {
+      "uploadOwn": "Uploaden",
+      "uploaded": "Geüploade afbeelding",
+      "removeBanner": "Standaard gebruiken"
     },
     "datasetMetadataDialog": {
       "dialogTitle": "Pagina-instellingen — Dataset",
