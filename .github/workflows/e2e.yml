@@ -12,6 +12,12 @@ on:
       - 'src/auth/handlers.rs'
       - '.github/workflows/e2e.yml'
 
+# Cancel a superseded e2e run when the same ref is pushed again — this 40-min job
+# is the most expensive to leave running on a stale commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   e2e:
     runs-on: ubuntu-latest

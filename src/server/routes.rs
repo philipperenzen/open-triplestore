@@ -465,8 +465,7 @@ async fn execute_query(
             Mode::Graph(f) => serialize_graph_to(results, f, &mut writer),
         };
         if let Err(msg) = result {
-            let _ =
-                chunk_tx.blocking_send(Err(std::io::Error::new(std::io::ErrorKind::Other, msg)));
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(msg)));
         }
     });
 
@@ -984,10 +983,7 @@ async fn graph_store_get(
         // can surface an error as a real 5xx if the dump cannot be initiated.
         let _ = start_tx.send(Ok(()));
         if let Err(e) = store.dump_to_writer(&mut writer, rdf_format, graph_iri.as_deref()) {
-            let _ = chunk_tx.blocking_send(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )));
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
 
@@ -3448,8 +3444,7 @@ pub(crate) async fn run_scoped_sparql(
             Mode::Graph(f) => serialize_graph_to(results, f, &mut writer),
         };
         if let Err(msg) = result {
-            let _ =
-                chunk_tx.blocking_send(Err(std::io::Error::new(std::io::ErrorKind::Other, msg)));
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(msg)));
         }
     });
 
@@ -4162,7 +4157,7 @@ INSERT DATA {{
     // rebuild and re-count just that graph.
     state
         .store
-        .update_targeted(&update, &[graph.clone()], false)
+        .update_targeted(&update, std::slice::from_ref(&graph), false)
         .map_err(|e| e.to_string())
 }
 

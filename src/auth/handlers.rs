@@ -2190,7 +2190,7 @@ pub async fn update_org_member_role(
 
     let role = req["role"]
         .as_str()
-        .and_then(|r| Role::from_str(r))
+        .and_then(Role::from_str)
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
@@ -3465,86 +3465,26 @@ pub async fn update_dataset_role(
     db.update_dataset_graphs_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Auto-register the dataset in the model / vocabulary registry so it shows
-    // up in those listings. Idempotent: skip if a record with this id already exists.
+    // Promote the dataset into the model / vocabulary registry so it shows up in
+    // those listings *with its data* — a published 1.0.0 version whose graphs hold
+    // a copy of the dataset's graphs, not just an empty metadata tag. Idempotent;
+    // best-effort (logged, never fails the role update).
     if let Some(role) = graph_role {
         let role_str = role.as_str();
         if role_str == "model" || role_str == "vocabulary" {
             let registry_id = slugify(&dataset.name);
             if !registry_id.is_empty() {
-                let now = chrono::Utc::now().to_rfc3339();
-                let owner_type = match dataset.owner_type {
-                    OwnerType::User => "user",
-                    OwnerType::Organisation => "organisation",
-                    OwnerType::Group => "group",
-                };
-                let owner_id = dataset.owner_id.as_str();
-                let creator = format!("{}/users/{}", state.base_url, current_user.user_id);
-                let title = if dataset.name.is_empty() {
-                    dataset_id.as_str()
-                } else {
-                    dataset.name.as_str()
-                };
-                let description = dataset.description.as_deref();
-
-                if role_str == "model" {
-                    if !crate::data_models::registry::data_model_exists(
-                        &state.store,
-                        &state.base_url,
-                        &registry_id,
-                    ) {
-                        if let Err(e) = crate::data_models::registry::insert_data_model(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            title,
-                            "", // namespace unknown — user can edit later
-                            description,
-                            false, // is_public — keep private until user opts in
-                            Some(owner_type),
-                            Some(owner_id),
-                            Some(&creator),
-                            &now,
-                        ) {
-                            tracing::warn!(
-                                "failed to auto-register data model for dataset {dataset_id}: {e}"
-                            );
-                        }
-                    }
-                } else {
-                    // role_str == "vocabulary" — same unified registry, kind=vocabulary.
-                    if !crate::data_models::registry::data_model_exists(
-                        &state.store,
-                        &state.base_url,
-                        &registry_id,
-                    ) {
-                        if let Err(e) = crate::data_models::registry::insert_data_model(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            title,
-                            "",
-                            description,
-                            false,
-                            Some(owner_type),
-                            Some(owner_id),
-                            Some(&creator),
-                            &now,
-                        ) {
-                            tracing::warn!(
-                                "failed to auto-register vocabulary for dataset {dataset_id}: {e}"
-                            );
-                        } else if let Err(e) = crate::data_models::registry::set_data_model_kind(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            crate::kind_detector::RegistryKind::Vocabulary,
-                        ) {
-                            tracing::warn!(
-                                "failed to set vocabulary kind for dataset {dataset_id}: {e}"
-                            );
-                        }
-                    }
+                if let Err(e) = promote_dataset_to_registry(
+                    &state,
+                    &dataset,
+                    &dataset_id,
+                    &registry_id,
+                    role_str,
+                    &current_user.user_id,
+                ) {
+                    tracing::warn!(
+                        "failed to promote dataset {dataset_id} into the {role_str} registry: {e}"
+                    );
                 }
             }
         }
@@ -3554,6 +3494,118 @@ pub async fn update_dataset_role(
     refresh_dataset_metadata(&state, &dataset_id);
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Promote a dataset whose graph role was set to `model`/`vocabulary` into the
+/// model registry: ensure a registry entry exists and a published `1.0.0` version
+/// holds a COPY of the dataset's graphs. Idempotent — only creates what's missing,
+/// and never clobbers an existing version's data.
+fn promote_dataset_to_registry(
+    state: &AppState,
+    dataset: &crate::auth::models::Dataset,
+    dataset_id: &str,
+    registry_id: &str,
+    role_str: &str,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    use crate::data_models::models::{DataModelVersion, VersionStatus};
+    use crate::data_models::{registry, upload};
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let owner_type = match dataset.owner_type {
+        OwnerType::User => "user",
+        OwnerType::Organisation => "organisation",
+        OwnerType::Group => "group",
+    };
+    let creator = format!("{}/users/{}", state.base_url, user_id);
+    let title = if dataset.name.is_empty() {
+        dataset_id
+    } else {
+        dataset.name.as_str()
+    };
+    let kind = if role_str == "vocabulary" {
+        crate::kind_detector::RegistryKind::Vocabulary
+    } else {
+        crate::kind_detector::RegistryKind::DataModel
+    };
+
+    // 1. Ensure the registry entry exists (kept private until the user opts in).
+    //    The registry id is derived from the dataset's free-form, non-unique name,
+    //    so a same-slug entry may already belong to another account. If one exists,
+    //    the caller must be allowed to WRITE it — the same `can_write_ontology` gate
+    //    every other registry write path enforces. Without this check a user with
+    //    write access to *their own* dataset could inject a published version into
+    //    a different owner's same-named model.
+    match registry::get_data_model(&state.store, &state.base_url, registry_id) {
+        Some(existing) => {
+            if !state.auth_db.can_write_ontology(
+                user_id,
+                existing.owner_type.as_deref(),
+                existing.owner_id.as_deref(),
+            )? {
+                anyhow::bail!(
+                    "registry entry '{registry_id}' already exists and is owned by \
+                     another account; refusing to promote dataset {dataset_id} into it"
+                );
+            }
+        }
+        None => {
+            registry::insert_data_model(
+                &state.store,
+                &state.base_url,
+                registry_id,
+                title,
+                "", // namespace unknown — user can edit later
+                dataset.description.as_deref(),
+                false,
+                Some(owner_type),
+                Some(dataset.owner_id.as_str()),
+                Some(&creator),
+                &now,
+            )?;
+            registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+        }
+    }
+
+    // 2. Ensure a published 1.0.0 version with the dataset's data exists — the
+    //    actual "move" the role assignment was missing.
+    if !registry::version_exists(&state.store, &state.base_url, registry_id, "1.0.0") {
+        let src_graphs: Vec<String> = state
+            .auth_db
+            .list_dataset_graph_entries(dataset_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.graph_iri)
+            .collect();
+        let sub_graphs = upload::copy_graphs_into_version(
+            &state.store,
+            &state.base_url,
+            registry_id,
+            "1.0.0",
+            &src_graphs,
+        )?;
+        let graph_iri = format!(
+            "{}/data-model/{}/version/1.0.0",
+            state.base_url, registry_id
+        );
+        let record = DataModelVersion {
+            data_model_id: registry_id.to_string(),
+            version: "1.0.0".to_string(),
+            status: VersionStatus::Published,
+            graph_iri,
+            sub_graphs,
+            created_at: now,
+            created_by: Some(creator),
+            derived_from: None,
+            notes: Some(format!("Imported from dataset {dataset_id}")),
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        registry::insert_version(&state.store, &state.base_url, &record)?;
+        registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+        registry::update_latest_published(&state.store, &state.base_url, registry_id, "1.0.0")?;
+    }
+    Ok(())
 }
 
 /// URL-safe slug derived from a free-form title — same shape that
@@ -4240,6 +4292,160 @@ pub async fn get_dataset_banner(
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Banner not found".to_string()))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, content_type)], data).into_response())
+}
+
+/// Request body for the banner-preset endpoints: a preset id to apply, or
+/// null/empty to clear the banner.
+#[derive(Deserialize)]
+pub struct BannerPresetBody {
+    #[serde(default)]
+    pub preset: Option<String>,
+}
+
+/// Banner preset ids are short url-safe slugs (`[a-z0-9-]`). The frontend
+/// `banners.ts` registry is the source of truth for which ids actually render;
+/// here we only guard the shape so the stored `preset:<id>` sentinel can never
+/// carry arbitrary text.
+fn is_valid_banner_preset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 40
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Resolve a request body into the `banner_key` to store: `Some("preset:<id>")`
+/// for a valid id, or `None` to clear. Rejects malformed ids.
+fn resolve_banner_preset_key(
+    body: &BannerPresetBody,
+) -> Result<Option<String>, (StatusCode, String)> {
+    match body
+        .preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => {
+            if !is_valid_banner_preset_id(id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid banner preset id".to_string(),
+                ));
+            }
+            Ok(Some(format!("preset:{id}")))
+        }
+        None => Ok(None),
+    }
+}
+
+/// PUT /api/datasets/:dataset_id/banner-preset — select a built-in animated
+/// banner preset (stored as `banner_key = "preset:<id>"`) or clear it. Mirrors
+/// the write-access check of `upload_dataset_banner`.
+pub async fn set_dataset_banner_preset(
+    user_opt: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Json(body): Json<BannerPresetBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = require_user(user_opt)?;
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    if !state
+        .auth_db
+        .can_write_dataset(&current_user.user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+    let new_key = resolve_banner_preset_key(&body)?;
+    state
+        .auth_db
+        .update_dataset_banner(&dataset_id, new_key.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "banner_key": new_key })))
+}
+
+/// PUT /api/organisations/:org_id/banner-preset — same as above for an
+/// organisation. Mirrors the admin/org-admin check of `upload_org_banner`.
+pub async fn set_org_banner_preset(
+    user_opt: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(org_id): Path<String>,
+    Json(body): Json<BannerPresetBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = require_user(user_opt)?;
+    if !current_user.is_admin() {
+        match state
+            .auth_db
+            .get_org_membership(&current_user.user_id, &org_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            Some(Role::Admin) => {}
+            _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
+        }
+    }
+    let new_key = resolve_banner_preset_key(&body)?;
+    state
+        .auth_db
+        .update_org_banner(&org_id, new_key.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "banner_key": new_key })))
+}
+
+#[cfg(test)]
+mod banner_preset_tests {
+    use super::{is_valid_banner_preset_id, resolve_banner_preset_key, BannerPresetBody};
+
+    #[test]
+    fn accepts_slug_ids_and_rejects_junk() {
+        for ok in ["aurora-teal", "gradient-dusk", "a", "x0123456789"] {
+            assert!(is_valid_banner_preset_id(ok), "{ok} should be valid");
+        }
+        let too_long = "z".repeat(41);
+        for bad in [
+            "",
+            "Aurora",
+            "has space",
+            "semi;colon",
+            "preset:teal",
+            "../x",
+            too_long.as_str(),
+        ] {
+            assert!(!is_valid_banner_preset_id(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn resolve_maps_to_sentinel_or_clears() {
+        let apply = BannerPresetBody {
+            preset: Some("aurora-rose".into()),
+        };
+        assert_eq!(
+            resolve_banner_preset_key(&apply).unwrap(),
+            Some("preset:aurora-rose".to_string())
+        );
+        // trims whitespace
+        let padded = BannerPresetBody {
+            preset: Some("  aurora-teal  ".into()),
+        };
+        assert_eq!(
+            resolve_banner_preset_key(&padded).unwrap(),
+            Some("preset:aurora-teal".to_string())
+        );
+        // null / empty clears
+        for clear in [None, Some(String::new()), Some("   ".into())] {
+            let body = BannerPresetBody { preset: clear };
+            assert_eq!(resolve_banner_preset_key(&body).unwrap(), None);
+        }
+        // malformed → 400
+        let bad = BannerPresetBody {
+            preset: Some("Bad Id".into()),
+        };
+        assert!(resolve_banner_preset_key(&bad).is_err());
+    }
 }
 
 #[cfg(test)]

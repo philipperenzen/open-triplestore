@@ -18,6 +18,7 @@ use common::{admin_state, mint_token, test_app};
 use open_triplestore::auth::dataset_graph::authorize_dataset_graph_target;
 use open_triplestore::auth::db::AuthDb;
 use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
+use open_triplestore::data_models::registry;
 use open_triplestore::server::AppState;
 use tower::ServiceExt as _;
 
@@ -269,4 +270,122 @@ fn authorize_dataset_graph_target_invariants_security() {
     // Prefix-collision guard: `mine` must not match `mine2`.
     assert!(!ok(&format!("{BASE}/dataset/mine2/instances")));
     assert!(!ok("urn:dataset:mine2:shapes"));
+}
+
+// ───────── HIGH: registry-promotion cross-owner injection (PR #70 follow-up) ─────────
+//
+// Setting a dataset's graph role to `model`/`vocabulary` promotes it into the model
+// registry under `slugify(dataset.name)`. Because that id is derived from the
+// free-form, non-unique dataset name, a same-slug registry entry may belong to a
+// different owner. The promote path must apply the same `can_write_ontology` gate as
+// every other registry write, or a dataset writer could publish their RDF as another
+// owner's model version.
+
+fn put_json(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Create a registry entry owned by `owner` with NO published version yet — the
+/// vulnerable state (e.g. a freshly created entry from the UI).
+fn make_versionless_model(state: &AppState, id: &str, title: &str, owner: &str) {
+    registry::insert_data_model(
+        &state.store,
+        &state.base_url,
+        id,
+        title,
+        "",
+        None,
+        false,
+        Some("user"),
+        Some(owner),
+        None,
+        "2026-01-01T00:00:00Z",
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cannot_promote_into_another_owners_registry_entry_security() {
+    let (state, _admin) = admin_state();
+    make_user(&state, "victim");
+    make_versionless_model(&state, "customer-model", "Customer Model", "victim");
+    assert!(!registry::version_exists(
+        &state.store,
+        &state.base_url,
+        "customer-model",
+        "1.0.0"
+    ));
+
+    // Attacker owns a dataset whose NAME slugifies to the victim's registry id.
+    let attacker = make_user(&state, "attacker");
+    state
+        .auth_db
+        .create_dataset(
+            "attackerds",
+            "Customer Model",
+            None,
+            OwnerType::User,
+            "attacker",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+
+    // The role update succeeds (promotion is best-effort), ...
+    let resp = test_app(state.clone())
+        .oneshot(put_json(
+            "/api/datasets/attackerds/role",
+            &attacker,
+            serde_json::json!({ "graph_role": "model" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // ... but the attacker's data must NOT have been injected as the victim entry's
+    // published 1.0.0 version.
+    assert!(
+        !registry::version_exists(&state.store, &state.base_url, "customer-model", "1.0.0"),
+        "attacker injected a 1.0.0 version into the victim's registry entry"
+    );
+}
+
+#[tokio::test]
+async fn owner_can_still_promote_into_own_registry_entry_security() {
+    // Positive control: the fix must not over-restrict the owner's own promotion.
+    let (state, _admin) = admin_state();
+    let owner = make_user(&state, "owner");
+    make_versionless_model(&state, "my-model", "My Model", "owner");
+    state
+        .auth_db
+        .create_dataset(
+            "ownerds",
+            "My Model",
+            None,
+            OwnerType::User,
+            "owner",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+
+    let resp = test_app(state.clone())
+        .oneshot(put_json(
+            "/api/datasets/ownerds/role",
+            &owner,
+            serde_json::json!({ "graph_role": "model" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        registry::version_exists(&state.store, &state.base_url, "my-model", "1.0.0"),
+        "owner's own promotion should have created the 1.0.0 version"
+    );
 }

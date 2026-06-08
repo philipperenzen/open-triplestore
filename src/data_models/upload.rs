@@ -150,9 +150,31 @@ pub fn parse_and_load(
         .or_else(|| format_from_filename(filename))
         .ok_or_else(|| format!("Cannot detect RDF format from content-type '{content_type}' or filename '{filename}'"))?;
 
-    // 2. Parse all quads
-    let mut quads = parse_quads(bytes, format)?;
+    // 2. Parse all quads, then hand off to the shared loader. Callers that already
+    //    hold parsed quads (e.g. vocab seeding, which parses once for kind detection)
+    //    call `load_parsed` directly to avoid a second parse of the same bytes.
+    let quads = parse_quads(bytes, format)?;
+    load_parsed(
+        store,
+        base_url,
+        data_model_id,
+        version_override,
+        quads,
+        merge,
+    )
+}
 
+/// Load already-parsed quads into versioned named graphs (steps 3–5 of
+/// `parse_and_load`). Split out so a caller that already parsed the input for
+/// another reason — vocab seeding parses once for kind detection — doesn't reparse.
+pub fn load_parsed(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version_override: Option<&str>,
+    mut quads: Vec<Quad>,
+    merge: bool,
+) -> Result<LoadResult, String> {
     // 3. Determine version
     let file_has_version_info = extract_owl_version_info(&quads).is_some();
     let version = version_override
@@ -308,4 +330,107 @@ pub fn clone_graphs_as_draft(
     let mut draft_graphs = draft_iris;
     draft_graphs.sort();
     Ok(draft_graphs)
+}
+
+/// Copy quads from arbitrary `source_graphs` into a new registry version's
+/// sub-graphs, returning the created sub-graph IRIs. Each source graph maps to
+/// `{base}/data-model/{id}/version/{version}/{suffix}` where `suffix` slugifies
+/// the source graph's last path segment (collisions are disambiguated). Used to
+/// promote a dataset's graphs into the model/vocabulary registry when its role
+/// is set — so the data actually moves there, not just a metadata tag.
+pub fn copy_graphs_into_version(
+    store: &TripleStore,
+    base_url: &str,
+    data_model_id: &str,
+    version: &str,
+    source_graphs: &[String],
+) -> Result<Vec<String>, StoreError> {
+    let base_graph = format!("{base_url}/data-model/{data_model_id}/version/{version}");
+    if source_graphs.is_empty() {
+        return Ok(vec![base_graph]);
+    }
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut seen_dst: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for src in source_graphs {
+        let base_suffix = slugify_last_segment(src);
+        let mut dst = format!("{base_graph}/{base_suffix}");
+        let mut n = 2;
+        while seen_dst.contains(&dst) {
+            dst = format!("{base_graph}/{base_suffix}-{n}");
+            n += 1;
+        }
+        seen_dst.insert(dst.clone());
+        pairs.push((dst, src.clone()));
+    }
+    let dst_iris: Vec<String> = pairs.iter().map(|(d, _)| d.clone()).collect();
+    let dst_refs: Vec<&str> = dst_iris.iter().map(|s| s.as_str()).collect();
+    store.bulk_delete_graphs(&dst_refs)?;
+
+    let mut all_quads: Vec<Quad> = Vec::new();
+    for (dst, src) in &pairs {
+        let dst_target = GraphName::NamedNode(
+            NamedNode::new(dst).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
+        );
+        let src_ref = GraphNameRef::NamedNode(
+            NamedNodeRef::new(src).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
+        );
+        for q in store.quads_for_graph(src_ref)? {
+            all_quads.push(Quad::new(
+                q.subject,
+                q.predicate,
+                q.object,
+                dst_target.clone(),
+            ));
+        }
+    }
+    let mut sub_graphs = dst_iris;
+    sub_graphs.sort();
+    store.bulk_insert_quads(all_quads, &sub_graphs)?;
+    Ok(sub_graphs)
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::copy_graphs_into_version;
+    use crate::store::TripleStore;
+    use oxigraph::model::{GraphNameRef, NamedNodeRef};
+
+    #[test]
+    fn copies_dataset_graphs_into_a_version() {
+        let store = TripleStore::in_memory().unwrap();
+        let src = "http://x/dataset/d1/g1";
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{src}> {{ \
+                 <http://x/s> <http://x/p> <http://x/o> . \
+                 <http://x/s2> <http://x/p2> \"lit\" . }} }}"
+            ))
+            .unwrap();
+
+        let subs =
+            copy_graphs_into_version(&store, "http://base", "m1", "1.0.0", &[src.to_string()])
+                .unwrap();
+        assert_eq!(
+            subs,
+            vec!["http://base/data-model/m1/version/1.0.0/g1".to_string()]
+        );
+
+        let nn = NamedNodeRef::new(&subs[0]).unwrap();
+        let quads = store.quads_for_graph(GraphNameRef::NamedNode(nn)).unwrap();
+        assert_eq!(
+            quads.len(),
+            2,
+            "both source triples copied into the version graph"
+        );
+    }
+
+    #[test]
+    fn empty_source_yields_the_base_version_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        let subs = copy_graphs_into_version(&store, "http://base", "m1", "1.0.0", &[]).unwrap();
+        assert_eq!(
+            subs,
+            vec!["http://base/data-model/m1/version/1.0.0".to_string()]
+        );
+    }
 }
