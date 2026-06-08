@@ -143,7 +143,7 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
     // A bare "*" cannot be combined with credentialed requests (Fetch spec), and
     // tower-http panics if `*` appears in an explicit origin list. Refuse it loudly
     // and fall back to same-origin only rather than crashing at the first request.
-    if origins.iter().any(|o| *o == "*") {
+    if origins.contains(&"*") {
         tracing::error!(
             "CORS_ORIGINS contains '*', which cannot be combined with credentialed API \
              requests. Ignoring it and allowing SAME-ORIGIN only. List explicit origins \
@@ -1505,7 +1505,7 @@ pub async fn run(
     {
         let seed_state = state.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = crate::saved_queries::seed::seed_open_triplestore(&seed_state);
+            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
             // Seed the standard RDF vocabularies (OWL/RDF/RDFS/SKOS/DCAT/PROV/…)
             // into the model registry as public reference entries (idempotent).
             crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);

@@ -92,13 +92,12 @@ fn find_candidate_nodes(store: &TripleStore, expr: &ShapeExpr) -> Vec<String> {
     let mut nodes = HashSet::new();
     for pred in &predicates {
         if let Ok(pred_ref) = NamedNodeRef::new(pred.as_str()) {
-            for quad in store
+            for q in store
                 .store()
                 .quads_for_pattern(None, Some(pred_ref), None, None)
+                .flatten()
             {
-                if let Ok(q) = quad {
-                    nodes.insert(q.subject.to_string());
-                }
+                nodes.insert(q.subject.to_string());
             }
         }
     }
@@ -270,13 +269,12 @@ fn get_outgoing_triples(store: &TripleStore, focus_node: &str) -> Vec<(String, S
 
     let mut triples = Vec::new();
     if let Ok(subj) = NamedNodeRef::new(clean_node.as_str()) {
-        for quad in store
+        for q in store
             .store()
             .quads_for_pattern(Some(subj.into()), None, None, None)
+            .flatten()
         {
-            if let Ok(q) = quad {
-                triples.push((q.predicate.to_string(), q.object.to_string()));
-            }
+            triples.push((q.predicate.to_string(), q.object.to_string()));
         }
     }
     triples
@@ -384,6 +382,7 @@ fn evaluate_triple_expr(
 }
 
 /// Evaluate an inverse triple constraint (^ prefix).
+#[allow(clippy::too_many_arguments)] // cohesive constraint inputs; a struct adds churn
 fn evaluate_inverse_constraint(
     store: &TripleStore,
     schema: &ShExSchema,
@@ -406,23 +405,21 @@ fn evaluate_inverse_constraint(
         NamedNodeRef::new(pred_clean),
         NamedNodeRef::new(clean_node.as_str()),
     ) {
-        for quad in
-            store
-                .store()
-                .quads_for_pattern(None, Some(pred_ref), Some(obj_ref.into()), None)
+        for q in store
+            .store()
+            .quads_for_pattern(None, Some(pred_ref), Some(obj_ref.into()), None)
+            .flatten()
         {
-            if let Ok(q) = quad {
-                if let Some(ve) = value_expr {
-                    let subj_str = q.subject.to_string();
-                    if matches!(
-                        evaluate_shape_expr(store, schema, &subj_str, ve, visited),
-                        ShExStatus::Conformant
-                    ) {
-                        match_count += 1;
-                    }
-                } else {
+            if let Some(ve) = value_expr {
+                let subj_str = q.subject.to_string();
+                if matches!(
+                    evaluate_shape_expr(store, schema, &subj_str, ve, visited),
+                    ShExStatus::Conformant
+                ) {
                     match_count += 1;
                 }
+            } else {
+                match_count += 1;
             }
         }
     }
@@ -543,10 +540,10 @@ fn evaluate_node_constraint(
 
 /// Extract the lexical form from an RDF term string.
 fn extract_lexical(term: &str) -> String {
-    if term.starts_with('"') {
+    if let Some(rest) = term.strip_prefix('"') {
         // Literal: extract content between quotes
-        if let Some(end) = term[1..].find('"') {
-            return term[1..=end].to_string();
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
         }
     }
     // For IRIs, use the full string

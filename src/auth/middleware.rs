@@ -346,6 +346,7 @@ pub async fn require_admin(req: Request, next: Next) -> Result<Response, Respons
 /// still read. Called from `require_auth`/`optional_auth` so the M-8 token-scope
 /// check (previously only on SPARQL UPDATE + Graph-Store writes) applies uniformly
 /// to every authenticated mutating endpoint.
+#[allow(clippy::result_large_err)] // Err is an axum Response, returned on the cold deny path
 fn enforce_write_scope_for_mutation(
     req: &Request,
     user: &AuthenticatedUser,

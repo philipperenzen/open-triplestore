@@ -16,6 +16,7 @@ use models::{DatasetVersion, VersionStatus};
 /// Snapshot `source_graphs` into a new version with the given lifecycle status
 /// and record it in the registry. `update_latest_draft` is only meaningful for
 /// draft versions, so it is driven off the status.
+#[allow(clippy::too_many_arguments)] // cohesive snapshot inputs; a struct adds churn
 pub fn snapshot_as_version(
     store: &TripleStore,
     base_url: &str,

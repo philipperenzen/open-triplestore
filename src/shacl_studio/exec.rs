@@ -224,6 +224,7 @@ pub fn execute_pipeline(
 /// additionally copied to a dedicated graph and/or captured in a new version;
 /// the validation report is serialised to standard `sh:ValidationReport` RDF and
 /// written to its configured destination. All steps are best-effort.
+#[allow(clippy::too_many_arguments)] // cohesive persist inputs; a struct adds churn
 fn persist_derived(
     store: &TripleStore,
     auth_db: &AuthDb,

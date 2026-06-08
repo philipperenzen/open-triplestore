@@ -58,6 +58,9 @@ impl PathCache {
     }
 
     /// Number of cached entries.
+    // is_empty is only needed by tests; keep it test-gated rather than ship an
+    // unused method, and waive the companion lint here.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.cache.lock().unwrap().len()
     }

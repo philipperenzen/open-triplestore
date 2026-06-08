@@ -141,6 +141,50 @@ fn summarise(
     }
 }
 
+/// Inspect a shapes graph and return `(target_classes, shape_count)` for the
+/// Library's cached facets. Best-effort: a query failure yields empty/zero.
+pub fn analyze_shapes_graph(store: &TripleStore, graph_iri: &str) -> (Vec<String>, i64) {
+    let targets = select_iris(
+        store,
+        &format!(
+            "PREFIX sh: <{SH}> SELECT DISTINCT ?c WHERE {{ GRAPH <{graph_iri}> {{ ?s sh:targetClass ?c }} }}"
+        ),
+        "c",
+    );
+    let count_q = format!(
+        "PREFIX sh: <{SH}> SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{ GRAPH <{graph_iri}> {{ \
+         {{ ?s a sh:NodeShape }} UNION {{ ?s a sh:PropertyShape }} UNION {{ ?s sh:property ?p }} \
+         UNION {{ ?s sh:targetClass ?tc }} }} }}"
+    );
+    let count = scalar_count(store, &count_q);
+    (targets, count)
+}
+
+/// Run a single-variable SELECT and collect the bound IRIs (named nodes only).
+pub fn select_iris(store: &TripleStore, query: &str, var: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
+        for sol in solutions.flatten() {
+            if let Some(Term::NamedNode(nn)) = sol.get(var) {
+                out.push(nn.as_str().to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Run a `SELECT (COUNT(..) AS ?n)` query and return the integer (0 on error).
+pub fn scalar_count(store: &TripleStore, query: &str) -> i64 {
+    if let Ok(QueryResults::Solutions(mut solutions)) = store.query(query) {
+        if let Some(Ok(sol)) = solutions.next() {
+            if let Some(Term::Literal(lit)) = sol.get("n") {
+                return lit.value().parse::<i64>().unwrap_or(0);
+            }
+        }
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,48 +261,4 @@ mod tests {
         assert!(!o.report.conforms);
         assert!(!o.passes);
     }
-}
-
-/// Inspect a shapes graph and return `(target_classes, shape_count)` for the
-/// Library's cached facets. Best-effort: a query failure yields empty/zero.
-pub fn analyze_shapes_graph(store: &TripleStore, graph_iri: &str) -> (Vec<String>, i64) {
-    let targets = select_iris(
-        store,
-        &format!(
-            "PREFIX sh: <{SH}> SELECT DISTINCT ?c WHERE {{ GRAPH <{graph_iri}> {{ ?s sh:targetClass ?c }} }}"
-        ),
-        "c",
-    );
-    let count_q = format!(
-        "PREFIX sh: <{SH}> SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE {{ GRAPH <{graph_iri}> {{ \
-         {{ ?s a sh:NodeShape }} UNION {{ ?s a sh:PropertyShape }} UNION {{ ?s sh:property ?p }} \
-         UNION {{ ?s sh:targetClass ?tc }} }} }}"
-    );
-    let count = scalar_count(store, &count_q);
-    (targets, count)
-}
-
-/// Run a single-variable SELECT and collect the bound IRIs (named nodes only).
-pub fn select_iris(store: &TripleStore, query: &str, var: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Ok(QueryResults::Solutions(solutions)) = store.query(query) {
-        for sol in solutions.flatten() {
-            if let Some(Term::NamedNode(nn)) = sol.get(var) {
-                out.push(nn.as_str().to_string());
-            }
-        }
-    }
-    out
-}
-
-/// Run a `SELECT (COUNT(..) AS ?n)` query and return the integer (0 on error).
-pub fn scalar_count(store: &TripleStore, query: &str) -> i64 {
-    if let Ok(QueryResults::Solutions(mut solutions)) = store.query(query) {
-        if let Some(Ok(sol)) = solutions.next() {
-            if let Some(Term::Literal(lit)) = sol.get("n") {
-                return lit.value().parse::<i64>().unwrap_or(0);
-            }
-        }
-    }
-    0
 }

@@ -443,7 +443,7 @@ mod tests {
             let outcome = super::super::run::run_validation(
                 &store,
                 &[super::super::seed::SHACL_SHACL_GRAPH.to_string()],
-                &[g.clone()],
+                std::slice::from_ref(&g),
                 SeverityThreshold::Violation,
                 false,
             )

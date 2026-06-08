@@ -750,7 +750,7 @@ fn bsbm_q1_find_products_by_features() {
     );
     // prod1 has feat1+feat2, numProp1=100 (in range)
     // prod4 has feat1+feat2, numProp1=150 (in range)
-    assert!(r.len() >= 1, "At least one product matches: {:?}", r);
+    assert!(!r.is_empty(), "At least one product matches: {:?}", r);
 }
 
 #[test]

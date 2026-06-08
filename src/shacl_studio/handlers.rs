@@ -243,7 +243,7 @@ pub async fn get_shape_graph_turtle(
             .map(|a| a.contains("text/shaclc"))
             .unwrap_or(false);
     if want_shaclc {
-        let shaclc = crate::shaclc::serialize(&state.store, &set.graph_iri).map_err(|e| e500(e))?;
+        let shaclc = crate::shaclc::serialize(&state.store, &set.graph_iri).map_err(e500)?;
         return Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response());
     }
     let data = state
@@ -1057,9 +1057,10 @@ fn validate_cron(cron: &Option<String>) -> Result<(), ApiErr> {
 ///
 /// Admins bypass. Otherwise every graph the pipeline would WRITE must be writable by the caller,
 /// using the same authority as the SPARQL/Graph-Store write path (`check_graph_permission(write)`):
-///   * an explicit (caller-supplied) inferred/results target graph, and
-///   * every data graph in scope when `run_inference` is set — SHACL-AF inference materialises
-///     triples *in place* into those graphs, so it is a write to them.
+/// - an explicit (caller-supplied) inferred/results target graph, and
+/// - every data graph in scope when `run_inference` is set — SHACL-AF inference
+///   materialises triples *in place* into those graphs, so it is a write to them.
+///
 /// The pipeline's own auto-namespaced `urn:system:*:{id}` report/inference graphs are server-owned
 /// and exempt. `exec::owner_can_write` re-checks the same authority at run time (covering the
 /// scheduler's otherwise-ambient authority and any later change to the owner's grants).
@@ -1307,8 +1308,8 @@ pub async fn run_pipeline(
         }
     })
     .await
-    .map_err(|e| e500(e))?
-    .map_err(|e| e500(e))?;
+    .map_err(e500)?
+    .map_err(e500)?;
 
     // Best-effort private usage telemetry. Only real (non-test) runs count.
     if !test {
