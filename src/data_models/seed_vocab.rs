@@ -139,8 +139,10 @@ const VOCABS: &[StdVocab] = &[
     },
 ];
 
-/// Seed every standard vocabulary that isn't already in the registry.
-pub fn seed_standard_vocabularies(state: &AppState) {
+/// Seed every standard vocabulary that isn't already in the registry. Returns the
+/// number of newly-seeded entries (0 once everything is already present, which is
+/// the idempotent steady state).
+pub fn seed_standard_vocabularies(state: &AppState) -> usize {
     let disabled = std::env::var("SEED_STANDARD_VOCABS")
         .map(|v| {
             matches!(
@@ -150,7 +152,7 @@ pub fn seed_standard_vocabularies(state: &AppState) {
         })
         .unwrap_or(false);
     if disabled {
-        return;
+        return 0;
     }
     let mut seeded = 0usize;
     for v in VOCABS {
@@ -163,6 +165,7 @@ pub fn seed_standard_vocabularies(state: &AppState) {
     if seeded > 0 {
         tracing::info!("Seeded {seeded} standard vocabularies into the model registry");
     }
+    seeded
 }
 
 /// Returns `Ok(true)` if a new entry was created, `Ok(false)` if it already
@@ -172,7 +175,8 @@ fn seed_one(state: &AppState, v: &StdVocab) -> anyhow::Result<bool> {
         return Ok(false);
     }
 
-    // Detect the kind (data-model vs vocabulary) the same way uploads do.
+    // Parse the TTL once and reuse the quads for both kind detection and loading —
+    // `parse_and_load` would otherwise reparse the same bytes a second time.
     let quads = upload::parse_rdf(v.ttl.as_bytes(), "text/turtle", "vocab.ttl")
         .map_err(|e| anyhow::anyhow!("parse: {e}"))?;
     let detected = crate::kind_detector::detect(&quads);
@@ -192,15 +196,14 @@ fn seed_one(state: &AppState, v: &StdVocab) -> anyhow::Result<bool> {
         &now,
     )?;
 
-    // Load the RDF into a published 1.0.0 version (merged into one graph).
-    let result = upload::parse_and_load(
+    // Load the already-parsed RDF into a published 1.0.0 version (merged into one
+    // graph). Reuses the quads parsed above instead of reparsing the TTL.
+    let result = upload::load_parsed(
         &state.store,
         &state.base_url,
         v.id,
         Some(VERSION),
-        v.ttl.as_bytes(),
-        "text/turtle",
-        "vocab.ttl",
+        quads,
         true,
     )
     .map_err(|e| anyhow::anyhow!("load: {e}"))?;
