@@ -17,12 +17,12 @@ pub fn is_due(cron: &str, t: DateTime<Utc>) -> bool {
     if fields.len() != 5 {
         return false;
     }
-    let minute = t.minute() as u32;
-    let hour = t.hour() as u32;
-    let dom = t.day() as u32;
-    let month = t.month() as u32;
+    let minute = t.minute();
+    let hour = t.hour();
+    let dom = t.day();
+    let month = t.month();
     // chrono: Mon=0..Sun=6 via num_days_from_monday; cron wants Sun=0..Sat=6.
-    let dow = (t.weekday().num_days_from_sunday()) as u32;
+    let dow = t.weekday().num_days_from_sunday();
 
     let min_ok = field_matches(fields[0], minute, 0, 59);
     let hour_ok = field_matches(fields[1], hour, 0, 23);
@@ -63,7 +63,7 @@ fn match_part(part: &str, value: u32, lo: u32, hi: u32) -> bool {
             _ => return false,
         };
         let (start, end) = range_bounds(base, lo, hi);
-        return value >= start && value <= end && (value - start) % step == 0;
+        return value >= start && value <= end && (value - start).is_multiple_of(step);
     }
     if part == "*" {
         return value >= lo && value <= hi;

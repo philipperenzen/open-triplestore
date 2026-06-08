@@ -10,11 +10,10 @@
 //!
 //! Everything is gated by env config and disabled by default, so existing
 //! password/PAT auth is unaffected until an IdP is wired up:
-//!   * `OIDC_ISSUER`         — issuer URL, e.g. `https://idp/realms/example` (enables this)
-//!   * `OIDC_AUDIENCE`       — expected `aud` (REQUIRED once `OIDC_ISSUER` is set;
-//!                              tokens are rejected until it is configured)
-//!   * `OIDC_DEFAULT_ROLE`   — role for newly provisioned users (default `user`)
-//!   * `ACCEPT_LEGACY_TOKENS`— keep accepting password-session JWTs + `ots_` PATs (default true)
+//! - `OIDC_ISSUER` — issuer URL, e.g. `https://idp/realms/example` (enables this)
+//! - `OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OIDC_ISSUER` is set; tokens are rejected until it is configured)
+//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`)
+//! - `ACCEPT_LEGACY_TOKENS` — keep accepting password-session JWTs + `ots_` PATs (default true)
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

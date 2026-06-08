@@ -482,29 +482,26 @@ impl<'a> QLQueryRewriter<'a> {
                FILTER(isIRI(?prop) && isIRI(?class)) \
              }}"
         );
-        match self.store.query(&q)? {
-            oxigraph::sparql::QueryResults::Solutions(sols) => {
-                for sol in sols.flatten() {
-                    let prop = sol.get("prop").and_then(|v| {
-                        if let oxigraph::model::Term::NamedNode(nn) = v {
-                            Some(nn.as_str().to_string())
-                        } else {
-                            None
-                        }
-                    });
-                    let cls = sol.get("class").and_then(|v| {
-                        if let oxigraph::model::Term::NamedNode(nn) = v {
-                            Some(nn.as_str().to_string())
-                        } else {
-                            None
-                        }
-                    });
-                    if let (Some(p), Some(c)) = (prop, cls) {
-                        tbox.existential_domain.entry(p).or_default().insert(c);
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.store.query(&q)? {
+            for sol in sols.flatten() {
+                let prop = sol.get("prop").and_then(|v| {
+                    if let oxigraph::model::Term::NamedNode(nn) = v {
+                        Some(nn.as_str().to_string())
+                    } else {
+                        None
                     }
+                });
+                let cls = sol.get("class").and_then(|v| {
+                    if let oxigraph::model::Term::NamedNode(nn) = v {
+                        Some(nn.as_str().to_string())
+                    } else {
+                        None
+                    }
+                });
+                if let (Some(p), Some(c)) = (prop, cls) {
+                    tbox.existential_domain.entry(p).or_default().insert(c);
                 }
             }
-            _ => {}
         }
 
         Ok(tbox)
@@ -515,31 +512,28 @@ impl<'a> QLQueryRewriter<'a> {
             "SELECT ?s ?o WHERE {{ ?s <{predicate}> ?o . FILTER(isIRI(?s) && isIRI(?o)) }}"
         );
         let mut pairs = Vec::new();
-        match self.store.query(&q)? {
-            oxigraph::sparql::QueryResults::Solutions(sols) => {
-                for sol in sols.flatten() {
-                    let s = sol.get("s").and_then(|v| {
-                        if let oxigraph::model::Term::NamedNode(nn) = v {
-                            Some(nn.as_str().to_string())
-                        } else {
-                            None
-                        }
-                    });
-                    let o = sol.get("o").and_then(|v| {
-                        if let oxigraph::model::Term::NamedNode(nn) = v {
-                            Some(nn.as_str().to_string())
-                        } else {
-                            None
-                        }
-                    });
-                    if let (Some(s), Some(o)) = (s, o) {
-                        if s != o {
-                            pairs.push((s, o));
-                        }
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.store.query(&q)? {
+            for sol in sols.flatten() {
+                let s = sol.get("s").and_then(|v| {
+                    if let oxigraph::model::Term::NamedNode(nn) = v {
+                        Some(nn.as_str().to_string())
+                    } else {
+                        None
+                    }
+                });
+                let o = sol.get("o").and_then(|v| {
+                    if let oxigraph::model::Term::NamedNode(nn) = v {
+                        Some(nn.as_str().to_string())
+                    } else {
+                        None
+                    }
+                });
+                if let (Some(s), Some(o)) = (s, o) {
+                    if s != o {
+                        pairs.push((s, o));
                     }
                 }
             }
-            _ => {}
         }
         Ok(pairs)
     }

@@ -82,6 +82,7 @@ pub struct NodeConstraint {
 
 /// RDF node kinds.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)] // IRI mirrors the SHACL/ShEx node-kind keyword
 pub enum NodeKind {
     IRI,
     BNode,
