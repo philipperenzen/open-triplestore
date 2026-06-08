@@ -226,8 +226,8 @@ impl ResultsTarget {
     }
 }
 
-/// A saved, named validation configuration: a data scope + composed shape graphs
-/// + options + triggers. Runnable manually, on-write, or on a schedule, and —
+/// A saved, named validation configuration: a data scope, composed shape graphs,
+/// options, and triggers. Runnable manually, on-write, or on a schedule, and —
 /// when `gate_writes` is set — able to reject non-conforming writes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationPipeline {

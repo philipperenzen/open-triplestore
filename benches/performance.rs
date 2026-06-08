@@ -1221,16 +1221,12 @@ fn bench_shacl_validate_clean(c: &mut Criterion) {
             .load_str(
                 &gen_shacl_persons_ttl(n, 0.0),
                 RdfFormat::Turtle,
-                Some(&format!("{data_graph}")),
+                Some(data_graph),
             )
             .unwrap();
         // Load shapes into a separate named graph
         store
-            .load_str(
-                &gen_shapes_ttl(),
-                RdfFormat::Turtle,
-                Some(&format!("{shapes_graph}")),
-            )
+            .load_str(&gen_shapes_ttl(), RdfFormat::Turtle, Some(shapes_graph))
             .unwrap();
 
         group.throughput(Throughput::Elements(n as u64));
@@ -1259,15 +1255,11 @@ fn bench_shacl_validate_violations(c: &mut Criterion) {
             .load_str(
                 &gen_shacl_persons_ttl(n, 0.2),
                 RdfFormat::Turtle,
-                Some(&format!("{data_graph}")),
+                Some(data_graph),
             )
             .unwrap();
         store
-            .load_str(
-                &gen_shapes_ttl(),
-                RdfFormat::Turtle,
-                Some(&format!("{shapes_graph}")),
-            )
+            .load_str(&gen_shapes_ttl(), RdfFormat::Turtle, Some(shapes_graph))
             .unwrap();
 
         group.throughput(Throughput::Elements(n as u64));

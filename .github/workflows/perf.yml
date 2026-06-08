@@ -1,7 +1,7 @@
 # Performance-regression GATE (authoritative).
 #
 # Runs a fast subset of the Criterion benchmark suite on every PR (and on pushes
-# to main/develop/release/**) and compares it against the committed baseline at
+# to main/release/**) and compares it against the committed baseline at
 # benches/perf_baseline.json via scripts/perf_regression.py. The script exits 0
 # (within tolerance), 1 (regression — fails the job), or 2 (baseline/usage
 # error). This is the canonical perf check; the baseline itself is refreshed only
@@ -28,8 +28,11 @@ on:
       - 'Cargo.lock'
       - 'scripts/perf_regression.py'
       - '.github/workflows/perf.yml'
+  # `develop` is intentionally NOT here: every change reaches it through a PR that
+  # already runs this gate, and the develop→main release PR runs it again — listing
+  # `develop` would fire a second, identical run on every push while that PR is open.
   push:
-    branches: [main, develop, 'release/**']
+    branches: [main, 'release/**']
     paths:
       - 'src/**'
       - 'opengraph/**'
@@ -38,6 +41,13 @@ on:
       - 'Cargo.lock'
       - 'scripts/perf_regression.py'
       - '.github/workflows/perf.yml'
+
+# Collapse superseded runs: a new push/PR-update on the same ref cancels the
+# in-flight one. push (refs/heads/*) and PR (refs/pull/*/merge) have distinct refs,
+# so a push never cancels a PR's required check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

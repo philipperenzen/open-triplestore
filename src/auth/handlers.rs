@@ -2259,7 +2259,7 @@ pub async fn update_org_member_role(
 
     let role = req["role"]
         .as_str()
-        .and_then(|r| Role::from_str(r))
+        .and_then(Role::from_str)
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
@@ -3599,21 +3599,41 @@ fn promote_dataset_to_registry(
     };
 
     // 1. Ensure the registry entry exists (kept private until the user opts in).
-    if !registry::data_model_exists(&state.store, &state.base_url, registry_id) {
-        registry::insert_data_model(
-            &state.store,
-            &state.base_url,
-            registry_id,
-            title,
-            "", // namespace unknown — user can edit later
-            dataset.description.as_deref(),
-            false,
-            Some(owner_type),
-            Some(dataset.owner_id.as_str()),
-            Some(&creator),
-            &now,
-        )?;
-        registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+    //    The registry id is derived from the dataset's free-form, non-unique name,
+    //    so a same-slug entry may already belong to another account. If one exists,
+    //    the caller must be allowed to WRITE it — the same `can_write_ontology` gate
+    //    every other registry write path enforces. Without this check a user with
+    //    write access to *their own* dataset could inject a published version into
+    //    a different owner's same-named model.
+    match registry::get_data_model(&state.store, &state.base_url, registry_id) {
+        Some(existing) => {
+            if !state.auth_db.can_write_ontology(
+                user_id,
+                existing.owner_type.as_deref(),
+                existing.owner_id.as_deref(),
+            )? {
+                anyhow::bail!(
+                    "registry entry '{registry_id}' already exists and is owned by \
+                     another account; refusing to promote dataset {dataset_id} into it"
+                );
+            }
+        }
+        None => {
+            registry::insert_data_model(
+                &state.store,
+                &state.base_url,
+                registry_id,
+                title,
+                "", // namespace unknown — user can edit later
+                dataset.description.as_deref(),
+                false,
+                Some(owner_type),
+                Some(dataset.owner_id.as_str()),
+                Some(&creator),
+                &now,
+            )?;
+            registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+        }
     }
 
     // 2. Ensure a published 1.0.0 version with the dataset's data exists — the

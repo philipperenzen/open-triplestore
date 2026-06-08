@@ -622,6 +622,7 @@ async fn openapi_core(
 
 /// The shared run path: load the query, check access, prepare (inject params +
 /// resolve version graphs), execute through the scoped streaming executor.
+#[allow(clippy::too_many_arguments)] // cohesive run inputs; a struct adds churn
 async fn run_core(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
