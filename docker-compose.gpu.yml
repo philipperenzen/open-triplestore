@@ -1,0 +1,17 @@
+# GPU override for the bundled LLM (Ollama) service.
+#
+# Use it together with the base compose file on an NVIDIA host:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llm up
+#
+# Requires the NVIDIA Container Toolkit (the `nvidia` Docker runtime). Without
+# this override the `ollama` service runs on CPU, which still works — just slower.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
