@@ -13,6 +13,7 @@
 //! provider or model. When no endpoint is reachable the UI hides the AI features.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::{
@@ -72,7 +73,7 @@ fn shacl_model() -> String {
 
 /// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
-fn api_key() -> Option<String> {
+pub(crate) fn api_key() -> Option<String> {
     env_nonempty("LLM_API_KEY")
 }
 
@@ -81,6 +82,23 @@ fn env_nonempty(key: &str) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Shared HTTP client for every call to the LLM gateway. Connection pooling +
+/// keep-alive means repeat calls (every chat round, health probe, feedback post)
+/// reuse an established TCP/TLS connection instead of paying a fresh handshake —
+/// for a TLS gateway that alone shaves ~100–300 ms off time-to-first-token, and a
+/// multi-round chat turn pays it once instead of per round.
+pub(crate) fn llm_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .expect("default reqwest client must build")
+    })
 }
 
 /// Send a single-turn chat completion to the gateway and return the assistant's
@@ -105,7 +123,7 @@ pub(crate) async fn chat_completion(
         "{}/v1/chat/completions",
         gateway_base().trim_end_matches('/')
     );
-    let mut rb = reqwest::Client::new().post(&url).json(&payload);
+    let mut rb = llm_client().post(&url).json(&payload);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -148,7 +166,7 @@ pub(crate) async fn chat_completion_messages(
         "{}/v1/chat/completions",
         gateway_base().trim_end_matches('/')
     );
-    let mut rb = reqwest::Client::new()
+    let mut rb = llm_client()
         .post(&url)
         .json(&payload)
         .timeout(Duration::from_secs(60));
@@ -180,6 +198,10 @@ pub fn llm_routes() -> Router<AppState> {
     Router::new()
         .route("/api/llm/sparql", post(nl_to_sparql))
         .route("/api/llm/chat", post(llm_chat))
+        .route(
+            "/api/llm/chat/stream",
+            post(super::llm_stream::llm_chat_stream),
+        )
         .route("/api/llm/feedback", post(forward_feedback))
         .route("/api/llm/health", get(llm_health))
         .route("/api/llm/shacl", post(shacl_assist))
@@ -313,7 +335,7 @@ pub struct LlmHealth {
 async fn llm_health(State(_state): State<AppState>) -> Json<LlmHealth> {
     let gateway = gateway_base();
     let base = gateway.trim_end_matches('/');
-    let client = reqwest::Client::new();
+    let client = llm_client();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
             .get(format!("{base}{path}"))
@@ -455,7 +477,7 @@ async fn forward_feedback(
     Json(signal): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
-    let mut rb = reqwest::Client::new().post(&url).json(&signal);
+    let mut rb = llm_client().post(&url).json(&signal);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -485,7 +507,7 @@ async fn forward_feedback(
 // before writing the final answer. Answers are markdown plus a small set of fenced
 // "widget" blocks (chart/map/card/api/csv) that the chat UI renders interactively.
 
-const CHAT_SYSTEM_PROMPT: &str = "You are Spark, the linked-data expert of the Open Triplestore platform, \
+pub(crate) const CHAT_SYSTEM_PROMPT: &str = "You are Spark, the linked-data expert of the Open Triplestore platform, \
 a knowledge-graph database. Help the user explore and understand linked data: which datasets exist and what \
 they cover, which API services can answer a question, what the graphs actually contain, and how RDF, SPARQL, \
 named graphs, vocabularies and SHACL work. Be precise with linked-data terminology, prefer labels over bare \
@@ -534,7 +556,7 @@ const MAX_CHAT_QUERY_ROWS: usize = 50;
 /// How many `SPARQL:` rounds the model may use within one user turn. Feeding rows
 /// (or the error, for self-repair) back after each round lets it e.g. count first
 /// and then fetch geometry for a map, while keeping latency and tokens bounded.
-const MAX_CHAT_QUERY_ROUNDS: usize = 3;
+pub(crate) const MAX_CHAT_QUERY_ROUNDS: usize = 3;
 /// Per-cell character budgets when rendering result rows into the follow-up prompt.
 /// WKT geometry cells get a larger budget so small geometries survive verbatim into
 /// a ```map widget; anything longer is truncated with '…' and the system prompt
@@ -543,7 +565,7 @@ const CHAT_CELL_MAX_CHARS: usize = 80;
 const CHAT_WKT_CELL_MAX_CHARS: usize = 600;
 /// Output-token budget per chat turn. Rich answers (markdown + widget JSON specs)
 /// need headroom; short answers still stop early.
-const CHAT_MAX_TOKENS: u32 = 3072;
+pub(crate) const CHAT_MAX_TOKENS: u32 = 3072;
 
 #[derive(Deserialize)]
 pub struct ChatMessage {
@@ -654,21 +676,7 @@ async fn llm_chat(
                     rows: Some(qr.rows),
                     truncated: qr.truncated,
                 });
-                if remaining > 0 {
-                    format!(
-                        "Query results:\n{table}\nIf you still need different data, reply with \
-                         `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
-                         write the final answer to my previous question in clear natural language, \
-                         using the presentation widgets (chart/map/card/api/csv/markdown table) \
-                         where they help."
-                    )
-                } else {
-                    format!(
-                        "Query results:\n{table}\nWrite the final answer to my previous question \
-                         in clear natural language, using the presentation widgets where they \
-                         help. Do not output another SPARQL: line."
-                    )
-                }
+                follow_up_after_rows(&table, remaining)
             }
             Err(e) => {
                 let emsg = e.message();
@@ -680,20 +688,7 @@ async fn llm_chat(
                     rows: None,
                     truncated: false,
                 });
-                if remaining > 0 {
-                    format!(
-                        "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
-                         query ({remaining} more allowed this turn), or answer without querying — \
-                         you may include the corrected query as a ```sparql block for the user to \
-                         run themselves."
-                    )
-                } else {
-                    format!(
-                        "That query failed to run: {emsg}\nAnswer my previous question as well as \
-                         you can without another query; include a corrected query as a ```sparql \
-                         block if useful. Do not output another SPARQL: line."
-                    )
-                }
+                follow_up_after_error(&emsg, remaining)
             }
         };
         msgs.push(json!({"role": "user", "content": follow_up}));
@@ -727,10 +722,50 @@ async fn llm_chat(
     }))
 }
 
+/// The follow-up user message after a successful query round: rows in, and either
+/// an invitation to keep querying or the instruction to write the final answer.
+/// Shared verbatim by the buffered and streaming chat loops.
+pub(crate) fn follow_up_after_rows(table: &str, remaining: usize) -> String {
+    if remaining > 0 {
+        format!(
+            "Query results:\n{table}\nIf you still need different data, reply with \
+             `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
+             write the final answer to my previous question in clear natural language, \
+             using the presentation widgets (chart/map/card/api/csv/markdown table) \
+             where they help."
+        )
+    } else {
+        format!(
+            "Query results:\n{table}\nWrite the final answer to my previous question \
+             in clear natural language, using the presentation widgets where they \
+             help. Do not output another SPARQL: line."
+        )
+    }
+}
+
+/// The follow-up user message after a failed query round: the error for
+/// self-repair, bounded by how many rounds remain.
+pub(crate) fn follow_up_after_error(emsg: &str, remaining: usize) -> String {
+    if remaining > 0 {
+        format!(
+            "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
+             query ({remaining} more allowed this turn), or answer without querying — \
+             you may include the corrected query as a ```sparql block for the user to \
+             run themselves."
+        )
+    } else {
+        format!(
+            "That query failed to run: {emsg}\nAnswer my previous question as well as \
+             you can without another query; include a corrected query as a ```sparql \
+             block if useful. Do not output another SPARQL: line."
+        )
+    }
+}
+
 /// Last-resort answer when the model keeps demanding more queries than allowed (or
 /// the gateway dies mid-turn): surface what we did retrieve instead of leaking a
 /// raw `SPARQL:` directive to the user.
-fn fallback_answer(runs: &[ChatQueryRun]) -> String {
+pub(crate) fn fallback_answer(runs: &[ChatQueryRun]) -> String {
     if let Some(ok) = runs.iter().rev().find(|r| r.ok) {
         let mut s = String::from("Here is what the query returned:\n\n");
         if let (Some(cols), Some(rows)) = (&ok.columns, &ok.rows) {
@@ -768,7 +803,7 @@ fn fallback_answer(runs: &[ChatQueryRun]) -> String {
 /// The named graphs `user` may read — the same scope the normal SPARQL endpoint
 /// applies. Mirrors `execute_query`: accessible-dataset graphs, plus named-graph
 /// ACL grants, plus (for admins) every registered graph.
-fn chat_accessible_graphs(
+pub(crate) fn chat_accessible_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
 ) -> Result<HashSet<String>, AppError> {
@@ -804,7 +839,7 @@ fn chat_accessible_graphs(
 /// Serialise the platform state visible to `user_id` into the prompt: accessible
 /// datasets (name, visibility, description, DCAT topics), the API services runnable
 /// against them, and the named graphs in scope.
-fn build_platform_context(
+pub(crate) fn build_platform_context(
     state: &AppState,
     user_id: Option<&str>,
     graphs: &HashSet<String>,
@@ -899,16 +934,16 @@ fn build_platform_context(
 }
 
 /// Tabular result of a chat-issued query.
-struct ChatQueryResult {
-    columns: Vec<String>,
-    rows: Vec<Vec<String>>,
-    truncated: bool,
+pub(crate) struct ChatQueryResult {
+    pub(crate) columns: Vec<String>,
+    pub(crate) rows: Vec<Vec<String>>,
+    pub(crate) truncated: bool,
 }
 
 /// Run a model-generated query under the caller's read scope and collect a capped
 /// table. The query is re-scoped with [`scope_query_to_authorized`] (the read
 /// boundary) exactly like a user-typed query, so it cannot read outside `graphs`.
-async fn run_chat_query(
+pub(crate) async fn run_chat_query(
     state: &AppState,
     query: &str,
     graphs: &HashSet<String>,
@@ -998,7 +1033,7 @@ fn term_to_short(term: &Term) -> String {
 }
 
 /// Render a query result as a compact pipe-delimited table for the follow-up prompt.
-fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
+pub(crate) fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     let mut s = String::new();
     s.push_str(&qr.columns.join(" | "));
     s.push('\n');
@@ -1053,7 +1088,7 @@ fn looks_like_wkt(s: &str) -> bool {
 /// If the model asked to run a query, return the query text. We look for a
 /// `SPARQL:` marker (case-insensitive, byte-safe), strip any code fence, and only
 /// accept it when it actually contains a query form — otherwise the reply is prose.
-fn extract_sparql_directive(reply: &str) -> Option<String> {
+pub(crate) fn extract_sparql_directive(reply: &str) -> Option<String> {
     let pos = find_ci(reply, "SPARQL:")?;
     let after = reply[pos + "SPARQL:".len()..].trim();
     let query = strip_code_fence(after);
@@ -1065,7 +1100,7 @@ fn extract_sparql_directive(reply: &str) -> Option<String> {
 
 /// Case-insensitive (ASCII) byte-index search — safe for slicing `haystack`,
 /// unlike `to_uppercase().find()` which can shift indices for some Unicode.
-fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+pub(crate) fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (hb, nb) = (haystack.as_bytes(), needle.as_bytes());
     if nb.is_empty() || hb.len() < nb.len() {
         return None;

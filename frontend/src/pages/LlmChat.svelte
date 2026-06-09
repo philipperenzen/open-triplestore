@@ -1,25 +1,30 @@
 <script>
   import { onMount, tick } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { llmChat, llmHealth, sendLlmFeedback } from '../lib/api.js';
+  import { llmChat, llmChatStream, llmHealth, sendLlmFeedback } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { isAuthenticated } from '../lib/stores.js';
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
   import {
-    Sparkles, Send, ThumbsUp, ThumbsDown, Loader2,
+    Sparkles, Send, Square, ThumbsUp, ThumbsDown, Loader2,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
   // backend ran, ok or failed) plus any API runs the user clicked open.
-  let messages = []; // { role, content, queries?: [{sparql, ok, error?, columns?, rows?, truncated}], ranQuery?, showQuery?, reviewed?, isError?, runs?: [{id, method, path}] }
+  // While a turn streams it also has: streaming (bool), phase
+  // ('thinking'|'answering'|'querying'), and queries may hold {pending: true}
+  // entries for rounds whose result hasn't arrived yet.
+  let messages = []; // { role, content, queries?: [{sparql, ok, error?, columns?, rows?, truncated, pending?}], ranQuery?, showQuery?, reviewed?, isError?, note?, runs?: [{id, method, path}] }
   let input = '';
   let loading = false;
   let llmStatus = null;
   let scrollEl;
   let runSeq = 0;
+  let aborter = null;
+  let scrollQueued = false;
 
   $: EXAMPLES = [
     $t('pages.llmChat.example1'),
@@ -40,6 +45,19 @@
     if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 
+  // Token-rate scroll following: only when the user is already near the bottom
+  // (don't fight a manual scroll-up), at most once per frame.
+  function followStream() {
+    if (scrollQueued || !scrollEl) return;
+    const near = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 120;
+    if (!near) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    });
+  }
+
   async function send(text) {
     const content = (text ?? input).trim();
     if (!content || loading) return;
@@ -49,27 +67,87 @@
     await scrollToBottom();
 
     const wire = messages.map((m) => ({ role: m.role, content: m.content }));
+    // The assistant turn appears immediately and fills in as events stream.
+    const msg = {
+      role: 'assistant', content: '', streaming: true, phase: 'thinking',
+      queries: [], ranQuery: false, showQuery: false, reviewed: null, note: null, runs: [],
+    };
+    messages = [...messages, msg];
+    aborter = new AbortController();
+    const touch = () => { messages = messages; followStream(); };
     try {
-      const resp = await llmChat(wire);
-      messages = [...messages, {
-        role: 'assistant',
-        content: resp.answer || $t('pages.llmChat.noAnswer'),
-        queries: normalizeQueries(resp),
-        ranQuery: !!resp.ran_query,
-        showQuery: false,
-        reviewed: null,
-        runs: [],
-      }];
+      const resp = await llmChatStream(wire, {
+        signal: aborter.signal,
+        onDelta: (chunk) => { msg.content += chunk; msg.phase = 'answering'; touch(); },
+        // The streamed text turned out to be a retrieval directive — drop it.
+        onRoundDiscard: () => { msg.content = ''; msg.phase = 'thinking'; touch(); },
+        onQuery: (q) => {
+          msg.phase = 'querying';
+          msg.queries = [...msg.queries, { sparql: q?.sparql || '', ok: null, pending: true }];
+          touch();
+        },
+        onQueryResult: (run) => {
+          const i = msg.queries.findIndex((r) => r.pending);
+          if (i !== -1) msg.queries[i] = { ...run, pending: false };
+          else msg.queries = [...msg.queries, { ...run, pending: false }];
+          msg.phase = 'thinking';
+          touch();
+        },
+      });
+      finalizeTurn(msg, resp);
     } catch (e) {
-      messages = [...messages, {
-        role: 'assistant',
-        isError: true,
-        content: e?.message || $t('pages.llmChat.unavailable'),
-      }];
+      if (e?.code === 'NO_STREAM') {
+        // Older server without the streaming endpoint — buffered call instead.
+        try {
+          finalizeTurn(msg, await llmChat(wire));
+        } catch (e2) {
+          failTurn(msg, e2);
+        }
+      } else if (e?.name === 'AbortError') {
+        if (msg.content) {
+          msg.streaming = false; msg.phase = null;
+          msg.note = $t('pages.llmChat.stopped');
+          messages = messages;
+        } else {
+          messages = messages.filter((m) => m !== msg);
+        }
+      } else {
+        failTurn(msg, e);
+      }
     } finally {
       loading = false;
+      aborter = null;
       await scrollToBottom();
     }
+  }
+
+  // Reconcile the turn to the server's authoritative response (same shape for
+  // the streamed `done` payload and the buffered endpoint).
+  function finalizeTurn(msg, resp) {
+    msg.content = resp.answer || $t('pages.llmChat.noAnswer');
+    msg.queries = normalizeQueries(resp);
+    msg.ranQuery = !!resp.ran_query;
+    msg.streaming = false;
+    msg.phase = null;
+    messages = messages;
+  }
+
+  // A turn that died mid-stream keeps its partial answer (with a note); one that
+  // produced nothing becomes an error bubble.
+  function failTurn(msg, e) {
+    msg.streaming = false;
+    msg.phase = null;
+    if (msg.content) {
+      msg.note = $t('pages.llmChat.interrupted');
+    } else {
+      msg.isError = true;
+      msg.content = e?.message || $t('pages.llmChat.unavailable');
+    }
+    messages = messages;
+  }
+
+  function stopStreaming() {
+    aborter?.abort();
   }
 
   function onKeydown(e) {
@@ -190,13 +268,21 @@
           {#if msg.role === 'assistant' && !msg.isError}
             <!-- Interactive answer: markdown plus runnable sparql/api blocks and
                  chart/map/card/csv widgets (sanitized in ChatRichMessage). -->
-            <div class="bubble-text">
+            <div class="bubble-text" class:streaming-text={msg.streaming && msg.phase === 'answering'}>
               <ChatRichMessage
                 content={msg.content}
+                streaming={!!msg.streaming}
                 on:runApi={(e) => attachRun(msg, e.detail)}
                 on:openInSparql={(e) => openInSparql(e.detail)}
               />
             </div>
+            {#if msg.streaming && msg.phase !== 'answering'}
+              <div class="stream-status">
+                <Loader2 size={13} class="spin" />
+                {msg.phase === 'querying' ? $t('pages.llmChat.runningQuery') : $t('pages.llmChat.thinking')}
+              </div>
+            {/if}
+            {#if msg.note}<p class="stream-note">{msg.note}</p>{/if}
           {:else}
             <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -218,8 +304,10 @@
                 <Terminal size={13} />
                 {#if msg.queries.length > 1}
                   {$t('pages.llmChat.ranQueries', { values: { count: msg.queries.length } })}
+                {:else if msg.queries[0].pending}
+                  {$t('pages.llmChat.runningQuery')}
                 {:else}
-                  {msg.ranQuery ? $t('pages.llmChat.ranQuery') : $t('pages.llmChat.attemptedQuery')}
+                  {(msg.streaming ? msg.queries[0].ok : msg.ranQuery) ? $t('pages.llmChat.ranQuery') : $t('pages.llmChat.attemptedQuery')}
                 {/if}
                 {#if msg.queries.length === 1 && msg.queries[0].rows}
                   <span class="row-count">· {msg.queries[0].rows.length}{msg.queries[0].truncated ? '+' : ''} {msg.queries[0].rows.length === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}</span>
@@ -237,6 +325,9 @@
                     <!-- highlightSparql escapes all source text (resultHighlight.js) -->
                     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                     <pre class="query-text"><code>{@html highlightSparql(q.sparql)}</code></pre>
+                    {#if q.pending}
+                      <p class="query-pending"><Loader2 size={12} class="spin" /> {$t('pages.llmChat.runningQuery')}</p>
+                    {/if}
                     {#if q.error}<p class="query-error">{q.error}</p>{/if}
                     <button class="open-sparql" on:click={() => openInSparql(q.sparql)}>
                       <Terminal size={12} /> {$t('pages.llmChat.openInSparql')}
@@ -262,7 +353,7 @@
             </div>
           {/if}
 
-          {#if msg.role === 'assistant' && !msg.isError}
+          {#if msg.role === 'assistant' && !msg.isError && !msg.streaming}
             <div class="feedback">
               <span class="feedback-label">{$t('pages.llmChat.helpful')}</span>
               <button class="thumb" class:up={msg.reviewed === 'up'} on:click={() => review(msg, i, 'up')} aria-label={$t('pages.llmChat.helpfulYes')}><ThumbsUp size={13} /></button>
@@ -273,13 +364,6 @@
       </div>
     {/each}
 
-    {#if loading}
-      <div class="row assistant">
-        <div class="bubble assistant thinking">
-          <Loader2 size={15} class="spin" /> {$t('pages.llmChat.thinking')}
-        </div>
-      </div>
-    {/if}
   </div>
 
   <form class="composer" on:submit|preventDefault={() => send()}>
@@ -291,9 +375,15 @@
       placeholder={offline ? $t('pages.llmChat.composerOffline') : $t('pages.llmChat.composerPlaceholder')}
       disabled={offline || loading}
     ></textarea>
-    <button class="send-btn" type="submit" disabled={offline || loading || !input.trim()} aria-label={$t('pages.llmChat.send')}>
-      {#if loading}<Loader2 size={16} class="spin" />{:else}<Send size={16} />{/if}
-    </button>
+    {#if loading}
+      <button class="send-btn stop" type="button" on:click={stopStreaming} aria-label={$t('pages.llmChat.stop')} title={$t('pages.llmChat.stop')}>
+        <Square size={14} />
+      </button>
+    {:else}
+      <button class="send-btn" type="submit" disabled={offline || !input.trim()} aria-label={$t('pages.llmChat.send')}>
+        <Send size={16} />
+      </button>
+    {/if}
   </form>
   <p class="disclaimer"><Database size={11} /> {$t('pages.llmChat.disclaimer')}</p>
 </div>
@@ -374,7 +464,23 @@
   .bubble.user { background: linear-gradient(135deg, #6d4ad9, #4f46e5); color: #fff; border-bottom-right-radius: 4px; }
   .bubble.assistant { background: var(--bg-strong); border: 1px solid var(--line-soft); color: var(--ink-800); border-bottom-left-radius: 4px; }
   .bubble.error { background: #fff8f8; border-color: #f3c9c9; color: #b91c1c; }
-  .bubble.thinking { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--ink-500); font-style: italic; }
+
+  /* Streaming feedback: a status row while the model thinks/queries, a blinking
+     caret at the end of the text while tokens arrive, a note for stopped turns. */
+  .stream-status {
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    color: var(--ink-500); font-style: italic; font-size: 0.85rem; margin-top: 0.15rem;
+  }
+  .streaming-text :global(.md-seg:last-child > *:last-child)::after {
+    content: '▍'; margin-left: 1px; color: #6d4ad9;
+    animation: caret-blink 1s steps(2, start) infinite;
+  }
+  @keyframes caret-blink { to { visibility: hidden; } }
+  .stream-note { margin: 0.45rem 0 0; font-size: 0.74rem; font-style: italic; color: var(--ink-400); }
+  .query-pending {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    margin: 0.35rem 0; font-size: 0.76rem; color: var(--ink-500); font-style: italic;
+  }
 
   /* Markdown-rendered assistant text. Tight vertical rhythm so blocks sit snugly in
      the bubble; `breaks:true` turns single newlines into <br>, so no pre-wrap. */
@@ -501,6 +607,12 @@
     opacity: 0.4; cursor: not-allowed; box-shadow: none;
     background: linear-gradient(135deg, #b8b2d6, #a5a3c4);
   }
+  /* While a reply streams the send button becomes a stop button. */
+  .send-btn.stop {
+    background: linear-gradient(135deg, #475569, #334155);
+    box-shadow: 0 2px 6px rgba(51,65,85,0.35), inset 0 1px 0 rgba(255,255,255,0.12);
+  }
+  .send-btn.stop:hover { filter: brightness(1.15); }
 
   .disclaimer {
     display: flex; align-items: center; gap: 0.35rem; justify-content: center;
