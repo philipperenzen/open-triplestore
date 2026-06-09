@@ -4,8 +4,10 @@
 #
 # Source: Wikidata (CC0), retrieved 2026-06-09 via the public SPARQL endpoint:
 # entities with both a coordinate location (P625) and a 3D model file (P4896).
-# The 3D models are STL files on Wikimedia Commons (Special:FilePath resolves to
-# the raw file with permissive CORS, so browsers can load them directly).
+# The 3D models are STL files on Wikimedia Commons. fog:asStl carries the direct
+# upload.wikimedia.org URL (CORS-enabled; resolved once from the P4896
+# Special:FilePath value, whose wiki host sends no CORS headers on the redirect
+# and is therefore not browser-fetchable cross-origin).
 # Modelled with the same standards layering as the Waalbrug example:
 # GeoSPARQL geometry (CRS84 lon/lat, exactly as Wikidata returns P625),
 # OMG/FOG file references, BOT containment from a demo collection root,
@@ -35,7 +37,7 @@ lm:DragonBridge a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(108.22666667 16.06111111)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "http://commons.wikimedia.org/wiki/Special:FilePath/Dragon%20Bridge%20in%20Da%20Nang.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/22/Dragon_Bridge_in_Da_Nang.stl"^^xsd:anyURI ] .
 
 # ── Big Ben (Elizabeth Tower), London ──
 lm:BigBen a bot:Element ;
@@ -44,7 +46,7 @@ lm:BigBen a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(-0.12457 51.50067)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "http://commons.wikimedia.org/wiki/Special:FilePath/Big%20Ben.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl"^^xsd:anyURI ] .
 
 # ── White House, Washington D.C. ──
 lm:WhiteHouse a bot:Element ;
@@ -53,7 +55,7 @@ lm:WhiteHouse a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(-77.036666666 38.897777777)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "http://commons.wikimedia.org/wiki/Special:FilePath/White%20House.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl"^^xsd:anyURI ] .
 
 # ── Empire State Building, New York ──
 lm:EmpireStateBuilding a bot:Element ;
@@ -62,7 +64,7 @@ lm:EmpireStateBuilding a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(-73.985555555 40.748333333)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "http://commons.wikimedia.org/wiki/Special:FilePath/Empire%20State%20Building%20%28simplified%29.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl"^^xsd:anyURI ] .
 
 # ── Sannō Shrine one-legged torii, Nagasaki ──
 lm:SannoShrine a bot:Element ;
@@ -71,4 +73,4 @@ lm:SannoShrine a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(129.86861111 32.7675)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "http://commons.wikimedia.org/wiki/Special:FilePath/Nagasaki%20torii%20shrine.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/1/1d/Nagasaki_torii_shrine.stl"^^xsd:anyURI ] .

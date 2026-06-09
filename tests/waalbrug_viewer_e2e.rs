@@ -233,7 +233,7 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     let files = bridge["files"].as_array().expect("files");
     assert!(
         files.iter().any(|f| f[0].as_str() == Some("Stl")
-            && f[1].as_str().unwrap_or("").contains("Dragon%20Bridge")),
+            && f[1].as_str().unwrap_or("").contains("Dragon_Bridge")),
         "Commons STL reference present: {files:?}"
     );
 }
