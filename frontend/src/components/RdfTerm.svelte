@@ -5,6 +5,7 @@
   import { isDark } from '../lib/theme.js';
   import { langToFlag } from '../lib/i18n/langFlag.js';
   import { Check, Copy } from 'lucide-svelte';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -130,13 +131,13 @@
     }
   }
 
-  function copyValue(e) {
+  async function copyValue(e) {
     e.stopPropagation();
     const val = typeof term?.value === 'string' ? term.value : (display || '');
-    navigator.clipboard.writeText(val).then(() => {
+    if (await copyToClipboard(val)) {
       copied = true;
       setTimeout(() => (copied = false), 1500);
-    }).catch(() => {});
+    }
   }
 
   $: display = (() => {

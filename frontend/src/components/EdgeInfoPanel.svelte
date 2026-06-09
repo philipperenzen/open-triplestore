@@ -20,6 +20,7 @@
   import { NAMESPACES, VOCAB, kindOf } from '../lib/ontology/vocabularies.js';
   import { prefixForNamespace } from '../lib/ontology/prefixService.js';
   import { t } from 'svelte-i18n';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   /**
    * @typedef {Object} EdgeModel
@@ -35,12 +36,11 @@
   const dispatch = createEventDispatcher();
 
   let copied = false;
-  function copy(s) {
-    try {
-      navigator.clipboard?.writeText(String(s ?? ''));
+  async function copy(s) {
+    if (await copyToClipboard(s)) {
       copied = true;
       setTimeout(() => (copied = false), 1200);
-    } catch { /* clipboard unavailable */ }
+    }
   }
 
   // Split an IRI into (namespace, local) at the last # or / — same rule the

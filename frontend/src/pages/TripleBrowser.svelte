@@ -18,6 +18,7 @@
   import { slide } from 'svelte/transition';
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
   import { navigate } from '../lib/router/index.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
   import Combobox from '../components/Combobox.svelte';
@@ -405,7 +406,7 @@
       else if (action === 'expandBoth')  browseExpandUri(data.fullIri, 'both');
       else if (action === 'expandBnode') browseExpandBnode(data.id);
       else if (action === 'collapse')    browseCollapseUri(data.fullIri || data.id);
-      else if (action === 'copyIri')     navigator.clipboard.writeText(data.fullIri).catch(() => {});
+      else if (action === 'copyIri')     void copyToClipboard(data.fullIri);
       else if (action === 'remove')      graphCanvas?.removeNode(data.id);
     }
   }
@@ -1175,7 +1176,7 @@
     lines.push(`} LIMIT ${pageSize}`);
     return lines.join('\n');
   })();
-  function copySparql() { navigator.clipboard.writeText(sparqlPreview).catch(() => {}); }
+  function copySparql() { void copyToClipboard(sparqlPreview); }
   function openInSparqlEditor() { navigate(`/sparql?query=${encodeURIComponent(sparqlPreview)}`); }
 
   // Monotonic request tokens: facet clicks / chip edits can fire overlapping
@@ -1614,7 +1615,7 @@
             <div class="sparql-preview-head">
               <span>{$i18nT('pages.tripleBrowser.generatedFromQuestion')}</span>
               <div class="sparql-preview-actions">
-                <button class="btn btn-sm btn-ghost" on:click={() => navigator.clipboard.writeText(llmSparql).catch(() => {})}><Copy size={12}/> {$i18nT('system.copy')}</button>
+                <button class="btn btn-sm btn-ghost" on:click={() => copyToClipboard(llmSparql)}><Copy size={12}/> {$i18nT('system.copy')}</button>
                 <button class="btn btn-sm" on:click={() => navigate(`/sparql?query=${encodeURIComponent(llmSparql)}`)}><ExternalLink size={12}/> {$i18nT('pages.tripleBrowser.openInEditor')}</button>
               </div>
             </div>

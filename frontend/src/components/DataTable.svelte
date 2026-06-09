@@ -10,6 +10,7 @@
   import TermPopover from './ontology/TermPopover.svelte';
   import { Copy } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -79,9 +80,7 @@
   function copyTriple(tr) {
     const line = toNTriples([tr]);
     dispatch('copy', { triple: tr, text: line });
-    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      navigator.clipboard.writeText(line).catch(() => {});
-    }
+    void copyToClipboard(line);
   }
 
   $: isEmpty = mode === 'triples'
