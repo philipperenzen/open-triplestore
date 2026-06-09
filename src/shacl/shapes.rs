@@ -53,24 +53,35 @@ pub enum PropertyPath {
 }
 
 impl PropertyPath {
-    /// Convert to a SPARQL property path expression.
+    /// Convert to a SPARQL property path expression. Composite sub-paths are
+    /// parenthesised so operator precedence is preserved — e.g. a sequence over an
+    /// alternative renders as `<a>/(<b>|<c>)`, not the mis-parsed `<a>/<b>|<c>`.
     pub fn to_sparql(&self) -> String {
         match self {
             PropertyPath::Predicate(iri) => format!("<{}>", iri),
-            PropertyPath::Inverse(inner) => format!("^({})", inner.to_sparql()),
+            PropertyPath::Inverse(inner) => format!("^{}", inner.to_sparql_atom()),
             PropertyPath::Sequence(paths) => paths
                 .iter()
-                .map(|p| p.to_sparql())
+                .map(|p| p.to_sparql_atom())
                 .collect::<Vec<_>>()
                 .join("/"),
             PropertyPath::Alternative(paths) => paths
                 .iter()
-                .map(|p| p.to_sparql())
+                .map(|p| p.to_sparql_atom())
                 .collect::<Vec<_>>()
                 .join("|"),
-            PropertyPath::ZeroOrMore(inner) => format!("({})*", inner.to_sparql()),
-            PropertyPath::OneOrMore(inner) => format!("({})+", inner.to_sparql()),
-            PropertyPath::ZeroOrOne(inner) => format!("({})?", inner.to_sparql()),
+            PropertyPath::ZeroOrMore(inner) => format!("{}*", inner.to_sparql_atom()),
+            PropertyPath::OneOrMore(inner) => format!("{}+", inner.to_sparql_atom()),
+            PropertyPath::ZeroOrOne(inner) => format!("{}?", inner.to_sparql_atom()),
+        }
+    }
+
+    /// SPARQL rendering of this path when used as a sub-path of another: a bare
+    /// predicate stays atomic; anything composite is wrapped in parentheses.
+    fn to_sparql_atom(&self) -> String {
+        match self {
+            PropertyPath::Predicate(iri) => format!("<{}>", iri),
+            other => format!("({})", other.to_sparql()),
         }
     }
 }
@@ -119,7 +130,10 @@ pub enum Constraint {
     // Shape-based constraints
     Node(String), // Reference to another shape by IRI
     QualifiedValueShape {
-        shape_iri: String,
+        // The value shape is stored inline (loaded at parse time) so that the standard
+        // SHACL idiom `sh:qualifiedValueShape [ … ]` — an inline blank node that is not a
+        // top-level shape — is enforced, mirroring how sh:not/and/or carry inline shapes.
+        shape: Box<Shape>,
         min_count: Option<usize>,
         max_count: Option<usize>,
     },
