@@ -142,8 +142,16 @@ services:
     container_name: triplestore-ollama
     profiles: ["llm"]
     ports:
-      # Loopback only — reached by the triplestore over the compose network.
-      - "${OLLAMA_BIND:-127.0.0.1}:11434:11434"
+      # Defaults to loopback. Follows the triplestore's bind (TRIPLESTORE_BIND) unless
+      # OLLAMA_BIND is set explicitly, so exposing the store on all interfaces also
+      # publishes the LLM on its default port 11434. Override OLLAMA_BIND to decouple.
+      - "${OLLAMA_BIND:-${TRIPLESTORE_BIND:-127.0.0.1}}:11434:11434"
+    environment:
+      # Listen on all interfaces inside the container (also the official image default).
+      - OLLAMA_HOST=0.0.0.0:11434
+      # Browser CORS allowlist for direct ollama calls. Follows the triplestore's
+      # CORS_ORIGINS unless OLLAMA_ORIGINS is set explicitly; "*" reflects any origin.
+      - OLLAMA_ORIGINS=${OLLAMA_ORIGINS:-${CORS_ORIGINS:-}}
     volumes:
       - ollama_models:/root/.ollama
     restart: unless-stopped

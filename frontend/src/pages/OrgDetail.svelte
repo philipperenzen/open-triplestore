@@ -1063,6 +1063,11 @@
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+    /* Cap the page on very wide screens so cards (About grid, members,
+       datasets) don't stretch edge-to-edge and spread content thinly.
+       Left-aligned to line up with the full-width topbar. */
+    width: 100%;
+    max-width: 1500px;
   }
 
   .breadcrumb {
