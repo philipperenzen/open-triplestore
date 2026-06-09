@@ -14,7 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- None.
+- SHACL-SPARQL **prefixes mechanism** (`sh:prefixes` → `sh:declare`/`sh:prefix`/
+  `sh:namespace`): a `PREFIX` prologue is now prepended to every `sh:select`,
+  `sh:construct` and SPARQL-target body, so constraints/rules/targets that use prefixed
+  names (`da:`, `geo:`, `geof:` …) parse instead of being silently skipped.
+- Per-constraint `sh:severity` on a `sh:SPARQLConstraint` node (e.g. `sh:Warning`) now
+  overrides the shape-level severity for that constraint's results.
+- Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
+  oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
+  SHACL (Core/SPARQL/AF) pass/fail matrix.
 
 ### Changed
 - None.
@@ -23,7 +31,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
-- None.
+- SHACL-SPARQL constraints, rules and custom targets that referenced prefixed names were
+  silently skipped (the query failed to parse and the result was swallowed), so the
+  corresponding violations/inferences never appeared. They now resolve via the declared
+  `sh:prefixes`.
 
 ### Security
 - None.

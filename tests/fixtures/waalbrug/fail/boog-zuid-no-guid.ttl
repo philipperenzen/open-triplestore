@@ -1,0 +1,10 @@
+# ❌ §5.5 — component with IFC geometry but no da:ifcGuid (ex:IfcRefShape, SPARQL/ASK).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix omg: <https://w3id.org/omg#> .
+@prefix fog: <https://w3id.org/fog#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+wb:Boog-Zuid a da:Brugonderdeel ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asIfc_v4.0 "https://data.example.nl/files/zuid.ifc#7zZ"^^xsd:anyURI ] .
+    # no da:ifcGuid -> ASK constraint fires
