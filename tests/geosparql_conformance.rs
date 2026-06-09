@@ -1862,10 +1862,10 @@ fn geos_cx_relate_de9im() {
     );
 }
 
-// Tracked feature gaps: geof:metricDistance / metricArea need a geodesic library,
-// geof:transform needs CRS reprojection (PROJ), and geof:aggUnion needs SPARQL
-// aggregate support. Calling them yields an unbound result. These flip when the
-// corresponding capability is added.
+// Tracked feature gaps: geof:metricDistance / metricArea need a geodesic library and
+// geof:aggUnion needs SPARQL aggregate support. Calling them yields an unbound result.
+// These flip when the corresponding capability is added. (geof:transform is now
+// supported — see geos_cx_transform_rd_to_wgs84 below.)
 #[test]
 fn geos_cx_geosparql11_function_gaps() {
     let s = ts();
@@ -1875,7 +1875,6 @@ fn geos_cx_geosparql11_function_gaps() {
     let gaps = [
         format!("geof:metricDistance({p}, {q})"),
         format!("geof:metricArea({poly})"),
-        format!("geof:transform({p}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
     ];
     for g in gaps {
         let r = geof_opt(&s, &g);
@@ -1885,6 +1884,35 @@ fn geos_cx_geosparql11_function_gaps() {
             r
         );
     }
+}
+
+// geof:transform reprojects between EPSG:28992 / 4326 / 3857. The Waalbrug tracé point
+// in RD New transforms to a plausible WGS84 lon/lat near Nijmegen (~5.86, ~51.85).
+#[test]
+fn geos_cx_transform_rd_to_wgs84() {
+    let s = ts();
+    let rd =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)\"^^geo:wktLiteral";
+    let out = geof_opt(
+        &s,
+        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
+    )
+    .unwrap_or_default();
+    assert!(out.contains("POINT"), "expected a WKT point, got {:?}", out);
+    // Extract the two coordinates and check they land near Nijmegen.
+    let inner = out
+        .split_once("POINT(")
+        .and_then(|(_, r)| r.split_once(')'))
+        .map(|(c, _)| c.to_string())
+        .unwrap_or_default();
+    let nums: Vec<f64> = inner
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .collect();
+    assert_eq!(nums.len(), 2, "two coords, got {:?}", inner);
+    let (lon, lat) = (nums[0], nums[1]);
+    assert!((lon - 5.86).abs() < 0.1, "lon {lon}");
+    assert!((lat - 51.85).abs() < 0.1, "lat {lat}");
 }
 
 // geos-11: geo:geoJSONLiteral is not parsed by the geof functions (WKT-only). Gap.
