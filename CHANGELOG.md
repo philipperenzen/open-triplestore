@@ -17,6 +17,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Changed
+- None.
+
+### Deprecated
+- None.
+
+### Fixed
+- None.
+
+### Security
+- None.
+
+## [0.2.4] — 2026-06-09
+
+### Added
+- None.
+
+### Changed
 - `CORS_ORIGINS=*` now enables permissive **mirror mode**: the server reflects the request's `Origin` (and its requested headers) with credentials, so a browser client served from any origin — e.g. the OTL viewer on `http://localhost:5190` — can connect cross-origin. Previously `*` was refused and the server silently fell back to same-origin only. An empty `CORS_ORIGINS` (the default) and explicit origin lists are unchanged.
 
 ### Deprecated
@@ -126,7 +143,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.0...v0.2.1
