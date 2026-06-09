@@ -4398,7 +4398,11 @@ mod visibility_leaks {
             )
             .await
             .unwrap();
-        assert!(resp.status().is_success(), "publish failed: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "publish failed: {}",
+            resp.status()
+        );
 
         let resp = test_app(state)
             .oneshot(
