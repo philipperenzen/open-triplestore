@@ -1,0 +1,11 @@
+# ❌ §4.3 — a bridge with no da:Boog fails sh:qualifiedMinCount on ex:BrugStructuurShape.
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix bot: <https://w3id.org/bot#> .
+wb:DuikerAlsBrug a da:Brug ;
+    bot:containsElement wb:Rijdek , wb:Landhoofd-Noord ;   # no da:Boog
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187320 428330)"^^geo:wktLiteral ] .
+wb:Rijdek a da:Rijdek .
+wb:Landhoofd-Noord a da:Landhoofd .

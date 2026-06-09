@@ -305,24 +305,21 @@ fn load_targets(
         targets.push(Target::TargetClass(shape_iri.to_string()));
     }
 
-    // SHACL-AF: SPARQL targets
-    let sparql_targets = execute_select_single(
-        store,
-        &format!(
-            r#"
-            PREFIX sh: <{SH}>
-            SELECT ?select WHERE {{
-                GRAPH <{shapes_graph}> {{
-                    <{shape_iri}> sh:target ?t .
-                    ?t sh:select ?select .
-                }}
-            }}
-            "#,
-        ),
-        "select",
-    )?;
-    for s in sparql_targets {
-        targets.push(Target::SparqlTarget(s));
+    // SHACL-AF: SPARQL targets. Resolve the target node through the raw quad index
+    // (it may be named, e.g. ex:BruggenOverWater, or an inline blank node) so its
+    // sh:select and sh:prefixes are both reachable. The previous SPARQL-query form
+    // could not read prefixes off a blank declaration node and prepended none.
+    for target_node in store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}target"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        if let Some(select) =
+            single_value(store, shapes_graph, &target_node, &format!("{SH}select"))
+        {
+            let prefixes = sparql_prefixes(store, shapes_graph, &target_node);
+            targets.push(Target::SparqlTarget(format!("{prefixes}{select}")));
+        }
     }
 
     Ok(targets)
@@ -582,8 +579,18 @@ fn load_constraints(
         if let Some(select) =
             single_value(store, shapes_graph, &sparql_node, &format!("{SH}select"))
         {
+            // Prepend the SHACL prefixes-mechanism prologue so prefixed names resolve.
+            let prefixes = sparql_prefixes(store, shapes_graph, &sparql_node);
             let message = single_value(store, shapes_graph, &sparql_node, &format!("{SH}message"));
-            constraints.push(Constraint::SparqlConstraint { select, message });
+            // sh:severity may sit on the SPARQLConstraint node (e.g. sh:Warning) and
+            // overrides the shape-level severity for this constraint's results.
+            let severity =
+                single_value(store, shapes_graph, &sparql_node, &format!("{SH}severity"));
+            constraints.push(Constraint::SparqlConstraint {
+                select: format!("{prefixes}{select}"),
+                message,
+                severity,
+            });
         }
     }
 
@@ -734,32 +741,40 @@ fn load_rules(
 ) -> Result<Vec<(String, Vec<Target>, RuleType, String)>, String> {
     let mut rules: Vec<(String, Vec<Target>, RuleType, String)> = Vec::new();
 
-    // SPARQL rules
-    let query = format!(
-        r#"
-        PREFIX sh: <{SH}>
-        SELECT ?shape ?construct WHERE {{
-            GRAPH <{shapes_graph}> {{
-                ?shape sh:rule ?rule .
-                ?rule sh:construct ?construct .
+    // SPARQL rules. Discover shapes carrying a CONSTRUCT rule, then resolve the rule
+    // node and its sh:prefixes through the raw quad index — the rule node (`sh:rule
+    // [ … ]`) is typically blank, and the prefixes prologue must be prepended so a
+    // prefixed CONSTRUCT body parses instead of being silently dropped.
+    let sparql_rule_shapes = execute_select_single(
+        store,
+        &format!(
+            r#"
+            PREFIX sh: <{SH}>
+            SELECT DISTINCT ?shape WHERE {{
+                GRAPH <{shapes_graph}> {{ ?shape sh:rule ?rule . ?rule sh:construct ?c . }}
             }}
-        }}
-        "#,
-    );
-
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
-        for solution in solutions.filter_map(|s| s.ok()) {
-            let shape_iri = match solution.get("shape") {
-                Some(oxigraph::model::Term::NamedNode(nn)) => nn.as_str().to_string(),
-                _ => continue,
-            };
-            let construct = match solution.get("construct") {
-                Some(oxigraph::model::Term::Literal(lit)) => lit.value().to_string(),
-                _ => continue,
-            };
-
-            let targets = load_targets(store, shapes_graph, &shape_iri).unwrap_or_default();
-            rules.push((shape_iri, targets, RuleType::SparqlRule, construct));
+            "#,
+        ),
+        "shape",
+    )?;
+    for shape_iri in &sparql_rule_shapes {
+        let targets = load_targets(store, shapes_graph, shape_iri).unwrap_or_default();
+        for rule_node in store
+            .objects_for_subject_in_graph(shape_iri, &format!("{SH}rule"), Some(shapes_graph))
+            .iter()
+            .map(term_to_lexical)
+        {
+            if let Some(construct) =
+                single_value(store, shapes_graph, &rule_node, &format!("{SH}construct"))
+            {
+                let prefixes = sparql_prefixes(store, shapes_graph, &rule_node);
+                rules.push((
+                    shape_iri.clone(),
+                    targets.clone(),
+                    RuleType::SparqlRule,
+                    format!("{prefixes}{construct}"),
+                ));
+            }
         }
     }
 
@@ -951,6 +966,37 @@ fn multi_values(
         .iter()
         .map(term_to_lexical)
         .collect()
+}
+
+/// Build the SPARQL `PREFIX` prologue declared via SHACL's prefixes mechanism for a
+/// constraint / rule / target `node`: `node sh:prefixes ?owner`, `?owner sh:declare
+/// [ sh:prefix "p" ; sh:namespace "ns"^^xsd:anyURI ]`. Returns `""` when none are
+/// declared. The declaration nodes are typically blank, so they are resolved through
+/// the raw quad index (SPARQL surface syntax cannot re-address a stored blank node).
+///
+/// Without this prologue a SHACL-SPARQL body that uses prefixed names (`da:`, `geo:`,
+/// `geof:` …) fails to parse, and the `if let Ok(..)` guards in evaluation silently
+/// drop the whole constraint/rule/target — see SHACL-SPARQL §5.2 (prefixes mechanism).
+fn sparql_prefixes(store: &TripleStore, shapes_graph: &str, node: &str) -> String {
+    let mut out = String::new();
+    for owner in store
+        .objects_for_subject_in_graph(node, &format!("{SH}prefixes"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        for decl in store
+            .objects_for_subject_in_graph(&owner, &format!("{SH}declare"), Some(shapes_graph))
+            .iter()
+            .map(term_to_lexical)
+        {
+            let prefix = single_value(store, shapes_graph, &decl, &format!("{SH}prefix"));
+            let namespace = single_value(store, shapes_graph, &decl, &format!("{SH}namespace"));
+            if let (Some(p), Some(ns)) = (prefix, namespace) {
+                out.push_str(&format!("PREFIX {p}: <{ns}>\n"));
+            }
+        }
+    }
+    out
 }
 
 fn ask(store: &TripleStore, query: &str) -> bool {

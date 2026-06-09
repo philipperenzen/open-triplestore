@@ -474,7 +474,16 @@ pub fn evaluate_constraint(
             }
         }
 
-        Constraint::SparqlConstraint { select, message } => {
+        Constraint::SparqlConstraint {
+            select,
+            message,
+            severity: severity_override,
+        } => {
+            // A sh:severity on the SPARQLConstraint node overrides the shape's severity.
+            let eff_severity = severity_override
+                .as_deref()
+                .map(Severity::from_iri)
+                .unwrap_or_else(|| severity.clone());
             // SHACL-SPARQL: execute the SELECT with $this PRE-BOUND to the focus
             // node; each result row is a violation. $this must be bound (not
             // textually replaced by `<iri>`), otherwise it cannot appear in the
@@ -489,7 +498,7 @@ pub fn evaluate_constraint(
                     let path_val = solution.get("path").map(|v| v.to_string());
 
                     results.push(ValidationResult {
-                        severity: severity.clone(),
+                        severity: eff_severity.clone(),
                         focus_node: focus_node.to_string(),
                         path: path_val.or_else(|| path.map(|p| p.to_sparql())),
                         value,

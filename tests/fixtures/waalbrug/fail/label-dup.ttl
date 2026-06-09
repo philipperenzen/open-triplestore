@@ -1,0 +1,5 @@
+# ❌ §4.2 — two nl labels violate sh:uniqueLang on ex:LabelShape (targetClass da:Kunstwerk).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+wb:Waalbrug a da:Kunstwerk ; rdfs:label "Waalbrug"@nl , "Waal"@nl .

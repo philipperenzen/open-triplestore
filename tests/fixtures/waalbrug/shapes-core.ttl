@@ -1,0 +1,63 @@
+# Waalbrug reference example — §4 SHACL Core shapes.
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix bot:  <https://w3id.org/bot#> .
+@prefix da:   <https://data.example.nl/def/> .
+@prefix ex:   <https://example.org/shape/def#> .
+
+### 4.1 Cardinality, datatype, nodeKind, class, code list
+da:Vaarwegbrug
+    a sh:NodeShape ;
+    sh:targetClass da:Vaarwegbrug ;
+    sh:property [ sh:path da:bouwjaar ;
+        sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:gYear ;
+        sh:message "Bouwjaar verplicht, exact 1, type xsd:gYear."@nl ] ;
+    sh:property [ sh:path da:beweegbaar ;
+        sh:datatype xsd:boolean ; sh:maxCount 1 ] ;
+    sh:property [ sh:path da:aantalOverspanningen ;
+        sh:datatype xsd:integer ; sh:minInclusive 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path geo:hasGeometry ;
+        sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:BlankNodeOrIRI ;
+        sh:message "Precies één geo:hasGeometry vereist."@nl ] ;
+    sh:property [ sh:path da:vrijeDoorvaarthoogte ;
+        sh:minCount 1 ; sh:class qudt:QuantityValue ;
+        sh:message "Vaarwegbrug vereist vrije doorvaarthoogte (QUDT)."@nl ] .
+
+da:Boog
+    a sh:NodeShape ; sh:targetClass da:Boog ;
+    sh:property [ sh:path da:materiaal ;
+        sh:minCount 1 ; sh:in ( da:staal da:beton ) ;
+        sh:message "Materiaal moet staal of beton zijn."@nl ] .
+
+### 4.2 Pattern (regex), language tags, unique language
+ex:GuidShape a sh:NodeShape ;
+    sh:targetClass da:Brugonderdeel ;
+    sh:property [ sh:path da:ifcGuid ;
+        sh:datatype xsd:string ;
+        sh:pattern "^[0-9A-Za-z_$]{22}$" ;     # IFC GlobalId = 22 base64-ish chars
+        sh:maxCount 1 ;
+        sh:message "ifcGuid moet 22 geldige IFC-GUID-tekens zijn."@nl ] .
+
+ex:LabelShape a sh:NodeShape ;
+    sh:targetClass da:Kunstwerk ;
+    sh:property [ sh:path rdfs:label ;
+        sh:minCount 1 ;
+        sh:languageIn ( "nl" "en" ) ;
+        sh:uniqueLang true ;
+        sh:message "Label moet nl en/of en zijn, max één per taal."@nl ] .
+
+### 4.3 Qualified value shapes + sh:or (geometry choice) — uses a complex property path
+ex:BrugStructuurShape a sh:NodeShape ;
+    sh:targetClass da:Brug ;
+    sh:property [ sh:path bot:containsElement ;
+        sh:qualifiedValueShape [ sh:class da:Boog ] ;
+        sh:qualifiedMinCount 1 ;
+        sh:message "Brug moet ≥ 1 boog (da:Boog) bevatten."@nl ] ;
+    sh:property [ sh:path ( geo:hasGeometry [ sh:alternativePath ( geo:asWKT geo:asGML ) ] ) ;
+        sh:minCount 1 ;
+        sh:or ( [ sh:datatype geo:wktLiteral ] [ sh:datatype geo:gmlLiteral ] ) ;
+        sh:message "Geometrie moet WKT- of GML-literal zijn."@nl ] .

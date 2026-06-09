@@ -1,0 +1,6 @@
+# ❌ §5.2 — movable bridge without an operating object (cross-property SPARQL).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+wb:DraaiBrug a da:Brug ; da:beweegbaar true .
+    # no da:heeftBedieningsobject
