@@ -478,22 +478,51 @@ async fn forward_feedback(
 // API services runnable against them, and the named graphs in scope — so questions
 // like "how many datasets about X are there?" or "is there an API service for this?"
 // are answered from real platform state, not hallucinated. For questions that need
-// the actual triples, the model emits a single `SPARQL:` line; we run it through the
-// exact same `scope_query_to_authorized` read boundary as any user query (it can
-// never read a graph the caller is not authorized to see), then feed the rows back
-// for a natural-language answer. At most one query per turn keeps weak models robust.
+// the actual triples, the model emits a `SPARQL:` line; we run it through the exact
+// same `scope_query_to_authorized` read boundary as any user query (it can never
+// read a graph the caller is not authorized to see), then feed the rows back. The
+// model may iterate (a few bounded rounds, with error feedback for self-repair)
+// before writing the final answer. Answers are markdown plus a small set of fenced
+// "widget" blocks (chart/map/card/api/csv) that the chat UI renders interactively.
 
-const CHAT_SYSTEM_PROMPT: &str = "You are the Linked Data assistant for the Open Triplestore platform, \
-a knowledge-graph database. Help the user explore linked data: answer questions about which datasets \
-exist and what topics they cover, point them at API services that can answer a question, explain RDF/SPARQL \
-concepts, and answer data questions about the knowledge graphs.\n\n\
+const CHAT_SYSTEM_PROMPT: &str = "You are Spark, the linked-data expert of the Open Triplestore platform, \
+a knowledge-graph database. Help the user explore and understand linked data: which datasets exist and what \
+they cover, which API services can answer a question, what the graphs actually contain, and how RDF, SPARQL, \
+named graphs, vocabularies and SHACL work. Be precise with linked-data terminology, prefer labels over bare \
+IRIs in prose, and say briefly how you obtained an answer (which graph or service it came from).\n\n\
 Use the PLATFORM CONTEXT below as your source of truth about what exists on this platform. It lists only \
 the datasets, API services and named graphs THIS user is allowed to see — never claim something exists \
 that is not listed.\n\n\
-If answering needs the actual contents of the graphs (counts, specific values, relationships), reply with \
-EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named graphs, and \
-nothing else. The system will run it and give you the results to summarise. Otherwise, answer directly and \
-concisely in natural language (markdown allowed). When you mention an API service, give its run URL.";
+# RETRIEVING DATA\n\
+If answering needs the actual contents of the graphs (counts, specific values, relationships, geometries), \
+reply with EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named \
+graphs, and nothing else. The system runs it read-only under the user's permissions and gives you the \
+result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
+write the final answer. Result cells may be truncated (they then end with …).\n\n\
+# PRESENTING DATA\n\
+Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
+they make the answer clearer:\n\
+- ```sparql — a query card with a Run button the user can execute themselves and open in the SPARQL \
+workspace. Use it whenever you show a query.\n\
+- ```api — a runnable API call; first line is `GET <path>`, for example:\n\
+```api\nGET /api/datasets/<dataset-id>/api-services/<slug>/run?param=value\n```\n\
+Use one whenever you mention an API service (inline code like `GET /api/...` becomes clickable too).\n\
+- ```chart — a JSON spec rendered as a chart: \
+{\"type\":\"bar\",\"title\":\"…\",\"yLabel\":\"…\",\"data\":[{\"label\":\"A\",\"value\":12.5}]} with type bar, line or pie; \
+multi-series: {\"type\":\"line\",\"series\":[{\"name\":\"2024\",\"data\":[{\"label\":\"Jan\",\"value\":3}]}]}. \
+Only chart numbers you actually retrieved — never invent values. Keep it under 40 points.\n\
+- ```map — a JSON spec rendered as an interactive map: \
+{\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
+WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
+was truncated.\n\
+- ```card — an entity info card: {\"title\":\"…\",\"subtitle\":\"…\",\"iri\":\"http://…\",\"image\":\"https://…\",\
+\"facts\":[{\"label\":\"Type\",\"value\":\"Bridge\"}]}. Ideal for \"tell me about X\" answers.\n\
+- ```csv — CSV text rendered as a table with a download button.\n\
+- ```turtle / ```json / ```xml — syntax-highlighted data snippets (not runnable). Small markdown tables \
+also render well.\n\n\
+Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
+locations → map, a single entity → card, raw listings → markdown table or csv, \"how do I get this \
+myself\" → sparql or api block. Answer in the user's language.";
 
 /// Cap how much platform state we serialise into the prompt so a large instance
 /// stays within the model's context window.
@@ -502,9 +531,19 @@ const MAX_SERVICES_IN_CONTEXT: usize = 40;
 const MAX_GRAPHS_IN_CONTEXT: usize = 40;
 /// Cap rows returned from a chat-issued SPARQL query (both to the model and the UI).
 const MAX_CHAT_QUERY_ROWS: usize = 50;
-/// Output-token budget per chat turn. The previous 700 cut longer answers off
-/// mid-sentence; this gives the model room to finish. Short answers still stop early.
-const CHAT_MAX_TOKENS: u32 = 2048;
+/// How many `SPARQL:` rounds the model may use within one user turn. Feeding rows
+/// (or the error, for self-repair) back after each round lets it e.g. count first
+/// and then fetch geometry for a map, while keeping latency and tokens bounded.
+const MAX_CHAT_QUERY_ROUNDS: usize = 3;
+/// Per-cell character budgets when rendering result rows into the follow-up prompt.
+/// WKT geometry cells get a larger budget so small geometries survive verbatim into
+/// a ```map widget; anything longer is truncated with '…' and the system prompt
+/// tells the model to skip truncated WKT.
+const CHAT_CELL_MAX_CHARS: usize = 80;
+const CHAT_WKT_CELL_MAX_CHARS: usize = 600;
+/// Output-token budget per chat turn. Rich answers (markdown + widget JSON specs)
+/// need headroom; short answers still stop early.
+const CHAT_MAX_TOKENS: u32 = 3072;
 
 #[derive(Deserialize)]
 pub struct ChatMessage {
@@ -519,14 +558,32 @@ pub struct ChatRequest {
     pub model: Option<String>,
 }
 
+/// One SPARQL round the chat ran (or attempted) while answering a turn.
+#[derive(Serialize)]
+pub struct ChatQueryRun {
+    pub sparql: String,
+    /// False when the query failed to run; `error` then says why.
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<Vec<String>>>,
+    /// True when the result set was capped at [`MAX_CHAT_QUERY_ROWS`].
+    pub truncated: bool,
+}
+
 #[derive(Serialize)]
 pub struct ChatResponse {
-    /// The assistant's natural-language answer (markdown).
+    /// The assistant's natural-language answer (markdown + widget blocks).
     pub answer: String,
     pub model: String,
-    /// True when a SPARQL query was generated and successfully run to answer.
+    /// True when at least one SPARQL query was generated and successfully run.
     pub ran_query: bool,
     /// The SPARQL that was run (or attempted), when the model chose to query.
+    /// Mirrors the last successful round (or the last attempt) for older clients;
+    /// `queries` carries the full trail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparql: Option<String>,
     /// Tabular results of the query, for the UI to render alongside the answer.
@@ -536,6 +593,10 @@ pub struct ChatResponse {
     pub rows: Option<Vec<Vec<String>>>,
     /// True when the result set was capped at [`MAX_CHAT_QUERY_ROWS`].
     pub truncated: bool,
+    /// Every query round of this turn, in order — successes and failures — so the
+    /// UI can show the full retrieval trail.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<ChatQueryRun>,
 }
 
 /// POST /api/llm/chat — grounded knowledge-graph chat.
@@ -571,60 +632,136 @@ async fn llm_chat(
         msgs.push(json!({"role": role, "content": m.content}));
     }
 
-    // Planning turn: answer directly, or emit `SPARQL:` to fetch data.
-    let first = chat_completion_messages(&model, msgs.clone(), CHAT_MAX_TOKENS).await?;
+    // Retrieval loop: the model either answers in prose or replies `SPARQL: <query>`.
+    // Each query runs under the caller's read scope; its rows — or its error, so the
+    // model can self-repair — go back into the conversation for the next round.
+    let mut runs: Vec<ChatQueryRun> = Vec::new();
+    let mut reply = chat_completion_messages(&model, msgs.clone(), CHAT_MAX_TOKENS).await?;
+    for round in 1..=MAX_CHAT_QUERY_ROUNDS {
+        let Some(query) = extract_sparql_directive(&reply) else {
+            break;
+        };
+        msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
+        let remaining = MAX_CHAT_QUERY_ROUNDS - round;
+        let follow_up = match run_chat_query(&state, &query, &graphs).await {
+            Ok(qr) => {
+                let table = render_rows_for_llm(&qr);
+                runs.push(ChatQueryRun {
+                    sparql: query,
+                    ok: true,
+                    error: None,
+                    columns: Some(qr.columns),
+                    rows: Some(qr.rows),
+                    truncated: qr.truncated,
+                });
+                if remaining > 0 {
+                    format!(
+                        "Query results:\n{table}\nIf you still need different data, reply with \
+                         `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
+                         write the final answer to my previous question in clear natural language, \
+                         using the presentation widgets (chart/map/card/api/csv/markdown table) \
+                         where they help."
+                    )
+                } else {
+                    format!(
+                        "Query results:\n{table}\nWrite the final answer to my previous question \
+                         in clear natural language, using the presentation widgets where they \
+                         help. Do not output another SPARQL: line."
+                    )
+                }
+            }
+            Err(e) => {
+                let emsg = e.message();
+                runs.push(ChatQueryRun {
+                    sparql: query,
+                    ok: false,
+                    error: Some(emsg.clone()),
+                    columns: None,
+                    rows: None,
+                    truncated: false,
+                });
+                if remaining > 0 {
+                    format!(
+                        "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
+                         query ({remaining} more allowed this turn), or answer without querying — \
+                         you may include the corrected query as a ```sparql block for the user to \
+                         run themselves."
+                    )
+                } else {
+                    format!(
+                        "That query failed to run: {emsg}\nAnswer my previous question as well as \
+                         you can without another query; include a corrected query as a ```sparql \
+                         block if useful. Do not output another SPARQL: line."
+                    )
+                }
+            }
+        };
+        msgs.push(json!({"role": "user", "content": follow_up}));
+        reply = chat_completion_messages(&model, msgs.clone(), CHAT_MAX_TOKENS)
+            .await
+            .unwrap_or_else(|_| fallback_answer(&runs));
+    }
+    // A stubborn model may still emit a directive after its last allowed round —
+    // never show that to the user; fall back to the data we did retrieve.
+    if extract_sparql_directive(&reply).is_some() {
+        reply = fallback_answer(&runs);
+    }
 
-    let Some(query) = extract_sparql_directive(&first) else {
-        return Ok(Json(ChatResponse {
-            answer: first,
-            model,
-            ran_query: false,
-            sparql: None,
-            columns: None,
-            rows: None,
-            truncated: false,
-        }));
-    };
+    // Legacy single-query fields mirror the last successful round (or the last
+    // attempt, so the UI can still offer "open in workspace" after a failure).
+    let last = runs.iter().rev().find(|r| r.ok).or_else(|| runs.last());
+    let ran_query = last.map(|r| r.ok).unwrap_or(false);
+    let sparql = last.map(|r| r.sparql.clone());
+    let columns = last.and_then(|r| r.columns.clone());
+    let rows = last.and_then(|r| r.rows.clone());
+    let truncated = last.map(|r| r.truncated).unwrap_or(false);
+    Ok(Json(ChatResponse {
+        answer: reply,
+        model,
+        ran_query,
+        sparql,
+        columns,
+        rows,
+        truncated,
+        queries: runs,
+    }))
+}
 
-    // The model wants data. Run the query under the caller's read scope, then ask
-    // it to turn the rows into prose.
-    match run_chat_query(&state, &query, &graphs).await {
-        Ok(qr) => {
-            let table = render_rows_for_llm(&qr);
-            msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
-            msgs.push(json!({
-                "role": "user",
-                "content": format!(
-                    "Query results:\n{table}\nUsing ONLY these results, answer my previous question \
-                     in clear natural language. Do not output SPARQL."
-                ),
-            }));
-            let answer = chat_completion_messages(&model, msgs, CHAT_MAX_TOKENS)
-                .await
-                .unwrap_or_else(|_| format!("Here are the results of the query:\n\n{table}"));
-            Ok(Json(ChatResponse {
-                answer,
-                model,
-                ran_query: true,
-                sparql: Some(query),
-                columns: Some(qr.columns),
-                rows: Some(qr.rows),
-                truncated: qr.truncated,
-            }))
+/// Last-resort answer when the model keeps demanding more queries than allowed (or
+/// the gateway dies mid-turn): surface what we did retrieve instead of leaking a
+/// raw `SPARQL:` directive to the user.
+fn fallback_answer(runs: &[ChatQueryRun]) -> String {
+    if let Some(ok) = runs.iter().rev().find(|r| r.ok) {
+        let mut s = String::from("Here is what the query returned:\n\n");
+        if let (Some(cols), Some(rows)) = (&ok.columns, &ok.rows) {
+            s.push_str(&format!("| {} |\n", cols.join(" | ")));
+            s.push_str(&format!(
+                "|{}|\n",
+                cols.iter().map(|_| " --- ").collect::<Vec<_>>().join("|")
+            ));
+            for row in rows.iter().take(15) {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|c| truncate(c, 80).replace('|', "\\|"))
+                    .collect();
+                s.push_str(&format!("| {} |\n", cells.join(" | ")));
+            }
+            if rows.is_empty() {
+                s.push_str("\n*(no rows)*\n");
+            } else if rows.len() > 15 || ok.truncated {
+                s.push_str("\n*(more rows not shown)*\n");
+            }
         }
-        Err(e) => Ok(Json(ChatResponse {
-            answer: format!(
-                "I tried to answer by querying the knowledge graph, but the query did not run ({}). \
-                 You can refine it in the SPARQL workspace:",
-                e.message()
-            ),
-            model,
-            ran_query: false,
-            sparql: Some(query),
-            columns: None,
-            rows: None,
-            truncated: false,
-        })),
+        s
+    } else if let Some(last) = runs.last() {
+        format!(
+            "I tried to answer by querying the knowledge graph, but the query did not run ({}). \
+             You can refine it here:\n\n```sparql\n{}\n```",
+            last.error.as_deref().unwrap_or("unknown error"),
+            last.sparql
+        )
+    } else {
+        "I could not produce an answer this turn — please try rephrasing the question.".to_string()
     }
 }
 
@@ -866,7 +1003,7 @@ fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     s.push_str(&qr.columns.join(" | "));
     s.push('\n');
     for row in &qr.rows {
-        let cells: Vec<String> = row.iter().map(|c| truncate(c, 80)).collect();
+        let cells: Vec<String> = row.iter().map(|c| truncate(c, cell_budget(c))).collect();
         s.push_str(&cells.join(" | "));
         s.push('\n');
     }
@@ -876,6 +1013,41 @@ fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
         s.push_str(&format!("(showing first {MAX_CHAT_QUERY_ROWS} rows)\n"));
     }
     s
+}
+
+/// Prompt budget for one result cell: WKT geometries get a larger budget than
+/// ordinary values so small ones survive verbatim into a ```map widget.
+fn cell_budget(cell: &str) -> usize {
+    if looks_like_wkt(cell) {
+        CHAT_WKT_CELL_MAX_CHARS
+    } else {
+        CHAT_CELL_MAX_CHARS
+    }
+}
+
+/// Does this value look like a WKT geometry literal, optionally carrying a
+/// GeoSPARQL `<crs-iri>` prefix?
+fn looks_like_wkt(s: &str) -> bool {
+    let t = s.trim_start();
+    let t = match t.strip_prefix('<') {
+        Some(rest) => rest
+            .split_once('>')
+            .map(|(_, after)| after.trim_start())
+            .unwrap_or(t),
+        None => t,
+    };
+    const KINDS: [&str; 7] = [
+        "MULTIPOINT",
+        "MULTILINESTRING",
+        "MULTIPOLYGON",
+        "GEOMETRYCOLLECTION",
+        "POINT",
+        "LINESTRING",
+        "POLYGON",
+    ];
+    KINDS
+        .iter()
+        .any(|k| t.get(..k.len()).is_some_and(|p| p.eq_ignore_ascii_case(k)))
 }
 
 /// If the model asked to run a query, return the query text. We look for a
@@ -927,7 +1099,70 @@ fn strip_code_fence(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_sparql_directive, find_ci, strip_code_fence, truncate, validate_sparql};
+    use super::{
+        extract_sparql_directive, fallback_answer, find_ci, looks_like_wkt, strip_code_fence,
+        truncate, validate_sparql, ChatQueryRun, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
+    };
+
+    #[test]
+    fn wkt_cells_are_recognised_for_the_larger_budget() {
+        assert!(looks_like_wkt("POINT(5.8645 51.8519)"));
+        assert!(looks_like_wkt("point(5.8645 51.8519)"));
+        assert!(looks_like_wkt(
+            "<http://www.opengis.net/def/crs/EPSG/0/4326> POLYGON((0 0, 1 0, 1 1, 0 0))"
+        ));
+        assert!(looks_like_wkt("  MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"));
+        assert!(!looks_like_wkt("Waalbrug"));
+        assert!(!looks_like_wkt("http://example.org/bridge/1"));
+        // Multi-byte content must not panic the prefix check.
+        assert!(!looks_like_wkt("héllo wörld"));
+        assert_eq!(super::cell_budget("POINT(1 2)"), CHAT_WKT_CELL_MAX_CHARS);
+        assert_eq!(super::cell_budget("plain value"), CHAT_CELL_MAX_CHARS);
+    }
+
+    #[test]
+    fn fallback_answer_prefers_last_successful_run() {
+        let runs = vec![
+            ChatQueryRun {
+                sparql: "SELECT ?broken".into(),
+                ok: false,
+                error: Some("parse error".into()),
+                columns: None,
+                rows: None,
+                truncated: false,
+            },
+            ChatQueryRun {
+                sparql: "SELECT ?name ?count WHERE {}".into(),
+                ok: true,
+                error: None,
+                columns: Some(vec!["name".into(), "count".into()]),
+                rows: Some(vec![vec!["Waalbrug".into(), "3".into()]]),
+                truncated: false,
+            },
+        ];
+        let s = fallback_answer(&runs);
+        assert!(s.contains("| name | count |"), "markdown header: {s}");
+        assert!(s.contains("| Waalbrug | 3 |"), "row: {s}");
+        assert!(
+            !s.to_uppercase().contains("SPARQL:"),
+            "no directive leaks: {s}"
+        );
+    }
+
+    #[test]
+    fn fallback_answer_surfaces_failed_query_for_the_user() {
+        let runs = vec![ChatQueryRun {
+            sparql: "SELECT ?s WHERE { ?s ?p }".into(),
+            ok: false,
+            error: Some("parse error".into()),
+            columns: None,
+            rows: None,
+            truncated: false,
+        }];
+        let s = fallback_answer(&runs);
+        assert!(s.contains("parse error"));
+        assert!(s.contains("```sparql"), "offers the query to refine: {s}");
+    }
 
     #[test]
     fn validate_sparql_accepts_valid_and_rejects_invalid() {
