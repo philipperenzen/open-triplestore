@@ -45,6 +45,8 @@ services:
       - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-}
       - OIDC_ORG_GROUP_PREFIX=${OIDC_ORG_GROUP_PREFIX:-}
       # CORS allowlist for trusted frontend origin(s), comma-separated (dev + prod).
+      # "*" reflects any origin with credentials (mirror mode) — lets a browser client
+      # on an arbitrary host (e.g. the OTL viewer) connect. Prefer an explicit list in prod.
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       # External validation platform base URL, used by /api/datasets/validate-and-commit.
       - VALIDATION_API_URL=${VALIDATION_API_URL:-}

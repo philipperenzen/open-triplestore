@@ -162,6 +162,119 @@ mod tests {
         );
     }
 
+    // ─── `CORS_ORIGINS=*` mirrors any origin so any-host browser clients connect ──
+
+    #[tokio::test]
+    async fn cors_wildcard_mirrors_any_origin_with_credentials() {
+        // A browser client (e.g. the OTL viewer on http://localhost:5190) preflights a
+        // credentialed request against a store launched with CORS_ORIGINS=*. The store
+        // must echo that exact origin (never the literal '*') and allow credentials, or
+        // the browser blocks the response. It must also reflect the requested headers —
+        // including ones outside the fixed allow-list — so any-origin mode is actually
+        // usable for clients we don't control.
+        let app = build_router(test_state(), "*", vec![]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/auth/me")
+                    .header(header::ORIGIN, "http://localhost:5190")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "authorization,x-otl-custom",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("http://localhost:5190"),
+            "wildcard CORS must mirror the caller's Origin, not the literal '*'"
+        );
+        assert_eq!(
+            headers
+                .get("access-control-allow-credentials")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+            "credentialed cross-origin fetches require Access-Control-Allow-Credentials: true"
+        );
+        // The non-standard `x-otl-custom` header is not in the fixed allow-list, so the
+        // preflight only succeeds if mirror mode reflects the requested headers.
+        let allowed = headers
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            allowed.contains("x-otl-custom"),
+            "wildcard CORS must mirror requested headers, got: {allowed:?}"
+        );
+    }
+
+    // ─── Mirror mode's safety rests on session cookies staying SameSite=Strict ────
+
+    #[tokio::test]
+    async fn auth_session_cookies_are_samesite_strict() {
+        // The CORS_ORIGINS=* mirror mode reflects any origin WITH credentials. That is
+        // only safe because the browser withholds the session cookies on cross-site
+        // requests — which holds solely while those cookies are SameSite=Strict. If a
+        // future change downgrades them to Lax/None this test fails, instead of silently
+        // turning mirror mode into a credentialed-CORS CSRF / account-takeover hole.
+        let state = test_state();
+        create_user_with_password(
+            &state,
+            "u1",
+            "alice",
+            "correct-horse-battery",
+            SystemRole::User,
+        );
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"username":"alice","password":"correct-horse-battery"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "valid login should succeed");
+
+        let cookies: Vec<String> = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(str::to_string)
+            .collect();
+        let session_cookies: Vec<&String> = cookies
+            .iter()
+            .filter(|c| c.starts_with("access_token=") || c.starts_with("refresh_token="))
+            .collect();
+        assert_eq!(
+            session_cookies.len(),
+            2,
+            "login must set both access_token and refresh_token cookies, got: {cookies:?}"
+        );
+        for c in session_cookies {
+            assert!(
+                c.contains("SameSite=Strict"),
+                "session cookie must be SameSite=Strict (mirror-mode CORS safety depends on \
+                 it); got: {c}"
+            );
+        }
+    }
+
     // ─── Finding 1: variable-graph UPDATE is admin-only ───────────────────────
 
     #[tokio::test]
