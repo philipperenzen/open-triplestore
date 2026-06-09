@@ -1384,10 +1384,7 @@ impl AuthDb {
     /// tabs/the session-restore thundering herd replaying the just-rotated cookie):
     /// as long as the session still has a live head, the replay rotates from it
     /// instead of being flagged as token theft.
-    pub fn get_active_family_head(
-        &self,
-        family_id: &str,
-    ) -> anyhow::Result<Option<RefreshToken>> {
+    pub fn get_active_family_head(&self, family_id: &str) -> anyhow::Result<Option<RefreshToken>> {
         let conn = self.pool.get()?;
         conn.query_row(
             "SELECT id, user_id, token_hash, expires_at, created_at, revoked, family_id \
@@ -5036,21 +5033,30 @@ mod tests {
             .unwrap();
 
         // The live head of family A is its newest token.
-        assert_eq!(
-            db.get_active_family_head("famA").unwrap().unwrap().id,
-            "a2"
-        );
+        assert_eq!(db.get_active_family_head("famA").unwrap().unwrap().id, "a2");
 
         // Revoke family A only.
         db.revoke_refresh_token_family("famA").unwrap();
-        assert!(db.get_refresh_token_by_hash("h_a1").unwrap().unwrap().revoked);
-        assert!(db.get_refresh_token_by_hash("h_a2").unwrap().unwrap().revoked);
-        // Session B survives.
-        assert!(!db.get_refresh_token_by_hash("h_b1").unwrap().unwrap().revoked);
-        assert!(db.get_active_family_head("famA").unwrap().is_none());
-        assert_eq!(
-            db.get_active_family_head("famB").unwrap().unwrap().id,
-            "b1"
+        assert!(
+            db.get_refresh_token_by_hash("h_a1")
+                .unwrap()
+                .unwrap()
+                .revoked
         );
+        assert!(
+            db.get_refresh_token_by_hash("h_a2")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        // Session B survives.
+        assert!(
+            !db.get_refresh_token_by_hash("h_b1")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        assert!(db.get_active_family_head("famA").unwrap().is_none());
+        assert_eq!(db.get_active_family_head("famB").unwrap().unwrap().id, "b1");
     }
 }

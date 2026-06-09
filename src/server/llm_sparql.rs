@@ -383,7 +383,8 @@ async fn nl_to_sparql(
             "This SPARQL query is not valid ({err}):\n\n{sparql}\n\n\
              Return a corrected, complete query. Declare every PREFIX you use. Reply with ONLY the SPARQL.",
         );
-        if let Ok(fixed) = chat_completion(&model, SYSTEM_PROMPT, &repair, SPARQL_MAX_TOKENS).await {
+        if let Ok(fixed) = chat_completion(&model, SYSTEM_PROMPT, &repair, SPARQL_MAX_TOKENS).await
+        {
             let fixed = finalize_sparql(&state, fixed).await;
             // Keep the repair only if it now parses; otherwise return the first attempt
             // so the user still has something concrete to edit.
@@ -415,7 +416,9 @@ fn build_sparql_prompt(req: &NlSparqlRequest) -> String {
         .map(str::trim)
         .filter(|q| !q.is_empty())
     {
-        s.push_str("\n\nCurrent query (edit this if the request refines it, otherwise replace it):\n");
+        s.push_str(
+            "\n\nCurrent query (edit this if the request refines it, otherwise replace it):\n",
+        );
         s.push_str(q);
     }
     s
@@ -426,10 +429,10 @@ fn build_sparql_prompt(req: &NlSparqlRequest) -> String {
 /// no-op when every prefix is already declared.
 async fn finalize_sparql(state: &AppState, sparql: String) -> String {
     let sparql = sparql.trim().to_string();
-    match resolve_prefixes(state, &sparql).await {
-        Some(with_prefixes) => with_prefixes,
-        None => sparql,
-    }
+    // Bind the result so the `&sparql` borrow ends before `sparql` is moved into
+    // unwrap_or (and so clippy sees the idiomatic unwrap_or, not a manual match).
+    let resolved = resolve_prefixes(state, &sparql).await;
+    resolved.unwrap_or(sparql)
 }
 
 /// Parse-check a query string with the same grammar the engine uses, returning the
