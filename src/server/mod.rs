@@ -42,7 +42,7 @@ use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::KeyExtractor;
 use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -113,7 +113,29 @@ impl KeyExtractor for SmartIpExtractor {
 }
 
 /// Build a CORS layer from a comma-separated list of allowed origins.
-/// If the list is empty, no cross-origin requests are allowed (same-origin only).
+///
+/// Three modes, selected by the `CORS_ORIGINS` value:
+/// * empty — same-origin only (no `Access-Control-Allow-Origin` is emitted).
+/// * an explicit comma-separated list — only those origins are reflected, with
+///   credentials. The tightest option; prefer it in production.
+/// * `*` — reflect ANY origin (and the requested headers) with credentials, by mirroring
+///   the request's `Origin` rather than the literal `*`, which the Fetch spec forbids
+///   alongside credentials. This lets a browser client served from any origin — e.g. the
+///   OTL viewer on `http://localhost:5190` — connect to this store.
+///
+/// Why mirroring any origin *with credentials* is safe here — and what it depends on:
+/// this server authenticates a request from EITHER an `Authorization: Bearer <token>`
+/// header OR an `access_token` cookie (`auth::middleware::extract_token`), so the cookie
+/// **is** a real ambient credential. What keeps mirror mode safe is that both session
+/// cookies (`access_token`, `refresh_token`) are `SameSite=Strict`, so the browser
+/// withholds them on every cross-site request — even a credentialed `fetch` to a
+/// mirrored origin. (The lone `SameSite=Lax` cookie, `oauth_state`, is a short-lived
+/// CSRF nonce that is never sent on `fetch`/XHR and confers no access; there is no HTTP
+/// Basic auth.) A hostile origin therefore cannot make the browser attach a usable
+/// credential, and cannot forge the bearer header — so it gains nothing it could not
+/// already reach unauthenticated. **Load-bearing invariant:** if any auth cookie is ever
+/// downgraded to `SameSite=Lax`/`None`, mirror mode becomes a credentialed-CORS / CSRF
+/// hole. The `auth_session_cookies_are_samesite_strict` regression test pins this.
 fn build_cors_layer(cors_origins: &str) -> CorsLayer {
     let origins: Vec<&str> = cors_origins
         .split(',')
@@ -140,16 +162,25 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
         // concurrency (If-Match) on draft edits across origins.
         .expose_headers([axum::http::header::ETAG]);
 
-    // A bare "*" cannot be combined with credentialed requests (Fetch spec), and
-    // tower-http panics if `*` appears in an explicit origin list. Refuse it loudly
-    // and fall back to same-origin only rather than crashing at the first request.
+    // `*` ⇒ permissive mirror mode. The literal `*` cannot be paired with
+    // `Access-Control-Allow-Credentials: true` (the Fetch spec rejects it), so mirror
+    // the caller's `Origin` instead — a concrete value that *is* legal with credentials.
+    // Also mirror the requested headers: in "any origin" mode we don't control the client,
+    // so a fixed allow-list would silently break a preflight the moment a client sends a
+    // header it doesn't enumerate. tower-http adds `Vary: Origin` automatically. See the
+    // safety rationale on this fn's doc comment.
     if origins.contains(&"*") {
-        tracing::error!(
-            "CORS_ORIGINS contains '*', which cannot be combined with credentialed API \
-             requests. Ignoring it and allowing SAME-ORIGIN only. List explicit origins \
-             (scheme + host) instead."
+        tracing::warn!(
+            "CORS_ORIGINS contains '*': reflecting ANY request origin with credentials \
+             (mirror mode). Safe only while both session cookies stay SameSite=Strict (the \
+             browser then withholds them cross-site, leaving the unforgeable Authorization \
+             bearer token as the only cross-origin credential). For a tighter posture in \
+             production, list explicit origins instead."
         );
-        return layer;
+        return layer
+            .allow_credentials(true)
+            .allow_origin(AllowOrigin::mirror_request())
+            .allow_headers(AllowHeaders::mirror_request());
     }
 
     if origins.is_empty() {
