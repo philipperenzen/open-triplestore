@@ -301,6 +301,13 @@ impl TripleStore {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 
+        // Register SHACL-AF user-defined functions (sh:SPARQLFunction) discovered in the
+        // store. Discovery uses the raw quad index (never store.query), so this does not
+        // re-enter query_options; each function evaluates against a fresh in-memory store.
+        for (iri, handler) in crate::shacl::sparql_functions::all_functions(self) {
+            opts = opts.with_custom_function(iri, move |args| handler(args));
+        }
+
         opts
     }
 
