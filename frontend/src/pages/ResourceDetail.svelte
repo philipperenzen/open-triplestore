@@ -21,6 +21,7 @@
   import { tick } from 'svelte';
   import { detectValueKind, datatypeLabel } from '../lib/ontology/valueType.js';
   import { prefixForNamespace, lookupNamespacePrefix } from '../lib/ontology/prefixService.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   const isIri = (term) => term && (term.type === 'uri' || term.type === 'iri');
   const langOf = (term) => term && (term['xml:lang'] || term.language || term.lang || '');
@@ -232,11 +233,10 @@
   }
 
   async function copyIri() {
-    try {
-      await navigator.clipboard.writeText(iri);
+    if (await copyToClipboard(iri)) {
       copied = true;
       setTimeout(() => (copied = false), 1500);
-    } catch {}
+    }
   }
 
   // Svelte action: invoke callback on a click outside the node.

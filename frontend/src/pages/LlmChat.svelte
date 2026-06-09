@@ -4,6 +4,7 @@
   import { llmChat, llmHealth, sendLlmFeedback } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { isAuthenticated } from '../lib/stores.js';
+  import { renderMarkdown } from '../lib/markdown.js';
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
@@ -108,16 +109,11 @@
     messages = [];
   }
 
-  // Escape, then allow only **bold** and `code`. Newlines render via pre-wrap.
-  // Escaping first means model output cannot inject markup.
+  // Render the assistant's markdown — including fenced code blocks, which are
+  // syntax-highlighted for SPARQL/Turtle/JSON/XML. renderMarkdown sanitizes the
+  // output with DOMPurify, so model output still cannot inject markup.
   function renderRich(text) {
-    const esc = (text || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    return esc
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/`([^`]+)`/g, '<code>$1</code>');
+    return renderMarkdown(text || '', { breaks: true }).html;
   }
 </script>
 
@@ -160,7 +156,7 @@
     {#each messages as msg, i}
       <div class="row {msg.role}">
         <div class="bubble {msg.role}" class:error={msg.isError}>
-          <!-- renderRich() HTML-escapes the text first, then only emits <strong>/<code> -->
+          <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
           <!-- eslint-disable-next-line svelte/no-at-html-tags -->
           <div class="bubble-text">{@html renderRich(msg.content)}</div>
 
@@ -310,12 +306,41 @@
   .bubble.error { background: #fff8f8; border-color: #f3c9c9; color: #b91c1c; }
   .bubble.thinking { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--ink-500); font-style: italic; }
 
-  .bubble-text { white-space: pre-wrap; word-break: break-word; }
+  /* Markdown-rendered assistant text. Tight vertical rhythm so blocks sit snugly in
+     the bubble; `breaks:true` turns single newlines into <br>, so no pre-wrap. */
+  .bubble-text { word-break: break-word; }
+  .bubble-text :global(p) { margin: 0 0 0.55rem; }
+  .bubble-text :global(ul), .bubble-text :global(ol) { margin: 0 0 0.55rem; padding-left: 1.25rem; }
+  .bubble-text :global(li) { margin: 0.12rem 0; }
+  .bubble-text :global(h1), .bubble-text :global(h2),
+  .bubble-text :global(h3), .bubble-text :global(h4) {
+    margin: 0.55rem 0 0.35rem; font-size: 1em; font-weight: 700;
+  }
+  .bubble-text :global(a) { color: inherit; text-decoration: underline; }
+  .bubble-text :global(p:last-child), .bubble-text :global(ul:last-child),
+  .bubble-text :global(ol:last-child), .bubble-text :global(pre:last-child) { margin-bottom: 0; }
   .bubble-text :global(code) {
     background: rgba(100,116,139,0.14); padding: 0 4px; border-radius: 4px;
     font-family: 'SF Mono', ui-monospace, monospace; font-size: 0.85em;
   }
   .bubble.user .bubble-text :global(code) { background: rgba(255,255,255,0.22); }
+  /* Fenced code blocks: dark panel, syntax-highlighted via resultHighlight.js tokens. */
+  .bubble-text :global(pre) {
+    background: #1e1e2e; color: #cdd6f4; padding: 0.7rem 0.85rem; border-radius: 0.6rem;
+    overflow-x: auto; margin: 0 0 0.55rem; line-height: 1.5;
+  }
+  .bubble-text :global(pre code) { background: none; padding: 0; color: inherit; font-size: 0.8rem; }
+  .bubble-text :global(pre .tok-comment) { color: #7f849c; font-style: italic; }
+  .bubble-text :global(pre .tok-iri)     { color: #89b4fa; }
+  .bubble-text :global(pre .tok-pname)   { color: #f5c2e7; }
+  .bubble-text :global(pre .tok-kw)      { color: #cba6f7; font-weight: 600; }
+  .bubble-text :global(pre .tok-str)     { color: #a6e3a1; }
+  .bubble-text :global(pre .tok-num)     { color: #fab387; }
+  .bubble-text :global(pre .tok-punct)   { color: #9399b2; }
+  .bubble-text :global(pre .tok-key)     { color: #89dceb; }
+  .bubble-text :global(pre .tok-tag)     { color: #89b4fa; }
+  .bubble-text :global(pre .tok-attr)    { color: #f9e2af; }
+  .bubble-text :global(pre .tok-meta)    { color: #7f849c; }
 
   .query-block { margin-top: 0.6rem; border-top: 1px solid var(--line-soft); padding-top: 0.5rem; }
   .query-toggle {

@@ -114,9 +114,21 @@ async fn sparql_query_get(
     Query(params): Query<SparqlQueryParams>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let query = params
-        .query
-        .ok_or_else(|| AppError::BadRequest("Missing 'query' parameter".to_string()))?;
+    let query = match params.query {
+        Some(q) => q,
+        None => {
+            // A browser hard-refresh / deep link to the `/sparql` client route
+            // arrives here with no `query` param. Serve the SPA shell so the
+            // workspace renders instead of a JSON error; genuine API clients
+            // (no `Accept: text/html`) still get the 400 below.
+            if let Some(resp) = spa_shell_response(&headers) {
+                return Ok(resp);
+            }
+            return Err(AppError::BadRequest(
+                "Missing 'query' parameter".to_string(),
+            ));
+        }
+    };
 
     let accept = headers
         .get(ACCEPT)
@@ -1316,6 +1328,26 @@ fn serve_frontend_enabled() -> bool {
     )
 }
 
+/// Returns the SPA shell (`index.html`) as a 200 response when the web UI is
+/// being served and the caller is a browser (`Accept: text/html`).
+///
+/// A few API routes share their path with a client-side route in the
+/// History-mode SPA (`/` → Home, `/sparql` → the SPARQL workspace). Those API
+/// routes are registered explicitly, so they shadow the `index.html` fallback
+/// configured in `mod.rs`: a hard refresh or deep link to e.g. `/sparql` reaches
+/// the API handler, which would otherwise answer a browser with a JSON error
+/// ("Missing 'query' parameter") instead of the page. Handlers call this first
+/// so a browser navigation renders the UI, while genuine API/RDF clients (which
+/// do not send `Accept: text/html`) fall through to the API behaviour.
+fn spa_shell_response(headers: &HeaderMap) -> Option<Response> {
+    if serve_frontend_enabled() && prefers_html(headers) {
+        if let Ok(html) = std::fs::read_to_string("frontend/dist/index.html") {
+            return Some(axum::response::Html(html).into_response());
+        }
+    }
+    None
+}
+
 async fn service_description_handler(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -1324,10 +1356,8 @@ async fn service_description_handler(
     // Content negotiation: a browser (Accept: text/html) gets the web UI; RDF/SPARQL
     // clients get the service description. The explicit `/` route shadows the SPA
     // fallback, so without this a browser at the root only ever sees Turtle.
-    if serve_frontend_enabled() && prefers_html(&headers) {
-        if let Ok(html) = std::fs::read_to_string("frontend/dist/index.html") {
-            return Ok(axum::response::Html(html).into_response());
-        }
+    if let Some(resp) = spa_shell_response(&headers) {
+        return Ok(resp);
     }
 
     let user_id = user.as_deref().map(|u| u.user_id.as_str());

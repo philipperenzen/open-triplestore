@@ -13,6 +13,7 @@
     Loader2, Network, Table2, BookOpen, Shapes, ChevronLeft, ChevronRight,
     Search, X, Copy, Unlink, Plus, Maximize2, Share2,
   } from 'lucide-svelte';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   export let graphIri: string = '';
   export let subGraphs: string[] = [];
@@ -464,7 +465,7 @@
       else if (action === 'expandBoth')   browseExpandUri(data.fullIri, 'both');
       else if (action === 'collapse')     browseCollapseUri(data.fullIri);
       else if (action === 'openResource') openResource(data.fullIri);
-      else if (action === 'copyIri')      navigator.clipboard.writeText(data.fullIri).catch(() => {});
+      else if (action === 'copyIri')      void copyToClipboard(data.fullIri);
       else if (action === 'remove')       graphCanvas?.removeNode(data.id);
     }
   }

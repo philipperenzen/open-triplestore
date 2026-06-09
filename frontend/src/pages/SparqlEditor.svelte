@@ -11,6 +11,7 @@
   import { Play, Loader2, Clock, Download, Check, X as XIcon, Trash2, FileCode, BookOpen, Layers, Wand2, ThumbsUp, ThumbsDown, LayoutList, Building2, Database, Plus, Lock } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { extractDeclaredPrefixes, extractUsedPrefixes, lookupPrefix, lookupPrefixSync } from '../lib/ontology/prefixService.js';
+  import { formatSparql } from '../lib/ontology/sparqlFormat.js';
   import { NAMESPACES } from '../lib/ontology/vocabularies.js';
   import { autofocus } from '../lib/actions/autofocus.js';
   import PageHeader from '../components/PageHeader.svelte';
@@ -109,9 +110,16 @@ LIMIT 25`;
       const schemaHint = Object.entries(declaredPrefixes)
         .map(([p, ns]) => `PREFIX ${p}: <${ns}>`)
         .join('\n');
-      const { sparql } = await nlToSparql(q, schemaHint);
+      // Pass the current editor content so the model can refine/extend it in place
+      // rather than always replacing it.
+      const { sparql } = await nlToSparql(q, schemaHint, query);
       if (sparql && sparql.trim()) {
-        query = sparql.trim();
+        // Auto-format so the generated query lands as readable multi-line SPARQL
+        // instead of a single line. formatSparql is idempotent and returns the
+        // input unchanged if it can't parse it, so this is always safe.
+        let generated = sparql.trim();
+        try { generated = formatSparql(generated); } catch { /* keep raw on format failure */ }
+        query = generated;
         lastGenerated = { question: q, sparql: query };
       } else {
         nlError = $i18nT('pages.sparql.emptyQueryError');

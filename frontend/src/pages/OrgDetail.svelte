@@ -34,6 +34,7 @@
   import { isAdmin, user as userStore } from '../lib/stores.js';
   import { VISIBILITIES } from '../lib/permissions.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import { Plus, Trash2, X, UserPlus, Terminal, Database, Network, Rows3, Activity, Edit2, ShieldCheck, Loader2, Upload, Copy, CheckCheck, Users, Building2, Globe, Mail, Link as LinkIcon, ChevronRight, Info, Hash, Bookmark } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import OrganisationMetadataDialog from '../components/OrganisationMetadataDialog.svelte';
@@ -186,12 +187,12 @@
 
   // Copy SPARQL endpoint URL
   let copiedSparql = false;
-  function copyOrgSparqlUrl() {
+  async function copyOrgSparqlUrl() {
     const url = `${window.location.origin}/api/organisations/${id}/sparql`;
-    navigator.clipboard.writeText(url).then(() => {
+    if (await copyToClipboard(url)) {
       copiedSparql = true;
       setTimeout(() => { copiedSparql = false; }, 2000);
-    }).catch(() => {});
+    }
   }
 
   onMount(async () => {

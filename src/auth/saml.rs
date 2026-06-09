@@ -245,9 +245,17 @@ pub async fn complete_saml_flow(
     let refresh = issue_refresh_token(jwt_config, &user.id, &user.username, user.role.as_str())?;
     let refresh_hash = hash_token(&refresh);
     let refresh_id = Uuid::new_v4().to_string();
+    // A fresh SAML login starts its own session family.
+    let family_id = Uuid::new_v4().to_string();
     let expires =
         chrono::Utc::now() + chrono::Duration::days(jwt_config.refresh_expiry_days as i64);
-    auth_db.create_refresh_token(&refresh_id, &user.id, &refresh_hash, &expires.to_rfc3339())?;
+    auth_db.create_refresh_token(
+        &refresh_id,
+        &user.id,
+        &refresh_hash,
+        &expires.to_rfc3339(),
+        &family_id,
+    )?;
 
     Ok((access, refresh))
 }
