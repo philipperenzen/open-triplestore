@@ -1170,6 +1170,11 @@ LIMIT 25`;
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    /* Cap the editor column on very wide screens so the header actions don't
+       fling to the far right and the editor/toolbar stay a readable width.
+       Left-aligned (no auto margins) to line up with the full-width topbar. */
+    width: 100%;
+    max-width: 1500px;
   }
 
   .editor-card h2 { margin: 0; }
