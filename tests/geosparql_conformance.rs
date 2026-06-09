@@ -2002,18 +2002,32 @@ fn geold_polygon_with_hole_containment() {
     );
 }
 
-// Tracked gap: geo:gmlLiteral is not parsed (WKT-only); topology over a GML literal is unbound.
+// GeoSPARQL Req 2: geo:gmlLiteral is parsed (GML 3.2 subset → WKT → GEOS), so topology
+// functions accept a GML literal argument. (Was a tracked gap; closed in the GML milestone.)
 #[test]
-fn geold_gml_literal_is_gap() {
+fn geold_gml_literal_supported() {
     let s = ts();
     let gml = "\"<gml:Point srsName='urn:ogc:def:crs:EPSG::4326'><gml:pos>1 2</gml:pos></gml:Point>\"^^geo:gmlLiteral";
-    let r = geof_opt(
+    // POINT(1 2) lies within the 0..5 square.
+    let inside = geof_opt(
         &s,
         &format!("geof:sfWithin({gml}, \"POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))\"^^geo:wktLiteral)"),
-    );
+    )
+    .unwrap_or_default();
     assert!(
-        r.is_none() || r.as_deref() == Some(""),
-        "geo:gmlLiteral support is a tracked gap, got {:?}",
-        r
+        inside.contains("true"),
+        "GML point (1,2) is within the square, got {:?}",
+        inside
+    );
+    // A GML and a WKT literal at the same coordinates are spatially equal.
+    let eq = geof_opt(
+        &s,
+        &format!("geof:sfEquals({gml}, \"POINT(1 2)\"^^geo:wktLiteral)"),
+    )
+    .unwrap_or_default();
+    assert!(
+        eq.contains("true"),
+        "GML/WKT round-trip equal, got {:?}",
+        eq
     );
 }
