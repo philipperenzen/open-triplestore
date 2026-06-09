@@ -1,0 +1,4 @@
+# ✅ §4.2 — 22-char IFC GUID conforms to ex:GuidShape (targetClass da:Brugonderdeel).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+wb:Boog-Noord a da:Brugonderdeel ; da:ifcGuid "1aB2cD3eF4gH5iJ6kL7mNo" .

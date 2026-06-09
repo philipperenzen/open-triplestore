@@ -1,0 +1,4 @@
+# ❌ §4.2 — ifcGuid fails sh:pattern (too short / invalid chars).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+wb:Boog-Fout a da:Brugonderdeel ; da:ifcGuid "te-kort" .
