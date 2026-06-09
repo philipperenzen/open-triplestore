@@ -15,6 +15,7 @@
     subgraphActionDataModel,
   } from '../lib/api.js';
   import { isAdmin, user } from '../lib/stores.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import UploadVersionDialog from '../components/UploadVersionDialog.svelte';
   import PublishConfirmDialog from '../components/PublishConfirmDialog.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -47,11 +48,11 @@
 
   // Copy-to-clipboard
   let copiedApi = null;
-  function copyApiUrl(key, url) {
-    navigator.clipboard.writeText(url).then(() => {
+  async function copyApiUrl(key, url) {
+    if (await copyToClipboard(url)) {
       copiedApi = key;
       setTimeout(() => { copiedApi = null; }, 2000);
-    }).catch(() => {});
+    }
   }
 
   let currentUser = null;
