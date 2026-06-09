@@ -28,6 +28,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 - None.
 
+## [0.2.3] — 2026-06-09
+
+### Added
+- The Spark assistant renders its replies as full markdown, so example queries appear as syntax-highlighted code blocks in the chat instead of plain text (#78).
+
+### Changed
+- NL→SPARQL generation in the SPARQL editor now declares every prefix it uses (and the server fills in any the model still omits), parse-validates the result and repairs it once if it is invalid, auto-formats the query into the editor, and can refine the query already in the editor instead of always replacing it (#78).
+- Spark chat replies are no longer cut off at a low output cap (raised from 700 to 2048 tokens) (#78).
+
+### Deprecated
+- None.
+
+### Fixed
+- Signing in to the same account from a second browser no longer logs you out of the first. Refresh-token reuse detection is now scoped to a single session ("token family") with a short rotation-grace window, so a concurrent-refresh race — e.g. browser session-restore reopening several tabs that refresh the same cookie at once — can no longer revoke every session (#78).
+- Hard-refreshing or deep-linking the `/sparql` page now serves the web UI instead of the SPARQL endpoint's "Missing 'query' parameter" error (#78).
+
+### Security
+- Refresh-token reuse/theft detection now revokes only the affected session family instead of every refresh token the user holds; genuine reuse of a fully-rotated chain still invalidates that session, and legacy pre-migration tokens (no family) still trigger a full revoke (#78).
+
 ## [0.2.2] — 2026-06-08
 
 ### Added
@@ -106,7 +125,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.1.0...v0.2.0
