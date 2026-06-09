@@ -727,6 +727,14 @@ pub async fn upload_version(
     if is_public {
         registry::update_latest_published(&state.store, &state.base_url, &id, &result.version)
             .map_err(AppError::from)?;
+    } else {
+        // A freshly uploaded draft becomes the model's current main-line draft, so
+        // keep the ver:latestDraft pointer in sync — mirroring how `create_draft`
+        // (the derived-draft flow) and the `is_public` branch above maintain their
+        // pointers. Without this, a raw draft upload left `latest_draft` null even
+        // though the version is a draft and shows up in the versions list.
+        registry::update_latest_draft(&state.store, &state.base_url, &id, &result.version)
+            .map_err(AppError::from)?;
     }
 
     // Record the upload in the provenance trail.
@@ -1856,6 +1864,14 @@ pub async fn publish_version(
     .map_err(AppError::from)?;
     registry::update_latest_published(&state.store, &state.base_url, &id, &ver)
         .map_err(AppError::from)?;
+    // Publishing a version that was the main-line draft retires the draft pointer.
+    // Staging already clears it, but a Draft can be published directly (see the
+    // status guard above), so without this `latest_draft` would keep pointing at a
+    // now-published version. Guard on equality so an unrelated pending draft pointer
+    // is left untouched.
+    if record.branch.is_none() && data_model.latest_draft.as_deref() == Some(ver.as_str()) {
+        registry::clear_latest_draft(&state.store, &state.base_url, &id).map_err(AppError::from)?;
+    }
 
     // Stamp version metadata into the published version's named graph: OWL
     // `owl:versionIRI`/`owl:priorVersion` for ontologies, DCAT/PAV/SKOS for

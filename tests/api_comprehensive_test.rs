@@ -4301,6 +4301,131 @@ mod visibility_leaks {
         );
     }
 
+    /// Regression: a raw draft upload (POST /versions, is_public=false) must set the
+    /// model's `latest_draft` pointer, and publishing that draft directly must clear it.
+    /// Previously `upload_version` only maintained `latest_published`, so an uploaded
+    /// draft left `latest_draft` null even though it showed in the versions list.
+    #[tokio::test]
+    async fn draft_upload_sets_latest_draft_and_publish_clears_it() {
+        let state = test_state();
+        let base = state.base_url.to_string();
+        // super_admin so one token can both upload (write) and publish (admin).
+        state
+            .auth_db
+            .create_user("u_adm", "adm", "adm@t.com", "h", SystemRole::SuperAdmin)
+            .unwrap();
+        let tok = mint_token("u_adm", "adm", "super_admin");
+
+        open_triplestore::data_models::registry::insert_data_model(
+            &state.store,
+            &base,
+            "m_draft",
+            "M draft",
+            "http://ex.org/md#",
+            None,
+            false,
+            Some("user"),
+            Some("u_adm"),
+            None,
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+        // Upload a DRAFT version (is_public=false) — the path that left latest_draft null.
+        let boundary = "BNDdraft";
+        let ttl: &[u8] = b"<http://ex.org/md#C> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .";
+        let body = multipart_body(
+            boundary,
+            &[
+                ("file", "text/turtle", Some("m.ttl"), ttl),
+                ("version", "text/plain", None, b"0.1.0"),
+                ("is_public", "text/plain", None, b"false"),
+            ],
+        );
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/models/m_draft/versions")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "draft upload should succeed"
+        );
+
+        // Summary must now report the uploaded draft as latest_draft.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/models/m_draft")
+                    .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp.into_body()).await;
+        assert_eq!(
+            json["latest_draft"], "0.1.0",
+            "raw draft upload must set latest_draft: {json}"
+        );
+        assert!(
+            json["latest_published"].is_null(),
+            "nothing published yet: {json}"
+        );
+
+        // Publishing the draft directly must retire the draft pointer.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/models/m_draft/versions/0.1.0/publish")
+                    .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "publish failed: {}",
+            resp.status()
+        );
+
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/models/m_draft")
+                    .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp.into_body()).await;
+        assert_eq!(
+            json["latest_published"], "0.1.0",
+            "published version should be latest_published: {json}"
+        );
+        assert!(
+            json["latest_draft"].is_null(),
+            "publishing the draft must clear latest_draft: {json}"
+        );
+    }
+
     /// Merging one version into another records a commit with the triple delta.
     #[tokio::test]
     async fn merge_apply_records_commit() {
