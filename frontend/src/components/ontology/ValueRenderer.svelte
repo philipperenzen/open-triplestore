@@ -7,6 +7,7 @@
   import { ExternalLink, Play, Copy, Check, Image as ImageIcon, ChevronRight, ChevronDown, Braces, MapPin } from 'lucide-svelte';
   import RdfTerm from '../RdfTerm.svelte';
   import { sanitizeHtml } from '../../lib/ontology/sanitizeHtml.js';
+  import { copyToClipboard } from '../../lib/clipboard.js';
 
   /** SPARQL-JSON-style binding: { type, value, datatype?, 'xml:lang'? } */
   export let term;
@@ -48,10 +49,11 @@
   $: dateFormatted = detection.kind === 'date' ? formatDate(term?.value) : '';
   $: numberFormatted = detection.kind === 'number' ? formatNum(term?.value) : '';
 
-  function copy() {
-    navigator.clipboard?.writeText(String(term?.value ?? ''));
-    copied = true;
-    setTimeout(() => (copied = false), 1200);
+  async function copy() {
+    if (await copyToClipboard(term?.value)) {
+      copied = true;
+      setTimeout(() => (copied = false), 1200);
+    }
   }
 
   function runSparql() {

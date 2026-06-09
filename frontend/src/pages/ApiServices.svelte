@@ -11,6 +11,7 @@
   import { highlight, highlightRdf, prettyJson, prettyXml } from '../lib/resultHighlight.js';
   import { downloadFile } from '../lib/rdf-utils.js';
   import { toastSuccess, toastError } from '../lib/toast';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import { isAuthenticated } from '../lib/stores.js';
   import { t as i18nT } from 'svelte-i18n';
   import { Link, navigate } from '../lib/router/index.js';
@@ -251,8 +252,8 @@
   // The public, runnable endpoint for a service (handy to copy from the run panel).
   const runPath = (q) => `/api/${qScope(q)}/${encodeURIComponent(qOwner(q))}/api-services/${encodeURIComponent(q.slug)}/run`;
   async function copyText(text) {
-    try { await navigator.clipboard.writeText(text); toastSuccess($i18nT('system.copied')); }
-    catch { toastError($i18nT('pages.apiServices.copyFailed')); }
+    if (await copyToClipboard(text)) toastSuccess($i18nT('system.copied'));
+    else toastError($i18nT('pages.apiServices.copyFailed'));
   }
 
   function downloadRun(q) {

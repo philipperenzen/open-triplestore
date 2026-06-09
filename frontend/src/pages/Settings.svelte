@@ -4,6 +4,7 @@
   import { getMe, updateMe, changePassword, listApiTokens, createApiToken, revokeApiToken, uploadUserAvatar, getUserAvatarUrl, selfDeactivate, selfPurge, logout } from '../lib/api.js';
   import { refreshUser, isAuthenticated, authInitialized } from '../lib/stores.js';
   import { TOKEN_SCOPES } from '../lib/permissions.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import { navigate } from '../lib/router/index.js';
   import { Key, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -187,10 +188,12 @@
     }
   }
 
-  function copyToken() {
-    navigator.clipboard.writeText(createdToken);
-    copied = true;
-    setTimeout(() => copied = false, 2000);
+  async function copyToken() {
+    // Use the robust helper: navigator.clipboard is undefined over plain HTTP (LAN),
+    // which used to make this throw and silently fail. Only flag "Copied!" on success;
+    // on failure the token stays visible in the <code> block for manual selection.
+    copied = await copyToClipboard(createdToken);
+    if (copied) setTimeout(() => copied = false, 2000);
   }
 
   // ── Danger Zone ──────────────────────────────────────────────────────────────

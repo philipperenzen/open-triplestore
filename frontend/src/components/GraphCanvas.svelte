@@ -12,6 +12,7 @@
   import GeoPreview from './GeoPreview.svelte';
   import EdgeInfoPanel from './EdgeInfoPanel.svelte';
   import { X, Copy, Check, ArrowUpRight, MapPin, ArrowRight, ArrowDownLeft } from 'lucide-svelte';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   export let nodes = [];
   export let edges = [];
@@ -950,12 +951,11 @@
       dispatch('nodeOpen', { id: inspected.id, fullIri: inspected.iri, nodeType: inspected.nodeType, label: inspected.label });
     }
   }
-  function copyInspectorText(s) {
-    try {
-      navigator.clipboard?.writeText(String(s ?? ''));
+  async function copyInspectorText(s) {
+    if (await copyToClipboard(s)) {
       copiedInspector = true;
       setTimeout(() => (copiedInspector = false), 1200);
-    } catch { /* clipboard unavailable */ }
+    }
   }
 
   // ─── Edge / predicate inspector ─────────────────────────────────────────────

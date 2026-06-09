@@ -52,6 +52,7 @@
   import { isAuthenticated, user } from '../lib/stores.js';
   import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
@@ -455,12 +456,12 @@
 
   // Copy-to-clipboard state per service
   let copiedSlug = null;
-  function copyEndpoint(slug) {
+  async function copyEndpoint(slug) {
     const url = `${window.location.origin}/api/datasets/${id}/services/${slug}/sparql`;
-    navigator.clipboard.writeText(url).then(() => {
+    if (await copyToClipboard(url)) {
       copiedSlug = slug;
       setTimeout(() => { copiedSlug = null; }, 2000);
-    }).catch(() => {});
+    }
   }
 
   // Validation
@@ -619,7 +620,7 @@
       else if (action === 'expandIn')   previewExpandUri(data.fullIri, 'in');
       else if (action === 'expandBoth') previewExpandUri(data.fullIri, 'both');
       else if (action === 'collapse')   previewCollapseUri(data.fullIri);
-      else if (action === 'copyIri')    navigator.clipboard.writeText(data.fullIri).catch(() => {});
+      else if (action === 'copyIri')    void copyToClipboard(data.fullIri);
     }
   }
 
@@ -1110,18 +1111,18 @@
     }
   }
 
-  function copyAssetIri(asset) {
-    navigator.clipboard.writeText(assetIri(asset)).then(() => {
+  async function copyAssetIri(asset) {
+    if (await copyToClipboard(assetIri(asset))) {
       copiedAssetId = asset.id;
       setTimeout(() => { copiedAssetId = null; }, 2000);
-    }).catch(() => {});
+    }
   }
 
   function copyAssetTurtle(asset) {
     const iri = assetIri(asset);
     const title = asset.filename.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const turtle = `<${iri}> a <http://www.w3.org/ns/dcat#Distribution> ;\n    <http://purl.org/dc/terms/title> "${title}" ;\n    <http://www.w3.org/ns/dcat#mediaType> "${asset.content_type}" ;\n    <http://www.w3.org/ns/dcat#downloadURL> <${iri}> .`;
-    navigator.clipboard.writeText(turtle).catch(() => {});
+    void copyToClipboard(turtle);
   }
 
   async function toggleAssetVisibility(asset) {
