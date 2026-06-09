@@ -56,7 +56,7 @@
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
@@ -1417,6 +1417,11 @@
       <Terminal size={22} />
       <strong>{$i18nT('pages.datasetDetail.sparql')}</strong>
       <span>{$i18nT('pages.datasetDetail.sparqlDesc')}</span>
+    </Link>
+    <Link to="/datasets/{id}/viewer" class="action-tile">
+      <Boxes size={22} />
+      <strong>{$i18nT('pages.datasetDetail.viewer3d')}</strong>
+      <span>{$i18nT('pages.datasetDetail.viewer3dDesc')}</span>
     </Link>
     <Link to="/datasets/{id}/api-services" class="action-tile">
       <Bookmark size={22} />
