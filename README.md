@@ -79,7 +79,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **DCAT 2 catalog** | Full W3C DCAT 2 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance |
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
-| **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md)) |
+| **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
 | **Prefix auto-resolution** | Unknown prefixes resolved on-the-fly via [prefix.cc](https://prefix.cc) with local caching |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |

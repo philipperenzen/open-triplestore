@@ -13,8 +13,9 @@ const SEEDED_SLUGS = new Set([
   'overview', 'named-graphs', 'datasets', 'organisations', 'versioning',
   'modelling', 'data-modeling', 'linked-data-modelling-styleguide', 'models',
   'dcat', 'formats', 'import', 'search-syntax', 'full-text-search', 'geosparql',
-  'reasoning', 'shacl', 'auth', 'security', 'api-services', 'api-reference',
-  'operations', 'standards', 'datatypes', 'faq', 'dataset-governance',
+  'spark', 'reasoning', 'shacl', 'auth', 'security', 'api-services',
+  'api-reference', 'operations', 'standards', 'datatypes', 'faq',
+  'dataset-governance',
 ]);
 
 const md = readFileSync(resolve(process.cwd(), '../docs/datatypes.md'), 'utf8');
