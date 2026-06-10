@@ -26,6 +26,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
   `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
   `sh:zeroOrOnePath` (previously only a single predicate IRI was understood).
+- GeoSPARQL **`geo:gmlLiteral`** parsing (GeoSPARQL 1.1 Req 2): the GML 3.2 geometry
+  subset — `Point`, `LineString`/`Curve`, `Polygon`/`Surface` and the `Multi*`
+  collections — is translated to WKT and handled by the existing GEOS path, so `geof:*`
+  functions now accept GML geometry literals (was WKT-only).
 
 ### Changed
 - None.
