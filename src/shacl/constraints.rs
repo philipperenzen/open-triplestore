@@ -510,6 +510,42 @@ pub fn evaluate_constraint(
             }
         }
 
+        // ---- SHACL-AF node expression (path + comparison subset) ----
+        Constraint::Expression {
+            path: expr_path,
+            checks,
+            message,
+        } => {
+            // Evaluate the inner comparison constraints against the values reached
+            // along the expression path; any inner violation fails the expression.
+            let mut inner = Vec::new();
+            for check in checks {
+                inner.extend(evaluate_constraint(
+                    store,
+                    shapes,
+                    shape_iri,
+                    focus_node,
+                    check,
+                    Some(expr_path),
+                    data_graphs,
+                    severity,
+                ));
+            }
+            if !inner.is_empty() {
+                results.push(ValidationResult {
+                    severity: severity.clone(),
+                    focus_node: focus_node.to_string(),
+                    path: Some(expr_path.to_sparql()),
+                    value: inner.into_iter().next().and_then(|r| r.value),
+                    source_shape: shape_iri.to_string(),
+                    source_constraint: "sh:expression".to_string(),
+                    message: message
+                        .clone()
+                        .unwrap_or_else(|| "sh:expression constraint not satisfied".to_string()),
+                });
+            }
+        }
+
         // ---- Numeric range constraints ----
         Constraint::MinExclusive(min_val) => {
             let values = get_value_terms(store, focus_node, path, data_graphs);

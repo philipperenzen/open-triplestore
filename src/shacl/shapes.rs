@@ -152,6 +152,15 @@ pub enum Constraint {
         message: Option<String>,
         severity: Option<String>,
     },
+
+    // SHACL-AF: sh:expression (node expression) — path + comparison subset. The values
+    // reached along `path` from the focus node must satisfy every constraint in `checks`
+    // (e.g. sh:minExclusive); a single violation is reported with `message`.
+    Expression {
+        path: PropertyPath,
+        checks: Vec<Constraint>,
+        message: Option<String>,
+    },
 }
 
 /// sh:nodeKind values.

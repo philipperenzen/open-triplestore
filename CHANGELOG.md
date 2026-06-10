@@ -35,6 +35,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closed-form transforms (no PROJ dependency). Feeds map/3D reprojection for the viewer.
 - `geof:distance` now honours its units-of-measure argument for linear units
   (`metre`/`kilometre`/`centimetre`/`millimetre`) over a metre-based CRS.
+- SHACL-AF **`sh:expression`** node expressions (path + comparison subset): values
+  reached along an expression's `sh:path` must satisfy its comparison constraints
+  (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
+- SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
+  `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  evaluated against a fresh in-memory store, fully supporting expression-style functions.
 
 ### Changed
 - None.
