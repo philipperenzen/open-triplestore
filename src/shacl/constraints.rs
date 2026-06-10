@@ -204,14 +204,22 @@ pub fn evaluate_constraint(
 
         Constraint::NodeKind(expected) => {
             if path.is_none() {
-                // Node-level: the focus node itself must match the kind.
+                // Node-level: the focus node itself must match the kind. Focus
+                // nodes are lexical strings (term kind is lost during target
+                // resolution), so literals are classified heuristically: not a
+                // blank node and not scheme-shaped ⇒ literal. This correctly
+                // accepts e.g. a WKT literal reached via sh:targetObjectsOf
+                // (previously sh:nodeKind sh:Literal always failed at node level).
+                let is_blank = focus_node.starts_with("_:");
+                let is_iri = !is_blank && looks_like_iri(focus_node);
+                let is_literal = !is_blank && !is_iri;
                 let is_valid = match expected {
-                    NodeKind::IRI => is_iri_str(focus_node),
-                    NodeKind::BlankNode => focus_node.starts_with("_:"),
-                    NodeKind::Literal => false,
-                    NodeKind::BlankNodeOrIRI => true,
-                    NodeKind::IRIOrLiteral => !focus_node.starts_with("_:"),
-                    NodeKind::BlankNodeOrLiteral => focus_node.starts_with("_:"),
+                    NodeKind::IRI => is_iri,
+                    NodeKind::BlankNode => is_blank,
+                    NodeKind::Literal => is_literal,
+                    NodeKind::BlankNodeOrIRI => is_blank || is_iri,
+                    NodeKind::IRIOrLiteral => is_iri || is_literal,
+                    NodeKind::BlankNodeOrLiteral => is_blank || is_literal,
                 };
                 if !is_valid {
                     results.push(ValidationResult {
@@ -737,85 +745,102 @@ pub fn evaluate_constraint(
         }
 
         // ---- Logical constraints ----
+        // In a property-shape context these apply to EACH VALUE NODE along the
+        // path (SHACL §4.6); only in a node-shape context (no path) do they apply
+        // to the focus node itself. Results keep the original focus node and
+        // carry the offending value in sh:value.
         Constraint::Not(inner_shape) => {
-            // Focus node must NOT conform to the inner shape.
-            // Conforms = zero violations → that is itself a violation for sh:not.
-            let inner_violations = validate_inline_shape(
-                store,
-                shapes,
-                focus_node,
-                inner_shape,
-                data_graphs,
-                severity,
-            );
-            if inner_violations.is_empty() {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: "sh:not".to_string(),
-                    message: "Focus node conforms to sh:not shape (must not conform)".to_string(),
-                });
+            for value in value_nodes(store, focus_node, path, data_graphs) {
+                // The value must NOT conform; zero inner violations → violation.
+                let inner_violations = validate_inline_shape(
+                    store,
+                    shapes,
+                    &value,
+                    inner_shape,
+                    data_graphs,
+                    severity,
+                );
+                if inner_violations.is_empty() {
+                    results.push(ValidationResult {
+                        severity: severity.clone(),
+                        focus_node: focus_node.to_string(),
+                        path: path.map(|p| p.to_sparql()),
+                        value: value_field(&value, focus_node),
+                        source_shape: shape_iri.to_string(),
+                        source_constraint: "sh:not".to_string(),
+                        message: "Value conforms to sh:not shape (must not conform)".to_string(),
+                    });
+                }
             }
         }
 
         Constraint::And(inner_shapes) => {
-            // All inner shapes must produce zero violations.
-            for inner in inner_shapes {
-                results.extend(validate_inline_shape(
-                    store,
-                    shapes,
-                    focus_node,
-                    inner,
-                    data_graphs,
-                    severity,
-                ));
+            // Every value must conform to ALL inner shapes; one violation per
+            // value that fails any of them.
+            for value in value_nodes(store, focus_node, path, data_graphs) {
+                let fails = inner_shapes.iter().any(|inner| {
+                    !validate_inline_shape(store, shapes, &value, inner, data_graphs, severity)
+                        .is_empty()
+                });
+                if fails {
+                    results.push(ValidationResult {
+                        severity: severity.clone(),
+                        focus_node: focus_node.to_string(),
+                        path: path.map(|p| p.to_sparql()),
+                        value: value_field(&value, focus_node),
+                        source_shape: shape_iri.to_string(),
+                        source_constraint: "sh:and".to_string(),
+                        message: "Value does not conform to all sh:and shapes".to_string(),
+                    });
+                }
             }
         }
 
         Constraint::Or(inner_shapes) => {
-            // At least one inner shape must produce zero violations.
-            let any_conforms = inner_shapes.iter().any(|inner| {
-                validate_inline_shape(store, shapes, focus_node, inner, data_graphs, severity)
-                    .is_empty()
-            });
-            if !any_conforms {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: "sh:or".to_string(),
-                    message: "Focus node does not conform to any sh:or shape".to_string(),
+            // Every value must conform to at least one inner shape.
+            for value in value_nodes(store, focus_node, path, data_graphs) {
+                let any_conforms = inner_shapes.iter().any(|inner| {
+                    validate_inline_shape(store, shapes, &value, inner, data_graphs, severity)
+                        .is_empty()
                 });
+                if !any_conforms {
+                    results.push(ValidationResult {
+                        severity: severity.clone(),
+                        focus_node: focus_node.to_string(),
+                        path: path.map(|p| p.to_sparql()),
+                        value: value_field(&value, focus_node),
+                        source_shape: shape_iri.to_string(),
+                        source_constraint: "sh:or".to_string(),
+                        message: "Value does not conform to any sh:or shape".to_string(),
+                    });
+                }
             }
         }
 
         Constraint::Xone(inner_shapes) => {
-            // Exactly one inner shape must produce zero violations.
-            let conforming_count = inner_shapes
-                .iter()
-                .filter(|inner| {
-                    validate_inline_shape(store, shapes, focus_node, inner, data_graphs, severity)
-                        .is_empty()
-                })
-                .count();
-            if conforming_count != 1 {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: "sh:xone".to_string(),
-                    message: format!(
-                        "Focus node conforms to {} sh:xone shapes, expected exactly 1",
-                        conforming_count
-                    ),
-                });
+            // Every value must conform to exactly one inner shape.
+            for value in value_nodes(store, focus_node, path, data_graphs) {
+                let conforming_count = inner_shapes
+                    .iter()
+                    .filter(|inner| {
+                        validate_inline_shape(store, shapes, &value, inner, data_graphs, severity)
+                            .is_empty()
+                    })
+                    .count();
+                if conforming_count != 1 {
+                    results.push(ValidationResult {
+                        severity: severity.clone(),
+                        focus_node: focus_node.to_string(),
+                        path: path.map(|p| p.to_sparql()),
+                        value: value_field(&value, focus_node),
+                        source_shape: shape_iri.to_string(),
+                        source_constraint: "sh:xone".to_string(),
+                        message: format!(
+                            "Value conforms to {} sh:xone shapes, expected exactly 1",
+                            conforming_count
+                        ),
+                    });
+                }
             }
         }
 
@@ -824,14 +849,29 @@ pub fn evaluate_constraint(
             // Look up the referenced shape in the loaded shapes collection.
             if let Some(ref_shape) = shapes.iter().find(|s| &s.iri == ref_shape_iri) {
                 let ref_shape = ref_shape.clone();
-                results.extend(validate_inline_shape(
-                    store,
-                    shapes,
-                    focus_node,
-                    &ref_shape,
-                    data_graphs,
-                    severity,
-                ));
+                // Each value node must conform to the referenced shape; one
+                // violation per non-conforming value (sh:node, SHACL §4.6.3).
+                for value in value_nodes(store, focus_node, path, data_graphs) {
+                    let inner = validate_inline_shape(
+                        store,
+                        shapes,
+                        &value,
+                        &ref_shape,
+                        data_graphs,
+                        severity,
+                    );
+                    if !inner.is_empty() {
+                        results.push(ValidationResult {
+                            severity: severity.clone(),
+                            focus_node: focus_node.to_string(),
+                            path: path.map(|p| p.to_sparql()),
+                            value: value_field(&value, focus_node),
+                            source_shape: shape_iri.to_string(),
+                            source_constraint: format!("sh:node <{}>", ref_shape_iri),
+                            message: format!("Value does not conform to shape <{}>", ref_shape_iri),
+                        });
+                    }
+                }
             }
             // If shape not found, skip silently (may be in a different shapes graph).
         }
@@ -924,6 +964,33 @@ fn bind_this(select: &str, focus_node: &str, data_graphs: &[String]) -> String {
     q
 }
 
+/// The value nodes a (possibly path-less) constraint applies to: the values
+/// along the path in a property-shape context, or the focus node itself in a
+/// node-shape context (SHACL §3.4). Distinct — SHACL counts value *nodes*, not
+/// SPARQL path bindings, so duplicates from diamond-shaped paths collapse.
+fn value_nodes(
+    store: &TripleStore,
+    focus_node: &str,
+    path: Option<&PropertyPath>,
+    data_graphs: &[String],
+) -> Vec<String> {
+    match path {
+        None => vec![focus_node.to_string()],
+        Some(_) => {
+            let mut vals = get_values(store, focus_node, path, data_graphs);
+            let mut seen = BTreeSet::new();
+            vals.retain(|v| seen.insert(v.clone()));
+            vals
+        }
+    }
+}
+
+/// `sh:value` for a result: the offending value node in property context, or
+/// `None` when the "value" is just the focus node itself (node context).
+fn value_field(value: &str, focus_node: &str) -> Option<String> {
+    (value != focus_node).then(|| value.to_string())
+}
+
 /// Get the string values for a focus node along a property path.
 fn get_values(
     store: &TripleStore,
@@ -953,7 +1020,9 @@ fn get_values(
     let path_sparql = path.to_sparql();
 
     // Check the per-thread path cache before executing a SPARQL query
-    if let Some(cached) = crate::store::path_cache::tl_get(focus_node, &path_sparql) {
+    if let Some(cached) =
+        crate::store::path_cache::tl_get(store.cache_id(), focus_node, &path_sparql)
+    {
         return cached;
     }
 
@@ -979,7 +1048,12 @@ fn get_values(
             Vec::new()
         };
 
-    crate::store::path_cache::tl_insert(focus_node.to_string(), path_sparql, results.clone());
+    crate::store::path_cache::tl_insert(
+        store.cache_id(),
+        focus_node.to_string(),
+        path_sparql,
+        results.clone(),
+    );
     results
 }
 
@@ -1078,9 +1152,28 @@ fn term_to_value_triple(term: &oxigraph::model::Term) -> (String, Option<String>
     }
 }
 
-/// Whether a string looks like an IRI for node-kind purposes.
-fn is_iri_str(s: &str) -> bool {
-    s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:")
+/// Scheme-shaped heuristic for classifying a lexical focus node as an IRI:
+/// `scheme:rest` with an alpha-led scheme and no whitespace. Misclassifies rare
+/// literals like bare time strings ("12:30:00"), which is accepted — the
+/// alternative (treating every focus as non-literal) failed all node-level
+/// `sh:nodeKind sh:Literal` checks.
+fn looks_like_iri(s: &str) -> bool {
+    if s.contains(char::is_whitespace) {
+        return false;
+    }
+    match s.split_once(':') {
+        Some((scheme, _)) => {
+            !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        }
+        None => false,
+    }
 }
 
 /// Whether a value term (as produced by `get_value_terms`) matches an expected
