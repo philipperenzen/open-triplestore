@@ -5168,6 +5168,31 @@ pub async fn validate_dataset(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Compliance-as-data: also persist the report as standard sh:ValidationReport
+    // RDF in a per-dataset system graph, replaced on every official run, so
+    // dashboards can query failures via SPARQL (history stays in run rows).
+    // Best-effort: an RDF-persistence failure must not fail the validation call.
+    {
+        let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
+        let report_iri = format!("{report_graph}#run-{}", summary.id);
+        let ttl = crate::shacl_studio::report_rdf::report_to_turtle(&report, &report_iri);
+        match state.store.graph_store_put(
+            Some(&report_graph),
+            &ttl,
+            oxigraph::io::RdfFormat::Turtle,
+        ) {
+            Ok(_) => {
+                let _ = state.auth_db.add_dataset_graph(&dataset_id, &report_graph);
+                let _ = state.auth_db.set_dataset_graph_role(
+                    &dataset_id,
+                    &report_graph,
+                    Some(crate::auth::models::GraphKind::System),
+                );
+            }
+            Err(e) => debug!("report-RDF persistence skipped: {e}"),
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "report": report,
         "run_id": summary.id,
@@ -6568,4 +6593,53 @@ pub async fn list_accessible_shape_graphs(
         .collect();
 
     Ok(Json(serde_json::json!({ "shape_graphs": shape_graphs })))
+}
+
+// ─── Viewer feed (geometry + 3D-file references per element) ────────────────────
+
+#[derive(Deserialize)]
+pub struct ViewerFeedQuery {
+    /// Optional root object IRI: restrict the feed to this object and its
+    /// directly contained elements.
+    pub root: Option<String>,
+}
+
+/// GET /api/datasets/:dataset_id/viewer-feed — per-element geometry (reprojected
+/// to EPSG:4326/3857) plus FOG 3D-file references (glTF/IFC/…), resolved from the
+/// BOT/OMG/FOG/GeoSPARQL layering. Feeds the map and 3D viewers; element detail
+/// is fetched separately on selection. Anonymous access works for public datasets.
+pub async fn viewer_feed(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Query(q): Query<ViewerFeedQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+    if !state
+        .auth_db
+        .can_access_dataset(user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+    if let Some(root) = q.root.as_deref() {
+        validate_iri(root)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid root IRI".to_string()))?;
+    }
+    let data_graphs = state
+        .auth_db
+        .list_dataset_graphs(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let elements =
+        crate::geo::viewer_feed::build_viewer_feed(&state.store, &data_graphs, q.root.as_deref());
+    Ok(Json(serde_json::json!({
+        "dataset_id": dataset_id,
+        "count": elements.len(),
+        "elements": elements,
+    })))
 }

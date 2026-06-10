@@ -78,6 +78,20 @@ fn finite(x: f64, y: f64) -> Option<(f64, f64)> {
     (x.is_finite() && y.is_finite()).then_some((x, y))
 }
 
+/// Reproject the WKT body of a geometry literal from `source` to `target`,
+/// returning the bare transformed WKT (no CRS prefix). `wkt_body` must not carry
+/// a `<crs>` prefix — strip it first (see `datatypes::extract_crs`/`extract_wkt`).
+pub fn reproject_wkt(wkt_body: &str, source: Crs, target: Crs) -> Option<String> {
+    use geo::MapCoords;
+    use wkt::{ToWkt, TryFromWkt};
+    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(wkt_body.trim()).ok()?;
+    let out = geom.map_coords(|c| {
+        let (x, y) = transform_xy(source, target, c.x, c.y).unwrap_or((c.x, c.y));
+        geo::Coord { x, y }
+    });
+    Some(out.wkt_string())
+}
+
 // ─── RD New (EPSG:28992) ↔ WGS84 — Strang van Hees approximation ───
 
 /// RD (easting `x`, northing `y`, metres) → WGS84 `(lon, lat)` degrees.
