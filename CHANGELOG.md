@@ -92,6 +92,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Waalbrug dataset round-trips through the official GeoSPARQL validator. See
   `docs/conformance/`.
 
+- **Spark chat is now an interactive linked-data canvas.** Assistant answers render
+  runnable widgets: `GET /api/.../run` mentions (fenced or inline) become one-click
+  API calls whose results show in place exactly like the API-services page (SPARQL
+  result table with linked RDF terms, CSV, RDF, JSON — with parameters, dataset
+  version and download); fenced ```sparql blocks get Run / copy / open-in-workspace
+  actions and execute under the caller's normal read scope; and the model can emit
+  ```chart (bar/line/pie), ```map (WGS84 WKT on Leaflet), ```card (entity info card)
+  and ```csv preview blocks. Spark itself may now run up to three scoped SPARQL
+  rounds per turn (with error feedback for self-repair), the full retrieval trail is
+  shown per answer with syntax-highlighted queries, and WKT result cells survive
+  long enough to be mapped.
+
 ### Fixed (SHACL engine, found by the official suites)
 - `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
   against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
