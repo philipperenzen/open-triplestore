@@ -1,0 +1,8 @@
+# §6.3 rule POSITIVE — bridge over water with a cs5 part MUST infer da:inspectieprioriteit "hoog".
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix bot: <https://w3id.org/bot#> .
+@prefix skos:<http://www.w3.org/2004/02/skos/core#> .
+wb:HoogBrug a da:Brug ; da:kruistWaterweg wb:Waal ; bot:containsElement wb:SlechtDeel .
+wb:SlechtDeel a da:Brugonderdeel ; da:conditiescore wb:cs5 .
+wb:cs5 a skos:Concept ; skos:notation "5" .

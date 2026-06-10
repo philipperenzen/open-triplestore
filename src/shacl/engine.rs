@@ -53,7 +53,7 @@ pub fn validate(
 
             focus_nodes
                 .par_iter()
-                .flat_map(|focus_node| {
+                .flat_map(|(focus_node, focus_kind)| {
                     let mut results = Vec::new();
 
                     // Node-level constraints
@@ -63,6 +63,7 @@ pub fn validate(
                             shapes_slice,
                             &shape.iri,
                             focus_node,
+                            *focus_kind,
                             constraint,
                             None,
                             data_graphs,
@@ -80,6 +81,7 @@ pub fn validate(
                                 shapes_slice,
                                 shape_iri,
                                 focus_node,
+                                *focus_kind,
                                 constraint,
                                 Some(&prop_shape.path),
                                 data_graphs,
@@ -305,24 +307,21 @@ fn load_targets(
         targets.push(Target::TargetClass(shape_iri.to_string()));
     }
 
-    // SHACL-AF: SPARQL targets
-    let sparql_targets = execute_select_single(
-        store,
-        &format!(
-            r#"
-            PREFIX sh: <{SH}>
-            SELECT ?select WHERE {{
-                GRAPH <{shapes_graph}> {{
-                    <{shape_iri}> sh:target ?t .
-                    ?t sh:select ?select .
-                }}
-            }}
-            "#,
-        ),
-        "select",
-    )?;
-    for s in sparql_targets {
-        targets.push(Target::SparqlTarget(s));
+    // SHACL-AF: SPARQL targets. Resolve the target node through the raw quad index
+    // (it may be named, e.g. ex:BruggenOverWater, or an inline blank node) so its
+    // sh:select and sh:prefixes are both reachable. The previous SPARQL-query form
+    // could not read prefixes off a blank declaration node and prepended none.
+    for target_node in store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}target"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        if let Some(select) =
+            single_value(store, shapes_graph, &target_node, &format!("{SH}select"))
+        {
+            let prefixes = sparql_prefixes(store, shapes_graph, &target_node);
+            targets.push(Target::SparqlTarget(format!("{prefixes}{select}")));
+        }
     }
 
     Ok(targets)
@@ -561,11 +560,15 @@ fn load_constraints(
             &format!("{}qualifiedMaxCount", SH),
         )
         .and_then(|v| v.parse::<usize>().ok());
-        constraints.push(Constraint::QualifiedValueShape {
-            shape_iri: qvs_iri,
-            min_count,
-            max_count,
-        });
+        // Load the value shape inline (named or blank) so an inline `[ … ]` is enforced
+        // rather than looked up — and silently skipped — in the top-level shapes list.
+        if let Ok(qvs_shape) = load_inline_shape(store, shapes_graph, &qvs_iri) {
+            constraints.push(Constraint::QualifiedValueShape {
+                shape: Box::new(qvs_shape),
+                min_count,
+                max_count,
+            });
+        }
     }
 
     // SHACL-AF: sh:sparql constraints. Resolve through the raw quad index so this
@@ -582,8 +585,46 @@ fn load_constraints(
         if let Some(select) =
             single_value(store, shapes_graph, &sparql_node, &format!("{SH}select"))
         {
+            // Prepend the SHACL prefixes-mechanism prologue so prefixed names resolve.
+            let prefixes = sparql_prefixes(store, shapes_graph, &sparql_node);
             let message = single_value(store, shapes_graph, &sparql_node, &format!("{SH}message"));
-            constraints.push(Constraint::SparqlConstraint { select, message });
+            // sh:severity may sit on the SPARQLConstraint node (e.g. sh:Warning) and
+            // overrides the shape-level severity for this constraint's results.
+            let severity =
+                single_value(store, shapes_graph, &sparql_node, &format!("{SH}severity"));
+            constraints.push(Constraint::SparqlConstraint {
+                select: format!("{prefixes}{select}"),
+                message,
+                severity,
+            });
+        }
+    }
+
+    // SHACL-AF: sh:expression node expressions (path + comparison subset). The
+    // expression node carries an sh:path and comparison constraints (e.g.
+    // sh:minExclusive); values along the path from the focus must satisfy them.
+    for expr_node in store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}expression"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        let Some(path_val) = single_value(store, shapes_graph, &expr_node, &format!("{SH}path"))
+        else {
+            continue;
+        };
+        let Some(path) = parse_property_path(store, shapes_graph, &path_val) else {
+            continue;
+        };
+        // Comparison/value constraints declared on the expression node (recursion is
+        // bounded: the expression node carries no further sh:expression).
+        let checks = load_constraints(store, shapes_graph, &expr_node)?;
+        if !checks.is_empty() {
+            let message = single_value(store, shapes_graph, &expr_node, &format!("{SH}message"));
+            constraints.push(Constraint::Expression {
+                path,
+                checks,
+                message,
+            });
         }
     }
 
@@ -634,10 +675,19 @@ fn load_property_shapes_inner(
     let mut result = Vec::new();
 
     for ps_iri in &ps_iris {
-        // Load path
-        let path_value = single_value(store, shapes_graph, ps_iri, &format!("{}path", SH));
-        let path = match path_value {
-            Some(p) => PropertyPath::Predicate(p),
+        // Load and parse the property path: a predicate IRI, or a blank-node path
+        // (sequence list, sh:inversePath, sh:alternativePath, sh:zeroOrMorePath, …).
+        let path = match single_value(store, shapes_graph, ps_iri, &format!("{}path", SH)) {
+            Some(p) => match parse_property_path(store, shapes_graph, &p) {
+                Some(pp) => pp,
+                None => {
+                    warn!(
+                        "Property shape <{}> has an unparseable sh:path, skipping",
+                        ps_iri
+                    );
+                    continue;
+                }
+            },
             None => {
                 warn!("Property shape <{}> has no sh:path, skipping", ps_iri);
                 continue;
@@ -666,8 +716,27 @@ fn load_property_shapes_inner(
 // Target resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -> Vec<String> {
-    let mut focus_nodes = Vec::new();
+/// Term kind of a resolved focus node, recorded at target resolution so
+/// node-level constraints (sh:nodeKind) can classify exactly instead of
+/// guessing from the lexical form — a string literal like "mailto:x@y.org" is
+/// otherwise indistinguishable from an IRI once stringified. `Unknown` keeps
+/// the lexical heuristic for paths where the kind was lost before resolution
+/// (sh:targetNode is loaded from the shapes graph as a bare string, and inline
+/// value-node recursion never had a kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusKind {
+    Iri,
+    BlankNode,
+    Literal,
+    Unknown,
+}
+
+fn resolve_targets(
+    store: &TripleStore,
+    shape: &Shape,
+    data_graphs: &[String],
+) -> Vec<(String, FocusKind)> {
+    let mut focus_nodes: Vec<(String, FocusKind)> = Vec::new();
 
     for target in &shape.targets {
         match target {
@@ -677,19 +746,19 @@ fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -
                     "SELECT DISTINCT ?s WHERE {{ {} }}",
                     graph_scoped(data_graphs, &format!("?s a <{class_iri}>"))
                 );
-                if let Ok(nodes) = execute_select_single(store, &query, "s") {
+                if let Ok(nodes) = execute_select_terms(store, &query, "s") {
                     focus_nodes.extend(nodes);
                 }
             }
             Target::TargetNode(node_iri) => {
-                focus_nodes.push(node_iri.clone());
+                focus_nodes.push((node_iri.clone(), FocusKind::Unknown));
             }
             Target::TargetSubjectsOf(pred_iri) => {
                 let query = format!(
                     "SELECT DISTINCT ?s WHERE {{ {} }}",
                     graph_scoped(data_graphs, &format!("?s <{pred_iri}> ?o"))
                 );
-                if let Ok(nodes) = execute_select_single(store, &query, "s") {
+                if let Ok(nodes) = execute_select_terms(store, &query, "s") {
                     focus_nodes.extend(nodes);
                 }
             }
@@ -698,22 +767,26 @@ fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -
                     "SELECT DISTINCT ?o WHERE {{ {} }}",
                     graph_scoped(data_graphs, &format!("?s <{pred_iri}> ?o"))
                 );
-                if let Ok(nodes) = execute_select_single(store, &query, "o") {
+                if let Ok(nodes) = execute_select_terms(store, &query, "o") {
                     focus_nodes.extend(nodes);
                 }
             }
             Target::SparqlTarget(sparql) => {
                 // SHACL-AF custom SPARQL target
-                if let Ok(nodes) = execute_select_single(store, sparql, "this") {
+                if let Ok(nodes) = execute_select_terms(store, sparql, "this") {
                     focus_nodes.extend(nodes);
                 }
             }
         }
     }
 
-    // Deduplicate
-    focus_nodes.sort();
-    focus_nodes.dedup();
+    // Deduplicate by lexical form, preferring an exactly-known kind over
+    // Unknown when the same node arrives via multiple targets.
+    focus_nodes.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| (a.1 == FocusKind::Unknown).cmp(&(b.1 == FocusKind::Unknown)))
+    });
+    focus_nodes.dedup_by(|a, b| a.0 == b.0);
     focus_nodes
 }
 
@@ -734,32 +807,40 @@ fn load_rules(
 ) -> Result<Vec<(String, Vec<Target>, RuleType, String)>, String> {
     let mut rules: Vec<(String, Vec<Target>, RuleType, String)> = Vec::new();
 
-    // SPARQL rules
-    let query = format!(
-        r#"
-        PREFIX sh: <{SH}>
-        SELECT ?shape ?construct WHERE {{
-            GRAPH <{shapes_graph}> {{
-                ?shape sh:rule ?rule .
-                ?rule sh:construct ?construct .
+    // SPARQL rules. Discover shapes carrying a CONSTRUCT rule, then resolve the rule
+    // node and its sh:prefixes through the raw quad index — the rule node (`sh:rule
+    // [ … ]`) is typically blank, and the prefixes prologue must be prepended so a
+    // prefixed CONSTRUCT body parses instead of being silently dropped.
+    let sparql_rule_shapes = execute_select_single(
+        store,
+        &format!(
+            r#"
+            PREFIX sh: <{SH}>
+            SELECT DISTINCT ?shape WHERE {{
+                GRAPH <{shapes_graph}> {{ ?shape sh:rule ?rule . ?rule sh:construct ?c . }}
             }}
-        }}
-        "#,
-    );
-
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
-        for solution in solutions.filter_map(|s| s.ok()) {
-            let shape_iri = match solution.get("shape") {
-                Some(oxigraph::model::Term::NamedNode(nn)) => nn.as_str().to_string(),
-                _ => continue,
-            };
-            let construct = match solution.get("construct") {
-                Some(oxigraph::model::Term::Literal(lit)) => lit.value().to_string(),
-                _ => continue,
-            };
-
-            let targets = load_targets(store, shapes_graph, &shape_iri).unwrap_or_default();
-            rules.push((shape_iri, targets, RuleType::SparqlRule, construct));
+            "#,
+        ),
+        "shape",
+    )?;
+    for shape_iri in &sparql_rule_shapes {
+        let targets = load_targets(store, shapes_graph, shape_iri).unwrap_or_default();
+        for rule_node in store
+            .objects_for_subject_in_graph(shape_iri, &format!("{SH}rule"), Some(shapes_graph))
+            .iter()
+            .map(term_to_lexical)
+        {
+            if let Some(construct) =
+                single_value(store, shapes_graph, &rule_node, &format!("{SH}construct"))
+            {
+                let prefixes = sparql_prefixes(store, shapes_graph, &rule_node);
+                rules.push((
+                    shape_iri.clone(),
+                    targets.clone(),
+                    RuleType::SparqlRule,
+                    format!("{prefixes}{construct}"),
+                ));
+            }
         }
     }
 
@@ -813,6 +894,9 @@ fn resolve_rule_targets(
         deactivated: false,
     };
     resolve_targets(store, &dummy_shape, data_graphs)
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect()
 }
 
 /// Apply one rule to one focus node. The number of *new* triples is not measured
@@ -921,6 +1005,37 @@ fn execute_select_single(
     }
 }
 
+/// Like [`execute_select_single`], but records each term's kind alongside its
+/// lexical form, so target resolution can carry term kinds into constraint
+/// evaluation (see [`FocusKind`]).
+fn execute_select_terms(
+    store: &TripleStore,
+    query: &str,
+    var: &str,
+) -> Result<Vec<(String, FocusKind)>, String> {
+    match store.query(query) {
+        Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => Ok(solutions
+            .filter_map(|s| s.ok())
+            .filter_map(|s| {
+                s.get(var).map(|v| match v {
+                    oxigraph::model::Term::NamedNode(nn) => {
+                        (nn.as_str().to_string(), FocusKind::Iri)
+                    }
+                    oxigraph::model::Term::Literal(lit) => {
+                        (lit.value().to_string(), FocusKind::Literal)
+                    }
+                    oxigraph::model::Term::BlankNode(bn) => {
+                        (format!("_:{}", bn.as_str()), FocusKind::BlankNode)
+                    }
+                    oxigraph::model::Term::Triple(t) => (t.to_string(), FocusKind::Unknown),
+                })
+            })
+            .collect()),
+        Ok(_) => Ok(Vec::new()),
+        Err(e) => Err(format!("Query error: {}", e)),
+    }
+}
+
 fn single_value(
     store: &TripleStore,
     shapes_graph: &str,
@@ -951,6 +1066,123 @@ fn multi_values(
         .iter()
         .map(term_to_lexical)
         .collect()
+}
+
+/// Parse a SHACL property path (SHACL §2.3) starting at `node` into a [`PropertyPath`].
+///
+/// Handles a predicate IRI; an RDF-list **sequence** path `( p1 p2 … )`; and the blank-node
+/// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
+/// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Blank-node cells are walked through the raw quad
+/// index (SPARQL surface syntax cannot re-address them). Returns `None` for an empty or
+/// malformed path so the caller can skip the property shape rather than mis-bind it. The
+/// previous loader treated every path as a single predicate, so a blank-node path collapsed
+/// to `Predicate("_:bn")` and matched nothing.
+fn parse_property_path(
+    store: &TripleStore,
+    shapes_graph: &str,
+    node: &str,
+) -> Option<PropertyPath> {
+    // A predicate path is a plain IRI.
+    if !node.starts_with("_:") {
+        return Some(PropertyPath::Predicate(node.to_string()));
+    }
+    // Blank node: a path-operator object, otherwise an RDF-list sequence path.
+    let op = |p: &str| -> Option<String> {
+        store
+            .objects_for_subject_in_graph(node, &format!("{SH}{p}"), Some(shapes_graph))
+            .first()
+            .map(term_to_lexical)
+    };
+    if let Some(inner) = op("inversePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::Inverse(Box::new(p)));
+    }
+    if let Some(head) = op("alternativePath") {
+        let parts: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, &head)
+            .iter()
+            .filter_map(|e| parse_property_path(store, shapes_graph, e))
+            .collect();
+        return (!parts.is_empty()).then_some(PropertyPath::Alternative(parts));
+    }
+    if let Some(inner) = op("zeroOrMorePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::ZeroOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("oneOrMorePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::OneOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("zeroOrOnePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
+    }
+    // Otherwise: an RDF-list sequence path `( p1 p2 … )`.
+    let seq: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, node)
+        .iter()
+        .filter_map(|e| parse_property_path(store, shapes_graph, e))
+        .collect();
+    (!seq.is_empty()).then_some(PropertyPath::Sequence(seq))
+}
+
+/// Walk the RDF list whose head is `head`, returning each member's lexical node form
+/// (IRI, `_:label`, or literal value) via the raw quad index. Empty if `head` is not a list.
+fn rdf_list_elements(store: &TripleStore, shapes_graph: &str, head: &str) -> Vec<String> {
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    let mut out = Vec::new();
+    let mut current = head.to_string();
+    for _ in 0..10_000 {
+        if current == RDF_NIL {
+            break;
+        }
+        match store
+            .objects_for_subject_in_graph(&current, RDF_FIRST, Some(shapes_graph))
+            .first()
+        {
+            Some(first) => out.push(term_to_lexical(first)),
+            None => break,
+        }
+        match store
+            .objects_for_subject_in_graph(&current, RDF_REST, Some(shapes_graph))
+            .first()
+        {
+            Some(rest) => current = term_to_lexical(rest),
+            None => break,
+        }
+    }
+    out
+}
+
+/// Build the SPARQL `PREFIX` prologue declared via SHACL's prefixes mechanism for a
+/// constraint / rule / target `node`: `node sh:prefixes ?owner`, `?owner sh:declare
+/// [ sh:prefix "p" ; sh:namespace "ns"^^xsd:anyURI ]`. Returns `""` when none are
+/// declared. The declaration nodes are typically blank, so they are resolved through
+/// the raw quad index (SPARQL surface syntax cannot re-address a stored blank node).
+///
+/// Without this prologue a SHACL-SPARQL body that uses prefixed names (`da:`, `geo:`,
+/// `geof:` …) fails to parse, and the `if let Ok(..)` guards in evaluation silently
+/// drop the whole constraint/rule/target — see SHACL-SPARQL §5.2 (prefixes mechanism).
+fn sparql_prefixes(store: &TripleStore, shapes_graph: &str, node: &str) -> String {
+    let mut out = String::new();
+    for owner in store
+        .objects_for_subject_in_graph(node, &format!("{SH}prefixes"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        for decl in store
+            .objects_for_subject_in_graph(&owner, &format!("{SH}declare"), Some(shapes_graph))
+            .iter()
+            .map(term_to_lexical)
+        {
+            let prefix = single_value(store, shapes_graph, &decl, &format!("{SH}prefix"));
+            let namespace = single_value(store, shapes_graph, &decl, &format!("{SH}namespace"));
+            if let (Some(p), Some(ns)) = (prefix, namespace) {
+                out.push_str(&format!("PREFIX {p}: <{ns}>\n"));
+            }
+        }
+    }
+    out
 }
 
 fn ask(store: &TripleStore, query: &str) -> bool {
@@ -1249,6 +1481,63 @@ mod tests {
                 .iter()
                 .any(|r| r.focus_node.contains("alice")),
             "ex:alice points at an IRI and must not be flagged, got {:?}",
+            report.results,
+        );
+    }
+
+    // Regression: focus nodes were carried as bare lexical strings, so a string
+    // literal reached via sh:targetObjectsOf whose lexical form is scheme-shaped
+    // ("mailto:info@example.org") was misclassified as an IRI by node-level
+    // sh:nodeKind — wrongly passing sh:IRI and wrongly violating sh:Literal.
+    // Target resolution now records the term kind alongside the lexical form.
+    const MAILTO_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:x ex:p "mailto:info@example.org" .
+    "#;
+
+    #[test]
+    fn literal_focus_via_target_objects_of_conforms_to_node_kind_literal() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:MailShape a sh:NodeShape ;
+                sh:targetObjectsOf ex:p ;
+                sh:nodeKind sh:Literal .
+        "#;
+        let store = store_with(shapes, MAILTO_DATA);
+
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+
+        assert!(
+            report.conforms,
+            "a literal object must satisfy sh:nodeKind sh:Literal, got {:?}",
+            report.results,
+        );
+    }
+
+    #[test]
+    fn literal_focus_via_target_objects_of_violates_node_kind_iri() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:MailShape a sh:NodeShape ;
+                sh:targetObjectsOf ex:p ;
+                sh:nodeKind sh:IRI .
+        "#;
+        let store = store_with(shapes, MAILTO_DATA);
+
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+
+        assert!(
+            !report.conforms,
+            "a literal object must violate sh:nodeKind sh:IRI"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.focus_node == "mailto:info@example.org"),
+            "violation should name the literal focus node, got {:?}",
             report.results,
         );
     }

@@ -86,6 +86,8 @@
     });
   }
 
+  $: slices = pieSlices(pieData, pieTotal);
+
   $: legendSeries = series.filter((s) => s.name);
 </script>
 
@@ -95,12 +97,12 @@
   {#if spec.type === 'pie'}
     <div class="pie-row">
       <svg viewBox="0 0 190 190" width="170" height="170" role="img" aria-label={spec.title || $t('components.chat.chartAlt')}>
-        {#each pieSlices(pieData, pieTotal) as s}
+        {#each slices as s}
           <path d={s.d} fill={s.color}><title>{s.label}: {fmt(s.value)} ({s.pct}%)</title></path>
         {/each}
       </svg>
       <ul class="pie-legend">
-        {#each pieSlices(pieData, pieTotal) as s}
+        {#each slices as s}
           <li><span class="dot" style="background:{s.color}"></span><span class="pl-label" title={s.label}>{short(s.label, 24)}</span><span class="pl-val">{fmt(s.value)} · {s.pct}%</span></li>
         {/each}
       </ul>

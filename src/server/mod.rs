@@ -783,6 +783,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/banner-preset",
             put(handlers::set_dataset_banner_preset),
         )
+        // Viewer feed: per-element geometry + 3D-file references (map/3D viewers).
+        // Optional auth so public datasets are viewable anonymously.
+        .route(
+            "/api/datasets/:dataset_id/viewer-feed",
+            get(routes::viewer_feed),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 

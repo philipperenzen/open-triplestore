@@ -1,0 +1,53 @@
+# Waalbrug reference example — §6 SHACL Advanced Features (functions, rules, target, expression).
+# Note: the rule/target/function bodies use the ex:prefixes declaration from shapes-sparql.ttl,
+# so load both shapes files together (or include the declaration alongside this one).
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix da:   <https://data.example.nl/def/> .
+@prefix ex:   <https://example.org/shape/def#> .
+
+### 6.1 SPARQL-based function — ex:afstandMeter(geomA, geomB)
+ex:afstandMeter a sh:SPARQLFunction ;
+    rdfs:comment "Afstand in meters tussen twee WKT-geometrieën."@nl ;
+    sh:parameter [ sh:path ex:geomA ; sh:datatype geo:wktLiteral ; sh:order 1 ] ;
+    sh:parameter [ sh:path ex:geomB ; sh:datatype geo:wktLiteral ; sh:order 2 ] ;
+    sh:returnType xsd:decimal ;
+    sh:prefixes ex:prefixes ;
+    sh:select """
+        SELECT ( geof:distance($geomA, $geomB, uom:metre) AS ?result )
+        WHERE { }
+    """ .
+
+### 6.3 SPARQL rule + custom target — derive inspection priority for poor condition
+ex:BruggenOverWater a sh:SPARQLTarget ;
+    sh:prefixes ex:prefixes ;
+    sh:select """
+        SELECT ?this
+        WHERE { ?this a da:Brug ; da:kruistWaterweg ?w . }
+    """ .
+
+ex:PrioriteitRegel a sh:NodeShape ;
+    sh:target ex:BruggenOverWater ;
+    sh:rule [ a sh:SPARQLRule ;
+        rdfs:label "Inspectieprioriteit hoog bij conditie 5/6"@nl ;
+        sh:prefixes ex:prefixes ;
+        sh:construct """
+            CONSTRUCT { $this da:inspectieprioriteit "hoog" . }
+            WHERE {
+                $this <https://w3id.org/bot#containsElement>/da:conditiescore ?cs .
+                ?cs <http://www.w3.org/2004/02/skos/core#notation> ?n .
+                FILTER ( ?n IN ("5","6") )
+            }
+        """ ] .
+
+### 6.4 Expression constraint (node expression) — clearance height must be ≥ 9.10 m
+ex:DoorvaarthoogteEisShape a sh:NodeShape ;
+    sh:targetClass da:Vaarwegbrug ;
+    sh:expression [
+        sh:message "Vrije doorvaarthoogte moet ≥ 9,10 m zijn."@nl ;
+        sh:minExclusive 9.09 ;
+        sh:path ( da:vrijeDoorvaarthoogte qudt:numericValue ) ] .

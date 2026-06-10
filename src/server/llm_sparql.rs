@@ -724,9 +724,11 @@ async fn llm_chat(
             .await
             .unwrap_or_else(|_| fallback_answer(&runs));
     }
-    // A stubborn model may still emit a directive after its last allowed round —
-    // never show that to the user; fall back to the data we did retrieve.
-    if extract_sparql_directive(&reply).is_some() {
+    // A stubborn model may still emit a *bare* directive after its last allowed
+    // round — never show that to the user; fall back to the data we did
+    // retrieve. A real answer that merely embeds a corrected query (which the
+    // failure follow-ups explicitly invite) is kept as-is.
+    if is_bare_sparql_directive(&reply) {
         reply = fallback_answer(&runs);
     }
     // Data widgets without any retrieval this turn mean the values came from the
@@ -762,8 +764,27 @@ async fn llm_chat(
 /// True when the answer embeds data widgets but no query succeeded this turn —
 /// i.e. the widget values cannot have come from the graphs.
 fn widgets_without_retrieval(answer: &str, runs: &[ChatQueryRun]) -> bool {
-    const DATA_WIDGETS: [&str; 4] = ["```chart", "```map", "```card", "```csv"];
-    DATA_WIDGETS.iter().any(|w| answer.contains(w)) && !runs.iter().any(|r| r.ok)
+    answer.lines().any(opens_data_widget_fence) && !runs.iter().any(|r| r.ok)
+}
+
+/// Does this line open a data-widget fence? Mirrors the frontend fence grammar
+/// (chatRich.js `FENCE_RE` + `specialSegment`): a run of 3+ backticks or tildes,
+/// leading whitespace and space before the tag allowed, including the tag
+/// aliases geo→map and infocard/info-card→card.
+fn opens_data_widget_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    let fence = match t.bytes().next() {
+        Some(c @ (b'`' | b'~')) => c,
+        _ => return false,
+    };
+    let run = t.bytes().take_while(|&b| b == fence).count();
+    if run < 3 {
+        return false;
+    }
+    matches!(
+        t[run..].trim().to_ascii_lowercase().as_str(),
+        "chart" | "map" | "geo" | "card" | "infocard" | "info-card" | "csv"
+    )
 }
 
 /// Last-resort answer when the model keeps demanding more queries than allowed (or
@@ -1054,10 +1075,11 @@ fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     s
 }
 
-/// Prompt budget for one result cell: WKT geometries get a larger budget than
-/// ordinary values so small ones survive verbatim into a ```map widget.
+/// Prompt budget for one result cell: geometry literals (WKT or GML) get a
+/// larger budget than ordinary values so small ones survive verbatim into a
+/// ```map widget.
 fn cell_budget(cell: &str) -> usize {
-    if looks_like_wkt(cell) {
+    if looks_like_wkt(cell) || looks_like_gml(cell) {
         CHAT_WKT_CELL_MAX_CHARS
     } else {
         CHAT_CELL_MAX_CHARS
@@ -1067,14 +1089,7 @@ fn cell_budget(cell: &str) -> usize {
 /// Does this value look like a WKT geometry literal, optionally carrying a
 /// GeoSPARQL `<crs-iri>` prefix?
 fn looks_like_wkt(s: &str) -> bool {
-    let t = s.trim_start();
-    let t = match t.strip_prefix('<') {
-        Some(rest) => rest
-            .split_once('>')
-            .map(|(_, after)| after.trim_start())
-            .unwrap_or(t),
-        None => t,
-    };
+    let t = crate::geo::datatypes::extract_wkt(s);
     const KINDS: [&str; 7] = [
         "MULTIPOINT",
         "MULTILINESTRING",
@@ -1089,17 +1104,79 @@ fn looks_like_wkt(s: &str) -> bool {
         .any(|k| t.get(..k.len()).is_some_and(|p| p.eq_ignore_ascii_case(k)))
 }
 
-/// If the model asked to run a query, return the query text. We look for a
-/// `SPARQL:` marker (case-insensitive, byte-safe), strip any code fence, and only
-/// accept it when it actually contains a query form — otherwise the reply is prose.
+/// Does this value look like a GML geometry literal (`<gml:Point …>…`)? GML
+/// cells get the same large budget as WKT so the model can convert them into
+/// ```map widgets.
+fn looks_like_gml(s: &str) -> bool {
+    s.trim_start().starts_with("<gml:")
+}
+
+/// If the model asked to run a query, return the query text. The `SPARQL:`
+/// marker is an *execution directive* only when it starts a line (leading
+/// whitespace allowed) — the system prompt asks for it on its own line, and a
+/// mid-sentence mention ("use this SPARQL: …") is prose, not a request to run.
+/// We strip any code fence after the marker and only accept it when it actually
+/// contains a query form — otherwise the reply is prose.
 fn extract_sparql_directive(reply: &str) -> Option<String> {
-    let pos = find_ci(reply, "SPARQL:")?;
+    let pos = directive_pos(reply)?;
     let after = reply[pos + "SPARQL:".len()..].trim();
     let query = strip_code_fence(after);
     let is_query = ["SELECT", "ASK", "CONSTRUCT", "DESCRIBE"]
         .iter()
         .any(|kw| find_ci(&query, kw).is_some());
     is_query.then_some(query)
+}
+
+/// Byte offset of the first line-anchored `SPARQL:` marker — a line whose
+/// trimmed form starts with it, case-insensitively. `None` when the marker only
+/// appears mid-line (prose).
+fn directive_pos(reply: &str) -> Option<usize> {
+    const MARKER: &[u8] = b"SPARQL:";
+    let mut offset = 0;
+    for line in reply.split('\n') {
+        let indent = line.len() - line.trim_start().len();
+        let rest = line[indent..].as_bytes();
+        if rest.len() >= MARKER.len() && rest[..MARKER.len()].eq_ignore_ascii_case(MARKER) {
+            return Some(offset + indent);
+        }
+        offset += line.len() + 1;
+    }
+    None
+}
+
+/// How much prose may surround a post-loop directive before the reply counts as
+/// a final answer rather than a bare query request.
+const BARE_DIRECTIVE_MAX_PROSE_CHARS: usize = 80;
+
+/// True when the reply is essentially *just* a `SPARQL:` execution directive —
+/// the directive line plus its (possibly fenced) query, with no substantial
+/// prose around it. Used only after the final round: a stubborn model's bare
+/// directive must never reach the user, but a real answer that embeds a
+/// corrected query under a line-anchored `SPARQL:` heading — the failure
+/// follow-ups explicitly invite a corrected ```sparql block — must be kept.
+fn is_bare_sparql_directive(reply: &str) -> bool {
+    let Some(pos) = directive_pos(reply) else {
+        return false;
+    };
+    if extract_sparql_directive(reply).is_none() {
+        return false;
+    }
+    let before = reply[..pos].trim();
+    let after = reply[pos + "SPARQL:".len()..].trim_start();
+    // Prose after the query: fenced or not, the query ends at the first fence
+    // line after it (mirroring strip_code_fence), so anything beyond that fence
+    // counts as surrounding prose.
+    let trailing = match after.strip_prefix("```") {
+        Some(fenced) => match fenced.find("\n```") {
+            Some(end) => fenced[end + "\n```".len()..].trim_start_matches('`').trim(),
+            None => "",
+        },
+        None => match after.find("\n```") {
+            Some(end) => after[end + "\n```".len()..].trim_start_matches('`').trim(),
+            None => "",
+        },
+    };
+    before.chars().count() + trailing.chars().count() < BARE_DIRECTIVE_MAX_PROSE_CHARS
 }
 
 /// Case-insensitive (ASCII) byte-index search — safe for slicing `haystack`,
@@ -1123,14 +1200,21 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Strip a leading ```/```sparql fence (and trailing ```), which small models often add.
+/// In both the fenced and unfenced forms the query ends at the FIRST fence line that
+/// follows it — a model that opens the fence *before* the `SPARQL:` marker (so the
+/// directive payload itself is unfenced) would otherwise drag the closing ``` and any
+/// trailing prose into the query text.
 fn strip_code_fence(s: &str) -> String {
     let t = s.trim();
     let Some(rest) = t.strip_prefix("```") else {
-        return t.to_string();
+        return match t.find("\n```") {
+            Some(end) => t[..end].trim().to_string(),
+            None => t.to_string(),
+        };
     };
     let rest = rest.strip_prefix("sparql").unwrap_or(rest);
     let rest = rest.trim_start_matches('\n');
-    match rest.rfind("```") {
+    match rest.find("```") {
         Some(end) => rest[..end].trim().to_string(),
         None => rest.trim().to_string(),
     }
@@ -1139,9 +1223,9 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_sparql_directive, fallback_answer, find_ci, looks_like_wkt, strip_code_fence,
-        truncate, validate_sparql, widgets_without_retrieval, ChatQueryRun, CHAT_CELL_MAX_CHARS,
-        CHAT_WKT_CELL_MAX_CHARS,
+        extract_sparql_directive, fallback_answer, find_ci, is_bare_sparql_directive,
+        looks_like_wkt, strip_code_fence, truncate, validate_sparql, widgets_without_retrieval,
+        ChatQueryRun, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
 
     fn ok_run() -> ChatQueryRun {
@@ -1167,6 +1251,21 @@ mod tests {
     }
 
     #[test]
+    fn widget_fence_variants_the_frontend_renders_are_detected() {
+        // The frontend (chatRich.js) also renders ~~~ fences, leading
+        // whitespace, a space before the tag, and the geo/infocard aliases.
+        assert!(widgets_without_retrieval("```geo\n{}\n```", &[]));
+        assert!(widgets_without_retrieval("~~~chart\n{}\n~~~", &[]));
+        assert!(widgets_without_retrieval("  ``` map\n{}\n```", &[]));
+        assert!(widgets_without_retrieval("````infocard\n{}\n````", &[]));
+        assert!(widgets_without_retrieval("```info-card\n{}\n```", &[]));
+        // A tag that merely starts with a widget name is not a widget fence.
+        assert!(!widgets_without_retrieval("```chartreuse\ncode\n```", &[]));
+        // Two characters are not a fence.
+        assert!(!widgets_without_retrieval("``map``", &[]));
+    }
+
+    #[test]
     fn wkt_cells_are_recognised_for_the_larger_budget() {
         assert!(looks_like_wkt("POINT(5.8645 51.8519)"));
         assert!(looks_like_wkt("point(5.8645 51.8519)"));
@@ -1180,6 +1279,16 @@ mod tests {
         assert!(!looks_like_wkt("héllo wörld"));
         assert_eq!(super::cell_budget("POINT(1 2)"), CHAT_WKT_CELL_MAX_CHARS);
         assert_eq!(super::cell_budget("plain value"), CHAT_CELL_MAX_CHARS);
+    }
+
+    #[test]
+    fn gml_cells_get_the_large_geometry_budget() {
+        let gml = "<gml:Polygon srsName=\"EPSG:4326\"><gml:exterior><gml:LinearRing>\
+                   <gml:posList>0 0 1 0 1 1 0 0</gml:posList>\
+                   </gml:LinearRing></gml:exterior></gml:Polygon>";
+        assert_eq!(super::cell_budget(gml), CHAT_WKT_CELL_MAX_CHARS);
+        // An ordinary XML/HTML-ish cell is not a geometry.
+        assert_eq!(super::cell_budget("<note>hi</note>"), CHAT_CELL_MAX_CHARS);
     }
 
     #[test]
@@ -1247,10 +1356,24 @@ mod tests {
     }
 
     #[test]
-    fn extracts_directive_case_insensitively_inline() {
-        let q = extract_sparql_directive("Sure, let me check. sparql: ASK { ?s ?p ?o }")
+    fn extracts_directive_case_insensitively_when_line_anchored() {
+        let q = extract_sparql_directive("Sure, let me check.\nsparql: ASK { ?s ?p ?o }")
             .expect("marker is case-insensitive");
         assert_eq!(q, "ASK { ?s ?p ?o }");
+        // Leading whitespace on the directive line is fine.
+        let q = extract_sparql_directive("  SPARQL: SELECT * WHERE { ?s ?p ?o }")
+            .expect("indented marker still anchors");
+        assert_eq!(q, "SELECT * WHERE { ?s ?p ?o }");
+    }
+
+    #[test]
+    fn mid_prose_sparql_mention_is_not_a_directive() {
+        // The marker only counts at the start of a line — a sentence that
+        // mentions "SPARQL:" followed by a query is prose, not a request to run.
+        assert_eq!(
+            extract_sparql_directive("You could use this SPARQL: SELECT * WHERE { ?s ?p ?o }"),
+            None
+        );
     }
 
     #[test]
@@ -1259,6 +1382,33 @@ mod tests {
             extract_sparql_directive("There are 3 datasets about water quality."),
             None
         );
+    }
+
+    #[test]
+    fn bare_directive_is_demoted_post_loop() {
+        assert!(is_bare_sparql_directive(
+            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```"
+        ));
+        assert!(is_bare_sparql_directive(
+            "SPARQL: SELECT * WHERE { ?s ?p ?o }"
+        ));
+    }
+
+    #[test]
+    fn prose_with_fenced_corrected_query_is_kept_post_loop() {
+        // The failure follow-ups explicitly invite a corrected ```sparql block —
+        // a final answer with substantial prose around it must not be demoted.
+        let reply = "I could not run the query because the graph IRI was wrong. \
+                     Here is a corrected version you can run yourself:\n\
+                     SPARQL:\n```sparql\nSELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }\n```\n\
+                     It selects every triple in the graph you asked about.";
+        assert!(!is_bare_sparql_directive(reply));
+        // Plain prose (no directive at all) is never demoted either.
+        assert!(!is_bare_sparql_directive("There are 3 datasets."));
+        // A mid-prose mention is not a directive, so it is kept.
+        assert!(!is_bare_sparql_directive(
+            "Use this SPARQL: SELECT * WHERE { ?s ?p ?o } to count them."
+        ));
     }
 
     #[test]
@@ -1291,5 +1441,40 @@ mod tests {
     #[test]
     fn strips_bare_fence_without_lang() {
         assert_eq!(strip_code_fence("```\nASK {}\n```"), "ASK {}");
+    }
+
+    #[test]
+    fn unfenced_query_stops_at_a_following_fence_line() {
+        // A model that opens the fence BEFORE the `SPARQL:` marker leaves the
+        // directive payload unfenced with a stray closing ``` after it — seen
+        // live with qwen2.5:7b. The fence and trailing prose are not query text.
+        assert_eq!(
+            strip_code_fence("SELECT ?x WHERE {}\n```\nYou can run this yourself."),
+            "SELECT ?x WHERE {}"
+        );
+        // Same for the extraction entry point.
+        let q = extract_sparql_directive(
+            "SPARQL:\nSELECT ?x WHERE {}\n```\nYou can run this yourself.",
+        )
+        .expect("query before the fence is extracted");
+        assert_eq!(q, "SELECT ?x WHERE {}");
+    }
+
+    #[test]
+    fn fenced_query_stops_at_first_closing_fence() {
+        // rfind would span into a SECOND fenced block; the query ends at the
+        // first closing fence.
+        assert_eq!(
+            strip_code_fence("```sparql\nASK {}\n```\nand also:\n```python\nx = 1\n```"),
+            "ASK {}"
+        );
+    }
+
+    #[test]
+    fn unfenced_directive_with_trailing_prose_after_fence_is_not_bare() {
+        let reply = "SPARQL:\nSELECT * WHERE { ?s ?p ?o }\n```\nThis long trailing \
+                     explanation describes the query in detail and is clearly a real \
+                     answer for the user rather than a bare execution directive.";
+        assert!(!is_bare_sparql_directive(reply));
     }
 }

@@ -1,0 +1,7 @@
+# ❌ §6.4 — clearance height 8.50 m < 9.10 m (sh:expression minExclusive).
+@prefix da:   <https://data.example.nl/def/> .
+@prefix wb:   <https://data.example.nl/id/waalbrug/> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+wb:LageBrug a da:Vaarwegbrug ;
+    da:vrijeDoorvaarthoogte [ a qudt:QuantityValue ; qudt:numericValue "8.50"^^xsd:decimal ] .

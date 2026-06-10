@@ -1,0 +1,152 @@
+# Waalbrug reference example — §3 Instance data (ABox), full canonical dataset.
+# Deliberately exercises many datatypes: xsd:decimal/integer/gYear/date/dateTime/
+# boolean, rdf:langString, geo:wktLiteral, geo:gmlLiteral, xsd:anyURI, SKOS concepts,
+# QUDT quantities. This is the conformant dataset that drives the §7 queries and the
+# viewer feed; the intended SHACL failures live in fail/*.ttl, isolated per case.
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcat:    <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix omg:     <https://w3id.org/omg#> .
+@prefix fog:     <https://w3id.org/fog#> .
+@prefix gom:     <https://w3id.org/gom#> .
+@prefix opm:     <https://w3id.org/opm#> .
+@prefix qudt:    <http://qudt.org/schema/qudt/> .
+@prefix unit:    <http://qudt.org/vocab/unit/> .
+@prefix quantitykind: <http://qudt.org/vocab/quantitykind/> .
+@prefix da:      <https://data.example.nl/def/> .
+@prefix wb:      <https://data.example.nl/id/waalbrug/> .
+
+#################################################################
+## The kunstwerk: typing, topology (BOT), geometry (GeoSPARQL)
+#################################################################
+wb:Waalbrug
+    a da:Vaarwegbrug ;
+    rdfs:label "Waalbrug Nijmegen"@nl , "Waal Bridge"@en ;
+    da:bouwjaar "1936"^^xsd:gYear ;
+    da:beweegbaar false ;
+    da:aantalOverspanningen 3 ;
+    da:kruistWaterweg wb:Waal ;                       # for the custom SHACL target (§6.3)
+    bot:containsElement wb:Rijdek , wb:Boog-Noord , wb:Boog-Zuid ,
+                        wb:Landhoofd-Noord , wb:Landhoofd-Zuid ;
+    da:vrijeDoorvaarthoogte wb:dvh ;
+    da:doorvaarthoogteState wb:dvh-state ;
+    geo:hasGeometry wb:geom-trace .
+
+# Tracé as WKT in RD New (EPSG:28992) — coordinates illustrative.
+wb:geom-trace a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> LINESTRING(187320 428330, 187610 428690)"^^geo:wktLiteral .
+
+# Free clearance height as a QUDT quantity (datatype-rich).
+wb:dvh a qudt:QuantityValue ;
+    qudt:hasQuantityKind quantitykind:Height ;
+    qudt:numericValue "9.10"^^xsd:decimal ;
+    qudt:unit unit:M .
+
+wb:Waal a da:Vaarweg ; rdfs:label "Waal"@nl .
+
+#################################################################
+## Components with sub-decomposition + GeoSPARQL + GUID + material
+#################################################################
+wb:Boog-Noord
+    a da:Boog ;
+    rdfs:label "Noordelijke boog"@nl ;
+    da:materiaal da:staal ;
+    da:conditiescore da:cs2 ;
+    bot:hasSubElement wb:Hanger-N03 ;
+    geo:hasGeometry wb:geom-boog-n ;
+    da:ifcGuid "1aB2cD3eF4gH5iJ6kL7mNo" ;              # IFC GlobalId (22 chars)
+    omg:hasGeometry wb:geomdesc-boog-n ;
+    da:laatsteInspectie wb:insp-boog-n .
+
+wb:geom-boog-n a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)"^^geo:wktLiteral .
+
+# Boog-Zuid: conformant in the canonical dataset (has WKT geom, IFC geom AND ifcGuid).
+# The fail/boog-zuid-no-guid.ttl case strips the GUID to trigger the §5.5 constraint.
+wb:Boog-Zuid
+    a da:Boog ;
+    rdfs:label "Zuidelijke boog"@nl ;
+    da:materiaal da:staal ;
+    da:conditiescore da:cs3 ;
+    geo:hasGeometry wb:geom-boog-z ;
+    da:ifcGuid "7zZ8yY9xX0wW1vV2uU3tTs" ;
+    omg:hasGeometry wb:geomdesc-boog-z .
+
+wb:geom-boog-z a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187510 428560)"^^geo:wktLiteral .
+
+wb:Rijdek a da:Rijdek ; rdfs:label "Rijdek"@nl ; da:conditiescore da:cs2 .
+
+# GML-literal geometry (alternative datatype) on another component.
+wb:Landhoofd-Noord a da:Landhoofd ;
+    rdfs:label "Noordelijk landhoofd"@nl ;
+    da:materiaal da:beton ;
+    da:conditiescore da:cs3 ;
+    geo:hasGeometry wb:geom-lh-n .
+wb:geom-lh-n a geo:Geometry ;
+    geo:asGML "<gml:Point srsName=\"http://www.opengis.net/def/crs/EPSG/0/28992\"><gml:pos>187330 428345</gml:pos></gml:Point>"^^geo:gmlLiteral .
+
+wb:Landhoofd-Zuid a da:Landhoofd ;
+    rdfs:label "Zuidelijk landhoofd"@nl ;
+    da:materiaal da:beton ;
+    da:conditiescore da:cs3 ;
+    geo:hasGeometry wb:geom-lh-z .
+wb:geom-lh-z a geo:Geometry ;
+    geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187600 428675)"^^geo:wktLiteral .
+
+#################################################################
+## OMG/FOG/GOM: one geometry description, several formats
+## (IFC + glTF + point cloud), CRS via GOM
+#################################################################
+wb:geomdesc-boog-n a omg:Geometry ;
+    gom:hasCoordinateSystem wb:rdnew-cs ;
+    fog:asIfc_v4.0 "https://data.example.nl/files/waalbrug.ifc#1aB2cD3eF4gH5iJ6kL7mNo"^^xsd:anyURI ;
+    fog:asGltf_v2.0-glb "https://data.example.nl/files/boog-noord.glb"^^xsd:anyURI ;
+    fog:asLaz_v1.4 "https://data.example.nl/files/boog-noord.laz"^^xsd:anyURI .
+
+wb:geomdesc-boog-z a omg:Geometry ;
+    gom:hasCoordinateSystem wb:rdnew-cs ;
+    fog:asIfc_v4.0 "https://data.example.nl/files/waalbrug.ifc#7zZ8yY9xX0wW1vV2uU3tTs"^^xsd:anyURI ;
+    fog:asGltf_v2.0-glb "https://data.example.nl/files/boog-zuid.glb"^^xsd:anyURI .
+
+wb:rdnew-cs a gom:CoordinateSystem ;
+    rdfs:label "Amersfoort / RD New + NAP"@nl ;
+    gom:hasEPSG "28992"^^xsd:string .
+
+#################################################################
+## DCAT 2: the geometry files as dataset / distributions
+#################################################################
+wb:Waalbrug-bim a dcat:Dataset ;
+    dcterms:title "BIM-leveringen Waalbrug"@nl ;
+    dcterms:conformsTo <https://standards.buildingsmart.org/IFC/RELEASE/IFC4/> ;
+    dcat:distribution
+      [ a dcat:Distribution ; dcat:mediaType "application/x-step" ;
+        dcat:accessURL <https://data.example.nl/files/waalbrug.ifc> ] ,
+      [ a dcat:Distribution ; dcat:mediaType "model/gltf-binary" ;
+        dcat:accessURL <https://data.example.nl/files/boog-noord.glb> ] .
+
+#################################################################
+## PROV-O + OPM: provenance on a measured property
+#################################################################
+wb:dvh-state a opm:CurrentPropertyState , prov:Entity ;
+    opm:value "9.10"^^xsd:decimal ;
+    prov:wasGeneratedBy wb:inwinning-2025 ;
+    prov:generatedAtTime "2025-04-12T10:30:00+02:00"^^xsd:dateTime .
+
+wb:inwinning-2025 a prov:Activity ;
+    rdfs:label "Hydrografische inwinning Waal 2025"@nl ;
+    prov:startedAtTime "2025-04-12T08:00:00+02:00"^^xsd:dateTime ;
+    prov:wasAssociatedWith [ a prov:Agent ; rdfs:label "Meetdienst"@nl ] .
+
+#################################################################
+## Inspection with time (OWL-Time / xsd:date)
+#################################################################
+wb:insp-boog-n a da:Inspectie ;
+    da:inspectiedatum "2025-09-30"^^xsd:date ;
+    da:vastgesteldeConditiescore da:cs2 .

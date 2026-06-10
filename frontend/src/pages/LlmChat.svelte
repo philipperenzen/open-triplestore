@@ -7,6 +7,7 @@
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
+  import CsvPreview from '../components/chat/CsvPreview.svelte';
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
@@ -48,7 +49,9 @@
     loading = true;
     await scrollToBottom();
 
-    const wire = messages.map((m) => ({ role: m.role, content: m.content }));
+    // Transport-error bubbles (isError) are UI-only — never replay them as
+    // assistant turns in the model conversation.
+    const wire = messages.filter((m) => !m.isError).map((m) => ({ role: m.role, content: m.content }));
     try {
       const resp = await llmChat(wire);
       messages = [...messages, {
@@ -79,21 +82,10 @@
     }
   }
 
-  // The backend's `queries` array is the full retrieval trail; older responses
-  // only carry the single legacy sparql/columns/rows fields — adapt those.
+  // The backend's `queries` array is the full retrieval trail (it always
+  // accompanies the legacy sparql/columns/rows fields when a query ran).
   function normalizeQueries(resp) {
-    if (Array.isArray(resp.queries) && resp.queries.length) return resp.queries;
-    if (resp.sparql) {
-      return [{
-        sparql: resp.sparql,
-        ok: !!resp.ran_query,
-        error: null,
-        columns: resp.columns || null,
-        rows: resp.rows || null,
-        truncated: !!resp.truncated,
-      }];
-    }
-    return [];
+    return resp.queries ?? [];
   }
 
   // The user clicked an inline `GET /api/...` in the answer: attach a run panel
@@ -119,7 +111,11 @@
     if (msg.reviewed === rating) return;
     msg.reviewed = rating;
     messages = messages;
-    const lastSparql = msg.queries?.length ? msg.queries[msg.queries.length - 1].sparql : null;
+    // Prefer the last *successful* query in the trail (the one the answer is
+    // based on); only fall back to the last attempt if none succeeded.
+    const trail = msg.queries || [];
+    const best = [...trail].reverse().find((q) => q.ok) || trail[trail.length - 1] || null;
+    const lastSparql = best ? best.sparql : null;
     sendLlmFeedback({
       track: 'sparql',
       event: 'chat',
@@ -242,18 +238,7 @@
                       <Terminal size={12} /> {$t('pages.llmChat.openInSparql')}
                     </button>
                     {#if q.columns && q.rows && q.rows.length}
-                      <div class="table-wrap">
-                        <table>
-                          <thead>
-                            <tr>{#each q.columns as c}<th>{c}</th>{/each}</tr>
-                          </thead>
-                          <tbody>
-                            {#each q.rows as r}
-                              <tr>{#each r as cell}<td title={cell}>{cell}</td>{/each}</tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      </div>
+                      <CsvPreview columns={q.columns} rows={q.rows} framed={false} downloadable={false} />
                       {#if q.truncated}<p class="truncated-note">{$t('pages.llmChat.showingFirstRows', { values: { count: q.rows.length } })}</p>{/if}
                     {/if}
                   </div>
@@ -448,13 +433,6 @@
   }
   .open-sparql:hover { background: #e0e7ff; }
 
-  .table-wrap { margin-top: 0.6rem; max-height: 280px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
-  table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
-  th, td {
-    text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line-soft);
-    max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  th { background: var(--bg-soft); position: sticky; top: 0; font-weight: 600; color: var(--ink-600); }
   .truncated-note { font-size: 0.72rem; color: var(--ink-400); margin: 0.35rem 0 0; }
 
   .feedback { display: flex; align-items: center; gap: 0.35rem; margin-top: 0.55rem; }
