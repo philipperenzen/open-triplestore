@@ -663,9 +663,7 @@ async fn llm_chat(
         msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
         let remaining = MAX_CHAT_QUERY_ROUNDS - round;
         let run_result = match validate_sparql(&query) {
-            Err(parse_err) => Err(AppError::BadRequest(format!(
-                "invalid SPARQL: {parse_err}"
-            ))),
+            Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
             Ok(()) => run_chat_query(&state, &query, &graphs).await,
         };
         let follow_up = match run_result {
