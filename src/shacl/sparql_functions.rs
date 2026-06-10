@@ -7,9 +7,9 @@
 //!
 //! **Evaluation model.** Definitions are discovered through the raw quad index
 //! (never via `store.query`, which would recurse through `query_options`). The body
-//! is evaluated against a *fresh in-memory store* with the parameters textually
-//! bound, which (a) avoids re-entrantly querying the store under evaluation and
-//! (b) fully supports "expression" functions whose `WHERE` clause is empty. A
+//! is evaluated against a *shared empty in-memory store* with the parameters
+//! textually bound, which (a) avoids re-entrantly querying the store under
+//! evaluation and (b) fully supports "expression" functions whose `WHERE` clause is empty. A
 //! function whose body actually queries data is not supported in this form and
 //! returns unbound — a documented limitation; express such logic as a
 //! SHACL-SPARQL constraint instead.
@@ -17,9 +17,22 @@
 use crate::store::TripleStore;
 use oxigraph::model::{GraphName, NamedNodeRef, Subject, Term as OxTerm, TermRef};
 use oxrdf::{NamedNode, Term};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 type FnHandler = Arc<dyn Fn(&[Term]) -> Option<Term> + Send + Sync>;
+
+/// Process-wide store for evaluating function bodies. Building a `TripleStore`
+/// (store allocation + `ParallelMirror`/`QueryCache` env reads) per *invocation*
+/// — i.e. per binding row — was pure overhead: the store stays empty (bodies are
+/// "expression" queries with the parameters textually substituted), nothing ever
+/// writes to it, and `TripleStore::query` takes `&self`, so one shared instance
+/// is safe to evaluate against from any thread.
+fn eval_store() -> Option<&'static TripleStore> {
+    static EVAL_STORE: OnceLock<Option<TripleStore>> = OnceLock::new();
+    EVAL_STORE
+        .get_or_init(|| TripleStore::in_memory().ok())
+        .as_ref()
+}
 
 const SH: &str = "http://www.w3.org/ns/shacl#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -80,8 +93,9 @@ fn build_handler(store: &TripleStore, iri: &str, graph: Option<&str>) -> Option<
             // oxrdf Term Display is valid SPARQL term syntax (e.g. "…"^^<dt>, <iri>).
             q = q.replace(&format!("${vn}"), &arg.to_string());
         }
-        // Evaluate against a fresh store so we never re-enter the caller's query.
-        let tmp = TripleStore::in_memory().ok()?;
+        // Evaluate against the shared empty store so we never re-enter the
+        // caller's query (and never pay a per-row store construction).
+        let tmp = eval_store()?;
         match tmp.query(&q) {
             Ok(oxigraph::sparql::QueryResults::Solutions(sols)) => {
                 for sol in sols.flatten() {
@@ -146,4 +160,43 @@ fn lexical(t: &OxTerm) -> String {
 /// Local name of an IRI: the part after the last `#` or `/`.
 fn local_name(iri: &str) -> String {
     iri.rsplit(['#', '/']).next().unwrap_or(iri).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxigraph::io::RdfFormat;
+
+    const FN_TTL: &str = r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+        ex:double a sh:SPARQLFunction ;
+            sh:parameter [ sh:path ex:x ; sh:order 0 ] ;
+            sh:returnType xsd:integer ;
+            sh:select "SELECT ($x * 2 AS ?result) WHERE {}" .
+    "#;
+
+    /// Handlers evaluate on the shared process-wide store; repeated invocations
+    /// (one per binding row in real queries) must keep returning the right value
+    /// without rebuilding a store each time.
+    #[test]
+    fn handler_evaluates_repeatedly_on_shared_store() {
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(FN_TTL, RdfFormat::Turtle, None).unwrap();
+        let fns = all_functions(&store);
+        assert_eq!(fns.len(), 1, "ex:double should be discovered");
+        let (iri, handler) = &fns[0];
+        assert_eq!(iri.as_str(), "http://example.org/double");
+        for _ in 0..3 {
+            let arg = Term::Literal(oxrdf::Literal::new_typed_literal(
+                "21",
+                NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+            ));
+            match handler(&[arg]).expect("function should return a value") {
+                Term::Literal(l) => assert_eq!(l.value(), "42"),
+                other => panic!("expected a literal, got {other}"),
+            }
+        }
+    }
 }

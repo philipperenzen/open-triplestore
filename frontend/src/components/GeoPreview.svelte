@@ -1,5 +1,5 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onDestroy } from 'svelte';
   import L from 'leaflet';
   import 'leaflet/dist/leaflet.css';
   import { t as i18nT } from 'svelte-i18n';
@@ -21,8 +21,6 @@
   let geometries = [];
   let toScale = false;
   let drawnLayers = [];
-  /** Assigned inside onMount (closes over the map); callable from reactivity. */
-  let drawGeometry = () => {};
 
   // CRS-aware: projected WKT (e.g. the Waalbrug demo's EPSG:28992) is
   // reprojected to WGS84 before plotting.
@@ -38,6 +36,43 @@
     tiles = L.tileLayer(t.url, { maxZoom: 19, attribution: t.attribution }).addTo(map);
   });
 
+  const toLatLng = (coords) => coords.map(([lng, lat]) => [lat, lng]);
+  const add = (layer) => {
+    layer.addTo(map);
+    drawnLayers.push(layer);
+  };
+  const point = ([lng, lat]) =>
+    toScale && scaleMeters > 0
+      ? add(L.circle([lat, lng], { radius: scaleMeters / 2, color: '#e8590c', weight: 2, fillOpacity: 0.18 }))
+      : add(L.marker([lat, lng]));
+  function drawGeometry(g) {
+    if (!g) return;
+    switch (g.kind) {
+      case 'point':
+        point(g.coord);
+        break;
+      case 'multipoint':
+        for (const c of g.coords) point(c);
+        break;
+      case 'linestring':
+        add(L.polyline(toLatLng(g.coords), { color: '#4a90d9' }));
+        break;
+      case 'multilinestring':
+        for (const line of g.lines) add(L.polyline(toLatLng(line), { color: '#4a90d9' }));
+        break;
+      case 'polygon':
+        add(L.polygon(g.rings.map(toLatLng), { color: '#6a5acd', weight: 2, fillOpacity: 0.15 }));
+        break;
+      case 'multipolygon':
+        for (const poly of g.polygons)
+          add(L.polygon(poly.map(toLatLng), { color: '#6a5acd', weight: 2, fillOpacity: 0.15 }));
+        break;
+      case 'geometrycollection':
+        for (const sub of g.geometries) drawGeometry(sub);
+        break;
+    }
+  }
+
   function drawAll() {
     for (const l of drawnLayers) l.remove();
     drawnLayers = [];
@@ -48,78 +83,41 @@
     for (const g of geometries) for (const [lng, lat] of geometryCoords(g)) all.push([lat, lng]);
     if (all.length === 1) map.setView(all[0], 12);
     else if (all.length > 1) map.fitBounds(all, { padding: [20, 20] });
+    else map.setView([0, 0], 1);
   }
 
   // Leaflet is a bundled npm dependency (was: CDN-loaded at runtime), so the
   // map works offline and under a strict CSP; only the OSM tiles need network.
-  onMount(async () => {
-    if (geometries.length === 0) return;
+  function initMap() {
     try {
-      if (!mapEl) return;
       map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true });
       const t = leafletTiles($isDark);
       tiles = L.tileLayer(t.url, { maxZoom: 19, attribution: t.attribution }).addTo(map);
-
-      const toLatLng = (coords) => coords.map(([lng, lat]) => [lat, lng]);
-      const add = (layer) => {
-        layer.addTo(map);
-        drawnLayers.push(layer);
-      };
-      const point = ([lng, lat]) =>
-        toScale && scaleMeters > 0
-          ? add(L.circle([lat, lng], { radius: scaleMeters / 2, color: '#e8590c', weight: 2, fillOpacity: 0.18 }))
-          : add(L.marker([lat, lng]));
-      drawGeometry = (g) => {
-        if (!g) return;
-        switch (g.kind) {
-          case 'point':
-            point(g.coord);
-            break;
-          case 'multipoint':
-            for (const c of g.coords) point(c);
-            break;
-          case 'linestring':
-            add(L.polyline(toLatLng(g.coords), { color: '#4a90d9' }));
-            break;
-          case 'multilinestring':
-            for (const line of g.lines) add(L.polyline(toLatLng(line), { color: '#4a90d9' }));
-            break;
-          case 'polygon':
-            add(L.polygon(g.rings.map(toLatLng), { color: '#6a5acd', weight: 2, fillOpacity: 0.15 }));
-            break;
-          case 'multipolygon':
-            for (const poly of g.polygons)
-              add(L.polygon(poly.map(toLatLng), { color: '#6a5acd', weight: 2, fillOpacity: 0.15 }));
-            break;
-          case 'geometrycollection':
-            for (const sub of g.geometries) drawGeometry(sub);
-            break;
-        }
-      };
-
-      const allLatLngs = [];
-      for (const g of geometries) {
-        drawGeometry(g);
-        for (const [lng, lat] of geometryCoords(g)) allLatLngs.push([lat, lng]);
-      }
-
-      if (allLatLngs.length === 1) {
-        map.setView(allLatLngs[0], 12);
-      } else if (allLatLngs.length > 1) {
-        map.fitBounds(allLatLngs, { padding: [20, 20] });
-      } else {
-        map.setView([0, 0], 1);
-      }
     } catch (_) {
       failed = true;
+      map = null;
     }
-  });
+  }
+
+  function destroyMap() {
+    if (map) { try { map.remove(); } catch {} }
+    map = null;
+    tiles = null;
+    drawnLayers = [];
+  }
 
   onDestroy(() => {
     unsubTheme();
-    if (map) { try { map.remove(); } catch {} }
+    destroyMap();
   });
 
+  // Lazy init: a reused instance (the singleton preview overlay keeps one
+  // mounted) may start with zero geometries, so create the map only once the
+  // map div is bound *and* there is something to draw.
+  $: if (!map && !failed && mapEl && geometries.length) initMap();
+  // The template drops the map div when geometries empty out — tear down so a
+  // later non-empty set re-initialises against the freshly bound element.
+  $: if (map && geometries.length === 0) destroyMap();
   // Redraw on geometry changes too — without this, the reused preview-overlay
   // instance keeps showing the previous term's geometry.
   $: if (map && (geometries || toScale !== undefined)) drawAll();
