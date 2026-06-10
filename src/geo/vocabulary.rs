@@ -11,6 +11,9 @@
 /// WKT literal datatype IRI
 pub const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
 
+/// GML literal datatype IRI
+pub const GML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#gmlLiteral";
+
 // ─── Simple Features topological function IRIs ───
 
 pub const SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";
