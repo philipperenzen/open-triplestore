@@ -1,0 +1,94 @@
+{
+  "type": "CityJSON",
+  "version": "2.0",
+  "metadata": {
+    "title": "Synthetic Nijmegen demo block — two LoD2 buildings (Open Triplestore CityJSON demo, CC0)",
+    "referenceSystem": "https://www.opengis.net/def/crs/EPSG/0/7415",
+    "geographicalExtent": [187535.0, 428246.0, 0.0, 187565.0, 428254.0, 9.0]
+  },
+  "transform": {
+    "scale": [0.001, 0.001, 0.001],
+    "translate": [187535.0, 428246.0, 0.0]
+  },
+  "CityObjects": {
+    "demo-house": {
+      "type": "Building",
+      "attributes": { "function": "residential", "storeysAboveGround": 2 },
+      "geometry": [
+        {
+          "type": "Solid",
+          "lod": "2",
+          "boundaries": [
+            [
+              [[0, 3, 2, 1]],
+              [[0, 1, 5, 4]],
+              [[1, 2, 6, 5]],
+              [[2, 3, 7, 6]],
+              [[3, 0, 4, 7]],
+              [[4, 8, 7]],
+              [[5, 6, 9]],
+              [[4, 5, 9, 8]],
+              [[6, 7, 8, 9]]
+            ]
+          ],
+          "semantics": {
+            "surfaces": [
+              { "type": "GroundSurface" },
+              { "type": "WallSurface" },
+              { "type": "RoofSurface" }
+            ],
+            "values": [[0, 1, 1, 1, 1, 1, 1, 2, 2]]
+          }
+        }
+      ]
+    },
+    "demo-warehouse": {
+      "type": "Building",
+      "attributes": { "function": "industrial", "storeysAboveGround": 1 },
+      "geometry": [
+        {
+          "type": "Solid",
+          "lod": "2",
+          "boundaries": [
+            [
+              [[10, 13, 12, 11]],
+              [[10, 11, 15, 14]],
+              [[11, 12, 16, 15]],
+              [[12, 13, 17, 16]],
+              [[13, 10, 14, 17]],
+              [[14, 15, 16, 17]]
+            ]
+          ],
+          "semantics": {
+            "surfaces": [
+              { "type": "GroundSurface" },
+              { "type": "WallSurface" },
+              { "type": "RoofSurface" }
+            ],
+            "values": [[0, 1, 1, 1, 1, 2]]
+          }
+        }
+      ]
+    }
+  },
+  "vertices": [
+    [0, 0, 0],
+    [10000, 0, 0],
+    [10000, 8000, 0],
+    [0, 8000, 0],
+    [0, 0, 6000],
+    [10000, 0, 6000],
+    [10000, 8000, 6000],
+    [0, 8000, 6000],
+    [0, 4000, 9000],
+    [10000, 4000, 9000],
+    [18000, 0, 0],
+    [30000, 0, 0],
+    [30000, 6000, 0],
+    [18000, 6000, 0],
+    [18000, 0, 4000],
+    [30000, 0, 4000],
+    [30000, 6000, 4000],
+    [18000, 6000, 4000]
+  ]
+}

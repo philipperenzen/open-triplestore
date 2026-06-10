@@ -26,7 +26,7 @@ lm:WorldLandmarks a bot:Zone ;
     rdfs:label "World landmarks (Wikidata 3D demo)"@en ;
     dcterms:source <https://query.wikidata.org/> ;
     bot:containsElement lm:DragonBridge , lm:BigBen , lm:WhiteHouse ,
-                        lm:EmpireStateBuilding , lm:SannoShrine .
+                        lm:EmpireStateBuilding , lm:SannoShrine , lm:NijmegenCityBlock .
 
 # ── Dragon Bridge, Da Nang (a real bridge with an open 3D model) ──
 lm:DragonBridge a bot:Element ;
@@ -72,3 +72,15 @@ lm:SannoShrine a bot:Element ;
         geo:asWKT "POINT(129.86861111 32.7675)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/1/1d/Nagasaki_torii_shrine.stl"^^xsd:anyURI ] .
+
+# ── Nijmegen city block (SYNTHETIC, CC0) — CityJSON LoD2 demo ──
+# Not from Wikidata: a hand-authored two-building CityJSON file (EPSG:7415,
+# semantic Roof/Wall/Ground surfaces) bundled with the frontend, so the viewer
+# can demonstrate georeferenced CityJSON rendering without external downloads.
+# The model is self-georeferenced; the WKT point is the fallback anchor.
+lm:NijmegenCityBlock a bot:Element ;
+    rdfs:label "Nijmegen city block (CityJSON LoD2 demo)"@en ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(5.85953 51.84188)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asCityjson "/samples/nijmegen-buildings.city.json"^^xsd:anyURI ] .

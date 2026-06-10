@@ -453,7 +453,7 @@ static DATASETS: &[DatasetSpec] = &[
     DatasetSpec {
         slug: "viewer-3d-demo",
         name: "3D & Map Viewer Demo",
-        description: "Geometry-rich linked data for the map and 3D viewers: the Waalbrug bridge                       (IMBOR/NEN 2660-2 style decomposition, EPSG:28992 RD New geometry, IFC/glTF                       references via OMG/FOG) and real Wikidata landmarks (CC0) whose open 3D                       models live on Wikimedia Commons. Served per element by the                       /api/datasets/:id/viewer-feed endpoint, reprojected to WGS84/Web Mercator.",
+        description: "Geometry-rich linked data for the map and 3D viewers: the Waalbrug bridge                       (IMBOR/NEN 2660-2 style decomposition, EPSG:28992 RD New geometry, IFC/glTF                       references via OMG/FOG), real Wikidata landmarks (CC0) whose open 3D                       models live on Wikimedia Commons, and a synthetic CityJSON LoD2 city block                       (EPSG:7415, semantic surfaces). Served per element by the                       /api/datasets/:id/viewer-feed endpoint, reprojected to WGS84/Web Mercator.",
         graphs: &[
             GraphSpec { suffix: "waalbrug", role: GraphKind::Instances, fmt: Fmt::Turtle, data: WAALBRUG_TTL },
             GraphSpec { suffix: "landmarks", role: GraphKind::Instances, fmt: Fmt::Turtle, data: LANDMARKS_TTL },

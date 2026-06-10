@@ -217,7 +217,11 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     let elements = j["elements"].as_array().expect("elements");
-    assert_eq!(elements.len(), 6, "collection root + 5 landmarks: {j}");
+    assert_eq!(
+        elements.len(),
+        7,
+        "collection root + 5 landmarks + CityJSON demo block: {j}"
+    );
 
     let bridge = elements
         .iter()
@@ -235,6 +239,23 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
         files.iter().any(|f| f[0].as_str() == Some("Stl")
             && f[1].as_str().unwrap_or("").contains("Dragon_Bridge")),
         "Commons STL reference present: {files:?}"
+    );
+
+    // The synthetic CityJSON block exposes its bundled, site-relative file.
+    let block = elements
+        .iter()
+        .find(|e| {
+            e["id"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("NijmegenCityBlock")
+        })
+        .expect("CityJSON demo block in feed");
+    let files = block["files"].as_array().expect("files");
+    assert!(
+        files.iter().any(|f| f[0].as_str() == Some("Cityjson")
+            && f[1].as_str() == Some("/samples/nijmegen-buildings.city.json")),
+        "CityJSON reference present: {files:?}"
     );
 }
 
