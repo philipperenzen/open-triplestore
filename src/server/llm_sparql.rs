@@ -130,6 +130,12 @@ pub(crate) async fn chat_completion(
     Ok(strip_code_fence(content))
 }
 
+/// Per-completion timeout for chat turns. Generous because the bundled Ollama
+/// service runs on whatever hardware is at hand — a 7B model on CPU with a long
+/// platform context can legitimately take more than a minute per completion.
+/// Hosted APIs answer in seconds and are unaffected.
+const CHAT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Send a full multi-turn conversation to the gateway and return the assistant's
 /// raw reply (trimmed, no code-fence stripping — the chat answer is prose, and any
 /// embedded SPARQL is extracted/sanitised separately). Used by the chat endpoint.
@@ -151,7 +157,7 @@ pub(crate) async fn chat_completion_messages(
     let mut rb = reqwest::Client::new()
         .post(&url)
         .json(&payload)
-        .timeout(Duration::from_secs(60));
+        .timeout(CHAT_COMPLETION_TIMEOUT);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -498,7 +504,10 @@ If answering needs the actual contents of the graphs (counts, specific values, r
 reply with EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named \
 graphs, and nothing else. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
-write the final answer. Result cells may be truncated (they then end with …).\n\n\
+write the final answer. Result cells may be truncated (they then end with …).\n\
+Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
+present (names, counts, coordinates) MUST come from query results or the platform context, never from \
+memory: if you have not retrieved them this turn, query first.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -522,7 +531,12 @@ was truncated.\n\
 also render well.\n\n\
 Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
 locations → map, a single entity → card, raw listings → markdown table or csv, \"how do I get this \
-myself\" → sparql or api block. Answer in the user's language.";
+myself\" → sparql or api block. Every fence must open on its own line, contain real content on the \
+following lines, and close with ``` on its own line — never write a one-line or empty fence. Widget \
+specs must be strict JSON: double quotes, no comments, no trailing commas, no placeholders (omit a \
+field rather than inventing it). Only fill chart/map/card/csv widgets with values you retrieved with \
+`SPARQL:` this turn, or that appear verbatim in the platform context — if you have neither, run a \
+query before answering.";
 
 /// Cap how much platform state we serialise into the prompt so a large instance
 /// stays within the model's context window.
@@ -641,9 +655,20 @@ async fn llm_chat(
         let Some(query) = extract_sparql_directive(&reply) else {
             break;
         };
+        // Inject any undeclared-but-known prefixes, then parse-check the model's
+        // own text BEFORE scoping: a syntax error reported against the scoped
+        // rewrite has line numbers that mean nothing to the model, which makes
+        // self-repair hopeless.
+        let query = finalize_sparql(&state, query).await;
         msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
         let remaining = MAX_CHAT_QUERY_ROUNDS - round;
-        let follow_up = match run_chat_query(&state, &query, &graphs).await {
+        let run_result = match validate_sparql(&query) {
+            Err(parse_err) => Err(AppError::BadRequest(format!(
+                "invalid SPARQL: {parse_err}"
+            ))),
+            Ok(()) => run_chat_query(&state, &query, &graphs).await,
+        };
+        let follow_up = match run_result {
             Ok(qr) => {
                 let table = render_rows_for_llm(&qr);
                 runs.push(ChatQueryRun {
@@ -706,6 +731,15 @@ async fn llm_chat(
     if extract_sparql_directive(&reply).is_some() {
         reply = fallback_answer(&runs);
     }
+    // Data widgets without any retrieval this turn mean the values came from the
+    // platform summary or model memory — say so instead of letting them read as
+    // queried data. (Smaller local models ignore the grounding instruction.)
+    if widgets_without_retrieval(&reply, &runs) {
+        reply.push_str(
+            "\n\n*These values were not retrieved from the knowledge graph this turn — \
+             run a query to verify them.*",
+        );
+    }
 
     // Legacy single-query fields mirror the last successful round (or the last
     // attempt, so the UI can still offer "open in workspace" after a failure).
@@ -725,6 +759,13 @@ async fn llm_chat(
         truncated,
         queries: runs,
     }))
+}
+
+/// True when the answer embeds data widgets but no query succeeded this turn —
+/// i.e. the widget values cannot have come from the graphs.
+fn widgets_without_retrieval(answer: &str, runs: &[ChatQueryRun]) -> bool {
+    const DATA_WIDGETS: [&str; 4] = ["```chart", "```map", "```card", "```csv"];
+    DATA_WIDGETS.iter().any(|w| answer.contains(w)) && !runs.iter().any(|r| r.ok)
 }
 
 /// Last-resort answer when the model keeps demanding more queries than allowed (or
@@ -883,7 +924,7 @@ fn build_platform_context(
     }
 
     if !graphs.is_empty() {
-        ctx.push_str("\n## Named graphs in scope (use these IRIs in GRAPH/FROM clauses)\n");
+        ctx.push_str("\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`)\n");
         for g in graphs.iter().take(MAX_GRAPHS_IN_CONTEXT) {
             ctx.push_str(&format!("- <{g}>\n"));
         }
@@ -1101,8 +1142,31 @@ fn strip_code_fence(s: &str) -> String {
 mod tests {
     use super::{
         extract_sparql_directive, fallback_answer, find_ci, looks_like_wkt, strip_code_fence,
-        truncate, validate_sparql, ChatQueryRun, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
+        truncate, validate_sparql, widgets_without_retrieval, ChatQueryRun, CHAT_CELL_MAX_CHARS,
+        CHAT_WKT_CELL_MAX_CHARS,
     };
+
+    fn ok_run() -> ChatQueryRun {
+        ChatQueryRun {
+            sparql: "SELECT * WHERE { ?s ?p ?o }".into(),
+            ok: true,
+            error: None,
+            columns: Some(vec!["s".into()]),
+            rows: Some(vec![vec!["x".into()]]),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn ungrounded_widgets_get_flagged_but_grounded_or_plain_answers_do_not() {
+        assert!(widgets_without_retrieval("```map\n{}\n```", &[]));
+        assert!(widgets_without_retrieval("```chart\n{}\n```", &[]));
+        // A successful run this turn grounds the widget.
+        assert!(!widgets_without_retrieval("```map\n{}\n```", &[ok_run()]));
+        // Prose and non-data fences never get the caveat.
+        assert!(!widgets_without_retrieval("plain prose", &[]));
+        assert!(!widgets_without_retrieval("```sparql\nASK {}\n```", &[]));
+    }
 
     #[test]
     fn wkt_cells_are_recognised_for_the_larger_budget() {

@@ -189,6 +189,59 @@ export function describeApiService(path) {
 
 const str = (v) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '');
 
+/**
+ * JSON.parse with a lenient retry for model output: smaller models sneak `//`
+ * or  `/* *\/` comments and trailing commas into widget specs. The stripper is
+ * string-aware, so `https://…` inside a value survives. Returns undefined when
+ * even the lenient pass fails.
+ */
+export function lenientJsonParse(text) {
+  const s = String(text ?? '');
+  try {
+    return JSON.parse(s);
+  } catch {
+    /* lenient pass below */
+  }
+  let out = '';
+  let inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      out += c;
+      if (c === '\\') {
+        out += s[i + 1] ?? '';
+        i++;
+      } else if (c === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      out += c;
+      continue;
+    }
+    if (c === '/' && s[i + 1] === '/') {
+      while (i < s.length && s[i] !== '\n') i++;
+      out += '\n';
+      continue;
+    }
+    if (c === '/' && s[i + 1] === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  out = out.replace(/,\s*([}\]])/g, '$1');
+  try {
+    return JSON.parse(out);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Normalise one chart data array into [{label, value}] with finite values. */
 function normPoints(arr) {
   if (!Array.isArray(arr)) return [];
@@ -212,12 +265,8 @@ function normPoints(arr) {
  * @returns {{spec?: {type, title, xLabel, yLabel, series: Array<{name, data}>}, error?: string}}
  */
 export function parseChartSpec(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return { error: 'invalid JSON' };
-  }
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
   if (!raw || typeof raw !== 'object') return { error: 'not an object' };
   const type = ['bar', 'line', 'pie'].includes(raw.type) ? raw.type : 'bar';
   let series;
@@ -250,12 +299,8 @@ export function parseMapSpec(text) {
   const t = String(text ?? '').trim();
   let features = [];
   if (t.startsWith('{') || t.startsWith('[')) {
-    let raw;
-    try {
-      raw = JSON.parse(t);
-    } catch {
-      return { error: 'invalid JSON' };
-    }
+    const raw = lenientJsonParse(t);
+    if (raw === undefined) return { error: 'invalid JSON' };
     const arr = Array.isArray(raw) ? raw : raw?.features;
     if (!Array.isArray(arr)) return { error: 'missing "features" array' };
     features = arr
@@ -284,12 +329,8 @@ export function parseMapSpec(text) {
  * @returns {{card?: {title, subtitle, iri, image, facts}, error?: string}}
  */
 export function parseInfoCard(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return { error: 'invalid JSON' };
-  }
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'not an object' };
   const facts = Array.isArray(raw.facts)
     ? raw.facts

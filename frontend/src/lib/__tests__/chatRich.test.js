@@ -10,6 +10,7 @@ import {
   sniffLang,
   normalizeSparqlResult,
   decorateApiLinks,
+  lenientJsonParse,
 } from '../chatRich.js';
 
 describe('parseChatBlocks', () => {
@@ -175,6 +176,29 @@ describe('parseMapSpec', () => {
   it('reports malformed specs', () => {
     expect(parseMapSpec('{"features":7}').error).toBeTruthy();
     expect(parseMapSpec('{oops').error).toBe('invalid JSON');
+  });
+});
+
+describe('lenientJsonParse', () => {
+  it('tolerates // and /* */ comments and trailing commas, preserving URLs', () => {
+    const card = lenientJsonParse(
+      '{\n  "title": "Waalbrug",\n  "image": "https://example.com/x.jpg", // replace if available\n  /* facts below */\n  "facts": [{"label":"Type","value":"Bridge"},],\n}'
+    );
+    expect(card).toEqual({
+      title: 'Waalbrug',
+      image: 'https://example.com/x.jpg',
+      facts: [{ label: 'Type', value: 'Bridge' }],
+    });
+  });
+
+  it('still parses strict JSON and rejects garbage', () => {
+    expect(lenientJsonParse('{"a":1}')).toEqual({ a: 1 });
+    expect(lenientJsonParse('{nope')).toBeUndefined();
+  });
+
+  it('feeds the card parser so commented specs render instead of breaking', () => {
+    const { card } = parseInfoCard('{"title":"X", // note\n"facts":[]}');
+    expect(card.title).toBe('X');
   });
 });
 
