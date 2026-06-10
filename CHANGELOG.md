@@ -23,6 +23,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
   oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
   SHACL (Core/SPARQL/AF) pass/fail matrix.
+- SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
+  `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
+  `sh:zeroOrOnePath` (previously only a single predicate IRI was understood).
 
 ### Changed
 - None.
@@ -35,6 +38,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   silently skipped (the query failed to parse and the result was swallowed), so the
   corresponding violations/inferences never appeared. They now resolve via the declared
   `sh:prefixes`.
+- An inline blank-node `sh:qualifiedValueShape [ … ]` was silently skipped: the value
+  shape was looked up by IRI in the top-level shapes list, where an inline shape never
+  appears. It is now loaded inline (like `sh:not`/`and`/`or`) and enforced.
 
 ### Security
 - None.

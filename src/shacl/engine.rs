@@ -558,11 +558,15 @@ fn load_constraints(
             &format!("{}qualifiedMaxCount", SH),
         )
         .and_then(|v| v.parse::<usize>().ok());
-        constraints.push(Constraint::QualifiedValueShape {
-            shape_iri: qvs_iri,
-            min_count,
-            max_count,
-        });
+        // Load the value shape inline (named or blank) so an inline `[ … ]` is enforced
+        // rather than looked up — and silently skipped — in the top-level shapes list.
+        if let Ok(qvs_shape) = load_inline_shape(store, shapes_graph, &qvs_iri) {
+            constraints.push(Constraint::QualifiedValueShape {
+                shape: Box::new(qvs_shape),
+                min_count,
+                max_count,
+            });
+        }
     }
 
     // SHACL-AF: sh:sparql constraints. Resolve through the raw quad index so this
@@ -641,10 +645,19 @@ fn load_property_shapes_inner(
     let mut result = Vec::new();
 
     for ps_iri in &ps_iris {
-        // Load path
-        let path_value = single_value(store, shapes_graph, ps_iri, &format!("{}path", SH));
-        let path = match path_value {
-            Some(p) => PropertyPath::Predicate(p),
+        // Load and parse the property path: a predicate IRI, or a blank-node path
+        // (sequence list, sh:inversePath, sh:alternativePath, sh:zeroOrMorePath, …).
+        let path = match single_value(store, shapes_graph, ps_iri, &format!("{}path", SH)) {
+            Some(p) => match parse_property_path(store, shapes_graph, &p) {
+                Some(pp) => pp,
+                None => {
+                    warn!(
+                        "Property shape <{}> has an unparseable sh:path, skipping",
+                        ps_iri
+                    );
+                    continue;
+                }
+            },
             None => {
                 warn!("Property shape <{}> has no sh:path, skipping", ps_iri);
                 continue;
@@ -966,6 +979,92 @@ fn multi_values(
         .iter()
         .map(term_to_lexical)
         .collect()
+}
+
+/// Parse a SHACL property path (SHACL §2.3) starting at `node` into a [`PropertyPath`].
+///
+/// Handles a predicate IRI; an RDF-list **sequence** path `( p1 p2 … )`; and the blank-node
+/// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
+/// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Blank-node cells are walked through the raw quad
+/// index (SPARQL surface syntax cannot re-address them). Returns `None` for an empty or
+/// malformed path so the caller can skip the property shape rather than mis-bind it. The
+/// previous loader treated every path as a single predicate, so a blank-node path collapsed
+/// to `Predicate("_:bn")` and matched nothing.
+fn parse_property_path(
+    store: &TripleStore,
+    shapes_graph: &str,
+    node: &str,
+) -> Option<PropertyPath> {
+    // A predicate path is a plain IRI.
+    if !node.starts_with("_:") {
+        return Some(PropertyPath::Predicate(node.to_string()));
+    }
+    // Blank node: a path-operator object, otherwise an RDF-list sequence path.
+    let op = |p: &str| -> Option<String> {
+        store
+            .objects_for_subject_in_graph(node, &format!("{SH}{p}"), Some(shapes_graph))
+            .first()
+            .map(term_to_lexical)
+    };
+    if let Some(inner) = op("inversePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::Inverse(Box::new(p)));
+    }
+    if let Some(head) = op("alternativePath") {
+        let parts: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, &head)
+            .iter()
+            .filter_map(|e| parse_property_path(store, shapes_graph, e))
+            .collect();
+        return (!parts.is_empty()).then_some(PropertyPath::Alternative(parts));
+    }
+    if let Some(inner) = op("zeroOrMorePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::ZeroOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("oneOrMorePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::OneOrMore(Box::new(p)));
+    }
+    if let Some(inner) = op("zeroOrOnePath") {
+        return parse_property_path(store, shapes_graph, &inner)
+            .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
+    }
+    // Otherwise: an RDF-list sequence path `( p1 p2 … )`.
+    let seq: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, node)
+        .iter()
+        .filter_map(|e| parse_property_path(store, shapes_graph, e))
+        .collect();
+    (!seq.is_empty()).then_some(PropertyPath::Sequence(seq))
+}
+
+/// Walk the RDF list whose head is `head`, returning each member's lexical node form
+/// (IRI, `_:label`, or literal value) via the raw quad index. Empty if `head` is not a list.
+fn rdf_list_elements(store: &TripleStore, shapes_graph: &str, head: &str) -> Vec<String> {
+    const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
+    const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
+    const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
+    let mut out = Vec::new();
+    let mut current = head.to_string();
+    for _ in 0..10_000 {
+        if current == RDF_NIL {
+            break;
+        }
+        match store
+            .objects_for_subject_in_graph(&current, RDF_FIRST, Some(shapes_graph))
+            .first()
+        {
+            Some(first) => out.push(term_to_lexical(first)),
+            None => break,
+        }
+        match store
+            .objects_for_subject_in_graph(&current, RDF_REST, Some(shapes_graph))
+            .first()
+        {
+            Some(rest) => current = term_to_lexical(rest),
+            None => break,
+        }
+    }
+    out
 }
 
 /// Build the SPARQL `PREFIX` prologue declared via SHACL's prefixes mechanism for a

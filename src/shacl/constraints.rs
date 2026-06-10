@@ -802,53 +802,50 @@ pub fn evaluate_constraint(
 
         // ---- Qualified value shape ----
         Constraint::QualifiedValueShape {
-            shape_iri: qvs_iri,
+            shape: qvs,
             min_count,
             max_count,
         } => {
-            if let Some(qvs) = shapes.iter().find(|s| &s.iri == qvs_iri) {
-                let qvs = qvs.clone();
-                // Collect values along the path; count those that conform to qvs.
-                let values = get_values(store, focus_node, path, data_graphs);
-                let conforming_count = values
-                    .iter()
-                    .filter(|v| {
-                        validate_inline_shape(store, shapes, v, &qvs, data_graphs, severity)
-                            .is_empty()
-                    })
-                    .count();
+            // Collect values along the path; count those that conform to the (inline)
+            // qualified value shape.
+            let values = get_values(store, focus_node, path, data_graphs);
+            let conforming_count = values
+                .iter()
+                .filter(|v| {
+                    validate_inline_shape(store, shapes, v, qvs, data_graphs, severity).is_empty()
+                })
+                .count();
 
-                if let Some(min) = min_count {
-                    if conforming_count < *min {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: None,
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:qualifiedMinCount {}", min),
-                            message: format!(
-                                "Only {} values conform to qualified shape, expected at least {}",
-                                conforming_count, min
-                            ),
-                        });
-                    }
+            if let Some(min) = min_count {
+                if conforming_count < *min {
+                    results.push(ValidationResult {
+                        severity: severity.clone(),
+                        focus_node: focus_node.to_string(),
+                        path: path.map(|p| p.to_sparql()),
+                        value: None,
+                        source_shape: shape_iri.to_string(),
+                        source_constraint: format!("sh:qualifiedMinCount {}", min),
+                        message: format!(
+                            "Only {} values conform to qualified shape, expected at least {}",
+                            conforming_count, min
+                        ),
+                    });
                 }
-                if let Some(max) = max_count {
-                    if conforming_count > *max {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: None,
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:qualifiedMaxCount {}", max),
-                            message: format!(
-                                "{} values conform to qualified shape, expected at most {}",
-                                conforming_count, max
-                            ),
-                        });
-                    }
+            }
+            if let Some(max) = max_count {
+                if conforming_count > *max {
+                    results.push(ValidationResult {
+                        severity: severity.clone(),
+                        focus_node: focus_node.to_string(),
+                        path: path.map(|p| p.to_sparql()),
+                        value: None,
+                        source_shape: shape_iri.to_string(),
+                        source_constraint: format!("sh:qualifiedMaxCount {}", max),
+                        message: format!(
+                            "{} values conform to qualified shape, expected at most {}",
+                            conforming_count, max
+                        ),
+                    });
                 }
             }
         }
