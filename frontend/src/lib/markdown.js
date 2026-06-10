@@ -42,6 +42,12 @@ function highlightFor(lang) {
   }
 }
 
+/** Highlight a SPARQL string (the RDF highlighter plus SPARQL keywords). Shared
+ * with the chat's runnable query blocks so they match fenced ```sparql code. */
+export function highlightSparql(src) {
+  return highlightRdf(src, SPARQL_KEYWORDS);
+}
+
 /** Turn heading text into a URL-safe slug used as an `id` / hash anchor. */
 export function slugify(text) {
   return String(text || '')

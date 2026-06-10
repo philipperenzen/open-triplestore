@@ -4,24 +4,29 @@
   import { llmChat, llmHealth, sendLlmFeedback } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { isAuthenticated } from '../lib/stores.js';
-  import { renderMarkdown } from '../lib/markdown.js';
+  import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
+  import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
+  import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
   } from 'lucide-svelte';
 
-  // One assistant turn may carry the SPARQL it ran plus the resulting table.
-  let messages = []; // { role, content, sparql?, columns?, rows?, truncated?, ranQuery?, showQuery?, reviewed?, isError? }
+  // One assistant turn carries the retrieval trail (every SPARQL round the
+  // backend ran, ok or failed) plus any API runs the user clicked open.
+  let messages = []; // { role, content, queries?: [{sparql, ok, error?, columns?, rows?, truncated}], ranQuery?, showQuery?, reviewed?, isError?, runs?: [{id, method, path}] }
   let input = '';
   let loading = false;
   let llmStatus = null;
   let scrollEl;
+  let runSeq = 0;
 
   $: EXAMPLES = [
     $t('pages.llmChat.example1'),
     $t('pages.llmChat.example2'),
     $t('pages.llmChat.example3'),
     $t('pages.llmChat.example4'),
+    $t('pages.llmChat.example5'),
   ];
 
   $: offline = llmStatus && !llmStatus.reachable;
@@ -49,13 +54,11 @@
       messages = [...messages, {
         role: 'assistant',
         content: resp.answer || $t('pages.llmChat.noAnswer'),
-        sparql: resp.sparql || null,
-        columns: resp.columns || null,
-        rows: resp.rows || null,
-        truncated: !!resp.truncated,
+        queries: normalizeQueries(resp),
         ranQuery: !!resp.ran_query,
         showQuery: false,
         reviewed: null,
+        runs: [],
       }];
     } catch (e) {
       messages = [...messages, {
@@ -76,6 +79,33 @@
     }
   }
 
+  // The backend's `queries` array is the full retrieval trail; older responses
+  // only carry the single legacy sparql/columns/rows fields — adapt those.
+  function normalizeQueries(resp) {
+    if (Array.isArray(resp.queries) && resp.queries.length) return resp.queries;
+    if (resp.sparql) {
+      return [{
+        sparql: resp.sparql,
+        ok: !!resp.ran_query,
+        error: null,
+        columns: resp.columns || null,
+        rows: resp.rows || null,
+        truncated: !!resp.truncated,
+      }];
+    }
+    return [];
+  }
+
+  // The user clicked an inline `GET /api/...` in the answer: attach a run panel
+  // (which auto-runs) under that message. One panel per distinct path.
+  function attachRun(msg, ep) {
+    if (!ep?.path) return;
+    msg.runs = msg.runs || [];
+    if (msg.runs.some((r) => r.path === ep.path)) return;
+    msg.runs = [...msg.runs, { id: ++runSeq, method: ep.method || 'GET', path: ep.path }];
+    messages = messages;
+  }
+
   function lastUserQuestion(idx) {
     for (let i = idx - 1; i >= 0; i--) {
       if (messages[i].role === 'user') return messages[i].content;
@@ -89,11 +119,12 @@
     if (msg.reviewed === rating) return;
     msg.reviewed = rating;
     messages = messages;
+    const lastSparql = msg.queries?.length ? msg.queries[msg.queries.length - 1].sparql : null;
     sendLlmFeedback({
       track: 'sparql',
       event: 'chat',
       input: { nl_question: lastUserQuestion(idx) },
-      output: { answer: msg.content, corrected_turtle: msg.sparql || null },
+      output: { answer: msg.content, corrected_turtle: lastSparql },
       label: { decision: rating === 'down' ? 'reject' : null, rating, source: 'human', comment: null },
       prov: { app: 'opentriplestore' },
     });
@@ -156,38 +187,77 @@
     {#each messages as msg, i}
       <div class="row {msg.role}">
         <div class="bubble {msg.role}" class:error={msg.isError}>
-          <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
-          <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-          <div class="bubble-text">{@html renderRich(msg.content)}</div>
+          {#if msg.role === 'assistant' && !msg.isError}
+            <!-- Interactive answer: markdown plus runnable sparql/api blocks and
+                 chart/map/card/csv widgets (sanitized in ChatRichMessage). -->
+            <div class="bubble-text">
+              <ChatRichMessage
+                content={msg.content}
+                on:runApi={(e) => attachRun(msg, e.detail)}
+                on:openInSparql={(e) => openInSparql(e.detail)}
+              />
+            </div>
+          {:else}
+            <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+            <div class="bubble-text">{@html renderRich(msg.content)}</div>
+          {/if}
 
-          {#if msg.sparql}
+          {#if msg.runs?.length}
+            <div class="attached-runs">
+              {#each msg.runs as r (r.id)}
+                <ApiRunBlock method={r.method} path={r.path} autorun />
+              {/each}
+            </div>
+          {/if}
+
+          {#if msg.queries?.length}
             <div class="query-block">
               <button class="query-toggle" on:click={() => { msg.showQuery = !msg.showQuery; messages = messages; }}>
                 {#if msg.showQuery}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
                 <Terminal size={13} />
-                {msg.ranQuery ? $t('pages.llmChat.ranQuery') : $t('pages.llmChat.attemptedQuery')}
-                {#if msg.rows}<span class="row-count">· {msg.rows.length}{msg.truncated ? '+' : ''} {msg.rows.length === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}</span>{/if}
+                {#if msg.queries.length > 1}
+                  {$t('pages.llmChat.ranQueries', { values: { count: msg.queries.length } })}
+                {:else}
+                  {msg.ranQuery ? $t('pages.llmChat.ranQuery') : $t('pages.llmChat.attemptedQuery')}
+                {/if}
+                {#if msg.queries.length === 1 && msg.queries[0].rows}
+                  <span class="row-count">· {msg.queries[0].rows.length}{msg.queries[0].truncated ? '+' : ''} {msg.queries[0].rows.length === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}</span>
+                {/if}
               </button>
               {#if msg.showQuery}
-                <pre class="query-text">{msg.sparql}</pre>
-                <button class="open-sparql" on:click={() => openInSparql(msg.sparql)}>
-                  <Terminal size={12} /> {$t('pages.llmChat.openInSparql')}
-                </button>
-                {#if msg.columns && msg.rows && msg.rows.length}
-                  <div class="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>{#each msg.columns as c}<th>{c}</th>{/each}</tr>
-                      </thead>
-                      <tbody>
-                        {#each msg.rows as r}
-                          <tr>{#each r as cell}<td title={cell}>{cell}</td>{/each}</tr>
-                        {/each}
-                      </tbody>
-                    </table>
+                {#each msg.queries as q, qi}
+                  <div class="query-item">
+                    {#if msg.queries.length > 1}
+                      <p class="query-label">
+                        {$t('pages.llmChat.queryN', { values: { n: qi + 1 } })}
+                        {#if q.rows}<span class="row-count">· {q.rows.length}{q.truncated ? '+' : ''} {q.rows.length === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}</span>{/if}
+                      </p>
+                    {/if}
+                    <!-- highlightSparql escapes all source text (resultHighlight.js) -->
+                    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+                    <pre class="query-text"><code>{@html highlightSparql(q.sparql)}</code></pre>
+                    {#if q.error}<p class="query-error">{q.error}</p>{/if}
+                    <button class="open-sparql" on:click={() => openInSparql(q.sparql)}>
+                      <Terminal size={12} /> {$t('pages.llmChat.openInSparql')}
+                    </button>
+                    {#if q.columns && q.rows && q.rows.length}
+                      <div class="table-wrap">
+                        <table>
+                          <thead>
+                            <tr>{#each q.columns as c}<th>{c}</th>{/each}</tr>
+                          </thead>
+                          <tbody>
+                            {#each q.rows as r}
+                              <tr>{#each r as cell}<td title={cell}>{cell}</td>{/each}</tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      </div>
+                      {#if q.truncated}<p class="truncated-note">{$t('pages.llmChat.showingFirstRows', { values: { count: q.rows.length } })}</p>{/if}
+                    {/if}
                   </div>
-                  {#if msg.truncated}<p class="truncated-note">{$t('pages.llmChat.showingFirstRows', { values: { count: msg.rows.length } })}</p>{/if}
-                {/if}
+                {/each}
               {/if}
             </div>
           {/if}
@@ -342,6 +412,9 @@
   .bubble-text :global(pre .tok-attr)    { color: #f9e2af; }
   .bubble-text :global(pre .tok-meta)    { color: #7f849c; }
 
+  .attached-runs { margin-top: 0.6rem; }
+  .attached-runs > :global(* + *) { margin-top: 0.45rem; }
+
   .query-block { margin-top: 0.6rem; border-top: 1px solid var(--line-soft); padding-top: 0.5rem; }
   .query-toggle {
     display: inline-flex; align-items: center; gap: 0.35rem; background: none; border: none;
@@ -349,11 +422,26 @@
   }
   .query-toggle:hover { text-decoration: underline; }
   .row-count { color: var(--ink-400); font-weight: 500; }
+  .query-item + .query-item { margin-top: 0.7rem; border-top: 1px dashed var(--line-soft); padding-top: 0.55rem; }
+  .query-label { margin: 0.4rem 0 0; font-size: 0.74rem; font-weight: 600; color: var(--ink-500); }
+  .query-error {
+    margin: 0.35rem 0; padding: 0.4rem 0.55rem; border-radius: 8px; font-size: 0.76rem;
+    background: #fff8f8; border: 1px solid #f3c9c9; color: #b91c1c;
+    white-space: pre-wrap; word-break: break-word;
+  }
   .query-text {
     margin: 0.5rem 0; padding: 0.5rem 0.6rem; background: #0f172a; color: #e2e8f0;
     border-radius: 8px; font-family: 'SF Mono', ui-monospace, monospace; font-size: 0.76rem;
     white-space: pre-wrap; word-break: break-word; overflow-x: auto;
   }
+  .query-text code { background: none; padding: 0; font-family: inherit; font-size: inherit; }
+  .query-text :global(.tok-comment) { color: #7f849c; font-style: italic; }
+  .query-text :global(.tok-iri)     { color: #89b4fa; }
+  .query-text :global(.tok-pname)   { color: #f5c2e7; }
+  .query-text :global(.tok-kw)      { color: #cba6f7; font-weight: 600; }
+  .query-text :global(.tok-str)     { color: #a6e3a1; }
+  .query-text :global(.tok-num)     { color: #fab387; }
+  .query-text :global(.tok-punct)   { color: #9399b2; }
   .open-sparql {
     display: inline-flex; align-items: center; gap: 0.3rem; background: #eef2ff; color: #4338ca;
     border: 1px solid #c7d2fe; border-radius: 6px; padding: 3px 8px; font-size: 0.74rem; cursor: pointer;
@@ -428,6 +516,7 @@
   :global(:is([data-theme="dark"], .dark)) .welcome-icon { background: rgba(139,92,246,0.2); color: #c4b5fd; }
   :global(:is([data-theme="dark"], .dark)) .bubble.error { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .query-toggle { color: #a5b4fc; }
+  :global(:is([data-theme="dark"], .dark)) .query-error { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .open-sparql { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
   :global(:is([data-theme="dark"], .dark)) .open-sparql:hover { background: rgba(99,102,241,0.28); }
 </style>
