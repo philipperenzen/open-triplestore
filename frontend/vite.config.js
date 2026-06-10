@@ -110,6 +110,9 @@ export default defineConfig(async () => {
             if (id.includes('node_modules/three')) {
               return 'three';
             }
+            if (id.includes('node_modules/maplibre-gl')) {
+              return 'maplibre';
+            }
             if (id.includes('node_modules/leaflet')) {
               return 'leaflet';
             }
@@ -117,6 +120,10 @@ export default defineConfig(async () => {
         },
       },
     },
+    // Svelte 5 ships separate client/server builds; vitest must resolve the
+    // *client* ("browser") build or component tests fail with
+    // "mount(...) is not available on the server".
+    resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
     test: {
       environment: 'jsdom',
       globals: true,

@@ -1,0 +1,70 @@
+// Dependency-free detection helpers shared by lightweight surfaces (RdfTerm in
+// tables/graphs) — deliberately free of three.js/leaflet imports so they add
+// nothing to the main bundle. The heavy viewer modules import from here too.
+
+export type ModelFormat = 'gltf' | 'stl' | 'cityjson' | 'citygml';
+
+/** Detect a loadable 3D-model format from a file URL (glb/gltf/stl/CityJSON/CityGML). */
+export function modelFormatFromUrl(url: string): ModelFormat | null {
+  // Absolute http(s) or site-relative (same-origin samples/assets).
+  if (!/^https?:\/\//i.test(url) && !url.startsWith('/')) return null;
+  const clean = url.split(/[?#]/)[0].toLowerCase();
+  if (clean.endsWith('.glb') || clean.endsWith('.gltf')) return 'gltf';
+  if (clean.endsWith('.stl')) return 'stl';
+  if (clean.endsWith('.cityjson') || clean.endsWith('.city.json')) return 'cityjson';
+  if (clean.endsWith('.citygml') || clean.endsWith('.gml')) return 'citygml';
+  return null;
+}
+
+/** FOG format key (the local name after `fog:as`, e.g. `Gltf_v2.0-glb`) → format. */
+function formatFromFogKey(key: string): ModelFormat | null {
+  const k = key.toLowerCase();
+  if (k.startsWith('gltf')) return 'gltf';
+  if (k.startsWith('stl')) return 'stl';
+  if (k.startsWith('cityjson')) return 'cityjson';
+  if (k.startsWith('citygml')) return 'citygml';
+  return null;
+}
+
+export interface ModelRef {
+  url: string;
+  format: ModelFormat;
+}
+
+/** Preference when an element offers several formats. */
+const FORMAT_ORDER: ModelFormat[] = ['gltf', 'cityjson', 'citygml', 'stl'];
+
+/**
+ * The best loadable 3D-model reference of a viewer-feed element: the explicit
+ * glTF URL first, then the FOG file list — by FOG format key or URL extension —
+ * preferring glTF > CityJSON > CityGML > STL.
+ */
+export function modelRefOf(el: {
+  gltf_url?: string | null;
+  files?: [string, string][];
+}): ModelRef | null {
+  if (el.gltf_url) return { url: el.gltf_url, format: 'gltf' };
+  const found = new Map<ModelFormat, string>();
+  for (const [key, url] of el.files || []) {
+    const format = formatFromFogKey(key) ?? modelFormatFromUrl(url);
+    if (format && !found.has(format)) found.set(format, url);
+  }
+  for (const format of FORMAT_ORDER) {
+    const url = found.get(format);
+    if (url) return { url, format };
+  }
+  return null;
+}
+
+/** Human-readable display name per model format (file chips, BIM lists). */
+export const FORMAT_LABELS: Record<ModelFormat, string> = {
+  gltf: 'glTF',
+  stl: 'STL',
+  cityjson: 'CityJSON',
+  citygml: 'CityGML',
+};
+
+/** Is this literal datatype a GeoSPARQL WKT literal? */
+export function isWktDatatype(datatype: string | undefined | null): boolean {
+  return !!datatype && datatype.endsWith('wktLiteral');
+}

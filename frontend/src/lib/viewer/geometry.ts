@@ -4,6 +4,7 @@
 // testable in jsdom.
 
 import { parseWktGeometry, type WktGeometry } from '../ontology/valueType';
+import { modelRefOf, type ModelFormat } from './detect';
 
 export interface ViewerElement {
   id: string;
@@ -87,24 +88,23 @@ export interface ModelRef {
   id: string;
   label: string;
   url: string;
-  format: 'gltf' | 'stl';
+  format: ModelFormat;
   /** Grid slot position in the 3D scene, [x, z]. */
   slot: [number, number];
 }
 
 /**
- * Elements with a loadable 3D model (glTF preferred, STL fallback from the FOG
- * file list), laid out on a √n×√n ground grid with `spacing` between slots.
+ * Elements with a loadable 3D model (glTF > CityJSON > CityGML > STL, resolved
+ * from the FOG file list), laid out on a √n×√n ground grid with `spacing`
+ * between slots.
  */
 export function modelRefs(elements: ViewerElement[], spacing = 3): ModelRef[] {
   const withModels = elements
     .map((el) => {
-      const stl = (el.files || []).find(([f]) => f.startsWith('Stl'))?.[1];
-      if (el.gltf_url) return { el, url: el.gltf_url, format: 'gltf' as const };
-      if (stl) return { el, url: stl, format: 'stl' as const };
-      return null;
+      const ref = modelRefOf(el);
+      return ref ? { el, ...ref } : null;
     })
-    .filter((x): x is { el: ViewerElement; url: string; format: 'gltf' | 'stl' } => x !== null);
+    .filter((x): x is { el: ViewerElement; url: string; format: ModelFormat } => x !== null);
   const cols = Math.max(1, Math.ceil(Math.sqrt(withModels.length)));
   return withModels.map(({ el, url, format }, i) => ({
     id: el.id,
@@ -113,4 +113,95 @@ export function modelRefs(elements: ViewerElement[], spacing = 3): ModelRef[] {
     format,
     slot: [(i % cols) * spacing, Math.floor(i / cols) * spacing],
   }));
+}
+
+// ── GeoJSON for the MapLibre map ─────────────────────────────────────────────
+
+export interface FeatureProps {
+  id: string;
+  label: string;
+  hasModel: boolean;
+}
+
+type Geo =
+  | { type: 'Point'; coordinates: [number, number] }
+  | { type: 'MultiPoint'; coordinates: [number, number][] }
+  | { type: 'LineString'; coordinates: [number, number][] }
+  | { type: 'MultiLineString'; coordinates: [number, number][][] }
+  | { type: 'Polygon'; coordinates: [number, number][][] }
+  | { type: 'MultiPolygon'; coordinates: [number, number][][][] };
+
+export interface GeoFeature {
+  type: 'Feature';
+  geometry: Geo;
+  properties: FeatureProps;
+}
+
+export interface ViewerGeoJSON {
+  points: GeoFeature[];
+  lines: GeoFeature[];
+  polygons: GeoFeature[];
+}
+
+function wktToGeo(g: WktGeometry): Geo | null {
+  switch (g.kind) {
+    case 'point':
+      return { type: 'Point', coordinates: g.coord };
+    case 'multipoint':
+      return { type: 'MultiPoint', coordinates: g.coords };
+    case 'linestring':
+      return { type: 'LineString', coordinates: g.coords };
+    case 'multilinestring':
+      return { type: 'MultiLineString', coordinates: g.lines };
+    case 'polygon':
+      return { type: 'Polygon', coordinates: g.rings };
+    case 'multipolygon':
+      return { type: 'MultiPolygon', coordinates: g.polygons };
+    default:
+      return null; // collections are flattened by the caller
+  }
+}
+
+/**
+ * Split the located elements into point / line / polygon GeoJSON features
+ * (WKT is already lon/lat, the GeoJSON axis order). GeometryCollections
+ * contribute one feature per member.
+ */
+export function elementsToGeoJSON(elements: ViewerElement[]): ViewerGeoJSON {
+  const out: ViewerGeoJSON = { points: [], lines: [], polygons: [] };
+  for (const el of elements) {
+    if (!el.wkt4326) continue;
+    const parsed = parseWktGeometry(el.wkt4326);
+    if (!parsed) continue;
+    const props: FeatureProps = {
+      id: el.id,
+      label: el.label || el.id.split(/[/#]/).pop() || el.id,
+      hasModel: modelRefOf(el) !== null,
+    };
+    const geoms = parsed.kind === 'geometrycollection' ? parsed.geometries : [parsed];
+    for (const g of geoms) {
+      const geometry = wktToGeo(g);
+      if (!geometry) continue;
+      const feature: GeoFeature = { type: 'Feature', geometry, properties: props };
+      if (geometry.type === 'Point' || geometry.type === 'MultiPoint') out.points.push(feature);
+      else if (geometry.type === 'LineString' || geometry.type === 'MultiLineString') out.lines.push(feature);
+      else out.polygons.push(feature);
+    }
+  }
+  return out;
+}
+
+/** The [lng, lat] anchor a point element's 3D model should stand at. */
+export function modelAnchor(el: ViewerElement): [number, number] | null {
+  if (!el.wkt4326) return null;
+  const g = parseWktGeometry(el.wkt4326);
+  if (!g) return null;
+  if (g.kind === 'point') return g.coord;
+  if (g.kind === 'multipoint') return g.coords[0] ?? null;
+  // Lines/polygons: centroid of their bounding box.
+  const f = toMapFeature(el);
+  if (!f || !f.latlngs.length) return null;
+  const b = featureBounds([f]);
+  if (!b) return null;
+  return [(b[0][1] + b[1][1]) / 2, (b[0][0] + b[1][0]) / 2];
 }

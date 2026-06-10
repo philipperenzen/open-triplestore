@@ -14,6 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Spark documentation page** (`docs/spark.md`, in-app at `/docs/spark` under
+  *Query & Search*): what the chat assistant is, how answers are grounded (platform
+  context + scoped SPARQL, up to 3 query rounds per turn), the widget block grammar
+  (`sparql`/`api`/`chart`/`map`/`card`/`csv`) with examples, `LLM_*` configuration,
+  and privacy/scope notes. Cross-linked from the overview, API-services doc and README.
 - SHACL-SPARQL **prefixes mechanism** (`sh:prefixes` → `sh:declare`/`sh:prefix`/
   `sh:namespace`): a `PREFIX` prologue is now prepended to every `sh:select`,
   `sh:construct` and SPARQL-target body, so constraints/rules/targets that use prefixed
@@ -52,13 +57,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
   Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
   Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
-  whose open 3D models live on Wikimedia Commons.
+  whose open 3D models live on Wikimedia Commons, and a synthetic CityJSON LoD2
+  demo block (EPSG:7415, semantic roof/wall/ground surfaces) bundled with the
+  frontend so georeferenced CityJSON rendering is demonstrable offline.
 - **Dataset 3D & map viewer** (frontend, `/datasets/:id/viewer`): an interactive map
   (Leaflet, now a bundled npm dependency) and a 3D scene (three.js — glTF via
   GLTFLoader, STL via STLLoader for the Commons landmark models) over the viewer feed,
   with a shared selection: clicking a part on the map, in 3D, or in the element list
   shows that element's linked data (via the existing browse API + `RdfTerm`).
   `GeoPreview` migrated from CDN-loaded Leaflet to the bundled dependency.
+- **Geo data explorer** (`/datasets/:id/viewer`, rebuilt): the map is now an explorable
+  MapLibre GL world — zoomed out, located elements are dots; zooming in, elements with a
+  3D model show the *actual model* standing georeferenced and to real scale next to OSM
+  building extrusions (tilt/rotate, streets/satellite basemaps, light + dark styles).
+  Clicking a feature or list row opens a draggable element inspector with Properties,
+  the BOT/IFC substructure tree (every sub-element navigable and visualizable, IFC
+  GlobalId + BIM file facts) and an interactive orbit 3D tab. Datasets without
+  geometry fall back to a pure 3D model explorer. Supports glTF, STL, CityJSON and
+  CityGML (client-side CRS reprojection via proj4).
+- **3D/geo everywhere**: RDF terms rendered anywhere (triple table, graph explorer,
+  resource panels, chat) get inline affordances — a map chip on `geo:wktLiteral`
+  values and a 3D chip on model-file URLs — opening a global draggable preview
+  overlay. Resource detail pages show a 3D model (BIM) card with IFC GlobalId and
+  file links (following named `hasGeometry` nodes one hop), and the geometry map
+  gains a *to scale* toggle driven by the model's measured real-world size.
+  **Projected-CRS WKT (e.g. the Waalbrug demo's EPSG:28992) is now reprojected
+  client-side before plotting** — previously raw map previews plotted projected
+  coordinates as lon/lat. Dark mode is supported across all maps and 3D scenes.
 - **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
   GeoSPARQL 1.1 SHACL validator (+ its valid/invalid example corpus) are vendored under
   `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted

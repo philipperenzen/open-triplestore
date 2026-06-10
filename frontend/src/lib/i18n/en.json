@@ -473,6 +473,7 @@
       "example2": "Is there an API service I can call to answer a question about cities, and how do I call it?",
       "example3": "What named graphs can I query right now?",
       "example4": "How many triples are in the Standards demo dataset?",
+      "example5": "Chart the number of triples per named graph as a bar chart.",
       "noAnswer": "(no answer returned)",
       "unavailable": "The assistant is unavailable. Is an LLM endpoint configured and running?",
       "badgeOnlineTitle": "LLM online ({gateway})",
@@ -485,6 +486,8 @@
       "welcomeIntro": "I can see the datasets, API services and graphs you have access to. Try one of these:",
       "guestNote": "You're browsing as a guest, so I can only see public data. Sign in to ask about your own datasets.",
       "ranQuery": "Ran a SPARQL query",
+      "ranQueries": "Ran {count} SPARQL queries",
+      "queryN": "Query {n}",
       "attemptedQuery": "Attempted SPARQL query",
       "rowSingular": "row",
       "rowPlural": "rows",
@@ -2517,10 +2520,7 @@
     "datasetViewer": {
       "title": "3D & map viewer",
       "back": "Dataset",
-      "map": "Map",
-      "threeD": "3D models",
       "elements": "Elements",
-      "selectHint": "Select an element on the map, in 3D, or in the list to see its linked data.",
       "openResource": "Open resource",
       "empty": "No elements with geometry or 3D models in this dataset."
     }
@@ -2544,6 +2544,30 @@
       "defaultGraph": "default",
       "copyNTriple": "Copy as N-Triple",
       "noResults": "No results."
+    },
+    "chat": {
+      "run": "Run",
+      "running": "Running…",
+      "copy": "Copy query",
+      "copyUrl": "Copy URL",
+      "openInSparql": "Open in SPARQL workspace",
+      "openServices": "Open the API services page",
+      "sparqlTitle": "SPARQL query",
+      "apiTitle": "API call",
+      "parameters": "Parameters",
+      "download": "Download",
+      "rowCount": "{count} rows",
+      "showingFirst": "showing the first {count}",
+      "noRows": "No rows.",
+      "askResult": "ASK result",
+      "yes": "yes",
+      "no": "no",
+      "graphTriples": "{count} triples",
+      "servedVersion": "dataset version {version}",
+      "mapFeatures": "{count} locations",
+      "noGeometry": "None of the WKT geometries in this map block could be read.",
+      "chartAlt": "Chart",
+      "brokenBlock": "This {label} block could not be rendered — showing its raw content."
     },
     "edgeInfo": {
       "predicateBadge": "Predicate",
@@ -3352,5 +3376,29 @@
       "binary": "binary",
       "showMore": "Show more"
     }
+  },
+  "viewer": {
+    "resize": "Resize",
+    "close": "Close",
+    "search": "Search elements…",
+    "located": "On the map",
+    "noLocation": "No location",
+    "properties": "Properties",
+    "structure": "Structure",
+    "model3d": "3D model",
+    "model3dBim": "3D model (BIM)",
+    "bimFiles": "BIM / geometry files",
+    "noChildren": "No sub-elements.",
+    "parent": "Part of",
+    "orbitHint": "Drag to rotate · scroll to zoom · right-drag to pan",
+    "zoomHint": "Zoom in to see 3D models to scale; right-drag (or Ctrl-drag) tilts and rotates the map.",
+    "basemap": "Basemap",
+    "basemapStreets": "Map",
+    "basemapSatellite": "Satellite",
+    "toScale": "to scale",
+    "geometry": "Geometry",
+    "showOnMap": "Show on map",
+    "show3d": "View 3D model",
+    "noModels": "No 3D models in this dataset."
   }
 }
