@@ -1,0 +1,76 @@
+# SEED COPY — canonical source: tests/fixtures/landmarks/landmarks.ttl
+# (a drift-guard test asserts byte equality below this header; edit the fixture, then re-copy)
+# World landmarks — real-world linked-data demo with open 3D models.
+#
+# Source: Wikidata (CC0), retrieved 2026-06-09 via the public SPARQL endpoint:
+# entities with both a coordinate location (P625) and a 3D model file (P4896).
+# The 3D models are STL files on Wikimedia Commons. fog:asStl carries the direct
+# upload.wikimedia.org URL (CORS-enabled; resolved once from the P4896
+# Special:FilePath value, whose wiki host sends no CORS headers on the redirect
+# and is therefore not browser-fetchable cross-origin).
+# Modelled with the same standards layering as the Waalbrug example:
+# GeoSPARQL geometry (CRS84 lon/lat, exactly as Wikidata returns P625),
+# OMG/FOG file references, BOT containment from a demo collection root,
+# PROV-O derivation back to the Wikidata entity.
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix omg:     <https://w3id.org/omg#> .
+@prefix fog:     <https://w3id.org/fog#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix wd:      <http://www.wikidata.org/entity/> .
+@prefix lm:      <https://data.example.nl/id/landmarks/> .
+
+# Demo collection root: gives the viewer feed a containment tree to walk.
+lm:WorldLandmarks a bot:Zone ;
+    rdfs:label "World landmarks (Wikidata 3D demo)"@en ;
+    dcterms:source <https://query.wikidata.org/> ;
+    bot:containsElement lm:DragonBridge , lm:BigBen , lm:WhiteHouse ,
+                        lm:EmpireStateBuilding , lm:SannoShrine .
+
+# ── Dragon Bridge, Da Nang (a real bridge with an open 3D model) ──
+lm:DragonBridge a bot:Element ;
+    rdfs:label "Dragon Bridge (Da Nang)"@en , "Cầu Rồng"@vi ;
+    prov:wasDerivedFrom wd:Q5305270 ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(108.22666667 16.06111111)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/22/Dragon_Bridge_in_Da_Nang.stl"^^xsd:anyURI ] .
+
+# ── Big Ben (Elizabeth Tower), London ──
+lm:BigBen a bot:Element ;
+    rdfs:label "Big Ben"@en ;
+    prov:wasDerivedFrom wd:Q41225 ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(-0.12457 51.50067)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl"^^xsd:anyURI ] .
+
+# ── White House, Washington D.C. ──
+lm:WhiteHouse a bot:Element ;
+    rdfs:label "White House"@en ;
+    prov:wasDerivedFrom wd:Q35525 ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(-77.036666666 38.897777777)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl"^^xsd:anyURI ] .
+
+# ── Empire State Building, New York ──
+lm:EmpireStateBuilding a bot:Element ;
+    rdfs:label "Empire State Building"@en ;
+    prov:wasDerivedFrom wd:Q9188 ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(-73.985555555 40.748333333)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl"^^xsd:anyURI ] .
+
+# ── Sannō Shrine one-legged torii, Nagasaki ──
+lm:SannoShrine a bot:Element ;
+    rdfs:label "Sannō Shrine (one-legged torii)"@en , "山王神社"@ja ;
+    prov:wasDerivedFrom wd:Q211522 ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(129.86861111 32.7675)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/1/1d/Nagasaki_torii_shrine.stl"^^xsd:anyURI ] .

@@ -37,6 +37,28 @@ enum G {
     Multi(MultiKind, Vec<G>),
 }
 
+/// Extract the `srsName` CRS URI from the outermost GML geometry element, if any
+/// (e.g. `<gml:Point srsName="http://www.opengis.net/def/crs/EPSG/0/28992">`).
+pub fn gml_srs_name(gml: &str) -> Option<String> {
+    let mut reader = Reader::from_str(gml);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.local_name().as_ref() == b"srsName" {
+                        if let Ok(v) = attr.unescape_value() {
+                            return Some(v.to_string());
+                        }
+                    }
+                }
+                // Keep scanning: the srsName may sit on a nested geometry element.
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+    }
+}
+
 /// Convert a GML geometry document to a WKT string, or `None` if it is not a
 /// recognised/parseable GML geometry.
 pub fn gml_to_wkt(gml: &str) -> Option<String> {

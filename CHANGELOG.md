@@ -42,6 +42,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
   queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
   evaluated against a fresh in-memory store, fully supporting expression-style functions.
+- **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
+  3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
+  parent topology, IFC GlobalId, glTF/IFC/other file URLs, and geometry reprojected to
+  EPSG:4326 and EPSG:3857 server-side. Anonymous access works for public datasets.
+- **Compliance as data**: every official dataset validation run now also persists its
+  `sh:ValidationReport` as RDF into `urn:system:reports:dataset:{id}` (replaced per run),
+  so dashboards can query failures via SPARQL; severity rollup stays on the run rows.
+- **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
+  Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
+  Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
+  whose open 3D models live on Wikimedia Commons.
 
 ### Changed
 - None.
