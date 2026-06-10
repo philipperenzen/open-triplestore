@@ -130,9 +130,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An inline blank-node `sh:qualifiedValueShape [ … ]` was silently skipped: the value
   shape was looked up by IRI in the top-level shapes list, where an inline shape never
   appears. It is now loaded inline (like `sh:not`/`and`/`or`) and enforced.
+- **Viewer feed**: WKT/GML literals carrying a CRS the server cannot reproject
+  (anything beyond EPSG:28992/4326/3857, e.g. EPSG:25832) are no longer emitted
+  verbatim as `wkt4326` — projected metre coordinates used to reach the map as
+  lon/lat and crash MapLibre's `fitBounds`, breaking the whole explorer; such
+  geometries are now omitted (the element still appears, without a location).
+  Datasets with plain GeoSPARQL geometry but no BOT containment topology now
+  appear in the feed as parentless roots (previously: an empty feed). 3D GML
+  (`srsDimension="3"`) coordinate lists now parse correctly (Z dropped) instead
+  of mis-pairing into garbage 2D coordinates. The unused per-element `wkt3857`
+  field (computed and serialized, read by nothing) was removed.
+- **SHACL `sh:nodeKind`** (node shapes): focus-node term kinds are recorded at
+  target resolution, so string literals shaped like IRIs (`"mailto:x@y.org"`,
+  `"urn:isbn:…"`) reached via `sh:targetObjectsOf` no longer wrongly satisfy
+  `sh:IRI` / wrongly violate `sh:Literal`. Custom `sh:SPARQLFunction` bodies
+  evaluate against a shared empty store instead of constructing a fresh
+  in-memory store per invocation (per binding row).
+- **Spark chat**: the `SPARQL:` execution directive only counts when it starts a
+  line, and a final answer that embeds a corrected ```sparql block is kept
+  instead of being demoted to the bare fallback table; query extraction stops at
+  the first code fence (a stray closing ``` and trailing prose no longer get
+  glued onto the query); the "values were not retrieved" caveat recognises every
+  fence variant the frontend renders (`~~~`, indentation, `geo`/`infocard`
+  aliases); GML cells get the same prompt budget as WKT. Client-side: transport
+  error bubbles are no longer replayed into the model conversation, feedback
+  submits the last *successful* query of the trail, and TSV responses normalise
+  CRLF and ragged rows.
+- **Viewer UI**: stale-response races on the resource page (slow geometry-hop /
+  model-measure fetches from a previously viewed resource no longer paint onto
+  the current one); the reused geo-preview overlay no longer goes permanently
+  blank when its first preview had unparseable WKT; `GEOMETRYCOLLECTION`
+  elements are included in map bounds/focus; out-of-range coordinates can no
+  longer crash the map; Escape closes only the topmost panel when the preview
+  overlay is stacked over the element inspector, and the inspector's drag
+  offset resets on close; fallback 3D-explorer models load concurrently.
 
 ### Security
-- None.
+- The element inspector's BIM file links now pass RDF-derived URLs through the
+  `safeExternalUrl` scheme allowlist like every other RDF-derived href, closing
+  the one sink where an uploaded `javascript:`/`data:` URL round-tripped into an
+  `<a href>` (low impact in modern browsers — `target="_blank"` blocks
+  new-context `javascript:` navigation — but a gap against the project's own
+  XSS control).
 
 ## [0.2.4] — 2026-06-09
 
