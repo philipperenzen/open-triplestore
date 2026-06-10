@@ -33,6 +33,15 @@
 
   /** Per-frame scratch matrix (avoids a Matrix4 allocation every render). */
   const SCRATCH_PROJ = new THREE.Matrix4();
+  // Scratch objects for raycastModels (runs on every mousemove). Reused across
+  // entries — only primitives (id, NDC depth) survive a loop iteration.
+  const RAY_PROJ = new THREE.Matrix4();
+  const RAY_FWD = new THREE.Matrix4();
+  const RAY_INV = new THREE.Matrix4();
+  const RAY_A = new THREE.Vector3();
+  const RAY_B = new THREE.Vector3();
+  const RAY_HIT = new THREE.Vector3();
+  const RAY = new THREE.Ray();
 
   let mapEl;
   let map = null;
@@ -197,25 +206,23 @@
     const h = canvas.clientHeight || 1;
     const nx = (point.x / w) * 2 - 1;
     const ny = -(point.y / h) * 2 + 1;
-    const proj = new THREE.Matrix4().fromArray(lastProj);
+    const proj = RAY_PROJ.fromArray(lastProj);
     let best = null;
     for (const [id, e] of entries) {
-      if (!e.mercMatrix || !e.box) continue;
-      const inv = proj.clone().multiply(e.mercMatrix);
-      if (Math.abs(inv.determinant()) < 1e-20) continue;
-      inv.invert();
+      if (!e.scene || !e.mercMatrix || !e.box) continue;
+      const fwd = RAY_FWD.multiplyMatrices(proj, e.mercMatrix); // local → NDC
+      if (Math.abs(fwd.determinant()) < 1e-20) continue;
+      const inv = RAY_INV.copy(fwd).invert();
       // Unproject two NDC depths → a ray in model-local space.
-      const a = new THREE.Vector3(nx, ny, -0.99).applyMatrix4(inv);
-      const b = new THREE.Vector3(nx, ny, 0.999).applyMatrix4(inv);
-      const dir = b.sub(a);
+      const a = RAY_A.set(nx, ny, -0.99).applyMatrix4(inv);
+      const dir = RAY_B.set(nx, ny, 0.999).applyMatrix4(inv).sub(a);
       if (!dir.lengthSq()) continue;
-      const ray = new THREE.Ray(a, dir.normalize());
-      const hit = new THREE.Vector3();
-      if (ray.intersectBox(e.box, hit)) {
+      RAY.origin.copy(a);
+      RAY.direction.copy(dir).normalize();
+      if (RAY.intersectBox(e.box, RAY_HIT)) {
         // Model-local distances are not comparable across entries (each local
         // space has its own metres scale); compare NDC depth instead.
-        const fwd = proj.clone().multiply(e.mercMatrix);
-        const d = hit.clone().applyMatrix4(fwd).z;
+        const d = RAY_HIT.applyMatrix4(fwd).z;
         if (!best || d < best.d) best = { id, d };
       }
     }
