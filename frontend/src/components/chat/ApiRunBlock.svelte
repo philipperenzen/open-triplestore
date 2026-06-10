@@ -11,7 +11,8 @@
   import { runSavedQuery, getSavedQuery } from '../../lib/api.js';
   import { describeApiService, parseCsv, normalizeSparqlResult } from '../../lib/chatRich.js';
   import { prettyJson, prettyXml, highlightJson, highlightXml, highlightRdf } from '../../lib/resultHighlight.js';
-  import { copyToClipboard } from '../../lib/clipboard.js';
+  import { downloadFile } from '../../lib/rdf-utils.js';
+  import RunCard, { copyWithReset } from './RunCard.svelte';
   import SparqlResultView from './SparqlResultView.svelte';
   import CsvPreview from './CsvPreview.svelte';
   import { Globe, Play, Loader2, Copy, Check, Download, ExternalLink, ChevronDown, ChevronRight } from 'lucide-svelte';
@@ -60,9 +61,13 @@
     if (c.includes('json')) return { kind: 'json', text: prettyJson(text) };
     if (c.includes('csv')) { const tab = parseCsv(text); return { kind: 'csv', ...tab }; }
     if (c.includes('tab-separated')) {
-      const lines = text.split('\n').filter((l) => l.trim());
+      const lines = text.replace(/\r\n?/g, '\n').split('\n').filter((l) => l.trim());
       const cells = lines.map((l) => l.split('\t'));
-      return { kind: 'csv', columns: cells[0] || [], rows: cells.slice(1) };
+      const columns = cells[0] || [];
+      const rows = cells.slice(1).map((r) => (r.length < columns.length
+        ? [...r, ...Array(columns.length - r.length).fill('')]
+        : r));
+      return { kind: 'csv', columns, rows };
     }
     if (c.includes('turtle') || c.includes('n-triples') || c.includes('n-quads') || c.includes('trig')) {
       return { kind: 'rdf', text };
@@ -111,11 +116,7 @@
     }
   }
 
-  async function copyUrl() {
-    await copyToClipboard(`${location.origin}${effectivePath}`);
-    copied = true;
-    setTimeout(() => { copied = false; }, 1500);
-  }
+  const copyUrl = () => copyWithReset(`${location.origin}${effectivePath}`, (v) => { copied = v; });
 
   function download() {
     const c = contentType.toLowerCase();
@@ -125,16 +126,11 @@
       : c.includes('turtle') ? 'ttl'
       : c.includes('n-triples') ? 'nt'
       : c.includes('xml') ? 'xml' : 'txt';
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([raw], { type: contentType || 'text/plain' }));
-    a.download = `${svc?.slug || 'result'}.${ext}`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    downloadFile(raw, `${svc?.slug || 'result'}.${ext}`, contentType || 'text/plain');
   }
 
-  const SCOPE_ROUTES = { datasets: 'datasets', organisations: 'organisations', groups: 'groups' };
   function openServices() {
-    if (svc) navigate(`/${SCOPE_ROUTES[svc.scope]}/${encodeURIComponent(svc.ownerId)}/api-services`);
+    if (svc) navigate(`/${svc.scope}/${encodeURIComponent(svc.ownerId)}/api-services`);
   }
 
   $: textShown = outcome && ['json', 'rdf', 'xml', 'text'].includes(outcome.kind)
@@ -143,27 +139,25 @@
   $: textTruncated = outcome && textShown.length < (outcome.text?.length || 0);
 </script>
 
-<div class="block">
-  <div class="head">
-    <span class="label" title={`${method} ${path}`}>
-      <Globe size={12} />
-      {#if service?.name}{service.name}{:else if svc}{svc.slug}{:else}{$t('components.chat.apiTitle')}{/if}
-    </span>
-    <span class="actions">
-      {#if elapsed != null && !running}<span class="elapsed">{elapsed} ms</span>{/if}
-      {#if svc}
-        <button class="act" on:click={openServices} title={$t('components.chat.openServices')} aria-label={$t('components.chat.openServices')}>
-          <ExternalLink size={12} />
-        </button>
-      {/if}
-      <button class="act" on:click={copyUrl} title={$t('components.chat.copyUrl')} aria-label={$t('components.chat.copyUrl')}>
-        {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
+<RunCard accent="emerald">
+  <span class="label" slot="label" title={`${method} ${path}`}>
+    <Globe size={12} />
+    {#if service?.name}{service.name}{:else if svc}{svc.slug}{:else}{$t('components.chat.apiTitle')}{/if}
+  </span>
+  <span class="actions" slot="actions">
+    {#if elapsed != null && !running}<span class="elapsed">{elapsed} ms</span>{/if}
+    {#if svc}
+      <button class="act" on:click={openServices} title={$t('components.chat.openServices')} aria-label={$t('components.chat.openServices')}>
+        <ExternalLink size={12} />
       </button>
-      <button class="act run" on:click={run} disabled={running}>
-        {#if running}<Loader2 size={12} class="spin" /> {$t('components.chat.running')}{:else}<Play size={12} /> {$t('components.chat.run')}{/if}
-      </button>
-    </span>
-  </div>
+    {/if}
+    <button class="act" on:click={copyUrl} title={$t('components.chat.copyUrl')} aria-label={$t('components.chat.copyUrl')}>
+      {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
+    </button>
+    <button class="act run" on:click={run} disabled={running}>
+      {#if running}<Loader2 size={12} class="spin" /> {$t('components.chat.running')}{:else}<Play size={12} /> {$t('components.chat.run')}{/if}
+    </button>
+  </span>
 
   <div class="url"><span class="method">{method}</span> <span class="path">{effectivePath}</span></div>
 
@@ -213,33 +207,17 @@
       </p>
     </div>
   {/if}
-</div>
+</RunCard>
 
 <style>
-  .block {
-    margin: 0 0 0.55rem; border: 1px solid var(--line-soft); border-radius: 10px;
-    background: var(--bg-soft); overflow: hidden;
-  }
-  .head {
-    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-    padding: 0.3rem 0.55rem; border-bottom: 1px solid var(--line-soft);
-  }
+  /* The card shell (.block/.head), the `.act` buttons and the `.elapsed` badge
+     are styled by RunCard (accent="emerald" picks the run-button palette). */
   .label {
     display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0;
     font-size: 0.74rem; font-weight: 700; color: var(--ink-700);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .actions { display: inline-flex; align-items: center; gap: 0.3rem; flex-shrink: 0; }
-  .elapsed { font-size: 0.68rem; color: var(--ink-400); }
-  .act {
-    display: inline-flex; align-items: center; gap: 0.25rem; cursor: pointer;
-    font-size: 0.7rem; font-weight: 600; padding: 2px 7px; border-radius: 6px;
-    background: var(--bg-strong); border: 1px solid var(--line-soft); color: var(--ink-600);
-  }
-  .act:hover:not(:disabled) { background: var(--bg-elevated); border-color: var(--line-strong); }
-  .act:disabled { opacity: 0.6; cursor: default; }
-  .act.run { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
-  .act.run:hover:not(:disabled) { background: #d1fae5; }
   .url {
     padding: 0.4rem 0.55rem; font-family: 'SF Mono', ui-monospace, monospace; font-size: 0.74rem;
     color: var(--ink-700); word-break: break-all;
@@ -273,8 +251,6 @@
   }
   .link:hover { text-decoration: underline; }
 
-  :global(:is([data-theme="dark"], .dark)) .act.run { background: rgba(16,185,129,0.15); border-color: rgba(16,185,129,0.3); color: #6ee7b7; }
-  :global(:is([data-theme="dark"], .dark)) .act.run:hover:not(:disabled) { background: rgba(16,185,129,0.25); }
   :global(:is([data-theme="dark"], .dark)) .method { background: rgba(16,185,129,0.15); border-color: rgba(16,185,129,0.3); color: #6ee7b7; }
   :global(:is([data-theme="dark"], .dark)) .params-toggle, :global(:is([data-theme="dark"], .dark)) .link { color: #a5b4fc; }
 </style>
