@@ -229,7 +229,6 @@ fn fail_bogen_too_close_geosparql() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "G3: sh:expression node expressions unimplemented; unblocked by R5"]
 fn fail_doorvaarthoogte_expression() {
     let r = validate_case(
         &[SHAPES_AF],
@@ -242,8 +241,49 @@ fn fail_doorvaarthoogte_expression() {
     );
 }
 
+/// §6.1 — the user-defined sh:SPARQLFunction ex:afstandMeter is callable from SPARQL and
+/// returns the same value as the raw geof:distance it wraps.
+#[test]
+fn sparql_function_afstandmeter_callable() {
+    let store = TripleStore::in_memory().unwrap();
+    // shapes-sparql provides ex:prefixes; shapes-af defines ex:afstandMeter.
+    store
+        .load_str(SHAPES_SPARQL, RdfFormat::Turtle, Some("urn:shapes"))
+        .unwrap();
+    store
+        .load_str(SHAPES_AF, RdfFormat::Turtle, Some("urn:shapes"))
+        .unwrap();
+    let q = r#"
+        PREFIX ex:   <https://example.org/shape/def#>
+        PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+        PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
+        PREFIX uom:  <http://www.opengis.net/def/uom/OGC/1.0/>
+        SELECT (ex:afstandMeter("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral) AS ?d)
+               (geof:distance("POINT(0 0)"^^geo:wktLiteral, "POINT(3 4)"^^geo:wktLiteral, uom:metre) AS ?ref)
+        WHERE {}
+    "#;
+    let (mut d, mut r) = (None, None);
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(q) {
+        for sol in sols.flatten() {
+            d = sol.get("d").map(|t| t.to_string());
+            r = sol.get("ref").map(|t| t.to_string());
+        }
+    }
+    let d = d.unwrap_or_default();
+    let r = r.unwrap_or_default();
+    assert!(
+        d.contains('5'),
+        "ex:afstandMeter should return 5, got {:?}",
+        d
+    );
+    assert_eq!(
+        d.split('"').nth(1),
+        r.split('"').nth(1),
+        "ex:afstandMeter must equal geof:distance (d={d:?}, ref={r:?})"
+    );
+}
+
 /// §6.3 rule fires on a 5/6 condition (positive) and not on ≤4 (negative).
-/// Rule bodies + custom target use prefixed names → blocked by G1 until R1.
 fn infer_priority(data: &str) -> bool {
     let store = TripleStore::in_memory().unwrap();
     store

@@ -598,6 +598,34 @@ fn load_constraints(
         }
     }
 
+    // SHACL-AF: sh:expression node expressions (path + comparison subset). The
+    // expression node carries an sh:path and comparison constraints (e.g.
+    // sh:minExclusive); values along the path from the focus must satisfy them.
+    for expr_node in store
+        .objects_for_subject_in_graph(shape_iri, &format!("{SH}expression"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        let Some(path_val) = single_value(store, shapes_graph, &expr_node, &format!("{SH}path"))
+        else {
+            continue;
+        };
+        let Some(path) = parse_property_path(store, shapes_graph, &path_val) else {
+            continue;
+        };
+        // Comparison/value constraints declared on the expression node (recursion is
+        // bounded: the expression node carries no further sh:expression).
+        let checks = load_constraints(store, shapes_graph, &expr_node)?;
+        if !checks.is_empty() {
+            let message = single_value(store, shapes_graph, &expr_node, &format!("{SH}message"));
+            constraints.push(Constraint::Expression {
+                path,
+                checks,
+                message,
+            });
+        }
+    }
+
     Ok(constraints)
 }
 
