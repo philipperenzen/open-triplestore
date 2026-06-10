@@ -473,6 +473,7 @@
       "example2": "Is er een API-service die ik kan aanroepen om een vraag over steden te beantwoorden, en hoe roep ik die aan?",
       "example3": "Welke benoemde grafen kan ik op dit moment bevragen?",
       "example4": "Hoeveel triples bevat de Standards-demodataset?",
+      "example5": "Toon het aantal triples per benoemde graaf als staafdiagram.",
       "noAnswer": "(geen antwoord ontvangen)",
       "unavailable": "De assistent is niet beschikbaar. Is er een LLM-endpoint geconfigureerd en actief?",
       "badgeOnlineTitle": "LLM online ({gateway})",
@@ -485,6 +486,8 @@
       "welcomeIntro": "Ik kan de datasets, API-services en grafen zien waartoe u toegang hebt. Probeer een van deze:",
       "guestNote": "U bladert als gast, dus ik kan alleen openbare data zien. Meld u aan om vragen te stellen over uw eigen datasets.",
       "ranQuery": "SPARQL-query uitgevoerd",
+      "ranQueries": "{count} SPARQL-query's uitgevoerd",
+      "queryN": "Query {n}",
       "attemptedQuery": "SPARQL-query geprobeerd",
       "rowSingular": "rij",
       "rowPlural": "rijen",
@@ -2517,10 +2520,7 @@
     "datasetViewer": {
       "title": "3D- & kaartviewer",
       "back": "Dataset",
-      "map": "Kaart",
-      "threeD": "3D-modellen",
       "elements": "Onderdelen",
-      "selectHint": "Selecteer een onderdeel op de kaart, in 3D of in de lijst om de linked data te zien.",
       "openResource": "Open resource",
       "empty": "Geen onderdelen met geometrie of 3D-modellen in deze dataset."
     }
@@ -2544,6 +2544,30 @@
       "defaultGraph": "standaard",
       "copyNTriple": "Kopiëren als N-Triple",
       "noResults": "Geen resultaten."
+    },
+    "chat": {
+      "run": "Uitvoeren",
+      "running": "Bezig…",
+      "copy": "Query kopiëren",
+      "copyUrl": "URL kopiëren",
+      "openInSparql": "Openen in SPARQL-werkruimte",
+      "openServices": "Open de API-servicespagina",
+      "sparqlTitle": "SPARQL-query",
+      "apiTitle": "API-aanroep",
+      "parameters": "Parameters",
+      "download": "Downloaden",
+      "rowCount": "{count} rijen",
+      "showingFirst": "de eerste {count} worden getoond",
+      "noRows": "Geen rijen.",
+      "askResult": "ASK-resultaat",
+      "yes": "ja",
+      "no": "nee",
+      "graphTriples": "{count} triples",
+      "servedVersion": "datasetversie {version}",
+      "mapFeatures": "{count} locaties",
+      "noGeometry": "Geen van de WKT-geometrieën in dit kaartblok kon worden gelezen.",
+      "chartAlt": "Diagram",
+      "brokenBlock": "Dit {label}-blok kon niet worden weergegeven — de ruwe inhoud wordt getoond."
     },
     "edgeInfo": {
       "predicateBadge": "Predicaat",
@@ -3352,5 +3376,29 @@
       "binary": "binair",
       "showMore": "Meer tonen"
     }
+  },
+  "viewer": {
+    "resize": "Formaat wijzigen",
+    "close": "Sluiten",
+    "search": "Zoek onderdelen…",
+    "located": "Op de kaart",
+    "noLocation": "Geen locatie",
+    "properties": "Eigenschappen",
+    "structure": "Structuur",
+    "model3d": "3D-model",
+    "model3dBim": "3D-model (BIM)",
+    "bimFiles": "BIM- / geometriebestanden",
+    "noChildren": "Geen sub-onderdelen.",
+    "parent": "Onderdeel van",
+    "orbitHint": "Sleep om te draaien · scroll om te zoomen · rechts-slepen om te verschuiven",
+    "zoomHint": "Zoom in om 3D-modellen op schaal te zien; sleep met rechts (of Ctrl) om de kaart te kantelen en draaien.",
+    "basemap": "Ondergrond",
+    "basemapStreets": "Kaart",
+    "basemapSatellite": "Satelliet",
+    "toScale": "op schaal",
+    "geometry": "Geometrie",
+    "showOnMap": "Toon op kaart",
+    "show3d": "Bekijk 3D-model",
+    "noModels": "Geen 3D-modellen in deze dataset."
   }
 }

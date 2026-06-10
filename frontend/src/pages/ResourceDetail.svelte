@@ -10,6 +10,72 @@
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
   import GeoPreview from '../components/GeoPreview.svelte';
+  import { modelFormatFromUrl, FORMAT_LABELS } from '../lib/viewer/detect';
+
+  // Model3D pulls the heavy three.js chunk; this page is in the main bundle,
+  // so load the viewer only when the resource actually has a 3D model.
+  const model3d = () => import('../components/viewer/Model3D.svelte');
+
+  // GeoSPARQL/OMG geometry often hangs off a *named* node
+  // (wb:Boog geo:hasGeometry wb:geom-boog; wb:geom-boog geo:asWKT "...").
+  // browseResource only inlines blank nodes, so follow hasGeometry objects one
+  // hop and harvest their WKT + model-file values too.
+  let hopWkts = [];
+  let hopModels = [];
+  async function followGeometryHops(rows) {
+    hopWkts = [];
+    hopModels = [];
+    const targets = rows
+      .filter((r) => (r.p?.value || '').endsWith('hasGeometry'))
+      .map((r) => r.o)
+      .filter((o) => o?.type === 'uri' || o?.type === 'iri')
+      .map((o) => o.value)
+      .slice(0, 4);
+    if (!targets.length) return;
+    const results = await Promise.all(
+      targets.map((t) => browseResource(t, graphScope || undefined).catch(() => null))
+    );
+    const wkts = [];
+    const models = [];
+    const scanRow = (r) => {
+      if (isWktLiteral(r.o)) wkts.push(r.o.value);
+      const v = r.o?.value;
+      if (typeof v === 'string') {
+        const format = modelFormatFromUrl(v);
+        if (format) models.push({ id: v, label: shortenIRI(r.p?.value || ''), url: v, format });
+      }
+    };
+    for (const res of results) {
+      if (!res) continue;
+      for (const r of res.outgoing || []) scanRow(r);
+      for (const rows2 of Object.values(res.bnodes || {})) for (const r of rows2 || []) scanRow(r);
+    }
+    hopWkts = wkts;
+    hopModels = models;
+  }
+  $: followGeometryHops(outgoing);
+
+  $: allWkts = [...featuredWkts, ...hopWkts.filter((w) => !featuredWkts.includes(w))];
+  $: allModels = [
+    ...featuredModels,
+    ...hopModels.filter((m) => !featuredModels.some((f) => f.url === m.url)),
+  ];
+
+  // Real-world footprint for the map's "to scale" toggle, measured from the
+  // resource's own 3D model (0 hides the toggle - no fabricated sizes).
+  let modelMeters = 0;
+  async function measureModel(models) {
+    modelMeters = 0;
+    if (!models.length) return;
+    try {
+      const { loadModel, realWorldMeters } = await import('../lib/viewer/models');
+      const group = await loadModel(models[0].url, models[0].format);
+      modelMeters = Math.round(realWorldMeters(group, 0));
+    } catch {
+      modelMeters = 0;
+    }
+  }
+  $: measureModel(allModels);
   import Select from '../components/Select.svelte';
   import { t as i18nT } from 'svelte-i18n';
   import {
@@ -346,6 +412,33 @@
   const isWktLiteral = (t) =>
     t?.type === 'literal' && (t.datatype === GEO_WKT_DATATYPE || WKT_RE.test(t.value || ''));
 
+  // 3D model / BIM references on this resource (or its blank-node closure):
+  // any object value that is a loadable model URL (glb/gltf/stl — the FOG
+  // pattern omg:hasGeometry/fog:asGltf…), plus an IFC GlobalId if present.
+  $: featuredModels = (() => {
+    const seen = new Set();
+    const out = [];
+    const scan = (r) => {
+      const v = r.o?.value;
+      if (typeof v !== 'string' || seen.has(v)) return;
+      const format = modelFormatFromUrl(v);
+      if (format) {
+        seen.add(v);
+        out.push({ id: v, label: shortenIRI(r.p?.value || ''), url: v, format });
+      }
+    };
+    for (const r of outgoing) scan(r);
+    for (const rows of Object.values(bnodes)) for (const r of (rows || [])) scan(r);
+    return out;
+  })();
+
+  $: featuredIfcGuid = (() => {
+    const isGuidPred = (r) => (r.p?.value || '').toLowerCase().endsWith('ifcguid');
+    for (const r of outgoing) if (isGuidPred(r)) return r.o?.value;
+    for (const rows of Object.values(bnodes)) for (const r of (rows || [])) if (isGuidPred(r)) return r.o?.value;
+    return null;
+  })();
+
   $: featuredWkts = (() => {
     const seen = new Set();
     const out = [];
@@ -676,10 +769,29 @@
       {/if}
 
       <!-- Featured visuals (geo / images / links) -->
-      {#if featuredWkts.length > 0}
+      {#if allWkts.length > 0}
         <div class="card">
           <h3><MapPin size={14} /> {$i18nT('pages.resource.geometry')}</h3>
-          <GeoPreview wkts={featuredWkts} />
+          <GeoPreview wkts={allWkts} scaleMeters={modelMeters} />
+        </div>
+      {/if}
+
+      {#if allModels.length > 0}
+        <div class="card">
+          <h3><Boxes size={14} /> {$i18nT('viewer.model3dBim')}</h3>
+          {#await model3d() then mod}
+            <svelte:component this={mod.default} refs={[allModels[0]]} height="260px" />
+          {/await}
+          <div class="bim-facts">
+            {#if featuredIfcGuid}
+              <span class="bim-fact" title="IFC GlobalId">IFC GlobalId <code>{featuredIfcGuid}</code></span>
+            {/if}
+            {#each allModels as m}
+              <a class="bim-fact" href={m.url} target="_blank" rel="noopener" title={m.url}>
+                {FORMAT_LABELS[m.format]} ↗
+              </a>
+            {/each}
+          </div>
         </div>
       {/if}
 
@@ -1184,6 +1296,25 @@
   .empty-state { display: flex; gap: 0.75rem; align-items: flex-start; padding: 1rem; background: #fffbe6; border: 1px solid #ffe58f; color: #614700; }
   .empty-state strong { display: block; margin-bottom: 0.25rem; }
   .empty-state .muted { margin: 0 0 0.5rem; }
+
+  .bim-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    align-items: center;
+  }
+  .bim-fact {
+    font-size: 0.74rem;
+    padding: 2px 10px;
+    border-radius: 99px;
+    border: 1px solid var(--line-soft, #e5e9ee);
+    background: var(--bg-subtle, #f8fafc);
+    color: var(--muted, #64748b);
+    text-decoration: none;
+  }
+  .bim-fact code { font-size: 0.72rem; color: var(--ink-900, #0f172a); }
+  a.bim-fact:hover { border-color: var(--brand-500, #2f88d8); color: var(--brand-600, #1d6fb8); }
 
   .img-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .img-strip a { display: inline-block; }

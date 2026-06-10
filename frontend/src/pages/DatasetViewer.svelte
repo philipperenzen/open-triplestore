@@ -1,16 +1,20 @@
 <script>
-  // Dataset 3D & map viewer: map (Leaflet) + 3D (three.js) views over the
-  // dataset's viewer feed, with a shared selection driving a linked-data panel.
-  // Selecting a part on the map, in the 3D scene, or in the element list keeps
-  // all three in sync; the panel shows that element's RDF.
+  // Dataset geo data explorer. The map is the canvas: zoomed out every located
+  // element is a dot; zooming in, elements with a 3D model become to-scale
+  // model markers. Clicking a feature (or a list row) opens the element modal —
+  // properties, BOT/IFC substructure (all navigable) and an interactive 3D
+  // viewer. Datasets without any located element fall back to a pure 3D
+  // explorer over their models. Light/dark follows the app theme.
   import { t as i18nT } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
   import { getViewerFeed } from '../lib/api.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
-  import { ChevronLeft, Map as MapIcon, Boxes } from 'lucide-svelte';
+  import { ChevronLeft, Search, Boxes, MapPin } from 'lucide-svelte';
+  import { modelRefOf } from '../lib/viewer/detect';
+  import { modelRefs } from '../lib/viewer/geometry';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
-  import Viewer3D from '../components/viewer/Viewer3D.svelte';
-  import ElementPanel from '../components/viewer/ElementPanel.svelte';
+  import Model3D from '../components/viewer/Model3D.svelte';
+  import ElementModal from '../components/viewer/ElementModal.svelte';
 
   export let id = '';
 
@@ -18,8 +22,21 @@
   let loading = true;
   let error = '';
   let selected = '';
+  let modalElement = null;
+  let query = '';
+  let mapComponent;
 
-  $: selectedElement = elements.find((e) => e.id === selected) || null;
+  $: filtered = query
+    ? elements.filter((e) =>
+        (e.label || e.id).toLowerCase().includes(query.toLowerCase())
+      )
+    : elements;
+  $: located = filtered.filter((e) => e.wkt4326);
+  $: unlocated = filtered.filter((e) => !e.wkt4326);
+  $: hasGeo = elements.some((e) => e.wkt4326);
+  $: fallbackRefs = modelRefs(elements);
+
+  const hasModel = (el) => !!modelRefOf(el);
 
   async function load() {
     loading = true;
@@ -27,11 +44,6 @@
     try {
       const data = await getViewerFeed(id);
       elements = data?.elements || [];
-      // Pre-select the first element that has a 3D model or geometry.
-      const first =
-        elements.find((e) => e.gltf_url || (e.files || []).length) ||
-        elements.find((e) => e.wkt4326);
-      if (first) selected = first.id;
     } catch (e) {
       error = e?.message || 'failed';
     } finally {
@@ -39,20 +51,29 @@
     }
   }
 
-  function onSelect(event) {
-    selected = event.detail.id;
+  function open(elId, { fly = true } = {}) {
+    selected = elId;
+    modalElement = elements.find((e) => e.id === elId) || null;
+    if (fly && modalElement?.wkt4326) mapComponent?.focusElement(elId);
+  }
+
+  function onMapSelect(event) {
+    open(event.detail.id, { fly: false });
   }
 
   load();
 </script>
 
-<div class="page viewer-page">
+<div class="page explorer-page">
   <div class="page-head">
     <Link to={`/datasets/${id}`} class="btn btn-sm">
       <ChevronLeft size={16} />
       {$i18nT('pages.datasetViewer.back')}
     </Link>
     <h1>{$i18nT('pages.datasetViewer.title')}</h1>
+    {#if !loading && elements.length}
+      <span class="count-chip">{elements.length} {$i18nT('pages.datasetViewer.elements').toLowerCase()}</span>
+    {/if}
   </div>
 
   {#if loading}
@@ -62,42 +83,75 @@
   {:else if elements.length === 0}
     <p class="hint">{$i18nT('pages.datasetViewer.empty')}</p>
   {:else}
-    <div class="viewer-grid">
-      <section class="pane map-pane">
-        <header><MapIcon size={15} /> {$i18nT('pages.datasetViewer.map')}</header>
-        <ViewerMap {elements} {selected} on:select={onSelect} height="calc(100% - 30px)" />
-      </section>
-      <section class="pane three-pane">
-        <header><Boxes size={15} /> {$i18nT('pages.datasetViewer.threeD')}</header>
-        <Viewer3D {elements} {selected} on:select={onSelect} height="calc(100% - 30px)" />
-      </section>
-      <aside class="pane side-pane">
-        <header>{$i18nT('pages.datasetViewer.elements')} ({elements.length})</header>
-        <ul class="element-list">
-          {#each elements as el}
-            <li>
-              <button
-                class:active={el.id === selected}
-                on:click={() => (selected = el.id)}
-                title={el.id}
-              >
-                {el.label || shortenIRI(el.id)}
-                {#if el.gltf_url || (el.files || []).length}<span class="badge">3D</span>{/if}
-                {#if el.wkt4326}<span class="badge geo">geo</span>{/if}
-              </button>
-            </li>
-          {/each}
-        </ul>
-        <div class="panel-wrap">
-          <ElementPanel iri={selected} datasetId={id} element={selectedElement} />
+    <div class="explorer">
+      <aside class="side card-flat">
+        <label class="search">
+          <Search size={14} />
+          <input
+            type="search"
+            placeholder={$i18nT('viewer.search')}
+            bind:value={query}
+            aria-label={$i18nT('viewer.search')}
+          />
+        </label>
+        <div class="list-scroll">
+          {#if located.length}
+            <div class="group-label"><MapPin size={12} /> {$i18nT('viewer.located')}</div>
+            <ul>
+              {#each located as el}
+                <li>
+                  <button class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
+                    <span class="label">{el.label || shortenIRI(el.id)}</span>
+                    {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          {#if unlocated.length}
+            <div class="group-label"><Boxes size={12} /> {$i18nT('viewer.noLocation')}</div>
+            <ul>
+              {#each unlocated as el}
+                <li>
+                  <button class:active={el.id === selected} on:click={() => open(el.id, { fly: false })} title={el.id}>
+                    <span class="label">{el.label || shortenIRI(el.id)}</span>
+                    {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </div>
+        <p class="side-hint">{$i18nT('viewer.zoomHint')}</p>
       </aside>
+
+      <section class="canvas card-flat">
+        {#if hasGeo}
+          <ViewerMap
+            bind:this={mapComponent}
+            {elements}
+            {selected}
+            on:select={onMapSelect}
+            height="100%"
+          />
+        {:else}
+          <Model3D refs={fallbackRefs} {selected} on:select={onMapSelect} height="100%" />
+        {/if}
+      </section>
     </div>
   {/if}
 </div>
 
+<ElementModal
+  element={modalElement}
+  {elements}
+  datasetId={id}
+  on:close={() => (modalElement = null)}
+  on:navigate={(e) => open(e.detail.id)}
+/>
+
 <style>
-  .viewer-page {
+  .explorer-page {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 90px);
@@ -111,94 +165,122 @@
   .page-head h1 {
     margin: 0;
     font-size: 1.2rem;
+    color: var(--ink-900, #0f172a);
   }
-  .viewer-grid {
+  .count-chip {
+    font-size: 0.74rem;
+    padding: 2px 10px;
+    border-radius: 99px;
+    background: var(--bg-soft, #f1f5f9);
+    color: var(--muted, #64748b);
+  }
+  .explorer {
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 1fr 1fr 340px;
-    grid-template-rows: 1fr;
+    grid-template-columns: 290px 1fr;
     gap: 0.6rem;
   }
-  .pane {
+  .side,
+  .canvas {
     display: flex;
     flex-direction: column;
     min-height: 0;
-    border: 1px solid var(--border, #e3e7ea);
-    border-radius: 10px;
-    background: var(--surface-1, #fff);
+    border: 1px solid var(--border, #e2e8f0);
+    border-radius: var(--radius-lg, 12px);
+    background: var(--bg-elevated, #fff);
     overflow: hidden;
   }
-  .pane > header {
+  .search {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
-    padding: 5px 10px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: var(--text-2, #555);
-    border-bottom: 1px solid var(--border, #e3e7ea);
+    gap: 6px;
+    margin: 10px;
+    padding: 6px 10px;
+    border: 1px solid var(--line-soft, #e6eaef);
+    border-radius: var(--radius-md, 9px);
+    background: var(--bg, #fff);
+    color: var(--muted, #64748b);
   }
-  .map-pane,
-  .three-pane {
-    min-height: 0;
+  .search input {
+    flex: 1;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    font-size: 0.85rem;
+    color: var(--ink-900, #0f172a);
   }
-  .side-pane {
-    display: grid;
-    grid-template-rows: auto minmax(80px, 32%) 1fr;
+  .list-scroll {
+    flex: 1;
+    overflow: auto;
+    padding: 0 8px 8px;
   }
-  .element-list {
+  .group-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted, #64748b);
+    padding: 8px 6px 4px;
+  }
+  ul {
     list-style: none;
     margin: 0;
-    padding: 0.3rem;
-    overflow: auto;
-    border-bottom: 1px solid var(--border, #e3e7ea);
+    padding: 0;
   }
-  .element-list button {
+  li > button {
     width: 100%;
     text-align: left;
     border: 0;
     background: transparent;
-    padding: 4px 8px;
-    border-radius: 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm, 7px);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 0.86rem;
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.45rem;
+    color: var(--ink-900, #0f172a);
   }
-  .element-list button:hover {
-    background: var(--surface-2, #f1f3f5);
+  li > button:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
   }
-  .element-list button.active {
-    background: var(--accent-soft, #e7f0fb);
+  li > button.active {
+    background: var(--bg-accent-soft, #e7f0fb);
     font-weight: 600;
+  }
+  li .label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .badge {
     font-size: 0.62rem;
     padding: 0 6px;
     border-radius: 99px;
-    background: #e8590c22;
+    background: rgba(232, 89, 12, 0.13);
     color: #e8590c;
   }
-  .badge.geo {
-    background: #4a90d922;
-    color: #2f6fb3;
-  }
-  .panel-wrap {
-    min-height: 0;
-    overflow: auto;
+  .side-hint {
+    margin: 0;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line-soft, #eef1f4);
+    font-size: 0.72rem;
+    color: var(--muted, #64748b);
   }
   .hint {
-    color: var(--text-2, #777);
+    color: var(--muted, #64748b);
   }
   .hint.error {
-    color: #c0392b;
+    color: var(--danger-500, #c0392b);
   }
-  @media (max-width: 1100px) {
-    .viewer-grid {
+  @media (max-width: 900px) {
+    .explorer {
       grid-template-columns: 1fr;
-      grid-template-rows: 320px 320px auto;
+      grid-template-rows: 220px 1fr;
     }
   }
 </style>
