@@ -244,7 +244,12 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     // The synthetic CityJSON block exposes its bundled, site-relative file.
     let block = elements
         .iter()
-        .find(|e| e["id"].as_str().unwrap_or("").ends_with("NijmegenCityBlock"))
+        .find(|e| {
+            e["id"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("NijmegenCityBlock")
+        })
         .expect("CityJSON demo block in feed");
     let files = block["files"].as_array().expect("files");
     assert!(
