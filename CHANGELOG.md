@@ -59,6 +59,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with a shared selection: clicking a part on the map, in 3D, or in the element list
   shows that element's linked data (via the existing browse API + `RdfTerm`).
   `GeoPreview` migrated from CDN-loaded Leaflet to the bundled dependency.
+- **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
+  GeoSPARQL 1.1 SHACL validator (+ its valid/invalid example corpus) are vendored under
+  `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted
+  tests must pass, listed known-failures must still fail). Scorecards:
+  W3C core 46 pass / 52 known-fail / 15 aux skips; OGC examples 44/48 matching, and the
+  Waalbrug dataset round-trips through the official GeoSPARQL validator. See
+  `docs/conformance/`.
+
+### Fixed (SHACL engine, found by the official suites)
+- `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
+  against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
+  an `sh:or` of datatype branches over `geo:asWKT` values mis-fired on every geometry.
+- Node-level `sh:nodeKind sh:Literal` could never match (focus nodes are lexical
+  strings); a blank/scheme-shaped/other heuristic now classifies them.
+- **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
+  keyed by `(focus, path)` only, and rayon worker caches survive across validation
+  passes — two stores in one process sharing a focus IRI and path could serve each other
+  stale values, yielding nondeterministic validation results. Cache keys now include a
+  process-unique per-store id.
 
 ### Changed
 - None.

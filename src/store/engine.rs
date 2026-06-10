@@ -187,7 +187,14 @@ pub struct TripleStore {
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
     blank_node_mode: BlankNodeMode,
+    /// Process-unique identity for cache keying (shared by clones, distinct per
+    /// underlying store). Prevents the per-thread SHACL path cache from serving
+    /// one store's results to another (same focus IRI + path, different data).
+    cache_id: u64,
 }
+
+/// Monotonic source for [`TripleStore::cache_id`].
+static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl TripleStore {
     /// Open or create a persistent store at the given path.
@@ -205,6 +212,7 @@ impl TripleStore {
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
+            cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -220,6 +228,7 @@ impl TripleStore {
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
+            cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -274,6 +283,11 @@ impl TripleStore {
     /// Access the underlying Oxigraph store for direct index queries.
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Process-unique store identity for cache keying (stable across clones).
+    pub fn cache_id(&self) -> u64 {
+        self.cache_id
     }
 
     /// Build query options with all registered custom functions (GeoSPARQL, RDF 1.2, etc.).
