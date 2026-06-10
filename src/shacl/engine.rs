@@ -53,7 +53,7 @@ pub fn validate(
 
             focus_nodes
                 .par_iter()
-                .flat_map(|focus_node| {
+                .flat_map(|(focus_node, focus_kind)| {
                     let mut results = Vec::new();
 
                     // Node-level constraints
@@ -63,6 +63,7 @@ pub fn validate(
                             shapes_slice,
                             &shape.iri,
                             focus_node,
+                            *focus_kind,
                             constraint,
                             None,
                             data_graphs,
@@ -80,6 +81,7 @@ pub fn validate(
                                 shapes_slice,
                                 shape_iri,
                                 focus_node,
+                                *focus_kind,
                                 constraint,
                                 Some(&prop_shape.path),
                                 data_graphs,
@@ -714,8 +716,27 @@ fn load_property_shapes_inner(
 // Target resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -> Vec<String> {
-    let mut focus_nodes = Vec::new();
+/// Term kind of a resolved focus node, recorded at target resolution so
+/// node-level constraints (sh:nodeKind) can classify exactly instead of
+/// guessing from the lexical form — a string literal like "mailto:x@y.org" is
+/// otherwise indistinguishable from an IRI once stringified. `Unknown` keeps
+/// the lexical heuristic for paths where the kind was lost before resolution
+/// (sh:targetNode is loaded from the shapes graph as a bare string, and inline
+/// value-node recursion never had a kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusKind {
+    Iri,
+    BlankNode,
+    Literal,
+    Unknown,
+}
+
+fn resolve_targets(
+    store: &TripleStore,
+    shape: &Shape,
+    data_graphs: &[String],
+) -> Vec<(String, FocusKind)> {
+    let mut focus_nodes: Vec<(String, FocusKind)> = Vec::new();
 
     for target in &shape.targets {
         match target {
@@ -725,19 +746,19 @@ fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -
                     "SELECT DISTINCT ?s WHERE {{ {} }}",
                     graph_scoped(data_graphs, &format!("?s a <{class_iri}>"))
                 );
-                if let Ok(nodes) = execute_select_single(store, &query, "s") {
+                if let Ok(nodes) = execute_select_terms(store, &query, "s") {
                     focus_nodes.extend(nodes);
                 }
             }
             Target::TargetNode(node_iri) => {
-                focus_nodes.push(node_iri.clone());
+                focus_nodes.push((node_iri.clone(), FocusKind::Unknown));
             }
             Target::TargetSubjectsOf(pred_iri) => {
                 let query = format!(
                     "SELECT DISTINCT ?s WHERE {{ {} }}",
                     graph_scoped(data_graphs, &format!("?s <{pred_iri}> ?o"))
                 );
-                if let Ok(nodes) = execute_select_single(store, &query, "s") {
+                if let Ok(nodes) = execute_select_terms(store, &query, "s") {
                     focus_nodes.extend(nodes);
                 }
             }
@@ -746,22 +767,26 @@ fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -
                     "SELECT DISTINCT ?o WHERE {{ {} }}",
                     graph_scoped(data_graphs, &format!("?s <{pred_iri}> ?o"))
                 );
-                if let Ok(nodes) = execute_select_single(store, &query, "o") {
+                if let Ok(nodes) = execute_select_terms(store, &query, "o") {
                     focus_nodes.extend(nodes);
                 }
             }
             Target::SparqlTarget(sparql) => {
                 // SHACL-AF custom SPARQL target
-                if let Ok(nodes) = execute_select_single(store, sparql, "this") {
+                if let Ok(nodes) = execute_select_terms(store, sparql, "this") {
                     focus_nodes.extend(nodes);
                 }
             }
         }
     }
 
-    // Deduplicate
-    focus_nodes.sort();
-    focus_nodes.dedup();
+    // Deduplicate by lexical form, preferring an exactly-known kind over
+    // Unknown when the same node arrives via multiple targets.
+    focus_nodes.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| (a.1 == FocusKind::Unknown).cmp(&(b.1 == FocusKind::Unknown)))
+    });
+    focus_nodes.dedup_by(|a, b| a.0 == b.0);
     focus_nodes
 }
 
@@ -869,6 +894,9 @@ fn resolve_rule_targets(
         deactivated: false,
     };
     resolve_targets(store, &dummy_shape, data_graphs)
+        .into_iter()
+        .map(|(node, _)| node)
+        .collect()
 }
 
 /// Apply one rule to one focus node. The number of *new* triples is not measured
@@ -972,6 +1000,37 @@ fn execute_select_single(
                 .collect();
             Ok(result)
         }
+        Ok(_) => Ok(Vec::new()),
+        Err(e) => Err(format!("Query error: {}", e)),
+    }
+}
+
+/// Like [`execute_select_single`], but records each term's kind alongside its
+/// lexical form, so target resolution can carry term kinds into constraint
+/// evaluation (see [`FocusKind`]).
+fn execute_select_terms(
+    store: &TripleStore,
+    query: &str,
+    var: &str,
+) -> Result<Vec<(String, FocusKind)>, String> {
+    match store.query(query) {
+        Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => Ok(solutions
+            .filter_map(|s| s.ok())
+            .filter_map(|s| {
+                s.get(var).map(|v| match v {
+                    oxigraph::model::Term::NamedNode(nn) => {
+                        (nn.as_str().to_string(), FocusKind::Iri)
+                    }
+                    oxigraph::model::Term::Literal(lit) => {
+                        (lit.value().to_string(), FocusKind::Literal)
+                    }
+                    oxigraph::model::Term::BlankNode(bn) => {
+                        (format!("_:{}", bn.as_str()), FocusKind::BlankNode)
+                    }
+                    oxigraph::model::Term::Triple(t) => (t.to_string(), FocusKind::Unknown),
+                })
+            })
+            .collect()),
         Ok(_) => Ok(Vec::new()),
         Err(e) => Err(format!("Query error: {}", e)),
     }
@@ -1422,6 +1481,63 @@ mod tests {
                 .iter()
                 .any(|r| r.focus_node.contains("alice")),
             "ex:alice points at an IRI and must not be flagged, got {:?}",
+            report.results,
+        );
+    }
+
+    // Regression: focus nodes were carried as bare lexical strings, so a string
+    // literal reached via sh:targetObjectsOf whose lexical form is scheme-shaped
+    // ("mailto:info@example.org") was misclassified as an IRI by node-level
+    // sh:nodeKind — wrongly passing sh:IRI and wrongly violating sh:Literal.
+    // Target resolution now records the term kind alongside the lexical form.
+    const MAILTO_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:x ex:p "mailto:info@example.org" .
+    "#;
+
+    #[test]
+    fn literal_focus_via_target_objects_of_conforms_to_node_kind_literal() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:MailShape a sh:NodeShape ;
+                sh:targetObjectsOf ex:p ;
+                sh:nodeKind sh:Literal .
+        "#;
+        let store = store_with(shapes, MAILTO_DATA);
+
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+
+        assert!(
+            report.conforms,
+            "a literal object must satisfy sh:nodeKind sh:Literal, got {:?}",
+            report.results,
+        );
+    }
+
+    #[test]
+    fn literal_focus_via_target_objects_of_violates_node_kind_iri() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:MailShape a sh:NodeShape ;
+                sh:targetObjectsOf ex:p ;
+                sh:nodeKind sh:IRI .
+        "#;
+        let store = store_with(shapes, MAILTO_DATA);
+
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+
+        assert!(
+            !report.conforms,
+            "a literal object must violate sh:nodeKind sh:IRI"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.focus_node == "mailto:info@example.org"),
+            "violation should name the literal focus node, got {:?}",
             report.results,
         );
     }
