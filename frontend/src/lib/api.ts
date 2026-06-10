@@ -504,6 +504,13 @@ export const browseResource = (iri, opts = {}) => {
   return request('GET', `/api/browse/resource?${qs.toString()}`);
 };
 export const browseStats = () => request('GET', '/api/browse/stats');
+// Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
+// references (glTF/IFC/...), resolved from BOT/OMG/FOG/GeoSPARQL. Feeds the
+// dataset 3D & map viewer; optional root IRI scopes to one object + children.
+export const getViewerFeed = (datasetId, root = null) => {
+  const qs = root ? `?root=${encodeURIComponent(root)}` : '';
+  return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
+};
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.

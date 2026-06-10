@@ -61,14 +61,23 @@ pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
     // Check the datatype
     let datatype = literal.datatype();
     let is_wkt = datatype.as_str() == vocabulary::WKT_LITERAL;
+    let is_gml = datatype.as_str() == vocabulary::GML_LITERAL;
     let is_string = datatype.as_str() == "http://www.w3.org/2001/XMLSchema#string";
 
-    // Accept geo:wktLiteral or plain string (for convenience)
-    if !is_wkt && !is_string {
+    // Accept geo:wktLiteral, geo:gmlLiteral, or a plain string (for convenience).
+    if !is_wkt && !is_gml && !is_string {
         return None;
     }
 
     let value = literal.value();
+
+    // GML literals are translated to WKT first, then parsed by the same GEOS path.
+    if is_gml {
+        let wkt = super::gml::gml_to_wkt(value)?;
+        trace!("Parsing GML→WKT: {}", wkt);
+        return parse_wkt_cached(&wkt);
+    }
+
     let wkt_str = extract_wkt(value);
 
     trace!("Parsing WKT: {}", wkt_str);
@@ -81,7 +90,7 @@ pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
 ///
 /// Input: `<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1 2)`
 /// Output: `POINT(1 2)`
-fn extract_wkt(value: &str) -> &str {
+pub fn extract_wkt(value: &str) -> &str {
     let trimmed = value.trim();
     if trimmed.starts_with('<') {
         // Find the closing '>' and skip past it

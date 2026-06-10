@@ -1,0 +1,10 @@
+# ❌ §5.3 — a component lies >25 m off the bridge tracé (SPARQL + geof:distance).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix bot: <https://w3id.org/bot#> .
+wb:OffBrug a da:Brug ;
+    geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> LINESTRING(187320 428330, 187610 428690)"^^geo:wktLiteral ] ;
+    bot:containsElement wb:VerOnderdeel .
+wb:VerOnderdeel a da:Brugonderdeel ;
+    geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187800 428900)"^^geo:wktLiteral ] .  # ~370 m off

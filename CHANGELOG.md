@@ -14,6 +14,101 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- None.
+
+### Changed
+- None.
+
+### Deprecated
+- None.
+
+### Fixed
+- None.
+
+### Security
+- None.
+
+## [0.3.0] — 2026-06-10
+
+### Added
+- **Spark documentation page** (`docs/spark.md`, in-app at `/docs/spark` under
+  *Query & Search*): what the chat assistant is, how answers are grounded (platform
+  context + scoped SPARQL, up to 3 query rounds per turn), the widget block grammar
+  (`sparql`/`api`/`chart`/`map`/`card`/`csv`) with examples, `LLM_*` configuration,
+  and privacy/scope notes. Cross-linked from the overview, API-services doc and README.
+- SHACL-SPARQL **prefixes mechanism** (`sh:prefixes` → `sh:declare`/`sh:prefix`/
+  `sh:namespace`): a `PREFIX` prologue is now prepended to every `sh:select`,
+  `sh:construct` and SPARQL-target body, so constraints/rules/targets that use prefixed
+  names (`da:`, `geo:`, `geof:` …) parse instead of being silently skipped.
+- Per-constraint `sh:severity` on a `sh:SPARQLConstraint` node (e.g. `sh:Warning`) now
+  overrides the shape-level severity for that constraint's results.
+- Waalbrug reference-example conformance fixtures (`tests/fixtures/waalbrug/`) and an
+  oracle (`tests/waalbrug_conformance.rs`) encoding the IMBOR/NEN 2660-2 GeoSPARQL +
+  SHACL (Core/SPARQL/AF) pass/fail matrix.
+- SHACL **complex property paths** are now parsed from RDF: sequence paths `( p1 p2 … )`,
+  `sh:inversePath`, `sh:alternativePath`, `sh:zeroOrMorePath`, `sh:oneOrMorePath` and
+  `sh:zeroOrOnePath` (previously only a single predicate IRI was understood).
+- GeoSPARQL **`geo:gmlLiteral`** parsing (GeoSPARQL 1.1 Req 2): the GML 3.2 geometry
+  subset — `Point`, `LineString`/`Curve`, `Polygon`/`Surface` and the `Multi*`
+  collections — is translated to WKT and handled by the existing GEOS path, so `geof:*`
+  functions now accept GML geometry literals (was WKT-only).
+- GeoSPARQL **`geof:transform`** for CRS reprojection between EPSG:28992 (Amersfoort /
+  RD New), EPSG:4326 / CRS84 (WGS84) and EPSG:3857 (Web Mercator), via pure-Rust
+  closed-form transforms (no PROJ dependency). Feeds map/3D reprojection for the viewer.
+- `geof:distance` now honours its units-of-measure argument for linear units
+  (`metre`/`kilometre`/`centimetre`/`millimetre`) over a metre-based CRS.
+- SHACL-AF **`sh:expression`** node expressions (path + comparison subset): values
+  reached along an expression's `sh:path` must satisfy its comparison constraints
+  (e.g. `sh:minExclusive`), reported with the expression's `sh:message`.
+- SHACL-AF **`sh:SPARQLFunction`**: user-defined functions (`sh:parameter`/`sh:order`/
+  `sh:select` + `sh:prefixes`) are registered as callable SPARQL functions, usable from
+  queries, SHACL-SPARQL constraints and rules (e.g. `ex:afstandMeter`). Bodies are
+  evaluated against a fresh in-memory store, fully supporting expression-style functions.
+- **Viewer feed** endpoint `GET /api/datasets/:id/viewer-feed`: per-element geometry +
+  3D-file references resolved from the BOT/OMG/FOG/GeoSPARQL layering — labels, types,
+  parent topology, IFC GlobalId, glTF/IFC/other file URLs, and geometry reprojected to
+  EPSG:4326 and EPSG:3857 server-side. Anonymous access works for public datasets.
+- **Compliance as data**: every official dataset validation run now also persists its
+  `sh:ValidationReport` as RDF into `urn:system:reports:dataset:{id}` (replaced per run),
+  so dashboards can query failures via SPARQL; severity rollup stays on the run rows.
+- **3D & Map Viewer demo dataset** (`viewer-3d-demo`) in the standards demo seed: the
+  Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
+  Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
+  whose open 3D models live on Wikimedia Commons, and a synthetic CityJSON LoD2
+  demo block (EPSG:7415, semantic roof/wall/ground surfaces) bundled with the
+  frontend so georeferenced CityJSON rendering is demonstrable offline.
+- **Dataset 3D & map viewer** (frontend, `/datasets/:id/viewer`): an interactive map
+  (Leaflet, now a bundled npm dependency) and a 3D scene (three.js — glTF via
+  GLTFLoader, STL via STLLoader for the Commons landmark models) over the viewer feed,
+  with a shared selection: clicking a part on the map, in 3D, or in the element list
+  shows that element's linked data (via the existing browse API + `RdfTerm`).
+  `GeoPreview` migrated from CDN-loaded Leaflet to the bundled dependency.
+- **Geo data explorer** (`/datasets/:id/viewer`, rebuilt): the map is now an explorable
+  MapLibre GL world — zoomed out, located elements are dots; zooming in, elements with a
+  3D model show the *actual model* standing georeferenced and to real scale next to OSM
+  building extrusions (tilt/rotate, streets/satellite basemaps, light + dark styles).
+  Clicking a feature or list row opens a draggable element inspector with Properties,
+  the BOT/IFC substructure tree (every sub-element navigable and visualizable, IFC
+  GlobalId + BIM file facts) and an interactive orbit 3D tab. Datasets without
+  geometry fall back to a pure 3D model explorer. Supports glTF, STL, CityJSON and
+  CityGML (client-side CRS reprojection via proj4).
+- **3D/geo everywhere**: RDF terms rendered anywhere (triple table, graph explorer,
+  resource panels, chat) get inline affordances — a map chip on `geo:wktLiteral`
+  values and a 3D chip on model-file URLs — opening a global draggable preview
+  overlay. Resource detail pages show a 3D model (BIM) card with IFC GlobalId and
+  file links (following named `hasGeometry` nodes one hop), and the geometry map
+  gains a *to scale* toggle driven by the model's measured real-world size.
+  **Projected-CRS WKT (e.g. the Waalbrug demo's EPSG:28992) is now reprojected
+  client-side before plotting** — previously raw map previews plotted projected
+  coordinates as lon/lat. Dark mode is supported across all maps and 3D scenes.
+- **Official conformance suites in CI**: the W3C SHACL core test suite and the OGC
+  GeoSPARQL 1.1 SHACL validator (+ its valid/invalid example corpus) are vendored under
+  `tests/fixtures/{w3c-shacl,ogc-geosparql}/` and run with a two-way ratchet (unlisted
+  tests must pass, listed known-failures must still fail). Scorecards:
+  W3C core 46 pass / 52 known-fail / 15 aux skips; OGC examples 44/48 matching, and the
+  Waalbrug dataset round-trips through the official GeoSPARQL validator. See
+  `docs/conformance/`.
+
 - **Spark chat is now an interactive linked-data canvas.** Assistant answers render
   runnable widgets: `GET /api/.../run` mentions (fenced or inline) become one-click
   API calls whose results show in place exactly like the API-services page (SPARQL
@@ -33,10 +128,66 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
-- None.
+- SHACL engine, found by the official conformance suites:
+  `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
+  against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
+  an `sh:or` of datatype branches over `geo:asWKT` values mis-fired on every geometry.
+  Node-level `sh:nodeKind sh:Literal` could never match (focus nodes are lexical
+  strings); a blank/scheme-shaped/other heuristic now classifies them.
+- **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
+  keyed by `(focus, path)` only, and rayon worker caches survive across validation
+  passes — two stores in one process sharing a focus IRI and path could serve each other
+  stale values, yielding nondeterministic validation results. Cache keys now include a
+  process-unique per-store id.
+- SHACL-SPARQL constraints, rules and custom targets that referenced prefixed names were
+  silently skipped (the query failed to parse and the result was swallowed), so the
+  corresponding violations/inferences never appeared. They now resolve via the declared
+  `sh:prefixes`.
+- An inline blank-node `sh:qualifiedValueShape [ … ]` was silently skipped: the value
+  shape was looked up by IRI in the top-level shapes list, where an inline shape never
+  appears. It is now loaded inline (like `sh:not`/`and`/`or`) and enforced.
+- **Viewer feed**: WKT/GML literals carrying a CRS the server cannot reproject
+  (anything beyond EPSG:28992/4326/3857, e.g. EPSG:25832) are no longer emitted
+  verbatim as `wkt4326` — projected metre coordinates used to reach the map as
+  lon/lat and crash MapLibre's `fitBounds`, breaking the whole explorer; such
+  geometries are now omitted (the element still appears, without a location).
+  Datasets with plain GeoSPARQL geometry but no BOT containment topology now
+  appear in the feed as parentless roots (previously: an empty feed). 3D GML
+  (`srsDimension="3"`) coordinate lists now parse correctly (Z dropped) instead
+  of mis-pairing into garbage 2D coordinates. The unused per-element `wkt3857`
+  field (computed and serialized, read by nothing) was removed.
+- **SHACL `sh:nodeKind`** (node shapes): focus-node term kinds are recorded at
+  target resolution, so string literals shaped like IRIs (`"mailto:x@y.org"`,
+  `"urn:isbn:…"`) reached via `sh:targetObjectsOf` no longer wrongly satisfy
+  `sh:IRI` / wrongly violate `sh:Literal`. Custom `sh:SPARQLFunction` bodies
+  evaluate against a shared empty store instead of constructing a fresh
+  in-memory store per invocation (per binding row).
+- **Spark chat**: the `SPARQL:` execution directive only counts when it starts a
+  line, and a final answer that embeds a corrected ```sparql block is kept
+  instead of being demoted to the bare fallback table; query extraction stops at
+  the first code fence (a stray closing ``` and trailing prose no longer get
+  glued onto the query); the "values were not retrieved" caveat recognises every
+  fence variant the frontend renders (`~~~`, indentation, `geo`/`infocard`
+  aliases); GML cells get the same prompt budget as WKT. Client-side: transport
+  error bubbles are no longer replayed into the model conversation, feedback
+  submits the last *successful* query of the trail, and TSV responses normalise
+  CRLF and ragged rows.
+- **Viewer UI**: stale-response races on the resource page (slow geometry-hop /
+  model-measure fetches from a previously viewed resource no longer paint onto
+  the current one); the reused geo-preview overlay no longer goes permanently
+  blank when its first preview had unparseable WKT; `GEOMETRYCOLLECTION`
+  elements are included in map bounds/focus; out-of-range coordinates can no
+  longer crash the map; Escape closes only the topmost panel when the preview
+  overlay is stacked over the element inspector, and the inspector's drag
+  offset resets on close; fallback 3D-explorer models load concurrently.
 
 ### Security
-- None.
+- The element inspector's BIM file links now pass RDF-derived URLs through the
+  `safeExternalUrl` scheme allowlist like every other RDF-derived href, closing
+  the one sink where an uploaded `javascript:`/`data:` URL round-tripped into an
+  `<a href>` (low impact in modern browsers — `target="_blank"` blocks
+  new-context `javascript:` navigation — but a gap against the project's own
+  XSS control).
 
 ## [0.2.4] — 2026-06-09
 
@@ -153,7 +304,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.1...v0.2.2

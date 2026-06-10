@@ -4,8 +4,10 @@
   import { navigate } from '../lib/router/index.js';
   import { isDark } from '../lib/theme.js';
   import { langToFlag } from '../lib/i18n/langFlag.js';
-  import { Check, Copy } from 'lucide-svelte';
+  import { Check, Copy, MapPin, Boxes } from 'lucide-svelte';
   import { copyToClipboard } from '../lib/clipboard.js';
+  import { modelFormatFromUrl, isWktDatatype } from '../lib/viewer/detect';
+  import { openPreview } from '../lib/viewer/preview';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -161,6 +163,27 @@
     return null;
   })();
 
+  // Inline viz affordances: a WKT geometry literal gets a map chip, a 3D-model
+  // file URL (glb/gltf/stl) gets a 3D chip — every table/graph/panel that
+  // renders terms through this component gains the previews for free.
+  $: geoWkt =
+    term?.type === 'literal' && isWktDatatype(term.datatype) && typeof term.value === 'string'
+      ? term.value
+      : null;
+  $: modelFormat =
+    typeof term?.value === 'string' && (term.type === 'uri' || term.type === 'iri' || term.type === 'literal')
+      ? modelFormatFromUrl(term.value)
+      : null;
+
+  function showGeo(e) {
+    e.stopPropagation();
+    openPreview({ kind: 'geo', wkts: [geoWkt], title: $i18nT('viewer.geometry') });
+  }
+  function showModel(e) {
+    e.stopPropagation();
+    openPreview({ kind: 'model', url: term.value, format: modelFormat, title: shortenIRI(term.value) });
+  }
+
   $: color = colorFor(term, $isDark);
   $: isClickable = navigable && (term?.type === 'uri' || term?.type === 'iri' || term?.type === 'bnode');
   $: tooltip = typeof term?.value === 'string' ? term?.value : display;
@@ -212,6 +235,16 @@
         title={literalMeta.title}
       >{#if literalMeta.flag}<span class="lit-flag">{literalMeta.flag}</span>{/if}{literalMeta.label}</span>
     {/if}
+    {#if !nested && geoWkt}
+      <button class="viz-chip" title={$i18nT('viewer.showOnMap')} on:click={showGeo} tabindex="-1">
+        <MapPin size={11} />
+      </button>
+    {/if}
+    {#if !nested && modelFormat}
+      <button class="viz-chip model" title={$i18nT('viewer.show3d')} on:click={showModel} tabindex="-1">
+        <Boxes size={11} />
+      </button>
+    {/if}
     {#if !nested}
       <button
         class="copy-btn"
@@ -236,6 +269,25 @@
 
   .term-wrap:not(:hover) .copy-btn { opacity: 0; pointer-events: none; }
   .term-wrap:hover .copy-btn { opacity: 1; }
+
+  /* Always-visible viz affordances (unlike the hover-only copy button): they
+     advertise that a geometry/model can be previewed in place. */
+  .viz-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line-soft, #dfe5ea);
+    background: var(--bg-subtle, #f8fafc);
+    color: var(--brand-600, #1d6fb8);
+    border-radius: 99px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .viz-chip.model { color: #e8590c; }
+  .viz-chip:hover { background: var(--bg-hover, rgba(0, 0, 0, 0.05)); }
 
   .rdf-term {
     font-size: 0.875rem;

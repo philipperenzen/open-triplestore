@@ -1,0 +1,10 @@
+# ❌ §5.1 — sum of span lengths (90) deviates >0.5 m from total length (100). Warning.
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+wb:SpanBrug a da:Brug ;
+    da:totaleLengte "100.0"^^xsd:decimal ;
+    da:heeftOverspanning
+        [ da:lengte "30.0"^^xsd:decimal ] ,
+        [ da:lengte "30.0"^^xsd:decimal ] ,
+        [ da:lengte "30.0"^^xsd:decimal ] .
