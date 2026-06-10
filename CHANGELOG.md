@@ -14,6 +14,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- None.
+
+### Changed
+- None.
+
+### Deprecated
+- None.
+
+### Fixed
+- None.
+
+### Security
+- None.
+
+## [0.3.0] — 2026-06-10
+
+### Added
 - **Spark documentation page** (`docs/spark.md`, in-app at `/docs/spark` under
   *Query & Search*): what the chat assistant is, how answers are grounded (platform
   context + scoped SPARQL, up to 3 query rounds per turn), the widget block grammar
@@ -104,18 +121,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shown per answer with syntax-highlighted queries, and WKT result cells survive
   long enough to be mapped.
 
-### Fixed (SHACL engine, found by the official suites)
-- `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
-  against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
-  an `sh:or` of datatype branches over `geo:asWKT` values mis-fired on every geometry.
-- Node-level `sh:nodeKind sh:Literal` could never match (focus nodes are lexical
-  strings); a blank/scheme-shaped/other heuristic now classifies them.
-- **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
-  keyed by `(focus, path)` only, and rayon worker caches survive across validation
-  passes — two stores in one process sharing a focus IRI and path could serve each other
-  stale values, yielding nondeterministic validation results. Cache keys now include a
-  process-unique per-store id.
-
 ### Changed
 - None.
 
@@ -123,6 +128,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- SHACL engine, found by the official conformance suites:
+  `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
+  against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
+  an `sh:or` of datatype branches over `geo:asWKT` values mis-fired on every geometry.
+  Node-level `sh:nodeKind sh:Literal` could never match (focus nodes are lexical
+  strings); a blank/scheme-shaped/other heuristic now classifies them.
+- **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
+  keyed by `(focus, path)` only, and rayon worker caches survive across validation
+  passes — two stores in one process sharing a focus IRI and path could serve each other
+  stale values, yielding nondeterministic validation results. Cache keys now include a
+  process-unique per-store id.
 - SHACL-SPARQL constraints, rules and custom targets that referenced prefixed names were
   silently skipped (the query failed to parse and the result was swallowed), so the
   corresponding violations/inferences never appeared. They now resolve via the declared
@@ -288,7 +304,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.1...v0.2.2
