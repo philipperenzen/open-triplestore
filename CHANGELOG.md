@@ -30,6 +30,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subset — `Point`, `LineString`/`Curve`, `Polygon`/`Surface` and the `Multi*`
   collections — is translated to WKT and handled by the existing GEOS path, so `geof:*`
   functions now accept GML geometry literals (was WKT-only).
+- GeoSPARQL **`geof:transform`** for CRS reprojection between EPSG:28992 (Amersfoort /
+  RD New), EPSG:4326 / CRS84 (WGS84) and EPSG:3857 (Web Mercator), via pure-Rust
+  closed-form transforms (no PROJ dependency). Feeds map/3D reprojection for the viewer.
+- `geof:distance` now honours its units-of-measure argument for linear units
+  (`metre`/`kilometre`/`centimetre`/`millimetre`) over a metre-based CRS.
 
 ### Changed
 - None.
