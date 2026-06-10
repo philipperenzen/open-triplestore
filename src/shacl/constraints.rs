@@ -1,3 +1,4 @@
+use super::engine::FocusKind;
 use super::report::{Severity, ValidationResult};
 use super::shapes::*;
 use crate::store::{escape_sparql_iri, TripleStore};
@@ -60,12 +61,16 @@ fn validate_inline_shape(
     let mut results = Vec::new();
     let shape_iri = &shape.iri;
 
+    // Inline shapes validate *value nodes*, whose term kind was never recorded
+    // (they come from lexical value lookups) — node-kind checks fall back to
+    // the lexical heuristic.
     for constraint in &shape.constraints {
         results.extend(evaluate_constraint(
             store,
             shapes,
             shape_iri,
             focus_node,
+            FocusKind::Unknown,
             constraint,
             None,
             data_graphs,
@@ -81,6 +86,7 @@ fn validate_inline_shape(
                 shapes,
                 ps_iri,
                 focus_node,
+                FocusKind::Unknown,
                 constraint,
                 Some(&prop_shape.path),
                 data_graphs,
@@ -97,13 +103,16 @@ fn parse_numeric(s: &str) -> Option<f64> {
     s.parse::<f64>().ok()
 }
 
-/// Evaluate a constraint against a focus node.
+/// Evaluate a constraint against a focus node. `focus_kind` is the focus
+/// node's term kind when target resolution could record it (see
+/// [`FocusKind`]); `FocusKind::Unknown` falls back to lexical heuristics.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_constraint(
     store: &TripleStore,
     shapes: &[Shape],
     shape_iri: &str,
     focus_node: &str,
+    focus_kind: FocusKind,
     constraint: &Constraint,
     path: Option<&PropertyPath>,
     data_graphs: &[String],
@@ -204,15 +213,25 @@ pub fn evaluate_constraint(
 
         Constraint::NodeKind(expected) => {
             if path.is_none() {
-                // Node-level: the focus node itself must match the kind. Focus
-                // nodes are lexical strings (term kind is lost during target
-                // resolution), so literals are classified heuristically: not a
-                // blank node and not scheme-shaped ⇒ literal. This correctly
-                // accepts e.g. a WKT literal reached via sh:targetObjectsOf
-                // (previously sh:nodeKind sh:Literal always failed at node level).
-                let is_blank = focus_node.starts_with("_:");
-                let is_iri = !is_blank && looks_like_iri(focus_node);
-                let is_literal = !is_blank && !is_iri;
+                // Node-level: the focus node itself must match the kind. Target
+                // resolution records the exact term kind where it can (class /
+                // subjectsOf / objectsOf / SPARQL targets); a string literal
+                // like "mailto:x@y.org" reached via sh:targetObjectsOf is then
+                // classified as a literal instead of being mistaken for an IRI
+                // by its scheme-shaped lexical form. Only when the kind is
+                // genuinely unknown (sh:targetNode, inline value-node
+                // recursion) do we fall back to the lexical heuristic: not a
+                // blank node and not scheme-shaped ⇒ literal.
+                let (is_iri, is_blank, is_literal) = match focus_kind {
+                    FocusKind::Iri => (true, false, false),
+                    FocusKind::BlankNode => (false, true, false),
+                    FocusKind::Literal => (false, false, true),
+                    FocusKind::Unknown => {
+                        let is_blank = focus_node.starts_with("_:");
+                        let is_iri = !is_blank && looks_like_iri(focus_node);
+                        (is_iri, is_blank, !is_blank && !is_iri)
+                    }
+                };
                 let is_valid = match expected {
                     NodeKind::IRI => is_iri,
                     NodeKind::BlankNode => is_blank,
@@ -533,6 +552,7 @@ pub fn evaluate_constraint(
                     shapes,
                     shape_iri,
                     focus_node,
+                    focus_kind,
                     check,
                     Some(expr_path),
                     data_graphs,

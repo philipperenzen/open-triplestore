@@ -37,7 +37,11 @@
     closePreview();
   }
   function onKeydown(e) {
-    if (e.key === 'Escape' && $preview) close();
+    if (e.key !== 'Escape' || !$preview) return;
+    // Topmost panel owns Escape: mark it consumed so a panel underneath
+    // (e.g. the dataset explorer's ElementModal) doesn't also close.
+    e.preventDefault();
+    close();
   }
 </script>
 

@@ -16,7 +16,7 @@ Attach test cases to a service so it is exercised after edits and on a schedule.
 
 ## AI query assistance
 
-When an LLM endpoint is configured, two assistants appear in the query editor and the API-services authoring form. **Bring your own LLM:** set `LLM_GATEWAY_URL` to any OpenAI-compatible chat endpoint (OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway), choose the model with `LLM_MODEL`, and set `LLM_API_KEY` if the endpoint needs a bearer token. Per-task overrides `LLM_SPARQL_MODEL` / `LLM_SHACL_MODEL` fall back to `LLM_MODEL`.
+When an LLM endpoint is configured, two assistants appear in the query editor and the API-services authoring form — and [Spark](/docs/spark), the platform-wide chat assistant with its interactive answer canvas, comes online at `/chat`. **Bring your own LLM:** set `LLM_GATEWAY_URL` to any OpenAI-compatible chat endpoint (OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway), choose the model with `LLM_MODEL`, and set `LLM_API_KEY` if the endpoint needs a bearer token. Per-task overrides `LLM_SPARQL_MODEL` / `LLM_SHACL_MODEL` fall back to `LLM_MODEL`.
 
 - **Natural language → SPARQL** — Describe what you want in plain language and get a generated query, optionally grounded with prefix/schema hints. Backed by `POST /api/llm/sparql`.
 - **Query repair** — When a saved query fails, request an AI-suggested fix to review and save as a new revision.

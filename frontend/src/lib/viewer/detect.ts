@@ -68,3 +68,20 @@ export const FORMAT_LABELS: Record<ModelFormat, string> = {
 export function isWktDatatype(datatype: string | undefined | null): boolean {
   return !!datatype && datatype.endsWith('wktLiteral');
 }
+
+// Predicate matching mirrors the server viewer feed's resolution
+// (src/geo/viewer_feed.rs) so the resource page and the feed agree on which
+// triples carry geometry / BIM identity.
+
+/** Exactly geo:hasGeometry or omg:hasGeometry — the two predicates the feed follows. */
+export function isGeometryPredicate(iri: string | undefined | null): boolean {
+  return (
+    iri === 'http://www.opengis.net/ont/geosparql#hasGeometry' ||
+    iri === 'https://w3id.org/omg#hasGeometry'
+  );
+}
+
+/** IFC GlobalId predicate — case-sensitive, like the feed's `STRENDS(STR(?guidp), "ifcGuid")`. */
+export function isIfcGuidPredicate(iri: string | undefined | null): boolean {
+  return !!iri && iri.endsWith('ifcGuid');
+}

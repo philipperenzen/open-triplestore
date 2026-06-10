@@ -17,7 +17,6 @@ export interface ViewerElement {
   files?: [string, string][];
   source_crs?: string | null;
   wkt4326?: string | null;
-  wkt3857?: string | null;
 }
 
 export type LatLng = [number, number];
@@ -25,7 +24,7 @@ export type LatLng = [number, number];
 export interface MapFeature {
   id: string;
   label: string;
-  kind: 'point' | 'line' | 'polygon';
+  kind: 'point' | 'line' | 'polygon' | 'geometrycollection';
   /** Leaflet order: [lat, lng]. For polygons: outer ring only. */
   latlngs: LatLng[];
 }
@@ -33,33 +32,46 @@ export interface MapFeature {
 /** WKT (lon lat) coordinate pairs → Leaflet [lat, lng]. */
 const toLatLng = (c: [number, number]): LatLng => [c[1], c[0]];
 
+/** The representative [lat, lng] list of a geometry (collections flattened). */
+function geometryLatLngs(g: WktGeometry): LatLng[] {
+  switch (g.kind) {
+    case 'point':
+      return [toLatLng(g.coord)];
+    case 'multipoint':
+    case 'linestring':
+      return g.coords.map(toLatLng);
+    case 'multilinestring':
+      return g.lines.flat().map(toLatLng);
+    case 'polygon':
+      return g.rings[0]?.map(toLatLng) ?? [];
+    case 'multipolygon':
+      return g.polygons[0]?.[0]?.map(toLatLng) ?? [];
+    case 'geometrycollection':
+      return g.geometries.flatMap(geometryLatLngs);
+    default:
+      return [];
+  }
+}
+
+const FEATURE_KIND: Partial<Record<WktGeometry['kind'], MapFeature['kind']>> = {
+  point: 'point',
+  multipoint: 'point',
+  linestring: 'line',
+  multilinestring: 'line',
+  polygon: 'polygon',
+  multipolygon: 'polygon',
+  geometrycollection: 'geometrycollection',
+};
+
 /** Flatten a parsed WKT geometry into one drawable map feature per element. */
 export function toMapFeature(el: ViewerElement): MapFeature | null {
   if (!el.wkt4326) return null;
   const g: WktGeometry | null = parseWktGeometry(el.wkt4326);
   if (!g) return null;
+  const kind = FEATURE_KIND[g.kind];
+  if (!kind) return null;
   const label = el.label || el.id.split(/[/#]/).pop() || el.id;
-  switch (g.kind) {
-    case 'point':
-      return { id: el.id, label, kind: 'point', latlngs: [toLatLng(g.coord)] };
-    case 'multipoint':
-      return { id: el.id, label, kind: 'point', latlngs: g.coords.map(toLatLng) };
-    case 'linestring':
-      return { id: el.id, label, kind: 'line', latlngs: g.coords.map(toLatLng) };
-    case 'multilinestring':
-      return { id: el.id, label, kind: 'line', latlngs: g.lines.flat().map(toLatLng) };
-    case 'polygon':
-      return { id: el.id, label, kind: 'polygon', latlngs: g.rings[0]?.map(toLatLng) ?? [] };
-    case 'multipolygon':
-      return {
-        id: el.id,
-        label,
-        kind: 'polygon',
-        latlngs: g.polygons[0]?.[0]?.map(toLatLng) ?? [],
-      };
-    default:
-      return null;
-  }
+  return { id: el.id, label, kind, latlngs: geometryLatLngs(g) };
 }
 
 /** Bounding box over features as [[minLat, minLng], [maxLat, maxLng]], or null. */
@@ -71,6 +83,9 @@ export function featureBounds(features: MapFeature[]): [LatLng, LatLng] | null {
   for (const f of features) {
     for (const [lat, lng] of f.latlngs) {
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      // Defensive: a mis-projected geometry (e.g. metres mistaken for degrees)
+      // must never produce bounds that make MapLibre's fitBounds throw.
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) continue;
       minLat = Math.min(minLat, lat);
       minLng = Math.min(minLng, lng);
       maxLat = Math.max(maxLat, lat);

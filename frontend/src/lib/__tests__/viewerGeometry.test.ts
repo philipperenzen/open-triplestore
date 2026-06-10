@@ -45,6 +45,36 @@ describe('viewer geometry helpers', () => {
     expect(featureBounds([])).toBeNull();
   });
 
+  it('flattens a GEOMETRYCOLLECTION so bounds cover all members', () => {
+    const f = toMapFeature({
+      id: 'gc',
+      wkt4326: 'GEOMETRYCOLLECTION(POINT(4 52), LINESTRING(5 53, 6 54))',
+    })!;
+    expect(f).not.toBeNull();
+    expect(f.kind).toBe('geometrycollection');
+    expect(f.latlngs).toEqual([
+      [52, 4],
+      [53, 5],
+      [54, 6],
+    ]);
+    const b = featureBounds([f])!;
+    expect(b).toEqual([
+      [52, 4], // min lat / min lng
+      [54, 6], // max lat / max lng
+    ]);
+  });
+
+  it('ignores out-of-range coordinates when computing bounds', () => {
+    // A geometry whose CRS was mishandled upstream (metres, not degrees) must
+    // not produce bounds that would make the map's fitBounds throw.
+    const bad = { id: 'bad', label: 'bad', kind: 'point' as const, latlngs: [[5338000, 167000]] as [number, number][] };
+    expect(featureBounds([bad])).toBeNull();
+    const good = toMapFeature(boog)!;
+    const b = featureBounds([bad, good])!;
+    expect(b[0]).toEqual([51.851, 5.86]);
+    expect(b[1]).toEqual([51.851, 5.86]);
+  });
+
   it('collects model refs preferring glTF, falling back to STL, on a grid', () => {
     const refs = modelRefs([boog, trace, landmark]);
     expect(refs).toHaveLength(2); // trace has no model

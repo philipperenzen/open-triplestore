@@ -10,7 +10,7 @@
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
   import GeoPreview from '../components/GeoPreview.svelte';
-  import { modelFormatFromUrl, FORMAT_LABELS } from '../lib/viewer/detect';
+  import { modelFormatFromUrl, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
 
   // Model3D pulls the heavy three.js chunk; this page is in the main bundle,
   // so load the viewer only when the resource actually has a 3D model.
@@ -23,10 +23,13 @@
   let hopWkts = [];
   let hopModels = [];
   async function followGeometryHops(rows) {
+    // Snapshot the IRI: the router reuses this component across navigations,
+    // so a slow response for the previous resource must not overwrite state.
+    const forIri = iri;
     hopWkts = [];
     hopModels = [];
     const targets = rows
-      .filter((r) => (r.p?.value || '').endsWith('hasGeometry'))
+      .filter((r) => isGeometryPredicate(r.p?.value))
       .map((r) => r.o)
       .filter((o) => o?.type === 'uri' || o?.type === 'iri')
       .map((o) => o.value)
@@ -35,6 +38,7 @@
     const results = await Promise.all(
       targets.map((t) => browseResource(t, graphScope || undefined).catch(() => null))
     );
+    if (forIri !== iri) return; // navigated away while loading
     const wkts = [];
     const models = [];
     const scanRow = (r) => {
@@ -65,13 +69,16 @@
   // resource's own 3D model (0 hides the toggle - no fabricated sizes).
   let modelMeters = 0;
   async function measureModel(models) {
+    const forIri = iri; // see followGeometryHops: guard against stale loads
     modelMeters = 0;
     if (!models.length) return;
     try {
       const { loadModel, realWorldMeters } = await import('../lib/viewer/models');
       const group = await loadModel(models[0].url, models[0].format);
+      if (forIri !== iri) return;
       modelMeters = Math.round(realWorldMeters(group, 0));
     } catch {
+      if (forIri !== iri) return;
       modelMeters = 0;
     }
   }
@@ -433,7 +440,7 @@
   })();
 
   $: featuredIfcGuid = (() => {
-    const isGuidPred = (r) => (r.p?.value || '').toLowerCase().endsWith('ifcguid');
+    const isGuidPred = (r) => isIfcGuidPredicate(r.p?.value);
     for (const r of outgoing) if (isGuidPred(r)) return r.o?.value;
     for (const rows of Object.values(bnodes)) for (const r of (rows || [])) if (isGuidPred(r)) return r.o?.value;
     return null;

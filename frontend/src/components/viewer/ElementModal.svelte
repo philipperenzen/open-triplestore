@@ -10,8 +10,10 @@
   import { X, Maximize2, Minimize2, Boxes, ChevronRight } from 'lucide-svelte';
   import { browseResource } from '../../lib/api.js';
   import { shortenIRI } from '../../lib/rdf-utils.js';
+  import { safeExternalUrl } from '../../lib/safeUrl';
   import { Link } from '../../lib/router/index.js';
   import { modelRefOf } from '../../lib/viewer/detect';
+  import { preview } from '../../lib/viewer/preview';
   import RdfTerm from '../RdfTerm.svelte';
   import Model3D from './Model3D.svelte';
 
@@ -33,10 +35,12 @@
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
   $: modelRef = element ? modelRefOf(element) : null;
-
-  function childrenOf(id) {
-    return elements.filter((e) => e.parent === id);
-  }
+  // parent id → number of children, in one pass (the structure tree reads a
+  // count per row; filtering elements per row would be O(N²)).
+  $: childCount = elements.reduce(
+    (m, e) => (e.parent ? m.set(e.parent, (m.get(e.parent) || 0) + 1) : m),
+    new Map()
+  );
 
   async function load(iri) {
     if (!iri) return;
@@ -67,10 +71,22 @@
     window.removeEventListener('pointermove', onDrag);
   }
   function onKeydown(e) {
-    if (e.key === 'Escape') dispatch('close');
+    if (e.key !== 'Escape') return;
+    // The preview overlay can be stacked on top (RdfTerm chips in the
+    // Properties tab open it) and owns Escape while visible — both the
+    // defaultPrevented mark and the store check make this robust regardless
+    // of svelte:window listener order.
+    if (e.defaultPrevented || $preview) return;
+    dispatch('close');
   }
 
   $: load(element?.id);
+  // Reset transient panel state when closed: the component stays mounted, so
+  // the next element would otherwise open at the previous drag offset / size.
+  $: if (!element) {
+    pos = { x: 0, y: 0 };
+    full = false;
+  }
   // When the element loses its model, fall back from the 3D tab.
   $: if (tab === '3d' && !modelRef) tab = 'properties';
 </script>
@@ -140,7 +156,7 @@
             {#each element.files || [] as [format, url]}
               <div class="bim-row">
                 <span class="k">{format}</span>
-                <a href={url} target="_blank" rel="noreferrer" title={url}>{shortenIRI(url)}</a>
+                <a href={safeExternalUrl(url)} target="_blank" rel="noreferrer" title={url}>{shortenIRI(url)}</a>
               </div>
             {/each}
           </section>
@@ -173,8 +189,8 @@
                   <span class="label">{child.label || shortenIRI(child.id)}</span>
                   {#if modelRefOf(child)}<span class="badge"><Boxes size={11} /> 3D</span>{/if}
                   {#if child.wkt4326}<span class="badge geo">geo</span>{/if}
-                  {#if childrenOf(child.id).length}
-                    <span class="sub-count">{childrenOf(child.id).length} ▸</span>
+                  {#if childCount.get(child.id)}
+                    <span class="sub-count">{childCount.get(child.id)} ▸</span>
                   {/if}
                 </button>
               </li>

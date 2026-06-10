@@ -307,6 +307,14 @@ const BUILTINS: &[Builtin] = &[
         admin_only: false,
         sort: 64,
     },
+    Builtin {
+        slug: "spark",
+        title: "Spark Chat Assistant",
+        category: "Query & Search",
+        body: include_str!("../../docs/spark.md"),
+        admin_only: false,
+        sort: 66,
+    },
     // ── Reasoning & Validation ──
     Builtin {
         slug: "reasoning",

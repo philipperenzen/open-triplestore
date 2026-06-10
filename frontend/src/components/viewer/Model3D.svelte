@@ -66,7 +66,10 @@
     loadedCount = 0;
     failedCount = 0;
     const wanted = refs;
-    for (const ref of wanted) {
+    // Load every model concurrently: each task owns its group, the counters
+    // are order-independent and loadModel caches per URL, so parallelism is
+    // safe and much faster than the old one-await-per-model loop.
+    const tasks = wanted.map(async (ref) => {
       const group = new THREE.Group();
       group.userData.elementId = ref.id;
       const [x, z] = ref.slot || [0, 0];
@@ -101,7 +104,9 @@
         placeholder.position.y = 0.5;
         group.add(placeholder);
       }
-    }
+    });
+    await Promise.allSettled(tasks);
+    if (refs !== wanted) return;
     highlight();
   }
 
