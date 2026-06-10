@@ -1060,7 +1060,9 @@
       "failedToDeleteDataset": "Failed to delete dataset",
       "failedToCreateService": "Failed to create service",
       "couldNotLoadVersion": "Could not load version {version} (HTTP {status})",
-      "failedToLoadVersion": "Failed to load version"
+      "failedToLoadVersion": "Failed to load version",
+      "viewer3d": "3D & map viewer",
+      "viewer3dDesc": "Inspect parts on the map and in 3D, with their linked data"
     },
     "validation": {
       "title": "SHACL Validation",
@@ -2511,6 +2513,16 @@
       "version": "Version",
       "noVersions": "No versions found for this vocabulary.",
       "loadFailed": "Failed to load vocabulary"
+    },
+    "datasetViewer": {
+      "title": "3D & map viewer",
+      "back": "Dataset",
+      "map": "Map",
+      "threeD": "3D models",
+      "elements": "Elements",
+      "selectHint": "Select an element on the map, in 3D, or in the list to see its linked data.",
+      "openResource": "Open resource",
+      "empty": "No elements with geometry or 3D models in this dataset."
     }
   },
   "toast": {
