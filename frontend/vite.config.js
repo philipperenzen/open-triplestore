@@ -107,6 +107,12 @@ export default defineConfig(async () => {
             if (id.includes('node_modules/cytoscape')) {
               return 'cytoscape';
             }
+            if (id.includes('node_modules/three')) {
+              return 'three';
+            }
+            if (id.includes('node_modules/leaflet')) {
+              return 'leaflet';
+            }
           },
         },
       },

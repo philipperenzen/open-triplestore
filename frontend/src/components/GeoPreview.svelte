@@ -1,5 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import L from 'leaflet';
+  import 'leaflet/dist/leaflet.css';
   import { parseWktGeometry, geometryCoords } from '../lib/ontology/valueType.js';
 
   export let wkts = [];
@@ -14,35 +16,11 @@
     .map(w => parseWktGeometry(w))
     .filter(Boolean);
 
-  const LEAFLET_JS = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-  const LEAFLET_CSS = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-
-  let leafletPromise;
-  function loadLeaflet() {
-    if (typeof window === 'undefined') return Promise.reject(new Error('ssr'));
-    if (window.L) return Promise.resolve(window.L);
-    if (leafletPromise) return leafletPromise;
-    leafletPromise = new Promise((resolve, reject) => {
-      if (!document.querySelector(`link[href="${LEAFLET_CSS}"]`)) {
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = LEAFLET_CSS;
-        document.head.appendChild(link);
-      }
-      const script = document.createElement('script');
-      script.src = LEAFLET_JS;
-      script.async = true;
-      script.onload = () => resolve(window.L);
-      script.onerror = () => reject(new Error('failed to load leaflet'));
-      document.head.appendChild(script);
-    });
-    return leafletPromise;
-  }
-
+  // Leaflet is a bundled npm dependency (was: CDN-loaded at runtime), so the
+  // map works offline and under a strict CSP; only the OSM tiles need network.
   onMount(async () => {
     if (geometries.length === 0) return;
     try {
-      const L = await loadLeaflet();
       if (!mapEl) return;
       map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true });
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {

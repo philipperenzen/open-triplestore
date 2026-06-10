@@ -1060,7 +1060,9 @@
       "failedToDeleteDataset": "Verwijderen van Dataset mislukt",
       "failedToCreateService": "Aanmaken van service mislukt",
       "couldNotLoadVersion": "Kon versie {version} niet laden (HTTP {status})",
-      "failedToLoadVersion": "Laden van versie mislukt"
+      "failedToLoadVersion": "Laden van versie mislukt",
+      "viewer3d": "3D- & kaartviewer",
+      "viewer3dDesc": "Bekijk onderdelen op de kaart en in 3D, met hun linked data"
     },
     "validation": {
       "title": "SHACL-validatie",
@@ -2511,6 +2513,16 @@
       "version": "Versie",
       "noVersions": "Geen versies gevonden voor dit vocabulaire.",
       "loadFailed": "Vocabulaire laden mislukt"
+    },
+    "datasetViewer": {
+      "title": "3D- & kaartviewer",
+      "back": "Dataset",
+      "map": "Kaart",
+      "threeD": "3D-modellen",
+      "elements": "Onderdelen",
+      "selectHint": "Selecteer een onderdeel op de kaart, in 3D of in de lijst om de linked data te zien.",
+      "openResource": "Open resource",
+      "empty": "Geen onderdelen met geometrie of 3D-modellen in deze dataset."
     }
   },
   "toast": {

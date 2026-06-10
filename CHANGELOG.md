@@ -53,6 +53,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Waalbrug bridge (EPSG:28992, IFC/glTF refs) plus real Wikidata landmarks (CC0 —
   Dragon Bridge Da Nang, Big Ben, White House, Empire State Building, Sannō Shrine)
   whose open 3D models live on Wikimedia Commons.
+- **Dataset 3D & map viewer** (frontend, `/datasets/:id/viewer`): an interactive map
+  (Leaflet, now a bundled npm dependency) and a 3D scene (three.js — glTF via
+  GLTFLoader, STL via STLLoader for the Commons landmark models) over the viewer feed,
+  with a shared selection: clicking a part on the map, in 3D, or in the element list
+  shows that element's linked data (via the existing browse API + `RdfTerm`).
+  `GeoPreview` migrated from CDN-loaded Leaflet to the bundled dependency.
 
 ### Changed
 - None.

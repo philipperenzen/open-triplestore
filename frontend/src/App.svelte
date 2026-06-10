@@ -35,6 +35,7 @@
   // Cytoscape, etc.) are only fetched when the route is first visited.
   import LazyPage from './components/LazyPage.svelte';
   const lazySparqlEditor     = () => import('./pages/SparqlEditor.svelte');
+  const lazyDatasetViewer    = () => import('./pages/DatasetViewer.svelte');
   const lazyApiServices      = () => import('./pages/ApiServices.svelte');
   // /graph-viz is deprecated: the unified browse page (/browse?view=graph) now
   // owns the graph viz. Keep a thin redirect so deep-links don't 404.
@@ -601,6 +602,9 @@
         </Route>
         <Route path="/validation" component={Validation} />
         <Route path="/datasets" component={Datasets} />
+        <Route path="/datasets/:id/viewer" let:params>
+          <LazyPage loader={lazyDatasetViewer} id={params.id} />
+        </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />
         </Route>
