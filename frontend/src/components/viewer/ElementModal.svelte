@@ -259,7 +259,7 @@
               </div>
             {/if}
             <Model3D
-              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format }]}
+              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis }]}
               on:select={(e) => {
                 // Picking an IFC mesh selects that atom (beam, slab, …): resolve
                 // its GlobalId to the feed element and open that panel.

@@ -157,7 +157,7 @@
     const ref = modelRefOf(el);
     if (!ref) return;
     try {
-      const cached = await loadModel(ref.url, ref.format);
+      const cached = await loadModel(ref.url, ref.format, { upAxis: ref.upAxis });
       if (entries.get(el.id) !== entry) return; // rebuilt meanwhile
       const model = cached.clone(true);
       // Clone materials so per-entry theming/highlighting never mutates the cache.
@@ -317,9 +317,20 @@
       if (!anchor || !e.modelGroup) continue;
       let feats = [];
       try {
-        feats = map.queryRenderedFeatures(map.project({ lng: anchor[0], lat: anchor[1] }), {
-          layers: [BUILDINGS_LAYER_ID],
-        });
+        const c = map.project({ lng: anchor[0], lat: anchor[1] });
+        // Query the model's whole FOOTPRINT, not just the anchor pixel — a tall
+        // model can poke through neighbouring extrusion footprints too. Radius =
+        // half the model's real size, converted to screen pixels at this zoom.
+        const mpp =
+          (156543.03392 * Math.cos((anchor[1] * Math.PI) / 180)) / Math.pow(2, map.getZoom());
+        const r = Math.min(140, Math.max(4, (e.meters || 50) / 2 / Math.max(mpp, 1e-6)));
+        feats = map.queryRenderedFeatures(
+          [
+            [c.x - r, c.y - r],
+            [c.x + r, c.y + r],
+          ],
+          { layers: [BUILDINGS_LAYER_ID] }
+        );
       } catch {
         continue;
       }

@@ -219,9 +219,22 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     let elements = j["elements"].as_array().expect("elements");
     assert_eq!(
         elements.len(),
-        7,
-        "collection root + 5 landmarks + CityJSON demo block: {j}"
+        6,
+        "collection root + 5 landmarks (the synthetic CityJSON block moved to the 3DBAG context graph): {j}"
     );
+    // Orientation annotations flow through: the two Z-up scans carry it, the
+    // Y-up models stay unannotated (no rotation).
+    let up = |name: &str| {
+        elements
+            .iter()
+            .find(|e| e["id"].as_str().unwrap_or("").ends_with(name))
+            .and_then(|e| e["up_axis"].as_str().map(str::to_string))
+    };
+    assert_eq!(up("BigBen").as_deref(), Some("Z"));
+    assert_eq!(up("EmpireStateBuilding").as_deref(), Some("Z"));
+    assert_eq!(up("WhiteHouse").as_deref(), Some("Z"));
+    assert_eq!(up("SannoShrine"), None);
+    assert_eq!(up("DragonBridge"), None);
 
     let bridge = elements
         .iter()
@@ -239,23 +252,6 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
         files.iter().any(|f| f[0].as_str() == Some("Stl")
             && f[1].as_str().unwrap_or("").contains("Dragon_Bridge")),
         "Commons STL reference present: {files:?}"
-    );
-
-    // The synthetic CityJSON block exposes its bundled, site-relative file.
-    let block = elements
-        .iter()
-        .find(|e| {
-            e["id"]
-                .as_str()
-                .unwrap_or("")
-                .ends_with("NijmegenCityBlock")
-        })
-        .expect("CityJSON demo block in feed");
-    let files = block["files"].as_array().expect("files");
-    assert!(
-        files.iter().any(|f| f[0].as_str() == Some("Cityjson")
-            && f[1].as_str() == Some("/samples/nijmegen-buildings.city.json")),
-        "CityJSON reference present: {files:?}"
     );
 }
 

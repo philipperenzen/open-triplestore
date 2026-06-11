@@ -34,11 +34,22 @@ const modelCache = new Map<string, Promise<THREE.Group>>();
 /**
  * Load a model into a normalised group (unit-ish bounding box, sitting on the
  * ground plane, centred on x/z) with [ModelGeoData] in `userData`. Cached per
- * URL; callers must `.clone()` before adding to a scene so cached geometry is
- * never mutated per-consumer.
+ * URL (+ orientation); callers must `.clone()` before adding to a scene so
+ * cached geometry is never mutated per-consumer.
+ *
+ * `upAxis: 'Z'` rotates a Z-up model into the scene's Y-up convention. There is
+ * no reliable way to detect a file's up-axis (3D-print STLs are usually Z-up,
+ * but plenty are exported Y-up — a tower and a bridge can't both win under one
+ * default), so orientation is *data*: the linked-data geometry node may carry
+ * `ots:modelUpAxis "Z"`, which the viewer feed forwards per element.
  */
-export function loadModel(url: string, format: ModelFormat): Promise<THREE.Group> {
-  const key = `${format}:${url}`;
+export function loadModel(
+  url: string,
+  format: ModelFormat,
+  opts: { upAxis?: string | null } = {},
+): Promise<THREE.Group> {
+  const upAxis = (opts.upAxis || '').toUpperCase() === 'Z' ? 'Z' : null;
+  const key = `${format}:${upAxis ?? '-'}:${url}`;
   let p = modelCache.get(key);
   if (!p) {
     p = (async () => {
@@ -49,10 +60,6 @@ export function loadModel(url: string, format: ModelFormat): Promise<THREE.Group
         group.add(gltf.scene);
       } else if (format === 'stl') {
         const geom = await new STLLoader().loadAsync(url);
-        // STL comes from CAD/3D-printing where Z is up; three.js scenes are
-        // Y-up. Without this the model lies flat on its back (a clock tower
-        // becomes a footbridge).
-        geom.rotateX(-Math.PI / 2);
         geom.computeVertexNormals();
         group.add(new THREE.Mesh(geom, defaultMaterial(false)));
       } else if (format === 'ifc') {
@@ -66,6 +73,14 @@ export function loadModel(url: string, format: ModelFormat): Promise<THREE.Group
         const city = format === 'cityjson' ? parseCityJSON(await res.json()) : parseCityGML(await res.text());
         group.add(city.group);
         anchorLonLat = city.anchorLonLat;
+      }
+      // Annotated Z-up content rotates into the Y-up scene BEFORE measuring, so
+      // realSize.y is the real-world height. IFC manages its own axes.
+      if (upAxis === 'Z' && format !== 'ifc') {
+        for (const child of group.children) {
+          child.rotation.x = -Math.PI / 2;
+        }
+        group.updateMatrixWorld(true);
       }
       const box = new THREE.Box3().setFromObject(group);
       const size = box.getSize(new THREE.Vector3());

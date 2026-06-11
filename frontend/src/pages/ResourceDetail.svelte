@@ -74,7 +74,7 @@
     if (!models.length) return;
     try {
       const { loadModel, realWorldMeters } = await import('../lib/viewer/models');
-      const group = await loadModel(models[0].url, models[0].format);
+      const group = await loadModel(models[0].url, models[0].format, { upAxis: models[0].upAxis });
       if (forIri !== iri) return;
       modelMeters = Math.round(realWorldMeters(group, 0));
     } catch {

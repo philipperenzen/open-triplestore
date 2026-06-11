@@ -31,6 +31,8 @@ function formatFromFogKey(key: string): ModelFormat | null {
 export interface ModelRef {
   url: string;
   format: ModelFormat;
+  /** Source up-axis from the element's `ots:modelUpAxis` annotation ('Z' rotates into Y-up scenes). */
+  upAxis?: string | null;
 }
 
 /** Preference when an element offers several formats. */
@@ -45,6 +47,7 @@ export function modelRefOf(el: {
   gltf_url?: string | null;
   ifc_url?: string | null;
   files?: [string, string][];
+  up_axis?: string | null;
 }): ModelRef | null {
   return modelRefsOf(el)[0] ?? null;
 }
@@ -58,6 +61,7 @@ export function modelRefsOf(el: {
   gltf_url?: string | null;
   ifc_url?: string | null;
   files?: [string, string][];
+  up_axis?: string | null;
 }): ModelRef[] {
   const found = new Map<ModelFormat, string>();
   if (el.gltf_url) found.set('gltf', el.gltf_url);
@@ -71,7 +75,7 @@ export function modelRefsOf(el: {
   const out: ModelRef[] = [];
   for (const format of FORMAT_ORDER) {
     const url = found.get(format);
-    if (url) out.push({ url, format });
+    if (url) out.push({ url, format, upAxis: el.up_axis ?? null });
   }
   return out;
 }
