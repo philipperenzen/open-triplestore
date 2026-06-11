@@ -1,7 +1,7 @@
 <script>
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { llmChat, llmHealth, sendLlmFeedback } from '../lib/api.js';
+  import { llmChat, llmChatStream, llmHealth, sendLlmFeedback } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { isAuthenticated } from '../lib/stores.js';
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
@@ -9,18 +9,24 @@
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
   import CsvPreview from '../components/chat/CsvPreview.svelte';
   import {
-    Sparkles, Send, ThumbsUp, ThumbsDown, Loader2,
+    Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
   // backend ran, ok or failed) plus any API runs the user clicked open.
-  let messages = []; // { role, content, queries?: [{sparql, ok, error?, columns?, rows?, truncated}], ranQuery?, showQuery?, reviewed?, isError?, runs?: [{id, method, path}] }
+  // While a turn streams, the trail entries are live: {sparql, pending, ok?,
+  // rowCount?, truncated?, error?} — replaced by the authoritative trail on done.
+  let messages = []; // { role, content, streaming?, stopped?, queries?, ranQuery?, showQuery?, reviewed?, isError?, runs? }
   let input = '';
   let loading = false;
   let llmStatus = null;
   let scrollEl;
   let runSeq = 0;
+  let abortCtl = null;
+  // Follow the stream only while the user is at the bottom — never yank the
+  // scroll position away from someone reading earlier messages.
+  let autoScroll = true;
 
   $: EXAMPLES = [
     $t('pages.llmChat.example1'),
@@ -36,43 +42,146 @@
     llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
   });
 
-  async function scrollToBottom() {
+  onDestroy(() => abortCtl?.abort());
+
+  function onScroll() {
+    if (!scrollEl) return;
+    autoScroll = scrollEl.scrollTop + scrollEl.clientHeight >= scrollEl.scrollHeight - 48;
+  }
+
+  async function scrollToBottom(force = false) {
     await tick();
-    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    if (scrollEl && (autoScroll || force)) scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+
+  // Coalesce streamed tokens: the model can emit dozens of deltas per second,
+  // and re-rendering markdown on every one wastes the main thread. Buffer and
+  // flush on a short timer instead — still reads as live typing.
+  let pendingText = '';
+  let flushTimer = null;
+  function queueDelta(draft, text) {
+    pendingText += text;
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      if (!pendingText) return;
+      draft.content += pendingText;
+      pendingText = '';
+      messages = messages;
+      scrollToBottom();
+    }, 50);
+  }
+  function clearDeltaQueue() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    pendingText = '';
   }
 
   async function send(text) {
     const content = (text ?? input).trim();
     if (!content || loading) return;
     input = '';
-    messages = [...messages, { role: 'user', content }];
     loading = true;
-    await scrollToBottom();
+    autoScroll = true;
 
-    // Transport-error bubbles (isError) are UI-only — never replay them as
-    // assistant turns in the model conversation.
-    const wire = messages.filter((m) => !m.isError).map((m) => ({ role: m.role, content: m.content }));
+    // The live assistant bubble this turn streams into.
+    const draft = {
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      queries: [],
+      ranQuery: false,
+      showQuery: false,
+      reviewed: null,
+      runs: [],
+    };
+    messages = [...messages, { role: 'user', content }, draft];
+    await scrollToBottom(true);
+
+    // Transport-error bubbles (isError) and empty drafts are UI-only — never
+    // replay them as assistant turns in the model conversation.
+    const wire = messages
+      .filter((m) => !m.isError && m !== draft && m.content)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    abortCtl = new AbortController();
+    let sawEvent = false;
     try {
-      const resp = await llmChat(wire);
-      messages = [...messages, {
-        role: 'assistant',
-        content: resp.answer || $t('pages.llmChat.noAnswer'),
-        queries: normalizeQueries(resp),
-        ranQuery: !!resp.ran_query,
-        showQuery: false,
-        reviewed: null,
-        runs: [],
-      }];
+      let resp;
+      try {
+        resp = await llmChatStream(wire, {
+          signal: abortCtl.signal,
+          onEvent: (ev) => { sawEvent = true; applyStreamEvent(draft, ev); },
+        });
+      } catch (e) {
+        // An older server (404) or a buffering proxy: retry once, non-streaming.
+        if (e?.name === 'AbortError' || sawEvent) throw e;
+        resp = await llmChat(wire);
+      }
+      clearDeltaQueue();
+      draft.content = resp.answer || $t('pages.llmChat.noAnswer');
+      draft.queries = normalizeQueries(resp);
+      draft.ranQuery = !!resp.ran_query;
+      draft.streaming = false;
     } catch (e) {
-      messages = [...messages, {
-        role: 'assistant',
-        isError: true,
-        content: e?.message || $t('pages.llmChat.unavailable'),
-      }];
+      clearDeltaQueue();
+      draft.streaming = false;
+      if (e?.name === 'AbortError') {
+        draft.stopped = true;
+        if (!draft.content && !draft.queries.length) {
+          // Nothing useful arrived — drop the empty bubble.
+          messages = messages.filter((m) => m !== draft);
+        }
+      } else if (draft.content) {
+        draft.errorNote = e?.message || $t('pages.llmChat.unavailable');
+      } else {
+        draft.isError = true;
+        draft.content = e?.message || $t('pages.llmChat.unavailable');
+        draft.queries = [];
+      }
     } finally {
+      abortCtl = null;
       loading = false;
+      messages = messages;
       await scrollToBottom();
     }
+  }
+
+  // Fold one streamed event into the live draft bubble.
+  function applyStreamEvent(draft, ev) {
+    if (ev.type === 'delta') {
+      queueDelta(draft, ev.text);
+      return;
+    }
+    if (ev.type === 'round_reset') {
+      clearDeltaQueue();
+      draft.content = '';
+    } else if (ev.type === 'query') {
+      draft.queries = [...draft.queries, { sparql: ev.sparql, pending: true }];
+    } else if (ev.type === 'query_result') {
+      const q = draft.queries[draft.queries.length - 1];
+      if (q) Object.assign(q, {
+        pending: false,
+        ok: ev.ok,
+        rowCount: ev.rows,
+        truncated: !!ev.truncated,
+        error: ev.error,
+      });
+    }
+    messages = messages;
+    scrollToBottom();
+  }
+
+  function stop() {
+    abortCtl?.abort();
+  }
+
+  // While streaming, an unfinished fenced block (``` not yet closed) would
+  // render as a broken half-widget — cut the draft at the dangling fence and
+  // let the closed part render; the rest arrives in a moment anyway.
+  function streamRenderable(text) {
+    const fences = [...text.matchAll(/^[ \t]*(`{3,}|~{3,})/gm)];
+    if (fences.length % 2 === 0) return text;
+    return text.slice(0, fences[fences.length - 1].index);
   }
 
   function onKeydown(e) {
@@ -163,7 +272,7 @@
     </div>
   {/if}
 
-  <div class="messages" bind:this={scrollEl}>
+  <div class="messages" bind:this={scrollEl} on:scroll={onScroll}>
     {#if messages.length === 0}
       <div class="welcome">
         <div class="welcome-icon"><Sparkles size={26} /></div>
@@ -183,7 +292,34 @@
     {#each messages as msg, i}
       <div class="row {msg.role}">
         <div class="bubble {msg.role}" class:error={msg.isError}>
-          {#if msg.role === 'assistant' && !msg.isError}
+          {#if msg.role === 'assistant' && !msg.isError && msg.streaming}
+            <!-- Live draft: tokens render as they stream (renderRich sanitizes
+                 with DOMPurify); widgets materialize when the turn completes. -->
+            {#if msg.content}
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+              <div class="bubble-text">{@html renderRich(streamRenderable(msg.content))}<span class="caret"></span></div>
+            {:else}
+              <p class="stream-status">
+                <Loader2 size={13} class="spin" />
+                {msg.queries.some((q) => q.pending) ? $t('pages.llmChat.statusQuerying') : $t('pages.llmChat.thinking')}
+              </p>
+            {/if}
+            {#if msg.queries.length}
+              <div class="live-trail">
+                {#each msg.queries as q}
+                  <span class="trail-chip" class:failed={q.pending === false && !q.ok}>
+                    {#if q.pending}
+                      <Loader2 size={11} class="spin" /> {$t('pages.llmChat.queryRunning')}
+                    {:else if q.ok}
+                      <Check size={11} /> {q.rowCount ?? 0}{q.truncated ? '+' : ''} {(q.rowCount ?? 0) === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}
+                    {:else}
+                      <AlertTriangle size={11} /> {$t('pages.llmChat.queryFailedShort')}
+                    {/if}
+                  </span>
+                {/each}
+              </div>
+            {/if}
+          {:else if msg.role === 'assistant' && !msg.isError}
             <!-- Interactive answer: markdown plus runnable sparql/api blocks and
                  chart/map/card/csv widgets (sanitized in ChatRichMessage). -->
             <div class="bubble-text">
@@ -193,6 +329,12 @@
                 on:openInSparql={(e) => openInSparql(e.detail)}
               />
             </div>
+            {#if msg.stopped}
+              <p class="stopped-note">{$t('pages.llmChat.stopped')}</p>
+            {/if}
+            {#if msg.errorNote}
+              <p class="stopped-note">{msg.errorNote}</p>
+            {/if}
           {:else}
             <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -207,7 +349,7 @@
             </div>
           {/if}
 
-          {#if msg.queries?.length}
+          {#if !msg.streaming && msg.queries?.length}
             <div class="query-block">
               <button class="query-toggle" on:click={() => { msg.showQuery = !msg.showQuery; messages = messages; }}>
                 {#if msg.showQuery}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
@@ -247,7 +389,7 @@
             </div>
           {/if}
 
-          {#if msg.role === 'assistant' && !msg.isError}
+          {#if msg.role === 'assistant' && !msg.isError && !msg.streaming}
             <div class="feedback">
               <span class="feedback-label">{$t('pages.llmChat.helpful')}</span>
               <button class="thumb" class:up={msg.reviewed === 'up'} on:click={() => review(msg, i, 'up')} aria-label={$t('pages.llmChat.helpfulYes')}><ThumbsUp size={13} /></button>
@@ -258,13 +400,6 @@
       </div>
     {/each}
 
-    {#if loading}
-      <div class="row assistant">
-        <div class="bubble assistant thinking">
-          <Loader2 size={15} class="spin" /> {$t('pages.llmChat.thinking')}
-        </div>
-      </div>
-    {/if}
   </div>
 
   <form class="composer" on:submit|preventDefault={() => send()}>
@@ -276,9 +411,15 @@
       placeholder={offline ? $t('pages.llmChat.composerOffline') : $t('pages.llmChat.composerPlaceholder')}
       disabled={offline || loading}
     ></textarea>
-    <button class="send-btn" type="submit" disabled={offline || loading || !input.trim()} aria-label={$t('pages.llmChat.send')}>
-      {#if loading}<Loader2 size={16} class="spin" />{:else}<Send size={16} />{/if}
-    </button>
+    {#if loading}
+      <button class="stop-btn" type="button" on:click={stop} aria-label={$t('pages.llmChat.stop')} title={$t('pages.llmChat.stop')}>
+        <Square size={13} />
+      </button>
+    {:else}
+      <button class="send-btn" type="submit" disabled={offline || !input.trim()} aria-label={$t('pages.llmChat.send')}>
+        <Send size={16} />
+      </button>
+    {/if}
   </form>
   <p class="disclaimer"><Database size={11} /> {$t('pages.llmChat.disclaimer')}</p>
 </div>
@@ -359,7 +500,27 @@
   .bubble.user { background: linear-gradient(135deg, #6d4ad9, #4f46e5); color: #fff; border-bottom-right-radius: 4px; }
   .bubble.assistant { background: var(--bg-strong); border: 1px solid var(--line-soft); color: var(--ink-800); border-bottom-left-radius: 4px; }
   .bubble.error { background: #fff8f8; border-color: #f3c9c9; color: #b91c1c; }
-  .bubble.thinking { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--ink-500); font-style: italic; }
+
+  /* Live streaming turn: status line, blinking caret, and the retrieval trail
+     chips that show each SPARQL round running and finishing in real time. */
+  .stream-status {
+    display: inline-flex; align-items: center; gap: 0.45rem; margin: 0;
+    color: var(--ink-500); font-style: italic; font-size: 0.88rem;
+  }
+  .caret {
+    display: inline-block; width: 7px; height: 1em; margin-left: 2px; border-radius: 2px;
+    background: currentColor; opacity: 0.6; vertical-align: text-bottom;
+    animation: caret-blink 1s steps(2, start) infinite;
+  }
+  @keyframes caret-blink { to { visibility: hidden; } }
+  .live-trail { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; }
+  .trail-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    font-size: 0.72rem; font-weight: 600; color: #4338ca;
+    background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 999px; padding: 2px 9px;
+  }
+  .trail-chip.failed { color: #b91c1c; background: #fff8f8; border-color: #f3c9c9; }
+  .stopped-note { margin: 0.45rem 0 0; font-size: 0.74rem; font-style: italic; color: var(--ink-400); }
 
   /* Markdown-rendered assistant text. Tight vertical rhythm so blocks sit snugly in
      the bubble; `breaks:true` turns single newlines into <br>, so no pre-wrap. */
@@ -479,6 +640,14 @@
     opacity: 0.4; cursor: not-allowed; box-shadow: none;
     background: linear-gradient(135deg, #b8b2d6, #a5a3c4);
   }
+  .stop-btn {
+    flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px; cursor: pointer;
+    display: grid; place-items: center; color: #dc2626;
+    background: #fff5f5; border: 1px solid #fca5a5;
+    transition: background 0.15s ease, transform 0.12s ease;
+  }
+  .stop-btn:hover { background: #fee2e2; }
+  .stop-btn:active { transform: scale(0.95); }
 
   .disclaimer {
     display: flex; align-items: center; gap: 0.35rem; justify-content: center;
@@ -497,4 +666,8 @@
   :global(:is([data-theme="dark"], .dark)) .query-error { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .open-sparql { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
   :global(:is([data-theme="dark"], .dark)) .open-sparql:hover { background: rgba(99,102,241,0.28); }
+  :global(:is([data-theme="dark"], .dark)) .trail-chip { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
+  :global(:is([data-theme="dark"], .dark)) .trail-chip.failed { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
+  :global(:is([data-theme="dark"], .dark)) .stop-btn { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.4); color: #fca5a5; }
+  :global(:is([data-theme="dark"], .dark)) .stop-btn:hover { background: rgba(220,38,38,0.2); }
 </style>

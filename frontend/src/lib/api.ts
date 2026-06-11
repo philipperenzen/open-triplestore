@@ -1,3 +1,4 @@
+
 const API_BASE = '';
 
 // In-memory token storage (M-2: avoids localStorage XSS exposure).
@@ -673,6 +674,47 @@ export async function llmChat(messages, model = null) {
   }
   return res.json();
 }
+
+// Streaming variant of llmChat. Calls `onEvent` for every server-sent event —
+// status / delta / round_reset / query / query_result — and resolves with the
+// terminal `done` payload (the same shape llmChat returns). Throws on transport
+// errors, on a terminal `error` event, and when the server doesn't actually
+// stream (older server, buffering proxy) — callers fall back to llmChat then.
+// Abort via `signal` to stop generation (closing the stream stops the server-side
+// turn as well).
+export async function llmChatStream(messages, { model = null, signal, onEvent } = {}) {
+  const token = getAccessToken();
+  const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}/api/llm/chat/stream`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({ messages, model }),
+    signal,
+  });
+  if (!res.ok) {
+    const msg = await extractErrorMessage(res);
+    const err = new ApiError(msg);
+    err.status = res.status;
+    throw err;
+  }
+  const contentType = res.headers.get('content-type') || '';
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    throw new ApiError('streaming unavailable');
+  }
+  const { sseJsonEvents } = await import('./sse.js');
+  for await (const ev of sseJsonEvents(res.body)) {
+    if (ev?.type === 'done') return ev.response;
+    if (ev?.type === 'error') throw new ApiError(ev.message || 'chat failed');
+    onEvent?.(ev);
+  }
+  throw new ApiError('stream ended unexpectedly');
+}
+
+// SHACL
+// Returns { report, run_id, ran_at } — the run is persisted server-side.
+// Pass { test: true } for a dry run that validates but is NOT recorded.
 export const validateDataset = (datasetId, data = {}, opts: { test?: boolean } = {}) =>
   request('POST', `/api/datasets/${datasetId}/validate${opts.test ? '?test=true' : ''}`, data);
 export const getShapes = (datasetId) =>

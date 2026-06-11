@@ -2572,6 +2572,12 @@
       "graphTriples": "{count} triples",
       "servedVersion": "dataset version {version}",
       "mapFeatures": "{count} locations",
+      "preparingWidget": "Preparing {label}…",
+      "pendingChart": "chart",
+      "pendingMap": "map",
+      "pendingCard": "info card",
+      "pendingTable": "table",
+      "pendingContent": "content",
       "noGeometry": "None of the WKT geometries in this map block could be read.",
       "chartAlt": "Chart",
       "brokenBlock": "This {label} block could not be rendered — showing its raw content."
