@@ -110,6 +110,16 @@ pub fn seed_open_triplestore(state: &AppState) {
     if disabled {
         return;
     }
+    // Two seeders can run concurrently on a fresh install: the boot task only
+    // reaches the demo seed after the SHACL/standards seeding (seconds), and the
+    // first-admin registration handler kicks one off the moment that admin
+    // exists — the browser-e2e harness registers its admin exactly in that
+    // window. The seed is idempotent but not concurrent with itself: both
+    // passes see "missing", then race their INSERTs into UNIQUE constraints
+    // (and both would download the demo IFC). Serialise process-wide; the
+    // second pass then no-ops via the existence checks.
+    static SEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SEED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if let Err(e) = try_seed(state) {
         tracing::warn!("open-triplestore demo seed skipped: {e}");
     }
@@ -303,6 +313,27 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drive `fut` to completion from any calling context. The seed normally runs
+/// on a `spawn_blocking` thread, where `Handle::current().block_on` would be
+/// fine — but tests call it straight from async workers, where that panics
+/// ("Cannot start a runtime from within a runtime"). A throwaway
+/// single-thread runtime on a scoped OS thread works from both.
+fn block_on_anywhere<T: Send>(
+    fut: impl std::future::Future<Output = T> + Send,
+) -> anyhow::Result<T> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                Ok(rt.block_on(fut))
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 /// Default source of the Schependomlaan design-model IFC — the canonical open
 /// Dutch BIM dataset (Nijmegen; CC BY 4.0, openBIMstandards/TU Eindhoven),
 /// mirrored on GitHub. Override with `SEED_IFC_URL`; disable the whole demo
@@ -336,22 +367,22 @@ fn seed_schependomlaan_ifc(state: &AppState, owner_id: &str) {
         return;
     }
     tracing::info!("seed: downloading Schependomlaan IFC ({url}) — first boot only");
-    // We're on a blocking thread (the seed runs in spawn_blocking), so driving
-    // the async download + import with block_on is safe here.
-    let handle = tokio::runtime::Handle::current();
-    let bytes = match handle.block_on(async {
+    let downloaded = block_on_anywhere(async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()?;
-        client
+        let bytes = client
             .get(&url)
             .send()
             .await?
             .error_for_status()?
             .bytes()
-            .await
-    }) {
-        Ok(b) => b.to_vec(),
+            .await?;
+        anyhow::Ok(bytes.to_vec())
+    })
+    .and_then(|r| r);
+    let bytes = match downloaded {
+        Ok(b) => b,
         Err(e) => {
             tracing::warn!(
                 "schependomlaan seed skipped (download failed, will retry next boot): {e}"
@@ -359,7 +390,7 @@ fn seed_schependomlaan_ifc(state: &AppState, owner_id: &str) {
             return;
         }
     };
-    match handle.block_on(crate::imports::ifc::import_ifc_bytes(
+    let imported = block_on_anywhere(crate::imports::ifc::import_ifc_bytes(
         state,
         DS,
         owner_id,
@@ -372,7 +403,9 @@ fn seed_schependomlaan_ifc(state: &AppState, owner_id: &str) {
         // The file's IfcSite carries an exporter-default location; anchor the
         // demo at the real Schependomlaan site (PDOK street centroid) instead.
         Some("POINT(5.83373 51.84114)".to_string()),
-    )) {
+    ))
+    .and_then(|r| r.map_err(anyhow::Error::msg));
+    match imported {
         Ok(o) => tracing::info!(
             "seeded Schependomlaan: {} elements / {} storeys / {} spaces; BOT {} + ifcOWL {} triples",
             o.stats.elements, o.stats.storeys, o.stats.spaces, o.stats.bot_triples, o.stats.ifcowl_triples
@@ -391,9 +424,6 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
     if !state.object_store.is_configured() || (!do_logo && !do_banner) {
         return;
     }
-    // The seed runs on a blocking thread (spawn_blocking), so drive the async
-    // object-store uploads to completion on the current runtime handle.
-    let rt = tokio::runtime::Handle::current();
     let assets: [(bool, &str, &'static [u8]); 2] = [
         (do_logo, "org-images", ORG_LOGO_PNG),
         (do_banner, "org-banners", ORG_BANNER_PNG),
@@ -403,11 +433,13 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
             continue;
         }
         let key = format!("{prefix}/{org_id}.png");
-        if let Err(e) = rt.block_on(state.object_store.upload(
+        let uploaded = block_on_anywhere(state.object_store.upload(
             &key,
             Bytes::from_static(bytes),
             "image/png",
-        )) {
+        ))
+        .and_then(|r| r);
+        if let Err(e) = uploaded {
             tracing::warn!("open-triplestore seed: branding upload to '{key}' failed: {e}");
             continue;
         }
