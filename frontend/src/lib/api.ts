@@ -1,4 +1,3 @@
-import { createSseParser } from './sse.js';
 
 const API_BASE = '';
 
@@ -643,117 +642,41 @@ export async function llmChat(messages, model = null) {
   return res.json();
 }
 
-// Streaming variant of llmChat (POST /api/llm/chat/stream, Server-Sent Events).
-// Answer tokens arrive through `onDelta` the moment the model produces them;
-// retrieval rounds surface live via `onQuery` / `onQueryResult`. Resolves with
-// the same final response object llmChat returns (the server's authoritative
-// `done` payload), so callers reconcile streamed state against it. Throws an
-// ApiError with `code === 'NO_STREAM'` when the server has no streaming endpoint
-// (older backend) — callers should fall back to llmChat. An AbortSignal lets the
-// user stop generation; the partial text already delivered stays valid.
-export async function llmChatStream(
-  messages,
-  {
-    model = null,
-    signal = undefined,
-    onMeta = null,
-    onRound = null,
-    onDelta = null,
-    onRoundDiscard = null,
-    onQuery = null,
-    onQueryResult = null,
-  }: {
-    model?: string | null;
-    signal?: AbortSignal;
-    onMeta?: ((meta: any) => void) | null;
-    onRound?: ((round: any) => void) | null;
-    onDelta?: ((text: string) => void) | null;
-    onRoundDiscard?: (() => void) | null;
-    onQuery?: ((q: any) => void) | null;
-    onQueryResult?: ((run: any) => void) | null;
-  } = {}
-) {
+// Streaming variant of llmChat. Calls `onEvent` for every server-sent event —
+// status / delta / round_reset / query / query_result — and resolves with the
+// terminal `done` payload (the same shape llmChat returns). Throws on transport
+// errors, on a terminal `error` event, and when the server doesn't actually
+// stream (older server, buffering proxy) — callers fall back to llmChat then.
+// Abort via `signal` to stop generation (closing the stream stops the server-side
+// turn as well).
+export async function llmChatStream(messages, { model = null, signal, onEvent } = {}) {
   const token = getAccessToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'text/event-stream',
-  };
+  const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${API_BASE}/api/llm/chat/stream`, {
     method: 'POST',
     headers,
     credentials: 'include',
-    signal,
     body: JSON.stringify({ messages, model }),
+    signal,
   });
-  if (res.status === 404 || res.status === 405) {
-    const err = new ApiError('streaming not supported by this server');
-    err.status = res.status;
-    (err as any).code = 'NO_STREAM';
-    throw err;
-  }
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
     err.status = res.status;
     throw err;
   }
-  if (!res.body) {
-    const err = new ApiError('streaming not supported in this browser');
-    (err as any).code = 'NO_STREAM';
-    throw err;
+  const contentType = res.headers.get('content-type') || '';
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    throw new ApiError('streaming unavailable');
   }
-
-  let final: any = null;
-  let streamError: string | null = null;
-  const parser = createSseParser((name, data) => {
-    let payload: any = null;
-    try {
-      payload = JSON.parse(data);
-    } catch {
-      payload = null;
-    }
-    switch (name) {
-      case 'meta':
-        onMeta?.(payload);
-        break;
-      case 'round':
-        onRound?.(payload);
-        break;
-      case 'delta':
-        if (typeof payload?.text === 'string' && payload.text) onDelta?.(payload.text);
-        break;
-      case 'round_discard':
-        onRoundDiscard?.();
-        break;
-      case 'query':
-        onQuery?.(payload);
-        break;
-      case 'query_result':
-        onQueryResult?.(payload);
-        break;
-      case 'done':
-        final = payload;
-        break;
-      case 'error':
-        streamError = payload?.message || 'the assistant stream failed';
-        break;
-    }
-  });
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    parser.push(decoder.decode(value, { stream: true }));
-    if (streamError) break; // terminal event — no need to drain further
+  const { sseJsonEvents } = await import('./sse.js');
+  for await (const ev of sseJsonEvents(res.body)) {
+    if (ev?.type === 'done') return ev.response;
+    if (ev?.type === 'error') throw new ApiError(ev.message || 'chat failed');
+    onEvent?.(ev);
   }
-  parser.finish();
-
-  if (streamError) throw new ApiError(streamError);
-  if (!final) throw new ApiError('the assistant stream ended unexpectedly');
-  return final;
+  throw new ApiError('stream ended unexpectedly');
 }
 
 // SHACL

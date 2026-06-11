@@ -81,7 +81,7 @@ pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
 ///
 /// Input: `<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1 2)`
 /// Output: `POINT(1 2)`
-fn extract_wkt(value: &str) -> &str {
+pub fn extract_wkt(value: &str) -> &str {
     let trimmed = value.trim();
     if trimmed.starts_with('<') {
         // Find the closing '>' and skip past it

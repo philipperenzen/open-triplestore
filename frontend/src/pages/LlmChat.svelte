@@ -1,5 +1,5 @@
 <script>
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { t } from 'svelte-i18n';
   import { llmChat, llmChatStream, llmHealth, sendLlmFeedback } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
@@ -7,24 +7,26 @@
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
+  import CsvPreview from '../components/chat/CsvPreview.svelte';
   import {
-    Sparkles, Send, Square, ThumbsUp, ThumbsDown, Loader2,
+    Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
   // backend ran, ok or failed) plus any API runs the user clicked open.
-  // While a turn streams it also has: streaming (bool), phase
-  // ('thinking'|'answering'|'querying'), and queries may hold {pending: true}
-  // entries for rounds whose result hasn't arrived yet.
-  let messages = []; // { role, content, queries?: [{sparql, ok, error?, columns?, rows?, truncated, pending?}], ranQuery?, showQuery?, reviewed?, isError?, note?, runs?: [{id, method, path}] }
+  // While a turn streams, the trail entries are live: {sparql, pending, ok?,
+  // rowCount?, truncated?, error?} — replaced by the authoritative trail on done.
+  let messages = []; // { role, content, streaming?, stopped?, queries?, ranQuery?, showQuery?, reviewed?, isError?, runs? }
   let input = '';
   let loading = false;
   let llmStatus = null;
   let scrollEl;
   let runSeq = 0;
-  let aborter = null;
-  let scrollQueued = false;
+  let abortCtl = null;
+  // Follow the stream only while the user is at the bottom — never yank the
+  // scroll position away from someone reading earlier messages.
+  let autoScroll = true;
 
   $: EXAMPLES = [
     $t('pages.llmChat.example1'),
@@ -40,114 +42,146 @@
     llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
   });
 
-  async function scrollToBottom() {
-    await tick();
-    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+  onDestroy(() => abortCtl?.abort());
+
+  function onScroll() {
+    if (!scrollEl) return;
+    autoScroll = scrollEl.scrollTop + scrollEl.clientHeight >= scrollEl.scrollHeight - 48;
   }
 
-  // Token-rate scroll following: only when the user is already near the bottom
-  // (don't fight a manual scroll-up), at most once per frame.
-  function followStream() {
-    if (scrollQueued || !scrollEl) return;
-    const near = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 120;
-    if (!near) return;
-    scrollQueued = true;
-    requestAnimationFrame(() => {
-      scrollQueued = false;
-      if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
-    });
+  async function scrollToBottom(force = false) {
+    await tick();
+    if (scrollEl && (autoScroll || force)) scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+
+  // Coalesce streamed tokens: the model can emit dozens of deltas per second,
+  // and re-rendering markdown on every one wastes the main thread. Buffer and
+  // flush on a short timer instead — still reads as live typing.
+  let pendingText = '';
+  let flushTimer = null;
+  function queueDelta(draft, text) {
+    pendingText += text;
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      if (!pendingText) return;
+      draft.content += pendingText;
+      pendingText = '';
+      messages = messages;
+      scrollToBottom();
+    }, 50);
+  }
+  function clearDeltaQueue() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    pendingText = '';
   }
 
   async function send(text) {
     const content = (text ?? input).trim();
     if (!content || loading) return;
     input = '';
-    messages = [...messages, { role: 'user', content }];
     loading = true;
-    await scrollToBottom();
+    autoScroll = true;
 
-    const wire = messages.map((m) => ({ role: m.role, content: m.content }));
-    // The assistant turn appears immediately and fills in as events stream.
-    const msg = {
-      role: 'assistant', content: '', streaming: true, phase: 'thinking',
-      queries: [], ranQuery: false, showQuery: false, reviewed: null, note: null, runs: [],
+    // The live assistant bubble this turn streams into.
+    const draft = {
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      queries: [],
+      ranQuery: false,
+      showQuery: false,
+      reviewed: null,
+      runs: [],
     };
-    messages = [...messages, msg];
-    aborter = new AbortController();
-    const touch = () => { messages = messages; followStream(); };
+    messages = [...messages, { role: 'user', content }, draft];
+    await scrollToBottom(true);
+
+    // Transport-error bubbles (isError) and empty drafts are UI-only — never
+    // replay them as assistant turns in the model conversation.
+    const wire = messages
+      .filter((m) => !m.isError && m !== draft && m.content)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    abortCtl = new AbortController();
+    let sawEvent = false;
     try {
-      const resp = await llmChatStream(wire, {
-        signal: aborter.signal,
-        onDelta: (chunk) => { msg.content += chunk; msg.phase = 'answering'; touch(); },
-        // The streamed text turned out to be a retrieval directive — drop it.
-        onRoundDiscard: () => { msg.content = ''; msg.phase = 'thinking'; touch(); },
-        onQuery: (q) => {
-          msg.phase = 'querying';
-          msg.queries = [...msg.queries, { sparql: q?.sparql || '', ok: null, pending: true }];
-          touch();
-        },
-        onQueryResult: (run) => {
-          const i = msg.queries.findIndex((r) => r.pending);
-          if (i !== -1) msg.queries[i] = { ...run, pending: false };
-          else msg.queries = [...msg.queries, { ...run, pending: false }];
-          msg.phase = 'thinking';
-          touch();
-        },
-      });
-      finalizeTurn(msg, resp);
+      let resp;
+      try {
+        resp = await llmChatStream(wire, {
+          signal: abortCtl.signal,
+          onEvent: (ev) => { sawEvent = true; applyStreamEvent(draft, ev); },
+        });
+      } catch (e) {
+        // An older server (404) or a buffering proxy: retry once, non-streaming.
+        if (e?.name === 'AbortError' || sawEvent) throw e;
+        resp = await llmChat(wire);
+      }
+      clearDeltaQueue();
+      draft.content = resp.answer || $t('pages.llmChat.noAnswer');
+      draft.queries = normalizeQueries(resp);
+      draft.ranQuery = !!resp.ran_query;
+      draft.streaming = false;
     } catch (e) {
-      if (e?.code === 'NO_STREAM') {
-        // Older server without the streaming endpoint — buffered call instead.
-        try {
-          finalizeTurn(msg, await llmChat(wire));
-        } catch (e2) {
-          failTurn(msg, e2);
+      clearDeltaQueue();
+      draft.streaming = false;
+      if (e?.name === 'AbortError') {
+        draft.stopped = true;
+        if (!draft.content && !draft.queries.length) {
+          // Nothing useful arrived — drop the empty bubble.
+          messages = messages.filter((m) => m !== draft);
         }
-      } else if (e?.name === 'AbortError') {
-        if (msg.content) {
-          msg.streaming = false; msg.phase = null;
-          msg.note = $t('pages.llmChat.stopped');
-          messages = messages;
-        } else {
-          messages = messages.filter((m) => m !== msg);
-        }
+      } else if (draft.content) {
+        draft.errorNote = e?.message || $t('pages.llmChat.unavailable');
       } else {
-        failTurn(msg, e);
+        draft.isError = true;
+        draft.content = e?.message || $t('pages.llmChat.unavailable');
+        draft.queries = [];
       }
     } finally {
+      abortCtl = null;
       loading = false;
-      aborter = null;
+      messages = messages;
       await scrollToBottom();
     }
   }
 
-  // Reconcile the turn to the server's authoritative response (same shape for
-  // the streamed `done` payload and the buffered endpoint).
-  function finalizeTurn(msg, resp) {
-    msg.content = resp.answer || $t('pages.llmChat.noAnswer');
-    msg.queries = normalizeQueries(resp);
-    msg.ranQuery = !!resp.ran_query;
-    msg.streaming = false;
-    msg.phase = null;
-    messages = messages;
-  }
-
-  // A turn that died mid-stream keeps its partial answer (with a note); one that
-  // produced nothing becomes an error bubble.
-  function failTurn(msg, e) {
-    msg.streaming = false;
-    msg.phase = null;
-    if (msg.content) {
-      msg.note = $t('pages.llmChat.interrupted');
-    } else {
-      msg.isError = true;
-      msg.content = e?.message || $t('pages.llmChat.unavailable');
+  // Fold one streamed event into the live draft bubble.
+  function applyStreamEvent(draft, ev) {
+    if (ev.type === 'delta') {
+      queueDelta(draft, ev.text);
+      return;
+    }
+    if (ev.type === 'round_reset') {
+      clearDeltaQueue();
+      draft.content = '';
+    } else if (ev.type === 'query') {
+      draft.queries = [...draft.queries, { sparql: ev.sparql, pending: true }];
+    } else if (ev.type === 'query_result') {
+      const q = draft.queries[draft.queries.length - 1];
+      if (q) Object.assign(q, {
+        pending: false,
+        ok: ev.ok,
+        rowCount: ev.rows,
+        truncated: !!ev.truncated,
+        error: ev.error,
+      });
     }
     messages = messages;
+    scrollToBottom();
   }
 
-  function stopStreaming() {
-    aborter?.abort();
+  function stop() {
+    abortCtl?.abort();
+  }
+
+  // While streaming, an unfinished fenced block (``` not yet closed) would
+  // render as a broken half-widget — cut the draft at the dangling fence and
+  // let the closed part render; the rest arrives in a moment anyway.
+  function streamRenderable(text) {
+    const fences = [...text.matchAll(/^[ \t]*(`{3,}|~{3,})/gm)];
+    if (fences.length % 2 === 0) return text;
+    return text.slice(0, fences[fences.length - 1].index);
   }
 
   function onKeydown(e) {
@@ -157,21 +191,10 @@
     }
   }
 
-  // The backend's `queries` array is the full retrieval trail; older responses
-  // only carry the single legacy sparql/columns/rows fields — adapt those.
+  // The backend's `queries` array is the full retrieval trail (it always
+  // accompanies the legacy sparql/columns/rows fields when a query ran).
   function normalizeQueries(resp) {
-    if (Array.isArray(resp.queries) && resp.queries.length) return resp.queries;
-    if (resp.sparql) {
-      return [{
-        sparql: resp.sparql,
-        ok: !!resp.ran_query,
-        error: null,
-        columns: resp.columns || null,
-        rows: resp.rows || null,
-        truncated: !!resp.truncated,
-      }];
-    }
-    return [];
+    return resp.queries ?? [];
   }
 
   // The user clicked an inline `GET /api/...` in the answer: attach a run panel
@@ -197,7 +220,11 @@
     if (msg.reviewed === rating) return;
     msg.reviewed = rating;
     messages = messages;
-    const lastSparql = msg.queries?.length ? msg.queries[msg.queries.length - 1].sparql : null;
+    // Prefer the last *successful* query in the trail (the one the answer is
+    // based on); only fall back to the last attempt if none succeeded.
+    const trail = msg.queries || [];
+    const best = [...trail].reverse().find((q) => q.ok) || trail[trail.length - 1] || null;
+    const lastSparql = best ? best.sparql : null;
     sendLlmFeedback({
       track: 'sparql',
       event: 'chat',
@@ -245,7 +272,7 @@
     </div>
   {/if}
 
-  <div class="messages" bind:this={scrollEl}>
+  <div class="messages" bind:this={scrollEl} on:scroll={onScroll}>
     {#if messages.length === 0}
       <div class="welcome">
         <div class="welcome-icon"><Sparkles size={26} /></div>
@@ -265,24 +292,49 @@
     {#each messages as msg, i}
       <div class="row {msg.role}">
         <div class="bubble {msg.role}" class:error={msg.isError}>
-          {#if msg.role === 'assistant' && !msg.isError}
+          {#if msg.role === 'assistant' && !msg.isError && msg.streaming}
+            <!-- Live draft: tokens render as they stream (renderRich sanitizes
+                 with DOMPurify); widgets materialize when the turn completes. -->
+            {#if msg.content}
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+              <div class="bubble-text">{@html renderRich(streamRenderable(msg.content))}<span class="caret"></span></div>
+            {:else}
+              <p class="stream-status">
+                <Loader2 size={13} class="spin" />
+                {msg.queries.some((q) => q.pending) ? $t('pages.llmChat.statusQuerying') : $t('pages.llmChat.thinking')}
+              </p>
+            {/if}
+            {#if msg.queries.length}
+              <div class="live-trail">
+                {#each msg.queries as q}
+                  <span class="trail-chip" class:failed={q.pending === false && !q.ok}>
+                    {#if q.pending}
+                      <Loader2 size={11} class="spin" /> {$t('pages.llmChat.queryRunning')}
+                    {:else if q.ok}
+                      <Check size={11} /> {q.rowCount ?? 0}{q.truncated ? '+' : ''} {(q.rowCount ?? 0) === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}
+                    {:else}
+                      <AlertTriangle size={11} /> {$t('pages.llmChat.queryFailedShort')}
+                    {/if}
+                  </span>
+                {/each}
+              </div>
+            {/if}
+          {:else if msg.role === 'assistant' && !msg.isError}
             <!-- Interactive answer: markdown plus runnable sparql/api blocks and
                  chart/map/card/csv widgets (sanitized in ChatRichMessage). -->
-            <div class="bubble-text" class:streaming-text={msg.streaming && msg.phase === 'answering'}>
+            <div class="bubble-text">
               <ChatRichMessage
                 content={msg.content}
-                streaming={!!msg.streaming}
                 on:runApi={(e) => attachRun(msg, e.detail)}
                 on:openInSparql={(e) => openInSparql(e.detail)}
               />
             </div>
-            {#if msg.streaming && msg.phase !== 'answering'}
-              <div class="stream-status">
-                <Loader2 size={13} class="spin" />
-                {msg.phase === 'querying' ? $t('pages.llmChat.runningQuery') : $t('pages.llmChat.thinking')}
-              </div>
+            {#if msg.stopped}
+              <p class="stopped-note">{$t('pages.llmChat.stopped')}</p>
             {/if}
-            {#if msg.note}<p class="stream-note">{msg.note}</p>{/if}
+            {#if msg.errorNote}
+              <p class="stopped-note">{msg.errorNote}</p>
+            {/if}
           {:else}
             <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -297,17 +349,15 @@
             </div>
           {/if}
 
-          {#if msg.queries?.length}
+          {#if !msg.streaming && msg.queries?.length}
             <div class="query-block">
               <button class="query-toggle" on:click={() => { msg.showQuery = !msg.showQuery; messages = messages; }}>
                 {#if msg.showQuery}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
                 <Terminal size={13} />
                 {#if msg.queries.length > 1}
                   {$t('pages.llmChat.ranQueries', { values: { count: msg.queries.length } })}
-                {:else if msg.queries[0].pending}
-                  {$t('pages.llmChat.runningQuery')}
                 {:else}
-                  {(msg.streaming ? msg.queries[0].ok : msg.ranQuery) ? $t('pages.llmChat.ranQuery') : $t('pages.llmChat.attemptedQuery')}
+                  {msg.ranQuery ? $t('pages.llmChat.ranQuery') : $t('pages.llmChat.attemptedQuery')}
                 {/if}
                 {#if msg.queries.length === 1 && msg.queries[0].rows}
                   <span class="row-count">· {msg.queries[0].rows.length}{msg.queries[0].truncated ? '+' : ''} {msg.queries[0].rows.length === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}</span>
@@ -325,26 +375,12 @@
                     <!-- highlightSparql escapes all source text (resultHighlight.js) -->
                     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                     <pre class="query-text"><code>{@html highlightSparql(q.sparql)}</code></pre>
-                    {#if q.pending}
-                      <p class="query-pending"><Loader2 size={12} class="spin" /> {$t('pages.llmChat.runningQuery')}</p>
-                    {/if}
                     {#if q.error}<p class="query-error">{q.error}</p>{/if}
                     <button class="open-sparql" on:click={() => openInSparql(q.sparql)}>
                       <Terminal size={12} /> {$t('pages.llmChat.openInSparql')}
                     </button>
                     {#if q.columns && q.rows && q.rows.length}
-                      <div class="table-wrap">
-                        <table>
-                          <thead>
-                            <tr>{#each q.columns as c}<th>{c}</th>{/each}</tr>
-                          </thead>
-                          <tbody>
-                            {#each q.rows as r}
-                              <tr>{#each r as cell}<td title={cell}>{cell}</td>{/each}</tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      </div>
+                      <CsvPreview columns={q.columns} rows={q.rows} framed={false} downloadable={false} />
                       {#if q.truncated}<p class="truncated-note">{$t('pages.llmChat.showingFirstRows', { values: { count: q.rows.length } })}</p>{/if}
                     {/if}
                   </div>
@@ -376,8 +412,8 @@
       disabled={offline || loading}
     ></textarea>
     {#if loading}
-      <button class="send-btn stop" type="button" on:click={stopStreaming} aria-label={$t('pages.llmChat.stop')} title={$t('pages.llmChat.stop')}>
-        <Square size={14} />
+      <button class="stop-btn" type="button" on:click={stop} aria-label={$t('pages.llmChat.stop')} title={$t('pages.llmChat.stop')}>
+        <Square size={13} />
       </button>
     {:else}
       <button class="send-btn" type="submit" disabled={offline || !input.trim()} aria-label={$t('pages.llmChat.send')}>
@@ -465,22 +501,26 @@
   .bubble.assistant { background: var(--bg-strong); border: 1px solid var(--line-soft); color: var(--ink-800); border-bottom-left-radius: 4px; }
   .bubble.error { background: #fff8f8; border-color: #f3c9c9; color: #b91c1c; }
 
-  /* Streaming feedback: a status row while the model thinks/queries, a blinking
-     caret at the end of the text while tokens arrive, a note for stopped turns. */
+  /* Live streaming turn: status line, blinking caret, and the retrieval trail
+     chips that show each SPARQL round running and finishing in real time. */
   .stream-status {
-    display: inline-flex; align-items: center; gap: 0.45rem;
-    color: var(--ink-500); font-style: italic; font-size: 0.85rem; margin-top: 0.15rem;
+    display: inline-flex; align-items: center; gap: 0.45rem; margin: 0;
+    color: var(--ink-500); font-style: italic; font-size: 0.88rem;
   }
-  .streaming-text :global(.md-seg:last-child > *:last-child)::after {
-    content: '▍'; margin-left: 1px; color: #6d4ad9;
+  .caret {
+    display: inline-block; width: 7px; height: 1em; margin-left: 2px; border-radius: 2px;
+    background: currentColor; opacity: 0.6; vertical-align: text-bottom;
     animation: caret-blink 1s steps(2, start) infinite;
   }
   @keyframes caret-blink { to { visibility: hidden; } }
-  .stream-note { margin: 0.45rem 0 0; font-size: 0.74rem; font-style: italic; color: var(--ink-400); }
-  .query-pending {
-    display: inline-flex; align-items: center; gap: 0.35rem;
-    margin: 0.35rem 0; font-size: 0.76rem; color: var(--ink-500); font-style: italic;
+  .live-trail { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.55rem; }
+  .trail-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    font-size: 0.72rem; font-weight: 600; color: #4338ca;
+    background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 999px; padding: 2px 9px;
   }
+  .trail-chip.failed { color: #b91c1c; background: #fff8f8; border-color: #f3c9c9; }
+  .stopped-note { margin: 0.45rem 0 0; font-size: 0.74rem; font-style: italic; color: var(--ink-400); }
 
   /* Markdown-rendered assistant text. Tight vertical rhythm so blocks sit snugly in
      the bubble; `breaks:true` turns single newlines into <br>, so no pre-wrap. */
@@ -554,13 +594,6 @@
   }
   .open-sparql:hover { background: #e0e7ff; }
 
-  .table-wrap { margin-top: 0.6rem; max-height: 280px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
-  table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
-  th, td {
-    text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line-soft);
-    max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  th { background: var(--bg-soft); position: sticky; top: 0; font-weight: 600; color: var(--ink-600); }
   .truncated-note { font-size: 0.72rem; color: var(--ink-400); margin: 0.35rem 0 0; }
 
   .feedback { display: flex; align-items: center; gap: 0.35rem; margin-top: 0.55rem; }
@@ -607,12 +640,14 @@
     opacity: 0.4; cursor: not-allowed; box-shadow: none;
     background: linear-gradient(135deg, #b8b2d6, #a5a3c4);
   }
-  /* While a reply streams the send button becomes a stop button. */
-  .send-btn.stop {
-    background: linear-gradient(135deg, #475569, #334155);
-    box-shadow: 0 2px 6px rgba(51,65,85,0.35), inset 0 1px 0 rgba(255,255,255,0.12);
+  .stop-btn {
+    flex-shrink: 0; width: 38px; height: 38px; border-radius: 11px; cursor: pointer;
+    display: grid; place-items: center; color: #dc2626;
+    background: #fff5f5; border: 1px solid #fca5a5;
+    transition: background 0.15s ease, transform 0.12s ease;
   }
-  .send-btn.stop:hover { filter: brightness(1.15); }
+  .stop-btn:hover { background: #fee2e2; }
+  .stop-btn:active { transform: scale(0.95); }
 
   .disclaimer {
     display: flex; align-items: center; gap: 0.35rem; justify-content: center;
@@ -631,4 +666,8 @@
   :global(:is([data-theme="dark"], .dark)) .query-error { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .open-sparql { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
   :global(:is([data-theme="dark"], .dark)) .open-sparql:hover { background: rgba(99,102,241,0.28); }
+  :global(:is([data-theme="dark"], .dark)) .trail-chip { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
+  :global(:is([data-theme="dark"], .dark)) .trail-chip.failed { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
+  :global(:is([data-theme="dark"], .dark)) .stop-btn { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.4); color: #fca5a5; }
+  :global(:is([data-theme="dark"], .dark)) .stop-btn:hover { background: rgba(220,38,38,0.2); }
 </style>

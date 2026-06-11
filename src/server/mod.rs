@@ -2,7 +2,6 @@ pub mod content_negotiation;
 pub mod error;
 mod linked_data;
 pub mod llm_sparql;
-pub mod llm_stream;
 pub mod openapi;
 pub mod routes;
 #[cfg(test)]

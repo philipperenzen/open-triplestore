@@ -6,9 +6,8 @@
   // bubble up as a `runApi` event — the chat page attaches the actual run panel.
   import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { Loader2 } from 'lucide-svelte';
   import { renderMarkdown } from '../../lib/markdown.js';
-  import { parseChatBlocks, reuseSegments, decorateApiLinks } from '../../lib/chatRich.js';
+  import { parseChatBlocks, decorateApiLinks } from '../../lib/chatRich.js';
   import SparqlRunBlock from './SparqlRunBlock.svelte';
   import ApiRunBlock from './ApiRunBlock.svelte';
   import ChatChart from './ChatChart.svelte';
@@ -17,42 +16,13 @@
   import CsvPreview from './CsvPreview.svelte';
 
   export let content = '';
-  /** True while the message is still arriving token by token: unclosed widget
-   *  fences render as a pending placeholder instead of half-parsed widgets. */
-  export let streaming = false;
 
   const dispatch = createEventDispatcher();
 
-  // Streamed messages re-parse on every delta; reuseSegments keeps the object
-  // identity of unchanged segments so settled widgets (charts, maps) don't
-  // re-render, and the WeakMap below makes unchanged markdown runs free.
-  let prevSegments = [];
-  $: segments = trackSegments(content, streaming);
-  function trackSegments(text, isStreaming) {
-    prevSegments = reuseSegments(prevSegments, parseChatBlocks(text, { streaming: isStreaming }));
-    return prevSegments;
-  }
+  $: segments = parseChatBlocks(content);
 
-  const htmlCache = new WeakMap();
-  function mdHtml(seg) {
-    let html = htmlCache.get(seg);
-    if (html === undefined) {
-      html = decorateApiLinks(renderMarkdown(seg.source, { breaks: true }).html);
-      htmlCache.set(seg, html);
-    }
-    return html;
-  }
-
-  function pendingLabel(label) {
-    switch (label) {
-      case 'sparql': return $t('components.chat.sparqlTitle');
-      case 'api': return $t('components.chat.apiTitle');
-      case 'chart': return $t('components.chat.pendingChart');
-      case 'map': return $t('components.chat.pendingMap');
-      case 'card': return $t('components.chat.pendingCard');
-      case 'csv': return $t('components.chat.pendingTable');
-      default: return $t('components.chat.pendingContent');
-    }
+  function mdHtml(src) {
+    return decorateApiLinks(renderMarkdown(src, { breaks: true }).html);
   }
 
   function apiLinkFrom(e) {
@@ -78,12 +48,7 @@
     <!-- renderMarkdown sanitizes with DOMPurify; decorateApiLinks only adds attributes. -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-    <div class="md-seg" on:click={onClick} on:keydown={onKeydown}>{@html mdHtml(seg)}</div>
-  {:else if seg.kind === 'pending'}
-    <div class="pending" role="status">
-      <Loader2 size={13} class="spin" />
-      <span>{$t('components.chat.preparingWidget', { values: { label: pendingLabel(seg.label) } })}</span>
-    </div>
+    <div class="md-seg" on:click={onClick} on:keydown={onKeydown}>{@html mdHtml(seg.source)}</div>
   {:else if seg.kind === 'sparql'}
     <SparqlRunBlock code={seg.code} on:openInSparql />
   {:else if seg.kind === 'api'}
@@ -106,19 +71,6 @@
 
 <style>
   .md-seg { word-break: break-word; }
-  /* A widget block still being generated (streaming): calm shimmer, fixed-ish
-     height so the bubble doesn't jump when the real widget replaces it. */
-  .pending {
-    display: flex; align-items: center; gap: 0.45rem;
-    margin: 0 0 0.55rem; padding: 0.55rem 0.75rem;
-    border: 1px dashed var(--line-strong, rgba(15,32,39,0.16));
-    border-radius: 10px; color: var(--ink-400); font-size: 0.78rem; font-style: italic;
-    background: linear-gradient(100deg, transparent 30%, rgba(109,74,217,0.07) 50%, transparent 70%)
-      var(--bg-soft, rgba(15,32,39,0.03));
-    background-size: 220% 100%;
-    animation: pending-sheen 1.6s linear infinite;
-  }
-  @keyframes pending-sheen { from { background-position: 120% 0; } to { background-position: -100% 0; } }
   /* Inline `GET /api/...` codes decorated by decorateApiLinks() — make them read
      as clickable chips inside the prose. */
   .md-seg :global(code.chat-api-link) {

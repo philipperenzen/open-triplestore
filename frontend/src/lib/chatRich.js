@@ -21,40 +21,15 @@ const MAX_MAP_FEATURES = 200;
 const MAX_CARD_FACTS = 24;
 const MAX_CSV_ROWS = 500;
 
-/** Fence languages that render as live widgets (see specialSegment). */
-const SPECIAL_LANGS = [
-  'sparql', 'rq', 'api', 'http', 'endpoint', 'chart',
-  'map', 'geo', 'card', 'infocard', 'info-card', 'csv',
-];
-
-/** Canonical widget kind for a special fence language (for pending labels). */
-function canonicalKind(lang) {
-  switch (lang) {
-    case 'rq': return 'sparql';
-    case 'http': case 'endpoint': return 'api';
-    case 'geo': return 'map';
-    case 'infocard': case 'info-card': return 'card';
-    default: return lang;
-  }
-}
-
 /**
  * Split an assistant message into renderable segments.
- *
- * With `streaming: true` the source is a partial, still-growing answer: an
- * unclosed widget fence at the end becomes a `{kind:'pending'}` placeholder
- * instead of a half-parsed (and flickering) widget or broken-block error. A
- * fence whose language tag may still be incomplete (it's the very last line,
- * e.g. "```cha…") is held as a generic pending block rather than guessing.
- *
  * @param {string} source - the raw markdown answer
- * @param {{streaming?: boolean}} [opts]
  * @returns {Array<object>} segments: {kind:'md', source} | {kind:'sparql', code}
  *   | {kind:'api', method, path} | {kind:'chart', spec} | {kind:'map', features}
  *   | {kind:'card', card} | {kind:'csv', columns, rows, raw}
- *   | {kind:'broken', label, error, raw} | {kind:'pending', label}
+ *   | {kind:'broken', label, error, raw}
  */
-export function parseChatBlocks(source, { streaming = false } = {}) {
+export function parseChatBlocks(source) {
   const lines = String(source ?? '').split('\n');
   const segments = [];
   let md = [];
@@ -81,22 +56,6 @@ export function parseChatBlocks(source, { streaming = false } = {}) {
         break;
       }
     }
-    if (close === -1 && streaming) {
-      // The block is still being generated. Widget fences become a placeholder;
-      // ordinary code fences stay in the markdown flow for a live code preview.
-      const langFinal = i < lines.length - 1; // a body line exists ⇒ the tag line was completed
-      if (langFinal ? SPECIAL_LANGS.includes(lang) : couldBecomeSpecial(lang)) {
-        flushMd();
-        segments.push({
-          kind: 'pending',
-          label: SPECIAL_LANGS.includes(lang) ? canonicalKind(lang) : '',
-        });
-      } else {
-        md.push(...lines.slice(i));
-        flushMd();
-      }
-      return segments;
-    }
     const body = lines.slice(i + 1, close === -1 ? lines.length : close).join('\n');
     const seg = specialSegment(lang, body);
     if (seg) {
@@ -111,41 +70,6 @@ export function parseChatBlocks(source, { streaming = false } = {}) {
   }
   flushMd();
   return segments;
-}
-
-/** Is `lang` a (possibly still-typing) prefix of any widget language? */
-function couldBecomeSpecial(lang) {
-  return SPECIAL_LANGS.some((s) => s.startsWith(lang));
-}
-
-/** Stable identity key for one parsed segment (see reuseSegments). */
-function segKey(seg) {
-  switch (seg.kind) {
-    case 'md': return `md:${seg.source}`;
-    case 'sparql': return `sparql:${seg.code}`;
-    case 'api': return `api:${seg.method} ${seg.path}`;
-    case 'chart': return `chart:${JSON.stringify(seg.spec)}`;
-    case 'map': return `map:${JSON.stringify(seg.features)}`;
-    case 'card': return `card:${JSON.stringify(seg.card)}`;
-    case 'csv': return `csv:${seg.raw}`;
-    case 'pending': return `pending:${seg.label}`;
-    case 'broken': return `broken:${seg.label}:${seg.raw}`;
-    default: return seg.kind;
-  }
-}
-
-/**
- * Re-parsing a streaming message produces all-new segment objects every token,
- * which would re-render every widget (charts, Leaflet maps) on each delta. Keep
- * the previous object whenever a segment is unchanged, so Svelte sees identical
- * props and leaves settled widgets alone — only the still-growing tail updates.
- */
-export function reuseSegments(prev, next) {
-  if (!prev || !prev.length) return next;
-  return next.map((seg, i) => {
-    const p = prev[i];
-    return p && p.kind === seg.kind && segKey(p) === segKey(seg) ? p : seg;
-  });
 }
 
 /** Map one fenced block to a widget segment, or null to leave it as markdown. */
@@ -265,6 +189,59 @@ export function describeApiService(path) {
 
 const str = (v) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '');
 
+/**
+ * JSON.parse with a lenient retry for model output: smaller models sneak `//`
+ * or  `/* *\/` comments and trailing commas into widget specs. The stripper is
+ * string-aware, so `https://…` inside a value survives. Returns undefined when
+ * even the lenient pass fails.
+ */
+export function lenientJsonParse(text) {
+  const s = String(text ?? '');
+  try {
+    return JSON.parse(s);
+  } catch {
+    /* lenient pass below */
+  }
+  let out = '';
+  let inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      out += c;
+      if (c === '\\') {
+        out += s[i + 1] ?? '';
+        i++;
+      } else if (c === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      out += c;
+      continue;
+    }
+    if (c === '/' && s[i + 1] === '/') {
+      while (i < s.length && s[i] !== '\n') i++;
+      out += '\n';
+      continue;
+    }
+    if (c === '/' && s[i + 1] === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    out += c;
+  }
+  out = out.replace(/,\s*([}\]])/g, '$1');
+  try {
+    return JSON.parse(out);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Normalise one chart data array into [{label, value}] with finite values. */
 function normPoints(arr) {
   if (!Array.isArray(arr)) return [];
@@ -288,12 +265,8 @@ function normPoints(arr) {
  * @returns {{spec?: {type, title, xLabel, yLabel, series: Array<{name, data}>}, error?: string}}
  */
 export function parseChartSpec(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return { error: 'invalid JSON' };
-  }
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
   if (!raw || typeof raw !== 'object') return { error: 'not an object' };
   const type = ['bar', 'line', 'pie'].includes(raw.type) ? raw.type : 'bar';
   let series;
@@ -326,12 +299,8 @@ export function parseMapSpec(text) {
   const t = String(text ?? '').trim();
   let features = [];
   if (t.startsWith('{') || t.startsWith('[')) {
-    let raw;
-    try {
-      raw = JSON.parse(t);
-    } catch {
-      return { error: 'invalid JSON' };
-    }
+    const raw = lenientJsonParse(t);
+    if (raw === undefined) return { error: 'invalid JSON' };
     const arr = Array.isArray(raw) ? raw : raw?.features;
     if (!Array.isArray(arr)) return { error: 'missing "features" array' };
     features = arr
@@ -360,12 +329,8 @@ export function parseMapSpec(text) {
  * @returns {{card?: {title, subtitle, iri, image, facts}, error?: string}}
  */
 export function parseInfoCard(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return { error: 'invalid JSON' };
-  }
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'not an object' };
   const facts = Array.isArray(raw.facts)
     ? raw.facts

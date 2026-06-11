@@ -1,60 +1,52 @@
-// Minimal incremental parser for a Server-Sent-Events byte stream, for endpoints
-// EventSource can't reach (POST bodies + Authorization headers — our streaming
-// chat). Feed it decoded text chunks as they arrive; it invokes `onEvent(name,
-// data)` for each complete event. Handles the full framing: CRLF or LF line
-// ends, `data:` with or without the leading space, multi-`data:`-line events
-// (joined with \n per spec), `:` comment keep-alives, and chunk boundaries that
-// split lines anywhere.
+// Minimal Server-Sent-Events reader for fetch() response bodies.
+//
+// EventSource can't send Authorization headers or a POST body, so the chat
+// streams through fetch + ReadableStream instead. The server emits one JSON
+// document per `data:` line; this yields each parsed document in order.
 
 /**
- * @param {(name: string, data: string) => void} onEvent
- * @returns {{push(chunk: string): void, finish(): void}}
+ * Async-iterate the JSON payloads of an SSE response body.
+ * Ignores comments, `event:`/`id:` fields, blank lines, unparsable payloads,
+ * and the OpenAI-style `[DONE]` sentinel.
+ *
+ * @param {ReadableStream<Uint8Array>} body fetch response body
  */
-export function createSseParser(onEvent) {
+export async function* sseJsonEvents(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
   let buf = '';
-  let eventName = '';
-  let dataLines = [];
-
-  const dispatch = () => {
-    if (dataLines.length) {
-      onEvent(eventName || 'message', dataLines.join('\n'));
-    }
-    eventName = '';
-    dataLines = [];
-  };
-
-  const takeLine = (line) => {
-    if (line === '') {
-      dispatch();
-    } else if (line.startsWith(':')) {
-      // comment / keep-alive
-    } else if (line.startsWith('event:')) {
-      eventName = line.slice('event:'.length).trim();
-    } else if (line.startsWith('data:')) {
-      const d = line.slice('data:'.length);
-      dataLines.push(d.startsWith(' ') ? d.slice(1) : d);
-    }
-    // other fields (id:, retry:) are irrelevant here
-  };
-
-  return {
-    push(chunk) {
-      buf += chunk;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
       let nl;
-      while ((nl = buf.indexOf('\n')) !== -1) {
-        let line = buf.slice(0, nl);
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).replace(/\r$/, '');
         buf = buf.slice(nl + 1);
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        takeLine(line);
+        const ev = parseSseLine(line);
+        if (ev !== undefined) yield ev;
       }
-    },
-    // The server may close without a trailing blank line — deliver what's pending.
-    finish() {
-      if (buf !== '') {
-        takeLine(buf.endsWith('\r') ? buf.slice(0, -1) : buf);
-        buf = '';
-      }
-      dispatch();
-    },
-  };
+    }
+    // A final unterminated line (stream closed without trailing newline).
+    const ev = parseSseLine(buf.replace(/\r$/, ''));
+    if (ev !== undefined) yield ev;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Parse one SSE line into its JSON payload, or `undefined` when the line
+ * carries no event data (other fields, comments, sentinels, broken JSON).
+ */
+export function parseSseLine(line) {
+  if (!line.startsWith('data:')) return undefined;
+  const payload = line.slice(5).trim();
+  if (!payload || payload === '[DONE]') return undefined;
+  try {
+    return JSON.parse(payload);
+  } catch {
+    return undefined;
+  }
 }

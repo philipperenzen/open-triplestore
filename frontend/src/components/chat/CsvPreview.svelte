@@ -3,6 +3,7 @@
   // as a real table, full content downloadable.
   import { t } from 'svelte-i18n';
   import { Download, Table2 } from 'lucide-svelte';
+  import { downloadFile } from '../../lib/rdf-utils.js';
 
   export let columns = [];
   export let rows = [];
@@ -10,16 +11,14 @@
   export let filename = 'data';
   /** Standalone widget (header strip + border) vs embedded in another card. */
   export let framed = true;
+  /** Offer a CSV download (requires `raw`); off for callers without raw text. */
+  export let downloadable = true;
 
   const MAX_SHOWN = 100;
   $: shown = rows.slice(0, MAX_SHOWN);
 
   function download() {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([raw], { type: 'text/csv' }));
-    a.download = `${filename}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    downloadFile(raw, `${filename}.csv`, 'text/csv');
   }
 </script>
 
@@ -27,7 +26,9 @@
   {#if framed}
     <div class="head">
       <span class="label"><Table2 size={12} /> CSV</span>
-      <button class="link" on:click={download}><Download size={11} /> {$t('components.chat.download')}</button>
+      {#if downloadable}
+        <button class="link" on:click={download}><Download size={11} /> {$t('components.chat.download')}</button>
+      {/if}
     </div>
   {/if}
   <div class="table-wrap">
@@ -46,7 +47,7 @@
   <p class="note">
     {$t('components.chat.rowCount', { values: { count: rows.length } })}
     {#if rows.length > MAX_SHOWN}· {$t('components.chat.showingFirst', { values: { count: MAX_SHOWN } })}{/if}
-    {#if !framed}
+    {#if !framed && downloadable}
       · <button class="link" on:click={download}><Download size={11} /> {$t('components.chat.download')}</button>
     {/if}
   </p>

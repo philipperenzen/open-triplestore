@@ -12,22 +12,28 @@
 //! `LLM_API_KEY` if the endpoint requires a bearer token. Nothing here is tied to a specific
 //! provider or model. When no endpoint is reachable the UI hides the AI features.
 
-use std::collections::HashSet;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::State,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Extension, Json, Router,
 };
+use futures::stream::Stream;
+use futures::StreamExt;
 use oxigraph::model::Term;
 use oxigraph::sparql::QueryResults;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::saved_queries::store::SavedQueryStore;
+use crate::store::TripleStore;
 
 use super::error::AppError;
 use super::routes::{resolve_prefixes, scope_query_to_authorized};
@@ -73,7 +79,7 @@ fn shacl_model() -> String {
 
 /// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
-pub(crate) fn api_key() -> Option<String> {
+fn api_key() -> Option<String> {
     env_nonempty("LLM_API_KEY")
 }
 
@@ -84,20 +90,18 @@ fn env_nonempty(key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Shared HTTP client for every call to the LLM gateway. Connection pooling +
-/// keep-alive means repeat calls (every chat round, health probe, feedback post)
-/// reuse an established TCP/TLS connection instead of paying a fresh handshake —
-/// for a TLS gateway that alone shaves ~100–300 ms off time-to-first-token, and a
-/// multi-round chat turn pays it once instead of per round.
-pub(crate) fn llm_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
+/// Shared HTTP client for every gateway call. A fresh `Client::new()` per call
+/// would open a new connection (TCP + TLS handshake) for every completion —
+/// with up to four completions per chat turn that handshake tax is pure added
+/// latency. One pooled client keeps the connection to the gateway alive.
+fn http() -> &'static reqwest::Client {
+    static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
+    HTTP.get_or_init(|| {
         reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(5))
             .pool_idle_timeout(Duration::from_secs(90))
-            .tcp_keepalive(Duration::from_secs(60))
             .build()
-            .expect("default reqwest client must build")
+            .expect("default reqwest client")
     })
 }
 
@@ -123,7 +127,7 @@ pub(crate) async fn chat_completion(
         "{}/v1/chat/completions",
         gateway_base().trim_end_matches('/')
     );
-    let mut rb = llm_client().post(&url).json(&payload);
+    let mut rb = http().post(&url).json(&payload);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -148,6 +152,12 @@ pub(crate) async fn chat_completion(
     Ok(strip_code_fence(content))
 }
 
+/// Per-completion timeout for chat turns. Generous because the bundled Ollama
+/// service runs on whatever hardware is at hand — a 7B model on CPU with a long
+/// platform context can legitimately take more than a minute per completion.
+/// Hosted APIs answer in seconds and are unaffected.
+const CHAT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Send a full multi-turn conversation to the gateway and return the assistant's
 /// raw reply (trimmed, no code-fence stripping — the chat answer is prose, and any
 /// embedded SPARQL is extracted/sanitised separately). Used by the chat endpoint.
@@ -166,10 +176,10 @@ pub(crate) async fn chat_completion_messages(
         "{}/v1/chat/completions",
         gateway_base().trim_end_matches('/')
     );
-    let mut rb = llm_client()
+    let mut rb = http()
         .post(&url)
         .json(&payload)
-        .timeout(Duration::from_secs(60));
+        .timeout(CHAT_COMPLETION_TIMEOUT);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -194,14 +204,223 @@ pub(crate) async fn chat_completion_messages(
         .to_string())
 }
 
+// ─── Streaming completions ─────────────────────────────────────────────────────
+//
+// The streaming chat path asks the gateway for `stream: true` and forwards
+// answer tokens to the browser as they arrive, so the user reads the answer
+// while it is being written instead of staring at a spinner for the whole
+// multi-round turn. Servers that ignore `stream: true` (and reply with a plain
+// JSON body) degrade gracefully to a single delta.
+
+/// Re-assemble SSE lines from arbitrarily-chunked network bytes. OpenAI-style
+/// streams put one JSON document per `data:` line, but a TCP chunk can split a
+/// line anywhere — this buffers the tail until its newline arrives.
+#[derive(Default)]
+struct SseLineBuffer {
+    buf: Vec<u8>,
+}
+
+impl SseLineBuffer {
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
+            line.pop(); // the \n itself
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            out.push(String::from_utf8_lossy(&line).into_owned());
+        }
+        out
+    }
+}
+
+/// The payload of an SSE `data:` line (`None` for events, ids and comments).
+fn sse_data(line: &str) -> Option<&str> {
+    line.strip_prefix("data:").map(str::trim)
+}
+
+/// The text piece carried by one streamed completion chunk. Handles the
+/// OpenAI delta shape plus the whole-message and legacy-text shapes some
+/// gateways emit instead.
+fn stream_delta_text(v: &Value) -> Option<&str> {
+    let choice = v.get("choices")?.get(0)?;
+    choice["delta"]["content"]
+        .as_str()
+        .or_else(|| choice["message"]["content"].as_str())
+        .or_else(|| choice["text"].as_str())
+}
+
+/// Decides, token by token, whether a round's reply is prose worth showing live
+/// or a `SPARQL:` execution directive that must stay internal. Holds back the
+/// first few characters until the classification is unambiguous, then either
+/// suppresses everything (directive) or passes tokens straight through.
+struct DeltaGate {
+    held: String,
+    decided: bool,
+    suppress: bool,
+    /// Whether any text was forwarded to the client this round — when a
+    /// directive shows up later anyway, the caller emits a `RoundReset` so the
+    /// client clears the obsolete draft.
+    forwarded: bool,
+}
+
+const DIRECTIVE_MARKER: &str = "SPARQL:";
+
+impl DeltaGate {
+    fn new() -> Self {
+        Self {
+            held: String::new(),
+            decided: false,
+            suppress: false,
+            forwarded: false,
+        }
+    }
+
+    /// Is `t` (what we have of the reply so far, trimmed) still a possible
+    /// prefix of the directive marker?
+    fn could_be_marker(t: &str) -> bool {
+        let n = t.len().min(DIRECTIVE_MARKER.len());
+        t.as_bytes()[..n].eq_ignore_ascii_case(&DIRECTIVE_MARKER.as_bytes()[..n])
+    }
+
+    async fn push(&mut self, sink: &EventSink, piece: &str) {
+        if self.suppress {
+            return;
+        }
+        if self.decided {
+            self.forwarded = true;
+            sink.delta(piece.to_string()).await;
+            return;
+        }
+        self.held.push_str(piece);
+        let t = self.held.trim_start();
+        if t.len() < DIRECTIVE_MARKER.len() {
+            if Self::could_be_marker(t) {
+                return; // still ambiguous — keep holding
+            }
+        } else if Self::could_be_marker(t) {
+            self.decided = true;
+            self.suppress = true;
+            return;
+        }
+        self.decided = true;
+        let flush = std::mem::take(&mut self.held);
+        if !flush.is_empty() {
+            self.forwarded = true;
+            sink.delta(flush).await;
+        }
+    }
+
+    /// Flush a short reply that never reached the classification threshold.
+    async fn finish(&mut self, sink: &EventSink) {
+        if self.decided || self.suppress {
+            return;
+        }
+        let t = self.held.trim_start();
+        self.decided = true;
+        if t.is_empty() || Self::could_be_marker(t) {
+            return;
+        }
+        let flush = std::mem::take(&mut self.held);
+        self.forwarded = true;
+        sink.delta(flush).await;
+    }
+}
+
+/// Streamed twin of [`chat_completion_messages`]: requests `stream: true`,
+/// forwards each token through `gate` (which classifies prose vs directive),
+/// and returns the assembled full reply. Gateways that answer with a plain
+/// JSON body instead of an event stream are handled transparently.
+async fn chat_completion_messages_stream(
+    model: &str,
+    messages: &[Value],
+    max_tokens: u32,
+    sink: &EventSink,
+    gate: &mut DeltaGate,
+) -> Result<String, AppError> {
+    let payload = json!({
+        "model": model,
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "stream": true,
+    });
+    let url = format!(
+        "{}/v1/chat/completions",
+        gateway_base().trim_end_matches('/')
+    );
+    let mut rb = http()
+        .post(&url)
+        .json(&payload)
+        .timeout(CHAT_COMPLETION_TIMEOUT);
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    let resp = rb
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(AppError::Internal(format!(
+            "LLM endpoint returned {}",
+            resp.status()
+        )));
+    }
+    let is_event_stream = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/event-stream"))
+        .unwrap_or(false);
+    if !is_event_stream {
+        // The server ignored `stream: true` — one JSON body, one delta.
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("invalid LLM response: {e}")))?;
+        let text = body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        gate.push(sink, &text).await;
+        gate.finish(sink).await;
+        return Ok(text);
+    }
+
+    let mut full = String::new();
+    let mut lines = SseLineBuffer::default();
+    let mut body = resp.bytes_stream();
+    'outer: while let Some(chunk) = body.next().await {
+        let chunk =
+            chunk.map_err(|e| AppError::Internal(format!("LLM stream interrupted: {e}")))?;
+        for line in lines.push(&chunk) {
+            let Some(data) = sse_data(&line) else {
+                continue;
+            };
+            if data == "[DONE]" {
+                break 'outer;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if let Some(piece) = stream_delta_text(&v) {
+                full.push_str(piece);
+                gate.push(sink, piece).await;
+            }
+        }
+    }
+    gate.finish(sink).await;
+    Ok(full.trim().to_string())
+}
+
 pub fn llm_routes() -> Router<AppState> {
     Router::new()
         .route("/api/llm/sparql", post(nl_to_sparql))
         .route("/api/llm/chat", post(llm_chat))
-        .route(
-            "/api/llm/chat/stream",
-            post(super::llm_stream::llm_chat_stream),
-        )
+        .route("/api/llm/chat/stream", post(llm_chat_stream))
         .route("/api/llm/feedback", post(forward_feedback))
         .route("/api/llm/health", get(llm_health))
         .route("/api/llm/shacl", post(shacl_assist))
@@ -335,7 +554,7 @@ pub struct LlmHealth {
 async fn llm_health(State(_state): State<AppState>) -> Json<LlmHealth> {
     let gateway = gateway_base();
     let base = gateway.trim_end_matches('/');
-    let client = llm_client();
+    let client = http();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
             .get(format!("{base}{path}"))
@@ -477,7 +696,7 @@ async fn forward_feedback(
     Json(signal): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
-    let mut rb = llm_client().post(&url).json(&signal);
+    let mut rb = http().post(&url).json(&signal);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -507,7 +726,7 @@ async fn forward_feedback(
 // before writing the final answer. Answers are markdown plus a small set of fenced
 // "widget" blocks (chart/map/card/api/csv) that the chat UI renders interactively.
 
-pub(crate) const CHAT_SYSTEM_PROMPT: &str = "You are Spark, the linked-data expert of the Open Triplestore platform, \
+const CHAT_SYSTEM_PROMPT: &str = "You are Spark, the linked-data expert of the Open Triplestore platform, \
 a knowledge-graph database. Help the user explore and understand linked data: which datasets exist and what \
 they cover, which API services can answer a question, what the graphs actually contain, and how RDF, SPARQL, \
 named graphs, vocabularies and SHACL work. Be precise with linked-data terminology, prefer labels over bare \
@@ -520,7 +739,14 @@ If answering needs the actual contents of the graphs (counts, specific values, r
 reply with EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named \
 graphs, and nothing else. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
-write the final answer. Result cells may be truncated (they then end with …).\n\n\
+write the final answer. Result cells may be truncated (they then end with …).\n\
+Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
+present (names, counts, coordinates) MUST come from query results or the platform context, never from \
+memory: if you have not retrieved them this turn, query first.\n\
+Query efficiently: fetch everything you need in as FEW rounds as possible (select labels and values \
+together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows come back; use LIMIT 50 \
+for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
+build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -544,7 +770,12 @@ was truncated.\n\
 also render well.\n\n\
 Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
 locations → map, a single entity → card, raw listings → markdown table or csv, \"how do I get this \
-myself\" → sparql or api block. Answer in the user's language.";
+myself\" → sparql or api block. Every fence must open on its own line, contain real content on the \
+following lines, and close with ``` on its own line — never write a one-line or empty fence. Widget \
+specs must be strict JSON: double quotes, no comments, no trailing commas, no placeholders (omit a \
+field rather than inventing it). Only fill chart/map/card/csv widgets with values you retrieved with \
+`SPARQL:` this turn, or that appear verbatim in the platform context — if you have neither, run a \
+query before answering. Be concise: lead with the answer, keep supporting prose short.";
 
 /// Cap how much platform state we serialise into the prompt so a large instance
 /// stays within the model's context window.
@@ -556,7 +787,7 @@ const MAX_CHAT_QUERY_ROWS: usize = 50;
 /// How many `SPARQL:` rounds the model may use within one user turn. Feeding rows
 /// (or the error, for self-repair) back after each round lets it e.g. count first
 /// and then fetch geometry for a map, while keeping latency and tokens bounded.
-pub(crate) const MAX_CHAT_QUERY_ROUNDS: usize = 3;
+const MAX_CHAT_QUERY_ROUNDS: usize = 3;
 /// Per-cell character budgets when rendering result rows into the follow-up prompt.
 /// WKT geometry cells get a larger budget so small geometries survive verbatim into
 /// a ```map widget; anything longer is truncated with '…' and the system prompt
@@ -565,7 +796,7 @@ const CHAT_CELL_MAX_CHARS: usize = 80;
 const CHAT_WKT_CELL_MAX_CHARS: usize = 600;
 /// Output-token budget per chat turn. Rich answers (markdown + widget JSON specs)
 /// need headroom; short answers still stop early.
-pub(crate) const CHAT_MAX_TOKENS: u32 = 3072;
+const CHAT_MAX_TOKENS: u32 = 3072;
 
 #[derive(Deserialize)]
 pub struct ChatMessage {
@@ -621,29 +852,178 @@ pub struct ChatResponse {
     pub queries: Vec<ChatQueryRun>,
 }
 
-/// POST /api/llm/chat — grounded knowledge-graph chat.
-async fn llm_chat(
-    State(state): State<AppState>,
-    user: Option<Extension<AuthenticatedUser>>,
-    Json(req): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, AppError> {
-    let user = user.as_deref();
+/// One server-sent event on `/api/llm/chat/stream`. The terminal event is
+/// always `done` (carrying the same payload as the JSON endpoint) or `error`.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ChatStreamEvent {
+    /// A completion round started — the model is generating.
+    Status { round: usize, state: &'static str },
+    /// A piece of the assistant's visible answer text, in order.
+    Delta { text: String },
+    /// Any draft text shown so far is obsolete (the model decided to run a
+    /// query after all) — the client should clear it.
+    RoundReset,
+    /// A SPARQL retrieval round is about to run.
+    Query { round: usize, sparql: String },
+    /// That retrieval round finished.
+    QueryResult {
+        round: usize,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<usize>,
+        truncated: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Terminal: the authoritative full response (UI replaces any draft with it).
+    Done { response: Box<ChatResponse> },
+    /// Terminal: the turn failed.
+    Error { message: String },
+}
+
+/// Where a chat turn reports progress. `None` for the plain JSON endpoint (no
+/// one is listening); a channel for the SSE endpoint. Send failures are
+/// ignored — a vanished listener must never fail the turn itself — but
+/// `is_closed` lets the loop stop burning LLM tokens once the client is gone.
+#[derive(Clone)]
+struct EventSink(Option<mpsc::Sender<ChatStreamEvent>>);
+
+impl EventSink {
+    fn none() -> Self {
+        Self(None)
+    }
+
+    fn is_live(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.0.as_ref().map(|tx| tx.is_closed()).unwrap_or(false)
+    }
+
+    async fn send(&self, ev: ChatStreamEvent) {
+        if let Some(tx) = &self.0 {
+            let _ = tx.send(ev).await;
+        }
+    }
+
+    async fn delta(&self, text: String) {
+        self.send(ChatStreamEvent::Delta { text }).await;
+    }
+}
+
+fn validate_chat_request(req: &ChatRequest) -> Result<(), AppError> {
     if req.messages.is_empty() || req.messages.iter().all(|m| m.content.trim().is_empty()) {
         return Err(AppError::BadRequest(
             "at least one message is required".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// POST /api/llm/chat — grounded knowledge-graph chat (single JSON response).
+async fn llm_chat(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Json<ChatResponse>, AppError> {
+    validate_chat_request(&req)?;
+    let user = user.map(|Extension(u)| u);
+    let resp = run_chat_turn(state, user, req, EventSink::none()).await?;
+    Ok(Json(resp))
+}
+
+/// POST /api/llm/chat/stream — the same grounded chat turn, streamed as SSE.
+/// The client sees answer tokens while the model writes them and a live
+/// retrieval trail (each query + its outcome) while rounds run; the terminal
+/// `done` event carries the exact payload the JSON endpoint would have sent.
+/// Closing the connection aborts the turn server-side.
+async fn llm_chat_stream(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    validate_chat_request(&req)?;
+    let user = user.map(|Extension(u)| u);
+    let (tx, rx) = mpsc::channel::<ChatStreamEvent>(64);
+    let sink = EventSink(Some(tx.clone()));
+    tokio::spawn(async move {
+        match run_chat_turn(state, user, req, sink).await {
+            Ok(resp) => {
+                let _ = tx
+                    .send(ChatStreamEvent::Done {
+                        response: Box::new(resp),
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(ChatStreamEvent::Error {
+                        message: e.message(),
+                    })
+                    .await;
+            }
+        }
+    });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|ev| (sse_event(&ev), rx))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn sse_event(ev: &ChatStreamEvent) -> Result<Event, Infallible> {
+    Ok(Event::default().json_data(ev).unwrap_or_else(|_| {
+        Event::default().data(r#"{"type":"error","message":"event serialization failed"}"#)
+    }))
+}
+
+/// One completion round: streamed (with tokens forwarded through a
+/// [`DeltaGate`]) when someone is listening, plain otherwise. Returns the full
+/// reply text plus whether any of it was forwarded to the client live.
+async fn next_reply(
+    model: &str,
+    msgs: &[Value],
+    sink: &EventSink,
+) -> Result<(String, bool), AppError> {
+    if sink.is_live() {
+        let mut gate = DeltaGate::new();
+        let text =
+            chat_completion_messages_stream(model, msgs, CHAT_MAX_TOKENS, sink, &mut gate).await?;
+        Ok((text, gate.forwarded))
+    } else {
+        let text = chat_completion_messages(model, msgs.to_vec(), CHAT_MAX_TOKENS).await?;
+        Ok((text, false))
+    }
+}
+
+/// One grounded chat turn: build the per-caller platform context, then run the
+/// retrieval loop, reporting progress through `sink`. Shared by the JSON and
+/// SSE endpoints so both have identical semantics and security scope.
+async fn run_chat_turn(
+    state: AppState,
+    user: Option<AuthenticatedUser>,
+    req: ChatRequest,
+    sink: EventSink,
+) -> Result<ChatResponse, AppError> {
+    let user = user.as_ref();
     let model = req.model.clone().unwrap_or_else(default_model);
 
     // The set of graphs this caller may read — the security scope for any query.
     let graphs = chat_accessible_graphs(&state, user)?;
+    // A sorted copy for everything that ends up in the prompt: HashSet iteration
+    // order is random per process, and a prompt that reshuffles between turns
+    // defeats provider-side prompt caching (and makes runs non-reproducible).
+    let mut graph_list: Vec<String> = graphs.iter().cloned().collect();
+    graph_list.sort();
     let user_id = user.map(|u| u.user_id.as_str());
-    let context = build_platform_context(&state, user_id, &graphs);
+    let context = build_platform_context(&state, user_id, &graph_list);
+    let vocab = graph_vocab_context(&state, &graph_list).await;
 
     let mut msgs: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
     msgs.push(json!({
         "role": "system",
-        "content": format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}"),
+        "content": format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}"),
     }));
     for m in &req.messages {
         let role = if m.role == "assistant" {
@@ -658,15 +1038,52 @@ async fn llm_chat(
     // Each query runs under the caller's read scope; its rows — or its error, so the
     // model can self-repair — go back into the conversation for the next round.
     let mut runs: Vec<ChatQueryRun> = Vec::new();
-    let mut reply = chat_completion_messages(&model, msgs.clone(), CHAT_MAX_TOKENS).await?;
+    sink.send(ChatStreamEvent::Status {
+        round: 0,
+        state: "thinking",
+    })
+    .await;
+    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink).await?;
     for round in 1..=MAX_CHAT_QUERY_ROUNDS {
         let Some(query) = extract_sparql_directive(&reply) else {
             break;
         };
+        // The streaming client hung up — stop burning completions on a turn
+        // nobody will read. (Never true for the JSON endpoint.)
+        if sink.is_closed() {
+            return Err(AppError::Internal("client disconnected".to_string()));
+        }
+        // Prose forwarded before the directive is pre-query chatter the next
+        // round supersedes — tell the client to clear its draft.
+        if forwarded {
+            sink.send(ChatStreamEvent::RoundReset).await;
+        }
+        // Inject any undeclared-but-known prefixes, then parse-check the model's
+        // own text BEFORE scoping: a syntax error reported against the scoped
+        // rewrite has line numbers that mean nothing to the model, which makes
+        // self-repair hopeless.
+        let query = finalize_sparql(&state, query).await;
         msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
+        sink.send(ChatStreamEvent::Query {
+            round,
+            sparql: query.clone(),
+        })
+        .await;
         let remaining = MAX_CHAT_QUERY_ROUNDS - round;
-        let follow_up = match run_chat_query(&state, &query, &graphs).await {
+        let run_result = match validate_sparql(&query) {
+            Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
+            Ok(()) => run_chat_query_timed(&state, &query, &graphs).await,
+        };
+        let follow_up = match run_result {
             Ok(qr) => {
+                sink.send(ChatStreamEvent::QueryResult {
+                    round,
+                    ok: true,
+                    rows: Some(qr.rows.len()),
+                    truncated: qr.truncated,
+                    error: None,
+                })
+                .await;
                 let table = render_rows_for_llm(&qr);
                 runs.push(ChatQueryRun {
                     sparql: query,
@@ -676,10 +1093,32 @@ async fn llm_chat(
                     rows: Some(qr.rows),
                     truncated: qr.truncated,
                 });
-                follow_up_after_rows(&table, remaining)
+                if remaining > 0 {
+                    format!(
+                        "Query results:\n{table}\nIf you still need different data, reply with \
+                         `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
+                         write the final answer to my previous question in clear natural language, \
+                         using the presentation widgets (chart/map/card/api/csv/markdown table) \
+                         where they help."
+                    )
+                } else {
+                    format!(
+                        "Query results:\n{table}\nWrite the final answer to my previous question \
+                         in clear natural language, using the presentation widgets where they \
+                         help. Do not output another SPARQL: line."
+                    )
+                }
             }
             Err(e) => {
                 let emsg = e.message();
+                sink.send(ChatStreamEvent::QueryResult {
+                    round,
+                    ok: false,
+                    rows: None,
+                    truncated: false,
+                    error: Some(emsg.clone()),
+                })
+                .await;
                 runs.push(ChatQueryRun {
                     sparql: query,
                     ok: false,
@@ -688,18 +1127,48 @@ async fn llm_chat(
                     rows: None,
                     truncated: false,
                 });
-                follow_up_after_error(&emsg, remaining)
+                if remaining > 0 {
+                    format!(
+                        "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
+                         query ({remaining} more allowed this turn), or answer without querying — \
+                         you may include the corrected query as a ```sparql block for the user to \
+                         run themselves."
+                    )
+                } else {
+                    format!(
+                        "That query failed to run: {emsg}\nAnswer my previous question as well as \
+                         you can without another query; include a corrected query as a ```sparql \
+                         block if useful. Do not output another SPARQL: line."
+                    )
+                }
             }
         };
         msgs.push(json!({"role": "user", "content": follow_up}));
-        reply = chat_completion_messages(&model, msgs.clone(), CHAT_MAX_TOKENS)
-            .await
-            .unwrap_or_else(|_| fallback_answer(&runs));
+        sink.send(ChatStreamEvent::Status {
+            round,
+            state: "thinking",
+        })
+        .await;
+        (reply, forwarded) = match next_reply(&model, &msgs, &sink).await {
+            Ok(v) => v,
+            Err(_) => (fallback_answer(&runs), false),
+        };
     }
-    // A stubborn model may still emit a directive after its last allowed round —
-    // never show that to the user; fall back to the data we did retrieve.
-    if extract_sparql_directive(&reply).is_some() {
+    // A stubborn model may still emit a *bare* directive after its last allowed
+    // round — never show that to the user; fall back to the data we did
+    // retrieve. A real answer that merely embeds a corrected query (which the
+    // failure follow-ups explicitly invite) is kept as-is.
+    if is_bare_sparql_directive(&reply) {
         reply = fallback_answer(&runs);
+    }
+    // Data widgets without any retrieval this turn mean the values came from the
+    // platform summary or model memory — say so instead of letting them read as
+    // queried data. (Smaller local models ignore the grounding instruction.)
+    if widgets_without_retrieval(&reply, &runs) {
+        reply.push_str(
+            "\n\n*These values were not retrieved from the knowledge graph this turn — \
+             run a query to verify them.*",
+        );
     }
 
     // Legacy single-query fields mirror the last successful round (or the last
@@ -710,7 +1179,7 @@ async fn llm_chat(
     let columns = last.and_then(|r| r.columns.clone());
     let rows = last.and_then(|r| r.rows.clone());
     let truncated = last.map(|r| r.truncated).unwrap_or(false);
-    Ok(Json(ChatResponse {
+    Ok(ChatResponse {
         answer: reply,
         model,
         ran_query,
@@ -719,53 +1188,39 @@ async fn llm_chat(
         rows,
         truncated,
         queries: runs,
-    }))
+    })
 }
 
-/// The follow-up user message after a successful query round: rows in, and either
-/// an invitation to keep querying or the instruction to write the final answer.
-/// Shared verbatim by the buffered and streaming chat loops.
-pub(crate) fn follow_up_after_rows(table: &str, remaining: usize) -> String {
-    if remaining > 0 {
-        format!(
-            "Query results:\n{table}\nIf you still need different data, reply with \
-             `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
-             write the final answer to my previous question in clear natural language, \
-             using the presentation widgets (chart/map/card/api/csv/markdown table) \
-             where they help."
-        )
-    } else {
-        format!(
-            "Query results:\n{table}\nWrite the final answer to my previous question \
-             in clear natural language, using the presentation widgets where they \
-             help. Do not output another SPARQL: line."
-        )
-    }
+/// True when the answer embeds data widgets but no query succeeded this turn —
+/// i.e. the widget values cannot have come from the graphs.
+fn widgets_without_retrieval(answer: &str, runs: &[ChatQueryRun]) -> bool {
+    answer.lines().any(opens_data_widget_fence) && !runs.iter().any(|r| r.ok)
 }
 
-/// The follow-up user message after a failed query round: the error for
-/// self-repair, bounded by how many rounds remain.
-pub(crate) fn follow_up_after_error(emsg: &str, remaining: usize) -> String {
-    if remaining > 0 {
-        format!(
-            "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
-             query ({remaining} more allowed this turn), or answer without querying — \
-             you may include the corrected query as a ```sparql block for the user to \
-             run themselves."
-        )
-    } else {
-        format!(
-            "That query failed to run: {emsg}\nAnswer my previous question as well as \
-             you can without another query; include a corrected query as a ```sparql \
-             block if useful. Do not output another SPARQL: line."
-        )
+/// Does this line open a data-widget fence? Mirrors the frontend fence grammar
+/// (chatRich.js `FENCE_RE` + `specialSegment`): a run of 3+ backticks or tildes,
+/// leading whitespace and space before the tag allowed, including the tag
+/// aliases geo→map and infocard/info-card→card.
+fn opens_data_widget_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    let fence = match t.bytes().next() {
+        Some(c @ (b'`' | b'~')) => c,
+        _ => return false,
+    };
+    let run = t.bytes().take_while(|&b| b == fence).count();
+    if run < 3 {
+        return false;
     }
+    matches!(
+        t[run..].trim().to_ascii_lowercase().as_str(),
+        "chart" | "map" | "geo" | "card" | "infocard" | "info-card" | "csv"
+    )
 }
 
 /// Last-resort answer when the model keeps demanding more queries than allowed (or
 /// the gateway dies mid-turn): surface what we did retrieve instead of leaking a
 /// raw `SPARQL:` directive to the user.
-pub(crate) fn fallback_answer(runs: &[ChatQueryRun]) -> String {
+fn fallback_answer(runs: &[ChatQueryRun]) -> String {
     if let Some(ok) = runs.iter().rev().find(|r| r.ok) {
         let mut s = String::from("Here is what the query returned:\n\n");
         if let (Some(cols), Some(rows)) = (&ok.columns, &ok.rows) {
@@ -803,7 +1258,7 @@ pub(crate) fn fallback_answer(runs: &[ChatQueryRun]) -> String {
 /// The named graphs `user` may read — the same scope the normal SPARQL endpoint
 /// applies. Mirrors `execute_query`: accessible-dataset graphs, plus named-graph
 /// ACL grants, plus (for admins) every registered graph.
-pub(crate) fn chat_accessible_graphs(
+fn chat_accessible_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
 ) -> Result<HashSet<String>, AppError> {
@@ -838,12 +1293,9 @@ pub(crate) fn chat_accessible_graphs(
 
 /// Serialise the platform state visible to `user_id` into the prompt: accessible
 /// datasets (name, visibility, description, DCAT topics), the API services runnable
-/// against them, and the named graphs in scope.
-pub(crate) fn build_platform_context(
-    state: &AppState,
-    user_id: Option<&str>,
-    graphs: &HashSet<String>,
-) -> String {
+/// against them, and the named graphs in scope. `graphs` must be pre-sorted so the
+/// prompt is stable across turns (prompt-cache friendly).
+fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[String]) -> String {
     let mut ctx = String::new();
 
     let datasets = state
@@ -918,7 +1370,7 @@ pub(crate) fn build_platform_context(
     }
 
     if !graphs.is_empty() {
-        ctx.push_str("\n## Named graphs in scope (use these IRIs in GRAPH/FROM clauses)\n");
+        ctx.push_str("\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`)\n");
         for g in graphs.iter().take(MAX_GRAPHS_IN_CONTEXT) {
             ctx.push_str(&format!("- <{g}>\n"));
         }
@@ -933,17 +1385,178 @@ pub(crate) fn build_platform_context(
     ctx
 }
 
+// ─── Graph vocabulary grounding ────────────────────────────────────────────────
+//
+// The single biggest accuracy lever for model-written SPARQL: without knowing the
+// vocabulary actually used in a graph, the model guesses predicates, gets empty
+// results, and burns retrieval rounds (slow AND wrong). We sample each in-scope
+// graph's classes and predicates with strictly bounded scans, cache the summary,
+// and put it in the prompt so the first query usually hits.
+
+/// How many graphs get a vocabulary block (the first N, sorted — deterministic).
+const VOCAB_GRAPH_LIMIT: usize = 8;
+const VOCAB_CLASS_LIMIT: usize = 6;
+const VOCAB_PRED_LIMIT: usize = 12;
+/// Row caps for the sampling scans — a hard bound on work per graph, whatever
+/// its size. Sampling can miss rare vocabulary; the retrieval loop still
+/// recovers via its normal feedback rounds.
+const VOCAB_CLASS_SCAN_ROWS: usize = 2000;
+const VOCAB_PRED_SCAN_ROWS: usize = 4000;
+/// How long a sampled summary stays fresh. Vocabulary changes rarely; five
+/// minutes keeps chat turns from re-scanning while still tracking imports.
+const VOCAB_TTL: Duration = Duration::from_secs(300);
+/// Total time budget for cold-cache sampling in one turn — never make the user
+/// wait long for grounding context; whatever was sampled in time is used.
+const VOCAB_TIME_BUDGET: Duration = Duration::from_secs(3);
+
+/// graph IRI → (sampled at, rendered summary block; empty = nothing usable).
+fn vocab_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, String)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A prompt section listing sampled classes + predicates per in-scope graph
+/// (first [`VOCAB_GRAPH_LIMIT`] of the sorted list). Served from a TTL cache;
+/// cold graphs are sampled inside a strict time budget — on timeout the turn
+/// proceeds with whatever context is already cached.
+async fn graph_vocab_context(state: &AppState, graphs: &[String]) -> String {
+    let wanted: Vec<&String> = graphs.iter().take(VOCAB_GRAPH_LIMIT).collect();
+    if wanted.is_empty() {
+        return String::new();
+    }
+    let mut summaries: HashMap<String, String> = HashMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    {
+        let cache = vocab_cache().lock().unwrap();
+        for &g in &wanted {
+            match cache.get(g) {
+                Some((at, summary)) if at.elapsed() < VOCAB_TTL => {
+                    summaries.insert(g.clone(), summary.clone());
+                }
+                _ => missing.push(g.clone()),
+            }
+        }
+    }
+    if !missing.is_empty() {
+        let store = state.store.clone();
+        let sampled = tokio::time::timeout(
+            VOCAB_TIME_BUDGET,
+            tokio::task::spawn_blocking(move || {
+                missing
+                    .into_iter()
+                    .map(|g| {
+                        let line = graph_vocab_summary(&store, &g).unwrap_or_default();
+                        (g, line)
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .await;
+        if let Ok(Ok(pairs)) = sampled {
+            let mut cache = vocab_cache().lock().unwrap();
+            for (g, summary) in pairs {
+                cache.insert(g.clone(), (Instant::now(), summary.clone()));
+                summaries.insert(g, summary);
+            }
+        }
+    }
+    let blocks: Vec<&str> = wanted
+        .iter()
+        .filter_map(|g| summaries.get(*g))
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if blocks.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}\n",
+        blocks.join("\n")
+    )
+}
+
+/// Sample one graph's vocabulary into a summary block, or `None` when the graph
+/// yields nothing usable (empty, or unreadable).
+fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
+    let classes = sample_distinct_iris(
+        store,
+        &format!(
+            "SELECT ?x WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} LIMIT {VOCAB_CLASS_SCAN_ROWS}"
+        ),
+        VOCAB_CLASS_LIMIT,
+    );
+    let predicates = sample_distinct_iris(
+        store,
+        &format!(
+            "SELECT ?x WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} LIMIT {VOCAB_PRED_SCAN_ROWS}"
+        ),
+        VOCAB_PRED_LIMIT,
+    );
+    if classes.is_empty() && predicates.is_empty() {
+        return None;
+    }
+    let mut s = format!("- <{graph}>");
+    if !classes.is_empty() {
+        s.push_str(&format!("\n  classes: {}", classes.join(" ")));
+    }
+    if !predicates.is_empty() {
+        s.push_str(&format!("\n  predicates: {}", predicates.join(" ")));
+    }
+    Some(s)
+}
+
+/// Run a single-variable `?x` sampling query and collect up to `cap` distinct
+/// IRIs (rendered `<iri>`). Deduplication happens here rather than with SPARQL
+/// DISTINCT so the scan stops at the row cap no matter what.
+fn sample_distinct_iris(store: &TripleStore, sparql: &str, cap: usize) -> Vec<String> {
+    let Ok(QueryResults::Solutions(solutions)) = store.query(sparql) else {
+        return Vec::new();
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for sol in solutions {
+        let Ok(sol) = sol else { break };
+        if let Some(Term::NamedNode(n)) = sol.get("x") {
+            if seen.insert(n.as_str().to_string()) {
+                out.push(format!("<{}>", n.as_str()));
+                if out.len() >= cap {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Tabular result of a chat-issued query.
-pub(crate) struct ChatQueryResult {
-    pub(crate) columns: Vec<String>,
-    pub(crate) rows: Vec<Vec<String>>,
-    pub(crate) truncated: bool,
+struct ChatQueryResult {
+    columns: Vec<String>,
+    rows: Vec<Vec<String>>,
+    truncated: bool,
+}
+
+/// [`run_chat_query`] bounded by the same configurable timeout as the public
+/// SPARQL endpoint, so a pathological model-written query cannot stall the
+/// chat. The timeout message feeds back to the model for self-repair.
+async fn run_chat_query_timed(
+    state: &AppState,
+    query: &str,
+    graphs: &HashSet<String>,
+) -> Result<ChatQueryResult, AppError> {
+    let limit = Duration::from_secs(state.query_timeout_secs);
+    match tokio::time::timeout(limit, run_chat_query(state, query, graphs)).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::BadRequest(format!(
+            "query timed out after {}s — simplify the pattern or add a LIMIT",
+            state.query_timeout_secs
+        ))),
+    }
 }
 
 /// Run a model-generated query under the caller's read scope and collect a capped
 /// table. The query is re-scoped with [`scope_query_to_authorized`] (the read
 /// boundary) exactly like a user-typed query, so it cannot read outside `graphs`.
-pub(crate) async fn run_chat_query(
+async fn run_chat_query(
     state: &AppState,
     query: &str,
     graphs: &HashSet<String>,
@@ -1033,7 +1646,7 @@ fn term_to_short(term: &Term) -> String {
 }
 
 /// Render a query result as a compact pipe-delimited table for the follow-up prompt.
-pub(crate) fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
+fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     let mut s = String::new();
     s.push_str(&qr.columns.join(" | "));
     s.push('\n');
@@ -1050,10 +1663,11 @@ pub(crate) fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     s
 }
 
-/// Prompt budget for one result cell: WKT geometries get a larger budget than
-/// ordinary values so small ones survive verbatim into a ```map widget.
+/// Prompt budget for one result cell: geometry literals (WKT or GML) get a
+/// larger budget than ordinary values so small ones survive verbatim into a
+/// ```map widget.
 fn cell_budget(cell: &str) -> usize {
-    if looks_like_wkt(cell) {
+    if looks_like_wkt(cell) || looks_like_gml(cell) {
         CHAT_WKT_CELL_MAX_CHARS
     } else {
         CHAT_CELL_MAX_CHARS
@@ -1063,14 +1677,7 @@ fn cell_budget(cell: &str) -> usize {
 /// Does this value look like a WKT geometry literal, optionally carrying a
 /// GeoSPARQL `<crs-iri>` prefix?
 fn looks_like_wkt(s: &str) -> bool {
-    let t = s.trim_start();
-    let t = match t.strip_prefix('<') {
-        Some(rest) => rest
-            .split_once('>')
-            .map(|(_, after)| after.trim_start())
-            .unwrap_or(t),
-        None => t,
-    };
+    let t = crate::geo::datatypes::extract_wkt(s);
     const KINDS: [&str; 7] = [
         "MULTIPOINT",
         "MULTILINESTRING",
@@ -1085,11 +1692,21 @@ fn looks_like_wkt(s: &str) -> bool {
         .any(|k| t.get(..k.len()).is_some_and(|p| p.eq_ignore_ascii_case(k)))
 }
 
-/// If the model asked to run a query, return the query text. We look for a
-/// `SPARQL:` marker (case-insensitive, byte-safe), strip any code fence, and only
-/// accept it when it actually contains a query form — otherwise the reply is prose.
-pub(crate) fn extract_sparql_directive(reply: &str) -> Option<String> {
-    let pos = find_ci(reply, "SPARQL:")?;
+/// Does this value look like a GML geometry literal (`<gml:Point …>…`)? GML
+/// cells get the same large budget as WKT so the model can convert them into
+/// ```map widgets.
+fn looks_like_gml(s: &str) -> bool {
+    s.trim_start().starts_with("<gml:")
+}
+
+/// If the model asked to run a query, return the query text. The `SPARQL:`
+/// marker is an *execution directive* only when it starts a line (leading
+/// whitespace allowed) — the system prompt asks for it on its own line, and a
+/// mid-sentence mention ("use this SPARQL: …") is prose, not a request to run.
+/// We strip any code fence after the marker and only accept it when it actually
+/// contains a query form — otherwise the reply is prose.
+fn extract_sparql_directive(reply: &str) -> Option<String> {
+    let pos = directive_pos(reply)?;
     let after = reply[pos + "SPARQL:".len()..].trim();
     let query = strip_code_fence(after);
     let is_query = ["SELECT", "ASK", "CONSTRUCT", "DESCRIBE"]
@@ -1098,9 +1715,61 @@ pub(crate) fn extract_sparql_directive(reply: &str) -> Option<String> {
     is_query.then_some(query)
 }
 
+/// Byte offset of the first line-anchored `SPARQL:` marker — a line whose
+/// trimmed form starts with it, case-insensitively. `None` when the marker only
+/// appears mid-line (prose).
+fn directive_pos(reply: &str) -> Option<usize> {
+    const MARKER: &[u8] = b"SPARQL:";
+    let mut offset = 0;
+    for line in reply.split('\n') {
+        let indent = line.len() - line.trim_start().len();
+        let rest = &line.as_bytes()[indent..];
+        if rest.len() >= MARKER.len() && rest[..MARKER.len()].eq_ignore_ascii_case(MARKER) {
+            return Some(offset + indent);
+        }
+        offset += line.len() + 1;
+    }
+    None
+}
+
+/// How much prose may surround a post-loop directive before the reply counts as
+/// a final answer rather than a bare query request.
+const BARE_DIRECTIVE_MAX_PROSE_CHARS: usize = 80;
+
+/// True when the reply is essentially *just* a `SPARQL:` execution directive —
+/// the directive line plus its (possibly fenced) query, with no substantial
+/// prose around it. Used only after the final round: a stubborn model's bare
+/// directive must never reach the user, but a real answer that embeds a
+/// corrected query under a line-anchored `SPARQL:` heading — the failure
+/// follow-ups explicitly invite a corrected ```sparql block — must be kept.
+fn is_bare_sparql_directive(reply: &str) -> bool {
+    let Some(pos) = directive_pos(reply) else {
+        return false;
+    };
+    if extract_sparql_directive(reply).is_none() {
+        return false;
+    }
+    let before = reply[..pos].trim();
+    let after = reply[pos + "SPARQL:".len()..].trim_start();
+    // Prose after the query: fenced or not, the query ends at the first fence
+    // line after it (mirroring strip_code_fence), so anything beyond that fence
+    // counts as surrounding prose.
+    let trailing = match after.strip_prefix("```") {
+        Some(fenced) => match fenced.find("\n```") {
+            Some(end) => fenced[end + "\n```".len()..].trim_start_matches('`').trim(),
+            None => "",
+        },
+        None => match after.find("\n```") {
+            Some(end) => after[end + "\n```".len()..].trim_start_matches('`').trim(),
+            None => "",
+        },
+    };
+    before.chars().count() + trailing.chars().count() < BARE_DIRECTIVE_MAX_PROSE_CHARS
+}
+
 /// Case-insensitive (ASCII) byte-index search — safe for slicing `haystack`,
 /// unlike `to_uppercase().find()` which can shift indices for some Unicode.
-pub(crate) fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (hb, nb) = (haystack.as_bytes(), needle.as_bytes());
     if nb.is_empty() || hb.len() < nb.len() {
         return None;
@@ -1119,14 +1788,21 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Strip a leading ```/```sparql fence (and trailing ```), which small models often add.
+/// In both the fenced and unfenced forms the query ends at the FIRST fence line that
+/// follows it — a model that opens the fence *before* the `SPARQL:` marker (so the
+/// directive payload itself is unfenced) would otherwise drag the closing ``` and any
+/// trailing prose into the query text.
 fn strip_code_fence(s: &str) -> String {
     let t = s.trim();
     let Some(rest) = t.strip_prefix("```") else {
-        return t.to_string();
+        return match t.find("\n```") {
+            Some(end) => t[..end].trim().to_string(),
+            None => t.to_string(),
+        };
     };
     let rest = rest.strip_prefix("sparql").unwrap_or(rest);
     let rest = rest.trim_start_matches('\n');
-    match rest.rfind("```") {
+    match rest.find("```") {
         Some(end) => rest[..end].trim().to_string(),
         None => rest.trim().to_string(),
     }
@@ -1135,9 +1811,49 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_sparql_directive, fallback_answer, find_ci, looks_like_wkt, strip_code_fence,
-        truncate, validate_sparql, ChatQueryRun, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
+        extract_sparql_directive, fallback_answer, find_ci, is_bare_sparql_directive,
+        looks_like_wkt, sse_data, stream_delta_text, strip_code_fence, truncate, validate_sparql,
+        widgets_without_retrieval, ChatQueryRun, ChatStreamEvent, DeltaGate, EventSink,
+        SseLineBuffer, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
+    use serde_json::json;
+
+    fn ok_run() -> ChatQueryRun {
+        ChatQueryRun {
+            sparql: "SELECT * WHERE { ?s ?p ?o }".into(),
+            ok: true,
+            error: None,
+            columns: Some(vec!["s".into()]),
+            rows: Some(vec![vec!["x".into()]]),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn ungrounded_widgets_get_flagged_but_grounded_or_plain_answers_do_not() {
+        assert!(widgets_without_retrieval("```map\n{}\n```", &[]));
+        assert!(widgets_without_retrieval("```chart\n{}\n```", &[]));
+        // A successful run this turn grounds the widget.
+        assert!(!widgets_without_retrieval("```map\n{}\n```", &[ok_run()]));
+        // Prose and non-data fences never get the caveat.
+        assert!(!widgets_without_retrieval("plain prose", &[]));
+        assert!(!widgets_without_retrieval("```sparql\nASK {}\n```", &[]));
+    }
+
+    #[test]
+    fn widget_fence_variants_the_frontend_renders_are_detected() {
+        // The frontend (chatRich.js) also renders ~~~ fences, leading
+        // whitespace, a space before the tag, and the geo/infocard aliases.
+        assert!(widgets_without_retrieval("```geo\n{}\n```", &[]));
+        assert!(widgets_without_retrieval("~~~chart\n{}\n~~~", &[]));
+        assert!(widgets_without_retrieval("  ``` map\n{}\n```", &[]));
+        assert!(widgets_without_retrieval("````infocard\n{}\n````", &[]));
+        assert!(widgets_without_retrieval("```info-card\n{}\n```", &[]));
+        // A tag that merely starts with a widget name is not a widget fence.
+        assert!(!widgets_without_retrieval("```chartreuse\ncode\n```", &[]));
+        // Two characters are not a fence.
+        assert!(!widgets_without_retrieval("``map``", &[]));
+    }
 
     #[test]
     fn wkt_cells_are_recognised_for_the_larger_budget() {
@@ -1153,6 +1869,16 @@ mod tests {
         assert!(!looks_like_wkt("héllo wörld"));
         assert_eq!(super::cell_budget("POINT(1 2)"), CHAT_WKT_CELL_MAX_CHARS);
         assert_eq!(super::cell_budget("plain value"), CHAT_CELL_MAX_CHARS);
+    }
+
+    #[test]
+    fn gml_cells_get_the_large_geometry_budget() {
+        let gml = "<gml:Polygon srsName=\"EPSG:4326\"><gml:exterior><gml:LinearRing>\
+                   <gml:posList>0 0 1 0 1 1 0 0</gml:posList>\
+                   </gml:LinearRing></gml:exterior></gml:Polygon>";
+        assert_eq!(super::cell_budget(gml), CHAT_WKT_CELL_MAX_CHARS);
+        // An ordinary XML/HTML-ish cell is not a geometry.
+        assert_eq!(super::cell_budget("<note>hi</note>"), CHAT_CELL_MAX_CHARS);
     }
 
     #[test]
@@ -1220,10 +1946,24 @@ mod tests {
     }
 
     #[test]
-    fn extracts_directive_case_insensitively_inline() {
-        let q = extract_sparql_directive("Sure, let me check. sparql: ASK { ?s ?p ?o }")
+    fn extracts_directive_case_insensitively_when_line_anchored() {
+        let q = extract_sparql_directive("Sure, let me check.\nsparql: ASK { ?s ?p ?o }")
             .expect("marker is case-insensitive");
         assert_eq!(q, "ASK { ?s ?p ?o }");
+        // Leading whitespace on the directive line is fine.
+        let q = extract_sparql_directive("  SPARQL: SELECT * WHERE { ?s ?p ?o }")
+            .expect("indented marker still anchors");
+        assert_eq!(q, "SELECT * WHERE { ?s ?p ?o }");
+    }
+
+    #[test]
+    fn mid_prose_sparql_mention_is_not_a_directive() {
+        // The marker only counts at the start of a line — a sentence that
+        // mentions "SPARQL:" followed by a query is prose, not a request to run.
+        assert_eq!(
+            extract_sparql_directive("You could use this SPARQL: SELECT * WHERE { ?s ?p ?o }"),
+            None
+        );
     }
 
     #[test]
@@ -1232,6 +1972,33 @@ mod tests {
             extract_sparql_directive("There are 3 datasets about water quality."),
             None
         );
+    }
+
+    #[test]
+    fn bare_directive_is_demoted_post_loop() {
+        assert!(is_bare_sparql_directive(
+            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```"
+        ));
+        assert!(is_bare_sparql_directive(
+            "SPARQL: SELECT * WHERE { ?s ?p ?o }"
+        ));
+    }
+
+    #[test]
+    fn prose_with_fenced_corrected_query_is_kept_post_loop() {
+        // The failure follow-ups explicitly invite a corrected ```sparql block —
+        // a final answer with substantial prose around it must not be demoted.
+        let reply = "I could not run the query because the graph IRI was wrong. \
+                     Here is a corrected version you can run yourself:\n\
+                     SPARQL:\n```sparql\nSELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }\n```\n\
+                     It selects every triple in the graph you asked about.";
+        assert!(!is_bare_sparql_directive(reply));
+        // Plain prose (no directive at all) is never demoted either.
+        assert!(!is_bare_sparql_directive("There are 3 datasets."));
+        // A mid-prose mention is not a directive, so it is kept.
+        assert!(!is_bare_sparql_directive(
+            "Use this SPARQL: SELECT * WHERE { ?s ?p ?o } to count them."
+        ));
     }
 
     #[test]
@@ -1264,5 +2031,134 @@ mod tests {
     #[test]
     fn strips_bare_fence_without_lang() {
         assert_eq!(strip_code_fence("```\nASK {}\n```"), "ASK {}");
+    }
+
+    #[test]
+    fn unfenced_query_stops_at_a_following_fence_line() {
+        // A model that opens the fence BEFORE the `SPARQL:` marker leaves the
+        // directive payload unfenced with a stray closing ``` after it — seen
+        // live with qwen2.5:7b. The fence and trailing prose are not query text.
+        assert_eq!(
+            strip_code_fence("SELECT ?x WHERE {}\n```\nYou can run this yourself."),
+            "SELECT ?x WHERE {}"
+        );
+        // Same for the extraction entry point.
+        let q = extract_sparql_directive(
+            "SPARQL:\nSELECT ?x WHERE {}\n```\nYou can run this yourself.",
+        )
+        .expect("query before the fence is extracted");
+        assert_eq!(q, "SELECT ?x WHERE {}");
+    }
+
+    #[test]
+    fn fenced_query_stops_at_first_closing_fence() {
+        // rfind would span into a SECOND fenced block; the query ends at the
+        // first closing fence.
+        assert_eq!(
+            strip_code_fence("```sparql\nASK {}\n```\nand also:\n```python\nx = 1\n```"),
+            "ASK {}"
+        );
+    }
+
+    #[test]
+    fn unfenced_directive_with_trailing_prose_after_fence_is_not_bare() {
+        let reply = "SPARQL:\nSELECT * WHERE { ?s ?p ?o }\n```\nThis long trailing \
+                     explanation describes the query in detail and is clearly a real \
+                     answer for the user rather than a bare execution directive.";
+        assert!(!is_bare_sparql_directive(reply));
+    }
+
+    // ── Streaming plumbing ────────────────────────────────────────────────────
+
+    #[test]
+    fn sse_line_buffer_reassembles_lines_split_across_chunks() {
+        let mut buf = SseLineBuffer::default();
+        assert!(buf.push(b"data: {\"a\"").is_empty(), "no newline yet");
+        let lines = buf.push(b":1}\r\ndata: [DONE]\n");
+        assert_eq!(lines, vec!["data: {\"a\":1}", "data: [DONE]"]);
+        // A chunk carrying several lines at once.
+        let lines = buf.push(b"event: x\ndata: 2\n\n");
+        assert_eq!(lines, vec!["event: x", "data: 2", ""]);
+    }
+
+    #[test]
+    fn sse_data_extracts_payload_and_ignores_other_fields() {
+        assert_eq!(sse_data("data: {\"x\":1}"), Some("{\"x\":1}"));
+        assert_eq!(sse_data("data:[DONE]"), Some("[DONE]"));
+        assert_eq!(sse_data("event: message"), None);
+        assert_eq!(sse_data(": keep-alive comment"), None);
+        assert_eq!(sse_data(""), None);
+    }
+
+    #[test]
+    fn stream_delta_text_handles_all_known_chunk_shapes() {
+        let openai = json!({"choices":[{"delta":{"content":"Hi"}}]});
+        assert_eq!(stream_delta_text(&openai), Some("Hi"));
+        let whole_message = json!({"choices":[{"message":{"content":"All"}}]});
+        assert_eq!(stream_delta_text(&whole_message), Some("All"));
+        let legacy = json!({"choices":[{"text":"Old"}]});
+        assert_eq!(stream_delta_text(&legacy), Some("Old"));
+        let role_only = json!({"choices":[{"delta":{"role":"assistant"}}]});
+        assert_eq!(stream_delta_text(&role_only), None);
+        let empty = json!({});
+        assert_eq!(stream_delta_text(&empty), None);
+    }
+
+    /// Run `pieces` through a fresh gate wired to a live sink; return the
+    /// forwarded delta texts plus the gate's `forwarded` flag.
+    async fn gate_run(pieces: &[&str]) -> (Vec<String>, bool) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let sink = EventSink(Some(tx));
+        let mut gate = DeltaGate::new();
+        for p in pieces {
+            gate.push(&sink, p).await;
+        }
+        gate.finish(&sink).await;
+        let forwarded = gate.forwarded;
+        drop(gate);
+        drop(sink);
+        let mut out = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let ChatStreamEvent::Delta { text } = ev {
+                out.push(text);
+            }
+        }
+        (out, forwarded)
+    }
+
+    #[tokio::test]
+    async fn delta_gate_suppresses_directive_replies() {
+        // Marker arriving in one piece, and split mid-marker across pieces.
+        let (out, forwarded) = gate_run(&["SPARQL: SELECT * WHERE { ?s ?p ?o }"]).await;
+        assert!(out.is_empty(), "directive must not stream: {out:?}");
+        assert!(!forwarded);
+        let (out, _) = gate_run(&["SPA", "RQL:", " SELECT ?s WHERE {}"]).await;
+        assert!(out.is_empty(), "split marker must not stream: {out:?}");
+        // Case-insensitive, leading whitespace allowed.
+        let (out, _) = gate_run(&["  sparql: ASK {}"]).await;
+        assert!(out.is_empty(), "lowercase marker must not stream: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn delta_gate_forwards_prose_intact() {
+        let (out, forwarded) = gate_run(&["There ", "are 3 ", "datasets."]).await;
+        assert_eq!(out.join(""), "There are 3 datasets.");
+        assert!(forwarded);
+        // A prefix that *almost* matches the marker resolves to prose unharmed.
+        let (out, _) = gate_run(&["SPAR", "K is the assistant name."]).await;
+        assert_eq!(out.join(""), "SPARK is the assistant name.");
+        // Short replies that never hit the threshold still flush on finish.
+        let (out, _) = gate_run(&["42"]).await;
+        assert_eq!(out.join(""), "42");
+    }
+
+    #[tokio::test]
+    async fn delta_gate_forwards_prose_that_precedes_a_late_directive() {
+        // The gate only classifies the reply head; a directive later in the
+        // text is the loop's job (it emits RoundReset). The pre-directive
+        // prose having streamed is expected.
+        let (out, forwarded) = gate_run(&["Let me check.\n", "SPARQL: SELECT ?s WHERE {}"]).await;
+        assert!(out.join("").starts_with("Let me check."));
+        assert!(forwarded);
     }
 }

@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseChatBlocks,
-  reuseSegments,
   parseApiEndpoint,
   describeApiService,
   parseChartSpec,
@@ -11,6 +10,7 @@ import {
   sniffLang,
   normalizeSparqlResult,
   decorateApiLinks,
+  lenientJsonParse,
 } from '../chatRich.js';
 
 describe('parseChatBlocks', () => {
@@ -179,6 +179,29 @@ describe('parseMapSpec', () => {
   });
 });
 
+describe('lenientJsonParse', () => {
+  it('tolerates // and /* */ comments and trailing commas, preserving URLs', () => {
+    const card = lenientJsonParse(
+      '{\n  "title": "Waalbrug",\n  "image": "https://example.com/x.jpg", // replace if available\n  /* facts below */\n  "facts": [{"label":"Type","value":"Bridge"},],\n}'
+    );
+    expect(card).toEqual({
+      title: 'Waalbrug',
+      image: 'https://example.com/x.jpg',
+      facts: [{ label: 'Type', value: 'Bridge' }],
+    });
+  });
+
+  it('still parses strict JSON and rejects garbage', () => {
+    expect(lenientJsonParse('{"a":1}')).toEqual({ a: 1 });
+    expect(lenientJsonParse('{nope')).toBeUndefined();
+  });
+
+  it('feeds the card parser so commented specs render instead of breaking', () => {
+    const { card } = parseInfoCard('{"title":"X", // note\n"facts":[]}');
+    expect(card.title).toBe('X');
+  });
+});
+
 describe('parseInfoCard', () => {
   it('keeps only well-formed facts and requires a title', () => {
     const { card } = parseInfoCard(
@@ -243,83 +266,5 @@ describe('sniffLang', () => {
     expect(sniffLang('SELECT ?s WHERE { ?s ?p ?o }')).toBe('sparql');
     expect(sniffLang('@prefix ex: <http://x/> .')).toBe('');
     expect(sniffLang('just some text')).toBe('');
-  });
-});
-
-describe('parseChatBlocks streaming mode', () => {
-  it('renders an unclosed widget fence as a pending placeholder', () => {
-    const segs = parseChatBlocks('Counting…\n```chart\n{"type":"bar","data":[', {
-      streaming: true,
-    });
-    expect(segs.map((s) => s.kind)).toEqual(['md', 'pending']);
-    expect(segs[1].label).toBe('chart');
-  });
-
-  it('holds a possibly-incomplete fence tag as a generic pending block', () => {
-    // "```cha" is the last line — the model may still be typing "```chart".
-    const segs = parseChatBlocks('Here:\n```cha', { streaming: true });
-    expect(segs.map((s) => s.kind)).toEqual(['md', 'pending']);
-    expect(segs[1].label).toBe('');
-  });
-
-  it('labels a complete widget tag even before any body arrives', () => {
-    const segs = parseChatBlocks('Here:\n```map', { streaming: true });
-    expect(segs).toContainEqual({ kind: 'pending', label: 'map' });
-  });
-
-  it('keeps unclosed ordinary code fences in the markdown flow for live preview', () => {
-    const segs = parseChatBlocks('Look:\n```turtle\n@prefix ex: <http://x/> .', {
-      streaming: true,
-    });
-    expect(segs.map((s) => s.kind)).toEqual(['md']);
-    expect(segs[0].source).toContain('```turtle');
-  });
-
-  it('an unknown-but-prefix-shaped tag with a body is not special and stays markdown', () => {
-    // "ma" is a prefix of "map", but a body line means the tag line was finished —
-    // so "ma" is final and not one of ours.
-    const segs = parseChatBlocks('```ma\nx\n', { streaming: true });
-    expect(segs.map((s) => s.kind)).toEqual(['md']);
-  });
-
-  it('closed widget fences still parse normally while streaming', () => {
-    const segs = parseChatBlocks(
-      'Done:\n```chart\n{"type":"bar","data":[{"label":"A","value":1}]}\n```\nmore text',
-      { streaming: true }
-    );
-    expect(segs.map((s) => s.kind)).toEqual(['md', 'chart', 'md']);
-  });
-
-  it('without the streaming flag an unclosed fence parses as before (broken/widget)', () => {
-    const segs = parseChatBlocks('```chart\n{"type":"bar","data":[');
-    expect(segs[0].kind).toBe('broken');
-  });
-});
-
-describe('reuseSegments', () => {
-  it('keeps object identity for unchanged segments and replaces changed ones', () => {
-    const a = parseChatBlocks(
-      'Intro\n```chart\n{"type":"bar","data":[{"label":"A","value":1}]}\n```\ntail', { streaming: true });
-    const b = parseChatBlocks(
-      'Intro\n```chart\n{"type":"bar","data":[{"label":"A","value":1}]}\n```\ntail grew', { streaming: true });
-    const reused = reuseSegments(a, b);
-    expect(reused[0]).toBe(a[0]); // unchanged md keeps identity
-    expect(reused[1]).toBe(a[1]); // settled chart keeps identity (no widget re-render)
-    expect(reused[2]).not.toBe(a[2]); // growing tail is the new object
-    expect(reused[2].source).toContain('tail grew');
-  });
-
-  it('pending placeholder is replaced by the real widget once the fence closes', () => {
-    const a = parseChatBlocks('```chart\n{"type":"bar","data":[', { streaming: true });
-    const b = parseChatBlocks(
-      '```chart\n{"type":"bar","data":[{"label":"A","value":1}]}\n```', { streaming: true });
-    const reused = reuseSegments(a, b);
-    expect(a[0].kind).toBe('pending');
-    expect(reused[0].kind).toBe('chart');
-  });
-
-  it('handles an empty previous parse', () => {
-    const next = parseChatBlocks('hello', { streaming: true });
-    expect(reuseSegments([], next)).toBe(next);
   });
 });

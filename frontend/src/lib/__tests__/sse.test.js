@@ -1,67 +1,88 @@
 import { describe, it, expect } from 'vitest';
-import { createSseParser } from '../sse.js';
+import { parseSseLine, sseJsonEvents } from '../sse.js';
 
-function collect() {
-  const events = [];
-  const parser = createSseParser((name, data) => events.push([name, data]));
-  return { events, parser };
+function streamOf(chunks) {
+  const enc = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(enc.encode(c));
+      controller.close();
+    },
+  });
 }
 
-describe('createSseParser', () => {
-  it('parses named events with JSON payloads', () => {
-    const { events, parser } = collect();
-    parser.push('event: delta\ndata: {"text":"Hi"}\n\n');
-    parser.push('event: done\ndata: {"answer":"Hi"}\n\n');
-    parser.finish();
+async function collect(chunks) {
+  const out = [];
+  for await (const ev of sseJsonEvents(streamOf(chunks))) out.push(ev);
+  return out;
+}
+
+describe('parseSseLine', () => {
+  it('extracts JSON payloads with and without a space after data:', () => {
+    expect(parseSseLine('data: {"a":1}')).toEqual({ a: 1 });
+    expect(parseSseLine('data:{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('ignores non-data fields, comments, sentinels and broken JSON', () => {
+    expect(parseSseLine('event: message')).toBeUndefined();
+    expect(parseSseLine('id: 4')).toBeUndefined();
+    expect(parseSseLine(': keep-alive')).toBeUndefined();
+    expect(parseSseLine('data: [DONE]')).toBeUndefined();
+    expect(parseSseLine('data: {broken')).toBeUndefined();
+    expect(parseSseLine('')).toBeUndefined();
+  });
+});
+
+describe('sseJsonEvents', () => {
+  it('yields each data event in order', async () => {
+    const events = await collect([
+      'data: {"type":"status","round":0}\n\n',
+      'data: {"type":"delta","text":"Hi"}\n\n',
+    ]);
     expect(events).toEqual([
-      ['delta', '{"text":"Hi"}'],
-      ['done', '{"answer":"Hi"}'],
+      { type: 'status', round: 0 },
+      { type: 'delta', text: 'Hi' },
     ]);
   });
 
-  it('reassembles events split anywhere across chunks', () => {
-    const { events, parser } = collect();
-    const wire = 'event: delta\ndata: {"text":"Hello world"}\n\n';
-    for (const ch of wire) parser.push(ch); // one char at a time
-    parser.finish();
-    expect(events).toEqual([['delta', '{"text":"Hello world"}']]);
-  });
-
-  it('handles CRLF lines, data without space, and comment keep-alives', () => {
-    const { events, parser } = collect();
-    parser.push(': ping\r\n\r\nevent: delta\r\ndata:{"text":"a"}\r\n\r\n');
-    parser.finish();
-    expect(events).toEqual([['delta', '{"text":"a"}']]);
-  });
-
-  it('joins multi data-line events with newlines (SSE spec)', () => {
-    const { events, parser } = collect();
-    parser.push('event: x\ndata: line1\ndata: line2\n\n');
-    parser.finish();
-    expect(events).toEqual([['x', 'line1\nline2']]);
-  });
-
-  it('defaults the event name to "message" and resets it between events', () => {
-    const { events, parser } = collect();
-    parser.push('event: delta\ndata: a\n\ndata: b\n\n');
-    parser.finish();
+  it('reassembles events split across network chunks', async () => {
+    const events = await collect([
+      'data: {"type":"del',
+      'ta","text":"to',
+      'gether"}\ndata: {"type":"done"}\n',
+    ]);
     expect(events).toEqual([
-      ['delta', 'a'],
-      ['message', 'b'],
+      { type: 'delta', text: 'together' },
+      { type: 'done' },
     ]);
   });
 
-  it('delivers a final unterminated event on finish', () => {
-    const { events, parser } = collect();
-    parser.push('event: done\ndata: {"answer":"tail"}'); // connection closed here
-    parser.finish();
-    expect(events).toEqual([['done', '{"answer":"tail"}']]);
+  it('handles CRLF line endings and keep-alive comments', async () => {
+    const events = await collect([
+      ': ping\r\n\r\ndata: {"ok":true}\r\n\r\n',
+    ]);
+    expect(events).toEqual([{ ok: true }]);
   });
 
-  it('ignores blank keep-alive frames without data', () => {
-    const { events, parser } = collect();
-    parser.push('\n\n: keep\n\n\n');
-    parser.finish();
-    expect(events).toEqual([]);
+  it('yields a final event even when the stream ends without a newline', async () => {
+    const events = await collect(['data: {"tail":1}']);
+    expect(events).toEqual([{ tail: 1 }]);
+  });
+
+  it('decodes multi-byte characters split across chunk boundaries', async () => {
+    const enc = new TextEncoder();
+    const bytes = enc.encode('data: {"text":"héllo…"}\n');
+    // Split in the middle of the é byte pair.
+    const cut = 16;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, cut));
+        controller.enqueue(bytes.slice(cut));
+        controller.close();
+      },
+    });
+    const out = [];
+    for await (const ev of sseJsonEvents(stream)) out.push(ev);
+    expect(out).toEqual([{ text: 'héllo…' }]);
   });
 });
