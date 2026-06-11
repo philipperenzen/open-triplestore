@@ -1483,6 +1483,7 @@ pub async fn run(
         let migrate_store = state.store.clone();
         let migrate_auth = state.auth_db.clone();
         let migrate_base = state.base_url.to_string();
+        let migrate_state = state.clone();
         tokio::task::spawn_blocking(move || {
             if let Err(e) =
                 crate::shacl_studio::seed::seed_shacl_shacl(&migrate_store, &migrate_auth)
@@ -1496,6 +1497,10 @@ pub async fn run(
             ) {
                 tracing::warn!("shacl_studio: legacy migration failed: {e}");
             }
+            // Self-healing: adopt every dataset's shapes graph(s) — configured
+            // `shapes_graph_iri` or shapes-role dataset graphs — into the Studio
+            // Library and bind them in the validation layer (idempotent).
+            crate::shacl_studio::migrate::backfill_dataset_shapes(&migrate_state);
             // Built-in per-standard shape graphs + validation pipelines (idempotent).
             if let Err(e) =
                 crate::shacl_studio::seed_standards::seed_standards(&migrate_store, &migrate_auth)

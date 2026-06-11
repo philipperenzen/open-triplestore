@@ -3,14 +3,20 @@
   // with model-driven pickers (target/path datalists fed by the dataset's real
   // classes + properties) and typed constraint controls. Every edit mutates the
   // structured model and re-serialises to Turtle, so the source view stays in
-  // sync. When the document uses SHACL the model can't losslessly round-trip
-  // (`canRoundTrip === false`) the cards drop to read-only and Turtle stays the
-  // single source of truth.
+  // sync. SHACL the model doesn't edit (SPARQL constraints, shared structures,
+  // …) is retained verbatim (`extraQuads`) and flagged via `hasUnsupported`,
+  // so the cards stay editable for the modelled constructs while everything
+  // else round-trips untouched.
   import {
     parseShapesGraph,
     serializeShapesGraph,
     makeCurie,
     propChips,
+    renderPath,
+    shortLocal,
+    SEVERITY_VIOLATION,
+    SEVERITY_WARNING,
+    SEVERITY_INFO,
     SH,
   } from '../lib/shaclModel.ts';
   import {
@@ -205,6 +211,17 @@
     expanded = { ...expanded, [id]: !expanded[id] };
   }
 
+  const STD_SEVERITIES = [SEVERITY_VIOLATION, SEVERITY_WARNING, SEVERITY_INFO];
+
+  // Compact summary of logical operators on a shape, e.g. "or(2) not(1)".
+  function logicSummary(logic) {
+    const parts = [];
+    for (const op of ['and', 'or', 'xone', 'not']) {
+      if (logic?.[op]?.length) parts.push(`sh:${op}(${logic[op].length})`);
+    }
+    return parts.join(' ');
+  }
+
   function dtValue(iri) {
     // Normalize the common datatype namespaces even when their prefix isn't
     // declared, so the picker matches an option instead of showing blank.
@@ -243,11 +260,11 @@
       <AlertTriangle size={18} /> {@html $i18nT('components.shapeBuilder.parseError')}
     </div>
   {:else}
-    {#if !editable}
+    {#if model.hasUnsupported}
       <div class="banner">
         <Lock size={14} />
         <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
-        <span>{@html $i18nT('components.shapeBuilder.readonlyBanner')}</span>
+        <span>{@html $i18nT('components.shapeBuilder.preservedBanner')}</span>
       </div>
     {/if}
 
@@ -274,10 +291,13 @@
           {:else}
             <span class="iri-static">{disp(shape.iri)}</span>
           {/if}
+          {#if shape.hasUnsupported}
+            <span class="chip chip-adv" title={$i18nT('components.shapeBuilder.preservedTitle')}>{$i18nT('components.shapeBuilder.advanced')}</span>
+          {/if}
           <span class="spacer"></span>
           {#if editable}
             <label class="mini-toggle" title={$i18nT('components.shapeBuilder.closedTitle')}>
-              <input type="checkbox" checked={!!shape.closed} on:change={(e) => { shape.closed = e.currentTarget.checked; touch(); }} />
+              <input type="checkbox" checked={!!shape.closed} on:change={(e) => { if (e.currentTarget.checked) shape.closed = true; else delete shape.closed; touch(); }} />
               <Lock size={11} /> {$i18nT('components.shapeBuilder.closed')}
             </label>
             <button class="icon-btn danger" on:click={() => deleteShape(si)} title={$i18nT('components.shapeBuilder.deleteShape')}><Trash2 size={14} /></button>
@@ -313,6 +333,9 @@
               {/if}
             </div>
           {/each}
+          {#if shape.logic}
+            <span class="target-chip" title={logicSummary(shape.logic)}>{logicSummary(shape.logic)}</span>
+          {/if}
           {#if editable}
             <button class="link-btn" on:click={() => addTarget(shape)}><Plus size={11} /> {$i18nT('components.shapeBuilder.target')}</button>
           {/if}
@@ -321,17 +344,21 @@
         <!-- Properties -->
         <div class="props">
           {#each shape.properties as p, pi (p._id)}
-            <div class="prop" class:complex={p.complex}>
+            <div class="prop" class:complex={p.hasUnsupported}>
               {#if editable}
                 <div class="prop-main">
-                  <Combobox
-                    class="sb-path"
-                    suggestions={propSuggestions}
-                    value={disp(p.path)}
-                    placeholder="ex:propertyPath"
-                    on:change={(e) => { p.path = expand(e.detail); touch(); }}
-                    title={$i18nT('components.shapeBuilder.propertyPathTitle')}
-                  />
+                  {#if p.pathExpr}
+                    <span class="ro-path" title={$i18nT('components.shapeBuilder.propertyPathTitle')}>{renderPath(p.pathExpr, curie)}</span>
+                  {:else}
+                    <Combobox
+                      class="sb-path"
+                      suggestions={propSuggestions}
+                      value={disp(p.path)}
+                      placeholder="ex:propertyPath"
+                      on:change={(e) => { p.path = expand(e.detail); touch(); }}
+                      title={$i18nT('components.shapeBuilder.propertyPathTitle')}
+                    />
+                  {/if}
                   <Select class="sb-sel" size="sm" bind:value={p._vt} on:change={() => applyValueType(p)} title={$i18nT('components.shapeBuilder.valueType')}
                     options={[{ value: 'any', label: $i18nT('components.shapeBuilder.valueAny') }, { value: 'literal', label: $i18nT('components.shapeBuilder.valueLiteral') }, { value: 'class', label: $i18nT('components.shapeBuilder.valueClass') }, { value: 'iri', label: 'IRI' }, { value: 'blank', label: $i18nT('components.shapeBuilder.valueBlankNode') }]} />
                   {#if p._vt === 'literal'}
@@ -345,6 +372,12 @@
                   <label class="mini-toggle" title={$i18nT('components.shapeBuilder.singleTitle')}>
                     <input type="checkbox" checked={p.c.maxCount === 1} on:change={(e) => toggleSingle(p, e.currentTarget.checked)} /> {$i18nT('components.shapeBuilder.single')}
                   </label>
+                  {#if p.logic || p.qualified}
+                    <span class="chip chip-shape" title={logicSummary(p.logic) || 'sh:qualifiedValueShape'}>{p.qualified ? 'qualified' : logicSummary(p.logic)}</span>
+                  {/if}
+                  {#if p.hasUnsupported}
+                    <span class="chip chip-adv" title={$i18nT('components.shapeBuilder.preservedTitle')}>{$i18nT('components.shapeBuilder.advanced')}</span>
+                  {/if}
                   <button class="icon-btn" class:active={expanded[p._id]} on:click={() => toggleAdvanced(p._id)} title={$i18nT('components.shapeBuilder.moreConstraints')}>
                     <SlidersHorizontal size={13} />
                   </button>
@@ -390,7 +423,13 @@
                       <label class="wide">{$i18nT('components.shapeBuilder.labelName')}<input value={p.name ?? ''} on:change={(e) => setStr(p, 'name', e.currentTarget.value)} /></label>
                       <label>{$i18nT('components.shapeBuilder.severity')}
                         <Select size="sm" value={p.severity ?? ''} on:change={(e) => setStr(p, 'severity', e.detail)}
-                          options={[{ value: '', label: $i18nT('components.shapeBuilder.severityInherit') }, { value: 'Violation', label: $i18nT('components.shapeBuilder.severityViolation') }, { value: 'Warning', label: $i18nT('components.shapeBuilder.severityWarning') }, { value: 'Info', label: $i18nT('components.shapeBuilder.severityInfo') }]} />
+                          options={[
+                            { value: '', label: $i18nT('components.shapeBuilder.severityInherit') },
+                            { value: SEVERITY_VIOLATION, label: $i18nT('components.shapeBuilder.severityViolation') },
+                            { value: SEVERITY_WARNING, label: $i18nT('components.shapeBuilder.severityWarning') },
+                            { value: SEVERITY_INFO, label: $i18nT('components.shapeBuilder.severityInfo') },
+                            ...(p.severity && !STD_SEVERITIES.includes(p.severity) ? [{ value: p.severity, label: shortLocal(p.severity) }] : []),
+                          ]} />
                       </label>
                       <label class="full">{$i18nT('components.shapeBuilder.messageLabel')}<input value={p.message ?? ''} placeholder={$i18nT('components.shapeBuilder.messagePlaceholder')} on:change={(e) => setStr(p, 'message', e.currentTarget.value)} /></label>
                       <label class="full">{$i18nT('components.shapeBuilder.description')}<input value={p.description ?? ''} on:change={(e) => setStr(p, 'description', e.currentTarget.value)} /></label>
@@ -401,10 +440,10 @@
                 <!-- read-only row -->
                 <div class="prop-ro">
                   <span class="badge badge-prop">P</span>
-                  <span class="ro-path">{p.pathComplex ? $i18nT('components.shapeBuilder.pathExpression') : disp(p.path)}</span>
+                  <span class="ro-path">{p.pathExpr ? renderPath(p.pathExpr, curie) : disp(p.path)}</span>
                   <span class="ro-chips">
                     {#each propChips(p, curie) as chip}<span class="chip chip-{chip.k}">{chip.v}</span>{/each}
-                    {#if p.complex}<span class="chip chip-adv">{$i18nT('components.shapeBuilder.advanced')}</span>{/if}
+                    {#if p.hasUnsupported}<span class="chip chip-adv">{$i18nT('components.shapeBuilder.advanced')}</span>{/if}
                   </span>
                   {#if p.message}<span class="ro-msg" title={p.message}>“{p.message}”</span>{/if}
                 </div>

@@ -254,7 +254,8 @@
                     <span class="chip chip-vis"><Lock size={10} /> {$t('pages.shapeLibrary.visibilityPrivate')}</span>
                   {/if}
                   {#if set.source !== 'manual'}
-                    <span class="chip chip-source chip-source-{set.source}">
+                    <span class="chip chip-source chip-source-{set.source}"
+                      title={set.source === 'imported' ? $t('pages.shapeLibrary.sourceImportedTitle') : undefined}>
                       {#if set.source === 'ai'}<Sparkles size={10} />{/if}
                       {set.source}
                     </span>
@@ -385,6 +386,7 @@
   .chip-source-derived { background: #fef3c7; color: #92400e; }
   .chip-source-ai { background: #fce7f3; color: #9d174d; }
   .chip-source-imported { background: #dbeafe; color: #1d4ed8; }
+  .chip-source-standard { background: #f1f5f9; color: #475569; }
   .chip-status { text-transform: capitalize; }
   .chip-status-draft { background: #f3f4f6; color: #6b7280; }
   .chip-status-staged { background: #fef3c7; color: #92400e; }
@@ -437,6 +439,7 @@
   :global(:is([data-theme="dark"], .dark)) .chip-source-derived { background: rgba(245,158,11,0.18); color: #fcd34d; }
   :global(:is([data-theme="dark"], .dark)) .chip-source-ai { background: rgba(236,72,153,0.2); color: #f9a8d4; }
   :global(:is([data-theme="dark"], .dark)) .chip-source-imported { background: rgba(59,130,246,0.2); color: #93c5fd; }
+  :global(:is([data-theme="dark"], .dark)) .chip-source-standard { background: rgba(255,255,255,0.06); color: var(--ink-500); }
   :global(:is([data-theme="dark"], .dark)) .modal { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .modal-body label { color: var(--ink-700); }
 </style>

@@ -13,7 +13,10 @@
 //! * [`gate`] — write-gating helper called by the on-write hook.
 //! * [`cron`] — minimal 5-field cron matcher for the scheduler.
 //! * [`scheduler`] — background task firing due pipelines.
-//! * [`migrate`] — one-time legacy-shapes-graph → ShapeGraph import.
+//! * [`registration`] — idempotent adoption of dataset shapes graphs into the
+//!   Library + validation-layer binding (import, role changes, boot backfill).
+//! * [`migrate`] — one-time legacy-shapes-graph → ShapeGraph import + the
+//!   dataset-shapes backfill sweep.
 //! * [`seed`] — idempotent built-in SHACL-SHACL meta-shapes.
 //! * [`handlers`] / [`routes`] — axum wiring.
 
@@ -28,6 +31,7 @@ pub mod introspect;
 pub mod manifest;
 pub mod migrate;
 pub mod models;
+pub mod registration;
 pub mod report_rdf;
 pub mod routes;
 pub mod run;

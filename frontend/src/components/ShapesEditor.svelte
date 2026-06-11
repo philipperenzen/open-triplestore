@@ -177,6 +177,7 @@ PREFIX ex: <http://example.org/>
                     <button class="card" on:click={() => insertCard(card)} title={card.example}>
                       <div class="card-top">
                         <span class="card-label">{card.label}</span>
+                        {#if card.sourceOnly}<span class="card-source-only">{$t('pages.shaclShapes.sourceOnly')}</span>{/if}
                         <span class="card-insert"><CornerDownLeft size={11} /> {$t('pages.shaclShapes.insert')}</span>
                       </div>
                       <div class="card-what">{card.what}</div>
@@ -286,6 +287,8 @@ PREFIX ex: <http://example.org/>
   .card-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .card-label { font-size: 0.84rem; font-weight: 600; color: #1e293b; }
   .card-insert { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.68rem; color: #0e7490; opacity: 0; }
+  .card-source-only { font-size: 0.64rem; font-weight: 600; color: #92400e; background: #fef3c7; border-radius: 999px; padding: 0 6px; white-space: nowrap; }
+  :global(:is([data-theme="dark"], .dark)) .card-source-only { background: rgba(245,158,11,0.18); color: #fcd34d; }
   .card:hover .card-insert { opacity: 1; }
   .card-what { font-size: 0.74rem; color: #64748b; line-height: 1.35; margin-top: 0.1rem; }
   .palette-empty { padding: 1rem; text-align: center; color: #94a3b8; font-size: 0.82rem; }

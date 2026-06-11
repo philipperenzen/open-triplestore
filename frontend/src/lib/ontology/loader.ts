@@ -172,6 +172,10 @@ export function extractOntologyModel(store: Store) {
     return shapes.get(iri);
   };
 
+  // Named subjects explicitly typed sh:PropertyShape; used to index orphans
+  // (property shapes never referenced from a node shape via sh:property).
+  const declaredPropertyShapes = new Set<string>();
+
   for (const q of store.getQuads(null, null, null, null)) {
     const s = q.subject.value, p = q.predicate.value, o = q.object;
     if (p === RDFS + 'label' && o.termType === 'Literal') {
@@ -189,7 +193,11 @@ export function extractOntologyModel(store: Store) {
       else if (t === OWL + 'DatatypeProperty') { ensureProp(s).kind = 'datatype'; }
       else if (t === OWL + 'AnnotationProperty') { ensureProp(s).kind ||= 'annotation'; }
       else if (t === SH + 'NodeShape') ensureShape(s);
-      else if (t === SH + 'PropertyShape') { /* handled via sh:property */ }
+      else if (t === SH + 'PropertyShape') {
+        // Attached ones are handled via sh:property below; remember named
+        // declarations so orphans can be indexed afterwards.
+        if (q.subject.termType === 'NamedNode') declaredPropertyShapes.add(s);
+      }
     } else if (p === RDFS + 'subClassOf' && o.termType === 'NamedNode') {
       ensureClass(s).parents.add(o.value);
       ensureClass(o.value).children.add(s);
@@ -205,11 +213,9 @@ export function extractOntologyModel(store: Store) {
   }
 
   // SHACL property shapes attached via sh:property
-  for (const q of store.getQuads(null, namedNode(SH + 'property'), null, null)) {
-    const shape = ensureShape(q.subject.value);
-    const pShape = q.object;
+  const propertyEntryOf = (pShape) => {
     const pick = (pred) => store.getObjects(pShape, namedNode(SH + pred), null)[0];
-    const entry = {
+    return {
       path: pick('path')?.value || '',
       name: pick('name')?.value || '',
       description: pick('description')?.value || '',
@@ -222,6 +228,21 @@ export function extractOntologyModel(store: Store) {
       in: store.getObjects(pShape, namedNode(SH + 'in'), null).map(t => t.value),
       severity: pick('severity')?.value,
     };
+  };
+  const attachedPropertyShapes = new Set<string>();
+  for (const q of store.getQuads(null, namedNode(SH + 'property'), null, null)) {
+    const shape = ensureShape(q.subject.value);
+    attachedPropertyShapes.add(q.object.value);
+    const entry = propertyEntryOf(q.object);
+    if (entry.path) shape.properties.push(entry);
+  }
+
+  // Orphan property shapes (declared but never attached) get their own shape
+  // entry so they still surface in the ontology model.
+  for (const iri of declaredPropertyShapes) {
+    if (attachedPropertyShapes.has(iri)) continue;
+    const shape = ensureShape(iri);
+    const entry = propertyEntryOf(namedNode(iri));
     if (entry.path) shape.properties.push(entry);
   }
 
