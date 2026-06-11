@@ -187,7 +187,14 @@ pub struct TripleStore {
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
     blank_node_mode: BlankNodeMode,
+    /// Process-unique identity for cache keying (shared by clones, distinct per
+    /// underlying store). Prevents the per-thread SHACL path cache from serving
+    /// one store's results to another (same focus IRI + path, different data).
+    cache_id: u64,
 }
+
+/// Monotonic source for [`TripleStore::cache_id`].
+static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl TripleStore {
     /// Open or create a persistent store at the given path.
@@ -205,6 +212,7 @@ impl TripleStore {
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
+            cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -220,6 +228,7 @@ impl TripleStore {
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
+            cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -276,6 +285,11 @@ impl TripleStore {
         &self.store
     }
 
+    /// Process-unique store identity for cache keying (stable across clones).
+    pub fn cache_id(&self) -> u64 {
+        self.cache_id
+    }
+
     /// Build query options with all registered custom functions (GeoSPARQL, RDF 1.2, etc.).
     pub(crate) fn query_options(&self) -> QueryOptions {
         // Disable SPARQL federation (`SERVICE`) explicitly. Today oxigraph is built
@@ -298,6 +312,13 @@ impl TripleStore {
         // Register SPARQL 1.2 ADJUST function (always available)
         {
             let (iri, handler) = crate::sparql::rdf12_functions::adjust_function();
+            opts = opts.with_custom_function(iri, move |args| handler(args));
+        }
+
+        // Register SHACL-AF user-defined functions (sh:SPARQLFunction) discovered in the
+        // store. Discovery uses the raw quad index (never store.query), so this does not
+        // re-enter query_options; each function evaluates against a fresh in-memory store.
+        for (iri, handler) in crate::shacl::sparql_functions::all_functions(self) {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 

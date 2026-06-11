@@ -1,0 +1,8 @@
+# §6.3 rule NEGATIVE — bridge over water with only cs3 parts must NOT infer a priority.
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix bot: <https://w3id.org/bot#> .
+@prefix skos:<http://www.w3.org/2004/02/skos/core#> .
+wb:GoedBrug a da:Brug ; da:kruistWaterweg wb:Waal ; bot:containsElement wb:GoedDeel .
+wb:GoedDeel a da:Brugonderdeel ; da:conditiescore wb:cs3 .
+wb:cs3 a skos:Concept ; skos:notation "3" .

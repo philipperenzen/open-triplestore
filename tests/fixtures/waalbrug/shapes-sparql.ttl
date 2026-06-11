@@ -1,0 +1,95 @@
+# Waalbrug reference example — §5 SHACL-SPARQL constraints + the ex:prefixes declaration.
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix da:   <https://data.example.nl/def/> .
+@prefix ex:   <https://example.org/shape/def#> .
+
+### 5.0 Prefix declaration for SHACL-SPARQL
+ex:prefixes
+    sh:declare [ sh:prefix "rdf"  ; sh:namespace "http://www.w3.org/1999/02/22-rdf-syntax-ns#"^^xsd:anyURI ] ,
+    [ sh:prefix "da"   ; sh:namespace "https://data.example.nl/def/"^^xsd:anyURI ] ,
+    [ sh:prefix "geo"  ; sh:namespace "http://www.opengis.net/ont/geosparql#"^^xsd:anyURI ] ,
+    [ sh:prefix "geof" ; sh:namespace "http://www.opengis.net/def/function/geosparql/"^^xsd:anyURI ] ,
+    [ sh:prefix "uom"  ; sh:namespace "http://www.opengis.net/def/uom/OGC/1.0/"^^xsd:anyURI ] ,
+    [ sh:prefix "qudt" ; sh:namespace "http://qudt.org/schema/qudt/"^^xsd:anyURI ] ,
+    [ sh:prefix "ex"   ; sh:namespace "https://example.org/shape/def#"^^xsd:anyURI ] .
+
+### 5.1 Aggregate — sum of span lengths vs total length (HAVING). Severity = Warning.
+ex:OverspanningSomShape a sh:NodeShape ;
+    sh:targetClass da:Brug ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:severity sh:Warning ;
+        sh:message "Som overspanningslengten wijkt >0,5 m af van totale lengte."@nl ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this (SUM(?l) AS ?value)
+            WHERE {
+                $this da:totaleLengte ?totaal .
+                $this da:heeftOverspanning/da:lengte ?l .
+            }
+            GROUP BY $this ?totaal
+            HAVING ( ABS(SUM(?l) - ?totaal) > 0.5 )
+        """ ] .
+
+### 5.2 Cross-property — a movable bridge requires an operating object
+ex:BeweegbaarShape a sh:NodeShape ;
+    sh:targetClass da:Brug ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Beweegbare brug zonder bedieningsobject."@nl ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this
+            WHERE {
+                $this da:beweegbaar true .
+                FILTER NOT EXISTS { $this da:heeftBedieningsobject ?b }
+            }
+        """ ] .
+
+### 5.3 GeoSPARQL — component geometry must lie within the bridge tracé envelope
+ex:OnderdeelInBrugShape a sh:NodeShape ;
+    sh:targetClass da:Brug ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Onderdeelgeometrie ligt >25 m buiten brug-tracé."@nl ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this ?onderdeel
+            WHERE {
+                $this geo:hasGeometry/geo:asWKT ?brugWkt .
+                $this <https://w3id.org/bot#containsElement> ?onderdeel .
+                ?onderdeel geo:hasGeometry/geo:asWKT ?oWkt .
+                FILTER ( geof:distance(?brugWkt, ?oWkt, uom:metre) > 25 )
+            }
+        """ ] .
+
+### 5.4 GeoSPARQL — two arches must not coincide (min. distance)
+ex:BogenAfstandShape a sh:NodeShape ;
+    sh:targetClass da:Brug ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Twee bogen liggen < 10 m uit elkaar (mogelijke dubbele registratie)."@nl ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this (?a AS ?value)
+            WHERE {
+                $this <https://w3id.org/bot#containsElement> ?a , ?b .
+                ?a a da:Boog . ?b a da:Boog .
+                FILTER ( STR(?a) < STR(?b) )
+                ?a geo:hasGeometry/geo:asWKT ?aw .
+                ?b geo:hasGeometry/geo:asWKT ?bw .
+                FILTER ( geof:distance(?aw, ?bw, uom:metre) < 10 )
+            }
+        """ ] .
+
+### 5.5 sh:ask-style validator — GUID required as soon as an IFC file is attached
+ex:IfcRefShape a sh:NodeShape ;
+    sh:targetClass da:Brugonderdeel ;
+    sh:sparql [ a sh:SPARQLConstraint ;
+        sh:message "Onderdeel met IFC-geometrie mist da:ifcGuid."@nl ;
+        sh:prefixes ex:prefixes ;
+        sh:select """
+            SELECT $this
+            WHERE {
+                $this <https://w3id.org/omg#hasGeometry>/<https://w3id.org/fog#asIfc_v4.0> ?ifc .
+                FILTER NOT EXISTS { $this da:ifcGuid ?g }
+            }
+        """ ] .

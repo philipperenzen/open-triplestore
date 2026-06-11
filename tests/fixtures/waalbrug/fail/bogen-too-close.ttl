@@ -1,0 +1,8 @@
+# ❌ §5.4 — two arches < 10 m apart (SPARQL + geof:distance; possible double registration).
+@prefix da:  <https://data.example.nl/def/> .
+@prefix wb:  <https://data.example.nl/id/waalbrug/> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+@prefix bot: <https://w3id.org/bot#> .
+wb:DubbelBrug a da:Brug ; bot:containsElement wb:BoogA , wb:BoogB .
+wb:BoogA a da:Boog ; geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)"^^geo:wktLiteral ] .
+wb:BoogB a da:Boog ; geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187423 428472)"^^geo:wktLiteral ] .  # ~3.6 m from BoogA

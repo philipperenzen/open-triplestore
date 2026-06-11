@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** current release **`0.2.4`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.3.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -79,7 +79,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **DCAT 2 catalog** | Full W3C DCAT 2 catalog at `/.well-known/void` — per-dataset distributions, VoID statistics, PROV-O provenance |
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
-| **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md)) |
+| **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
 | **Prefix auto-resolution** | Unknown prefixes resolved on-the-fly via [prefix.cc](https://prefix.cc) with local caching |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
@@ -187,7 +187,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.2.4"}
+# {"status":"ok","version":"0.3.0"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare

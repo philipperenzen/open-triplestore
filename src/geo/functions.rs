@@ -67,6 +67,8 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::AREA, fn_area),
         make_fn(vocab::GET_SRID, fn_get_srid),
         make_fn(vocab::RELATE, fn_relate),
+        // ─── CRS transform ───
+        make_fn(vocab::TRANSFORM, fn_transform),
     ]
 }
 
@@ -368,11 +370,78 @@ fn fn_union(args: &[Term]) -> Option<Term> {
 fn fn_distance(args: &[Term]) -> Option<Term> {
     let (g1, g2) = parse_two_geoms(args)?;
 
-    // Third arg (optional): units IRI
-    let _unit_scale = args.get(2).and_then(parse_uom).unwrap_or(1.0);
+    // Planar distance in the CRS of the first geometry. The optional third argument
+    // is a units-of-measure IRI; for a metre-based CRS (e.g. EPSG:28992) the planar
+    // value is already in metres, so we convert by dividing by the unit's metre size
+    // (metre → ÷1, kilometre → ÷1000, …). For a geographic CRS the planar value is in
+    // degrees and no linear conversion is applied — geodesic metres would need
+    // geof:metricDistance (a separate, still-tracked gap).
+    let metres_per_unit = args.get(2).and_then(uom_metres_per_unit).unwrap_or(1.0);
 
-    let dist = g1.distance(&g2).ok()?;
+    let dist = g1.distance(&g2).ok()? / metres_per_unit;
     Some(double_literal(dist))
+}
+
+/// Size of a linear units-of-measure IRI in metres, for converting a metre-based
+/// planar distance into the requested unit. Returns `None` for non-linear/unknown
+/// units so the caller falls back to the raw (unscaled) planar value.
+fn uom_metres_per_unit(term: &Term) -> Option<f64> {
+    match term {
+        Term::NamedNode(nn) => match nn.as_str() {
+            s if s == vocab::METRE => Some(1.0),
+            s if s == vocab::KILOMETRE => Some(1000.0),
+            s if s == vocab::CENTIMETRE => Some(0.01),
+            s if s == vocab::MILLIMETRE => Some(0.001),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `geof:transform(geom, targetCrsIri)` — reproject a geometry literal to the target
+/// CRS (OGC GeoSPARQL Geometry Extension). The source CRS is taken from the literal's
+/// `<crs>` prefix (defaulting to CRS84); supported CRS are EPSG:28992 / 4326 / 3857
+/// (see [`super::crs`]). Returns a `geo:wktLiteral` prefixed with the target CRS, or
+/// `None` if either CRS is unsupported or the geometry does not parse.
+fn fn_transform(args: &[Term]) -> Option<Term> {
+    use super::crs::Crs;
+    use geo::MapCoords;
+    use wkt::{ToWkt, TryFromWkt};
+
+    let lit = match args.first()? {
+        Term::Literal(l) => l,
+        _ => return None,
+    };
+    let value = lit.value();
+    let source = extract_crs(value)
+        .and_then(Crs::from_uri)
+        .unwrap_or(Crs::Wgs84);
+
+    let target_iri = match args.get(1)? {
+        Term::NamedNode(nn) => nn.as_str(),
+        _ => return None,
+    };
+    let target = Crs::from_uri(target_iri)?;
+
+    // Strip the optional CRS prefix to get the bare WKT, then parse via geo-types.
+    let trimmed = value.trim();
+    let wkt_body = if trimmed.starts_with('<') {
+        trimmed.split_once('>').map(|(_, rest)| rest.trim())?
+    } else {
+        trimmed
+    };
+    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(wkt_body).ok()?;
+
+    let out = geom.map_coords(|c| {
+        let (x, y) = super::crs::transform_xy(source, target, c.x, c.y).unwrap_or((c.x, c.y));
+        geo::Coord { x, y }
+    });
+
+    let lexical = format!("<{}> {}", target.to_uri(), out.wkt_string());
+    Some(Term::Literal(oxrdf::Literal::new_typed_literal(
+        lexical,
+        NamedNode::new_unchecked(vocab::WKT_LITERAL),
+    )))
 }
 
 fn fn_area(args: &[Term]) -> Option<Term> {
