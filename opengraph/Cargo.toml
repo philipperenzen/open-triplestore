@@ -13,7 +13,7 @@ publish = false
 
 [dependencies]
 # Oxigraph engine — opengraph wraps and extends these (re-exported from lib.rs).
-oxigraph  = "0.4"
+oxigraph  = "0.5"
 oxrdf     = "0.2"
 spargebra = "0.3"
 
