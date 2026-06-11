@@ -265,8 +265,17 @@ pub struct AuthDb {
 impl AuthDb {
     /// Open or create the SQLite database at the given path and run migrations.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let manager = SqliteConnectionManager::file(path)
-            .with_init(|c| c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;"));
+        let manager = SqliteConnectionManager::file(path).with_init(|c| {
+            // `busy_timeout` MUST be set first: it makes a connection wait for the
+            // write lock instead of failing instantly with SQLITE_BUSY ("database is
+            // locked"). r2d2 opens the whole pool eagerly, so the 8 connections race
+            // to run `journal_mode=WAL` at boot — without the timeout already in
+            // effect, the losers of that race error out. Ordering it ahead of WAL
+            // also covers the boot seeders/audit writes that contend on the DB.
+            c.execute_batch(
+                "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
+            )
+        });
         let pool = r2d2::Pool::builder()
             .max_size(8)
             .build(manager)

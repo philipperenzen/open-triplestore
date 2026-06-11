@@ -7,9 +7,9 @@
   // explorer over their models. Light/dark follows the app theme.
   import { t as i18nT } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
-  import { getViewerFeed } from '../lib/api.js';
+  import { getViewerFeed, listDatasetGraphs } from '../lib/api.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
-  import { ChevronLeft, Search, Boxes, MapPin } from 'lucide-svelte';
+  import { ChevronLeft, Search, Boxes, MapPin, X, Download, FileDown } from 'lucide-svelte';
   import { modelRefOf } from '../lib/viewer/detect';
   import { modelRefs } from '../lib/viewer/geometry';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
@@ -19,12 +19,43 @@
   export let id = '';
 
   let elements = [];
+  let graphs = [];
   let loading = true;
   let error = '';
   let selected = '';
-  let modalElement = null;
   let query = '';
   let mapComponent;
+  let dlOpen = false;
+
+  // Download sources: the original IFC file (fragment-less) and every dataset
+  // graph in the user's preferred RDF serialization.
+  const LD_FORMATS = [
+    { key: 'turtle', label: 'Turtle' },
+    { key: 'jsonld', label: 'JSON-LD' },
+    { key: 'rdfxml', label: 'RDF/XML' },
+    { key: 'ntriples', label: 'N-Triples' },
+  ];
+  $: ifcUrl = (elements.find((e) => e.ifc_url)?.ifc_url || '').split('#')[0];
+  $: mapAttribution = elements.some((e) =>
+    (e.files || []).some(([, url]) => /3dbag/i.test(url || ''))
+  )
+    ? '© 3DBAG by tudelft3d and 3DGI (CC BY 4.0)'
+    : '';
+
+  // Several movable inspector panels can be open at once (one per element).
+  // Only the first MODEL_CAP panels mount the heavy 3D viewer; the rest open
+  // "info-only" with a button to load 3D on demand (which evicts the oldest 3D
+  // viewer). A small dock lists the open panels and brings them to front.
+  const MAX_PANELS = 5;
+  const MODEL_CAP = 2;
+  let panels = []; // { id, z, loadModel, seq }
+  let zTop = 1100;
+  let seqCounter = 0;
+
+  const panelLabel = (pid) => {
+    const el = elements.find((e) => e.id === pid);
+    return el?.label || shortenIRI(pid);
+  };
 
   $: filtered = query
     ? elements.filter((e) =>
@@ -49,16 +80,69 @@
     } finally {
       loading = false;
     }
+    try {
+      graphs = (await listDatasetGraphs(id)) || [];
+    } catch {
+      graphs = []; // downloads simply hide when the graph list is unavailable
+    }
   }
 
   function open(elId, { fly = true } = {}) {
     selected = elId;
-    modalElement = elements.find((e) => e.id === elId) || null;
-    if (fly && modalElement?.wkt4326) mapComponent?.focusElement(elId);
+    const el = elements.find((e) => e.id === elId);
+    if (el && fly && el.wkt4326) mapComponent?.focusElement(elId);
+    if (!el) return;
+    if (panels.some((p) => p.id === elId)) {
+      focusPanel(elId);
+      return;
+    }
+    const wantsModel = hasModel(el);
+    const modelCount = panels.filter((p) => p.loadModel).length;
+    const panel = { id: elId, z: ++zTop, seq: seqCounter++, loadModel: wantsModel && modelCount < MODEL_CAP };
+    panels = [...panels, panel];
+    if (panels.length > MAX_PANELS) panels = panels.slice(panels.length - MAX_PANELS);
+  }
+
+  function focusPanel(id) {
+    selected = id;
+    panels = panels.map((p) => (p.id === id ? { ...p, z: ++zTop } : p));
+  }
+  function closePanel(id) {
+    panels = panels.filter((p) => p.id !== id);
+  }
+  function closeAll() {
+    panels = [];
+  }
+  // Promote an info-only panel to a live 3D viewer, evicting the oldest one when
+  // the model cap is reached — so the user can always inspect the 3D they want.
+  function loadModelFor(id) {
+    let next = panels;
+    if (panels.filter((p) => p.loadModel).length >= MODEL_CAP) {
+      const oldest = panels.filter((p) => p.loadModel).sort((a, b) => a.z - b.z)[0];
+      if (oldest) next = next.map((p) => (p.id === oldest.id ? { ...p, loadModel: false } : p));
+    }
+    panels = next.map((p) => (p.id === id ? { ...p, loadModel: true, z: ++zTop } : p));
+  }
+
+  // Fly the map to a located element (panels stay open; the flown-to element
+  // gets the selection highlight so it's findable among the rooftops).
+  function showOnMap(elId) {
+    selected = elId;
+    mapComponent?.focusElement(elId);
   }
 
   function onMapSelect(event) {
-    open(event.detail.id, { fly: false });
+    const { id: elId, guid } = event.detail || {};
+    // An IFC mesh pick carries the element's GlobalId — resolve it to the feed
+    // element so clicking a beam opens *that beam's* panel.
+    if (guid) {
+      const byGuid = elements.find((e) => e.ifc_guid === guid);
+      if (byGuid) {
+        open(byGuid.id, { fly: false });
+        return;
+      }
+    }
+    if (elId) open(elId, { fly: false });
   }
 
   load();
@@ -73,6 +157,35 @@
     <h1>{$i18nT('pages.datasetViewer.title')}</h1>
     {#if !loading && elements.length}
       <span class="count-chip">{elements.length} {$i18nT('pages.datasetViewer.elements').toLowerCase()}</span>
+    {/if}
+    {#if !loading && (ifcUrl || graphs.length)}
+      <div class="dl-wrap">
+        <button class="btn btn-sm" on:click={() => (dlOpen = !dlOpen)} aria-expanded={dlOpen}>
+          <Download size={14} /> {$i18nT('viewer.download')}
+        </button>
+        {#if dlOpen}
+          <div class="dl-menu">
+            {#if ifcUrl}
+              <a class="dl-item dl-ifc" href={ifcUrl} download>
+                <FileDown size={13} /> {$i18nT('viewer.downloadIfc')}
+              </a>
+            {/if}
+            {#if graphs.length}
+              <div class="dl-head">{$i18nT('viewer.downloadLd')}</div>
+              {#each graphs as g (g.graph_iri)}
+                <div class="dl-graph">
+                  <span class="dl-gname" title={g.graph_iri}>{shortenIRI(g.graph_iri)}</span>
+                  <span class="dl-fmts">
+                    {#each LD_FORMATS as f}
+                      <a href={`/store?graph=${encodeURIComponent(g.graph_iri)}&format=${f.key}`}>{f.label}</a>
+                    {/each}
+                  </span>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
     {/if}
   </div>
 
@@ -131,6 +244,7 @@
             bind:this={mapComponent}
             {elements}
             {selected}
+            extraAttribution={mapAttribution}
             on:select={onMapSelect}
             height="100%"
           />
@@ -142,13 +256,42 @@
   {/if}
 </div>
 
-<ElementModal
-  element={modalElement}
-  {elements}
-  datasetId={id}
-  on:close={() => (modalElement = null)}
-  on:navigate={(e) => open(e.detail.id)}
-/>
+{#each panels as p (p.id)}
+  <ElementModal
+    element={elements.find((e) => e.id === p.id) || null}
+    {elements}
+    datasetId={id}
+    offset={p.seq % 6}
+    z={p.z}
+    lite={!p.loadModel}
+    hasMap={hasGeo}
+    on:focus={() => focusPanel(p.id)}
+    on:close={() => closePanel(p.id)}
+    on:navigate={(e) => open(e.detail.id)}
+    on:loadmodel={() => loadModelFor(p.id)}
+    on:showonmap={(e) => showOnMap(e.detail.id)}
+  />
+{/each}
+
+{#if panels.length}
+  <div class="panel-dock">
+    <span class="dock-label">{panels.length} {$i18nT('viewer.openPanels')}</span>
+    {#each panels as p (p.id)}
+      <span class="dock-chip" class:has3d={p.loadModel}>
+        <button class="dock-focus" on:click={() => focusPanel(p.id)} title={panelLabel(p.id)}>
+          {#if p.loadModel}<Boxes size={11} />{/if}
+          <span class="dock-name">{panelLabel(p.id)}</span>
+        </button>
+        <button class="dock-close" on:click={() => closePanel(p.id)} aria-label={$i18nT('viewer.close')}>
+          <X size={12} />
+        </button>
+      </span>
+    {/each}
+    {#if panels.length > 1}
+      <button class="dock-closeall" on:click={closeAll}>{$i18nT('viewer.closeAll')}</button>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .explorer-page {
@@ -276,6 +419,139 @@
   }
   .hint.error {
     color: var(--danger-500, #c0392b);
+  }
+
+  /* Download menu (IFC + linked-data formats) */
+  .dl-wrap { position: relative; margin-left: auto; }
+  .dl-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 50;
+    min-width: 300px;
+    padding: 8px;
+    border-radius: 12px;
+    background: var(--bg-elevated, #fff);
+    border: 1px solid var(--line-soft, #e2e8f0);
+    box-shadow: var(--shadow-md, 0 12px 30px rgba(0, 0, 0, 0.16));
+    animation: rowIn var(--dur-base, 220ms) var(--ease-out, ease) both;
+  }
+  .dl-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 8px;
+    border-radius: 8px;
+    font-size: 0.84rem;
+    color: var(--ink-900, #0f172a);
+    text-decoration: none;
+  }
+  .dl-item:hover { background: var(--bg-hover, rgba(0, 0, 0, 0.05)); }
+  .dl-head {
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted, #64748b);
+    font-weight: 700;
+    padding: 8px 8px 2px;
+  }
+  .dl-graph {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 5px 8px;
+    font-size: 0.8rem;
+  }
+  .dl-gname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink-700, #334155);
+    min-width: 0;
+  }
+  .dl-fmts { display: inline-flex; gap: 8px; flex: none; }
+  .dl-fmts a { font-size: 0.74rem; color: var(--brand-600, #1d6fb8); text-decoration: none; }
+  .dl-fmts a:hover { text-decoration: underline; }
+
+  /* Dock — manages the open inspector panels (focus / close). */
+  .panel-dock {
+    position: fixed;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    z-index: 1300;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: min(92vw, 900px);
+    flex-wrap: wrap;
+    padding: 6px 8px;
+    border-radius: 999px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.92));
+    border: 1px solid var(--line-soft, #e2e8f0);
+    box-shadow: var(--shadow-md, 0 12px 30px rgba(0, 0, 0, 0.16));
+    backdrop-filter: blur(10px);
+    animation: rowIn var(--dur-base, 220ms) var(--ease-out, ease) both;
+  }
+  .dock-label {
+    font-size: 0.7rem;
+    color: var(--muted, #64748b);
+    padding: 0 4px;
+    white-space: nowrap;
+  }
+  .dock-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border-radius: 999px;
+    background: var(--bg-soft, #f1f5f9);
+    border: 1px solid transparent;
+    max-width: 180px;
+  }
+  .dock-chip.has3d {
+    border-color: rgba(232, 89, 12, 0.4);
+  }
+  .dock-focus {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 0;
+    background: transparent;
+    padding: 4px 4px 4px 10px;
+    cursor: pointer;
+    font-size: 0.76rem;
+    color: var(--ink-900, #0f172a);
+    min-width: 0;
+  }
+  .dock-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dock-close {
+    border: 0;
+    background: transparent;
+    padding: 4px 8px 4px 2px;
+    cursor: pointer;
+    color: var(--muted, #64748b);
+    display: grid;
+    place-items: center;
+  }
+  .dock-close:hover {
+    color: var(--danger-500, #c0392b);
+  }
+  .dock-closeall {
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font-size: 0.72rem;
+    color: var(--muted, #64748b);
+    padding: 0 8px;
+    white-space: nowrap;
+  }
+  .dock-closeall:hover {
+    color: var(--ink-900, #0f172a);
   }
   @media (max-width: 900px) {
     .explorer {

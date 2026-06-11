@@ -38,3 +38,4 @@ jwt_secret
 # Defence in depth — these are also excluded from the public copy entirely.
 SECURITY_ASSESSMENT.md
 docs/audit-report-2026-04-22.md
+scratch/

@@ -5,7 +5,7 @@
   import {
     ArrowLeft, Plus, Upload, GitCompare, CheckCircle, Trash2, Loader2,
     Download, Copy, CheckCheck, Lock, Globe, Pencil, X, Save, BookOpen,
-    ChevronDown, ChevronUp, PlayCircle, Users, Building2, User,
+    ChevronDown, ChevronUp, PlayCircle, Users, Building2, User, Maximize2,
   } from 'lucide-svelte';
   import {
     getDataModel, listDataModelVersions, deleteDataModelVersion, stageDataModelVersion,
@@ -472,6 +472,13 @@
                   >
                     <BookOpen size={13} />
                     {browserVersion === ver.version ? $t('system.close') : $t('pages.modelDetail.browse')}
+                  </button>
+                  <button
+                    class="ver-btn"
+                    on:click={() => navigate(`/models/${id}/viewer/${ver.version}`)}
+                    title={$t('pages.modelDetail.openFullViewer')}
+                  >
+                    <Maximize2 size={13} /> {$t('pages.modelDetail.openViewer')}
                   </button>
 
                   <span class="ver-sep"></span>

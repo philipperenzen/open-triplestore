@@ -17,6 +17,7 @@
 @prefix geo:     <http://www.opengis.net/ont/geosparql#> .
 @prefix bot:     <https://w3id.org/bot#> .
 @prefix omg:     <https://w3id.org/omg#> .
+@prefix ots:     <https://opentriplestore.org/ns#> .
 @prefix fog:     <https://w3id.org/fog#> .
 @prefix prov:    <http://www.w3.org/ns/prov#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
@@ -28,7 +29,7 @@ lm:WorldLandmarks a bot:Zone ;
     rdfs:label "World landmarks (Wikidata 3D demo)"@en ;
     dcterms:source <https://query.wikidata.org/> ;
     bot:containsElement lm:DragonBridge , lm:BigBen , lm:WhiteHouse ,
-                        lm:EmpireStateBuilding , lm:SannoShrine , lm:NijmegenCityBlock .
+                        lm:EmpireStateBuilding , lm:SannoShrine .
 
 # ── Dragon Bridge, Da Nang (a real bridge with an open 3D model) ──
 lm:DragonBridge a bot:Element ;
@@ -46,7 +47,8 @@ lm:BigBen a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(-0.12457 51.50067)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl"^^xsd:anyURI ;
+        ots:modelUpAxis "Z" ] .
 
 # ── White House, Washington D.C. ──
 lm:WhiteHouse a bot:Element ;
@@ -55,7 +57,8 @@ lm:WhiteHouse a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(-77.036666666 38.897777777)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl"^^xsd:anyURI ;
+        ots:modelUpAxis "Z" ] .
 
 # ── Empire State Building, New York ──
 lm:EmpireStateBuilding a bot:Element ;
@@ -64,7 +67,8 @@ lm:EmpireStateBuilding a bot:Element ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(-73.985555555 40.748333333)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl"^^xsd:anyURI ] .
+        fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl"^^xsd:anyURI ;
+        ots:modelUpAxis "Z" ] .
 
 # ── Sannō Shrine one-legged torii, Nagasaki ──
 lm:SannoShrine a bot:Element ;
@@ -74,15 +78,3 @@ lm:SannoShrine a bot:Element ;
         geo:asWKT "POINT(129.86861111 32.7675)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/1/1d/Nagasaki_torii_shrine.stl"^^xsd:anyURI ] .
-
-# ── Nijmegen city block (SYNTHETIC, CC0) — CityJSON LoD2 demo ──
-# Not from Wikidata: a hand-authored two-building CityJSON file (EPSG:7415,
-# semantic Roof/Wall/Ground surfaces) bundled with the frontend, so the viewer
-# can demonstrate georeferenced CityJSON rendering without external downloads.
-# The model is self-georeferenced; the WKT point is the fallback anchor.
-lm:NijmegenCityBlock a bot:Element ;
-    rdfs:label "Nijmegen city block (CityJSON LoD2 demo)"@en ;
-    geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POINT(5.85953 51.84188)"^^geo:wktLiteral ] ;
-    omg:hasGeometry [ a omg:Geometry ;
-        fog:asCityjson "/samples/nijmegen-buildings.city.json"^^xsd:anyURI ] .

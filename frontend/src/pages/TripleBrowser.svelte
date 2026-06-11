@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import { delayedLoading } from '../lib/delayedLoading';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
   import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
@@ -833,6 +834,14 @@
     flushOnHide(); // client-side route change unmounts us — capture final state
   });
 
+  // Debounced loading: only show the skeleton once a fetch has run past the
+  // motion threshold, so quick page/filter changes keep the current rows visible
+  // instead of flashing a skeleton (then the new rows animate in via DataTable).
+  const tableBusy = delayedLoading();
+  const showSkeleton = tableBusy.show;
+  $: tableBusy.set(loading);
+  onDestroy(() => tableBusy.cancel());
+
   onMount(async () => {
     // Load prefix.cc prefixes in background (non-blocking)
     loadPrefixCcPrefixes();
@@ -1653,7 +1662,7 @@
         </div>
       {/if}
 
-      {#if loading}
+      {#if $showSkeleton}
         <div class="skeleton-rows">
           {#each Array(10) as _}
             <div class="skeleton-row">
@@ -1664,6 +1673,11 @@
             </div>
           {/each}
         </div>
+      {:else if loading && filteredTriples.length === 0}
+        <!-- A fetch is in flight but hasn't crossed the skeleton delay yet and we
+             have no prior rows to keep showing: hold a calm placeholder rather
+             than flashing the "store empty" state. -->
+        <div class="table-placeholder" aria-hidden="true"></div>
       {:else if filteredTriples.length === 0}
         <div class="empty-state">
           {#if tableSearch}
@@ -2354,6 +2368,8 @@
   .empty-state a { color: #4a90d9; }
   .muted-tip { font-size: 0.8rem; color: #94a3b8; margin: 0.25rem 0; }
 
+  /* Calm holder shown during a sub-delay first load (no skeleton, no flash). */
+  .table-placeholder { min-height: 220px; }
   .skeleton-rows { padding: 0.5rem 0; }
   .skeleton-row { display: flex; gap: 1rem; padding: 0.55rem 0.75rem; border-bottom: 1px solid #f0f0f0; align-items: center; }
   .skel { height: 12px; border-radius: 6px; background: linear-gradient(90deg, #e8e8e8 25%, #f5f5f5 50%, #e8e8e8 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; }

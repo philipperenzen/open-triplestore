@@ -86,6 +86,22 @@
   $: isEmpty = mode === 'triples'
     ? (!triples || triples.length === 0)
     : (!bindings || bindings.length === 0);
+
+  // Staggered row entrance: replay whenever the data array identity changes (a
+  // page change, new query, or filter hands us a fresh array). Rows are keyed by
+  // a generation counter so Svelte recreates them — which re-triggers the CSS
+  // entrance — but only for reasonably-sized pages. Very large result sets render
+  // with stable index keys (no animation) to avoid a costly full remount.
+  let _gen = 0;
+  let _ref = null;
+  $: {
+    const cur = mode === 'triples' ? triples : bindings;
+    if (cur !== _ref) { _ref = cur; _gen += 1; }
+  }
+  $: rowCount = mode === 'triples' ? (triples?.length || 0) : (bindings?.length || 0);
+  $: animateRows = rowCount > 0 && rowCount <= 150;
+  const rowKey = (i) => (animateRows ? _gen * 100003 + i : i);
+  const rowDelay = (i) => (animateRows ? `animation-delay:${Math.min(i * 16, 200)}ms` : '');
 </script>
 
 <div class="table-scroll" style="max-height: {maxHeight}" class:is-loading={loading}>
@@ -108,8 +124,8 @@
         </tr>
       </thead>
       <tbody>
-        {#each triples as tr}
-          <tr class="triple-row">
+        {#each triples as tr, i (rowKey(i))}
+          <tr class="triple-row" class:row-in={animateRows} style={rowDelay(i)}>
             <td class="term-cell">
               <RdfTerm term={tr.subject} graph={tr.graph?.value || ''} />
             </td>
@@ -157,8 +173,8 @@
         </tr>
       </thead>
       <tbody>
-        {#each bindings as row}
-          <tr class="triple-row">
+        {#each bindings as row, i (rowKey(i))}
+          <tr class="triple-row" class:row-in={animateRows} style={rowDelay(i)}>
             {#each vars as v}
               <td class="term-cell">
                 <RdfTerm term={row[v] || null} />
@@ -216,6 +232,15 @@
   }
   .triple-row:hover .row-action { opacity: 1; }
   .row-action:hover { color: #4a90d9; background: #e8f2fc; }
+
+  /* Staggered row entrance (keyframe `rowIn` is global, in app.css). The global
+     prefers-reduced-motion rule collapses this to an instant paint. */
+  .row-in {
+    animation-name: rowIn;
+    animation-duration: var(--dur-base);
+    animation-timing-function: var(--ease-out);
+    animation-fill-mode: both;
+  }
 
   /* Subtle loading veil — the parent owns the spinner/state; we just dim. */
   .is-loading tbody { opacity: 0.5; transition: opacity 0.15s; }

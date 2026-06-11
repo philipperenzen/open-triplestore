@@ -61,6 +61,32 @@ impl GraphFormat {
             },
         }
     }
+
+    /// File extension for download filenames.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            GraphFormat::Turtle => "ttl",
+            GraphFormat::NTriples => "nt",
+            GraphFormat::RdfXml => "rdf",
+            GraphFormat::NQuads => "nq",
+            GraphFormat::TriG => "trig",
+            GraphFormat::JsonLd => "jsonld",
+        }
+    }
+}
+
+/// Map an explicit `?format=` query value to a graph serialization — the
+/// browser-download path, where callers can't set an Accept header.
+pub fn graph_format_from_param(p: &str) -> Option<GraphFormat> {
+    match p.trim().to_ascii_lowercase().as_str() {
+        "turtle" | "ttl" => Some(GraphFormat::Turtle),
+        "ntriples" | "nt" | "n-triples" => Some(GraphFormat::NTriples),
+        "rdfxml" | "xml" | "rdf-xml" | "rdf" => Some(GraphFormat::RdfXml),
+        "jsonld" | "json-ld" | "json" => Some(GraphFormat::JsonLd),
+        "trig" => Some(GraphFormat::TriG),
+        "nquads" | "nq" | "n-quads" => Some(GraphFormat::NQuads),
+        _ => None,
+    }
 }
 
 /// Negotiate the result format from an Accept header for SELECT/ASK queries.

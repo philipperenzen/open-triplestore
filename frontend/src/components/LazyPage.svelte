@@ -22,13 +22,19 @@
 
   let Component = $state(null);
   let loadError = $state(null);
+  // Only reveal the "Loading…" state once the chunk fetch has run past the motion
+  // threshold — a cached/already-fetched chunk resolves first and never flashes it.
+  let showLoading = $state(false);
 
   onMount(async () => {
+    const timer = setTimeout(() => { showLoading = true; }, 480);
     try {
       const mod = await loader();
       Component = mod.default;
     } catch (e) {
       loadError = e?.message ?? 'Failed to load page';
+    } finally {
+      clearTimeout(timer);
     }
   });
 </script>
@@ -39,7 +45,7 @@
   </div>
 {:else if Component}
   <Component {...restProps} />
-{:else}
+{:else if showLoading}
   <div class="page-loading" aria-busy="true" aria-label="Loading page…" style="padding: 3rem; text-align: center; color: var(--ink-500);">
     Loading…
   </div>

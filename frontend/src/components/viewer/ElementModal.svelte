@@ -7,12 +7,12 @@
   //   3D         — interactive model viewer (orbit: rotate / pan / zoom)
   import { createEventDispatcher } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
-  import { X, Maximize2, Minimize2, Boxes, ChevronRight } from 'lucide-svelte';
+  import { X, Maximize2, Minimize2, Boxes, ChevronRight, MapPin } from 'lucide-svelte';
   import { browseResource } from '../../lib/api.js';
   import { shortenIRI } from '../../lib/rdf-utils.js';
   import { safeExternalUrl } from '../../lib/safeUrl';
   import { Link } from '../../lib/router/index.js';
-  import { modelRefOf } from '../../lib/viewer/detect';
+  import { modelRefOf, modelRefsOf, FORMAT_LABELS } from '../../lib/viewer/detect';
   import { preview } from '../../lib/viewer/preview';
   import RdfTerm from '../RdfTerm.svelte';
   import Model3D from './Model3D.svelte';
@@ -22,19 +22,34 @@
   /** All feed elements — used to derive the substructure tree. */
   export let elements = [];
   export let datasetId = '';
+  /** Cascade index so stacked panels don't open exactly on top of each other. */
+  export let offset = 0;
+  /** Stacking order — the parent bumps this to bring a panel to the front. */
+  export let z = 1100;
+  /** Info-only mode: the 3D model isn't mounted (the parent caps how many heavy
+   *  3D viewers run at once); the 3D tab offers a "load" button instead. */
+  export let lite = false;
+  /** Whether the hosting page shows a map — enables the "Show on map" action. */
+  export let hasMap = false;
 
   const dispatch = createEventDispatcher();
 
   let tab = 'properties';
   let full = false;
-  let pos = { x: 0, y: 0 };
+  let pos = { x: offset * 30, y: offset * 30 };
   let dragging = null;
   let data = null;
   let loading = false;
   let error = '';
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
-  $: modelRef = element ? modelRefOf(element) : null;
+  // All linked 3D representations of this element (glTF / CityJSON / STL /
+  // IFC …). The user can switch between them in the 3D tab; the preferred
+  // format is the default.
+  $: modelOptions = element ? modelRefsOf(element) : [];
+  let chosenFormat = null;
+  $: if (element?.id) chosenFormat = null; // element switch resets the choice
+  $: modelRef = modelOptions.find((o) => o.format === chosenFormat) ?? modelOptions[0] ?? null;
   // parent id → number of children, in one pass (the structure tree reads a
   // count per row; filtering elements per row would be O(N²)).
   $: childCount = elements.reduce(
@@ -81,24 +96,36 @@
   }
 
   $: load(element?.id);
-  // Reset transient panel state when closed: the component stays mounted, so
-  // the next element would otherwise open at the previous drag offset / size.
-  $: if (!element) {
-    pos = { x: 0, y: 0 };
-    full = false;
-  }
   // When the element loses its model, fall back from the 3D tab.
   $: if (tab === '3d' && !modelRef) tab = 'properties';
+
+  // "Show on map" target: this element when it is located, else the nearest
+  // located ancestor (a beam flies to its building/site anchor). Null hides
+  // the action (no map on the page, or nothing in the chain has geometry).
+  $: mapTargetId = (() => {
+    if (!hasMap || !element) return null;
+    let cur = element;
+    const seen = new Set();
+    while (cur && !cur.wkt4326 && cur.parent && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      cur = elements.find((e) => e.id === cur.parent) || null;
+    }
+    return cur?.wkt4326 ? cur.id : null;
+  })();
 </script>
 
 <svelte:window on:keydown={onKeydown} />
 
 {#if element}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="element-modal"
     class:full
     style:transform={full ? '' : `translate(${pos.x}px, ${pos.y}px)`}
+    style:z-index={z}
+    on:pointerdown|capture={() => dispatch('focus')}
     role="dialog"
+    tabindex="-1"
     aria-label={element.label || element.id}
   >
     <!-- Drag handle: pointer-only affordance; all controls inside stay
@@ -137,6 +164,14 @@
         </button>
       {/if}
       <span class="spacer"></span>
+      {#if mapTargetId}
+        <!-- span wrapper: `.tabs > button` styles direct children as tabs -->
+        <span class="map-action">
+          <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: mapTargetId })}>
+            <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
+          </button>
+        </span>
+      {/if}
       <Link to={`/resource?iri=${encodeURIComponent(element.id)}`} class="btn btn-sm">
         {$i18nT('pages.datasetViewer.openResource')}
       </Link>
@@ -204,13 +239,39 @@
           </button>
         {/if}
       {:else if tab === '3d' && modelRef}
-        <div class="model-wrap">
-          <Model3D
-            refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format }]}
-            height="100%"
-          />
-          <p class="hint center">{$i18nT('viewer.orbitHint')}</p>
-        </div>
+        {#if lite}
+          <div class="model-locked">
+            <Boxes size={26} />
+            <p class="hint center">{$i18nT('viewer.modelLimited')}</p>
+            <button class="btn btn-sm" on:click={() => dispatch('loadmodel')}>{$i18nT('viewer.load3d')}</button>
+          </div>
+        {:else}
+          <div class="model-wrap">
+            {#if modelOptions.length > 1}
+              <div class="fmt-picker" role="group" aria-label={$i18nT('viewer.modelFormat')}>
+                {#each modelOptions as opt (opt.format)}
+                  <button
+                    class="fmt-chip"
+                    class:active={opt.format === modelRef.format}
+                    on:click={() => (chosenFormat = opt.format)}
+                  >{FORMAT_LABELS[opt.format]}</button>
+                {/each}
+              </div>
+            {/if}
+            <Model3D
+              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis }]}
+              on:select={(e) => {
+                // Picking an IFC mesh selects that atom (beam, slab, …): resolve
+                // its GlobalId to the feed element and open that panel.
+                const guid = e.detail?.guid;
+                const hit = guid && elements.find((el) => el.ifc_guid === guid);
+                if (hit && hit.id !== element.id) dispatch('navigate', { id: hit.id });
+              }}
+              height="100%"
+            />
+            <p class="hint center">{$i18nT('viewer.orbitHint')}</p>
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -326,6 +387,15 @@
   .spacer {
     flex: 1;
   }
+  .map-action {
+    display: inline-flex;
+    margin-right: 6px;
+  }
+  .map-action button {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
   .body {
     flex: 1;
     min-height: 0;
@@ -434,8 +504,41 @@
     flex-direction: column;
     gap: 6px;
   }
+  .fmt-picker {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .fmt-chip {
+    border: 1px solid var(--line-soft, #e2e8f0);
+    background: var(--bg, #fff);
+    color: var(--muted, #64748b);
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .fmt-chip:hover {
+    color: var(--ink-900, #0f172a);
+  }
+  .fmt-chip.active {
+    background: var(--bg-accent-soft, #e7f0fb);
+    border-color: var(--brand-500, #2f88d8);
+    color: var(--brand-600, #1d6fb8);
+  }
   .model-wrap :global(.model-3d) {
     flex: 1;
+  }
+  .model-locked {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    color: var(--muted, #64748b);
+    text-align: center;
   }
   .hint {
     color: var(--muted, #64748b);

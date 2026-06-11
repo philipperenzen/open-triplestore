@@ -546,6 +546,8 @@
       {/if}
 
       <section class="page-shell">
+        {#key $location?.pathname}
+        <div class="route-view">
         <Route path="/" component={Home} />
         <Route path="/login" component={Login} />
         <Route path="/register" component={Register} />
@@ -650,6 +652,8 @@
         <Route path="/graph-viz">
           <LazyPage loader={lazyGraphVisualizer} />
         </Route>
+        </div>
+        {/key}
       </section>
     </main>
 

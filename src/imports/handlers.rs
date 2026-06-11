@@ -304,6 +304,14 @@ pub async fn bulk_import(
         _ => None,
     };
 
+    // IFC STEP files take a different pipeline: the bytes are stored as a
+    // downloadable dataset asset and *transformed* to linked data (BOT topology
+    // + full ifcOWL lift) rather than parsed as RDF. Split them out here; they
+    // are processed after the RDF batch below.
+    let (ifc_files, raw_files): (Vec<_>, Vec<_>) = raw_files
+        .into_iter()
+        .partition(|(filename, content_type, _)| super::ifc::is_ifc_file(filename, content_type));
+
     let inputs: Vec<InputFile> = raw_files
         .into_iter()
         .map(|(filename, content_type, bytes)| {
@@ -424,7 +432,7 @@ pub async fn bulk_import(
         Ok(())
     };
 
-    let result = tokio::task::spawn_blocking(move || {
+    let mut result = tokio::task::spawn_blocking(move || {
         parse_and_load_bulk(&store, inputs, authorize, before_replace)
     })
     .await
@@ -434,6 +442,84 @@ pub async fn bulk_import(
         BulkError::Forbidden(m) => AppError::Forbidden(m),
         BulkError::Failed(m) => AppError::BadRequest(m),
     })?;
+
+    // ── IFC files: stored as assets + transformed to linked data ──────────────
+    for (filename, _content_type, bytes) in ifc_files {
+        let Some(ds_id) = meta.dataset_id.as_deref() else {
+            result.failed_count += 1;
+            result.file_results.push(crate::imports::bulk::FileResult {
+                filename,
+                status: "error",
+                error: Some("IFC import requires a dataset_id".to_string()),
+                graph_iris: Vec::new(),
+                quad_count: None,
+            });
+            continue;
+        };
+        let target = meta
+            .targets
+            .get(&filename)
+            .cloned()
+            .or_else(|| meta.default_target_graph.clone());
+        // Same write-scope rule as the RDF path: non-admins may only target
+        // graphs registered solely to this dataset or under its IRI namespace.
+        if !authz_is_admin {
+            if let Some(t) = target.as_deref() {
+                let namespace =
+                    format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), ds_id);
+                let registered = state.auth_db.list_dataset_graphs(ds_id).unwrap_or_default();
+                let owned_by_other = state
+                    .auth_db
+                    .graph_has_other_dataset_refs(t, ds_id)
+                    .unwrap_or(true);
+                let in_scope = registered.iter().any(|g| g == t) || t.starts_with(&namespace);
+                if owned_by_other || !in_scope {
+                    return Err(AppError::Forbidden(format!(
+                        "Target graph <{t}> is outside dataset '{ds_id}'"
+                    )));
+                }
+            }
+        }
+        match crate::imports::ifc::import_ifc_bytes(
+            &state,
+            ds_id,
+            &user.user_id,
+            &filename,
+            bytes,
+            target,
+            false,
+            true,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                result.success_count += 1;
+                let mut graphs = vec![outcome.bot_graph.clone()];
+                if let Some(g) = &outcome.ifcowl_graph {
+                    graphs.push(g.clone());
+                }
+                result.file_results.push(crate::imports::bulk::FileResult {
+                    filename,
+                    status: "ok",
+                    error: None,
+                    graph_iris: graphs,
+                    quad_count: Some(outcome.stats.bot_triples + outcome.stats.ifcowl_triples),
+                });
+            }
+            Err(e) => {
+                result.failed_count += 1;
+                result.file_results.push(crate::imports::bulk::FileResult {
+                    filename,
+                    status: "error",
+                    error: Some(e),
+                    graph_iris: Vec::new(),
+                    quad_count: None,
+                });
+            }
+        }
+    }
 
     // Best-effort: register newly-touched graphs against the dataset and
     // auto-detect + store graph_role for each.
@@ -506,7 +592,7 @@ pub async fn bulk_import(
 }
 
 /// Run `kind_detector::detect` on a graph's quads and store the inferred role.
-fn detect_and_store_graph_role(state: &AppState, dataset_id: &str, graph_iri: &str) {
+pub(crate) fn detect_and_store_graph_role(state: &AppState, dataset_id: &str, graph_iri: &str) {
     use oxigraph::model::GraphNameRef;
     let Ok(graph_name) = oxigraph::model::NamedNode::new(graph_iri) else {
         return;

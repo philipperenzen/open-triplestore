@@ -1,0 +1,28 @@
+# Schependomlaan map context — the REAL city block around the Schependomlaan
+# site in Nijmegen, from 3DBAG (LoD2.2 CityJSON excerpt, bundled with the
+# frontend at /samples/schependomlaan-3dbag.city.json).
+#
+# Data: © 3DBAG by tudelft3d and 3DGI — CC BY 4.0
+#       https://docs.3dbag.nl/en/copyright/
+# The CityJSON file is self-georeferenced (EPSG:7415); the WKT point is the
+# fallback map anchor at the street centroid (PDOK locatieserver).
+
+@prefix sd:      <https://opentriplestore.org/demo/viewer-3d-demo/context#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix omg:     <https://w3id.org/omg#> .
+@prefix fog:     <https://w3id.org/fog#> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+sd:SchependomlaanBlock a bot:Element ;
+    rdfs:label "Schependomlaan city block (3DBAG LoD2.2)"@en ;
+    rdfs:comment "Real LoD2.2 building models of the blocks around the Schependomlaan site in Nijmegen, from the open 3DBAG dataset."@en ;
+    dcterms:license <https://creativecommons.org/licenses/by/4.0/> ;
+    dcterms:rightsHolder "© 3DBAG by tudelft3d and 3DGI" ;
+    dcterms:source <https://docs.3dbag.nl/en/copyright/> ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(5.83373 51.84114)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asCityjson "/samples/schependomlaan-3dbag.city.json"^^xsd:anyURI ] .

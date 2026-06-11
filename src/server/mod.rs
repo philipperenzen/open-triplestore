@@ -3,6 +3,8 @@ pub mod error;
 mod linked_data;
 pub mod llm_sparql;
 pub mod openapi;
+#[cfg(test)]
+mod role_visibility_tests;
 pub mod routes;
 #[cfg(test)]
 mod security_regression_tests;
@@ -31,7 +33,7 @@ use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_r
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
 use axum::extract::{ConnectInfo, DefaultBodyLimit};
-use axum::http::{HeaderName, HeaderValue, Method, Request};
+use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
@@ -457,6 +459,43 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 })
                 .per_second(period_secs)
                 .burst_size(burst)
+                // Shape the 429 ourselves: tower_governor's default only sets its
+                // own `x-ratelimit-after` header, so standards-compliant clients
+                // (and our frontend's fetchRetry429) never saw a `Retry-After` to
+                // honor and surfaced "Too Many Requests! Wait for 1s" as an error.
+                .error_handler(|err| match err {
+                    GovernorError::TooManyRequests { wait_time, headers } => {
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(
+                            format!("Rate limit reached — retry in {wait_time}s."),
+                        ));
+                        *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                        if let Some(h) = headers {
+                            *resp.headers_mut() = h;
+                        }
+                        let secs = HeaderValue::from_str(&wait_time.to_string())
+                            .unwrap_or(HeaderValue::from_static("1"));
+                        resp.headers_mut()
+                            .insert(axum::http::header::RETRY_AFTER, secs);
+                        resp
+                    }
+                    GovernorError::UnableToExtractKey => {
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(
+                            "Unable to extract rate-limit key".to_string(),
+                        ));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        resp
+                    }
+                    GovernorError::Other { code, msg, headers } => {
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(
+                            msg.unwrap_or_else(|| "rate limiter error".to_string()),
+                        ));
+                        *resp.status_mut() = code;
+                        if let Some(h) = headers {
+                            *resp.headers_mut() = h;
+                        }
+                        resp
+                    }
+                })
                 .finish()
                 .unwrap(),
         )
@@ -467,8 +506,13 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let auth_rate_conf = make_rate_conf(6, 8);
 
     // M-6: SPARQL / graph-store rate limiting — looser than auth (these are functional, not auth).
-    // 20 requests per minute sustained (1 token / 3s); burst of 15. Protects against runaway query loops.
-    let sparql_rate_conf = make_rate_conf(3, 15);
+    // 60/min sustained (1 token/s) with a burst of 40: one interactive page can
+    // legitimately fire a dozen-plus small scoped queries at once (per-graph
+    // content-kind checks, ontology loads, graph expansions, previews), and the
+    // old 15-burst tripped real users mid-click. A runaway query loop still gets
+    // cut off within seconds, and clients are told when to come back via
+    // Retry-After (see make_rate_conf's error_handler).
+    let sparql_rate_conf = make_rate_conf(1, 40);
 
     // Bulk import: a single authenticated upload may legitimately ship many
     // files, and power users ramp through the wizard repeatedly, so the burst
@@ -788,6 +832,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/:dataset_id/viewer-feed",
             get(routes::viewer_feed),
+        )
+        // Anonymous-capable asset download (dataset visibility decides) — the
+        // viewer fetches e.g. the original IFC file through this without auth.
+        .route(
+            "/api/datasets/:dataset_id/assets/:asset_id/download",
+            get(routes::download_asset_public),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
@@ -1476,47 +1526,51 @@ pub async fn run(
         crate::backup::spawn_scheduler(mgr.clone(), hours, Some(state.object_store.clone()));
     }
 
-    // SHACL Studio: seed the built-in SHACL-SHACL meta-shapes and import every
-    // dataset's existing shapes graph into the Library (both idempotent), then
-    // start the pipeline scheduler.
+    // Boot-time migration + seeding + the SHACL pipeline scheduler.
     {
-        let migrate_store = state.store.clone();
-        let migrate_auth = state.auth_db.clone();
-        let migrate_base = state.base_url.to_string();
+        // One SEQUENTIAL blocking task, not two concurrent ones. The SHACL/standards
+        // migration and the demo-data seed both write the same SQLite identity DB and
+        // the same RDF store; running them concurrently produced "database is locked"
+        // contention and a boot deadlock that left the public demo datasets
+        // half-seeded — registered graphs with zero triples, which read as "no data"
+        // to logged-out users and made the landing-page total count show zero.
+        // Sequencing removes the contention and lets the dataset-metadata audit run
+        // *after* the datasets it audits exist. Spawned (not awaited) so the server
+        // still starts serving immediately.
+        let seed_state = state.clone();
+        let base = state.base_url.to_string();
         tokio::task::spawn_blocking(move || {
-            if let Err(e) =
-                crate::shacl_studio::seed::seed_shacl_shacl(&migrate_store, &migrate_auth)
-            {
+            let store = &seed_state.store;
+            let auth = &seed_state.auth_db;
+            // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
+            if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
                 tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
             }
-            if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(
-                &migrate_store,
-                &migrate_auth,
-                &migrate_base,
-            ) {
+            if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, &base) {
                 tracing::warn!("shacl_studio: legacy migration failed: {e}");
             }
-            // Built-in per-standard shape graphs + validation pipelines (idempotent).
-            if let Err(e) =
-                crate::shacl_studio::seed_standards::seed_standards(&migrate_store, &migrate_auth)
-            {
+            if let Err(e) = crate::shacl_studio::seed_standards::seed_standards(store, auth) {
                 tracing::warn!("shacl_studio: standards seed failed: {e}");
             }
-            // Built-in dataset-structure governance model, then audit + repair
-            // existing dataset metadata against it (idempotent; never deletes).
-            let _ = crate::auth::dataset_audit::seed_dataset_structure_shapes(
-                &migrate_store,
-                &migrate_auth,
+            // 2. Dataset-structure governance shapes (must exist before the audit).
+            let _ = crate::auth::dataset_audit::seed_dataset_structure_shapes(store, auth);
+            // 3. Bundled public demo org + datasets + graph data + saved queries.
+            //    Idempotent and self-healing: back-fills any registered-but-empty
+            //    public demo graph left behind by an earlier interrupted seed.
+            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
+            // 4. Standard RDF vocabularies into the model registry.
+            crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
+            // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
+            crate::auth::dataset_graph::reconcile_all_dataset_metadata(
+                store,
+                &seed_state.base_url,
+                auth,
             );
-            if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(
-                &migrate_store,
-                &migrate_auth,
-                &migrate_base,
-            ) {
+            if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(store, auth, &base) {
                 tracing::warn!("dataset metadata audit failed: {e}");
             }
-            // Built-in documentation pages (idempotent; preserves user edits).
-            if let Err(e) = crate::docs::seed_builtin_docs(&migrate_auth) {
+            // 6. Built-in documentation pages (idempotent; preserves user edits).
+            if let Err(e) = crate::docs::seed_builtin_docs(auth) {
                 tracing::warn!("docs seed failed: {e}");
             }
         });
@@ -1534,26 +1588,6 @@ pub async fn run(
             .and_then(|s| s.parse().ok())
             .unwrap_or(365);
         crate::auth::audit::spawn_pseudonymisation_task(state.audit.clone(), days);
-    }
-
-    // Seed the bundled public "Open Triplestore" demo organisation + datasets +
-    // saved queries on first run (idempotent; opt out with SEED_STANDARDS_DEMO=false).
-    // Off the async runtime since it does blocking store/db writes.
-    {
-        let seed_state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
-            // Seed the standard RDF vocabularies (OWL/RDF/RDFS/SKOS/DCAT/PROV/…)
-            // into the model registry as public reference entries (idempotent).
-            crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
-            // Migrate any pre-existing datasets onto the canonical singular dataset
-            // IRI so their metadata node renders complete when browsed/clicked.
-            crate::auth::dataset_graph::reconcile_all_dataset_metadata(
-                &seed_state.store,
-                &seed_state.base_url,
-                &seed_state.auth_db,
-            );
-        });
     }
 
     // Build router — auth endpoint rate limiting is applied inside build_router.
