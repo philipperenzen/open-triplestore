@@ -64,7 +64,7 @@ full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-s
 [dependencies]
 libc = "0.2"
 # Core triple store engine
-oxigraph = "0.4"
+oxigraph = "0.5"
 oxrdf = "0.2"
 spargebra = "0.3"
 
