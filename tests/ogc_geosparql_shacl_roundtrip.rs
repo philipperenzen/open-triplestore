@@ -27,8 +27,14 @@ const KNOWN_DEVIATIONS: &[(&str, &str)] = &[
     // Empirical baseline: 46/48 match the OGC oracle — see docs/conformance/geosparql.md.
     // (S04-invalid-01/02 fixed by the typed-term SHACL engine refactor: node-level
     // datatype/lexical-form checks now see the focus literal's datatype.)
-    ("S18-invalid.ttl", "validator sh:sparql constraint subtlety not caught"),
-    ("S21-invalid.ttl", "validator sh:sparql constraint subtlety not caught"),
+    (
+        "S18-invalid.ttl",
+        "validator sh:sparql constraint subtlety not caught",
+    ),
+    (
+        "S21-invalid.ttl",
+        "validator sh:sparql constraint subtlety not caught",
+    ),
 ];
 
 fn validate_against_ogc(data: &str, data_fmt: RdfFormat) -> Result<bool, String> {
