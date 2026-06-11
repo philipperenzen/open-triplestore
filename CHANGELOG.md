@@ -14,6 +14,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **IFC → linked data**: bulk import accepts `.ifc` files — stored as a downloadable
+  dataset asset and transformed into a BOT topology graph (storeys/elements,
+  property sets, FOG file references) plus a full ifcOWL-style instance lift
+  (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
+  trig/nquads) with download disposition, and assets gain an anonymous-capable
+  `…/download` route gated by dataset visibility.
+- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+  BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
+  with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
+- **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
+  clicking a beam opens that element's linked-data panel; multiple movable
+  element panels with a dock; map layer toggles + legend; "Show on map";
+  a model-format picker; ontology viewer standards header + full-page viewer.
+
+### Changed
+- App-wide motion polish: route transitions, staggered table rows, delayed
+  loading indicators (no sub-500 ms skeleton flash), reduced-motion guard.
+- SPARQL/read rate limit raised to an interactive burst (40 @ 60/min) and 429s
+  now carry a standard `Retry-After`; the web client retries them transparently.
+
+### Deprecated
+- None.
+
+### Fixed
+- STL models rendered lying flat (Z-up vs Y-up) and basemap building extrusions
+  overlapping real 3D models on the map.
+- Boot seeding serialized + self-healing (a half-seeded instance left public
+  demo graphs registered but empty, so logged-out visitors saw no data and a
+  zero landing count); SQLite `busy_timeout` now precedes WAL setup.
+- Ontology viewer rendered empty for model-registry versions (preloaded store
+  now supersedes an empty SPARQL load).
+
+### Security
+- Authorization matrix tests (role × visibility × endpoint) pinning anonymous
+  access to public data across browse/SPARQL/GSP/datasets/service description.
+
+## [0.3.0] — 2026-06-10
+
+### Added
 - **Spark documentation page** (`docs/spark.md`, in-app at `/docs/spark` under
   *Query & Search*): what the chat assistant is, how answers are grounded (platform
   context + scoped SPARQL, up to 3 query rounds per turn), the widget block grammar
@@ -92,17 +131,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Waalbrug dataset round-trips through the official GeoSPARQL validator. See
   `docs/conformance/`.
 
-### Fixed (SHACL engine, found by the official suites)
-- `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
-  against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
-  an `sh:or` of datatype branches over `geo:asWKT` values mis-fired on every geometry.
-- Node-level `sh:nodeKind sh:Literal` could never match (focus nodes are lexical
-  strings); a blank/scheme-shaped/other heuristic now classifies them.
-- **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
-  keyed by `(focus, path)` only, and rayon worker caches survive across validation
-  passes — two stores in one process sharing a focus IRI and path could serve each other
-  stale values, yielding nondeterministic validation results. Cache keys now include a
-  process-unique per-store id.
+- **Spark chat is now an interactive linked-data canvas.** Assistant answers render
+  runnable widgets: `GET /api/.../run` mentions (fenced or inline) become one-click
+  API calls whose results show in place exactly like the API-services page (SPARQL
+  result table with linked RDF terms, CSV, RDF, JSON — with parameters, dataset
+  version and download); fenced ```sparql blocks get Run / copy / open-in-workspace
+  actions and execute under the caller's normal read scope; and the model can emit
+  ```chart (bar/line/pie), ```map (WGS84 WKT on Leaflet), ```card (entity info card)
+  and ```csv preview blocks. Spark itself may now run up to three scoped SPARQL
+  rounds per turn (with error feedback for self-repair), the full retrieval trail is
+  shown per answer with syntax-highlighted queries, and WKT result cells survive
+  long enough to be mapped.
 
 ### Changed
 - None.
@@ -111,6 +150,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- SHACL engine, found by the official conformance suites:
+  `sh:not`/`sh:and`/`sh:or`/`sh:xone`/`sh:node` in property-shape context were evaluated
+  against the focus node instead of each value node along the path (SHACL §4.6) — e.g.
+  an `sh:or` of datatype branches over `geo:asWKT` values mis-fired on every geometry.
+  Node-level `sh:nodeKind sh:Literal` could never match (focus nodes are lexical
+  strings); a blank/scheme-shaped/other heuristic now classifies them.
+- **Cross-store path-cache poisoning**: the per-thread SHACL property-path cache was
+  keyed by `(focus, path)` only, and rayon worker caches survive across validation
+  passes — two stores in one process sharing a focus IRI and path could serve each other
+  stale values, yielding nondeterministic validation results. Cache keys now include a
+  process-unique per-store id.
 - SHACL-SPARQL constraints, rules and custom targets that referenced prefixed names were
   silently skipped (the query failed to parse and the result was swallowed), so the
   corresponding violations/inferences never appeared. They now resolve via the declared
@@ -118,9 +168,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An inline blank-node `sh:qualifiedValueShape [ … ]` was silently skipped: the value
   shape was looked up by IRI in the top-level shapes list, where an inline shape never
   appears. It is now loaded inline (like `sh:not`/`and`/`or`) and enforced.
+- **Viewer feed**: WKT/GML literals carrying a CRS the server cannot reproject
+  (anything beyond EPSG:28992/4326/3857, e.g. EPSG:25832) are no longer emitted
+  verbatim as `wkt4326` — projected metre coordinates used to reach the map as
+  lon/lat and crash MapLibre's `fitBounds`, breaking the whole explorer; such
+  geometries are now omitted (the element still appears, without a location).
+  Datasets with plain GeoSPARQL geometry but no BOT containment topology now
+  appear in the feed as parentless roots (previously: an empty feed). 3D GML
+  (`srsDimension="3"`) coordinate lists now parse correctly (Z dropped) instead
+  of mis-pairing into garbage 2D coordinates. The unused per-element `wkt3857`
+  field (computed and serialized, read by nothing) was removed.
+- **SHACL `sh:nodeKind`** (node shapes): focus-node term kinds are recorded at
+  target resolution, so string literals shaped like IRIs (`"mailto:x@y.org"`,
+  `"urn:isbn:…"`) reached via `sh:targetObjectsOf` no longer wrongly satisfy
+  `sh:IRI` / wrongly violate `sh:Literal`. Custom `sh:SPARQLFunction` bodies
+  evaluate against a shared empty store instead of constructing a fresh
+  in-memory store per invocation (per binding row).
+- **Spark chat**: the `SPARQL:` execution directive only counts when it starts a
+  line, and a final answer that embeds a corrected ```sparql block is kept
+  instead of being demoted to the bare fallback table; query extraction stops at
+  the first code fence (a stray closing ``` and trailing prose no longer get
+  glued onto the query); the "values were not retrieved" caveat recognises every
+  fence variant the frontend renders (`~~~`, indentation, `geo`/`infocard`
+  aliases); GML cells get the same prompt budget as WKT. Client-side: transport
+  error bubbles are no longer replayed into the model conversation, feedback
+  submits the last *successful* query of the trail, and TSV responses normalise
+  CRLF and ragged rows.
+- **Viewer UI**: stale-response races on the resource page (slow geometry-hop /
+  model-measure fetches from a previously viewed resource no longer paint onto
+  the current one); the reused geo-preview overlay no longer goes permanently
+  blank when its first preview had unparseable WKT; `GEOMETRYCOLLECTION`
+  elements are included in map bounds/focus; out-of-range coordinates can no
+  longer crash the map; Escape closes only the topmost panel when the preview
+  overlay is stacked over the element inspector, and the inspector's drag
+  offset resets on close; fallback 3D-explorer models load concurrently.
 
 ### Security
-- None.
+- The element inspector's BIM file links now pass RDF-derived URLs through the
+  `safeExternalUrl` scheme allowlist like every other RDF-derived href, closing
+  the one sink where an uploaded `javascript:`/`data:` URL round-tripped into an
+  `<a href>` (low impact in modern browsers — `target="_blank"` blocks
+  new-context `javascript:` navigation — but a gap against the project's own
+  XSS control).
 
 ## [0.2.4] — 2026-06-09
 
@@ -237,7 +326,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.1...v0.2.2
