@@ -505,7 +505,7 @@
   <!-- Panel body -->
   <div class="ob-body">
     {#if activeMode === 'ontology'}
-      <OntologyModelViewer {graphIri} {subGraphs} initialTab="classes" preloadedStore={loadedStore} />
+      <OntologyModelViewer {graphIri} {subGraphs} {versionLabel} initialTab="classes" preloadedStore={loadedStore} />
 
     {:else if activeMode === 'graph'}
       <div class="ob-graph-area">
@@ -721,10 +721,10 @@
     padding: 3rem 1rem; color: var(--ink-400, #94a3b8); font-size: 0.875rem;
   }
 
-  /* Graph view */
+  /* Graph view — scale with the viewport so it feels generous on big screens. */
   .ob-graph-area {
     position: relative;
-    height: 560px;
+    height: clamp(460px, 72vh, 820px);
   }
   .ob-graph-empty {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -767,7 +767,7 @@
   }
   .ob-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .ob-table-wrap { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+  .ob-table-wrap { overflow-x: auto; max-height: 68vh; overflow-y: auto; }
   .ob-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
   .ob-table th {
     position: sticky; top: 0;

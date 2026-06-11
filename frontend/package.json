@@ -65,6 +65,7 @@
     "swagger-ui-dist": "^5.32.6",
     "tailwindcss": "^4.3.0",
     "three": "^0.184.0",
+    "web-ifc": "^0.0.77",
     "wellknown": "^0.5.0"
   }
 }

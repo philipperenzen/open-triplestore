@@ -91,14 +91,38 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Compute backoff delay for a 429 response, honoring Retry-After when present.
+// Compute backoff delay for a 429 response. Takes the LARGER of the server's
+// suggestion (`Retry-After`, or the governor's `x-ratelimit-after` on older
+// deployments — often `0` when the refill is sub-second) and capped exponential
+// backoff, plus jitter so a burst of throttled requests doesn't retry in
+// lockstep and immediately re-contend for the same refill token.
 function backoffDelayMs(res: Response, attempt: number): number {
-  const ra = res.headers.get('Retry-After');
-  if (ra) {
-    const secs = Number(ra);
-    if (!Number.isNaN(secs) && secs >= 0) return Math.min(secs * 1000, 5000);
+  const expo = Math.min(500 * Math.pow(2, attempt), 8000);
+  const jitter = Math.random() * 250;
+  const ra = res.headers.get('Retry-After') ?? res.headers.get('x-ratelimit-after');
+  const secs = ra ? Number(ra) : NaN;
+  const suggested = !Number.isNaN(secs) && secs >= 0 ? secs * 1000 : 0;
+  return Math.max(suggested, expo) + jitter;
+}
+
+/**
+ * fetch() that transparently retries rate-limited (429) responses with the
+ * server-suggested delay. Every interactive surface that talks to the
+ * rate-limited endpoints (/sparql, /store …) must go through this — pages like
+ * the dataset detail or graph explorer legitimately fire short query bursts,
+ * and a raw 429 would otherwise surface as an error box mid-interaction.
+ */
+export async function fetchRetry429(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  attempts = 5,
+): Promise<Response> {
+  let res = await fetch(input, init);
+  for (let attempt = 0; attempt < attempts && res.status === 429; attempt++) {
+    await sleep(backoffDelayMs(res, attempt));
+    res = await fetch(input, init);
   }
-  return Math.min(500 * Math.pow(2, attempt), 4000);
+  return res;
 }
 
 async function request(method, path, body = null) {
@@ -542,7 +566,9 @@ async function executeSparql(url, query) {
     'Accept': graphQ ? 'application/n-triples' : 'application/sparql-results+json',
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(url, { method: 'POST', headers, body: query });
+  // /sparql is rate-limited per IP; retry 429s with the server-suggested delay
+  // so legitimate UI query bursts never surface "Too Many Requests" errors.
+  const res = await fetchRetry429(url, { method: 'POST', headers, body: query });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -576,7 +602,7 @@ export async function nlToSparql(question, schemaHint, currentQuery = null) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/sparql`, {
+  const res = await fetchRetry429(`${API_BASE}/api/llm/sparql`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -599,7 +625,7 @@ export async function llmHealth() {
   try {
     const token = getAccessToken();
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const res = await fetch(`${API_BASE}/api/llm/health`, { headers });
+    const res = await fetchRetry429(`${API_BASE}/api/llm/health`, { headers });
     if (!res.ok) return { reachable: false };
     return res.json(); // { gateway, reachable, detail }
   } catch {
@@ -614,7 +640,7 @@ export async function sendLlmFeedback(signal) {
     const token = getAccessToken();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    await fetch(`${API_BASE}/api/llm/feedback`, {
+    await fetchRetry429(`${API_BASE}/api/llm/feedback`, {
       method: 'POST',
       headers,
       body: JSON.stringify(signal),
@@ -633,7 +659,7 @@ export async function llmChat(messages, model = null) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/chat`, {
+  const res = await fetchRetry429(`${API_BASE}/api/llm/chat`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -647,10 +673,6 @@ export async function llmChat(messages, model = null) {
   }
   return res.json();
 }
-
-// SHACL
-// Returns { report, run_id, ran_at } — the run is persisted server-side.
-// Pass { test: true } for a dry run that validates but is NOT recorded.
 export const validateDataset = (datasetId, data = {}, opts: { test?: boolean } = {}) =>
   request('POST', `/api/datasets/${datasetId}/validate${opts.test ? '?test=true' : ''}`, data);
 export const getShapes = (datasetId) =>
@@ -831,7 +853,7 @@ export async function aiShacl({ task, description, turtle, modelContext, model }
   const token = getAccessToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/shacl`, {
+  const res = await fetchRetry429(`${API_BASE}/api/llm/shacl`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -854,7 +876,7 @@ export function deleteGraph(graphIri) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'DELETE', headers }).then(async (res) => {
+  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'DELETE', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return true;
   });
@@ -956,7 +978,7 @@ export function exportGraph(graphIri) {
   const token = getAccessToken();
   const headers = { 'Accept': 'text/turtle' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'GET', headers }).then(async (res) => {
+  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'GET', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return res.text();
   });
@@ -970,11 +992,12 @@ export async function sparqlUpdate(update) {
     if (token) h['Authorization'] = `Bearer ${token}`;
     return h;
   }
-  let res = await fetch('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+  // A 429 rejection happens before the update executes, so retrying is safe.
+  let res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
   if (res.status === 401 && getRefreshToken()) {
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+      res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
     } else {
       clearTokens();
       window.dispatchEvent(new CustomEvent('auth-expired'));

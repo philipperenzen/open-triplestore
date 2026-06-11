@@ -77,7 +77,7 @@
       scene.add(group);
       groupsById.set(ref.id, group);
       try {
-        const model = (await loadModel(ref.url, ref.format)).clone(true);
+        const model = (await loadModel(ref.url, ref.format, { upAxis: ref.upAxis })).clone(true);
         if (refs !== wanted) return; // a newer refs set superseded this load
         // clone(true) shares material instances with the loadModel cache -
         // clone materials per instance so highlight()/theming never mutates
@@ -111,7 +111,7 @@
   }
 
   function onClick(event) {
-    if (!renderer || groupsById.size < 2) return;
+    if (!renderer || groupsById.size === 0) return;
     const rect = renderer.domElement.getBoundingClientRect();
     const pointer = new THREE.Vector2(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -120,9 +120,16 @@
     raycaster.setFromCamera(pointer, camera);
     const hits = raycaster.intersectObjects([...groupsById.values()], true);
     if (!hits.length) return;
-    let node = hits[0].object;
+    const hit = hits[0].object;
+    // IFC meshes carry their element's GlobalId — picking one selects that
+    // *atom* (a beam, a slab), not just the whole model.
+    const guid = hit.userData?.ifcGuid || null;
+    let node = hit;
     while (node && !node.userData.elementId) node = node.parent;
-    if (node?.userData.elementId) dispatch('select', { id: node.userData.elementId });
+    const id = node?.userData.elementId || null;
+    if (guid || (id && groupsById.size > 1)) {
+      dispatch('select', { id, guid });
+    }
   }
 
   onMount(() => {

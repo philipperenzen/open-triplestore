@@ -262,7 +262,7 @@ export function styleFor(kind: BasemapKind, dark: boolean): StyleSpecification |
   return dark ? darkStyle() : LIGHT_STYLE_URL;
 }
 
-const BUILDINGS_LAYER_ID = 'ots-3d-buildings';
+export const BUILDINGS_LAYER_ID = 'ots-3d-buildings';
 
 /**
  * Add an OSM fill-extrusion layer over the style's OpenMapTiles `building`

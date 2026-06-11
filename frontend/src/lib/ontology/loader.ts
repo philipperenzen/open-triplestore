@@ -10,6 +10,7 @@
 
 import { Parser, Store, Writer, DataFactory } from 'n3';
 import type { Quad_Subject, Quad_Predicate, Quad_Object } from 'n3';
+import { fetchRetry429 } from '../api';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
@@ -77,7 +78,9 @@ export async function loadOntologyGraph(graphs: string[], sparqlUrl = '/sparql')
 }
 
 async function postSparql(url: string, query: string, accept: string): Promise<string> {
-  const res = await fetch(url, {
+  // /sparql is rate-limited per IP — retry 429s so an ontology load racing other
+  // page queries doesn't fail with "Too Many Requests".
+  const res = await fetchRetry429(url, {
     method: 'POST',
     credentials: 'include',
     headers: {
