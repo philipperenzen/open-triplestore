@@ -49,8 +49,17 @@ export function loadModel(url: string, format: ModelFormat): Promise<THREE.Group
         group.add(gltf.scene);
       } else if (format === 'stl') {
         const geom = await new STLLoader().loadAsync(url);
+        // STL comes from CAD/3D-printing where Z is up; three.js scenes are
+        // Y-up. Without this the model lies flat on its back (a clock tower
+        // becomes a footbridge).
+        geom.rotateX(-Math.PI / 2);
         geom.computeVertexNormals();
         group.add(new THREE.Mesh(geom, defaultMaterial(false)));
+      } else if (format === 'ifc') {
+        // web-ifc (WASM) loads on demand; a `#GlobalId` fragment isolates one
+        // element. Meshes carry `userData.ifcGuid` for per-element picking.
+        const { loadIfcGroup } = await import('./ifc');
+        group.add(await loadIfcGroup(url));
       } else {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`fetch failed: ${res.status}`);

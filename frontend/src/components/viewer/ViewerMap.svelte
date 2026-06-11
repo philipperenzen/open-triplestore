@@ -18,12 +18,14 @@
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf } from '../../lib/viewer/detect';
   import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
-  import { styleFor, add3dBuildings } from '../../lib/viewer/basemaps';
+  import { styleFor, add3dBuildings, BUILDINGS_LAYER_ID } from '../../lib/viewer/basemaps';
 
   /** @type {import('../../lib/viewer/geometry').ViewerElement[]} */
   export let elements = [];
   export let selected = '';
   export let height = '100%';
+  /** Extra map attribution line (e.g. the 3DBAG CC-BY credit). */
+  export let extraAttribution = '';
   /** Fallback footprint (m) for models with untrustworthy units (most STLs). */
   const FALLBACK_FOOTPRINT_M = 90;
 
@@ -33,11 +35,31 @@
 
   /** Per-frame scratch matrix (avoids a Matrix4 allocation every render). */
   const SCRATCH_PROJ = new THREE.Matrix4();
+  // Scratch objects for raycastModels (runs on every mousemove). Reused across
+  // entries — only primitives (id, NDC depth) survive a loop iteration.
+  const RAY_PROJ = new THREE.Matrix4();
+  const RAY_FWD = new THREE.Matrix4();
+  const RAY_INV = new THREE.Matrix4();
+  const RAY_A = new THREE.Vector3();
+  const RAY_B = new THREE.Vector3();
+  const RAY_HIT = new THREE.Vector3();
+  const RAY = new THREE.Ray();
 
   let mapEl;
   let map = null;
   let dark = false;
   let basemap = 'streets'; // 'streets' | 'satellite'
+  // Layer visibility (doubles as the legend). 3D models are a custom WebGL layer,
+  // so they're toggled via each model group's `.visible` rather than a layout prop.
+  let layersOn = { points: true, lines: true, areas: true, models: true, labels: true, osm3d: true };
+  const LAYER_DEFS = [
+    { key: 'points', shape: 'dot', color: '#2f88d8', label: 'viewer.layerPoints' },
+    { key: 'lines', shape: 'line', color: '#2f88d8', label: 'viewer.layerLines' },
+    { key: 'areas', shape: 'area', color: '#6d5ba8', label: 'viewer.layerAreas' },
+    { key: 'models', shape: 'box', color: '#e8590c', label: 'viewer.layerModels' },
+    { key: 'osm3d', shape: 'box', color: '#64748b', label: 'viewer.layerOsmBuildings' },
+    { key: 'labels', shape: 'text', color: '#64748b', label: 'viewer.layerLabels' },
+  ];
   /** id → { anchor, anchorUsed, scene, modelGroup, box, mercMatrix, meters } */
   let entries = new Map();
   let renderer = null;
@@ -197,25 +219,23 @@
     const h = canvas.clientHeight || 1;
     const nx = (point.x / w) * 2 - 1;
     const ny = -(point.y / h) * 2 + 1;
-    const proj = new THREE.Matrix4().fromArray(lastProj);
+    const proj = RAY_PROJ.fromArray(lastProj);
     let best = null;
     for (const [id, e] of entries) {
-      if (!e.mercMatrix || !e.box) continue;
-      const inv = proj.clone().multiply(e.mercMatrix);
-      if (Math.abs(inv.determinant()) < 1e-20) continue;
-      inv.invert();
+      if (!e.scene || !e.mercMatrix || !e.box) continue;
+      const fwd = RAY_FWD.multiplyMatrices(proj, e.mercMatrix); // local → NDC
+      if (Math.abs(fwd.determinant()) < 1e-20) continue;
+      const inv = RAY_INV.copy(fwd).invert();
       // Unproject two NDC depths → a ray in model-local space.
-      const a = new THREE.Vector3(nx, ny, -0.99).applyMatrix4(inv);
-      const b = new THREE.Vector3(nx, ny, 0.999).applyMatrix4(inv);
-      const dir = b.sub(a);
+      const a = RAY_A.set(nx, ny, -0.99).applyMatrix4(inv);
+      const dir = RAY_B.set(nx, ny, 0.999).applyMatrix4(inv).sub(a);
       if (!dir.lengthSq()) continue;
-      const ray = new THREE.Ray(a, dir.normalize());
-      const hit = new THREE.Vector3();
-      if (ray.intersectBox(e.box, hit)) {
+      RAY.origin.copy(a);
+      RAY.direction.copy(dir).normalize();
+      if (RAY.intersectBox(e.box, RAY_HIT)) {
         // Model-local distances are not comparable across entries (each local
         // space has its own metres scale); compare NDC depth instead.
-        const fwd = proj.clone().multiply(e.mercMatrix);
-        const d = hit.clone().applyMatrix4(fwd).z;
+        const d = RAY_HIT.applyMatrix4(fwd).z;
         if (!best || d < best.d) best = { id, d };
       }
     }
@@ -278,6 +298,64 @@
     add3dBuildings(map, dark);
     if (!map.getLayer('ots-3d-models')) map.addLayer(modelLayer);
     applySelectedPaint();
+    applyLayerVisibility();
+    suppressBasemapBuildingsUnderModels();
+  }
+
+  // ── Basemap-building suppression ────────────────────────────────────────────
+  // Our georeferenced models stand where the OSM extrusion layer also raises a
+  // generic grey block — the two overlap and z-fight (Big Ben inside a slab).
+  // Fix: query the extrusion features under each model anchor and filter those
+  // footprints out of the layer. Feature ids vary per tile/zoom, so re-resolve
+  // whenever the map goes idle after movement.
+  let suppressedIds = new Set();
+  function suppressBasemapBuildingsUnderModels() {
+    if (!map || !map.getLayer(BUILDINGS_LAYER_ID)) return;
+    let changed = false;
+    for (const e of entries.values()) {
+      const anchor = e.anchorUsed ?? e.anchor;
+      if (!anchor || !e.modelGroup) continue;
+      let feats = [];
+      try {
+        feats = map.queryRenderedFeatures(map.project({ lng: anchor[0], lat: anchor[1] }), {
+          layers: [BUILDINGS_LAYER_ID],
+        });
+      } catch {
+        continue;
+      }
+      for (const f of feats) {
+        if (f.id !== undefined && !suppressedIds.has(f.id)) {
+          suppressedIds.add(f.id);
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      map.setFilter(BUILDINGS_LAYER_ID, ['!', ['in', ['id'], ['literal', [...suppressedIds]]]]);
+    }
+  }
+
+  function setLayerVis(id, on) {
+    if (map?.getLayer(id)) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
+  }
+  // Apply the layer toggles. Re-run after (re)adding layers so a basemap switch
+  // preserves the user's choices.
+  function applyLayerVisibility() {
+    if (!map) return;
+    setLayerVis('ots-point', layersOn.points);
+    setLayerVis('ots-line', layersOn.lines);
+    setLayerVis('ots-fill', layersOn.areas);
+    setLayerVis('ots-fill-line', layersOn.areas);
+    setLayerVis('ots-label', layersOn.labels);
+    setLayerVis(BUILDINGS_LAYER_ID, layersOn.osm3d);
+    for (const e of entries.values()) {
+      if (e.modelGroup) e.modelGroup.visible = layersOn.models;
+    }
+    map.triggerRepaint?.();
+  }
+  function toggleLayer(key) {
+    layersOn = { ...layersOn, [key]: !layersOn[key] };
+    applyLayerVisibility();
   }
 
   function applySelectedPaint() {
@@ -406,16 +484,20 @@
     map = new maplibregl.Map({
       container: mapEl,
       style: styleFor(basemap, dark),
-      attributionControl: { compact: true },
+      attributionControl: extraAttribution
+        ? { compact: true, customAttribution: extraAttribution }
+        : { compact: true },
       maxPitch: 70,
     });
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-left');
     map.on('style.load', () => {
       styleReady = true;
+      suppressedIds = new Set(); // feature ids are style/source-specific
       ensureOverlays();
       themeMaterials();
     });
+    map.on('idle', suppressBasemapBuildingsUnderModels);
     map.on('click', onClick);
     map.on('mousemove', onMouseMove);
     map.on('mouseout', () => {
@@ -458,6 +540,22 @@
       on:click={() => setBasemap('satellite')}
     ><Satellite size={14} /></button>
   </div>
+
+  <!-- Layers + legend: toggle each feature kind on/off; the swatch is the legend. -->
+  <div class="map-layers" role="group" aria-label={$i18nT('viewer.layers')}>
+    <div class="ml-title">{$i18nT('viewer.layers')}</div>
+    {#each LAYER_DEFS as L}
+      <label class="ml-row" class:off={!layersOn[L.key]}>
+        <input type="checkbox" checked={layersOn[L.key]} on:change={() => toggleLayer(L.key)} />
+        <span class="ml-swatch ml-{L.shape}" style:--sw={L.color}></span>
+        <span class="ml-name">{$i18nT(L.label)}</span>
+      </label>
+    {/each}
+    <div class="ml-legend-sel">
+      <span class="ml-swatch ml-dot" style:--sw={SELECT_COLOR}></span>
+      <span class="ml-name">{$i18nT('viewer.layerSelected')}</span>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -499,6 +597,94 @@
   .basemap-toggle button.active {
     background: var(--bg-accent-soft, #e7f0fb);
     color: var(--brand-600, #2563a8);
+  }
+
+  /* Layers + legend control (top-right) */
+  .map-layers {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.95));
+    border: 1px solid var(--line-soft, #e6eaef);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(8px);
+    font-size: 0.76rem;
+    color: var(--ink-900, #0f172a);
+  }
+  .ml-title {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted, #64748b);
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+  .ml-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    padding: 1px 0;
+  }
+  .ml-row.off .ml-name {
+    opacity: 0.45;
+    text-decoration: line-through;
+  }
+  .ml-row input {
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--brand-500, #2f88d8);
+  }
+  .ml-swatch {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    display: inline-block;
+  }
+  .ml-dot {
+    border-radius: 50%;
+    background: var(--sw);
+    border: 1.5px solid #fff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+  }
+  .ml-line {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--sw);
+  }
+  .ml-area {
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--sw) 22%, transparent);
+    border: 1.5px solid var(--sw);
+  }
+  .ml-box {
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--sw) 30%, transparent);
+    border: 1.5px solid var(--sw);
+  }
+  .ml-text {
+    background: linear-gradient(var(--sw), var(--sw)) left 60% / 100% 2px no-repeat;
+    font: 700 11px/14px serif;
+    color: var(--sw);
+    text-align: center;
+  }
+  .ml-text::before {
+    content: 'A';
+  }
+  .ml-legend-sel {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--line-soft, #e6eaef);
+    color: var(--muted, #64748b);
   }
   :global(.viewer-popup .maplibregl-popup-content) {
     padding: 4px 9px;

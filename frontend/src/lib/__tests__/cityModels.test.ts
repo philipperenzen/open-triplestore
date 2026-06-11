@@ -4,13 +4,17 @@ import { resolve } from 'node:path';
 import type { Mesh, MeshStandardMaterial } from 'three';
 import { epsgFromReference, toLonLat } from '../viewer/crs';
 import { parseCityJSON, parseCityGML } from '../viewer/cityjson';
-import { modelFormatFromUrl, modelRefOf } from '../viewer/detect';
+import { modelFormatFromUrl, modelRefOf, modelRefsOf, isGeometryPredicate, isIfcGuidPredicate } from '../viewer/detect';
 import { elementsToGeoJSON, modelAnchor } from '../viewer/geometry';
 
-// The bundled demo sample (frontend/public/samples/, referenced by the seeded
-// viewer-3d-demo dataset) — parsing it here keeps the shipped file valid.
+// Synthetic two-building sample — kept as a compact parser fixture.
 const SAMPLE_PATH = resolve(process.cwd(), 'public/samples/nijmegen-buildings.city.json');
 const sample = JSON.parse(readFileSync(SAMPLE_PATH, 'utf8'));
+// The REAL bundled demo excerpt (3DBAG LoD2.2 around the Schependomlaan site,
+// referenced by the seeded viewer-3d-demo context graph) — parsing it here
+// keeps the shipped file valid.
+const BAG_PATH = resolve(process.cwd(), 'public/samples/schependomlaan-3dbag.city.json');
+const bagSample = JSON.parse(readFileSync(BAG_PATH, 'utf8'));
 
 describe('crs', () => {
   it('extracts EPSG codes from the common reference spellings', () => {
@@ -32,6 +36,39 @@ describe('crs', () => {
   it('passes 4326 through and rejects unknown codes', () => {
     expect(toLonLat(4326)!([5.5, 52.0])).toEqual([5.5, 52.0]);
     expect(toLonLat(999999)).toBeNull();
+  });
+});
+
+describe('modelRefsOf', () => {
+  it('lists every linked representation ordered by preference', () => {
+    const el = {
+      gltf_url: 'https://x/model.glb',
+      ifc_url: 'https://x/model.ifc#0TestBeamAAAAAAAAAAAA5',
+      files: [['Stl', 'https://x/model.stl']] as [string, string][],
+    };
+    const refs = modelRefsOf(el);
+    expect(refs.map((r) => r.format)).toEqual(['gltf', 'stl', 'ifc']);
+    expect(modelRefOf(el)!.format).toBe('gltf');
+    // The IFC ref keeps its element-isolating fragment.
+    expect(refs.find((r) => r.format === 'ifc')!.url).toContain('#0TestBeam');
+  });
+
+  it('falls back to the dedicated ifc_url when FOG lists none', () => {
+    const refs = modelRefsOf({ ifc_url: 'https://x/m.ifc' });
+    expect(refs).toEqual([{ url: 'https://x/m.ifc', format: 'ifc' }]);
+  });
+});
+
+describe('parseCityJSON (3DBAG excerpt)', () => {
+  it('parses the bundled Schependomlaan 3DBAG block with real geometry near the site', () => {
+    const model = parseCityJSON(bagSample);
+    // Semantics are stripped from the excerpt, so all 157 buildings merge into
+    // one mesh bucket — assert on the actual triangulated geometry instead.
+    const mesh = model.group.children[0] as Mesh;
+    expect(mesh.geometry.getAttribute('position').count).toBeGreaterThan(3000);
+    const [lon, lat] = model.anchorLonLat!;
+    expect(lon).toBeCloseTo(5.834, 1);
+    expect(lat).toBeCloseTo(51.841, 1);
   });
 });
 
@@ -125,6 +162,26 @@ describe('model format detection', () => {
     };
     expect(modelRefOf(el)).toEqual({ url: 'https://x.test/m', format: 'cityjson' });
     expect(modelRefOf({ gltf_url: 'https://x.test/m.glb', ...el })?.format).toBe('gltf');
+  });
+});
+
+describe('geo/BIM predicate matching (mirrors src/geo/viewer_feed.rs)', () => {
+  it('matches exactly geo:hasGeometry and omg:hasGeometry', () => {
+    expect(isGeometryPredicate('http://www.opengis.net/ont/geosparql#hasGeometry')).toBe(true);
+    expect(isGeometryPredicate('https://w3id.org/omg#hasGeometry')).toBe(true);
+    // Not just any *hasGeometry — only the two predicates the server feed follows.
+    expect(isGeometryPredicate('http://example.org/vocab#hasGeometry')).toBe(false);
+    expect(isGeometryPredicate('http://www.opengis.net/ont/geosparql#asWKT')).toBe(false);
+    expect(isGeometryPredicate(undefined)).toBe(false);
+  });
+
+  it('matches ifcGuid case-sensitively, like the feed STRENDS filter', () => {
+    expect(isIfcGuidPredicate('http://example.org/props#ifcGuid')).toBe(true);
+    expect(isIfcGuidPredicate('https://w3id.org/props#ifcGuid')).toBe(true);
+    expect(isIfcGuidPredicate('http://example.org/props#IfcGUID')).toBe(false);
+    expect(isIfcGuidPredicate('http://example.org/props#ifcguid')).toBe(false);
+    expect(isIfcGuidPredicate('')).toBe(false);
+    expect(isIfcGuidPredicate(null)).toBe(false);
   });
 });
 

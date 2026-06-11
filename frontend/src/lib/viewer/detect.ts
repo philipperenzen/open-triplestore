@@ -2,7 +2,7 @@
 // tables/graphs) — deliberately free of three.js/leaflet imports so they add
 // nothing to the main bundle. The heavy viewer modules import from here too.
 
-export type ModelFormat = 'gltf' | 'stl' | 'cityjson' | 'citygml';
+export type ModelFormat = 'gltf' | 'stl' | 'cityjson' | 'citygml' | 'ifc';
 
 /** Detect a loadable 3D-model format from a file URL (glb/gltf/stl/CityJSON/CityGML). */
 export function modelFormatFromUrl(url: string): ModelFormat | null {
@@ -13,6 +13,7 @@ export function modelFormatFromUrl(url: string): ModelFormat | null {
   if (clean.endsWith('.stl')) return 'stl';
   if (clean.endsWith('.cityjson') || clean.endsWith('.city.json')) return 'cityjson';
   if (clean.endsWith('.citygml') || clean.endsWith('.gml')) return 'citygml';
+  if (clean.endsWith('.ifc')) return 'ifc';
   return null;
 }
 
@@ -23,6 +24,7 @@ function formatFromFogKey(key: string): ModelFormat | null {
   if (k.startsWith('stl')) return 'stl';
   if (k.startsWith('cityjson')) return 'cityjson';
   if (k.startsWith('citygml')) return 'citygml';
+  if (k.startsWith('ifc')) return 'ifc';
   return null;
 }
 
@@ -32,7 +34,7 @@ export interface ModelRef {
 }
 
 /** Preference when an element offers several formats. */
-const FORMAT_ORDER: ModelFormat[] = ['gltf', 'cityjson', 'citygml', 'stl'];
+const FORMAT_ORDER: ModelFormat[] = ['gltf', 'cityjson', 'citygml', 'stl', 'ifc'];
 
 /**
  * The best loadable 3D-model reference of a viewer-feed element: the explicit
@@ -41,19 +43,37 @@ const FORMAT_ORDER: ModelFormat[] = ['gltf', 'cityjson', 'citygml', 'stl'];
  */
 export function modelRefOf(el: {
   gltf_url?: string | null;
+  ifc_url?: string | null;
   files?: [string, string][];
 }): ModelRef | null {
-  if (el.gltf_url) return { url: el.gltf_url, format: 'gltf' };
+  return modelRefsOf(el)[0] ?? null;
+}
+
+/**
+ * Every loadable 3D-model reference of an element, one per format, ordered by
+ * preference — lets viewers offer a format picker when an element links
+ * several representations (e.g. a glTF *and* the source IFC).
+ */
+export function modelRefsOf(el: {
+  gltf_url?: string | null;
+  ifc_url?: string | null;
+  files?: [string, string][];
+}): ModelRef[] {
   const found = new Map<ModelFormat, string>();
+  if (el.gltf_url) found.set('gltf', el.gltf_url);
   for (const [key, url] of el.files || []) {
     const format = formatFromFogKey(key) ?? modelFormatFromUrl(url);
     if (format && !found.has(format)) found.set(format, url);
   }
+  // The feed's dedicated ifc_url (possibly carrying a `#GlobalId` fragment that
+  // isolates this element in the model) backs the FOG list up.
+  if (el.ifc_url && !found.has('ifc')) found.set('ifc', el.ifc_url);
+  const out: ModelRef[] = [];
   for (const format of FORMAT_ORDER) {
     const url = found.get(format);
-    if (url) return { url, format };
+    if (url) out.push({ url, format });
   }
-  return null;
+  return out;
 }
 
 /** Human-readable display name per model format (file chips, BIM lists). */
@@ -62,9 +82,27 @@ export const FORMAT_LABELS: Record<ModelFormat, string> = {
   stl: 'STL',
   cityjson: 'CityJSON',
   citygml: 'CityGML',
+  ifc: 'IFC',
 };
 
 /** Is this literal datatype a GeoSPARQL WKT literal? */
 export function isWktDatatype(datatype: string | undefined | null): boolean {
   return !!datatype && datatype.endsWith('wktLiteral');
+}
+
+// Predicate matching mirrors the server viewer feed's resolution
+// (src/geo/viewer_feed.rs) so the resource page and the feed agree on which
+// triples carry geometry / BIM identity.
+
+/** Exactly geo:hasGeometry or omg:hasGeometry — the two predicates the feed follows. */
+export function isGeometryPredicate(iri: string | undefined | null): boolean {
+  return (
+    iri === 'http://www.opengis.net/ont/geosparql#hasGeometry' ||
+    iri === 'https://w3id.org/omg#hasGeometry'
+  );
+}
+
+/** IFC GlobalId predicate — case-sensitive, like the feed's `STRENDS(STR(?guidp), "ifcGuid")`. */
+export function isIfcGuidPredicate(iri: string | undefined | null): boolean {
+  return !!iri && iri.endsWith('ifcGuid');
 }

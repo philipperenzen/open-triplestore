@@ -5,8 +5,8 @@
 //! (`omg:hasGeometry` → `fog:as…` URLs), and **GeoSPARQL** geometry
 //! (`geo:hasGeometry` → `geo:asWKT` / `geo:asGML`) — into a flat list of
 //! elements. Geometries are reprojected to EPSG:4326 (for `[lng, lat]` map
-//! layers) and EPSG:3857 via [`super::crs`], so the frontend never needs CRS
-//! math. Vocabulary-specific detail (condition scores, inspection data, …) is
+//! layers) via [`super::crs`], so the frontend never needs CRS math.
+//! Vocabulary-specific detail (condition scores, inspection data, …) is
 //! deliberately *not* flattened here: the client fetches an element's full RDF
 //! on selection.
 
@@ -45,8 +45,6 @@ pub struct ViewerElement {
     pub source_crs: Option<String>,
     /// Geometry as WKT in EPSG:4326, `(x y) = (lon lat)` — feeds map layers.
     pub wkt4326: Option<String>,
-    /// Geometry as WKT in EPSG:3857 (Web Mercator).
-    pub wkt3857: Option<String>,
 }
 
 const FOG_AS: &str = "https://w3id.org/fog#as";
@@ -68,7 +66,9 @@ pub fn build_viewer_feed(
         None => String::new(),
     };
     // Roots (subjects of bot:containsElement that are nobody's child) appear as
-    // rows with unbound ?parent; children come from the containment closure.
+    // rows with unbound ?parent; children come from the containment closure. The
+    // third arm admits plain geo/omg subjects outside any BOT containment, also
+    // as parentless roots — a dataset needs no BOT topology to feed the viewer.
     let query = format!(
         r#"
         PREFIX bot:  <https://w3id.org/bot#>
@@ -81,6 +81,9 @@ pub fn build_viewer_feed(
             {{ ?parent (bot:containsElement|bot:hasSubElement) ?el . }}
             UNION
             {{ ?el bot:containsElement ?child .
+               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement) ?el }} }}
+            UNION
+            {{ ?el (geo:hasGeometry|omg:hasGeometry) ?anyg .
                FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement) ?el }} }}
             {root_filter}
             OPTIONAL {{ ?el rdfs:label ?label }}
@@ -159,15 +162,22 @@ pub fn build_viewer_feed(
 /// Fill the reprojected geometry fields from a (possibly CRS-prefixed) WKT literal value.
 fn apply_wkt(el: &mut ViewerElement, literal_value: &str) {
     let source_uri = extract_crs(literal_value);
-    let source = source_uri.and_then(Crs::from_uri).unwrap_or(Crs::Wgs84);
+    // An explicit but unsupported CRS must not be mislabelled as WGS84 — projected
+    // metre coordinates would reach the map as lng/lat. Skip the geometry instead.
+    // No prefix keeps the GeoSPARQL default (CRS84).
+    let source = match source_uri {
+        Some(uri) => match Crs::from_uri(uri) {
+            Some(crs) => crs,
+            None => return,
+        },
+        None => Crs::Wgs84,
+    };
     el.source_crs = Some(
         source_uri
             .map(str::to_string)
             .unwrap_or_else(|| Crs::Wgs84.to_uri().to_string()),
     );
-    let body = extract_wkt(literal_value);
-    el.wkt4326 = reproject_wkt(body, source, Crs::Wgs84);
-    el.wkt3857 = reproject_wkt(body, source, Crs::WebMercator);
+    el.wkt4326 = reproject_wkt(extract_wkt(literal_value), source, Crs::Wgs84);
 }
 
 /// Fill the reprojected geometry fields from a GML literal value (srsName-aware).
@@ -176,13 +186,16 @@ fn apply_gml(el: &mut ViewerElement, gml_value: &str) {
         return;
     };
     let source_uri = gml_srs_name(gml_value);
-    let source = source_uri
-        .as_deref()
-        .and_then(Crs::from_uri)
-        .unwrap_or(Crs::Wgs84);
+    // Same contract as apply_wkt: unsupported explicit srsName → skip, no srsName → CRS84.
+    let source = match source_uri.as_deref() {
+        Some(uri) => match Crs::from_uri(uri) {
+            Some(crs) => crs,
+            None => return,
+        },
+        None => Crs::Wgs84,
+    };
     el.source_crs = Some(source_uri.unwrap_or_else(|| Crs::Wgs84.to_uri().to_string()));
     el.wkt4326 = reproject_wkt(&wkt_body, source, Crs::Wgs84);
-    el.wkt3857 = reproject_wkt(&wkt_body, source, Crs::WebMercator);
 }
 
 fn term_str(t: &oxigraph::model::Term) -> String {
@@ -256,5 +269,46 @@ mod tests {
             bridge.wkt4326.as_deref().unwrap().starts_with("LINESTRING"),
             "root keeps its linestring"
         );
+    }
+
+    #[test]
+    fn unsupported_crs_yields_no_wkt4326() {
+        let data = r#"
+            @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+            @prefix ex:  <http://example.org/> .
+            ex:thing geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/25832> POINT(687000 5338000)"^^geo:wktLiteral ] .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(data, RdfFormat::Turtle, None).unwrap();
+        let feed = build_viewer_feed(&store, &[], None);
+        assert_eq!(feed.len(), 1, "{feed:?}");
+        assert!(
+            feed[0].wkt4326.is_none(),
+            "UTM metres must not be emitted as lng/lat: {:?}",
+            feed[0].wkt4326
+        );
+    }
+
+    #[test]
+    fn plain_geosparql_without_bot_appears_as_root() {
+        let data = r#"
+            @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+            @prefix ex:  <http://example.org/> .
+            ex:thing geo:hasGeometry [ geo:asWKT "POINT(4 52)"^^geo:wktLiteral ] .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(data, RdfFormat::Turtle, None).unwrap();
+        let feed = build_viewer_feed(&store, &[], None);
+        assert_eq!(feed.len(), 1, "{feed:?}");
+        assert_eq!(feed[0].id, "http://example.org/thing");
+        assert!(feed[0].parent.is_none(), "no BOT containment → root");
+        let wkt = feed[0].wkt4326.as_deref().unwrap();
+        let nums: Vec<f64> = wkt
+            .trim_start_matches("POINT(")
+            .trim_end_matches(')')
+            .split_whitespace()
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        assert_eq!(nums, [4.0, 52.0], "unprefixed WKT stays WGS84: {wkt}");
     }
 }

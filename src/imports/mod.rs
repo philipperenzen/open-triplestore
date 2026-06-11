@@ -8,4 +8,5 @@
 
 pub mod bulk;
 pub mod handlers;
+pub mod ifc;
 pub mod routes;

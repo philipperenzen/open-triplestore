@@ -217,11 +217,7 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     let elements = j["elements"].as_array().expect("elements");
-    assert_eq!(
-        elements.len(),
-        7,
-        "collection root + 5 landmarks + CityJSON demo block: {j}"
-    );
+    assert_eq!(elements.len(), 6, "collection root + 5 landmarks: {j}");
 
     let bridge = elements
         .iter()
@@ -240,36 +236,72 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
             && f[1].as_str().unwrap_or("").contains("Dragon_Bridge")),
         "Commons STL reference present: {files:?}"
     );
+}
 
-    // The synthetic CityJSON block exposes its bundled, site-relative file.
+/// The 3DBAG context graph (real Schependomlaan city block) exposes its
+/// bundled, site-relative CityJSON through the same feed.
+#[tokio::test]
+async fn viewer_feed_serves_3dbag_context_block() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "ctx",
+            "Context",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state
+        .auth_db
+        .add_dataset_graph("ctx", "urn:ctx:data")
+        .unwrap();
+    state
+        .store
+        .load_str(
+            include_str!("../src/saved_queries/data/schependomlaan-context.ttl"),
+            RdfFormat::Turtle,
+            Some("urn:ctx:data"),
+        )
+        .unwrap();
+
+    let resp = test_app(state)
+        .oneshot(req("GET", "/api/datasets/ctx/viewer-feed", Some(&token)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp.into_body()).await;
+    let elements = j["elements"].as_array().expect("elements");
     let block = elements
         .iter()
         .find(|e| {
             e["id"]
                 .as_str()
                 .unwrap_or("")
-                .ends_with("NijmegenCityBlock")
+                .ends_with("SchependomlaanBlock")
         })
-        .expect("CityJSON demo block in feed");
+        .expect("3DBAG context block in feed");
     let files = block["files"].as_array().expect("files");
     assert!(
         files.iter().any(|f| f[0].as_str() == Some("Cityjson")
-            && f[1].as_str() == Some("/samples/nijmegen-buildings.city.json")),
+            && f[1].as_str() == Some("/samples/schependomlaan-3dbag.city.json")),
         "CityJSON reference present: {files:?}"
     );
+    let wkt = block["wkt4326"].as_str().expect("wkt4326");
+    assert!(wkt.contains("5.83"), "anchored near Nijmegen: {wkt}");
 }
 
 /// Drift guard: the seed copies under src/saved_queries/data/ must stay
 /// byte-identical to the canonical fixtures (below their 2-line SEED COPY header).
 #[test]
 fn seed_copies_match_canonical_fixtures() {
-    for (seed, fixture) in [
-        (include_str!("../src/saved_queries/data/waalbrug.ttl"), ABOX),
-        (
-            include_str!("../src/saved_queries/data/landmarks.ttl"),
-            include_str!("fixtures/landmarks/landmarks.ttl"),
-        ),
-    ] {
+    for (seed, fixture) in [(
+        include_str!("../src/saved_queries/data/landmarks.ttl"),
+        include_str!("fixtures/landmarks/landmarks.ttl"),
+    )] {
         let body: String = seed.lines().skip(2).collect::<Vec<_>>().join("\n");
         let canon: String = fixture.lines().collect::<Vec<_>>().join("\n");
         assert_eq!(

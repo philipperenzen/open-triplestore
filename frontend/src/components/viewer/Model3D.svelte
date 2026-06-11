@@ -66,7 +66,10 @@
     loadedCount = 0;
     failedCount = 0;
     const wanted = refs;
-    for (const ref of wanted) {
+    // Load every model concurrently: each task owns its group, the counters
+    // are order-independent and loadModel caches per URL, so parallelism is
+    // safe and much faster than the old one-await-per-model loop.
+    const tasks = wanted.map(async (ref) => {
       const group = new THREE.Group();
       group.userData.elementId = ref.id;
       const [x, z] = ref.slot || [0, 0];
@@ -101,12 +104,14 @@
         placeholder.position.y = 0.5;
         group.add(placeholder);
       }
-    }
+    });
+    await Promise.allSettled(tasks);
+    if (refs !== wanted) return;
     highlight();
   }
 
   function onClick(event) {
-    if (!renderer || groupsById.size < 2) return;
+    if (!renderer || groupsById.size === 0) return;
     const rect = renderer.domElement.getBoundingClientRect();
     const pointer = new THREE.Vector2(
       ((event.clientX - rect.left) / rect.width) * 2 - 1,
@@ -115,9 +120,16 @@
     raycaster.setFromCamera(pointer, camera);
     const hits = raycaster.intersectObjects([...groupsById.values()], true);
     if (!hits.length) return;
-    let node = hits[0].object;
+    const hit = hits[0].object;
+    // IFC meshes carry their element's GlobalId — picking one selects that
+    // *atom* (a beam, a slab), not just the whole model.
+    const guid = hit.userData?.ifcGuid || null;
+    let node = hit;
     while (node && !node.userData.elementId) node = node.parent;
-    if (node?.userData.elementId) dispatch('select', { id: node.userData.elementId });
+    const id = node?.userData.elementId || null;
+    if (guid || (id && groupsById.size > 1)) {
+      dispatch('select', { id, guid });
+    }
   }
 
   onMount(() => {

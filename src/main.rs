@@ -17,6 +17,7 @@ mod dataset_versions;
 mod dcat;
 mod docs;
 mod geo;
+mod ifc;
 mod imports;
 mod kind_detector;
 #[cfg(feature = "ldp")]

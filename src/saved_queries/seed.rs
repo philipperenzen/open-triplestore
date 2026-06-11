@@ -116,40 +116,18 @@ pub fn seed_open_triplestore(state: &AppState) {
 }
 
 fn try_seed(state: &AppState) -> anyhow::Result<()> {
-    // Idempotent: if the demo organisation already exists we don't reseed it,
-    // but we do back-fill branding when an earlier (pre-branding) seed left it
-    // without a logo or banner — without ever clobbering artwork an admin has
-    // since uploaded.
-    if let Some(existing) = state.auth_db.get_organisation_by_slug(ORG_SLUG)? {
-        seed_org_branding(
-            state,
-            &existing.id,
-            existing.image_key.is_none(),
-            existing.banner_key.is_none(),
-        );
-        // Back-fill dataset branding too, for installs seeded before it shipped —
-        // only filling what's unset so an admin's own artwork is never clobbered.
-        for brand in DATASET_BRANDS {
-            if let Ok(Some(ds)) = state.auth_db.get_dataset(brand.slug) {
-                seed_dataset_branding(
-                    state,
-                    &ds.id,
-                    brand.slug,
-                    ds.image_key.is_none(),
-                    ds.banner_key.is_none(),
-                );
-            }
-        }
-        return Ok(());
-    }
-
-    // Owner = a super_admin (preferred) or any admin. On a brand-new install
-    // before any admin exists, skip quietly — it will seed on the next start.
-    let users = state.auth_db.list_users()?;
-    let owner = users
-        .iter()
-        .find(|u| matches!(u.role, SystemRole::SuperAdmin) && u.is_active)
-        .or_else(|| users.iter().find(|u| u.role.is_admin() && u.is_active));
+    // Owner of the demo content: a super_admin (preferred) or any active admin.
+    // On a brand-new install before any admin exists, skip quietly — the boot
+    // seeder retries on the next start, once the first user (who is promoted to
+    // super_admin on registration) exists.
+    let owner = {
+        let users = state.auth_db.list_users()?;
+        users
+            .iter()
+            .find(|u| matches!(u.role, SystemRole::SuperAdmin) && u.is_active)
+            .or_else(|| users.iter().find(|u| u.role.is_admin() && u.is_active))
+            .cloned()
+    };
     let owner = match owner {
         Some(u) => u,
         None => {
@@ -158,25 +136,45 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         }
     };
 
-    // Create the public organisation and attach the seeding admin to it.
-    let org_id = Uuid::new_v4().to_string();
-    let org = state.auth_db.create_organisation(
-        &org_id,
-        ORG_NAME,
-        ORG_SLUG,
-        Some(ORG_DESCRIPTION),
-        None,
-    )?;
-    let _ = state
-        .auth_db
-        .add_org_member(&owner.id, &org_id, Role::Admin);
-    org_graph::write_org_metadata_graph(&state.store, &state.base_url, &org, &[]);
-
-    // Give the public org page a branded logo + banner out of the box.
-    seed_org_branding(state, &org_id, true, true);
+    // Resolve or create the public demo organisation. We deliberately do NOT bail
+    // out when it already exists: an earlier boot may have created the org and
+    // registered the demo graphs but failed to load their triples (an interrupted
+    // or lock-contended seed), leaving registered-but-empty public graphs that read
+    // as "no data" to logged-out users. So the whole seed runs idempotently every
+    // boot and back-fills whatever is missing, without ever clobbering admin edits.
+    let org_id = match state.auth_db.get_organisation_by_slug(ORG_SLUG)? {
+        Some(existing) => {
+            // Back-fill org branding for installs seeded before branding shipped.
+            seed_org_branding(
+                state,
+                &existing.id,
+                existing.image_key.is_none(),
+                existing.banner_key.is_none(),
+            );
+            existing.id
+        }
+        None => {
+            let org_id = Uuid::new_v4().to_string();
+            let org = state.auth_db.create_organisation(
+                &org_id,
+                ORG_NAME,
+                ORG_SLUG,
+                Some(ORG_DESCRIPTION),
+                None,
+            )?;
+            let _ = state
+                .auth_db
+                .add_org_member(&owner.id, &org_id, Role::Admin);
+            org_graph::write_org_metadata_graph(&state.store, &state.base_url, &org, &[]);
+            // Give the public org page a branded logo + banner out of the box.
+            seed_org_branding(state, &org_id, true, true);
+            org_id
+        }
+    };
 
     let sq = SavedQueryStore::new(state.auth_db.pool());
     let mut graph_count = 0usize;
+    let mut backfilled = 0usize;
     let mut service_count = 0usize;
 
     for ds in seed_data::datasets() {
@@ -184,27 +182,46 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         // (`{base}/dataset/{id}`) is human-readable — e.g. `…/dataset/spatial`
         // rather than `…/dataset/<uuid>`. Slugs are unique across the demo set.
         let ds_id = ds.slug.to_string();
-        if let Err(e) = state.auth_db.create_dataset(
-            &ds_id,
-            ds.name,
-            Some(ds.description),
-            OwnerType::Organisation,
-            &org_id,
-            Visibility::Public,
-            None,
-        ) {
-            tracing::warn!("open-triplestore seed: dataset '{}' failed: {e}", ds.slug);
-            continue;
+        let existed = matches!(state.auth_db.get_dataset(&ds_id), Ok(Some(_)));
+        if !existed {
+            if let Err(e) = state.auth_db.create_dataset(
+                &ds_id,
+                ds.name,
+                Some(ds.description),
+                OwnerType::Organisation,
+                &org_id,
+                Visibility::Public,
+                None,
+            ) {
+                tracing::warn!(
+                    "open-triplestore seed: dataset '{}' create failed: {e}",
+                    ds.slug
+                );
+                continue;
+            }
+            // Themed icon + animated banner preset so the public page isn't blank.
+            seed_dataset_branding(state, &ds_id, ds.slug, true, true);
         }
-
-        // Themed icon + animated banner preset so the public page isn't blank.
-        seed_dataset_branding(state, &ds_id, ds.slug, true, true);
 
         for g in ds.graphs {
             let graph_iri = format!("{DEMO_BASE}/{}/{}", ds.slug, g.suffix);
-            if let Err(e) = load_graph(state, &graph_iri, g) {
-                tracing::warn!("open-triplestore seed: graph <{graph_iri}> load failed: {e}");
-                continue;
+            // (Re)load the bundled data only when the target graph is empty: either a
+            // fresh seed, or a previous seed that registered the graph but never
+            // populated it. A graph that already holds triples is left untouched, so
+            // an admin's edits to demo data are never overwritten.
+            let is_empty = state
+                .store
+                .graph_count_cached(Some(&graph_iri))
+                .unwrap_or(0)
+                == 0;
+            if is_empty {
+                if let Err(e) = load_graph(state, &graph_iri, g) {
+                    tracing::warn!("open-triplestore seed: graph <{graph_iri}> load failed: {e}");
+                    continue;
+                }
+                if existed {
+                    backfilled += 1;
+                }
             }
             let _ = state.auth_db.add_dataset_graph(&ds_id, &graph_iri);
             let _ = state
@@ -228,43 +245,140 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
             );
         }
 
-        for req in seed_data::services_for(ds.slug) {
-            match sq.create(QueryScope::Dataset, &ds_id, &req, &owner.id) {
-                Ok(svc) => {
-                    metadata::record_service(&state.store, &state.base_url, &svc);
-                    metadata::record_revision(
-                        &state.store,
-                        &state.base_url,
-                        &svc.id,
-                        svc.current_revision,
-                        req.version_name.as_deref(),
-                        req.note.as_deref(),
-                        svc.sparql.as_deref().unwrap_or(&req.sparql),
-                        "manual",
-                        &svc.created_by,
-                        &svc.created_at,
-                    );
-                    service_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!("open-triplestore seed: service '{}' failed: {e}", req.name)
+        // Saved-query services — create only when the dataset has none yet, so a
+        // reseed on every boot doesn't pile up duplicate services.
+        let has_services = sq
+            .list(QueryScope::Dataset, &ds_id)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        if !has_services {
+            for req in seed_data::services_for(ds.slug) {
+                match sq.create(QueryScope::Dataset, &ds_id, &req, &owner.id) {
+                    Ok(svc) => {
+                        metadata::record_service(&state.store, &state.base_url, &svc);
+                        metadata::record_revision(
+                            &state.store,
+                            &state.base_url,
+                            &svc.id,
+                            svc.current_revision,
+                            req.version_name.as_deref(),
+                            req.note.as_deref(),
+                            svc.sparql.as_deref().unwrap_or(&req.sparql),
+                            "manual",
+                            &svc.created_by,
+                            &svc.created_at,
+                        );
+                        service_count += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!("open-triplestore seed: service '{}' failed: {e}", req.name)
+                    }
                 }
             }
         }
     }
 
+    // The Schependomlaan IFC (layered Dutch BIM demo) is downloaded + converted
+    // on first boot — and back-filled on later boots if a download once failed.
+    seed_schependomlaan_ifc(state, &owner.id);
+
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
 
+    // Back-filled graph data changes what each principal can see/count, so drop the
+    // accessible-graph cache to reflect it immediately rather than after the TTL.
+    if backfilled > 0 {
+        state.auth_db.invalidate_accessible_graphs_cache();
+    }
+
     tracing::info!(
-        "Seeded '{}' organisation ({}) with {} datasets, {} graphs, {} saved queries",
+        "Seeded/verified '{}' organisation ({}): {} datasets, {} graphs ({} back-filled), {} new services",
         ORG_NAME,
         org_id,
         seed_data::datasets().len(),
         graph_count,
+        backfilled,
         service_count
     );
     Ok(())
+}
+
+/// Default source of the Schependomlaan design-model IFC — the canonical open
+/// Dutch BIM dataset (Nijmegen; CC BY 4.0, openBIMstandards/TU Eindhoven),
+/// mirrored on GitHub. Override with `SEED_IFC_URL`; disable the whole demo
+/// seed with `SEED_STANDARDS_DEMO=false`.
+const SCHEPENDOMLAAN_IFC_URL: &str = "https://raw.githubusercontent.com/jakob-beetz/DataSetSchependomlaan/master/Design%20model%20IFC/IFC%20Schependomlaan.ifc";
+
+/// Download the Schependomlaan IFC (~49 MB, first boot only) and run it through
+/// the same IFC import pipeline users get: stored as a public dataset asset,
+/// converted to a BOT topology graph + a full ifcOWL lift, every storey, wall
+/// and beam individually addressable. Skips instantly when the building graph
+/// already has data; a failed download just retries on the next boot.
+fn seed_schependomlaan_ifc(state: &AppState, owner_id: &str) {
+    const DS: &str = "viewer-3d-demo";
+    let bot_graph = format!("{}/{}/building", seed_data::DEMO_BASE, DS);
+    if state
+        .store
+        .graph_count_cached(Some(&bot_graph))
+        .unwrap_or(0)
+        > 0
+    {
+        return;
+    }
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    let url = std::env::var("SEED_IFC_URL").unwrap_or_else(|_| SCHEPENDOMLAAN_IFC_URL.to_string());
+    // An explicitly empty SEED_IFC_URL disables the IFC demo (also used by
+    // tests, which must never reach out to the network).
+    if url.trim().is_empty() {
+        tracing::info!("SEED_IFC_URL is empty — skipping the Schependomlaan IFC demo");
+        return;
+    }
+    tracing::info!("seed: downloading Schependomlaan IFC ({url}) — first boot only");
+    // We're on a blocking thread (the seed runs in spawn_blocking), so driving
+    // the async download + import with block_on is safe here.
+    let handle = tokio::runtime::Handle::current();
+    let bytes = match handle.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()?;
+        client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await
+    }) {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            tracing::warn!(
+                "schependomlaan seed skipped (download failed, will retry next boot): {e}"
+            );
+            return;
+        }
+    };
+    match handle.block_on(crate::imports::ifc::import_ifc_bytes(
+        state,
+        DS,
+        owner_id,
+        "Schependomlaan.ifc",
+        bytes,
+        Some(bot_graph),
+        true,
+        true,
+        Some(url),
+        // The file's IfcSite carries an exporter-default location; anchor the
+        // demo at the real Schependomlaan site (PDOK street centroid) instead.
+        Some("POINT(5.83373 51.84114)".to_string()),
+    )) {
+        Ok(o) => tracing::info!(
+            "seeded Schependomlaan: {} elements / {} storeys / {} spaces; BOT {} + ifcOWL {} triples",
+            o.stats.elements, o.stats.storeys, o.stats.spaces, o.stats.bot_triples, o.stats.ifcowl_triples
+        ),
+        Err(e) => tracing::warn!("schependomlaan seed failed: {e}"),
+    }
 }
 
 /// Upload the bundled logo/banner for the demo organisation and record their
