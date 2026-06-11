@@ -497,6 +497,10 @@
       "helpfulYes": "Nuttig",
       "helpfulNo": "Niet nuttig",
       "thinking": "Aan het nadenken…",
+      "runningQuery": "De knowledge graph wordt bevraagd…",
+      "stop": "Stop met genereren",
+      "stopped": "Gestopt — gedeeltelijk antwoord.",
+      "interrupted": "De verbinding viel weg — gedeeltelijk antwoord getoond.",
       "composerOffline": "LLM-gateway offline…",
       "composerPlaceholder": "Stel een vraag over datasets, API-services of de kennisgrafen…",
       "send": "Verzenden",
@@ -1063,9 +1067,7 @@
       "failedToDeleteDataset": "Verwijderen van Dataset mislukt",
       "failedToCreateService": "Aanmaken van service mislukt",
       "couldNotLoadVersion": "Kon versie {version} niet laden (HTTP {status})",
-      "failedToLoadVersion": "Laden van versie mislukt",
-      "viewer3d": "3D- & kaartviewer",
-      "viewer3dDesc": "Bekijk onderdelen op de kaart en in 3D, met hun linked data"
+      "failedToLoadVersion": "Laden van versie mislukt"
     },
     "validation": {
       "title": "SHACL-validatie",
@@ -2516,13 +2518,6 @@
       "version": "Versie",
       "noVersions": "Geen versies gevonden voor dit vocabulaire.",
       "loadFailed": "Vocabulaire laden mislukt"
-    },
-    "datasetViewer": {
-      "title": "3D- & kaartviewer",
-      "back": "Dataset",
-      "elements": "Onderdelen",
-      "openResource": "Open resource",
-      "empty": "Geen onderdelen met geometrie of 3D-modellen in deze dataset."
     }
   },
   "toast": {
@@ -2565,6 +2560,12 @@
       "graphTriples": "{count} triples",
       "servedVersion": "datasetversie {version}",
       "mapFeatures": "{count} locaties",
+      "preparingWidget": "{label} wordt voorbereid…",
+      "pendingChart": "grafiek",
+      "pendingMap": "kaart",
+      "pendingCard": "infokaart",
+      "pendingTable": "tabel",
+      "pendingContent": "inhoud",
       "noGeometry": "Geen van de WKT-geometrieën in dit kaartblok kon worden gelezen.",
       "chartAlt": "Diagram",
       "brokenBlock": "Dit {label}-blok kon niet worden weergegeven — de ruwe inhoud wordt getoond."
@@ -3376,29 +3377,5 @@
       "binary": "binair",
       "showMore": "Meer tonen"
     }
-  },
-  "viewer": {
-    "resize": "Formaat wijzigen",
-    "close": "Sluiten",
-    "search": "Zoek onderdelen…",
-    "located": "Op de kaart",
-    "noLocation": "Geen locatie",
-    "properties": "Eigenschappen",
-    "structure": "Structuur",
-    "model3d": "3D-model",
-    "model3dBim": "3D-model (BIM)",
-    "bimFiles": "BIM- / geometriebestanden",
-    "noChildren": "Geen sub-onderdelen.",
-    "parent": "Onderdeel van",
-    "orbitHint": "Sleep om te draaien · scroll om te zoomen · rechts-slepen om te verschuiven",
-    "zoomHint": "Zoom in om 3D-modellen op schaal te zien; sleep met rechts (of Ctrl) om de kaart te kantelen en draaien.",
-    "basemap": "Ondergrond",
-    "basemapStreets": "Kaart",
-    "basemapSatellite": "Satelliet",
-    "toScale": "op schaal",
-    "geometry": "Geometrie",
-    "showOnMap": "Toon op kaart",
-    "show3d": "Bekijk 3D-model",
-    "noModels": "Geen 3D-modellen in deze dataset."
   }
 }

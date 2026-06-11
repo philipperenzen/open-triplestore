@@ -497,6 +497,10 @@
       "helpfulYes": "Helpful",
       "helpfulNo": "Not helpful",
       "thinking": "Thinking…",
+      "runningQuery": "Querying the knowledge graph…",
+      "stop": "Stop generating",
+      "stopped": "Stopped — partial answer.",
+      "interrupted": "The connection dropped — partial answer shown.",
       "composerOffline": "LLM gateway offline…",
       "composerPlaceholder": "Ask about datasets, API services, or the knowledge graphs…",
       "send": "Send",
@@ -1063,9 +1067,7 @@
       "failedToDeleteDataset": "Failed to delete dataset",
       "failedToCreateService": "Failed to create service",
       "couldNotLoadVersion": "Could not load version {version} (HTTP {status})",
-      "failedToLoadVersion": "Failed to load version",
-      "viewer3d": "3D & map viewer",
-      "viewer3dDesc": "Inspect parts on the map and in 3D, with their linked data"
+      "failedToLoadVersion": "Failed to load version"
     },
     "validation": {
       "title": "SHACL Validation",
@@ -2516,13 +2518,6 @@
       "version": "Version",
       "noVersions": "No versions found for this vocabulary.",
       "loadFailed": "Failed to load vocabulary"
-    },
-    "datasetViewer": {
-      "title": "3D & map viewer",
-      "back": "Dataset",
-      "elements": "Elements",
-      "openResource": "Open resource",
-      "empty": "No elements with geometry or 3D models in this dataset."
     }
   },
   "toast": {
@@ -2565,6 +2560,12 @@
       "graphTriples": "{count} triples",
       "servedVersion": "dataset version {version}",
       "mapFeatures": "{count} locations",
+      "preparingWidget": "Preparing {label}…",
+      "pendingChart": "chart",
+      "pendingMap": "map",
+      "pendingCard": "info card",
+      "pendingTable": "table",
+      "pendingContent": "content",
       "noGeometry": "None of the WKT geometries in this map block could be read.",
       "chartAlt": "Chart",
       "brokenBlock": "This {label} block could not be rendered — showing its raw content."
@@ -3376,29 +3377,5 @@
       "binary": "binary",
       "showMore": "Show more"
     }
-  },
-  "viewer": {
-    "resize": "Resize",
-    "close": "Close",
-    "search": "Search elements…",
-    "located": "On the map",
-    "noLocation": "No location",
-    "properties": "Properties",
-    "structure": "Structure",
-    "model3d": "3D model",
-    "model3dBim": "3D model (BIM)",
-    "bimFiles": "BIM / geometry files",
-    "noChildren": "No sub-elements.",
-    "parent": "Part of",
-    "orbitHint": "Drag to rotate · scroll to zoom · right-drag to pan",
-    "zoomHint": "Zoom in to see 3D models to scale; right-drag (or Ctrl-drag) tilts and rotates the map.",
-    "basemap": "Basemap",
-    "basemapStreets": "Map",
-    "basemapSatellite": "Satellite",
-    "toScale": "to scale",
-    "geometry": "Geometry",
-    "showOnMap": "Show on map",
-    "show3d": "View 3D model",
-    "noModels": "No 3D models in this dataset."
   }
 }
