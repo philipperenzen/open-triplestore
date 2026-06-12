@@ -121,7 +121,10 @@
   // Best-effort — a failed save never disturbs the visible chat.
   async function persistTurn(userContent, draft) {
     if (!$isAuthenticated) return;
-    const keepAssistant = !draft.isError && (draft.content || draft.queries?.length);
+    // Failed turns are not history: a guard-rejected question saved server-side
+    // would poison the conversation again on every reload.
+    if (draft.isError) return;
+    const keepAssistant = draft.content || draft.queries?.length;
     if (!keepAssistant && !messages.includes(draft)) return; // dropped empty turn
     try {
       if (!activeId) {
@@ -247,13 +250,16 @@
       reviewed: null,
       runs: [],
     };
-    messages = [...messages, { role: 'user', content }, draft];
+    const userMsg = { role: 'user', content };
+    messages = [...messages, userMsg, draft];
     await scrollToBottom(true);
 
-    // Transport-error bubbles (isError) and empty drafts are UI-only — never
-    // replay them as assistant turns in the model conversation.
+    // Transport-error bubbles (isError), guard-rejected user messages and empty
+    // drafts are UI-only — never replay them as turns in the model conversation.
+    // (A rejected message replayed next turn would just be rejected again,
+    // poisoning the whole conversation.)
     const wire = messages
-      .filter((m) => !m.isError && m !== draft && m.content)
+      .filter((m) => !m.isError && !m.rejected && m !== draft && m.content)
       .map((m) => ({ role: m.role, content: m.content }));
 
     abortCtl = new AbortController();
@@ -295,6 +301,9 @@
         draft.isError = true;
         draft.content = e?.message || $t('pages.llmChat.unavailable');
         draft.queries = [];
+        // The server rejected this request outright (guard block, rate limit):
+        // keep the bubble visible but never replay the message in later turns.
+        if (e?.status === 400 || e?.status === 429) userMsg.rejected = true;
       }
     } finally {
       abortCtl = null;
@@ -514,7 +523,7 @@
 
     {#each messages as msg, i}
       <div class="row {msg.role}">
-        <div class="bubble {msg.role}" class:error={msg.isError}>
+        <div class="bubble {msg.role}" class:error={msg.isError} class:rejected={msg.rejected}>
           {#if msg.role === 'assistant' && !msg.isError && msg.streaming}
             <!-- Live draft: tokens render as they stream (renderRich sanitizes
                  with DOMPurify); widgets materialize when the turn completes. -->
@@ -889,6 +898,9 @@
     box-shadow: 0 1px 2px rgba(15,32,39,0.05);
   }
   .bubble.user { background: linear-gradient(135deg, #6d4ad9, #4f46e5); color: #fff; border-bottom-right-radius: 4px; }
+  /* Guard-rejected question: stays visible for context but is excluded from
+     every later turn — the dimming signals it is out of the conversation. */
+  .bubble.rejected { opacity: 0.55; }
   .bubble.assistant { background: var(--bg-strong); border: 1px solid var(--line-soft); color: var(--ink-800); border-bottom-left-radius: 4px; }
   .bubble.error { background: #fff8f8; border-color: #f3c9c9; color: #b91c1c; }
 
