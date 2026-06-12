@@ -1332,7 +1332,9 @@
       "mfaCode": "Verificatiecode",
       "mfaRecoveryHint": "Toestel kwijt? Voer in plaats daarvan een van je herstelcodes in.",
       "mfaSubmit": "Verifiëren",
-      "mfaBack": "Terug naar wachtwoord"
+      "mfaBack": "Terug naar wachtwoord",
+      "passkeySignIn": "Inloggen met een passkey",
+      "passkeyFailed": "Inloggen met passkey is mislukt — probeer het opnieuw of gebruik je wachtwoord."
     },
     "register": {
       "title": "Registreren",
@@ -1494,7 +1496,21 @@
       "recoveryCodesDone": "Ik heb ze opgeslagen",
       "twoFactorDisableTitle": "Tweestapsverificatie uitschakelen",
       "twoFactorDisableBody": "Bevestig met je wachtwoord en een actuele code (of een herstelcode). Je account valt terug op inloggen met alleen een wachtwoord.",
-      "twoFactorDisableCode": "Authenticator- of herstelcode"
+      "twoFactorDisableCode": "Authenticator- of herstelcode",
+      "passkeysHeading": "Passkeys",
+      "passkeysHint": "Log in zonder wachtwoord met de schermvergrendeling van je apparaat, je vingerafdruk of een hardware-beveiligingssleutel.",
+      "passkeysNone": "Nog geen passkeys geregistreerd.",
+      "passkeyAdd": "Passkey toevoegen",
+      "passkeyAddTitle": "Een passkey toevoegen",
+      "passkeyAddBody": "Geef de passkey een herkenbare naam en volg daarna de aanwijzingen van je browser om hem aan te maken.",
+      "passkeyNamePlaceholder": "bijv. MacBook Touch ID",
+      "passkeyCreate": "Passkey aanmaken",
+      "passkeyCreating": "Wachten op je browser…",
+      "passkeyCreated": "Aangemaakt",
+      "passkeyRemove": "Passkey verwijderen",
+      "passkeyRemoveTitle": "Passkey verwijderen",
+      "passkeyRemoveBody": "Met deze passkey kun je daarna niet meer inloggen op je account. Bevestig met je wachtwoord.",
+      "passkeyUnsupported": "Deze browser ondersteunt geen passkeys."
     },
     "admin": {
       "title": "Gebruikersbeheer",

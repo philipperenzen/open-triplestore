@@ -51,6 +51,7 @@ mod helpers {
             mailer: Arc::new(open_triplestore::email::Mailer::log_only("http://localhost:7878")),
             base_url: Arc::new("http://localhost:7878".to_string()),
             oauth_sessions: new_session_store(),
+            passkey_sessions: open_triplestore::auth::passkey::new_session_store(),
             auth_ext: Arc::new(open_triplestore::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
             secure_cookies: false,

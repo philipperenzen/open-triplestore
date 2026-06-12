@@ -1,17 +1,20 @@
 <script>
   import { onMount } from 'svelte';
-  import { login as apiLogin, verify2fa, setTokens, getOauthProviders } from '../lib/api.js';
+  import { login as apiLogin, verify2fa, setTokens, getOauthProviders, passkeyLoginStart, passkeyLoginFinish } from '../lib/api.js';
+  import { isPasskeySupported, getPasskeyAssertion } from '../lib/webauthn.js';
   import { refreshUser } from '../lib/stores.js';
   import { navigate } from '../lib/router/index.js';
   import { Link } from '../lib/router/index.js';
   import { t } from 'svelte-i18n';
-  import { LogIn, Loader2, ShieldCheck, ArrowLeft } from 'lucide-svelte';
+  import { LogIn, Loader2, ShieldCheck, ArrowLeft, KeyRound } from 'lucide-svelte';
 
   let username = '';
   let password = '';
   let error = '';
   let loading = false;
   let ssoProviders = [];
+  let passkeySupported = false;
+  let passkeyLoading = false;
 
   // Two-factor step: set when login answered with mfa_required.
   let mfaToken = '';
@@ -19,6 +22,7 @@
   let mfaInput;
 
   onMount(async () => {
+    passkeySupported = isPasskeySupported();
     try {
       ssoProviders = await getOauthProviders();
     } catch {
@@ -61,6 +65,30 @@
       error = e.message;
     } finally {
       loading = false;
+    }
+  }
+
+  async function handlePasskeyLogin() {
+    error = '';
+    passkeyLoading = true;
+    try {
+      const start = await passkeyLoginStart();
+      const credential = await getPasskeyAssertion(start.options.publicKey);
+      const res = await passkeyLoginFinish(start.challenge_id, credential);
+      if (res.mfa_required) {
+        mfaToken = res.mfa_token;
+        mfaCode = '';
+        setTimeout(() => mfaInput?.focus(), 50);
+        return;
+      }
+      await finishLogin(res);
+    } catch (e) {
+      // Dismissing the browser's passkey prompt is not an error.
+      if (e?.name !== 'NotAllowedError' && e?.name !== 'AbortError') {
+        error = e.message || $t('pages.login.passkeyFailed');
+      }
+    } finally {
+      passkeyLoading = false;
     }
   }
 
@@ -137,11 +165,17 @@
       </button>
     </form>
 
-    {#if ssoProviders.length > 0}
+    {#if passkeySupported || ssoProviders.length > 0}
       <div class="sso-divider">
         <span>{$t('pages.login.ssoDivider')}</span>
       </div>
       <div class="sso-buttons">
+        {#if passkeySupported}
+          <button class="btn btn-sso" type="button" on:click={handlePasskeyLogin} disabled={passkeyLoading || loading}>
+            {#if passkeyLoading}<Loader2 size={14} class="animate-spin" />{:else}<KeyRound size={14} />{/if}
+            {$t('pages.login.passkeySignIn')}
+          </button>
+        {/if}
         {#each ssoProviders as provider}
           <button class="btn btn-sso" type="button" on:click={() => beginSso(provider.slug)}>
             {provider.name}

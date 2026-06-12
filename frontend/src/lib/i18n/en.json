@@ -1332,7 +1332,9 @@
       "mfaCode": "Verification code",
       "mfaRecoveryHint": "Lost your device? Enter one of your recovery codes instead.",
       "mfaSubmit": "Verify",
-      "mfaBack": "Back to password"
+      "mfaBack": "Back to password",
+      "passkeySignIn": "Sign in with a passkey",
+      "passkeyFailed": "Passkey sign-in failed — try again or use your password."
     },
     "register": {
       "title": "Register",
@@ -1494,7 +1496,21 @@
       "recoveryCodesDone": "I've saved them",
       "twoFactorDisableTitle": "Disable two-factor authentication",
       "twoFactorDisableBody": "Confirm with your password and a current code (or a recovery code). Your account falls back to password-only sign-in.",
-      "twoFactorDisableCode": "Authenticator or recovery code"
+      "twoFactorDisableCode": "Authenticator or recovery code",
+      "passkeysHeading": "Passkeys",
+      "passkeysHint": "Sign in without a password using your device's screen lock, fingerprint, or a hardware security key.",
+      "passkeysNone": "No passkeys registered yet.",
+      "passkeyAdd": "Add passkey",
+      "passkeyAddTitle": "Add a passkey",
+      "passkeyAddBody": "Give the passkey a recognisable name, then follow your browser's prompts to create it.",
+      "passkeyNamePlaceholder": "e.g. MacBook Touch ID",
+      "passkeyCreate": "Create passkey",
+      "passkeyCreating": "Waiting for your browser…",
+      "passkeyCreated": "Created",
+      "passkeyRemove": "Remove passkey",
+      "passkeyRemoveTitle": "Remove passkey",
+      "passkeyRemoveBody": "This passkey will no longer be able to sign in to your account. Confirm with your password.",
+      "passkeyUnsupported": "This browser does not support passkeys."
     },
     "admin": {
       "title": "User Management",

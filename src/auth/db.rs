@@ -360,6 +360,23 @@ impl AuthDb {
             );
             CREATE INDEX IF NOT EXISTS idx_totp_recovery_user ON totp_recovery_codes(user_id);
 
+            -- WebAuthn/FIDO2 passkeys. public_key holds the full serialized
+            -- webauthn-rs Passkey (COSE public key + verification policy);
+            -- counter and transports are denormalised copies for listing and
+            -- clone detection without parsing the JSON.
+            CREATE TABLE IF NOT EXISTS webauthn_credentials (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                credential_id TEXT NOT NULL UNIQUE,
+                public_key TEXT NOT NULL,
+                counter INTEGER NOT NULL DEFAULT 0,
+                transports TEXT,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+
             -- Per-account login throttle (independent of the per-IP rate limit) to
             -- stop distributed credential-stuffing against a single username.
             -- Keyed by the SUBMITTED username so guesses at non-existent accounts
@@ -1318,6 +1335,102 @@ impl AuthDb {
             params![user_id],
         )?;
         Ok(())
+    }
+
+    // ─── WebAuthn passkeys ────────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_webauthn_credential(
+        &self,
+        id: &str,
+        user_id: &str,
+        credential_id: &str,
+        public_key: &str,
+        counter: i64,
+        transports: Option<&str>,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO webauthn_credentials
+                 (id, user_id, credential_id, public_key, counter, transports, name, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![id, user_id, credential_id, public_key, counter, transports, name, now],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_webauthn_credential(row: &rusqlite::Row) -> rusqlite::Result<WebauthnCredential> {
+        Ok(WebauthnCredential {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            credential_id: row.get(2)?,
+            public_key: row.get(3)?,
+            counter: row.get(4)?,
+            transports: row.get(5)?,
+            name: row.get(6)?,
+            created_at: row.get(7)?,
+            last_used_at: row.get(8)?,
+        })
+    }
+
+    const WEBAUTHN_CREDENTIAL_COLS: &'static str =
+        "id, user_id, credential_id, public_key, counter, transports, name, created_at, last_used_at";
+
+    pub fn list_webauthn_credentials(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<WebauthnCredential>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM webauthn_credentials WHERE user_id=?1 ORDER BY created_at",
+            Self::WEBAUTHN_CREDENTIAL_COLS
+        ))?;
+        let rows = stmt.query_map(params![user_id], Self::row_to_webauthn_credential)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Look up a credential by its (globally unique) WebAuthn credential ID.
+    pub fn get_webauthn_credential_by_cred_id(
+        &self,
+        credential_id: &str,
+    ) -> anyhow::Result<Option<WebauthnCredential>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM webauthn_credentials WHERE credential_id=?1",
+            Self::WEBAUTHN_CREDENTIAL_COLS
+        ))?;
+        let mut rows = stmt.query_map(params![credential_id], Self::row_to_webauthn_credential)?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
+    /// Persist the post-authentication credential state: updated serialized
+    /// passkey (counter/backup flags), denormalised counter, and last-used time.
+    pub fn update_webauthn_credential_usage(
+        &self,
+        id: &str,
+        public_key: &str,
+        counter: i64,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE webauthn_credentials SET public_key=?1, counter=?2, last_used_at=?3 WHERE id=?4",
+            params![public_key, counter, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one of `user_id`'s passkeys. Returns false when the row did not
+    /// exist or belongs to another user (scoping the DELETE prevents IDOR).
+    pub fn delete_webauthn_credential(&self, id: &str, user_id: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "DELETE FROM webauthn_credentials WHERE id=?1 AND user_id=?2",
+            params![id, user_id],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn update_user_role(&self, id: &str, role: SystemRole) -> anyhow::Result<()> {

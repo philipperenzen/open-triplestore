@@ -109,6 +109,12 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::handlers::TotpSetupResponse,
             crate::auth::handlers::TotpEnableResponse,
             crate::auth::handlers::MfaRequiredResponse,
+            crate::auth::passkey::RegisterStartResponse,
+            crate::auth::passkey::RegisterFinishRequest,
+            crate::auth::passkey::LoginStartResponse,
+            crate::auth::passkey::LoginFinishRequest,
+            crate::auth::passkey::DeletePasskeyRequest,
+            crate::auth::passkey::PasskeySummary,
             crate::auth::handlers::CreateApiTokenRequest,
             crate::auth::handlers::ApiTokenResponse,
             crate::auth::handlers::ApiTokenCreatedResponse,
@@ -2673,6 +2679,116 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     json!({ "mfa_token": "…from login…", "code": "123456" }),
                 ),
                 vec![("200", "Auth tokens"), ("401", "Invalid code or expired login")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys",
+        vec![(
+            M::Get,
+            o(
+                "Auth",
+                "List passkeys",
+                "WebAuthn passkeys registered to the current account.",
+                vec![],
+                vec![("200", "Passkey list")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/register/start",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Begin passkey registration",
+                "Mint a WebAuthn creation challenge for the signed-in user. Pass the returned `options.publicKey` to `navigator.credentials.create()` and redeem the result at /api/auth/passkeys/register/finish within 5 minutes.",
+                vec![],
+                vec![("200", "challenge_id + creation options"), ("400", "Passkey limit reached")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/register/finish",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Finish passkey registration",
+                "Verify the authenticator's response and store the new credential under the given name.",
+                vec![],
+                ref_body(
+                    "RegisterFinishRequest",
+                    json!({ "challenge_id": "…from register/start…", "name": "MacBook Touch ID", "credential": { "id": "…", "rawId": "…", "response": {}, "type": "public-key" } }),
+                ),
+                vec![
+                    ("201", "Passkey registered"),
+                    ("400", "Unknown/expired challenge or invalid attestation"),
+                    ("409", "Credential already registered"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/:credential_id",
+        vec![(
+            M::Delete,
+            ob(
+                "Auth",
+                "Remove a passkey",
+                "Delete one of the account's passkeys. Requires the current password — a hijacked session must not be able to strip credentials.",
+                vec![],
+                ref_body(
+                    "DeletePasskeyRequest",
+                    json!({ "password": "s3cret-passphrase" }),
+                ),
+                vec![
+                    ("204", "Removed"),
+                    ("401", "Wrong password"),
+                    ("404", "No such passkey"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/login/start",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Begin passkey login",
+                "Mint a discoverable-credential WebAuthn challenge (no username needed). Pass the returned `options.publicKey` to `navigator.credentials.get()` and redeem at /api/auth/passkeys/login/finish.",
+                vec![],
+                vec![("200", "challenge_id + request options")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/login/finish",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Finish passkey login",
+                "Verify the authenticator's assertion and receive the same access + refresh tokens (and HttpOnly cookies) as POST /api/auth/login.",
+                vec![],
+                ref_body(
+                    "LoginFinishRequest",
+                    json!({ "challenge_id": "…from login/start…", "credential": { "id": "…", "rawId": "…", "response": {}, "type": "public-key" } }),
+                ),
+                vec![("200", "Auth tokens"), ("401", "Invalid credentials")],
                 false,
             ),
         )],

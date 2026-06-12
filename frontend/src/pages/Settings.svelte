@@ -1,14 +1,15 @@
 <script>
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { getMe, updateMe, changePassword, changeEmail, resendVerification, totpSetup, totpEnable, totpDisable, listApiTokens, createApiToken, revokeApiToken, uploadUserAvatar, getUserAvatarUrl, selfDeactivate, selfPurge, logout } from '../lib/api.js';
+  import { getMe, updateMe, changePassword, changeEmail, resendVerification, totpSetup, totpEnable, totpDisable, listPasskeys, passkeyRegisterStart, passkeyRegisterFinish, deletePasskey, listApiTokens, createApiToken, revokeApiToken, uploadUserAvatar, getUserAvatarUrl, selfDeactivate, selfPurge, logout } from '../lib/api.js';
+  import { isPasskeySupported, createPasskey } from '../lib/webauthn.js';
   import { refreshUser, isAuthenticated, authInitialized } from '../lib/stores.js';
   import { TOKEN_SCOPES } from '../lib/permissions.js';
   import { copyToClipboard } from '../lib/clipboard.js';
   import { validateEmail } from '../lib/validate.ts';
   import { navigate } from '../lib/router/index.js';
   import { renderSVG } from 'uqr';
-  import { Key, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle, ShieldCheck, ShieldOff, MailCheck, MailWarning, Pencil } from 'lucide-svelte';
+  import { Key, KeyRound, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle, ShieldCheck, ShieldOff, MailCheck, MailWarning, Pencil } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
 
   let profile = null;
@@ -62,7 +63,8 @@
       editPhone = profile.phone || '';
       editOrganization = profile.organization || '';
     } catch {}
-    await loadTokens();
+    passkeySupported = isPasskeySupported();
+    await Promise.all([loadTokens(), loadPasskeys()]);
   });
 
   async function handleAvatarUpload(e) {
@@ -276,6 +278,73 @@
   async function copyRecoveryCodes() {
     codesCopied = await copyToClipboard(recoveryCodes.join('\n'));
     if (codesCopied) setTimeout(() => codesCopied = false, 2000);
+  }
+
+  // ── Passkeys ─────────────────────────────────────────────────────────────────
+
+  let passkeys = [];
+  let passkeysLoading = false;
+  let passkeySupported = false;
+  // null | 'add' | 'remove'
+  let passkeyModal = null;
+  let passkeyName = '';
+  let passkeyError = '';
+  let passkeyBusy = false;
+  let removePasskeyId = null;
+  let removePasskeyPassword = '';
+
+  async function loadPasskeys() {
+    passkeysLoading = true;
+    try {
+      passkeys = await listPasskeys();
+    } catch {}
+    passkeysLoading = false;
+  }
+
+  function openPasskeyAdd() {
+    passkeyName = '';
+    passkeyError = '';
+    passkeyModal = 'add';
+  }
+
+  async function confirmPasskeyAdd() {
+    passkeyError = '';
+    passkeyBusy = true;
+    try {
+      const start = await passkeyRegisterStart();
+      const credential = await createPasskey(start.options.publicKey);
+      await passkeyRegisterFinish(start.challenge_id, passkeyName.trim() || null, credential);
+      passkeyModal = null;
+      await loadPasskeys();
+    } catch (e) {
+      // Dismissing the browser's passkey prompt is not an error.
+      if (e?.name !== 'NotAllowedError' && e?.name !== 'AbortError') {
+        passkeyError = e.message || String(e);
+      }
+    } finally {
+      passkeyBusy = false;
+    }
+  }
+
+  function openPasskeyRemove(id) {
+    removePasskeyId = id;
+    removePasskeyPassword = '';
+    passkeyError = '';
+    passkeyModal = 'remove';
+  }
+
+  async function confirmPasskeyRemove() {
+    passkeyError = '';
+    passkeyBusy = true;
+    try {
+      await deletePasskey(removePasskeyId, removePasskeyPassword);
+      passkeyModal = null;
+      await loadPasskeys();
+    } catch (e) {
+      passkeyError = e.message;
+    } finally {
+      passkeyBusy = false;
+    }
   }
 
   function toggleScope(scope) {
@@ -529,6 +598,48 @@
       </div>
     {:else}
       <p class="hint">{$t('system.loading')}</p>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h2><KeyRound size={18} /> {$t('pages.settings.passkeysHeading')}</h2>
+    <p class="hint">{$t('pages.settings.passkeysHint')}</p>
+    {#if passkeysLoading}
+      <p class="hint">{$t('system.loading')}</p>
+    {:else if passkeys.length === 0}
+      <p class="hint">{$t('pages.settings.passkeysNone')}</p>
+    {:else}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>{$t('pages.settings.name')}</th>
+            <th>{$t('pages.settings.passkeyCreated')}</th>
+            <th>{$t('pages.settings.lastUsed')}</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each passkeys as pk}
+            <tr>
+              <td>{pk.name}</td>
+              <td>{new Date(pk.created_at).toLocaleDateString()}</td>
+              <td>{pk.last_used_at ? new Date(pk.last_used_at).toLocaleDateString() : $t('pages.settings.never')}</td>
+              <td>
+                <button class="btn btn-sm btn-danger" on:click={() => openPasskeyRemove(pk.id)} title={$t('pages.settings.passkeyRemove')}>
+                  <Trash2 size={14} />
+                </button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+    {#if passkeySupported}
+      <button class="btn btn-sm passkey-add-btn" on:click={openPasskeyAdd}>
+        <Plus size={14} /> {$t('pages.settings.passkeyAdd')}
+      </button>
+    {:else}
+      <p class="hint">{$t('pages.settings.passkeyUnsupported')}</p>
     {/if}
   </div>
 
@@ -848,6 +959,58 @@
         </button>
         <button class="btn btn-sm btn-ghost" on:click={() => totpModal = null}>{$t('pages.settings.recoveryCodesDone')}</button>
       </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Passkey add modal: name, then the browser's creation ceremony -->
+{#if passkeyModal === 'add'}
+  <div class="modal-backdrop" on:click={() => passkeyModal = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (passkeyModal = null)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.passkeyAddTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3 class="modal-title-plain"><KeyRound size={18} /> {$t('pages.settings.passkeyAddTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.passkeyAddBody')}</p>
+      {#if passkeyError}<p class="error">{passkeyError}</p>{/if}
+      <form on:submit|preventDefault={confirmPasskeyAdd}>
+        <div class="form-group">
+          <label for="settings-passkey-name">{$t('pages.settings.name')}</label>
+          <input id="settings-passkey-name" bind:value={passkeyName} maxlength="100" placeholder={$t('pages.settings.passkeyNamePlaceholder')} />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => passkeyModal = null}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm" type="submit" disabled={passkeyBusy}>
+            {#if passkeyBusy}<Loader2 size={14} class="animate-spin" /> {$t('pages.settings.passkeyCreating')}{:else}<KeyRound size={14} /> {$t('pages.settings.passkeyCreate')}{/if}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Passkey remove modal: password confirm -->
+{#if passkeyModal === 'remove'}
+  <div class="modal-backdrop" on:click={() => passkeyModal = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (passkeyModal = null)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.passkeyRemoveTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3><AlertTriangle size={18} /> {$t('pages.settings.passkeyRemoveTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.passkeyRemoveBody')}</p>
+      {#if passkeyError}<p class="error">{passkeyError}</p>{/if}
+      <form on:submit|preventDefault={confirmPasskeyRemove}>
+        <div class="form-group">
+          <label for="settings-passkey-remove-password">{$t('pages.settings.confirmWithPassword')}</label>
+          <input type="text" name="username" autocomplete="username" value={profile?.username ?? ''} hidden />
+          <input id="settings-passkey-remove-password" type="password" bind:value={removePasskeyPassword} autocomplete="current-password" required placeholder={$t('pages.settings.currentPasswordPlaceholder')} />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => passkeyModal = null}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm btn-danger" type="submit" disabled={passkeyBusy || !removePasskeyPassword}>
+            {#if passkeyBusy}<Loader2 size={14} class="animate-spin" />{/if}
+            {$t('pages.settings.passkeyRemove')}
+          </button>
+        </div>
+      </form>
     </div>
   </div>
 {/if}
@@ -1176,6 +1339,7 @@
     color: var(--ink-500);
   }
   .twofa-status.on { color: #2d7d46; }
+  .passkey-add-btn { margin-top: 0.75rem; }
   .totp-qr {
     display: grid;
     place-items: center;

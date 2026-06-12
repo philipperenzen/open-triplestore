@@ -22,6 +22,7 @@ pub mod oauth;
 pub mod oauth_handlers;
 pub mod oidc_rs;
 pub mod org_graph;
+pub mod passkey;
 pub mod password;
 pub mod saml;
 pub mod secret;

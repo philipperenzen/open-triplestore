@@ -297,6 +297,27 @@ impl EmailToken {
     }
 }
 
+// ─── WebAuthn passkeys ───────────────────────────────────────────────────────
+
+/// A registered WebAuthn/FIDO2 passkey credential.
+/// `public_key` is the serialized `webauthn_rs::prelude::Passkey` JSON.
+#[derive(Debug, Clone)]
+pub struct WebauthnCredential {
+    pub id: String,
+    pub user_id: String,
+    /// Credential ID, base64url (no padding) — unique across all users.
+    pub credential_id: String,
+    pub public_key: String,
+    /// Authenticator signature counter at last use (clone detection).
+    pub counter: i64,
+    /// JSON array of authenticator transports reported at registration.
+    pub transports: Option<String>,
+    /// User-chosen label ("MacBook Touch ID", "YubiKey 5"…).
+    pub name: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
 // ─── API Token ───────────────────────────────────────────────────────────────
 
 /// A long-lived API token for programmatic access.

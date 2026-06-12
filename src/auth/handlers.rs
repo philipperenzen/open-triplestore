@@ -22,7 +22,7 @@ use super::{dataset_graph, secret, totp, user_graph, validate};
 use crate::server::{AppState, CookieConfig};
 
 /// Lifetime of email-verification and change-email links.
-const EMAIL_TOKEN_TTL_HOURS: i64 = 24;
+pub(crate) const EMAIL_TOKEN_TTL_HOURS: i64 = 24;
 /// Lifetime of password-reset links.
 const RESET_TOKEN_TTL_MINUTES: i64 = 60;
 /// Minimum seconds between two emails of the same kind to one account.
@@ -35,7 +35,7 @@ const TOTP_ISSUER: &str = "Open Triplestore";
 /// True when password logins require a verified email address
 /// (`OTS_REQUIRE_VERIFIED_EMAIL=1`). Off by default so existing deployments
 /// and local development keep working without an SMTP relay.
-fn require_verified_email() -> bool {
+pub(crate) fn require_verified_email() -> bool {
     std::env::var("OTS_REQUIRE_VERIFIED_EMAIL")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
@@ -449,7 +449,7 @@ pub struct UpdateServiceRequest {
 
 /// Issue an access + refresh token pair, storing the refresh token hash in DB.
 /// Build `Set-Cookie` headers for access and refresh tokens (M-2: HttpOnly cookies).
-fn auth_cookie_headers(
+pub(crate) fn auth_cookie_headers(
     access_token: &str,
     refresh_token: &str,
     access_expiry_secs: u64,
@@ -497,7 +497,7 @@ fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
 /// brand-new family id; a rotation passes the family of the token being rotated,
 /// so every token from one login shares a family and reuse-detection can be scoped
 /// to that single session.
-fn issue_tokens(
+pub(crate) fn issue_tokens(
     jwt_config: &JwtConfig,
     auth_db: &AuthDb,
     user: &User,
@@ -711,7 +711,7 @@ pub async fn register(
 /// Mint a single-use email action token: random 256-bit value, stored hashed.
 /// Outstanding tokens of the same kind are voided first (newest link wins).
 /// Returns the raw token for inclusion in the email link.
-fn issue_email_token(
+pub(crate) fn issue_email_token(
     db: &AuthDb,
     user_id: &str,
     kind: &str,
@@ -739,7 +739,7 @@ fn issue_email_token(
 
 /// Per-account resend throttle: true when a still-valid token of `kind` was
 /// minted within the last [`EMAIL_RESEND_THROTTLE_SECS`].
-fn email_recently_sent(db: &AuthDb, user_id: &str, kind: &str) -> bool {
+pub(crate) fn email_recently_sent(db: &AuthDb, user_id: &str, kind: &str) -> bool {
     db.latest_email_token_created_at(user_id, kind)
         .ok()
         .flatten()

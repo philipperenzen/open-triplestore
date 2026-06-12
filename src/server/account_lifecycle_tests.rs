@@ -39,6 +39,7 @@ mod tests {
             mailer: Arc::new(crate::email::Mailer::log_only("http://localhost:7878")),
             base_url: Arc::new("http://localhost:7878".to_string()),
             oauth_sessions: crate::auth::oauth::new_session_store(),
+            passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
             secure_cookies: false,

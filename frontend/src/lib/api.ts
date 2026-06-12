@@ -220,6 +220,19 @@ export const totpEnable = (code) => request('POST', '/api/auth/2fa/enable', { co
 export const totpDisable = (password, code) =>
   request('POST', '/api/auth/2fa/disable', { password, code });
 
+// WebAuthn passkeys
+export const listPasskeys = () => request('GET', '/api/auth/passkeys');
+export const passkeyRegisterStart = () =>
+  request('POST', '/api/auth/passkeys/register/start');
+export const passkeyRegisterFinish = (challenge_id, name, credential) =>
+  request('POST', '/api/auth/passkeys/register/finish', { challenge_id, name, credential });
+export const deletePasskey = (passkeyId, password) =>
+  request('DELETE', `/api/auth/passkeys/${passkeyId}`, { password });
+export const passkeyLoginStart = () =>
+  request('POST', '/api/auth/passkeys/login/start');
+export const passkeyLoginFinish = (challenge_id, credential) =>
+  request('POST', '/api/auth/passkeys/login/finish', { challenge_id, credential });
+
 // API Tokens
 export const listApiTokens = () => request('GET', '/api/auth/tokens');
 export const createApiToken = (data) => request('POST', '/api/auth/tokens', data);
