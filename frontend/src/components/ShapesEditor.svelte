@@ -22,6 +22,8 @@
 
   let editorRef;
   let shapesContent = '';
+  /** Snapshot of the last loaded/saved Turtle — powers the dirty indicator. */
+  let savedContent = '';
   let loading = false;
   let saving = false;
   let inferring = false;
@@ -93,9 +95,12 @@ PREFIX ex: <http://example.org/>
     } catch (_) {
       shapesContent = EMPTY_TEMPLATE;
     } finally {
+      savedContent = shapesContent;
       loading = false;
     }
   }
+
+  $: dirty = !loading && shapesContent !== savedContent;
 
   async function saveShapes() {
     if (!targetKey) return;
@@ -105,6 +110,7 @@ PREFIX ex: <http://example.org/>
     try {
       if (shapeGraphId) await putShapeGraphTurtle(shapeGraphId, shapesContent);
       else await putShapes(datasetId, shapesContent);
+      savedContent = shapesContent;
       saveSuccess = true;
       setTimeout(() => (saveSuccess = false), 3000);
     } catch (e) {
@@ -151,7 +157,9 @@ PREFIX ex: <http://example.org/>
       </div>
     </div>
     <div class="toolbar-actions">
-      {#if saveSuccess}
+      {#if dirty}
+        <span class="dirty-chip" title={$t('components.shapeBuilder.unsavedChanges')}><span class="dirty-dot"></span> {$t('components.shapeBuilder.unsavedChanges')}</span>
+      {:else if saveSuccess}
         <span class="save-success"><Check size={14} /> {$t('pages.shaclShapes.saved')}</span>
       {/if}
       {#if inferResult !== null}
@@ -201,8 +209,9 @@ PREFIX ex: <http://example.org/>
           {#if inferring}<Loader2 size={14} class="spin" /> {$t('pages.shaclShapes.inferring')}{:else}<Zap size={14} /> {$t('pages.shaclShapes.infer')}{/if}
         </button>
       {/if}
-      <button class="btn btn-sm" on:click={saveShapes} disabled={saving || !targetKey}>
+      <button class="btn btn-sm save-btn" class:has-dirty={dirty} on:click={saveShapes} disabled={saving || !targetKey} title={dirty ? $t('components.shapeBuilder.unsavedChanges') : undefined}>
         {#if saving}<Loader2 size={14} class="spin" /> {$t('pages.shaclShapes.saving')}{:else}<Save size={14} /> {$t('system.save')}{/if}
+        {#if dirty}<span class="dirty-dot on-btn"></span>{/if}
       </button>
     </div>
   </div>
@@ -267,10 +276,15 @@ PREFIX ex: <http://example.org/>
   .error { color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.82rem; margin: 0; }
   .btn-ghost.active { background: #ecfeff; color: #0e7490; border-color: #7ED6D0; }
 
-  .view-toggle { display: inline-flex; border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden; background: #fff; }
-  .vt { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; padding: 0.3rem 0.6rem; border: none; background: transparent; color: #64748b; cursor: pointer; }
-  .vt:hover { background: #f1f5f9; }
-  .vt.active { background: #ecfeff; color: #0e7490; font-weight: 600; }
+  .view-toggle { display: inline-flex; gap: 2px; border: 1px solid var(--line-soft); border-radius: 9px; padding: 2px; background: var(--bg-soft); }
+  .vt { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; font-weight: 600; padding: 0.3rem 0.7rem; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #64748b; cursor: pointer; transition: background 0.12s, color 0.12s; }
+  .vt:hover { background: rgba(255,255,255,0.7); color: #334155; }
+  .vt.active { background: #fff; color: #0e7490; font-weight: 700; border-color: var(--brand-300, #7ED6D0); box-shadow: var(--shadow-xs); }
+
+  .dirty-chip { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.74rem; font-weight: 600; color: #92400e; background: #fef3c7; border: 1px solid #fde68a; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+  .dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: #d97706; flex-shrink: 0; }
+  .dirty-dot.on-btn { background: #fff; box-shadow: 0 0 0 2px rgba(217,119,6,0.85); margin-left: 0.1rem; }
+  .save-btn { position: relative; }
 
   /* Palette */
   .palette-anchor { position: relative; }
@@ -313,8 +327,12 @@ PREFIX ex: <http://example.org/>
   :global(:is([data-theme="dark"], .dark)) .error { color: #fca5a5; background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); }
   :global(:is([data-theme="dark"], .dark)) .btn-ghost.active { background: var(--brand-100); color: var(--brand-700); border-color: var(--brand-200); }
   :global(:is([data-theme="dark"], .dark)) .view-toggle { background: var(--bg-strong); }
-  :global(:is([data-theme="dark"], .dark)) .vt:hover { background: rgba(255,255,255,0.06); }
-  :global(:is([data-theme="dark"], .dark)) .vt.active { background: var(--brand-100); color: var(--brand-700); }
+  :global(:is([data-theme="dark"], .dark)) .vt { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .vt:hover { background: rgba(255,255,255,0.06); color: var(--ink-800); }
+  :global(:is([data-theme="dark"], .dark)) .vt.active { background: var(--brand-100); color: var(--brand-700); border-color: var(--brand-300); box-shadow: none; }
+  :global(:is([data-theme="dark"], .dark)) .dirty-chip { background: rgba(245,158,11,0.14); border-color: rgba(245,158,11,0.35); color: #fcd34d; }
+  :global(:is([data-theme="dark"], .dark)) .dirty-dot { background: #fbbf24; }
+  :global(:is([data-theme="dark"], .dark)) .dirty-dot.on-btn { background: #fff; box-shadow: 0 0 0 2px rgba(251,191,36,0.85); }
   :global(:is([data-theme="dark"], .dark)) .palette { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .input-icon { background: var(--bg-soft); }
   :global(:is([data-theme="dark"], .dark)) .input-icon input { color: var(--ink-900); }

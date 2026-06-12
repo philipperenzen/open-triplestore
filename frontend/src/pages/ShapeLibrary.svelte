@@ -70,6 +70,21 @@
     return true;
   });
 
+  // Standards are seeded with 'standard'/'builtin' tags (their record source
+  // is 'imported'); tags are the display signal that separates them from the
+  // user's own shape graphs.
+  function isStandard(s) {
+    return (s.tags || []).some((tag) => tag === 'standard' || tag === 'builtin');
+  }
+  // Relevance-first default: the user's own/imported shape graphs (newest
+  // first), then the bundled standards alphabetically.
+  $: ownSets = filtered.filter((s) => !isStandard(s)).sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  $: standardSets = filtered.filter(isStandard).sort((a, b) => a.name.localeCompare(b.name));
+  $: groups = [
+    { key: 'own', label: $t('pages.shapeLibrary.groupYours'), items: ownSets },
+    { key: 'std', label: $t('pages.shapeLibrary.groupStandards'), items: standardSets },
+  ].filter((g) => g.items.length);
+
   function countBy(arr, key) {
     const m = new Map();
     for (const x of arr) {
@@ -239,8 +254,12 @@
           {/if}
         </div>
       {:else}
+        {#each groups as g (g.key)}
+        {#if groups.length > 1}
+          <h3 class="group-label">{g.label} <span class="group-count">{g.items.length}</span></h3>
+        {/if}
         <ul class="set-grid">
-          {#each filtered as set (set.id)}
+          {#each g.items as set (set.id)}
             <li class="set-card">
               <Link to={`/shacl/shapes/${set.id}`} class="set-card-main">
                 <div class="set-head">
@@ -253,7 +272,9 @@
                   {:else}
                     <span class="chip chip-vis"><Lock size={10} /> {$t('pages.shapeLibrary.visibilityPrivate')}</span>
                   {/if}
-                  {#if set.source !== 'manual'}
+                  {#if isStandard(set)}
+                    <span class="chip chip-source chip-source-standard" title={$t('pages.shapeLibrary.sourceStandardTitle')}>{$t('pages.shapeLibrary.sourceStandard')}</span>
+                  {:else if set.source !== 'manual'}
                     <span class="chip chip-source chip-source-{set.source}"
                       title={set.source === 'imported' ? $t('pages.shapeLibrary.sourceImportedTitle') : undefined}>
                       {#if set.source === 'ai'}<Sparkles size={10} />{/if}
@@ -282,6 +303,7 @@
             </li>
           {/each}
         </ul>
+        {/each}
       {/if}
     </section>
   </div>
@@ -367,6 +389,9 @@
   .placeholder h3 { margin: 0; }
   .placeholder p { margin: 0; max-width: 32rem; font-size: 0.9rem; color: #94a3b8; }
 
+  .group-label { display: flex; align-items: baseline; gap: 0.4rem; margin: 0 0 0.55rem; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; }
+  .group-label + .set-grid { margin-bottom: 1.1rem; }
+  .group-count { font-size: 0.7rem; font-weight: 600; color: #94a3b8; }
   .set-grid { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.85rem; }
   .set-card { border: 1px solid var(--line-soft); border-radius: 12px; background: #fff; display: flex; flex-direction: column; transition: border-color 0.12s, box-shadow 0.12s; }
   .set-card:hover { border-color: #7ED6D0; box-shadow: var(--shadow-sm); }
@@ -421,6 +446,8 @@
   :global(:is([data-theme="dark"], .dark)) .icon-btn:hover { background: rgba(255,255,255,0.06); color: var(--ink-800); }
   :global(:is([data-theme="dark"], .dark)) .icon-danger:hover { background: rgba(239,68,68,0.14); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .facet-group h4 { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .group-label { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .group-count { color: var(--ink-400); }
   :global(:is([data-theme="dark"], .dark)) .facet { color: var(--ink-800); }
   :global(:is([data-theme="dark"], .dark)) .facet:hover { background: rgba(255,255,255,0.06); }
   :global(:is([data-theme="dark"], .dark)) .facet.active { background: var(--brand-100); color: var(--brand-700); border-color: var(--brand-300); }
