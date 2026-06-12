@@ -196,6 +196,20 @@
     const m = String(iri).match(/[^#/]+$/);
     return m ? m[0] : iri;
   }
+
+  /**
+   * Classify a binding target IRI for display. Dataset targets are the
+   * canonical `{base}/dataset/{id}` IRIs; graph targets nest under
+   * `…/dataset/{id}/graphs/{tail}` — both link to the dataset page.
+   */
+  function parseTarget(iri) {
+    const s = String(iri);
+    const g = s.match(/\/dataset\/([^/]+)\/graphs\/(.+)$/);
+    if (g) return { datasetId: g[1], label: `${g[1]} / ${g[2]}` };
+    const d = s.match(/\/dataset\/([^/]+)$/);
+    if (d) return { datasetId: d[1], label: d[1] };
+    return { datasetId: null, label: shortIRI(s) };
+  }
 </script>
 
 <div class="editor-page">
@@ -230,14 +244,16 @@
             <h2>{set.name}</h2>
             {#if set.description}<p class="meta-desc">{set.description}</p>{/if}
             <div class="meta-chips">
-              {#if set.status}<span class="chip status-{set.status}">{set.status}</span>{/if}
-              {#if set.visibility === 'public'}<span class="chip"><Globe size={10} /> {$i18nT('pages.shapeGraphEditor.chipPublic')}</span>{:else if set.visibility === 'members'}<span class="chip"><Users size={10} /> {$i18nT('pages.shapeGraphEditor.chipMembers')}</span>{:else}<span class="chip"><Lock size={10} /> {$i18nT('pages.shapeGraphEditor.chipPrivate')}</span>{/if}
+              {#if set.status}<span class="chip chip-cap status-{set.status}">{set.status}</span>{/if}
+              {#if set.visibility === 'public'}<span class="chip chip-cap"><Globe size={10} /> {$i18nT('pages.shapeGraphEditor.chipPublic')}</span>{:else if set.visibility === 'members'}<span class="chip chip-cap"><Users size={10} /> {$i18nT('pages.shapeGraphEditor.chipMembers')}</span>{:else}<span class="chip chip-cap"><Lock size={10} /> {$i18nT('pages.shapeGraphEditor.chipPrivate')}</span>{/if}
               {#if set.source && set.source !== 'manual'}
-                <span class="chip chip-source-{set.source}">{#if set.source === 'ai'}<Sparkles size={10} />{/if} {set.source}</span>
+                <span class="chip chip-cap chip-source-{set.source}">{#if set.source === 'ai'}<Sparkles size={10} />{/if} {set.source}</span>
               {/if}
-              <span class="chip">v{set.version}</span>
-              <span class="chip"><strong>{set.shape_count}</strong> {set.shape_count === 1 ? $i18nT('pages.shapeGraphEditor.shapeSingular') : $i18nT('pages.shapeGraphEditor.shapePlural')}</span>
-              <span class="chip dim">{$i18nT('pages.shapeGraphEditor.updatedPrefix', { values: { time: relativeTime(set.updated_at) } })}</span>
+              <span class="meta-quiet">
+                v{set.version}
+                · <strong>{set.shape_count}</strong> {set.shape_count === 1 ? $i18nT('pages.shapeGraphEditor.shapeSingular') : $i18nT('pages.shapeGraphEditor.shapePlural')}
+                · {$i18nT('pages.shapeGraphEditor.updatedPrefix', { values: { time: relativeTime(set.updated_at) } })}
+              </span>
             </div>
             {#if (set.target_classes || []).length}
               <div class="targets">
@@ -246,9 +262,20 @@
             {/if}
             {#if impact.length}
               <div class="impact">
-                <Link2 size={11} /> <span class="impact-label">{impact.length === 1 ? $i18nT('pages.shapeGraphEditor.appliedToTarget', { values: { count: impact.length } }) : $i18nT('pages.shapeGraphEditor.appliedToTargets', { values: { count: impact.length } })}</span>
-                {#each impact.slice(0, 5) as t}<span class="chip chip-applied" title={t}>{shortIRI(t)}</span>{/each}
-                {#if impact.length > 5}<span class="chip">+{impact.length - 5}</span>{/if}
+                <span class="impact-label"><Link2 size={11} /> {impact.length === 1 ? $i18nT('pages.shapeGraphEditor.appliedToTarget', { values: { count: impact.length } }) : $i18nT('pages.shapeGraphEditor.appliedToTargets', { values: { count: impact.length } })}</span>
+                <ul class="impact-list">
+                  {#each impact.slice(0, 12) as t}
+                    {@const tt = parseTarget(t)}
+                    <li>
+                      {#if tt.datasetId}
+                        <Link to={`/datasets/${tt.datasetId}`} class="impact-link" title={t}><Database size={10} /> {tt.label}</Link>
+                      {:else}
+                        <span class="chip chip-applied" title={t}>{tt.label}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                  {#if impact.length > 12}<li><span class="chip">+{impact.length - 12}</span></li>{/if}
+                </ul>
               </div>
             {/if}
           </div>
@@ -387,15 +414,21 @@
   .meta-main { min-width: 0; }
   .meta-main h2 { margin: 0 0 0.2rem; font-size: 1.15rem; overflow-wrap: anywhere; }
   .meta-desc { margin: 0 0 0.5rem; color: #64748b; font-size: 0.85rem; }
-  .meta-chips, .targets { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+  .meta-chips, .targets { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
   .targets { margin-top: 0.45rem; }
-  .impact { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.76rem; color: #475569; }
-  .impact-label { font-weight: 600; }
-  .chip-applied { background: #f0fdf4; color: #15803d; font-family: 'IBM Plex Mono', monospace; font-weight: 500; text-transform: none; }
+  .meta-quiet { font-size: 0.74rem; color: #94a3b8; margin-left: 0.35rem; white-space: nowrap; }
+  .meta-quiet strong { color: #475569; font-weight: 700; }
+  .impact { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; font-size: 0.76rem; color: #475569; }
+  .impact-label { display: inline-flex; align-items: center; gap: 0.3rem; font-weight: 600; }
+  .impact-list { list-style: none; display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; margin: 0; padding: 0; }
+  :global(.editor-page .impact-link) { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; text-decoration: none; }
+  :global(.editor-page .impact-link:hover) { border-color: #15803d; text-decoration: underline; }
+  .chip-applied { background: #f0fdf4; color: #15803d; font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
   .add-hint { margin: 0 0 0.6rem; font-size: 0.82rem; color: #64748b; }
-  .chip { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.7rem; padding: 2px 7px; border-radius: 999px; background: #f1f5f9; color: #475569; font-weight: 600; text-transform: capitalize; }
-  .chip.dim { background: transparent; color: #94a3b8; }
-  .chip strong { color: #1e293b; }
+  /* No text-transform on the base chip — identifiers (dataset ids, graph
+     names) must render verbatim; only taxonomy chips get capitalised. */
+  .chip { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.7rem; padding: 2px 7px; border-radius: 999px; background: #f1f5f9; color: #475569; font-weight: 600; }
+  .chip-cap { text-transform: capitalize; }
   .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; text-transform: none; }
   .chip-source-derived { background: #fef3c7; color: #92400e; }
   .chip-source-ai { background: #fce7f3; color: #9d174d; }
@@ -441,10 +474,13 @@
   :global(:is([data-theme="dark"], .dark)) .error { color: #fca5a5; background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); }
   :global(:is([data-theme="dark"], .dark) .editor-page .back) { color: var(--brand-700); }
   :global(:is([data-theme="dark"], .dark)) .chip { background: rgba(255,255,255,0.06); color: var(--ink-400); }
-  :global(:is([data-theme="dark"], .dark)) .chip strong { color: var(--ink-900); }
   :global(:is([data-theme="dark"], .dark)) .chip-target { background: var(--brand-100); color: var(--brand-700); }
   :global(:is([data-theme="dark"], .dark)) .impact { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .meta-quiet { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .meta-quiet strong { color: var(--ink-800); }
   :global(:is([data-theme="dark"], .dark)) .chip-applied { background: rgba(34,197,94,0.18); color: #86efac; }
+  :global(:is([data-theme="dark"], .dark) .editor-page .impact-link) { background: rgba(34,197,94,0.18); border-color: rgba(34,197,94,0.4); color: #86efac; }
+  :global(:is([data-theme="dark"], .dark) .editor-page .impact-link:hover) { border-color: #86efac; }
   :global(:is([data-theme="dark"], .dark)) .chip-source-derived { background: rgba(245,158,11,0.18); color: #fcd34d; }
   :global(:is([data-theme="dark"], .dark)) .chip-source-ai { background: rgba(236,72,153,0.2); color: #f9a8d4; }
   :global(:is([data-theme="dark"], .dark)) .chip-source-imported { background: rgba(59,130,246,0.2); color: #93c5fd; }

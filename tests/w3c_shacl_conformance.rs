@@ -34,62 +34,13 @@ const SUITE_ROOT: &str = "tests/fixtures/w3c-shacl/core";
 /// Removing an entry requires the test to actually pass (the ratchet asserts
 /// both directions).
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    // Empirical baseline: 46 pass / 52 known-fail / 15 aux skips. Dominant gap
-    // categories are explained in docs/conformance/shacl.md; the root cause for
-    // most is the engine's string-typed focus-node model (term kind/datatype
-    // lost during target resolution).
-    ("complex/personexample.ttl", "result metadata semantics (sh:message/sh:severity propagation, deactivated edge case)"),
-    ("complex/shacl-shacl.ttl", "shape-based constraint detail"),
-    ("misc/deactivated-002.ttl", "result metadata semantics (sh:message/sh:severity propagation, deactivated edge case)"),
-    ("misc/message-001.ttl", "result metadata semantics (sh:message/sh:severity propagation, deactivated edge case)"),
-    ("misc/severity-001.ttl", "result metadata semantics (sh:message/sh:severity propagation, deactivated edge case)"),
-    ("node/class-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/class-002.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/class-003.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/closed-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/closed-002.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/datatype-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/datatype-002.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/languageIn-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/maxExclusive-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/maxInclusive-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/minExclusive-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/minInclusive-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/minInclusive-002.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/minInclusive-003.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/minLength-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("node/node-001.ttl", "node-level value constraints on string focus nodes (term kind/datatype lost in target resolution)"),
-    ("path/path-alternative-001.ttl", "path value-node detail"),
-    ("path/path-complex-001.ttl", "path value-node detail"),
-    ("path/path-complex-002.ttl", "path value-node detail"),
-    ("path/path-oneOrMore-001.ttl", "path value-node detail"),
-    ("path/path-sequence-001.ttl", "sequence-path edge cases"),
-    ("path/path-sequence-002.ttl", "sequence-path edge cases"),
-    ("path/path-sequence-duplicate-001.ttl", "result cardinality: one result per offending value occurrence vs distinct value nodes"),
-    ("path/path-strange-001.ttl", "sequence-path edge cases"),
-    ("path/path-strange-002.ttl", "sequence-path edge cases"),
-    ("path/path-zeroOrMore-001.ttl", "path value-node detail"),
-    ("path/path-zeroOrOne-001.ttl", "path value-node detail"),
-    ("property/class-001.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/datatype-003.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/datatype-ill-formed.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/equals-001.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/lessThan-002.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/maxExclusive-001.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/maxInclusive-001.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/minExclusive-002.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/node-001.ttl", "shape-based constraint detail"),
-    ("property/not-001.ttl", "shape-based constraint detail"),
-    ("property/or-001.ttl", "shape-based constraint detail"),
-    ("property/or-datatypes-001.ttl", "typed-literal comparison / result cardinality detail"),
-    ("property/property-001.ttl", "shape-based constraint detail"),
-    ("property/qualifiedMinCountDisjoint-001.ttl", "qualified value shape: sibling-disjointness unimplemented"),
-    ("property/qualifiedValueShape-001.ttl", "qualified value shape: sibling-disjointness unimplemented"),
-    ("property/qualifiedValueShapesDisjoint-001.ttl", "qualified value shape: sibling-disjointness unimplemented"),
-    ("property/uniqueLang-001.ttl", "typed-literal comparison / result cardinality detail"),
-    ("targets/targetClassImplicit-001.ttl", "target edge cases (implicit class target via subclass, targetObjectsOf detail)"),
-    ("targets/targetObjectsOf-001.ttl", "target edge cases (implicit class target via subclass, targetObjectsOf detail)"),
-    ("validation-reports/shared.ttl", "shape-based constraint detail"),
+    // Empirical baseline: 97 pass / 1 known-fail / 15 aux skips (was 46/52/15
+    // before the typed-term engine refactor — focus and value nodes are now
+    // oxigraph Terms end-to-end, so node-level value constraints, typed-literal
+    // comparison, ill-formed-literal detection, sh:closed property enumeration,
+    // own-path property shapes, nested sh:property, and qualified-shape sibling
+    // disjointness all evaluate per spec). See docs/conformance/shacl.md.
+    ("property/uniqueLang-002.ttl", "oxigraph's storage canonicalises \"1\"^^xsd:boolean to \"true\" (native value encoding), so the spec's literal-\"true\"-only activation of sh:uniqueLang is indistinguishable post-load"),
 ];
 
 #[derive(Debug, PartialEq)]
