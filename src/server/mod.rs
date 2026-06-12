@@ -5,6 +5,8 @@ pub mod llm_sparql;
 pub mod openapi;
 pub mod routes;
 #[cfg(test)]
+mod account_lifecycle_tests;
+#[cfg(test)]
 mod security_regression_tests;
 #[cfg(test)]
 mod security_tests;
@@ -232,6 +234,9 @@ pub struct AppState {
     pub jwt_config: Arc<JwtConfig>,
     /// S3 object storage for assets.
     pub object_store: Arc<ObjectStore>,
+    /// Transactional email for account flows (verification, password reset).
+    /// Falls back to a log-only backend when SMTP is not configured.
+    pub mailer: Arc<crate::email::Mailer>,
     /// Base URL for minting linked data IRIs (no trailing slash).
     pub base_url: Arc<String>,
     /// In-memory PKCE session store for OAuth 2.0 / OIDC flows.
@@ -277,6 +282,7 @@ impl AppState {
             object_store: Arc::new(
                 ObjectStore::local(std::env::temp_dir().join("triplestore-test-objects")).unwrap(),
             ),
+            mailer: Arc::new(crate::email::Mailer::log_only("http://localhost")),
             base_url: Arc::new("http://localhost".to_string()),
             oauth_sessions: crate::auth::oauth::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
@@ -483,6 +489,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route("/api/auth/login", post(handlers::login))
         .route("/api/auth/refresh", post(handlers::refresh))
         .route("/api/auth/logout", post(handlers::logout))
+        // Account recovery + email confirmation: enumeration-safe by design,
+        // but still behind the brute-force limiter (token/code guessing).
+        .route("/api/auth/forgot-password", post(handlers::forgot_password))
+        .route("/api/auth/forgot-username", post(handlers::forgot_username))
+        .route("/api/auth/reset-password", post(handlers::reset_password))
+        .route("/api/auth/verify-email", post(handlers::verify_email))
+        // Second step of a 2FA login (code guessing → same limiter).
+        .route("/api/auth/2fa/verify", post(handlers::verify_2fa))
+        .route("/api/auth/features", get(handlers::auth_features))
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
         })
@@ -495,6 +510,14 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // (e.g. GET /api/auth/me) stay in the unthrottled protected group below.
     let auth_sensitive_routes = Router::new()
         .route("/api/auth/change-password", post(handlers::change_password))
+        .route("/api/auth/change-email", post(handlers::change_email))
+        .route(
+            "/api/auth/verify-email/resend",
+            post(handlers::resend_verification),
+        )
+        .route("/api/auth/2fa/setup", post(handlers::totp_setup))
+        .route("/api/auth/2fa/enable", post(handlers::totp_enable))
+        .route("/api/auth/2fa/disable", post(handlers::totp_disable))
         .route(
             "/api/auth/tokens",
             get(handlers::list_api_tokens).post(handlers::create_api_token),
@@ -1432,6 +1455,17 @@ pub async fn run(
         }
     }
 
+    // Transactional account email (verification, password reset). Logs-only
+    // until SMTP_HOST is configured; links default to the public base URL.
+    let mailer = Arc::new(crate::email::Mailer::from_env(base_url.trim_end_matches('/')));
+    if mailer.smtp_configured() {
+        tracing::info!("email: SMTP relay configured — account emails will be delivered");
+    } else {
+        tracing::info!(
+            "email: SMTP not configured (set SMTP_HOST) — account emails are written to the log"
+        );
+    }
+
     // Hold a flush handle for graceful shutdown — `store` is moved into AppState below.
     let shutdown_store = store.clone();
     let state = AppState {
@@ -1442,6 +1476,7 @@ pub async fn run(
         backup: backup.clone(),
         jwt_config: jwt_config.clone(),
         object_store,
+        mailer,
         base_url: Arc::new(base_url.trim_end_matches('/').to_string()),
         oauth_sessions: crate::auth::oauth::new_session_store(),
         auth_ext,

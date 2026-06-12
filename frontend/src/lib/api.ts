@@ -199,6 +199,27 @@ export const updateMe = (data) => request('PUT', '/api/auth/me', data);
 export const changePassword = (current_password, new_password) =>
   request('POST', '/api/auth/change-password', { current_password, new_password });
 
+// Account recovery, email verification & two-factor login
+export const getAuthFeatures = () => request('GET', '/api/auth/features');
+export const forgotPassword = (identifier) =>
+  request('POST', '/api/auth/forgot-password', { identifier });
+export const forgotUsername = (email) =>
+  request('POST', '/api/auth/forgot-username', { email });
+export const resetPassword = (token, new_password) =>
+  request('POST', '/api/auth/reset-password', { token, new_password });
+export const verifyEmail = (token) =>
+  request('POST', '/api/auth/verify-email', { token });
+export const resendVerification = () =>
+  request('POST', '/api/auth/verify-email/resend');
+export const changeEmail = (new_email, password) =>
+  request('POST', '/api/auth/change-email', { new_email, password });
+export const verify2fa = (mfa_token, code) =>
+  request('POST', '/api/auth/2fa/verify', { mfa_token, code });
+export const totpSetup = () => request('POST', '/api/auth/2fa/setup');
+export const totpEnable = (code) => request('POST', '/api/auth/2fa/enable', { code });
+export const totpDisable = (password, code) =>
+  request('POST', '/api/auth/2fa/disable', { password, code });
+
 // API Tokens
 export const listApiTokens = () => request('GET', '/api/auth/tokens');
 export const createApiToken = (data) => request('POST', '/api/auth/tokens', data);

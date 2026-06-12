@@ -21,6 +21,9 @@
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
   import Register from './pages/Register.svelte';
+  import ForgotPassword from './pages/ForgotPassword.svelte';
+  import ResetPassword from './pages/ResetPassword.svelte';
+  import VerifyEmail from './pages/VerifyEmail.svelte';
   import OAuthCallback from './pages/OAuthCallback.svelte';
   import Settings from './pages/Settings.svelte';
   import Datasets from './pages/Datasets.svelte';
@@ -549,6 +552,9 @@
         <Route path="/" component={Home} />
         <Route path="/login" component={Login} />
         <Route path="/register" component={Register} />
+        <Route path="/forgot-password" component={ForgotPassword} />
+        <Route path="/reset-password" component={ResetPassword} />
+        <Route path="/verify-email" component={VerifyEmail} />
         <Route path="/oauth/callback" component={OAuthCallback} />
         <Route path="/browse">
           <LazyPage loader={lazyTripleBrowser} />

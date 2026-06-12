@@ -25,4 +25,6 @@ pub mod org_graph;
 pub mod password;
 pub mod saml;
 pub mod secret;
+pub mod totp;
 pub mod user_graph;
+pub mod validate;

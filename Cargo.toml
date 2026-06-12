@@ -47,8 +47,9 @@ saml            = ["dep:samael", "samael/xmlsec"]
 test-utils      = []
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
-## Optional SMTP alerting via lettre
-alerting        = ["dep:lettre"]
+## Optional SMTP alerting (lettre itself is a core dependency — the auth
+## mailer uses it unconditionally — this flag only gates the alerting module).
+alerting        = []
 ## Asset metadata extractors — heavier per-kind probers, off by default.
 ## (Image dimensions + geo bbox/CRS are always on; they reuse existing deps.)
 asset-pdf         = ["dep:lopdf"]            # PDF page count
@@ -119,11 +120,14 @@ argon2 = "0.5"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+# TOTP two-factor codes (RFC 6238: HMAC-SHA1)
+hmac = "0.12"
+sha1 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 flate2 = "1"
 age = { version = "0.10", optional = true }
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"], optional = true }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 
 # S3 object storage
 aws-sdk-s3 = "1"

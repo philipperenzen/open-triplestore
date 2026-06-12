@@ -98,6 +98,17 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::handlers::ChangePasswordRequest,
             crate::auth::handlers::RefreshRequest,
             crate::auth::handlers::LogoutRequest,
+            crate::auth::handlers::ForgotPasswordRequest,
+            crate::auth::handlers::ForgotUsernameRequest,
+            crate::auth::handlers::ResetPasswordRequest,
+            crate::auth::handlers::VerifyEmailRequest,
+            crate::auth::handlers::ChangeEmailRequest,
+            crate::auth::handlers::TotpEnableRequest,
+            crate::auth::handlers::TotpDisableRequest,
+            crate::auth::handlers::MfaVerifyRequest,
+            crate::auth::handlers::TotpSetupResponse,
+            crate::auth::handlers::TotpEnableResponse,
+            crate::auth::handlers::MfaRequiredResponse,
             crate::auth::handlers::CreateApiTokenRequest,
             crate::auth::handlers::ApiTokenResponse,
             crate::auth::handlers::ApiTokenCreatedResponse,
@@ -2349,7 +2360,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Auth",
                 "Register",
-                "Register a new user. The first registered user becomes super_admin.",
+                "Register a new user (email, username and password are validated; a verification link is emailed). The first registered user becomes super_admin.",
                 vec![],
                 ref_body(
                     "RegisterRequest",
@@ -2368,7 +2379,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Auth",
                 "Login",
-                "Authenticate and receive access + refresh tokens (also set as HttpOnly cookies).",
+                "Authenticate and receive access + refresh tokens (also set as HttpOnly cookies). Accounts with two-factor enabled instead receive `{ mfa_required, mfa_token }` to redeem at /api/auth/2fa/verify.",
                 vec![],
                 ref_body(
                     "LoginRequest",
@@ -2433,7 +2444,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![],
                     ref_body(
                         "UpdateProfileRequest",
-                        json!({ "email": "alice@new.example.org", "display_name": "Alice" }),
+                        json!({ "username": "alice", "display_name": "Alice" }),
                     ),
                     vec![("200", "Updated user"), ("401", "Authentication required")],
                     true,
@@ -2460,6 +2471,209 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     ("401", "Authentication required"),
                 ],
                 true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/features",
+        vec![(
+            M::Get,
+            o(
+                "Auth",
+                "Auth capability flags",
+                "Public flags the auth UI adapts to: whether account email is actually delivered (SMTP configured), whether verified email is required for password login, and whether self-registration is closed.",
+                vec![],
+                vec![("200", "Capability flags")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/forgot-password",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Forgot password",
+                "Start self-service password recovery. Always answers 200 with the same body (no account enumeration); when the identifier matches an active account, a single-use reset link (1h) is emailed.",
+                vec![],
+                ref_body(
+                    "ForgotPasswordRequest",
+                    json!({ "identifier": "alice" }),
+                ),
+                vec![("200", "Generic acknowledgement")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/forgot-username",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Forgot username",
+                "Email the username tied to an address. Always answers 200 with the same body (no account enumeration).",
+                vec![],
+                ref_body(
+                    "ForgotUsernameRequest",
+                    json!({ "email": "alice@example.org" }),
+                ),
+                vec![("200", "Generic acknowledgement")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/reset-password",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Reset password",
+                "Redeem an emailed reset token and set a new password. Revokes every existing session and marks the email verified (mailbox control was proven).",
+                vec![],
+                ref_body(
+                    "ResetPasswordRequest",
+                    json!({ "token": "…from the email link…", "new_password": "new-stronger-pass" }),
+                ),
+                vec![("204", "Password reset"), ("400", "Invalid or expired link")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/verify-email",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Verify email",
+                "Redeem an emailed confirmation link: first-time address verification or the confirmation step of an email change.",
+                vec![],
+                ref_body(
+                    "VerifyEmailRequest",
+                    json!({ "token": "…from the email link…" }),
+                ),
+                vec![("200", "Email verified"), ("400", "Invalid or expired link")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/verify-email/resend",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Resend verification email",
+                "Mail a fresh confirmation link to the signed-in (unverified) account. Throttled per account.",
+                vec![],
+                vec![
+                    ("202", "Sent"),
+                    ("400", "Already verified"),
+                    ("429", "Sent too recently"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/change-email",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Change email",
+                "Start an email change (requires the current password). With SMTP configured the new address only takes effect once its mailbox confirms the emailed link; without SMTP the change applies immediately but is marked unverified.",
+                vec![],
+                ref_body(
+                    "ChangeEmailRequest",
+                    json!({ "new_email": "alice@new.example.org", "password": "s3cret-passphrase" }),
+                ),
+                vec![
+                    ("200", "Changed directly (no SMTP)"),
+                    ("202", "Confirmation link sent"),
+                    ("401", "Wrong password"),
+                    ("409", "Email already in use"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/setup",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Begin 2FA enrollment",
+                "Mint a TOTP shared secret and otpauth:// URI for the authenticator app. 2FA only activates after /api/auth/2fa/enable proves a correct code.",
+                vec![],
+                vec![("200", "Secret + otpauth URL"), ("409", "Already enabled")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/enable",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Activate 2FA",
+                "Confirm enrollment with a live TOTP code. Returns ten single-use recovery codes — shown exactly once.",
+                vec![],
+                ref_body("TotpEnableRequest", json!({ "code": "123456" })),
+                vec![("200", "Recovery codes"), ("400", "Incorrect code")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/disable",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Disable 2FA",
+                "Turn two-factor off. Requires the current password AND a live TOTP code (or an unused recovery code).",
+                vec![],
+                ref_body(
+                    "TotpDisableRequest",
+                    json!({ "password": "s3cret-passphrase", "code": "123456" }),
+                ),
+                vec![("204", "Disabled"), ("401", "Wrong password or code")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/verify",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Finish 2FA login",
+                "Second step of a two-factor login: exchange the short-lived `mfa_token` from POST /api/auth/login plus a TOTP or recovery code for a session.",
+                vec![],
+                ref_body(
+                    "MfaVerifyRequest",
+                    json!({ "mfa_token": "…from login…", "code": "123456" }),
+                ),
+                vec![("200", "Auth tokens"), ("401", "Invalid code or expired login")],
+                false,
             ),
         )],
     );

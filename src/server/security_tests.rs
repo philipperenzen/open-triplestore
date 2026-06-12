@@ -45,6 +45,7 @@ mod tests {
             backup: None,
             jwt_config: Arc::new(JwtConfig::new(TEST_JWT_SECRET.to_string(), 30, 30)),
             object_store: Arc::new(ObjectStore::noop()),
+            mailer: Arc::new(crate::email::Mailer::log_only("http://localhost:7878")),
             base_url: Arc::new("http://localhost:7878".to_string()),
             oauth_sessions: crate::auth::oauth::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),

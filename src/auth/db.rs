@@ -15,7 +15,7 @@ type AccessibleGraphs = (HashSet<String>, HashSet<String>);
 
 use super::models::*;
 
-/// Helper to read a User from a row (columns per USER_COLS: id, username, email, password_hash, role, is_active, created_at, updated_at, is_public, avatar_key, can_publish, display_name, bio, website, phone, organization).
+/// Helper to read a User from a row (columns per USER_COLS: id, username, email, password_hash, role, is_active, created_at, updated_at, is_public, avatar_key, can_publish, display_name, bio, website, phone, organization, email_verified, totp_enabled).
 fn read_user(row: &rusqlite::Row) -> rusqlite::Result<User> {
     // Tolerate NULLs in any column so one malformed row never fails the whole query.
     let role_str: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
@@ -38,6 +38,8 @@ fn read_user(row: &rusqlite::Row) -> rusqlite::Result<User> {
         website: row.get(13)?,
         phone: row.get(14)?,
         organization: row.get(15)?,
+        email_verified: row.get::<_, i32>(16).unwrap_or(0) != 0,
+        totp_enabled: row.get::<_, i32>(17).unwrap_or(0) != 0,
     })
 }
 
@@ -107,9 +109,12 @@ fn scope_membership_role(role: Option<Role>, visibility: Visibility) -> Option<R
     }
 }
 
-const USER_COLS: &str = "id, username, email, password_hash, role, is_active, created_at, updated_at, COALESCE(is_public,0), avatar_key, COALESCE(can_publish,0), display_name, bio, website, phone, organization";
+const USER_COLS: &str = "id, username, email, password_hash, role, is_active, created_at, updated_at, COALESCE(is_public,0), avatar_key, COALESCE(can_publish,0), display_name, bio, website, phone, organization, COALESCE(email_verified,0), COALESCE(totp_enabled,0)";
 /// Same columns but table-qualified with `u.` alias, for use in JOIN queries.
-const USER_COLS_U: &str = "u.id, u.username, u.email, u.password_hash, u.role, u.is_active, u.created_at, u.updated_at, COALESCE(u.is_public,0), u.avatar_key, COALESCE(u.can_publish,0), u.display_name, u.bio, u.website, u.phone, u.organization";
+const USER_COLS_U: &str = "u.id, u.username, u.email, u.password_hash, u.role, u.is_active, u.created_at, u.updated_at, COALESCE(u.is_public,0), u.avatar_key, COALESCE(u.can_publish,0), u.display_name, u.bio, u.website, u.phone, u.organization, COALESCE(u.email_verified,0), COALESCE(u.totp_enabled,0)";
+/// Number of columns in USER_COLS/USER_COLS_U — the first index AFTER the user
+/// columns when a query appends extra columns (e.g. a membership role).
+const USER_COLS_LEN: usize = 18;
 
 /// Helper to read a Dataset from a row (24 columns, 0-indexed).
 /// Column order: id(0), name(1), description(2), owner_type(3), owner_id(4), visibility(5),
@@ -313,6 +318,7 @@ impl AuthDb {
                 id TEXT PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 email TEXT NOT NULL UNIQUE,
+                email_verified INTEGER NOT NULL DEFAULT 0,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 role TEXT NOT NULL DEFAULT 'user',
@@ -320,8 +326,39 @@ impl AuthDb {
                 is_public INTEGER NOT NULL DEFAULT 0,
                 avatar_key TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                -- TOTP two-factor login: AES-GCM-encrypted shared secret, the
+                -- enabled flag, and the last successfully-used time step
+                -- (replay guard — a TOTP code must never authenticate twice).
+                totp_secret_enc TEXT,
+                totp_enabled INTEGER NOT NULL DEFAULT 0,
+                totp_last_step INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Single-use, expiring tokens mailed to users to prove mailbox
+            -- control: email verification, password reset, email change.
+            -- Only the SHA-256 hash of a token is stored.
+            CREATE TABLE IF NOT EXISTS email_tokens (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('verify_email','reset_password','change_email')),
+                token_hash TEXT NOT NULL UNIQUE,
+                new_email TEXT,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                used_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_email_tokens_user ON email_tokens(user_id, kind);
+
+            -- Single-use 2FA recovery codes (hashed); replace-on-regenerate.
+            CREATE TABLE IF NOT EXISTS totp_recovery_codes (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                code_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                used_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_totp_recovery_user ON totp_recovery_codes(user_id);
 
             -- Per-account login throttle (independent of the per-IP rate limit) to
             -- stop distributed credential-stuffing against a single username.
@@ -898,9 +935,29 @@ impl AuthDb {
             // every session the user has (which logged people out of their other
             // browsers/tabs). NULL on rows created before this column existed.
             "ALTER TABLE refresh_tokens ADD COLUMN family_id TEXT",
+            // TOTP two-factor login columns.
+            "ALTER TABLE users ADD COLUMN totp_secret_enc TEXT",
+            "ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors
+        }
+
+        // One-time upgrade: add users.email_verified, grandfathering every
+        // EXISTING account as verified — they predate verification, and
+        // retroactively unverifying them could lock people out when the
+        // OTS_REQUIRE_VERIFIED_EMAIL gate is enabled. Detected via
+        // pragma_table_info so the backfill runs exactly once (fresh databases
+        // get the column from CREATE TABLE above and skip this path).
+        let has_email_verified = conn
+            .prepare("SELECT 1 FROM pragma_table_info('users') WHERE name='email_verified'")?
+            .exists([])?;
+        if !has_email_verified {
+            conn.execute_batch(
+                "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;
+                 UPDATE users SET email_verified = 1;",
+            )?;
         }
 
         // One-time rebuild: widen `resource_access.principal_type` to allow
@@ -974,6 +1031,8 @@ impl AuthDb {
             website: None,
             phone: None,
             organization: None,
+            email_verified: false,
+            totp_enabled: false,
         })
     }
 
@@ -1026,6 +1085,237 @@ impl AuthDb {
         conn.execute(
             "UPDATE users SET password_hash=?1, updated_at=?2 WHERE id=?3",
             params![password_hash, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark the user's email address as verified (or not).
+    pub fn set_email_verified(&self, id: &str, verified: bool) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE users SET email_verified=?1, updated_at=?2 WHERE id=?3",
+            params![verified as i32, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Switch the account to a new (just-confirmed) email address.
+    pub fn update_user_email_verified(&self, id: &str, email: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE users SET email=?1, email_verified=1, updated_at=?2 WHERE id=?3",
+            params![email, now, id],
+        )?;
+        Ok(())
+    }
+
+    // ─── Email action tokens (verification / reset / change-email) ───────────
+
+    pub fn create_email_token(
+        &self,
+        id: &str,
+        user_id: &str,
+        kind: &str,
+        token_hash: &str,
+        new_email: Option<&str>,
+        expires_at: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO email_tokens (id, user_id, kind, token_hash, new_email, expires_at, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![id, user_id, kind, token_hash, new_email, expires_at, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_email_token_by_hash(&self, token_hash: &str) -> anyhow::Result<Option<EmailToken>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT id, user_id, kind, token_hash, new_email, expires_at, created_at, used_at
+             FROM email_tokens WHERE token_hash = ?1",
+            params![token_hash],
+            |row| {
+                Ok(EmailToken {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    token_hash: row.get(3)?,
+                    new_email: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    created_at: row.get(6)?,
+                    used_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn mark_email_token_used(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE email_tokens SET used_at=?1 WHERE id=?2 AND used_at IS NULL",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Void every outstanding token of `kind` for a user (issuing a fresh one
+    /// supersedes the old, and a completed reset voids its siblings).
+    pub fn invalidate_email_tokens(&self, user_id: &str, kind: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE email_tokens SET used_at=?1 WHERE user_id=?2 AND kind=?3 AND used_at IS NULL",
+            params![now, user_id, kind],
+        )?;
+        Ok(())
+    }
+
+    /// Creation time of the newest still-valid token of `kind` for a user —
+    /// drives per-account resend throttles.
+    pub fn latest_email_token_created_at(
+        &self,
+        user_id: &str,
+        kind: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT MAX(created_at) FROM email_tokens
+             WHERE user_id=?1 AND kind=?2 AND used_at IS NULL",
+            params![user_id, kind],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|o| o.flatten())
+        .map_err(Into::into)
+    }
+
+    /// The pending new address of an outstanding change-email token, if any.
+    pub fn pending_email_change(&self, user_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.query_row(
+            "SELECT new_email FROM email_tokens
+             WHERE user_id=?1 AND kind='change_email' AND used_at IS NULL AND expires_at > ?2
+             ORDER BY created_at DESC LIMIT 1",
+            params![user_id, now],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|o| o.flatten())
+        .map_err(Into::into)
+    }
+
+    // ─── TOTP two-factor login ────────────────────────────────────────────────
+
+    /// Store (or clear) the encrypted TOTP secret. Setting a new secret resets
+    /// the enabled flag and replay guard — enablement requires a correct code.
+    pub fn set_totp_secret(&self, id: &str, secret_enc: Option<&str>) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE users SET totp_secret_enc=?1, totp_enabled=0, totp_last_step=0, updated_at=?2 WHERE id=?3",
+            params![secret_enc, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_totp_secret(&self, id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT totp_secret_enc FROM users WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|o| o.flatten())
+        .map_err(Into::into)
+    }
+
+    pub fn set_totp_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE users SET totp_enabled=?1, updated_at=?2 WHERE id=?3",
+            params![enabled as i32, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Replay guard: record the last successfully-used TOTP step. Returns true
+    /// only if `step` is strictly newer than the stored one (compare-and-set,
+    /// so two concurrent logins can't both consume the same code).
+    pub fn try_advance_totp_step(&self, id: &str, step: u64) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE users SET totp_last_step=?1 WHERE id=?2 AND totp_last_step < ?1",
+            params![step as i64, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn get_totp_last_step(&self, id: &str) -> anyhow::Result<u64> {
+        let conn = self.pool.get()?;
+        let v: i64 = conn.query_row(
+            "SELECT COALESCE(totp_last_step,0) FROM users WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(v.max(0) as u64)
+    }
+
+    /// Replace the user's recovery codes with a fresh set (stored hashed).
+    pub fn replace_recovery_codes(&self, user_id: &str, code_hashes: &[String]) -> anyhow::Result<()> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "DELETE FROM totp_recovery_codes WHERE user_id=?1",
+            params![user_id],
+        )?;
+        for hash in code_hashes {
+            tx.execute(
+                "INSERT INTO totp_recovery_codes (id, user_id, code_hash, created_at) VALUES (?1,?2,?3,?4)",
+                params![uuid::Uuid::new_v4().to_string(), user_id, hash, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically consume one unused recovery code. True when a code matched.
+    pub fn consume_recovery_code(&self, user_id: &str, code_hash: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE totp_recovery_codes SET used_at=?1
+             WHERE user_id=?2 AND code_hash=?3 AND used_at IS NULL",
+            params![now, user_id, code_hash],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn count_unused_recovery_codes(&self, user_id: &str) -> anyhow::Result<i64> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM totp_recovery_codes WHERE user_id=?1 AND used_at IS NULL",
+            params![user_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn clear_recovery_codes(&self, user_id: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "DELETE FROM totp_recovery_codes WHERE user_id=?1",
+            params![user_id],
         )?;
         Ok(())
     }
@@ -1755,8 +2045,9 @@ impl AuthDb {
         let members = stmt
             .query_map(params![org_id], |row| {
                 let user = read_user(row)?;
-                // Role is appended after the 16 USER_COLS_U columns (indices 0..=15).
-                let role_str: String = row.get::<_, Option<String>>(16)?.unwrap_or_default();
+                // Role is appended after the USER_COLS_U columns.
+                let role_str: String =
+                    row.get::<_, Option<String>>(USER_COLS_LEN)?.unwrap_or_default();
                 Ok((user, Role::from_str(&role_str).unwrap_or(Role::Member)))
             })?
             // Skip any row that fails to map rather than 500-ing the whole list.
@@ -2018,8 +2309,9 @@ impl AuthDb {
         let members = stmt
             .query_map(params![group_id], |row| {
                 let user = read_user(row)?;
-                // Role is appended after the 16 USER_COLS_U columns (indices 0..=15).
-                let role_str: String = row.get::<_, Option<String>>(16)?.unwrap_or_default();
+                // Role is appended after the USER_COLS_U columns.
+                let role_str: String =
+                    row.get::<_, Option<String>>(USER_COLS_LEN)?.unwrap_or_default();
                 Ok((user, Role::from_str(&role_str).unwrap_or(Role::Member)))
             })?
             .filter_map(|r| r.ok())
