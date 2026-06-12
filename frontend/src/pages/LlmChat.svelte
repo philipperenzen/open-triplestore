@@ -1,16 +1,23 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { llmChat, llmChatStream, llmHealth, sendLlmFeedback } from '../lib/api.js';
+  import {
+    llmChat, llmChatStream, llmHealth, sendLlmFeedback,
+    llmConversations, llmCreateConversation, llmGetConversation,
+    llmRenameConversation, llmDeleteConversation, llmAppendMessage,
+    llmMemory, llmSetMemory,
+  } from '../lib/api.js';
   import { navigate } from '../lib/router/index.js';
   import { isAuthenticated } from '../lib/stores.js';
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
   import CsvPreview from '../components/chat/CsvPreview.svelte';
+  import ConfirmModal from '../components/ConfirmModal.svelte';
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
+    Plus, Pencil, Trash2, Info, NotebookPen, X, MessageSquare,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
@@ -28,6 +35,22 @@
   // scroll position away from someone reading earlier messages.
   let autoScroll = true;
 
+  // ── Chat history (signed-in users only; guests stay ephemeral) ────────────
+  let conversations = []; // { id, title, created_at, updated_at, message_count }
+  let activeId = null;
+  let convLoading = false;
+  let renamingId = null;
+  let renameText = '';
+  let deleteTarget = null; // conversation pending ConfirmModal
+  let lastModel = ''; // model id of the latest turn (shown in About)
+
+  // ── Memory + About panels ──────────────────────────────────────────────────
+  let aboutOpen = false;
+  let memoryOpen = false;
+  let memory = { instructions: '', enabled: true };
+  let memorySaving = false;
+  let memorySaved = false;
+
   $: EXAMPLES = [
     $t('pages.llmChat.example1'),
     $t('pages.llmChat.example2'),
@@ -40,9 +63,139 @@
 
   onMount(() => {
     llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
+    if ($isAuthenticated) loadConversations();
   });
 
   onDestroy(() => abortCtl?.abort());
+
+  // ── History: list / open / new / rename / delete ───────────────────────────
+
+  async function loadConversations() {
+    try {
+      const r = await llmConversations();
+      conversations = r.conversations || [];
+    } catch {
+      // History is an extra — the chat itself works without it.
+    }
+  }
+
+  function newChat() {
+    if (loading) return;
+    activeId = null;
+    messages = [];
+    input = '';
+  }
+
+  async function openConversation(id) {
+    if (loading || convLoading || id === activeId) return;
+    convLoading = true;
+    try {
+      const r = await llmGetConversation(id);
+      activeId = id;
+      messages = (r.messages || []).map((m) => ({
+        role: m.role,
+        content: m.content,
+        queries: m.queries || [],
+        ranQuery: (m.queries || []).some((q) => q.ok),
+        showQuery: false,
+        reviewed: null,
+        stopped: !!m.stopped,
+        runs: [],
+      }));
+      if (r.messages?.length) {
+        const last = [...r.messages].reverse().find((m) => m.model);
+        if (last) lastModel = last.model;
+      }
+      autoScroll = true;
+      await scrollToBottom(true);
+    } catch {
+      // Conversation may have been deleted elsewhere — refresh the list.
+      loadConversations();
+    } finally {
+      convLoading = false;
+    }
+  }
+
+  // Persist a finished turn: lazily create the conversation on the first send
+  // (the server derives the title from the message), then append both sides.
+  // Best-effort — a failed save never disturbs the visible chat.
+  async function persistTurn(userContent, draft) {
+    if (!$isAuthenticated) return;
+    const keepAssistant = !draft.isError && (draft.content || draft.queries?.length);
+    if (!keepAssistant && !messages.includes(draft)) return; // dropped empty turn
+    try {
+      if (!activeId) {
+        const c = await llmCreateConversation(userContent);
+        activeId = c.id;
+      }
+      await llmAppendMessage(activeId, { role: 'user', content: userContent });
+      if (keepAssistant) {
+        await llmAppendMessage(activeId, {
+          role: 'assistant',
+          content: draft.content || '',
+          queries: draft.queries?.length ? draft.queries : null,
+          model: draft.model || null,
+          stopped: !!draft.stopped,
+        });
+      }
+      loadConversations();
+    } catch {
+      // best-effort
+    }
+  }
+
+  function startRename(c) {
+    renamingId = c.id;
+    renameText = c.title;
+  }
+
+  async function commitRename() {
+    const id = renamingId;
+    const title = renameText.trim();
+    renamingId = null;
+    if (!id || !title) return;
+    const c = conversations.find((x) => x.id === id);
+    if (!c || c.title === title) return;
+    c.title = title;
+    conversations = conversations;
+    try { await llmRenameConversation(id, title); } catch { loadConversations(); }
+  }
+
+  async function confirmDelete() {
+    const c = deleteTarget;
+    deleteTarget = null;
+    if (!c) return;
+    conversations = conversations.filter((x) => x.id !== c.id);
+    if (activeId === c.id) newChat();
+    try { await llmDeleteConversation(c.id); } catch { loadConversations(); }
+  }
+
+  // ── Memory panel ────────────────────────────────────────────────────────────
+
+  async function openMemory() {
+    memoryOpen = true;
+    memorySaved = false;
+    try { memory = await llmMemory(); } catch { memory = { instructions: '', enabled: true }; }
+  }
+
+  async function saveMemory() {
+    memorySaving = true;
+    memorySaved = false;
+    try {
+      await llmSetMemory(memory.instructions, memory.enabled);
+      memorySaved = true;
+    } catch (e) {
+      alert(e?.message || 'Could not save');
+    } finally {
+      memorySaving = false;
+    }
+  }
+
+  // Models the gateway reports (OpenAI-style /v1/models payload), for About.
+  $: gatewayModels = (llmStatus?.detail?.data || [])
+    .map((m) => m?.id)
+    .filter(Boolean)
+    .slice(0, 6);
 
   function onScroll() {
     if (!scrollEl) return;
@@ -113,14 +266,19 @@
           onEvent: (ev) => { sawEvent = true; applyStreamEvent(draft, ev); },
         });
       } catch (e) {
-        // An older server (404) or a buffering proxy: retry once, non-streaming.
+        // An older server (404/405) or a buffering proxy: retry once, non-streaming.
+        // Real rejections (guard 400, rate limit 429, auth) must NOT retry — the
+        // buffered endpoint would just reject again and double-count the request.
         if (e?.name === 'AbortError' || sawEvent) throw e;
+        if (e?.status && e.status !== 404 && e.status !== 405) throw e;
         resp = await llmChat(wire);
       }
       clearDeltaQueue();
       draft.content = resp.answer || $t('pages.llmChat.noAnswer');
       draft.queries = normalizeQueries(resp);
       draft.ranQuery = !!resp.ran_query;
+      draft.model = resp.model || '';
+      lastModel = draft.model || lastModel;
       draft.streaming = false;
     } catch (e) {
       clearDeltaQueue();
@@ -142,6 +300,7 @@
       abortCtl = null;
       loading = false;
       messages = messages;
+      persistTurn(content, draft);
       await scrollToBottom();
     }
   }
@@ -242,7 +401,7 @@
   }
 
   function clearChat() {
-    messages = [];
+    newChat();
   }
 
   // Render the assistant's markdown — including fenced code blocks, which are
@@ -253,6 +412,43 @@
   }
 </script>
 
+<div class="chat-layout" class:with-sidebar={$isAuthenticated}>
+  {#if $isAuthenticated}
+    <aside class="chat-sidebar">
+      <button class="new-chat-btn" on:click={newChat} disabled={loading}>
+        <Plus size={14} /> {$t('pages.llmChat.newChat')}
+      </button>
+      <div class="conv-list" class:dim={convLoading}>
+        {#if conversations.length === 0}
+          <p class="conv-empty">{$t('pages.llmChat.historyEmpty')}</p>
+        {/if}
+        {#each conversations as c (c.id)}
+          <div class="conv-item" class:active={c.id === activeId}>
+            {#if renamingId === c.id}
+              <!-- svelte-ignore a11y-autofocus -->
+              <input
+                class="conv-rename"
+                bind:value={renameText}
+                autofocus
+                on:keydown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') renamingId = null; }}
+                on:blur={commitRename}
+              />
+            {:else}
+              <button class="conv-open" on:click={() => openConversation(c.id)} title={c.title}>
+                <MessageSquare size={13} />
+                <span class="conv-title">{c.title || $t('pages.llmChat.untitled')}</span>
+              </button>
+              <span class="conv-actions">
+                <button class="conv-act" on:click={() => startRename(c)} aria-label={$t('pages.llmChat.renameChat')} title={$t('pages.llmChat.renameChat')}><Pencil size={12} /></button>
+                <button class="conv-act danger" on:click={() => { deleteTarget = c; }} aria-label={$t('pages.llmChat.deleteChat')} title={$t('pages.llmChat.deleteChat')}><Trash2 size={12} /></button>
+              </span>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    </aside>
+  {/if}
+
 <div class="chat-page">
   <div class="chat-head-actions">
     {#if llmStatus}
@@ -260,8 +456,35 @@
         {llmStatus.reachable ? $t('pages.llmChat.badgeOnline') : $t('pages.llmChat.badgeOffline')}
       </span>
     {/if}
+    <span class="head-spacer"></span>
+    {#if $isAuthenticated}
+      <button class="head-btn" on:click={openMemory} aria-label={$t('pages.llmChat.memoryTitle')} title={$t('pages.llmChat.memoryTitle')}>
+        <NotebookPen size={14} />
+      </button>
+    {/if}
+    <button class="head-btn" on:click={() => { aboutOpen = !aboutOpen; }} aria-label={$t('pages.llmChat.aboutSpark')} title={$t('pages.llmChat.aboutSpark')} aria-expanded={aboutOpen}>
+      <Info size={14} />
+    </button>
     {#if messages.length}
       <button class="btn-clear" on:click={clearChat}>{$t('pages.llmChat.clearChat')}</button>
+    {/if}
+    {#if aboutOpen}
+      <div class="about-pop">
+        <div class="about-head">
+          <strong>{$t('pages.llmChat.aboutSpark')}</strong>
+          <button class="head-btn" on:click={() => { aboutOpen = false; }} aria-label={$t('pages.llmChat.close')}><X size={13} /></button>
+        </div>
+        {#if lastModel || gatewayModels.length}
+          <p class="about-row"><span>{$t('pages.llmChat.aboutModel')}</span> {lastModel || gatewayModels[0]}</p>
+        {/if}
+        {#if llmStatus?.gateway}
+          <p class="about-row"><span>{$t('pages.llmChat.aboutGateway')}</span> {llmStatus.gateway}</p>
+        {/if}
+        <p class="about-title">{$t('pages.llmChat.aboutGroundingTitle')}</p>
+        <p class="about-text">{$t('pages.llmChat.aboutGroundingText')}</p>
+        <p class="about-title">{$t('pages.llmChat.aboutPrivacyTitle')}</p>
+        <p class="about-text">{$t('pages.llmChat.aboutPrivacyText')}</p>
+      </div>
     {/if}
   </div>
 
@@ -423,20 +646,188 @@
   </form>
   <p class="disclaimer"><Database size={11} /> {$t('pages.llmChat.disclaimer')}</p>
 </div>
+</div>
+
+{#if memoryOpen}
+  <div
+    class="memory-overlay"
+    role="presentation"
+    on:click={() => { memoryOpen = false; }}
+    on:keydown={(e) => { if (e.key === 'Escape') memoryOpen = false; }}
+  >
+    <div
+      class="memory-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label={$t('pages.llmChat.memoryTitle')}
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown|stopPropagation={(e) => { if (e.key === 'Escape') memoryOpen = false; }}
+    >
+      <div class="memory-head">
+        <strong><NotebookPen size={14} /> {$t('pages.llmChat.memoryTitle')}</strong>
+        <button class="head-btn" on:click={() => { memoryOpen = false; }} aria-label={$t('pages.llmChat.close')}><X size={14} /></button>
+      </div>
+      <p class="memory-hint">{$t('pages.llmChat.memoryHint')}</p>
+      <textarea
+        class="memory-input"
+        rows="6"
+        maxlength="4000"
+        bind:value={memory.instructions}
+        placeholder={$t('pages.llmChat.memoryPlaceholder')}
+      ></textarea>
+      <label class="memory-toggle">
+        <input type="checkbox" bind:checked={memory.enabled} />
+        {$t('pages.llmChat.memoryEnabled')}
+      </label>
+      <div class="memory-actions">
+        {#if memorySaved}<span class="memory-saved"><Check size={13} /> {$t('pages.llmChat.memorySaved')}</span>{/if}
+        <button class="memory-save" on:click={saveMemory} disabled={memorySaving}>
+          {#if memorySaving}<Loader2 size={13} class="spin" />{/if}
+          {$t('pages.llmChat.memorySave')}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if deleteTarget}
+  <ConfirmModal
+    title={$t('pages.llmChat.deleteChat')}
+    message={`${$t('pages.llmChat.deleteChatConfirm')} — “${deleteTarget.title || $t('pages.llmChat.untitled')}”`}
+    confirmLabel={$t('pages.llmChat.deleteChat')}
+    on:confirm={confirmDelete}
+    on:cancel={() => { deleteTarget = null; }}
+  />
+{/if}
 
 <style>
-  .chat-page {
+  .chat-layout {
     max-width: 880px;
     margin: 0 auto;
+    display: flex;
+    align-items: stretch;
+    gap: 1rem;
+  }
+  .chat-layout.with-sidebar { max-width: 1120px; }
+
+  .chat-page {
+    flex: 1;
+    min-width: 0;
     padding: 0.5rem 0.25rem 1rem;
     display: flex;
     flex-direction: column;
   }
 
+  /* ── Conversation sidebar ─────────────────────────────────────────────── */
+  .chat-sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    padding: 0.5rem 0 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  @media (max-width: 760px) { .chat-sidebar { display: none; } }
+  .new-chat-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    padding: 0.5rem 0.75rem; border-radius: 10px; cursor: pointer;
+    font-size: 0.82rem; font-weight: 600; color: #4338ca;
+    background: #eef2ff; border: 1px solid #c7d2fe;
+    transition: background 0.15s ease;
+  }
+  .new-chat-btn:hover:not(:disabled) { background: #e0e7ff; }
+  .new-chat-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .conv-list {
+    flex: 1; overflow-y: auto; max-height: 70vh;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .conv-list.dim { opacity: 0.6; pointer-events: none; }
+  .conv-empty { font-size: 0.76rem; color: var(--ink-400); padding: 0.4rem 0.5rem; }
+  .conv-item {
+    display: flex; align-items: center; gap: 2px; border-radius: 8px;
+    padding-right: 2px;
+  }
+  .conv-item:hover, .conv-item.active { background: var(--bg-strong); }
+  .conv-item.active { border: 1px solid var(--line-soft); }
+  .conv-open {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.45rem;
+    background: none; border: none; cursor: pointer; text-align: left;
+    padding: 0.45rem 0.5rem; color: var(--ink-700); font-size: 0.8rem;
+  }
+  .conv-open :global(svg) { flex-shrink: 0; opacity: 0.55; }
+  .conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv-actions { display: none; align-items: center; }
+  .conv-item:hover .conv-actions, .conv-item.active .conv-actions { display: inline-flex; }
+  .conv-act {
+    display: inline-flex; padding: 4px; border: none; background: none; cursor: pointer;
+    color: var(--ink-400); border-radius: 6px;
+  }
+  .conv-act:hover { background: var(--line-soft); color: var(--ink-700); }
+  .conv-act.danger:hover { color: #dc2626; }
+  .conv-rename {
+    flex: 1; min-width: 0; font: inherit; font-size: 0.8rem; padding: 0.35rem 0.45rem;
+    border: 1px solid #a5b4fc; border-radius: 8px; background: var(--bg-strong); color: var(--ink-800);
+    outline: none;
+  }
+
   .chat-head-actions {
+    position: relative;
     display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem;
     margin-bottom: 0.5rem; min-height: 1.6rem;
   }
+  .head-spacer { flex: 1; }
+  .head-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 5px; border-radius: 8px; cursor: pointer; color: var(--ink-500);
+    background: var(--bg-strong); border: 1px solid var(--line-soft);
+  }
+  .head-btn:hover { background: var(--bg-soft); color: var(--ink-700); }
+
+  /* ── About popover ────────────────────────────────────────────────────── */
+  .about-pop {
+    position: absolute; top: 2rem; right: 0; z-index: 30; width: min(340px, 90vw);
+    background: var(--bg-elevated); border: 1px solid var(--line-strong); border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(15,32,39,0.16); padding: 0.8rem 0.95rem; text-align: left;
+  }
+  .about-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
+  .about-head strong { font-size: 0.88rem; color: var(--ink-800); }
+  .about-row { margin: 0.15rem 0; font-size: 0.78rem; color: var(--ink-700); word-break: break-all; }
+  .about-row span { display: inline-block; min-width: 64px; color: var(--ink-400); font-weight: 600; }
+  .about-title { margin: 0.6rem 0 0.1rem; font-size: 0.74rem; font-weight: 700; color: var(--ink-500); text-transform: uppercase; letter-spacing: 0.03em; }
+  .about-text { margin: 0; font-size: 0.78rem; color: var(--ink-600); line-height: 1.45; }
+
+  /* ── Memory modal ─────────────────────────────────────────────────────── */
+  .memory-overlay {
+    position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center;
+    background: rgba(15, 23, 42, 0.45); padding: 1rem;
+  }
+  .memory-modal {
+    width: min(480px, 94vw); background: var(--bg-elevated); border: 1px solid var(--line-strong);
+    border-radius: 14px; box-shadow: 0 16px 48px rgba(15,32,39,0.25); padding: 1rem 1.1rem;
+  }
+  .memory-head { display: flex; align-items: center; justify-content: space-between; }
+  .memory-head strong { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.95rem; color: var(--ink-800); }
+  .memory-hint { margin: 0.45rem 0 0.6rem; font-size: 0.78rem; color: var(--ink-500); line-height: 1.45; }
+  .memory-input {
+    width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem;
+    min-height: 110px; padding: 0.55rem 0.65rem; border-radius: 10px;
+    border: 1px solid var(--line-strong); background: var(--bg-strong); color: var(--ink-800);
+  }
+  .memory-input:focus { outline: none; border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
+  .memory-toggle {
+    display: flex; align-items: center; gap: 0.45rem; margin: 0.55rem 0 0;
+    font-size: 0.8rem; color: var(--ink-700); cursor: pointer;
+  }
+  .memory-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.6rem; margin-top: 0.75rem; }
+  .memory-saved { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.76rem; color: #16a34a; }
+  .memory-save {
+    display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
+    padding: 0.45rem 1rem; border-radius: 9px; border: none; color: #fff;
+    font-size: 0.82rem; font-weight: 600;
+    background: linear-gradient(135deg, #7c5cff, #4f46e5);
+  }
+  .memory-save:disabled { opacity: 0.6; cursor: not-allowed; }
 
   .llm-badge {
     font-size: 0.7rem; font-weight: 600; color: #16a34a; white-space: nowrap;
@@ -670,4 +1061,7 @@
   :global(:is([data-theme="dark"], .dark)) .trail-chip.failed { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .stop-btn { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.4); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .stop-btn:hover { background: rgba(220,38,38,0.2); }
+  :global(:is([data-theme="dark"], .dark)) .new-chat-btn { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); color: #a5b4fc; }
+  :global(:is([data-theme="dark"], .dark)) .new-chat-btn:hover:not(:disabled) { background: rgba(99,102,241,0.28); }
+  :global(:is([data-theme="dark"], .dark)) .memory-saved { color: #6ee7b7; }
 </style>

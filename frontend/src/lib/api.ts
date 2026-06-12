@@ -712,6 +712,37 @@ export async function llmChatStream(messages, { model = null, signal, onEvent } 
   throw new ApiError('stream ended unexpectedly');
 }
 
+// ─── Spark chat history + memory (auth required; guests keep no history) ────
+export const llmConversations = () =>
+  request('GET', '/api/llm/conversations'); // { conversations: [{id,title,created_at,updated_at,message_count}] }
+export const llmCreateConversation = (title = '') =>
+  request('POST', '/api/llm/conversations', { title });
+export const llmGetConversation = (id) =>
+  request('GET', `/api/llm/conversations/${encodeURIComponent(id)}`); // { id, messages: [{role,content,queries?,model?,stopped?,created_at}] }
+export const llmRenameConversation = (id, title) =>
+  request('PATCH', `/api/llm/conversations/${encodeURIComponent(id)}`, { title });
+export const llmDeleteConversation = (id) =>
+  request('DELETE', `/api/llm/conversations/${encodeURIComponent(id)}`);
+// message: { role, content, queries?, model?, stopped? }
+export const llmAppendMessage = (id, message) =>
+  request('POST', `/api/llm/conversations/${encodeURIComponent(id)}/messages`, message);
+export const llmMemory = () =>
+  request('GET', '/api/llm/memory'); // { instructions, enabled }
+export const llmSetMemory = (instructions, enabled = true) =>
+  request('PUT', '/api/llm/memory', { instructions, enabled });
+
+// ─── Admin: LLM request telemetry (admin only; server enforces) ─────────────
+export const adminLlmRequests = (opts: { limit?: number; offset?: number; status?: string; endpoint?: string; user_id?: string; since?: string } = {}) => {
+  const p = new URLSearchParams();
+  for (const k of ['limit', 'offset', 'status', 'endpoint', 'user_id', 'since'] as const) {
+    if (opts[k] !== undefined && opts[k] !== '') p.set(k, String(opts[k]));
+  }
+  const qs = p.toString();
+  return request('GET', `/api/admin/llm/requests${qs ? `?${qs}` : ''}`); // { requests, limit, offset }
+};
+export const adminLlmStats = () =>
+  request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
+
 // SHACL
 // Returns { report, run_id, ran_at } — the run is persisted server-side.
 // Pass { test: true } for a dry run that validates but is NOT recorded.
