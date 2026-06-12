@@ -302,8 +302,24 @@ export const revokeDatasetGrant = (id, principalType: 'user' | 'group', principa
   request('DELETE', `/api/datasets/${id}/grants/${principalType}/${principalId}`);
 export const updateDatasetShacl = (id, data) => request('PUT', `/api/datasets/${id}/shacl`, data);
 export const updateDatasetRole = (id, graph_role) => request('PUT', `/api/datasets/${id}/role`, { graph_role });
-export const detectShapes = (graphIri: string) => request('GET', `/api/shacl/detect-shapes?graph=${encodeURIComponent(graphIri)}`);
-export const listAccessibleShapeGraphs = () => request('GET', '/api/shacl/dataset-shape-graphs');
+// `suggested_datasets` may flag candidates that already have shapes attached.
+export type DetectShapesResponse = {
+  shapes_detected: boolean;
+  shape_count: number;
+  suggested_datasets: { id: string; name: string; has_shapes?: boolean }[];
+};
+export const detectShapes = (graphIri: string): Promise<DetectShapesResponse> =>
+  request('GET', `/api/shacl/detect-shapes?graph=${encodeURIComponent(graphIri)}`);
+// Datasets that can act as shapes sources: a configured shapes_graph_iri, a
+// Studio binding, or a shapes-role graph (shapes_graph_iri may be null then).
+export type DatasetShapeGraph = {
+  dataset_id: string;
+  dataset_name: string;
+  shapes_graph_iri: string | null;
+  source?: string;
+};
+export const listAccessibleShapeGraphs = (): Promise<{ shape_graphs: DatasetShapeGraph[] }> =>
+  request('GET', '/api/shacl/dataset-shape-graphs');
 export type DatasetGraph = { graph_iri: string; graph_role?: string | null; private?: boolean; triple_count?: number };
 
 export const listDatasetGraphs = (id): Promise<DatasetGraph[]> => request('GET', `/api/datasets/${id}/graphs`);

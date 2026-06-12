@@ -2,10 +2,40 @@ use super::constraints::evaluate_constraint;
 use super::report::{Severity, ValidationReport, ValidationResult};
 use super::shapes::*;
 use crate::store::TripleStore;
+use oxigraph::model::Term;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 const SH: &str = "http://www.w3.org/ns/shacl#";
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDFS_SUBCLASS: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+
+/// Maximum loader recursion depth for inline shapes (sh:node / sh:not / sh:and /
+/// nested sh:property …). Inline shapes are loaded eagerly, so a cyclic shapes
+/// graph (A `sh:node` B, B `sh:node` A) must be cut at load time as well as at
+/// evaluation time.
+const MAX_SHAPE_LOAD_DEPTH: u32 = 50;
+
+thread_local! {
+    static SHAPE_LOAD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct LoadDepthGuard;
+impl LoadDepthGuard {
+    fn enter() -> (Self, bool) {
+        let depth = SHAPE_LOAD_DEPTH.with(|d| {
+            let v = d.get() + 1;
+            d.set(v);
+            v
+        });
+        (LoadDepthGuard, depth <= MAX_SHAPE_LOAD_DEPTH)
+    }
+}
+impl Drop for LoadDepthGuard {
+    fn drop(&mut self) {
+        SHAPE_LOAD_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
 
 /// Validate data graphs against shapes in a shapes graph.
 ///
@@ -53,40 +83,47 @@ pub fn validate(
 
             focus_nodes
                 .par_iter()
-                .flat_map(|(focus_node, focus_kind)| {
+                .flat_map(|focus_node| {
                     let mut results = Vec::new();
 
                     // Node-level constraints
                     for constraint in &shape.constraints {
-                        results.extend(evaluate_constraint(
+                        let rs = evaluate_constraint(
                             store,
                             shapes_slice,
                             &shape.iri,
                             focus_node,
-                            *focus_kind,
                             constraint,
                             None,
                             data_graphs,
                             &severity,
-                        ));
+                        );
+                        results.extend(apply_message(rs, &shape.message, constraint));
                     }
 
-                    // Property shape constraints
+                    // Property shape constraints. A property shape's own
+                    // sh:severity / sh:message override the parent shape's
+                    // (SHACL §3.6 — the shape that declares the constraint).
                     for prop_shape in &shape.property_shapes {
                         let shape_iri = prop_shape.iri.as_deref().unwrap_or(&shape.iri);
+                        let prop_severity = prop_shape
+                            .severity
+                            .as_deref()
+                            .map(Severity::from_iri)
+                            .unwrap_or_else(|| severity.clone());
 
                         for constraint in &prop_shape.constraints {
-                            results.extend(evaluate_constraint(
+                            let rs = evaluate_constraint(
                                 store,
                                 shapes_slice,
                                 shape_iri,
                                 focus_node,
-                                *focus_kind,
                                 constraint,
                                 Some(&prop_shape.path),
                                 data_graphs,
-                                &severity,
-                            ));
+                                &prop_severity,
+                            );
+                            results.extend(apply_message(rs, &prop_shape.message, constraint));
                         }
                     }
 
@@ -110,6 +147,24 @@ pub fn validate(
         results: all_results,
         results_count,
     })
+}
+
+/// Apply a shape-declared `sh:message` to the results of one constraint
+/// evaluation. SPARQL constraints keep their own `sh:message` (declared on the
+/// SPARQLConstraint node itself).
+fn apply_message(
+    mut results: Vec<ValidationResult>,
+    message: &Option<String>,
+    constraint: &Constraint,
+) -> Vec<ValidationResult> {
+    if let Some(msg) = message {
+        if !matches!(constraint, Constraint::SparqlConstraint { .. }) {
+            for r in &mut results {
+                r.message = msg.clone();
+            }
+        }
+    }
+    results
 }
 
 /// Apply SHACL-AF inference rules and materialise derived triples.
@@ -224,14 +279,42 @@ fn load_single_shape(
     let message = single_value(store, shapes_graph, shape_iri, &format!("{}message", SH));
 
     // Load direct constraints on the node shape
-    let constraints = load_constraints(store, shapes_graph, shape_iri)?;
+    let mut constraints = load_constraints(store, shapes_graph, shape_iri)?;
 
     // Load property shapes
-    let property_shapes = load_property_shapes(store, shapes_graph, shape_iri)?;
+    let mut property_shapes = load_property_shapes(store, shapes_graph, shape_iri)?;
+
+    // A top-level *property* shape (it has its own sh:path, e.g.
+    // `ex:S a sh:PropertyShape ; sh:path ex:p ; sh:minCount 1 ; sh:targetNode …`):
+    // its constraints apply along that path, and any nested sh:property children
+    // apply to the path's value nodes. Model it as a single own-path property
+    // shape so the engine evaluates everything in path context.
+    let shape_type = if let Some(own_path) =
+        single_value(store, shapes_graph, shape_iri, &format!("{}path", SH))
+            .and_then(|p| parse_property_path(store, shapes_graph, &p))
+    {
+        constraints.extend(
+            property_shapes
+                .drain(..)
+                .map(|ps| Constraint::Property(Box::new(ps))),
+        );
+        property_shapes = vec![PropertyShape {
+            iri: Some(shape_iri.to_string()),
+            path: own_path,
+            constraints: std::mem::take(&mut constraints),
+            name: None,
+            description: None,
+            severity: None,
+            message: None,
+        }];
+        ShapeType::PropertyShape
+    } else {
+        ShapeType::NodeShape
+    };
 
     Ok(Shape {
         iri: shape_iri.to_string(),
-        shape_type: ShapeType::NodeShape,
+        shape_type,
         targets,
         constraints,
         property_shapes,
@@ -260,16 +343,14 @@ fn load_targets(
         targets.push(Target::TargetClass(c));
     }
 
-    // sh:targetNode
-    let nodes = execute_select_single(
-        store,
-        &format!(
-            "SELECT ?v WHERE {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}targetNode> ?v }} }}"
-        ),
-        "v",
-    )?;
-    for n in nodes {
-        targets.push(Target::TargetNode(n));
+    // sh:targetNode — keep the *typed* term: target nodes may be literals
+    // (`sh:targetNode 42`) whose datatype matters for node-level constraints.
+    for t in store.objects_for_subject_in_graph(
+        shape_iri,
+        &format!("{SH}targetNode"),
+        Some(shapes_graph),
+    ) {
+        targets.push(Target::TargetNode(t));
     }
 
     // sh:targetSubjectsOf
@@ -334,6 +415,14 @@ fn load_constraints(
 ) -> Result<Vec<Constraint>, String> {
     let mut constraints = Vec::new();
 
+    // Typed first-object lookup for constraint constants (sh:hasValue, ranges).
+    let typed_value = |pred: &str| -> Option<Term> {
+        store
+            .objects_for_subject_in_graph(shape_iri, &format!("{SH}{pred}"), Some(shapes_graph))
+            .into_iter()
+            .next()
+    };
+
     // sh:class
     for v in multi_values(store, shapes_graph, shape_iri, &format!("{}class", SH)) {
         constraints.push(Constraint::Class(v));
@@ -385,37 +474,18 @@ fn load_constraints(
         constraints.push(Constraint::Pattern { pattern, flags });
     }
 
-    // sh:minExclusive / sh:minInclusive / sh:maxExclusive / sh:maxInclusive
-    if let Some(v) = single_value(
-        store,
-        shapes_graph,
-        shape_iri,
-        &format!("{}minExclusive", SH),
-    ) {
+    // sh:minExclusive / sh:minInclusive / sh:maxExclusive / sh:maxInclusive —
+    // the bound keeps its typed literal form for typed comparison.
+    if let Some(v) = typed_value("minExclusive") {
         constraints.push(Constraint::MinExclusive(v));
     }
-    if let Some(v) = single_value(
-        store,
-        shapes_graph,
-        shape_iri,
-        &format!("{}minInclusive", SH),
-    ) {
+    if let Some(v) = typed_value("minInclusive") {
         constraints.push(Constraint::MinInclusive(v));
     }
-    if let Some(v) = single_value(
-        store,
-        shapes_graph,
-        shape_iri,
-        &format!("{}maxExclusive", SH),
-    ) {
+    if let Some(v) = typed_value("maxExclusive") {
         constraints.push(Constraint::MaxExclusive(v));
     }
-    if let Some(v) = single_value(
-        store,
-        shapes_graph,
-        shape_iri,
-        &format!("{}maxInclusive", SH),
-    ) {
+    if let Some(v) = typed_value("maxInclusive") {
         constraints.push(Constraint::MaxInclusive(v));
     }
 
@@ -444,18 +514,18 @@ fn load_constraints(
         constraints.push(Constraint::LessThanOrEquals(v));
     }
 
-    // sh:hasValue
-    if let Some(v) = single_value(store, shapes_graph, shape_iri, &format!("{}hasValue", SH)) {
+    // sh:hasValue (typed: may be an IRI or a literal)
+    if let Some(v) = typed_value("hasValue") {
         constraints.push(Constraint::HasValue(v));
     }
 
-    // sh:in (RDF list)
-    let in_values = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}in", SH));
+    // sh:in (RDF list, typed members)
+    let in_values = load_rdf_list_terms(store, shapes_graph, shape_iri, &format!("{}in", SH));
     if !in_values.is_empty() {
         constraints.push(Constraint::In(in_values));
     }
 
-    // sh:languageIn (RDF list)
+    // sh:languageIn (RDF list of language-tag strings)
     let lang_values = load_rdf_list(store, shapes_graph, shape_iri, &format!("{}languageIn", SH));
     if !lang_values.is_empty() {
         constraints.push(Constraint::LanguageIn(lang_values));
@@ -468,7 +538,8 @@ fn load_constraints(
         }
     }
 
-    // sh:closed + sh:ignoredProperties
+    // sh:closed + sh:ignoredProperties. A closed shape allows exactly the
+    // predicate paths of its own property shapes plus the ignored list.
     let is_closed = store
         .objects_for_subject_in_graph(shape_iri, &format!("{SH}closed"), Some(shapes_graph))
         .iter()
@@ -480,14 +551,33 @@ fn load_constraints(
             shape_iri,
             &format!("{}ignoredProperties", SH),
         );
+        let mut allowed = Vec::new();
+        for ps in store
+            .objects_for_subject_in_graph(shape_iri, &format!("{SH}property"), Some(shapes_graph))
+            .iter()
+            .map(term_to_lexical)
+        {
+            if let Some(Term::NamedNode(p)) = store
+                .objects_for_subject_in_graph(&ps, &format!("{SH}path"), Some(shapes_graph))
+                .into_iter()
+                .next()
+            {
+                allowed.push(p.as_str().to_string());
+            }
+        }
         constraints.push(Constraint::Closed {
             ignored_properties: ignored,
+            allowed_properties: allowed,
         });
     }
 
-    // sh:node
+    // sh:node — loaded inline (named or blank) so inline `sh:node [ … ]` bodies
+    // are enforced rather than looked up — and silently skipped — in the
+    // top-level shapes list.
     for v in multi_values(store, shapes_graph, shape_iri, &format!("{}node", SH)) {
-        constraints.push(Constraint::Node(v));
+        if let Ok(node_shape) = load_inline_shape(store, shapes_graph, &v) {
+            constraints.push(Constraint::Node(Box::new(node_shape)));
+        }
     }
 
     // sh:not
@@ -560,6 +650,13 @@ fn load_constraints(
             &format!("{}qualifiedMaxCount", SH),
         )
         .and_then(|v| v.parse::<usize>().ok());
+        let disjoint = single_value(
+            store,
+            shapes_graph,
+            shape_iri,
+            &format!("{}qualifiedValueShapesDisjoint", SH),
+        )
+        .is_some_and(|v| v == "true");
         // Load the value shape inline (named or blank) so an inline `[ … ]` is enforced
         // rather than looked up — and silently skipped — in the top-level shapes list.
         if let Ok(qvs_shape) = load_inline_shape(store, shapes_graph, &qvs_iri) {
@@ -567,6 +664,9 @@ fn load_constraints(
                 shape: Box::new(qvs_shape),
                 min_count,
                 max_count,
+                disjoint,
+                // Wired by load_property_shapes_inner once all siblings are loaded.
+                sibling_shapes: Vec::new(),
             });
         }
     }
@@ -631,14 +731,45 @@ fn load_constraints(
     Ok(constraints)
 }
 
-/// Load an inline (possibly blank-node) shape by IRI for use in logical constraint operators.
+/// Load an inline (possibly blank-node) shape by IRI for use in logical constraint
+/// operators, sh:node and sh:qualifiedValueShape. An inline shape carrying its own
+/// `sh:path` is a *property* shape: its constraints apply along that path.
 fn load_inline_shape(
     store: &TripleStore,
     shapes_graph: &str,
     shape_iri: &str,
 ) -> Result<Shape, String> {
-    let constraints = load_constraints(store, shapes_graph, shape_iri)?;
-    let property_shapes = load_property_shapes_inner(store, shapes_graph, shape_iri)?;
+    // Inline shapes load eagerly and may reference each other — bound the loader
+    // recursion so a cyclic shapes graph cannot overflow the stack at load time.
+    let (_guard, within_limit) = LoadDepthGuard::enter();
+    if !within_limit {
+        return Err(format!(
+            "shape load recursion exceeded max depth {MAX_SHAPE_LOAD_DEPTH} at <{shape_iri}>"
+        ));
+    }
+
+    let mut constraints = load_constraints(store, shapes_graph, shape_iri)?;
+    let mut property_shapes = load_property_shapes_inner(store, shapes_graph, shape_iri)?;
+
+    if let Some(own_path) = single_value(store, shapes_graph, shape_iri, &format!("{SH}path"))
+        .and_then(|p| parse_property_path(store, shapes_graph, &p))
+    {
+        constraints.extend(
+            property_shapes
+                .drain(..)
+                .map(|ps| Constraint::Property(Box::new(ps))),
+        );
+        property_shapes = vec![PropertyShape {
+            iri: Some(shape_iri.to_string()),
+            path: own_path,
+            constraints: std::mem::take(&mut constraints),
+            name: None,
+            description: None,
+            severity: None,
+            message: None,
+        }];
+    }
+
     Ok(Shape {
         iri: shape_iri.to_string(),
         shape_type: ShapeType::NodeShape,
@@ -664,6 +795,15 @@ fn load_property_shapes_inner(
     shapes_graph: &str,
     shape_iri: &str,
 ) -> Result<Vec<PropertyShape>, String> {
+    // Bound recursion: nested `sh:property` chains load eagerly and could cycle
+    // through named property shapes.
+    let (_guard, within_limit) = LoadDepthGuard::enter();
+    if !within_limit {
+        return Err(format!(
+            "property-shape load recursion exceeded max depth {MAX_SHAPE_LOAD_DEPTH} at <{shape_iri}>"
+        ));
+    }
+
     // Use the raw quad index so a blank-node parent (an inline `sh:node` /
     // `sh:qualifiedValueShape` body) can have its property shapes dereferenced.
     let ps_iris: Vec<String> = store
@@ -695,10 +835,23 @@ fn load_property_shapes_inner(
         };
 
         // Load constraints on the property shape
-        let constraints = load_constraints(store, shapes_graph, ps_iri)?;
+        let mut constraints = load_constraints(store, shapes_graph, ps_iri)?;
+
+        // Nested `sh:property` on a property shape: each value node along this
+        // shape's path is validated against the nested property shape
+        // (SHACL §2.1.3, see w3c property/property-001).
+        if let Ok(nested) = load_property_shapes_inner(store, shapes_graph, ps_iri) {
+            constraints.extend(
+                nested
+                    .into_iter()
+                    .map(|ps| Constraint::Property(Box::new(ps))),
+            );
+        }
 
         let name = single_value(store, shapes_graph, ps_iri, &format!("{}name", SH));
         let description = single_value(store, shapes_graph, ps_iri, &format!("{}description", SH));
+        let severity = single_value(store, shapes_graph, ps_iri, &format!("{}severity", SH));
+        let message = single_value(store, shapes_graph, ps_iri, &format!("{}message", SH));
 
         result.push(PropertyShape {
             iri: Some(ps_iri.clone()),
@@ -706,7 +859,39 @@ fn load_property_shapes_inner(
             constraints,
             name,
             description,
+            severity,
+            message,
         });
+    }
+
+    // sh:qualifiedValueShapesDisjoint: a property shape's *sibling shapes* are the
+    // qualified value shapes of the other property shapes that share its parent
+    // (SHACL §4.5.4). Wire them now that every sibling is loaded.
+    let sibling_qvs: Vec<Option<Shape>> = result
+        .iter()
+        .map(|ps| {
+            ps.constraints.iter().find_map(|c| match c {
+                Constraint::QualifiedValueShape { shape, .. } => Some((**shape).clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    for (i, ps) in result.iter_mut().enumerate() {
+        for c in ps.constraints.iter_mut() {
+            if let Constraint::QualifiedValueShape {
+                disjoint: true,
+                sibling_shapes,
+                ..
+            } = c
+            {
+                *sibling_shapes = sibling_qvs
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .filter_map(|(_, s)| s.clone())
+                    .collect();
+            }
+        }
     }
 
     Ok(result)
@@ -716,42 +901,28 @@ fn load_property_shapes_inner(
 // Target resolution
 // ---------------------------------------------------------------------------
 
-/// Term kind of a resolved focus node, recorded at target resolution so
-/// node-level constraints (sh:nodeKind) can classify exactly instead of
-/// guessing from the lexical form — a string literal like "mailto:x@y.org" is
-/// otherwise indistinguishable from an IRI once stringified. `Unknown` keeps
-/// the lexical heuristic for paths where the kind was lost before resolution
-/// (sh:targetNode is loaded from the shapes graph as a bare string, and inline
-/// value-node recursion never had a kind).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusKind {
-    Iri,
-    BlankNode,
-    Literal,
-    Unknown,
-}
-
-fn resolve_targets(
-    store: &TripleStore,
-    shape: &Shape,
-    data_graphs: &[String],
-) -> Vec<(String, FocusKind)> {
-    let mut focus_nodes: Vec<(String, FocusKind)> = Vec::new();
+fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -> Vec<Term> {
+    let mut focus_nodes: Vec<Term> = Vec::new();
 
     for target in &shape.targets {
         match target {
             Target::TargetClass(class_iri) => {
-                // All instances of the class across the dataset's data graphs.
+                // All SHACL instances of the class across the dataset's data
+                // graphs — including instances of subclasses
+                // (rdf:type/rdfs:subClassOf*, SHACL §2.1.3.1).
                 let query = format!(
                     "SELECT DISTINCT ?s WHERE {{ {} }}",
-                    graph_scoped(data_graphs, &format!("?s a <{class_iri}>"))
+                    graph_scoped(
+                        data_graphs,
+                        &format!("?s <{RDF_TYPE}>/<{RDFS_SUBCLASS}>* <{class_iri}>")
+                    )
                 );
                 if let Ok(nodes) = execute_select_terms(store, &query, "s") {
                     focus_nodes.extend(nodes);
                 }
             }
-            Target::TargetNode(node_iri) => {
-                focus_nodes.push((node_iri.clone(), FocusKind::Unknown));
+            Target::TargetNode(node) => {
+                focus_nodes.push(node.clone());
             }
             Target::TargetSubjectsOf(pred_iri) => {
                 let query = format!(
@@ -780,13 +951,10 @@ fn resolve_targets(
         }
     }
 
-    // Deduplicate by lexical form, preferring an exactly-known kind over
-    // Unknown when the same node arrives via multiple targets.
-    focus_nodes.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| (a.1 == FocusKind::Unknown).cmp(&(b.1 == FocusKind::Unknown)))
-    });
-    focus_nodes.dedup_by(|a, b| a.0 == b.0);
+    // Deduplicate by term identity (N-Triples form) — the same node may arrive
+    // via multiple targets.
+    let mut seen = std::collections::BTreeSet::new();
+    focus_nodes.retain(|t| seen.insert(t.to_string()));
     focus_nodes
 }
 
@@ -894,8 +1062,8 @@ fn resolve_rule_targets(
         deactivated: false,
     };
     resolve_targets(store, &dummy_shape, data_graphs)
-        .into_iter()
-        .map(|(node, _)| node)
+        .iter()
+        .map(term_to_lexical)
         .collect()
 }
 
@@ -1005,31 +1173,14 @@ fn execute_select_single(
     }
 }
 
-/// Like [`execute_select_single`], but records each term's kind alongside its
-/// lexical form, so target resolution can carry term kinds into constraint
-/// evaluation (see [`FocusKind`]).
-fn execute_select_terms(
-    store: &TripleStore,
-    query: &str,
-    var: &str,
-) -> Result<Vec<(String, FocusKind)>, String> {
+/// Like [`execute_select_single`], but keeps the full typed terms so target
+/// resolution carries term kind, datatype and language into constraint
+/// evaluation.
+fn execute_select_terms(store: &TripleStore, query: &str, var: &str) -> Result<Vec<Term>, String> {
     match store.query(query) {
         Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => Ok(solutions
             .filter_map(|s| s.ok())
-            .filter_map(|s| {
-                s.get(var).map(|v| match v {
-                    oxigraph::model::Term::NamedNode(nn) => {
-                        (nn.as_str().to_string(), FocusKind::Iri)
-                    }
-                    oxigraph::model::Term::Literal(lit) => {
-                        (lit.value().to_string(), FocusKind::Literal)
-                    }
-                    oxigraph::model::Term::BlankNode(bn) => {
-                        (format!("_:{}", bn.as_str()), FocusKind::BlankNode)
-                    }
-                    oxigraph::model::Term::Triple(t) => (t.to_string(), FocusKind::Unknown),
-                })
-            })
+            .filter_map(|s| s.get(var).cloned())
             .collect()),
         Ok(_) => Ok(Vec::new()),
         Err(e) => Err(format!("Query error: {}", e)),
@@ -1074,9 +1225,11 @@ fn multi_values(
 /// path operators `sh:inversePath`, `sh:alternativePath` (an RDF list), `sh:zeroOrMorePath`,
 /// `sh:oneOrMorePath`, `sh:zeroOrOnePath`. Blank-node cells are walked through the raw quad
 /// index (SPARQL surface syntax cannot re-address them). Returns `None` for an empty or
-/// malformed path so the caller can skip the property shape rather than mis-bind it. The
-/// previous loader treated every path as a single predicate, so a blank-node path collapsed
-/// to `Predicate("_:bn")` and matched nothing.
+/// malformed path so the caller can skip the property shape rather than mis-bind it.
+///
+/// A node carrying BOTH list cells (`rdf:first`/`rdf:rest`) and a path operator is
+/// interpreted as the sequence path — matching the W3C suite's `path-strange-*`
+/// expectations, which treat the list reading as authoritative.
 fn parse_property_path(
     store: &TripleStore,
     shapes_graph: &str,
@@ -1086,7 +1239,14 @@ fn parse_property_path(
     if !node.starts_with("_:") {
         return Some(PropertyPath::Predicate(node.to_string()));
     }
-    // Blank node: a path-operator object, otherwise an RDF-list sequence path.
+    // Blank node: an RDF-list sequence path takes precedence over operators.
+    let seq: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, node)
+        .iter()
+        .filter_map(|e| parse_property_path(store, shapes_graph, e))
+        .collect();
+    if !seq.is_empty() {
+        return Some(PropertyPath::Sequence(seq));
+    }
     let op = |p: &str| -> Option<String> {
         store
             .objects_for_subject_in_graph(node, &format!("{SH}{p}"), Some(shapes_graph))
@@ -1116,12 +1276,7 @@ fn parse_property_path(
         return parse_property_path(store, shapes_graph, &inner)
             .map(|p| PropertyPath::ZeroOrOne(Box::new(p)));
     }
-    // Otherwise: an RDF-list sequence path `( p1 p2 … )`.
-    let seq: Vec<PropertyPath> = rdf_list_elements(store, shapes_graph, node)
-        .iter()
-        .filter_map(|e| parse_property_path(store, shapes_graph, e))
-        .collect();
-    (!seq.is_empty()).then_some(PropertyPath::Sequence(seq))
+    None
 }
 
 /// Walk the RDF list whose head is `head`, returning each member's lexical node form
@@ -1198,12 +1353,23 @@ fn load_rdf_list(
     subject: &str,
     predicate: &str,
 ) -> Vec<String> {
-    // Walk the RDF list via rdf:first/rdf:rest. In standard Turtle `( … )`
-    // syntax the list cells are blank nodes, which SPARQL surface syntax cannot
-    // re-address (`_:x` in a query is a fresh existential, so the old
-    // `<_:bn>`-interpolated queries silently matched nothing and left every
-    // list-based constraint — sh:in, sh:languageIn, sh:and/or/xone,
-    // sh:ignoredProperties — empty). Resolve cells through the raw quad index.
+    load_rdf_list_terms(store, shapes_graph, subject, predicate)
+        .iter()
+        .map(term_to_lexical)
+        .collect()
+}
+
+/// Walk the RDF list reached from `subject` via `predicate`, keeping each
+/// member's *typed* term (sh:in members may be typed literals). In standard
+/// Turtle `( … )` syntax the list cells are blank nodes, which SPARQL surface
+/// syntax cannot re-address (`_:x` in a query is a fresh existential), so cells
+/// are resolved through the raw quad index.
+fn load_rdf_list_terms(
+    store: &TripleStore,
+    shapes_graph: &str,
+    subject: &str,
+    predicate: &str,
+) -> Vec<Term> {
     const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
     const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
     const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
@@ -1228,7 +1394,7 @@ fn load_rdf_list(
             .into_iter()
             .next()
         {
-            values.push(term_to_lexical(&first));
+            values.push(first);
         }
         match store
             .objects_for_subject_in_graph(&current, RDF_REST, Some(shapes_graph))
@@ -1298,9 +1464,6 @@ mod tests {
     use crate::store::TripleStore;
     use oxigraph::io::RdfFormat;
 
-    // Uses a *named* property shape (ex:NameProp) rather than a blank node: the
-    // engine resolves property-shape constraints by IRI, so a blank-node
-    // `sh:property [ ... ]` is not currently picked up.
     const SHAPES: &str = r#"
         @prefix sh: <http://www.w3.org/ns/shacl#> .
         @prefix ex: <http://example.org/> .
@@ -1489,7 +1652,7 @@ mod tests {
     // literal reached via sh:targetObjectsOf whose lexical form is scheme-shaped
     // ("mailto:info@example.org") was misclassified as an IRI by node-level
     // sh:nodeKind — wrongly passing sh:IRI and wrongly violating sh:Literal.
-    // Target resolution now records the term kind alongside the lexical form.
+    // Focus nodes are typed terms end-to-end now.
     const MAILTO_DATA: &str = r#"
         @prefix ex: <http://example.org/> .
         ex:x ex:p "mailto:info@example.org" .
@@ -1540,5 +1703,31 @@ mod tests {
             "violation should name the literal focus node, got {:?}",
             report.results,
         );
+    }
+
+    // Typed focus nodes: node-level value constraints (range, datatype) must
+    // evaluate against the focus literal's datatype — `sh:targetNode 7` with
+    // `sh:minInclusive 8` is a violation, `9` conforms.
+    #[test]
+    fn node_level_range_constraint_on_literal_targets() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:RangeShape a sh:NodeShape ;
+                sh:minInclusive 8 ;
+                sh:targetNode 7 ;
+                sh:targetNode 9 .
+        "#;
+        let store = store_with(shapes, "");
+
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+
+        assert!(!report.conforms, "7 < 8 must violate sh:minInclusive");
+        assert_eq!(
+            report.results_count, 1,
+            "only 7 violates: {:?}",
+            report.results
+        );
+        assert_eq!(report.results[0].focus_node, "7");
     }
 }
