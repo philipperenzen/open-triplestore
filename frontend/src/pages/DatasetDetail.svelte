@@ -45,7 +45,11 @@
     listOrganisations,
     getDatasetEffectiveShapes,
     listBindingsForTarget,
+    getLatestValidationRun,
+    getValidationHistory,
   } from '../lib/api.js';
+  import { unwrapValidationRun, validationErrorMessage } from '../lib/validationReport.js';
+  import { toastSuccess } from '../lib/toast.ts';
   import { RESOURCE_ROLES, RESOURCE_ROLE_RANK, VISIBILITY_LABEL } from '../lib/permissions.js';
   import { t as i18nT } from 'svelte-i18n';
   import { Link, navigate } from '../lib/router/index.js';
@@ -112,11 +116,20 @@
       await updateGraphRole(id, iri, role || null);
       graphs = graphs.map(gr => graphIri(gr) === iri ? { ...(typeof gr === 'string' ? { graph_iri: gr } : gr), graph_role: role || null } : gr);
       editingGraphRoleIri = null;
+      if (role === 'shapes') onShapesRoleAssigned();
     } catch (e) {
       error = e.message;
     } finally {
       updatingGraphRole = false;
     }
+  }
+
+  // A graph just got the 'shapes' role: the backend auto-registers it in the
+  // SHACL Studio library, so refresh the effective-shapes panel and say so.
+  function onShapesRoleAssigned() {
+    shapesRoleNotice = true;
+    toastSuccess($i18nT('pages.datasetDetail.shapesRoleSetToast'));
+    void loadEffectiveShapes();
   }
 
   let updatingGraphPrivacy = null; // IRI currently being toggled
@@ -468,6 +481,38 @@
   let validationReport = null;
   let validating = false;
   let shapesGraphIri = '';
+  let validationError = '';
+  let validationRanAt = null;
+  let validationHistory = [];
+  // Set after a graph's role becomes 'shapes': the backend auto-registers it
+  // in the SHACL Studio library, so we surface a pointer to it.
+  let shapesRoleNotice = false;
+
+  function fmtDateTime(s) {
+    if (!s) return '';
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? s : d.toLocaleString();
+  }
+
+  // Last persisted run + a short history, so the section shows state on load.
+  async function loadValidationState() {
+    if (!$isAuthenticated) return;
+    try {
+      const latest = await getLatestValidationRun(id);
+      if (latest) {
+        const run = unwrapValidationRun(latest);
+        if (run.report) {
+          validationReport = run.report;
+          validationRanAt = run.ranAt;
+        }
+      }
+    } catch (_) { /* non-fatal — the card still allows running validation */ }
+    try {
+      validationHistory = (await getValidationHistory(id, 5)) || [];
+    } catch (_) {
+      validationHistory = [];
+    }
+  }
 
   // Validation layer: shape graphs that effectively apply (dataset-level bindings
   // ∪ shapes inherited from the dataset's graphs).
@@ -699,7 +744,7 @@
   onMount(async () => {
     // fetchAccess depends on the loaded dataset (owner + can_manage), so run it after.
     await Promise.all([fetchDataset(), fetchGraphs(), fetchServices(), fetchAssets(), fetchVersions()]);
-    await Promise.all([fetchAccess(), loadDataPreview(), loadEffectiveShapes()]);
+    await Promise.all([fetchAccess(), loadDataPreview(), loadEffectiveShapes(), loadValidationState()]);
   });
 
   async function fetchDataset() {
@@ -1160,13 +1205,23 @@
 
   async function runValidation() {
     validating = true;
-    validationReport = null;
+    validationError = '';
     try {
-      validationReport = await validateDataset(id, {
+      // The endpoint returns an envelope { report, run_id, ran_at } — unwrap it.
+      const res = await validateDataset(id, {
         shapes_graph: shapesGraphIri || null,
       });
+      const run = unwrapValidationRun(res);
+      validationReport = run.report;
+      validationRanAt = run.ranAt;
+      // The run may have resolved shapes that weren't listed yet (e.g. freshly
+      // auto-registered imported shapes) — refresh the panel and the history.
+      await Promise.all([
+        loadEffectiveShapes(),
+        getValidationHistory(id, 5).then((h) => { validationHistory = h || []; }).catch(() => {}),
+      ]);
     } catch (e) {
-      error = e.message;
+      validationError = validationErrorMessage(e, $i18nT('pages.datasetDetail.validationFailed'));
     } finally {
       validating = false;
     }
@@ -1385,9 +1440,20 @@
       contextName={dataset?.name}
       datasetId={id}
       declaredRole={dataset?.graph_role ?? null}
-      onresolved={(e) => { dataset = { ...dataset, graph_role: e.role }; }}
+      onresolved={(e) => {
+        dataset = { ...dataset, graph_role: e.role };
+        if (e.role === 'shapes') onShapesRoleAssigned();
+      }}
     />
   {/key}
+{/if}
+
+{#if shapesRoleNotice}
+  <div class="card shapes-studio-note">
+    <ShieldCheck size={15} />
+    <span>{$i18nT('pages.datasetDetail.shapesAutoRegisteredNotice')}</span>
+    <Link to="/shacl/shapes" class="btn btn-sm btn-ghost shapes-studio-link">{$i18nT('pages.datasetDetail.openShaclStudio')}</Link>
+  </div>
 {/if}
 
 <!-- Explore & Visualize -->
@@ -2031,10 +2097,15 @@
     </div>
   {/if}
 
+  {#if validationError}
+    <p class="error validation-error">{validationError}</p>
+  {/if}
+
   {#if validationReport}
     <div class="report" class:conforms={validationReport.conforms}>
       <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
-        — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}</p>
+        — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}
+        {#if validationRanAt}<span class="run-meta" title={validationRanAt}> · {fmtDateTime(validationRanAt)}</span>{/if}</p>
       {#if validationReport.results.length > 0}
         <table>
           <thead>
@@ -2053,8 +2124,26 @@
         </table>
       {/if}
     </div>
-  {:else}
+  {:else if !validationError}
     <p class="hint-text">{$i18nT('pages.datasetDetail.runValidationHint')}</p>
+  {/if}
+
+  {#if validationHistory.length > 0}
+    <div class="val-history">
+      <div class="eff-head">{$i18nT('pages.datasetDetail.recentValidationRuns')}</div>
+      <ul class="val-history-list">
+        {#each validationHistory as run (run.id)}
+          <li class="val-history-item">
+            {#if run.conforms}
+              <span class="vh-pill vh-ok"><Check size={11} /> {$i18nT('pages.datasetDetail.conforms')}</span>
+            {:else}
+              <span class="vh-pill vh-fail"><XIcon size={11} /> {run.results_count} {$i18nT('pages.datasetDetail.results')}</span>
+            {/if}
+            <span class="vh-time" title={run.run_timestamp}>{fmtDateTime(run.run_timestamp)}</span>
+          </li>
+        {/each}
+      </ul>
+    </div>
   {/if}
 </div>
 </div><!-- /detail-stack -->
@@ -2168,6 +2257,9 @@
           <input id="shapes-iri" bind:value={shapesGraphIri} placeholder="https://example.org/shapes" />
           <p class="field-hint-text">{$i18nT('pages.datasetDetail.shapesGraphBlankHint')}</p>
         </div>
+        {#if validationError}
+          <p class="error validation-error">{validationError}</p>
+        {/if}
         {#if validationReport}
           <div class="report" class:conforms={validationReport.conforms}>
             <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
@@ -2681,6 +2773,22 @@
   .report { padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem; }
   .report.conforms { background: #d4edda; }
   .report:not(.conforms) { background: #f8d7da; }
+  .run-meta { font-weight: 400; font-size: 0.78rem; opacity: 0.75; }
+  .validation-error { margin: 0.5rem 0 0; }
+
+  .val-history { margin-top: 0.75rem; }
+  .val-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+  .val-history-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; }
+  .vh-pill { display: inline-flex; align-items: center; gap: 3px; font-size: 0.68rem; padding: 1px 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+  .vh-ok { background: #dcfce7; color: #15803d; }
+  .vh-fail { background: #fee2e2; color: #b91c1c; }
+  .vh-time { color: var(--ink-400, #9ca3af); }
+  :global(:is([data-theme="dark"], .dark)) .vh-ok { background: rgba(16,185,129,0.18); color: #6ee7b7; }
+  :global(:is([data-theme="dark"], .dark)) .vh-fail { background: rgba(239,68,68,0.18); color: #fca5a5; }
+
+  .shapes-studio-note { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; }
+  .shapes-studio-note span { flex: 1; min-width: 0; }
+  :global(.shapes-studio-link) { flex-shrink: 0; }
 
   .effective-shapes { margin: 0.25rem 0 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--line-soft, #e5e7eb); border-radius: 8px; background: var(--bg-soft, #f8fafc); }
   .eff-head { font-size: 0.8rem; font-weight: 600; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; margin-bottom: 0.4rem; }

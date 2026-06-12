@@ -12,10 +12,11 @@
   import {
     getPipeline, createPipeline, updatePipeline, deletePipeline, runPipeline,
     listShapeGraphs, listDatasets, browseGraphs,
+    getDatasetEffectiveShapes, listBindingsForTarget,
   } from '../lib/api.js';
   import {
     Workflow, ArrowLeft, Save, Trash2, Play, Loader2, ShieldCheck, Database, FileCode,
-    Calendar, Zap, AlertTriangle, GitMerge, Network, FlaskConical,
+    Calendar, Zap, AlertTriangle, GitMerge, Network, FlaskConical, X,
   } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -47,8 +48,6 @@
   let targetClasses = '';             // comma separated; advanced, informational
   let shapeGraphIds = new Set();        // the shape graphs used AS validators
 
-  let graphFilter = '';
-
   let severityThreshold = 'violation';
   let runInference = false;
   let maxResults = '';
@@ -71,11 +70,199 @@
   // Picker data
   let allShapeGraphs = [];
   let allDatasets = [];
-  let allGraphs = [];
+  let graphEntries = [];   // [{iri, label, context, groupKey, groupLabel, groupLabelKey, system}]
 
-  $: filteredGraphs = graphFilter.trim()
-    ? allGraphs.filter((g) => (g.iri + ' ' + g.name).toLowerCase().includes(graphFilter.trim().toLowerCase()))
-    : allGraphs;
+  // ── Selected-first ordering (with hover-freeze) ───────────────────────────
+  // Each picker renders a memoised ordering: checked items pinned on top
+  // (alphabetical), a subtle divider, then the unchecked rest (alphabetical;
+  // the graphs picker groups the rest by owning dataset). The ordering is
+  // recomputed on: data load, search-text change, the system-graphs toggle,
+  // chip removal, and the pointer/focus LEAVING the list — but deliberately
+  // NOT while the pointer is inside the list, so rows never jump under the
+  // cursor mid-click. Counts, chips and the summary still update live.
+  let dsSearch = '';
+  let graphSearch = '';
+  let metaSearch = '';
+  let valSearch = '';
+  let showSystemGraphs = false;
+
+  let dsOrder = [];        // datasets, with _pinned flags frozen at sort time
+  let metaOrder = [];      // shape graphs as meta-targets
+  let valOrder = [];       // shape graphs as validators
+  let graphPinned = [];    // selected graphs (always visible, even system ones)
+  let graphGroups = [];    // unselected graphs, grouped: [{key, label, labelKey, items}]
+
+  $: systemGraphCount = graphEntries.filter((g) => g.system).length;
+
+  function buildGraphEntries(rawIris) {
+    const dsPrefixes = allDatasets.map((d) => ({
+      d,
+      prefix: d.dataset_iri ? d.dataset_iri.replace(/\/$/, '') + '/' : null,
+      segment: '/' + d.id + '/',
+    }));
+    graphEntries = rawIris.map((iri) => {
+      if (iri.startsWith('urn:system:')) {
+        const label = iri.slice('urn:system:'.length);
+        return { iri, label, context: label, groupKey: '3:system', groupLabelKey: 'groupSystemGraphs', system: true };
+      }
+      for (const { d, prefix, segment } of dsPrefixes) {
+        // Primary: the graph IRI lives under the dataset IRI. Fallback: the
+        // dataset id appears as a path segment (demo graphs use another host).
+        let suffix = null;
+        if (prefix && iri.startsWith(prefix)) suffix = iri.slice(prefix.length);
+        else {
+          const at = iri.indexOf(segment);
+          if (at > 0) suffix = iri.slice(at + segment.length);
+        }
+        if (suffix) {
+          return {
+            iri, label: suffix, context: `${d.name} / ${suffix}`,
+            groupKey: '0:' + d.name.toLowerCase() + ':' + d.id, groupLabel: d.name, system: false,
+          };
+        }
+      }
+      // Model-registry version snapshots: …/data-model/{model}/version/{ver}
+      const vm = iri.match(/\/data-model\/([^/]+)\/version\/([^/]+)\/?$/);
+      if (vm) {
+        const label = `${vm[1]} · v${vm[2]}`;
+        return { iri, label, context: label, groupKey: '1:models', groupLabelKey: 'groupModelVersions', system: false };
+      }
+      const short = shortenIRI(iri);
+      return { iri, label: short, context: short, groupKey: '2:other', groupLabelKey: 'groupOtherGraphs', system: false };
+    });
+  }
+
+  function orderFlat(items, selectedSet, idOf, nameOf, query) {
+    const q = query.trim().toLowerCase();
+    return items
+      .filter((x) => !q || (nameOf(x) + ' ' + idOf(x)).toLowerCase().includes(q))
+      .map((x) => ({ ...x, _pinned: selectedSet.has(idOf(x)) }))
+      .sort((a, b) => (a._pinned === b._pinned ? nameOf(a).localeCompare(nameOf(b)) : a._pinned ? -1 : 1));
+  }
+
+  function resortDatasets() {
+    dsOrder = orderFlat(allDatasets, datasetTargetIds, (d) => d.id, (d) => d.name, dsSearch);
+  }
+  function resortMeta() {
+    metaOrder = orderFlat(allShapeGraphs, metaShapeGraphIds, (s) => s.id, (s) => s.name, metaSearch);
+  }
+  function resortValidators() {
+    valOrder = orderFlat(allShapeGraphs, shapeGraphIds, (s) => s.id, (s) => s.name, valSearch);
+  }
+  function resortGraphs() {
+    const q = graphSearch.trim().toLowerCase();
+    const matches = (g) => !q || (g.context + ' ' + g.iri + ' ' + (g.groupLabel || '')).toLowerCase().includes(q);
+    graphPinned = graphEntries
+      .filter((g) => graphTargetIris.has(g.iri) && matches(g))
+      .sort((a, b) => a.context.localeCompare(b.context));
+    const byGroup = new Map();
+    for (const g of graphEntries) {
+      if (graphTargetIris.has(g.iri) || !matches(g) || (g.system && !showSystemGraphs)) continue;
+      if (!byGroup.has(g.groupKey)) byGroup.set(g.groupKey, { key: g.groupKey, label: g.groupLabel, labelKey: g.groupLabelKey, items: [] });
+      byGroup.get(g.groupKey).items.push(g);
+    }
+    graphGroups = [...byGroup.values()].sort((a, b) => a.key.localeCompare(b.key));
+    for (const grp of graphGroups) grp.items.sort((a, b) => a.label.localeCompare(b.label));
+  }
+  function resortAll() { resortDatasets(); resortGraphs(); resortMeta(); resortValidators(); }
+
+  // Search text (and the system toggle / loaded data) re-sorts immediately;
+  // the selection Sets are intentionally NOT referenced here (hover-freeze).
+  $: { void dsSearch; void allDatasets; resortDatasets(); }
+  $: { void graphSearch; void showSystemGraphs; void graphEntries; resortGraphs(); }
+  $: { void metaSearch; void allShapeGraphs; resortMeta(); }
+  $: { void valSearch; void allShapeGraphs; resortValidators(); }
+
+  /** Re-sort when keyboard focus leaves the picker entirely. */
+  function focusLeft(e, resort) {
+    if (!e.currentTarget.contains(e.relatedTarget)) resort();
+  }
+
+  // ── What validates what ───────────────────────────────────────────────────
+  // For each selected dataset/graph target we fetch the shape graphs bound to
+  // it in the validation layer (datasets: effective = own ∪ contained graphs'
+  // bindings). Cached per target for the lifetime of the editor.
+  let targetShapes = {}; // `${kind}:${id}` → { state: 'loading'|'ok'|'error', shapes: [{id,name}] }
+
+  $: ensureTargetShapes(datasetTargetIds, graphTargetIris);
+  function ensureTargetShapes(dsSel, gSel) {
+    for (const tid of dsSel) loadTargetShapes('dataset', tid);
+    for (const iri of gSel) loadTargetShapes('graph', iri);
+  }
+  async function loadTargetShapes(kind, tid) {
+    const key = `${kind}:${tid}`;
+    if (targetShapes[key]) return;
+    targetShapes = { ...targetShapes, [key]: { state: 'loading', shapes: [] } };
+    try {
+      const shapes = kind === 'dataset'
+        ? (await getDatasetEffectiveShapes(tid)) || []
+        : (await listBindingsForTarget('graph', tid))?.shape_graphs || [];
+      targetShapes = { ...targetShapes, [key]: { state: 'ok', shapes: shapes.map((s) => ({ id: s.id, name: s.name })) } };
+    } catch {
+      targetShapes = { ...targetShapes, [key]: { state: 'error', shapes: [] } };
+    }
+  }
+
+  function shapeGraphName(sid) {
+    return allShapeGraphs.find((s) => s.id === sid)?.name || sid;
+  }
+
+  /** Compact "validated by …" line under a selected target chip. */
+  function describeValidators(bound, validatorCount) {
+    const names = bound.map((s) => s.name);
+    const parts = [];
+    if (names.length) {
+      const head = names.slice(0, 2).join(', ');
+      const more = names.length - 2;
+      parts.push($i18nT('pages.pipelineEditor.validatedByList', {
+        values: { names: more > 0 ? `${head} ${$i18nT('pages.pipelineEditor.validatedByMore', { values: { count: more } })}` : head },
+      }));
+    }
+    if (validatorCount) {
+      parts.push(names.length
+        ? $i18nT('pages.pipelineEditor.pipelineValidatorCount', { values: { count: validatorCount } })
+        : $i18nT('pages.pipelineEditor.validatedByOnlyPipeline', { values: { count: validatorCount } }));
+    }
+    return parts.join(' · ');
+  }
+  function validatorsTitle(bound, validatorIds) {
+    const all = [...bound.map((s) => s.name), ...[...validatorIds].map(shapeGraphName)];
+    return [...new Set(all)].join(', ');
+  }
+
+  // ── Selection chips (pinned at the top of "What to validate") ─────────────
+  const byLabel = (a, b) => a.label.localeCompare(b.label);
+  $: dsChips = [...datasetTargetIds].map((tid) => {
+    const d = allDatasets.find((x) => x.id === tid);
+    return { kind: 'dataset', id: tid, label: d?.name || tid, title: d?.dataset_iri || tid };
+  }).sort(byLabel);
+  $: graphChips = [...graphTargetIris].map((iri) => {
+    const g = graphEntries.find((x) => x.iri === iri);
+    return { kind: 'graph', id: iri, label: g?.context || shortenIRI(iri), title: iri };
+  }).sort(byLabel);
+  $: metaChips = [...metaShapeGraphIds].map((sid) => {
+    const s = allShapeGraphs.find((x) => x.id === sid);
+    return { kind: 'shapegraph', id: sid, label: s?.name || sid, title: s?.name || sid };
+  }).sort(byLabel);
+  $: totalSelectedTargets = datasetTargetIds.size + graphTargetIris.size + metaShapeGraphIds.size;
+
+  function removeTarget(kind, tid) {
+    if (kind === 'dataset') { datasetTargetIds.delete(tid); datasetTargetIds = new Set(datasetTargetIds); resortDatasets(); }
+    else if (kind === 'graph') { graphTargetIris.delete(tid); graphTargetIris = new Set(graphTargetIris); resortGraphs(); }
+    else { metaShapeGraphIds.delete(tid); metaShapeGraphIds = new Set(metaShapeGraphIds); resortMeta(); }
+  }
+
+  // Every distinct shape graph that would take part in a run: the pipeline's
+  // own validators ∪ shapes bound to the selected targets (∪ SHACL-SHACL for
+  // meta-validated shape-graph targets).
+  $: involvedValidators = (() => {
+    const m = new Map();
+    for (const sid of shapeGraphIds) m.set(sid, shapeGraphName(sid));
+    for (const tid of datasetTargetIds) for (const s of targetShapes[`dataset:${tid}`]?.shapes || []) m.set(s.id, s.name);
+    for (const iri of graphTargetIris) for (const s of targetShapes[`graph:${iri}`]?.shapes || []) m.set(s.id, s.name);
+    if (metaShapeGraphIds.size) m.set('urn:system:shapes:shacl-shacl', 'SHACL-SHACL');
+    return m;
+  })();
 
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
@@ -92,10 +279,10 @@
       ]);
       allShapeGraphs = shapeGraphs || [];
       allDatasets = datasets || [];
-      allGraphs = (Array.isArray(graphs) ? graphs : (graphs?.graphs || []))
+      const rawIris = (Array.isArray(graphs) ? graphs : (graphs?.graphs || []))
         .map((e) => e.iri ?? e.graph ?? e.graph_iri ?? null)
-        .filter(Boolean)
-        .map((iri) => ({ iri, name: shortenIRI(iri) }));
+        .filter(Boolean);
+      buildGraphEntries(rawIris);
       if (!isNew) {
         const p = await getPipeline(id);
         name = p.name;
@@ -128,7 +315,11 @@
         resultsTarget = p.results_target || 'none';
         resultsTargetGraph = p.results_target_graph || '';
         decomposeCron(p.schedule_cron);
+        // A pipeline that already targets a system graph must show it.
+        if ([...graphTargetIris].some((iri) => iri.startsWith('urn:system:'))) showSystemGraphs = true;
       }
+      // Surface existing selections on top from the first render.
+      resortAll();
     } catch (e) {
       toastError(e.message);
     } finally {
@@ -172,6 +363,19 @@
     if (metaShapeGraphIds.size) parts.push($i18nT('pages.pipelineEditor.scopeMeta', { values: { count: metaShapeGraphIds.size } }));
     return parts.length ? parts.join(' · ') : $i18nT('pages.pipelineEditor.scopeNothing');
   })();
+
+  // Summary values: real names (truncated with "+N more"), counts in the title.
+  function truncateNames(names, max = 3) {
+    if (!names.length) return '';
+    const head = names.slice(0, max).join(', ');
+    return names.length > max
+      ? `${head} ${$i18nT('pages.pipelineEditor.summaryMore', { values: { count: names.length - max } })}`
+      : head;
+  }
+  $: scopeNames = [...dsChips, ...graphChips, ...metaChips].map((c) => c.label);
+  $: scopeValue = scopeNames.length ? truncateNames(scopeNames) : $i18nT('pages.pipelineEditor.scopeNothing');
+  $: validatorNames = [...shapeGraphIds].map(shapeGraphName).sort((a, b) => a.localeCompare(b));
+  $: validatorValue = validatorNames.length ? truncateNames(validatorNames) : $i18nT('pages.pipelineEditor.summaryNoValidators');
 
   function describeSchedule(mode, h, m, d, custom) {
     const days = [
@@ -311,43 +515,148 @@
         <header class="panel-head"><Database size={14} /><h3>{$i18nT('pages.pipelineEditor.whatToValidate')}</h3></header>
         <p class="hint">{$i18nT('pages.pipelineEditor.whatToValidateHint')}</p>
 
+        <!-- Selection summary: every selected target as a removable chip, with
+             its effective validators ("validated by …") right underneath. -->
+        <div class="sel-summary" class:is-empty={totalSelectedTargets === 0}>
+          {#if totalSelectedTargets === 0}
+            <p class="sel-empty">{$i18nT('pages.pipelineEditor.nothingSelected')}</p>
+          {:else}
+            {#if dsChips.length}
+              <div class="sel-group">
+                <span class="sel-kind"><Database size={10} /> {$i18nT('pages.pipelineEditor.datasets')}</span>
+                <div class="sel-chips">
+                  {#each dsChips as c (c.id)}
+                    {@const info = targetShapes[`dataset:${c.id}`]}
+                    {@const bound = info?.shapes || []}
+                    {@const vacuous = info?.state === 'ok' && !bound.length && !shapeGraphIds.size}
+                    <div class="sel-chip" class:warn={vacuous}>
+                      <span class="sel-chip-head">
+                        <Database size={11} />
+                        <span class="sel-chip-name" title={c.title}>{c.label}</span>
+                        <button class="sel-chip-x" on:click={() => removeTarget(c.kind, c.id)} aria-label={$i18nT('pages.pipelineEditor.removeFromSelection', { values: { name: c.label } })}><X size={11} /></button>
+                      </span>
+                      <span class="sel-chip-sub" title={vacuous ? $i18nT('pages.pipelineEditor.noValidatorsHint') : validatorsTitle(bound, shapeGraphIds)}>
+                        {#if !info || info.state === 'loading'}{$i18nT('pages.pipelineEditor.checkingShapes')}
+                        {:else if info.state === 'error'}{$i18nT('pages.pipelineEditor.bindingsUnknown')}
+                        {:else if vacuous}<AlertTriangle size={10} /> {$i18nT('pages.pipelineEditor.noValidators')}
+                        {:else}{describeValidators(bound, shapeGraphIds.size)}{/if}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            {#if graphChips.length}
+              <div class="sel-group">
+                <span class="sel-kind"><Network size={10} /> {$i18nT('pages.pipelineEditor.namedGraphs')}</span>
+                <div class="sel-chips">
+                  {#each graphChips as c (c.id)}
+                    {@const info = targetShapes[`graph:${c.id}`]}
+                    {@const bound = info?.shapes || []}
+                    {@const vacuous = info?.state === 'ok' && !bound.length && !shapeGraphIds.size}
+                    <div class="sel-chip" class:warn={vacuous}>
+                      <span class="sel-chip-head">
+                        <Network size={11} />
+                        <span class="sel-chip-name" title={c.title}>{c.label}</span>
+                        <button class="sel-chip-x" on:click={() => removeTarget(c.kind, c.id)} aria-label={$i18nT('pages.pipelineEditor.removeFromSelection', { values: { name: c.label } })}><X size={11} /></button>
+                      </span>
+                      <span class="sel-chip-sub" title={vacuous ? $i18nT('pages.pipelineEditor.noValidatorsHint') : validatorsTitle(bound, shapeGraphIds)}>
+                        {#if !info || info.state === 'loading'}{$i18nT('pages.pipelineEditor.checkingShapes')}
+                        {:else if info.state === 'error'}{$i18nT('pages.pipelineEditor.bindingsUnknown')}
+                        {:else if vacuous}<AlertTriangle size={10} /> {$i18nT('pages.pipelineEditor.noValidators')}
+                        {:else}{describeValidators(bound, shapeGraphIds.size)}{/if}
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            {#if metaChips.length}
+              <div class="sel-group">
+                <span class="sel-kind"><FlaskConical size={10} /> {$i18nT('pages.pipelineEditor.shapeGraphs')}</span>
+                <div class="sel-chips">
+                  {#each metaChips as c (c.id)}
+                    <div class="sel-chip">
+                      <span class="sel-chip-head">
+                        <FileCode size={11} />
+                        <span class="sel-chip-name" title={c.title}>{c.label}</span>
+                        <button class="sel-chip-x" on:click={() => removeTarget(c.kind, c.id)} aria-label={$i18nT('pages.pipelineEditor.removeFromSelection', { values: { name: c.label } })}><X size={11} /></button>
+                      </span>
+                      <span class="sel-chip-sub">{$i18nT('pages.pipelineEditor.metaValidatedChip')}</span>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          {/if}
+        </div>
+
         <div class="target-group">
-          <span class="group-label"><Database size={11} /> {$i18nT('pages.pipelineEditor.datasets')}</span>
-          <div class="picker">
-            {#each allDatasets as ds}
+          <span class="group-label">
+            <Database size={11} /> {$i18nT('pages.pipelineEditor.datasets')}
+            {#if datasetTargetIds.size}<span class="count-badge">{$i18nT('pages.pipelineEditor.selectedCount', { values: { count: datasetTargetIds.size } })}</span>{/if}
+          </span>
+          <input class="filter-input" placeholder={$i18nT('pages.pipelineEditor.searchDatasets')} bind:value={dsSearch} />
+          <div class="picker" role="group" aria-label={$i18nT('pages.pipelineEditor.datasets')} on:mouseleave={resortDatasets} on:focusout={(e) => focusLeft(e, resortDatasets)}>
+            {#each dsOrder as ds, i (ds.id)}
+              {#if i > 0 && !ds._pinned && dsOrder[i - 1]._pinned}<div class="sel-divider" role="separator"></div>{/if}
               <label class="picker-row">
                 <input type="checkbox" checked={datasetTargetIds.has(ds.id)} on:change={() => (datasetTargetIds = toggle(datasetTargetIds, ds.id))} />
                 <Database size={11} />
-                <span>{ds.name}</span>
+                <span title={ds.dataset_iri || ds.id}>{ds.name}</span>
                 {#if ds.visibility !== 'public'}<span class="dim">{ds.visibility}</span>{/if}
               </label>
             {/each}
             {#if allDatasets.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noDatasets')}</p>{/if}
+            {#if allDatasets.length > 0 && dsOrder.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noGraphsMatchFilter')}</p>{/if}
           </div>
         </div>
 
         <div class="target-group">
-          <span class="group-label"><Network size={11} /> {$i18nT('pages.pipelineEditor.namedGraphs')}</span>
-          {#if allGraphs.length > 8}
-            <input class="filter-input" placeholder={$i18nT('pages.pipelineEditor.filterGraphs')} bind:value={graphFilter} />
+          <span class="group-label">
+            <Network size={11} /> {$i18nT('pages.pipelineEditor.namedGraphs')}
+            {#if graphTargetIris.size}<span class="count-badge">{$i18nT('pages.pipelineEditor.selectedCount', { values: { count: graphTargetIris.size } })}</span>{/if}
+          </span>
+          <input class="filter-input" placeholder={$i18nT('pages.pipelineEditor.filterGraphs')} bind:value={graphSearch} />
+          {#if systemGraphCount > 0}
+            <label class="check sys-toggle">
+              <input type="checkbox" bind:checked={showSystemGraphs} />
+              <span>{$i18nT('pages.pipelineEditor.showSystemGraphs', { values: { count: systemGraphCount } })}</span>
+            </label>
           {/if}
-          <div class="picker">
-            {#each filteredGraphs as g (g.iri)}
+          <div class="picker picker-graphs" role="group" aria-label={$i18nT('pages.pipelineEditor.namedGraphs')} on:mouseleave={resortGraphs} on:focusout={(e) => focusLeft(e, resortGraphs)}>
+            {#each graphPinned as g (g.iri)}
               <label class="picker-row">
                 <input type="checkbox" checked={graphTargetIris.has(g.iri)} on:change={() => (graphTargetIris = toggle(graphTargetIris, g.iri))} />
                 <Network size={11} />
-                <span title={g.iri}>{g.name}</span>
+                <span title={g.iri}>{g.context}</span>
               </label>
             {/each}
-            {#if allGraphs.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noNamedGraphs')}</p>{/if}
-            {#if allGraphs.length > 0 && filteredGraphs.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noGraphsMatchFilter')}</p>{/if}
+            {#if graphPinned.length && graphGroups.length}<div class="sel-divider" role="separator"></div>{/if}
+            {#each graphGroups as grp (grp.key)}
+              <div class="picker-group-head">{grp.label ?? $i18nT(`pages.pipelineEditor.${grp.labelKey}`)}</div>
+              {#each grp.items as g (g.iri)}
+                <label class="picker-row picker-row-grouped">
+                  <input type="checkbox" checked={graphTargetIris.has(g.iri)} on:change={() => (graphTargetIris = toggle(graphTargetIris, g.iri))} />
+                  <Network size={11} />
+                  <span title={g.iri}>{g.label}</span>
+                </label>
+              {/each}
+            {/each}
+            {#if graphEntries.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noNamedGraphs')}</p>{/if}
+            {#if graphEntries.length > 0 && graphPinned.length === 0 && graphGroups.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noGraphsMatchFilter')}</p>{/if}
           </div>
         </div>
 
         <div class="target-group">
-          <span class="group-label"><FlaskConical size={11} /> {$i18nT('pages.pipelineEditor.shapeGraphs')} <span class="group-note">{$i18nT('pages.pipelineEditor.shapeGraphsMetaNote')}</span></span>
-          <div class="picker">
-            {#each allShapeGraphs as set}
+          <span class="group-label">
+            <FlaskConical size={11} /> {$i18nT('pages.pipelineEditor.shapeGraphs')} <span class="group-note">{$i18nT('pages.pipelineEditor.shapeGraphsMetaNote')}</span>
+            {#if metaShapeGraphIds.size}<span class="count-badge">{$i18nT('pages.pipelineEditor.selectedCount', { values: { count: metaShapeGraphIds.size } })}</span>{/if}
+          </span>
+          <input class="filter-input" placeholder={$i18nT('pages.pipelineEditor.searchShapeGraphs')} bind:value={metaSearch} />
+          <div class="picker" role="group" aria-label={$i18nT('pages.pipelineEditor.shapeGraphs')} on:mouseleave={resortMeta} on:focusout={(e) => focusLeft(e, resortMeta)}>
+            {#each metaOrder as set, i (set.id)}
+              {#if i > 0 && !set._pinned && metaOrder[i - 1]._pinned}<div class="sel-divider" role="separator"></div>{/if}
               <label class="picker-row">
                 <input type="checkbox" checked={metaShapeGraphIds.has(set.id)} on:change={() => (metaShapeGraphIds = toggle(metaShapeGraphIds, set.id))} />
                 <FileCode size={11} />
@@ -356,6 +665,7 @@
               </label>
             {/each}
             {#if allShapeGraphs.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noShapeGraphs')}</p>{/if}
+            {#if allShapeGraphs.length > 0 && metaOrder.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noGraphsMatchFilter')}</p>{/if}
           </div>
         </div>
 
@@ -370,10 +680,15 @@
 
       <!-- Validators -->
       <section class="card panel">
-        <header class="panel-head"><FileCode size={14} /><h3>{$i18nT('pages.pipelineEditor.validateWith')}</h3></header>
+        <header class="panel-head">
+          <FileCode size={14} /><h3>{$i18nT('pages.pipelineEditor.validateWith')}</h3>
+          {#if shapeGraphIds.size}<span class="count-badge">{$i18nT('pages.pipelineEditor.selectedCount', { values: { count: shapeGraphIds.size } })}</span>{/if}
+        </header>
         <p class="hint">{$i18nT('pages.pipelineEditor.validateWithHint')}</p>
-        <div class="picker">
-          {#each allShapeGraphs as set}
+        <input class="filter-input" placeholder={$i18nT('pages.pipelineEditor.searchShapeGraphs')} bind:value={valSearch} />
+        <div class="picker" role="group" aria-label={$i18nT('pages.pipelineEditor.validateWith')} on:mouseleave={resortValidators} on:focusout={(e) => focusLeft(e, resortValidators)}>
+          {#each valOrder as set, i (set.id)}
+            {#if i > 0 && !set._pinned && valOrder[i - 1]._pinned}<div class="sel-divider" role="separator"></div>{/if}
             <label class="picker-row">
               <input type="checkbox" checked={shapeGraphIds.has(set.id)} on:change={() => (shapeGraphIds = toggle(shapeGraphIds, set.id))} />
               <FileCode size={11} />
@@ -384,6 +699,7 @@
           {#if allShapeGraphs.length === 0}
             <p class="empty">{$i18nT('pages.pipelineEditor.noShapeGraphsLibrary')} <Link to="/shacl/shapes">{$i18nT('pages.pipelineEditor.createOne')}</Link></p>
           {/if}
+          {#if allShapeGraphs.length > 0 && valOrder.length === 0}<p class="empty">{$i18nT('pages.pipelineEditor.noGraphsMatchFilter')}</p>{/if}
         </div>
       </section>
 
@@ -528,14 +844,23 @@
           <span class="stat-ic ic-scope"><Database size={15} /></span>
           <div class="stat-body">
             <span class="stat-label">{$i18nT('pages.pipelineEditor.scope')}</span>
-            <span class="stat-value" title={scopeSummary}>{scopeSummary}</span>
+            <span class="stat-value stat-names" title={scopeNames.length ? `${scopeSummary}: ${scopeNames.join(', ')}` : scopeSummary}>{scopeValue}</span>
           </div>
         </div>
         <div class="stat">
           <span class="stat-ic ic-shapes"><FileCode size={15} /></span>
           <div class="stat-body">
-            <span class="stat-label">{$i18nT('pages.pipelineEditor.shapeGraphs')}</span>
-            <span class="stat-value">{$i18nT('pages.pipelineEditor.summaryShapeGraphCount', { values: { count: shapeGraphIds.size } })}</span>
+            <span class="stat-label">{$i18nT('pages.pipelineEditor.validateWith')}</span>
+            <span class="stat-value stat-names" title={validatorNames.join(', ')}>{validatorValue}</span>
+          </div>
+        </div>
+        <div class="stat">
+          <span class="stat-ic ic-involved"><ShieldCheck size={15} /></span>
+          <div class="stat-body">
+            <span class="stat-label">{$i18nT('pages.pipelineEditor.summaryValidators')}</span>
+            <span class="stat-value" title={[...involvedValidators.values()].sort((a, b) => a.localeCompare(b)).join(', ')}>
+              {$i18nT('pages.pipelineEditor.summaryShapeGraphCount', { values: { count: involvedValidators.size } })}
+            </span>
           </div>
         </div>
         <div class="stat">
@@ -572,7 +897,9 @@
   .icon-danger { color: #b91c1c; }
   .desc-input { width: 100%; margin-top: 0.5rem; padding: 0.4rem 0.55rem; font-size: 0.88rem; border: 1px solid var(--line-soft); border-radius: 8px; font-family: inherit; resize: vertical; }
 
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.85rem; align-items: start; }
+  /* minmax(0, 1fr): long graph/dataset names must truncate inside the column,
+     never widen it past the viewport (grid min-content blowout). */
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.85rem; align-items: start; }
   .panel { padding: 0.85rem 1rem !important; }
   .panel-head { display: flex; align-items: center; gap: 0.35rem; margin-bottom: 0.4rem; color: #475569; }
   .panel-head h3 { margin: 0; font-size: 0.9rem; font-weight: 700; color: #334155; }
@@ -598,6 +925,39 @@
   .group-note { text-transform: none; letter-spacing: 0; font-weight: 500; color: #94a3b8; }
   .filter-input { width: 100%; margin-bottom: 0.3rem; padding: 0.32rem 0.5rem; font-size: 0.82rem; border: 1px solid var(--line-soft); border-radius: 8px; font-family: inherit; }
   .target-group .picker { max-height: 140px; }
+  .target-group .picker-graphs { max-height: 220px; }
+
+  /* Per-section "N selected" badge */
+  .count-badge { margin-left: auto; background: var(--brand-100); color: var(--brand-700); border-radius: 999px; padding: 1px 8px; font-size: 0.66rem; font-weight: 700; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+  .panel-head .count-badge { margin-left: auto; }
+
+  /* Selection summary: removable chips pinned at the top of the targets card */
+  .sel-summary { display: flex; flex-direction: column; gap: 0.45rem; border: 1px solid var(--line-soft); border-radius: 10px; padding: 0.5rem 0.6rem; background: var(--bg-soft); margin-bottom: 0.65rem; }
+  .sel-summary.is-empty { border-style: dashed; }
+  .sel-empty { margin: 0; color: var(--ink-400); font-size: 0.8rem; }
+  .sel-group { display: flex; flex-direction: column; gap: 0.25rem; }
+  .sel-kind { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-400); }
+  .sel-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .sel-chip { display: flex; flex-direction: column; gap: 1px; background: var(--bg-strong); border: 1px solid var(--line-soft); border-radius: 8px; padding: 0.25rem 0.45rem; max-width: 100%; min-width: 0; }
+  .sel-chip.warn { border-color: #fcd34d; background: #fffbeb; }
+  .sel-chip-head { display: inline-flex; align-items: center; gap: 0.3rem; min-width: 0; }
+  .sel-chip-head > :global(svg) { flex-shrink: 0; color: var(--ink-500); }
+  .sel-chip-name { font-size: 0.76rem; font-weight: 600; color: var(--ink-800); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 17rem; }
+  .sel-chip-x { display: inline-flex; align-items: center; border: none; background: transparent; cursor: pointer; color: var(--ink-400); padding: 1px; border-radius: 4px; margin-left: 0.1rem; }
+  .sel-chip-x:hover { color: var(--danger-500); background: var(--danger-100); }
+  .sel-chip-sub { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.67rem; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 19rem; }
+  .sel-chip.warn .sel-chip-sub { color: #b45309; font-weight: 600; }
+  .sel-chip.warn .sel-chip-sub > :global(svg) { flex-shrink: 0; }
+
+  /* Divider between the pinned (selected) block and the rest of a picker */
+  .sel-divider { height: 1px; background: var(--line-strong); opacity: 0.55; margin: 0.3rem 0.2rem; flex-shrink: 0; }
+
+  /* Group headers inside the named-graphs picker */
+  .picker-group-head { font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-400); padding: 0.4rem 0.45rem 0.05rem; }
+  .panel label.picker-row-grouped { padding-left: 0.9rem; }
+
+  /* "Show system graphs (N)" toggle */
+  .panel label.sys-toggle { flex-direction: row; align-items: center; gap: 0.4rem; margin: 0 0 0.3rem; font-size: 0.75rem; font-weight: 500; color: var(--ink-500); }
 
   .advanced { margin-top: 0.6rem; font-size: 0.85rem; }
   .advanced summary { cursor: pointer; color: #475569; font-weight: 600; }
@@ -629,11 +989,14 @@
   .stat-ic { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0; }
   .ic-scope { background: #e0f2fe; color: #0369a1; }
   .ic-shapes { background: #ede9fe; color: #6d28d9; }
+  .ic-involved { background: var(--brand-100); color: var(--brand-700); }
   .ic-threshold { background: #dcfce7; color: #15803d; }
   .ic-schedule { background: #fef3c7; color: #b45309; }
   .stat-body { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }
   .stat-label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; color: #94a3b8; }
   .stat-value { font-size: 0.86rem; font-weight: 600; color: #1e293b; text-transform: capitalize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Names are data, not labels — never capitalise them. */
+  .stat-value.stat-names { text-transform: none; }
 
   .chip { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.7rem; padding: 3px 9px; border-radius: 999px; background: #f1f5f9; color: #475569; font-weight: 600; }
   .chip-trigger { background: #ede9fe; color: #5b21b6; }
@@ -667,4 +1030,9 @@
   :global(:is([data-theme="dark"], .dark)) .chip { background: rgba(255,255,255,0.06); color: var(--ink-400); }
   :global(:is([data-theme="dark"], .dark)) .chip-trigger { background: rgba(139,92,246,0.2); color: #c4b5fd; }
   :global(:is([data-theme="dark"], .dark)) .chip-gate { background: rgba(239,68,68,0.18); color: #fca5a5; }
+  :global(:is([data-theme="dark"], .dark)) .sel-summary { background: var(--bg-soft); }
+  :global(:is([data-theme="dark"], .dark)) .sel-chip { background: var(--bg-strong); border-color: var(--line-strong); }
+  :global(:is([data-theme="dark"], .dark)) .sel-chip.warn { background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.4); }
+  :global(:is([data-theme="dark"], .dark)) .sel-chip.warn .sel-chip-sub { color: #fcd34d; }
+  :global(:is([data-theme="dark"], .dark)) .sel-chip-x:hover { color: #fca5a5; background: rgba(239,68,68,0.18); }
 </style>

@@ -5,13 +5,17 @@
 // writes that model back to clean, readable Turtle. Together they give the
 // builder two-way sync with the Turtle source.
 //
-// Safety gate: the builder must never silently drop SHACL it doesn't model. The
-// parser sets `canRoundTrip = false` whenever it meets anything outside the
-// supported subset — path expressions, logical ops (sh:and/or/xone/not), SPARQL
-// constraints/rules, qualified shapes, named/shared property shapes, or any
-// unrecognised predicate. When `canRoundTrip` is false the builder stays
-// read-only and the Turtle source remains the single source of truth, so no
-// information is lost.
+// Lossless guarantee: every quad of the source document is accounted for.
+// A quad is either
+//   (a) modelled — parsed into a typed field and regenerated on serialise — or
+//   (b) retained verbatim in an `extraQuads` bag (per node shape, per property
+//       shape, or graph-level) and replayed on serialise with stable
+//       blank-node labels, including whole unknown blank-node closures.
+// Constructs the builder cannot edit (SPARQL constraints, rules, exotic
+// literals, …) therefore survive round-trips untouched. `hasUnsupported`
+// flags shapes carrying retained quads so the UI can badge them; the editor
+// stays editable for the modelled constructs. `canRoundTrip` is false only
+// when the Turtle itself fails to parse.
 
 import { Parser } from 'n3';
 
@@ -24,7 +28,12 @@ const RDF_FIRST = RDF + 'first';
 const RDF_REST = RDF + 'rest';
 const RDF_NIL = RDF + 'nil';
 
-export type Severity = 'Violation' | 'Warning' | 'Info';
+/** A severity is any IRI; usually one of the SEVERITY_* constants. */
+export type Severity = string;
+export const SEVERITY_VIOLATION = SH + 'Violation';
+export const SEVERITY_WARNING = SH + 'Warning';
+export const SEVERITY_INFO = SH + 'Info';
+
 export type TargetKind = 'class' | 'node' | 'subjectsOf' | 'objectsOf';
 
 /** A concrete RDF value the builder can render and edit. */
@@ -33,6 +42,53 @@ export interface TermValue {
   value: string;
   datatype?: string; // for literals, when not xsd:string / langString
   lang?: string;
+}
+
+/** A retained RDF term (subject/object of an extra quad). */
+export interface ExtraTerm {
+  termType: 'NamedNode' | 'BlankNode' | 'Literal';
+  value: string;
+  datatype?: string;
+  language?: string;
+}
+
+/** A retained quad, replayed verbatim on serialise. */
+export interface ExtraQuad {
+  s: ExtraTerm;
+  p: string; // predicate IRI
+  o: ExtraTerm;
+}
+
+/** Structured SHACL property path expression. */
+export type PathExpr =
+  | { kind: 'predicate'; iri: string }
+  | { kind: 'inverse'; path: PathExpr }
+  | { kind: 'sequence'; paths: PathExpr[] }
+  | { kind: 'alternative'; paths: PathExpr[] }
+  | { kind: 'zeroOrMore'; path: PathExpr }
+  | { kind: 'oneOrMore'; path: PathExpr }
+  | { kind: 'zeroOrOne'; path: PathExpr };
+
+/** A shape operand: a reference to a named shape, or an inline anonymous one. */
+export type ShapeRef = { ref: string } | { inline: PropertyShape };
+
+/**
+ * Logical operators. `and`/`or`/`xone` each hold ONE operand list (a second
+ * sh:and/or/xone on the same shape is retained via extraQuads); `not` holds
+ * one entry per sh:not statement.
+ */
+export interface LogicConstraints {
+  and?: ShapeRef[];
+  or?: ShapeRef[];
+  xone?: ShapeRef[];
+  not?: ShapeRef[];
+}
+
+export interface QualifiedValue {
+  shape: ShapeRef;
+  minCount?: number;
+  maxCount?: number;
+  disjoint?: boolean;
 }
 
 /** Typed constraints we model on a property shape. */
@@ -61,8 +117,19 @@ export interface PropConstraints {
   lessThanOrEquals?: string;
 }
 
+/**
+ * A property shape. Also used for inline anonymous shapes inside logical
+ * operands and qualified value shapes, where `path` may be empty and
+ * `properties` may carry nested `sh:property` children.
+ */
 export interface PropertyShape {
-  path: string; // single predicate IRI when simple
+  /** IRI when this is a named (shared) property shape. */
+  iri?: string;
+  /** Had an explicit `a sh:PropertyShape`. */
+  declared?: boolean;
+  path: string; // single predicate IRI when simple, '' otherwise
+  /** Structured path when it is not a plain predicate IRI. */
+  pathExpr?: PathExpr;
   pathComplex?: boolean;
   name?: string;
   description?: string;
@@ -71,8 +138,16 @@ export interface PropertyShape {
   order?: number;
   group?: string;
   c: PropConstraints;
-  /** True when the property carries SHACL the builder doesn't model. */
-  complex?: boolean;
+  logic?: LogicConstraints;
+  qualified?: QualifiedValue;
+  /** Nested sh:property children (inline anonymous node shapes). */
+  properties?: PropertyShape[];
+  /** Quads under this shape the model doesn't understand (kept verbatim). */
+  extraQuads?: ExtraQuad[];
+  /** True when this shape (or a nested one) carries retained quads. */
+  hasUnsupported?: boolean;
+  /** @internal original RDF subject; partitions extraQuads on serialise. */
+  _own?: ExtraTerm;
 }
 
 export interface NodeShape {
@@ -85,14 +160,20 @@ export interface NodeShape {
   description?: string;
   message?: string;
   severity?: Severity;
+  logic?: LogicConstraints;
   properties: PropertyShape[];
-  complex?: boolean;
+  extraQuads?: ExtraQuad[];
+  hasUnsupported?: boolean;
 }
 
 export interface ShapesGraph {
   prefixes: Record<string, string>;
   shapes: NodeShape[];
-  /** When false, the builder must stay read-only (Turtle stays canonical). */
+  /** Quads outside any modelled shape, replayed verbatim on serialise. */
+  extraQuads?: ExtraQuad[];
+  /** True when any retained (non-modelled) statement is present anywhere. */
+  hasUnsupported?: boolean;
+  /** False only when the Turtle failed to parse (model edits impossible). */
   canRoundTrip: boolean;
   parseError?: string;
 }
@@ -110,63 +191,33 @@ const TARGET_BY_PRED: Record<string, TargetKind> = {
   targetObjectsOf: 'objectsOf',
 };
 
-// Predicates the builder fully understands. Anything else flips canRoundTrip.
-const NODE_KNOWN = new Set(
-  [
-    'targetClass',
-    'targetNode',
-    'targetSubjectsOf',
-    'targetObjectsOf',
-    'property',
-    'closed',
-    'ignoredProperties',
-    'name',
-    'description',
-    'message',
-    'severity',
-  ].map((p) => SH + p),
-);
-const PROP_KNOWN = new Set(
-  [
-    'path',
-    'name',
-    'description',
-    'message',
-    'severity',
-    'order',
-    'group',
-    'minCount',
-    'maxCount',
-    'datatype',
-    'class',
-    'nodeKind',
-    'minInclusive',
-    'maxInclusive',
-    'minExclusive',
-    'maxExclusive',
-    'minLength',
-    'maxLength',
-    'pattern',
-    'flags',
-    'in',
-    'hasValue',
-    'languageIn',
-    'uniqueLang',
-    'node',
-    'equals',
-    'disjoint',
-    'lessThan',
-    'lessThanOrEquals',
-  ].map((p) => SH + p),
-);
+// Lexical forms the serialiser re-emits bare (Turtle INTEGER / DECIMAL).
+const BARE_INT = /^[+-]?\d+$/;
+const BARE_DECIMAL = /^[+-]?\d*\.\d+$/;
+const BARE_NUM = /^[+-]?(\d+|\d*\.\d+)$/;
 
 // ─── Parsing ────────────────────────────────────────────────────────────────
 
 type N3Term = { termType: string; value: string; datatype?: { value: string }; language?: string };
+type Q = { subject: N3Term; predicate: N3Term; object: N3Term };
+
+const termKey = (t: N3Term): string =>
+  t.termType === 'Literal'
+    ? `L${t.value}${t.language || ''}${t.datatype?.value || ''}`
+    : (t.termType === 'BlankNode' ? 'B' : 'N') + t.value;
+
+const toExtraTerm = (t: N3Term): ExtraTerm => {
+  if (t.termType === 'NamedNode') return { termType: 'NamedNode', value: t.value };
+  if (t.termType === 'BlankNode') return { termType: 'BlankNode', value: t.value };
+  const e: ExtraTerm = { termType: 'Literal', value: t.value };
+  if (t.language) e.language = t.language;
+  else if (t.datatype?.value && t.datatype.value !== XSD + 'string') e.datatype = t.datatype.value;
+  return e;
+};
 
 export function parseShapesGraph(ttl: string): ShapesGraph {
   const prefixes: Record<string, string> = {};
-  const quads: { subject: N3Term; predicate: N3Term; object: N3Term }[] = [];
+  let parsed: Q[];
   try {
     // Synchronous parse: when no quad callback is given, N3 returns the full
     // quad array immediately (and throws on error). The callback form instead
@@ -174,89 +225,460 @@ export function parseShapesGraph(ttl: string): ShapesGraph {
     const onPrefix = (prefix: string, iri: string | { value: string }) => {
       prefixes[prefix] = typeof iri === 'string' ? iri : iri?.value;
     };
-    // Call as a bound method (detaching `parse` would lose its `this`).
-    const parsed = new Parser().parse(String(ttl || ''), null as never, onPrefix as never) as unknown as {
-      subject: N3Term;
-      predicate: N3Term;
-      object: N3Term;
-    }[];
-    for (const q of parsed) quads.push(q);
+    parsed = new Parser().parse(String(ttl || ''), null as never, onPrefix as never) as unknown as Q[];
   } catch (e) {
     return { prefixes, shapes: [], canRoundTrip: false, parseError: (e as Error)?.message || 'Invalid Turtle' };
   }
 
-  // Index subject → predicate → object terms, and note blank-node subjects.
-  const idx = new Map<string, Map<string, N3Term[]>>();
-  const blank = new Set<string>();
-  for (const q of quads) {
-    const s = q.subject.value;
-    if (q.subject.termType === 'BlankNode') blank.add(s);
-    let m = idx.get(s);
-    if (!m) {
-      m = new Map();
-      idx.set(s, m);
+  // De-duplicate identical triples (RDF set semantics) so quad-level
+  // used-tracking can work by object identity.
+  const quads: Q[] = [];
+  {
+    const seen = new Set<string>();
+    for (const q of parsed) {
+      const k = `${termKey(q.subject)}>${q.predicate.value}>${termKey(q.object)}`;
+      if (!seen.has(k)) {
+        seen.add(k);
+        quads.push(q);
+      }
     }
-    const arr = m.get(q.predicate.value);
-    if (arr) arr.push(q.object);
-    else m.set(q.predicate.value, [q.object]);
   }
 
-  const consumed = new Set<string>(); // subjects fully accounted for by the model
-  const objs = (s: string, local: string) => idx.get(s)?.get(SH + local) || [];
-  const firstSh = (s: string, local: string) => objs(s, local)[0];
-  const litStr = (s: string, local: string) => {
-    const t = firstSh(s, local);
-    return t && t.termType === 'Literal' ? t.value : undefined;
-  };
-  const intSh = (s: string, local: string) => {
-    const v = litStr(s, local);
-    return v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v) : undefined;
-  };
-  const iriSh = (s: string, local: string) => {
-    const t = firstSh(s, local);
-    return t && t.termType === 'NamedNode' ? t.value : undefined;
-  };
-  const sevOf = (s: string): Severity | undefined => {
-    const v = iriSh(s, 'severity');
-    if (!v) return undefined;
-    if (v === SH + 'Warning') return 'Warning';
-    if (v === SH + 'Info') return 'Info';
-    if (v === SH + 'Violation') return 'Violation';
-    return undefined; // non-standard severity → caller marks complex
-  };
+  // Index subject-key → predicate → quads, and count blank-node references.
+  const idx = new Map<string, Map<string, Q[]>>();
+  const bRefs = new Map<string, number>();
+  for (const q of quads) {
+    const sk = termKey(q.subject);
+    let m = idx.get(sk);
+    if (!m) {
+      m = new Map();
+      idx.set(sk, m);
+    }
+    const arr = m.get(q.predicate.value);
+    if (arr) arr.push(q);
+    else m.set(q.predicate.value, [q]);
+    if (q.object.termType === 'BlankNode') bRefs.set(q.object.value, (bRefs.get(q.object.value) || 0) + 1);
+  }
+  // A blank node referenced from more than one place can't be restructured
+  // without breaking co-reference; such structures are retained verbatim.
+  const shared = (label: string) => (bRefs.get(label) || 0) > 1;
 
+  const used = new Set<Q>();
+  const use = (q: Q) => used.add(q);
+  const quadsOf = (sk: string, pred: string): Q[] => idx.get(sk)?.get(pred) || [];
+  const sQuads = (sk: string, local: string) => quadsOf(sk, SH + local);
+
+  // ── Pickers: model a value only when serialisation reproduces the quad ──
+  const pickStr = (sk: string, local: string): string | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      const o = q.object;
+      if (o.termType === 'Literal' && !o.language && (!o.datatype || o.datatype.value === XSD + 'string')) {
+        use(q);
+        return o.value;
+      }
+    }
+    return undefined;
+  };
+  const pickIri = (sk: string, local: string): string | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      if (q.object.termType === 'NamedNode') {
+        use(q);
+        return q.object.value;
+      }
+    }
+    return undefined;
+  };
+  const pickInt = (sk: string, local: string): number | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      const o = q.object;
+      if (
+        o.termType === 'Literal' &&
+        o.datatype?.value === XSD + 'integer' &&
+        BARE_INT.test(o.value) &&
+        String(Number(o.value)) === o.value
+      ) {
+        use(q);
+        return Number(o.value);
+      }
+    }
+    return undefined;
+  };
+  const pickNum = (sk: string, local: string): number | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      const o = q.object;
+      const dt = o.datatype?.value;
+      const ok =
+        o.termType === 'Literal' &&
+        ((dt === XSD + 'integer' && BARE_INT.test(o.value)) || (dt === XSD + 'decimal' && BARE_DECIMAL.test(o.value))) &&
+        String(Number(o.value)) === o.value;
+      if (ok) {
+        use(q);
+        return Number(o.value);
+      }
+    }
+    return undefined;
+  };
+  const pickBool = (sk: string, local: string): boolean | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      const o = q.object;
+      if (o.termType === 'Literal' && o.datatype?.value === XSD + 'boolean' && (o.value === 'true' || o.value === 'false')) {
+        use(q);
+        return o.value === 'true';
+      }
+    }
+    return undefined;
+  };
+  // Range bounds are stored as strings and re-emitted either bare (numeric)
+  // or quoted (plain string). Anything else (dates, doubles, langStrings)
+  // is retained verbatim so its datatype isn't silently lost.
+  const pickBound = (sk: string, local: string): string | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      const o = q.object;
+      if (o.termType !== 'Literal' || o.language) continue;
+      const dt = o.datatype?.value || XSD + 'string';
+      const ok =
+        (dt === XSD + 'integer' && BARE_INT.test(o.value)) ||
+        (dt === XSD + 'decimal' && BARE_DECIMAL.test(o.value)) ||
+        (dt === XSD + 'string' && !BARE_NUM.test(o.value));
+      if (ok) {
+        use(q);
+        return o.value;
+      }
+    }
+    return undefined;
+  };
   const termValue = (t: N3Term): TermValue => {
     if (t.termType === 'NamedNode') return { type: 'iri', value: t.value };
     const dt = t.datatype?.value;
-    const lang = t.language || '';
     const tv: TermValue = { type: 'literal', value: t.value };
-    if (lang) tv.lang = lang;
+    if (t.language) tv.lang = t.language;
     else if (dt && dt !== XSD + 'string') tv.datatype = dt;
     return tv;
   };
+  const pickTerm = (sk: string, local: string): TermValue | undefined => {
+    for (const q of sQuads(sk, local)) {
+      if (used.has(q)) continue;
+      if (q.object.termType === 'NamedNode' || q.object.termType === 'Literal') {
+        use(q);
+        return termValue(q.object);
+      }
+    }
+    return undefined;
+  };
 
-  const readList = (head: N3Term | undefined): N3Term[] | null => {
+  // Read a well-formed, unshared RDF list without consuming it; the caller
+  // commits the returned quads only when it can model every item.
+  const readList = (head: N3Term): { items: N3Term[]; quads: Q[] } | null => {
     const items: N3Term[] = [];
+    const lq: Q[] = [];
     const guard = new Set<string>();
     let node = head;
-    while (node) {
-      if (node.termType === 'NamedNode' && node.value === RDF_NIL) return items;
-      if (node.termType !== 'BlankNode') return null;
-      if (guard.has(node.value)) return null;
+    for (;;) {
+      if (node.termType === 'NamedNode') return node.value === RDF_NIL ? { items, quads: lq } : null;
+      if (node.termType !== 'BlankNode' || guard.has(node.value) || shared(node.value)) return null;
       guard.add(node.value);
-      consumed.add(node.value);
-      const cell = idx.get(node.value);
-      const first = cell?.get(RDF_FIRST)?.[0];
-      const rest = cell?.get(RDF_REST)?.[0];
-      if (!first || !rest) return null;
-      items.push(first);
-      node = rest;
+      const m = idx.get('B' + node.value);
+      const f = m?.get(RDF_FIRST) || [];
+      const r = m?.get(RDF_REST) || [];
+      // Cells must be pure list cells (extra annotations would dangle after
+      // the list is regenerated), with exactly one first/rest each.
+      if (!m || m.size !== 2 || f.length !== 1 || r.length !== 1) return null;
+      if (used.has(f[0]) || used.has(r[0])) return null;
+      items.push(f[0].object);
+      lq.push(f[0], r[0]);
+      node = r[0].object;
+    }
+  };
+
+  // Structured path parsing; pure (caller commits quads on success).
+  const parsePath = (t: N3Term): { expr: PathExpr; quads: Q[] } | null => {
+    if (t.termType === 'NamedNode') {
+      if (t.value === RDF_NIL) return null;
+      return { expr: { kind: 'predicate', iri: t.value }, quads: [] };
+    }
+    if (t.termType !== 'BlankNode' || shared(t.value)) return null;
+    const m = idx.get('B' + t.value);
+    if (!m) return null;
+    if (m.has(RDF_FIRST)) {
+      const l = readList(t);
+      if (!l || l.items.length < 2) return null;
+      const subs = l.items.map(parsePath);
+      if (subs.some((s) => !s)) return null;
+      return {
+        expr: { kind: 'sequence', paths: subs.map((s) => s!.expr) },
+        quads: l.quads.concat(...subs.map((s) => s!.quads)),
+      };
+    }
+    if (m.size !== 1) return null;
+    const [pred, qs] = [...m.entries()][0];
+    if (qs.length !== 1 || used.has(qs[0])) return null;
+    const q = qs[0];
+    const unary = (kind: 'inverse' | 'zeroOrMore' | 'oneOrMore' | 'zeroOrOne') => {
+      const s = parsePath(q.object);
+      return s ? { expr: { kind, path: s.expr } as PathExpr, quads: [q, ...s.quads] } : null;
+    };
+    if (pred === SH + 'inversePath') return unary('inverse');
+    if (pred === SH + 'zeroOrMorePath') return unary('zeroOrMore');
+    if (pred === SH + 'oneOrMorePath') return unary('oneOrMore');
+    if (pred === SH + 'zeroOrOnePath') return unary('zeroOrOne');
+    if (pred === SH + 'alternativePath') {
+      const l = readList(q.object);
+      if (!l || l.items.length < 2) return null;
+      const subs = l.items.map(parsePath);
+      if (subs.some((s) => !s)) return null;
+      return {
+        expr: { kind: 'alternative', paths: subs.map((s) => s!.expr) },
+        quads: [q, ...l.quads, ...subs.flatMap((s) => s!.quads)],
+      };
     }
     return null;
   };
 
-  const isNodeShapeSubject = (s: string, m: Map<string, N3Term[]>): boolean => {
-    const types = (m.get(RDF_TYPE) || []).map((o) => o.value);
+  // ── Extras: anything not modelled is retained, with its bnode closure ──
+  type ExtraOwner = { extraQuads?: ExtraQuad[]; hasUnsupported?: boolean; declared?: boolean };
+  const toQuad = (q: Q): ExtraQuad => ({ s: toExtraTerm(q.subject), p: q.predicate.value, o: toExtraTerm(q.object) });
+  const collectClosure = (t: N3Term, owner: ExtraOwner) => {
+    if (t.termType !== 'BlankNode') return;
+    const stack = [t.value];
+    while (stack.length) {
+      const lab = stack.pop()!;
+      const m = idx.get('B' + lab);
+      if (!m) continue;
+      for (const qs of m.values()) {
+        for (const q of qs) {
+          if (used.has(q)) continue;
+          use(q);
+          owner.extraQuads!.push(toQuad(q));
+          if (q.object.termType === 'BlankNode') stack.push(q.object.value);
+        }
+      }
+    }
+  };
+  const sweep = (sk: string, owner: ExtraOwner, declaredType: string) => {
+    const m = idx.get(sk);
+    if (!m) return;
+    for (const [pred, qs] of m) {
+      for (const q of qs) {
+        if (used.has(q)) continue;
+        if (pred === RDF_TYPE && q.object.termType === 'NamedNode' && q.object.value === declaredType) {
+          owner.declared = true;
+          use(q);
+          continue;
+        }
+        use(q);
+        (owner.extraQuads ||= []).push(toQuad(q));
+        owner.hasUnsupported = true;
+        collectClosure(q.object, owner);
+      }
+    }
+  };
+
+  const refsUnsupported = (logic?: LogicConstraints, qualified?: QualifiedValue): boolean => {
+    const all: ShapeRef[] = [];
+    for (const op of ['and', 'or', 'xone', 'not'] as const) if (logic?.[op]) all.push(...logic[op]!);
+    if (qualified) all.push(qualified.shape);
+    return all.some((r) => 'inline' in r && r.inline.hasUnsupported);
+  };
+
+  // Named (IRI-identified) property shapes are parsed once and shared.
+  const namedProps = new Map<string, PropertyShape>();
+
+  const shapeRefOf = (t: N3Term): ShapeRef | null => {
+    if (t.termType === 'NamedNode') return { ref: t.value };
+    if (t.termType === 'BlankNode' && !shared(t.value)) return { inline: parseBody(termKey(t), t) };
+    return null;
+  };
+
+  const parseLogic = (sk: string): LogicConstraints | undefined => {
+    const logic: LogicConstraints = {};
+    let any = false;
+    for (const op of ['and', 'or', 'xone'] as const) {
+      // Only the first list per operator is modelled; further ones (a second
+      // sh:or is a separate constraint) are retained verbatim.
+      const q = sQuads(sk, op).find((x) => !used.has(x));
+      if (!q) continue;
+      const l = readList(q.object);
+      if (!l) continue;
+      if (!l.items.every((t) => t.termType === 'NamedNode' || (t.termType === 'BlankNode' && !shared(t.value)))) continue;
+      use(q);
+      l.quads.forEach(use);
+      logic[op] = l.items.map((t) => shapeRefOf(t)!);
+      any = true;
+    }
+    for (const q of sQuads(sk, 'not')) {
+      if (used.has(q)) continue;
+      const r = q.object.termType === 'NamedNode' || (q.object.termType === 'BlankNode' && !shared(q.object.value));
+      if (!r) continue;
+      use(q);
+      (logic.not ||= []).push(shapeRefOf(q.object)!);
+      any = true;
+    }
+    return any ? logic : undefined;
+  };
+
+  const parseQualified = (sk: string): QualifiedValue | undefined => {
+    let shape: ShapeRef | undefined;
+    for (const q of sQuads(sk, 'qualifiedValueShape')) {
+      if (used.has(q)) continue;
+      const r =
+        q.object.termType === 'NamedNode' || (q.object.termType === 'BlankNode' && !shared(q.object.value))
+          ? shapeRefOf(q.object)
+          : null;
+      if (r) {
+        use(q);
+        shape = r;
+      }
+      break;
+    }
+    if (!shape) return undefined;
+    const qv: QualifiedValue = { shape };
+    const mn = pickInt(sk, 'qualifiedMinCount');
+    if (mn != null) qv.minCount = mn;
+    const mx = pickInt(sk, 'qualifiedMaxCount');
+    if (mx != null) qv.maxCount = mx;
+    const dj = pickBool(sk, 'qualifiedValueShapesDisjoint');
+    if (dj != null) qv.disjoint = dj;
+    return qv;
+  };
+
+  // Parse a property shape / inline anonymous shape body.
+  const parseBody = (sk: string, own: N3Term): PropertyShape => {
+    const ps: PropertyShape = { path: '', c: {} };
+    ps._own = toExtraTerm(own);
+
+    for (const q of sQuads(sk, 'path')) {
+      if (used.has(q)) continue;
+      const r = parsePath(q.object);
+      if (r) {
+        use(q);
+        r.quads.forEach(use);
+        if (r.expr.kind === 'predicate') ps.path = r.expr.iri;
+        else {
+          ps.pathExpr = r.expr;
+          ps.pathComplex = true;
+        }
+      }
+      break; // only the first sh:path is modelled; a failed parse stays retained
+    }
+
+    const c = ps.c;
+    const setN = (key: 'minCount' | 'maxCount' | 'minLength' | 'maxLength') => {
+      const v = pickInt(sk, key);
+      if (v != null) c[key] = v;
+    };
+    setN('minCount');
+    setN('maxCount');
+    const dt = pickIri(sk, 'datatype');
+    if (dt) c.datatype = dt;
+    const cl = pickIri(sk, 'class');
+    if (cl) c.class = cl;
+    const nk = pickIri(sk, 'nodeKind');
+    if (nk) c.nodeKind = nk;
+    for (const k of ['minInclusive', 'maxInclusive', 'minExclusive', 'maxExclusive'] as const) {
+      const v = pickBound(sk, k);
+      if (v != null) c[k] = v;
+    }
+    setN('minLength');
+    setN('maxLength');
+    const pat = pickStr(sk, 'pattern');
+    if (pat != null) c.pattern = pat;
+    const fl = pickStr(sk, 'flags');
+    if (fl != null) c.flags = fl;
+    const ul = pickBool(sk, 'uniqueLang');
+    if (ul != null) c.uniqueLang = ul;
+    const nd = pickIri(sk, 'node');
+    if (nd) c.node = nd;
+    for (const k of ['equals', 'disjoint', 'lessThan', 'lessThanOrEquals'] as const) {
+      const v = pickIri(sk, k);
+      if (v) c[k] = v;
+    }
+    const hv = pickTerm(sk, 'hasValue');
+    if (hv) c.hasValue = hv;
+
+    for (const q of sQuads(sk, 'in')) {
+      if (used.has(q)) continue;
+      const l = readList(q.object);
+      if (l && l.items.every((t) => t.termType === 'NamedNode' || t.termType === 'Literal')) {
+        use(q);
+        l.quads.forEach(use);
+        c.in = l.items.map(termValue);
+      }
+      break;
+    }
+    for (const q of sQuads(sk, 'languageIn')) {
+      if (used.has(q)) continue;
+      const l = readList(q.object);
+      if (
+        l &&
+        l.items.every((t) => t.termType === 'Literal' && !t.language && (!t.datatype || t.datatype.value === XSD + 'string'))
+      ) {
+        use(q);
+        l.quads.forEach(use);
+        c.languageIn = l.items.map((t) => t.value);
+      }
+      break;
+    }
+
+    const name = pickStr(sk, 'name');
+    if (name != null) ps.name = name;
+    const desc = pickStr(sk, 'description');
+    if (desc != null) ps.description = desc;
+    const msg = pickStr(sk, 'message');
+    if (msg != null) ps.message = msg;
+    const sev = pickIri(sk, 'severity');
+    if (sev) ps.severity = sev;
+    const ord = pickNum(sk, 'order');
+    if (ord != null) ps.order = ord;
+    const grp = pickIri(sk, 'group');
+    if (grp) ps.group = grp;
+
+    const logic = parseLogic(sk);
+    if (logic) ps.logic = logic;
+    const qualified = parseQualified(sk);
+    if (qualified) ps.qualified = qualified;
+
+    const children: PropertyShape[] = [];
+    for (const q of sQuads(sk, 'property')) {
+      if (used.has(q)) continue;
+      const child = propertyRef(q);
+      if (child) children.push(child);
+    }
+    if (children.length) ps.properties = children;
+
+    sweep(sk, ps, SH + 'PropertyShape');
+    if (children.some((ch) => ch.hasUnsupported) || refsUnsupported(ps.logic, ps.qualified)) ps.hasUnsupported = true;
+    return ps;
+  };
+
+  // Resolve a sh:property object: blank (anonymous) or named (shared) shape.
+  const propertyRef = (q: Q): PropertyShape | null => {
+    const o = q.object;
+    if (o.termType === 'BlankNode') {
+      if (shared(o.value)) return null; // multi-referenced; retained verbatim
+      use(q);
+      return parseBody(termKey(o), o);
+    }
+    if (o.termType === 'NamedNode') {
+      use(q);
+      let ps = namedProps.get(o.value);
+      if (!ps) {
+        ps = idx.has(termKey(o)) ? parseBody(termKey(o), o) : { path: '', c: {}, _own: toExtraTerm(o) };
+        ps.iri = o.value;
+        namedProps.set(o.value, ps);
+      }
+      return ps;
+    }
+    return null;
+  };
+
+  const isNodeShapeSubject = (m: Map<string, Q[]>): boolean => {
+    const types = (m.get(RDF_TYPE) || []).map((q) => q.object.value);
     if (types.includes(SH + 'NodeShape')) return true;
     const hasTargetOrProp =
       m.has(SH + 'targetClass') ||
@@ -267,169 +689,67 @@ export function parseShapesGraph(ttl: string): ShapesGraph {
     return hasTargetOrProp && !m.has(SH + 'path');
   };
 
-  const parseProperty = (pid: string): PropertyShape => {
-    consumed.add(pid);
-    const m = idx.get(pid) || new Map<string, N3Term[]>();
-    let complex = false;
-
-    // path: only a single predicate IRI is modelled; expressions are complex.
-    const pathTerm = firstSh(pid, 'path');
-    let path = '';
-    let pathComplex = false;
-    if (pathTerm && pathTerm.termType === 'NamedNode') path = pathTerm.value;
-    else if (pathTerm) {
-      pathComplex = true;
-      complex = true;
-    }
-
-    const c: PropConstraints = {};
-    if (intSh(pid, 'minCount') != null) c.minCount = intSh(pid, 'minCount');
-    if (intSh(pid, 'maxCount') != null) c.maxCount = intSh(pid, 'maxCount');
-    if (iriSh(pid, 'datatype')) c.datatype = iriSh(pid, 'datatype');
-    if (iriSh(pid, 'class')) c.class = iriSh(pid, 'class');
-    if (iriSh(pid, 'nodeKind')) c.nodeKind = iriSh(pid, 'nodeKind');
-    for (const k of ['minInclusive', 'maxInclusive', 'minExclusive', 'maxExclusive'] as const) {
-      const term = firstSh(pid, k);
-      if (!term) continue;
-      // Only plain numeric bounds round-trip losslessly (they re-emit bare).
-      // Typed bounds (xsd:date, xsd:double exponents, …) drop to read-only so
-      // their datatype isn't silently lost.
-      if (term.termType === 'Literal' && /^-?\d+(\.\d+)?$/.test(term.value)) c[k] = term.value;
-      else {
-        complex = true;
-        if (term.termType === 'Literal') c[k] = term.value;
-      }
-    }
-    if (intSh(pid, 'minLength') != null) c.minLength = intSh(pid, 'minLength');
-    if (intSh(pid, 'maxLength') != null) c.maxLength = intSh(pid, 'maxLength');
-    if (litStr(pid, 'pattern') != null) c.pattern = litStr(pid, 'pattern');
-    if (litStr(pid, 'flags') != null) c.flags = litStr(pid, 'flags');
-    if (litStr(pid, 'uniqueLang') != null) c.uniqueLang = litStr(pid, 'uniqueLang') === 'true';
-    if (iriSh(pid, 'node')) c.node = iriSh(pid, 'node');
-    for (const k of ['equals', 'disjoint', 'lessThan', 'lessThanOrEquals'] as const) {
-      const v = iriSh(pid, k);
-      if (v) c[k] = v;
-    }
-    const hv = firstSh(pid, 'hasValue');
-    if (hv) c.hasValue = termValue(hv);
-
-    const inHead = firstSh(pid, 'in');
-    if (inHead) {
-      const list = readList(inHead);
-      if (list) c.in = list.map(termValue);
-      else complex = true;
-    }
-    const langHead = firstSh(pid, 'languageIn');
-    if (langHead) {
-      const list = readList(langHead);
-      if (list && list.every((t) => t.termType === 'Literal')) c.languageIn = list.map((t) => t.value);
-      else complex = true;
-    }
-
-    if (firstSh(pid, 'severity') && !sevOf(pid)) complex = true; // non-standard severity
-
-    // Any predicate we don't model → complex (preserve via read-only mode).
-    for (const pred of m.keys()) {
-      if (pred === RDF_TYPE) continue;
-      if (!PROP_KNOWN.has(pred)) complex = true;
-    }
-
-    const ps: PropertyShape = { path, c };
-    if (pathComplex) ps.pathComplex = true;
-    const name = litStr(pid, 'name');
-    if (name != null) ps.name = name;
-    const desc = litStr(pid, 'description');
-    if (desc != null) ps.description = desc;
-    const msg = litStr(pid, 'message');
-    if (msg != null) ps.message = msg;
-    const sev = sevOf(pid);
-    if (sev) ps.severity = sev;
-    if (intSh(pid, 'order') != null) ps.order = intSh(pid, 'order');
-    const grp = iriSh(pid, 'group');
-    if (grp) ps.group = grp;
-    if (complex) ps.complex = true;
-    return ps;
-  };
-
   const shapes: NodeShape[] = [];
-  for (const [s, m] of idx) {
-    if (blank.has(s)) continue;
-    if (!isNodeShapeSubject(s, m)) continue;
-    consumed.add(s);
-    let complex = false;
+  for (const [sk, m] of idx) {
+    if (!sk.startsWith('N')) continue; // blank-node shapes stay where referenced
+    if (!isNodeShapeSubject(m)) continue;
+    const iri = sk.slice(1);
+    if (namedProps.has(iri)) continue; // already modelled as a property shape
 
-    const targets: { kind: TargetKind; value: string }[] = [];
+    const ns: NodeShape = { iri, declared: false, targets: [], properties: [] };
     for (const [pred, kind] of Object.entries(TARGET_BY_PRED)) {
-      for (const t of objs(s, pred)) {
-        if (t.termType === 'NamedNode') targets.push({ kind: kind as TargetKind, value: t.value });
-        else complex = true; // e.g. targetClass via a list/expression
+      for (const q of quadsOf(sk, SH + pred)) {
+        if (used.has(q)) continue;
+        if (q.object.termType === 'NamedNode') {
+          use(q);
+          ns.targets.push({ kind, value: q.object.value });
+        }
       }
     }
-
-    const properties: PropertyShape[] = [];
-    for (const po of objs(s, 'property')) {
-      if (po.termType === 'BlankNode') properties.push(parseProperty(po.value));
-      else {
-        // Named / shared property shape — not restructured by the builder.
-        complex = true;
-        if (idx.has(po.value)) properties.push(parseProperty(po.value));
+    const closed = pickBool(sk, 'closed');
+    if (closed != null) ns.closed = closed;
+    for (const q of sQuads(sk, 'ignoredProperties')) {
+      if (used.has(q)) continue;
+      const l = readList(q.object);
+      if (l && l.items.every((t) => t.termType === 'NamedNode')) {
+        use(q);
+        l.quads.forEach(use);
+        ns.ignoredProperties = l.items.map((t) => t.value);
       }
+      break;
     }
-
-    const closedV = litStr(s, 'closed');
-    const ignoredHead = firstSh(s, 'ignoredProperties');
-    let ignoredProperties: string[] | undefined;
-    if (ignoredHead) {
-      const list = readList(ignoredHead);
-      if (list && list.every((t) => t.termType === 'NamedNode')) ignoredProperties = list.map((t) => t.value);
-      else complex = true;
-    }
-    if (firstSh(s, 'severity') && !sevOf(s)) complex = true;
-
-    for (const pred of m.keys()) {
-      if (pred === RDF_TYPE) continue;
-      if (!NODE_KNOWN.has(pred)) complex = true;
-    }
-    if (properties.some((p) => p.complex)) complex = true;
-
-    const types = (m.get(RDF_TYPE) || []).map((o) => o.value);
-    const ns: NodeShape = {
-      iri: s,
-      declared: types.includes(SH + 'NodeShape'),
-      targets,
-      properties,
-    };
-    if (closedV != null) ns.closed = closedV === 'true';
-    if (ignoredProperties) ns.ignoredProperties = ignoredProperties;
-    const name = litStr(s, 'name');
+    const name = pickStr(sk, 'name');
     if (name != null) ns.name = name;
-    const desc = litStr(s, 'description');
+    const desc = pickStr(sk, 'description');
     if (desc != null) ns.description = desc;
-    const msg = litStr(s, 'message');
+    const msg = pickStr(sk, 'message');
     if (msg != null) ns.message = msg;
-    const sev = sevOf(s);
+    const sev = pickIri(sk, 'severity');
     if (sev) ns.severity = sev;
-    if (complex) ns.complex = true;
+    const logic = parseLogic(sk);
+    if (logic) ns.logic = logic;
+
+    for (const q of sQuads(sk, 'property')) {
+      if (used.has(q)) continue;
+      const child = propertyRef(q);
+      if (child) ns.properties.push(child);
+    }
+
+    sweep(sk, ns, SH + 'NodeShape');
+    if (ns.properties.some((p) => p.hasUnsupported) || refsUnsupported(ns.logic)) ns.hasUnsupported = true;
     shapes.push(ns);
   }
 
-  // Any shape-relevant quad not consumed (standalone property shapes, orphan
-  // SHACL, rules, etc.) means we can't safely regenerate the whole document.
-  let uncovered = false;
-  for (const q of quads) {
-    if (consumed.has(q.subject.value)) continue;
-    const isShape =
-      q.predicate.value.startsWith(SH) ||
-      (q.predicate.value === RDF_TYPE && q.object.value.startsWith(SH));
-    if (isShape) {
-      uncovered = true;
-      break;
-    }
-  }
+  // Everything left over (orphan property shapes, ontology triples mixed into
+  // the document, …) is retained at graph level.
+  const gExtras: ExtraQuad[] = [];
+  for (const q of quads) if (!used.has(q)) gExtras.push(toQuad(q));
 
   shapes.sort((a, b) => a.iri.localeCompare(b.iri));
-  const canRoundTrip = !uncovered && shapes.every((s) => !s.complex);
-  return { prefixes, shapes, canRoundTrip };
+  const g: ShapesGraph = { prefixes, shapes, canRoundTrip: true };
+  if (gExtras.length) g.extraQuads = gExtras;
+  if (gExtras.length || shapes.some((s) => s.hasUnsupported)) g.hasUnsupported = true;
+  return g;
 }
 
 // ─── Serialising ──────────────────────────────────────────────────────────────
@@ -445,25 +765,114 @@ export function serializeShapesGraph(g: ShapesGraph): string {
   const prefixes: Record<string, string> = { ...DEFAULT_PREFIXES, ...g.prefixes };
   const curie = makeCurie(prefixes);
 
+  // Stable blank-node labels for retained quads (deterministic per serialise).
+  const blanks = new Map<string, string>();
+  const bl = (label: string): string => {
+    let v = blanks.get(label);
+    if (!v) {
+      v = 'x' + blanks.size;
+      blanks.set(label, v);
+    }
+    return v;
+  };
+  // Retained quads whose subject is a blank-node closure (or another subject
+  // than the owning shape) are emitted as labelled top-level statements.
+  const pool: string[] = [];
+
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+  const str = (s: string): string => `"${esc(s)}"`;
   const lit = (tv: TermValue): string => {
-    const esc = tv.value
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
-      .replace(/\t/g, '\\t');
-    if (tv.lang) return `"${esc}"@${tv.lang}`;
-    if (tv.datatype && tv.datatype !== XSD + 'string') return `"${esc}"^^${curie(tv.datatype)}`;
-    return `"${esc}"`;
+    if (tv.lang) return `${str(tv.value)}@${tv.lang}`;
+    if (tv.datatype && tv.datatype !== XSD + 'string') return `${str(tv.value)}^^${curie(tv.datatype)}`;
+    return str(tv.value);
   };
   const val = (tv: TermValue): string => (tv.type === 'iri' ? curie(tv.value) : lit(tv));
-  const num = (s: string): string => (/^-?\d+(\.\d+)?$/.test(s.trim()) ? s.trim() : `"${s.replace(/"/g, '\\"')}"`);
-  const str = (s: string): string =>
-    `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
+  const num = (s: string): string => (BARE_NUM.test(s.trim()) ? s.trim() : str(s));
+  const xTerm = (t: ExtraTerm): string => {
+    if (t.termType === 'NamedNode') return curie(t.value);
+    if (t.termType === 'BlankNode') return '_:' + bl(t.value);
+    if (t.language) return `${str(t.value)}@${t.language}`;
+    if (t.datatype) return `${str(t.value)}^^${curie(t.datatype)}`;
+    return str(t.value);
+  };
+  const xPred = (p: string): string => (p === RDF_TYPE ? 'a' : curie(p));
 
-  const propLines = (p: PropertyShape): string[] => {
+  const pathTtl = (e: PathExpr): string => {
+    switch (e.kind) {
+      case 'predicate':
+        return curie(e.iri);
+      case 'inverse':
+        return `[ sh:inversePath ${pathTtl(e.path)} ]`;
+      case 'sequence':
+        return `( ${e.paths.map(pathTtl).join(' ')} )`;
+      case 'alternative':
+        return `[ sh:alternativePath ( ${e.paths.map(pathTtl).join(' ')} ) ]`;
+      case 'zeroOrMore':
+        return `[ sh:zeroOrMorePath ${pathTtl(e.path)} ]`;
+      case 'oneOrMore':
+        return `[ sh:oneOrMorePath ${pathTtl(e.path)} ]`;
+      case 'zeroOrOne':
+        return `[ sh:zeroOrOnePath ${pathTtl(e.path)} ]`;
+    }
+  };
+
+  const namedEmitted = new Set<string>();
+  const namedBlocks: string[] = [];
+
+  const refTtl = (r: ShapeRef, indent: string): string => ('ref' in r ? curie(r.ref) : inline(r.inline, indent, false));
+
+  const inline = (p: PropertyShape, indent: string, placeholderPath: boolean): string => {
+    const inner = indent + '  ';
+    const lines: string[] = [];
+    if (p.declared && !p.iri) lines.push('a sh:PropertyShape');
+    lines.push(...bodyLines(p, inner, placeholderPath));
+    if (!lines.length) return '[ ]';
+    return `[\n${lines.map((l) => `${inner}${l} ;`).join('\n')}\n${indent}]`;
+  };
+
+  const propertyLine = (p: PropertyShape, indent: string): string => {
+    if (p.iri) {
+      if (!namedEmitted.has(p.iri)) {
+        namedEmitted.add(p.iri);
+        const lines = bodyLines(p, '  ', false);
+        if (p.declared || lines.length) {
+          const head = `${curie(p.iri)}${p.declared ? ' a sh:PropertyShape' : ''}`;
+          if (!lines.length) namedBlocks.push(`${head} .`);
+          else if (p.declared) namedBlocks.push(`${head} ;\n  ${lines.join(' ;\n  ')} .`);
+          else namedBlocks.push(`${head} ${lines.join(' ;\n  ')} .`);
+        }
+      }
+      return `sh:property ${curie(p.iri)}`;
+    }
+    return `sh:property ${inline(p, indent, true)}`;
+  };
+
+  const logicLines = (logic: LogicConstraints | undefined, indent: string, out: string[]) => {
+    if (!logic) return;
+    for (const op of ['and', 'or', 'xone'] as const) {
+      const refs = logic[op];
+      if (refs) out.push(`sh:${op} ( ${refs.map((r) => refTtl(r, indent)).join(' ')} )`);
+    }
+    for (const r of logic.not || []) out.push(`sh:not ${refTtl(r, indent)}`);
+  };
+
+  // Partition retained quads: subject == the owning node → inline lines;
+  // everything else (closures) → labelled top-level statements.
+  const splitExtras = (extras: ExtraQuad[] | undefined, own: ExtraTerm | undefined): string[] => {
+    const ownLines: string[] = [];
+    for (const e of extras || []) {
+      if (own && e.s.termType === own.termType && e.s.value === own.value) ownLines.push(`${xPred(e.p)} ${xTerm(e.o)}`);
+      else pool.push(`${xTerm(e.s)} ${xPred(e.p)} ${xTerm(e.o)} .`);
+    }
+    return ownLines;
+  };
+
+  const bodyLines = (p: PropertyShape, indent: string, placeholderPath: boolean): string[] => {
     const out: string[] = [];
-    out.push(`sh:path ${p.path ? curie(p.path) : 'rdf:nil'}`);
+    const ownExtras = splitExtras(p.extraQuads, p._own);
+    if (p.pathExpr) out.push(`sh:path ${pathTtl(p.pathExpr)}`);
+    else if (p.path) out.push(`sh:path ${curie(p.path)}`);
+    else if (placeholderPath && !ownExtras.some((l) => l.startsWith('sh:path '))) out.push(`sh:path rdf:nil`);
     if (p.name != null) out.push(`sh:name ${str(p.name)}`);
     if (p.description != null) out.push(`sh:description ${str(p.description)}`);
     if (p.group) out.push(`sh:group ${curie(p.group)}`);
@@ -482,45 +891,69 @@ export function serializeShapesGraph(g: ShapesGraph): string {
     if (c.maxLength != null) out.push(`sh:maxLength ${c.maxLength}`);
     if (c.pattern != null) out.push(`sh:pattern ${str(c.pattern)}`);
     if (c.flags != null) out.push(`sh:flags ${str(c.flags)}`);
-    if (c.languageIn && c.languageIn.length) out.push(`sh:languageIn ( ${c.languageIn.map(str).join(' ')} )`);
-    if (c.uniqueLang) out.push(`sh:uniqueLang true`);
-    if (c.in && c.in.length) out.push(`sh:in ( ${c.in.map(val).join(' ')} )`);
+    if (c.languageIn) out.push(`sh:languageIn ( ${c.languageIn.map(str).join(' ')} )`);
+    if (c.uniqueLang != null) out.push(`sh:uniqueLang ${c.uniqueLang}`);
+    if (c.in) out.push(`sh:in ( ${c.in.map(val).join(' ')} )`);
     if (c.hasValue) out.push(`sh:hasValue ${val(c.hasValue)}`);
     if (c.node) out.push(`sh:node ${curie(c.node)}`);
     for (const k of ['equals', 'disjoint', 'lessThan', 'lessThanOrEquals'] as const) {
       if (c[k]) out.push(`sh:${k} ${curie(c[k] as string)}`);
     }
-    if (p.severity) out.push(`sh:severity sh:${p.severity}`);
+    logicLines(p.logic, indent, out);
+    if (p.qualified) {
+      out.push(`sh:qualifiedValueShape ${refTtl(p.qualified.shape, indent)}`);
+      if (p.qualified.minCount != null) out.push(`sh:qualifiedMinCount ${p.qualified.minCount}`);
+      if (p.qualified.maxCount != null) out.push(`sh:qualifiedMaxCount ${p.qualified.maxCount}`);
+      if (p.qualified.disjoint != null) out.push(`sh:qualifiedValueShapesDisjoint ${p.qualified.disjoint}`);
+    }
+    if (p.severity) out.push(`sh:severity ${curie(p.severity)}`);
     if (p.message != null) out.push(`sh:message ${str(p.message)}`);
+    for (const child of p.properties || []) out.push(propertyLine(child, indent));
+    out.push(...ownExtras);
     return out;
   };
 
   const shapeBlock = (s: NodeShape): string => {
     const parts: string[] = [];
+    const ownExtras = splitExtras(s.extraQuads, { termType: 'NamedNode', value: s.iri });
     for (const t of s.targets) parts.push(`sh:${TARGET_PRED[t.kind]} ${curie(t.value)}`);
     if (s.name != null) parts.push(`sh:name ${str(s.name)}`);
     if (s.description != null) parts.push(`sh:description ${str(s.description)}`);
-    if (s.severity) parts.push(`sh:severity sh:${s.severity}`);
+    if (s.severity) parts.push(`sh:severity ${curie(s.severity)}`);
     if (s.message != null) parts.push(`sh:message ${str(s.message)}`);
-    if (s.closed) parts.push(`sh:closed true`);
-    if (s.ignoredProperties && s.ignoredProperties.length)
-      parts.push(`sh:ignoredProperties ( ${s.ignoredProperties.map(curie).join(' ')} )`);
-    for (const p of s.properties) {
-      const lines = propLines(p)
-        .map((l) => `    ${l} ;`)
-        .join('\n');
-      parts.push(`sh:property [\n${lines}\n  ]`);
-    }
+    if (s.closed != null) parts.push(`sh:closed ${s.closed}`);
+    if (s.ignoredProperties) parts.push(`sh:ignoredProperties ( ${s.ignoredProperties.map(curie).join(' ')} )`);
+    logicLines(s.logic, '  ', parts);
+    for (const p of s.properties) parts.push(propertyLine(p, '  '));
+    parts.push(...ownExtras);
     const head = `${curie(s.iri)} a sh:NodeShape`;
     if (parts.length === 0) return `${head} .`;
     return `${head} ;\n  ${parts.join(' ;\n  ')} .`;
   };
 
+  const blocks = g.shapes.map(shapeBlock);
+
+  // Graph-level retained statements, grouped by subject.
+  const tail: string[] = [];
+  if (g.extraQuads?.length) {
+    const bySubj = new Map<string, { s: ExtraTerm; rows: string[] }>();
+    for (const e of g.extraQuads) {
+      const k = e.s.termType + '' + e.s.value;
+      let ent = bySubj.get(k);
+      if (!ent) {
+        ent = { s: e.s, rows: [] };
+        bySubj.set(k, ent);
+      }
+      ent.rows.push(`${xPred(e.p)} ${xTerm(e.o)}`);
+    }
+    for (const { s, rows } of bySubj.values()) tail.push(`${xTerm(s)} ${rows.join(' ;\n  ')} .`);
+  }
+
   const usedPrefixes = Object.entries(prefixes)
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([p, ns]) => `@prefix ${p}: <${ns}> .`)
     .join('\n');
-  const body = g.shapes.map(shapeBlock).join('\n\n');
+  const body = [...blocks, ...namedBlocks, ...tail, ...pool].join('\n\n');
   return `${usedPrefixes}\n\n${body}\n`;
 }
 
@@ -537,12 +970,38 @@ function makeCurie(prefixes: Record<string, string>): (iri: string) => string {
   };
 }
 
-// ─── Display helpers (shared by the builder's read-only mode) ────────────────
+// ─── Display helpers (shared by the builder) ─────────────────────────────────
 
 export function shortLocal(iri: string): string {
   if (!iri) return '';
   const parts = String(iri).split(/[#/]/);
   return parts[parts.length - 1] || iri;
+}
+
+/**
+ * Human-readable, SPARQL-ish rendering of a property path expression,
+ * e.g. `^ex:p`, `ex:a/ex:b`, `ex:a|ex:b`, `ex:p*`, `ex:p+`, `ex:p?`.
+ */
+export function renderPath(expr: PathExpr | string | undefined | null, curie: (iri: string) => string): string {
+  if (!expr) return '';
+  if (typeof expr === 'string') return curie(expr);
+  const wrap = (e: PathExpr): string => (e.kind === 'predicate' ? curie(e.iri) : `(${renderPath(e, curie)})`);
+  switch (expr.kind) {
+    case 'predicate':
+      return curie(expr.iri);
+    case 'inverse':
+      return '^' + wrap(expr.path);
+    case 'sequence':
+      return expr.paths.map(wrap).join('/');
+    case 'alternative':
+      return expr.paths.map(wrap).join('|');
+    case 'zeroOrMore':
+      return wrap(expr.path) + '*';
+    case 'oneOrMore':
+      return wrap(expr.path) + '+';
+    case 'zeroOrOne':
+      return wrap(expr.path) + '?';
+  }
 }
 
 /** Compact chips summarising a property's constraints, for read-only display. */
@@ -566,7 +1025,14 @@ export function propChips(p: PropertyShape, curie: (iri: string) => string): { k
   if (c.node) chips.push({ k: 'shape', v: 'node ' + curie(c.node) });
   if (c.uniqueLang) chips.push({ k: 'str', v: 'uniqueLang' });
   if (c.languageIn && c.languageIn.length) chips.push({ k: 'str', v: 'lang' });
-  if (p.severity) chips.push({ k: 'sev', v: p.severity });
+  if (p.logic) {
+    for (const op of ['and', 'or', 'xone', 'not'] as const) {
+      const n = p.logic[op]?.length;
+      if (n) chips.push({ k: 'shape', v: `${op}(${n})` });
+    }
+  }
+  if (p.qualified) chips.push({ k: 'shape', v: 'qualified' });
+  if (p.severity) chips.push({ k: 'sev', v: shortLocal(p.severity) });
   return chips;
 }
 

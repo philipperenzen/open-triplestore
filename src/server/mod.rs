@@ -1549,6 +1549,10 @@ pub async fn run(
             if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, &base) {
                 tracing::warn!("shacl_studio: legacy migration failed: {e}");
             }
+            // Self-healing: adopt every dataset's shapes graph(s) — configured
+            // `shapes_graph_iri` or shapes-role dataset graphs — into the Studio
+            // Library and bind them in the validation layer (idempotent).
+            crate::shacl_studio::migrate::backfill_dataset_shapes(&seed_state);
             if let Err(e) = crate::shacl_studio::seed_standards::seed_standards(store, auth) {
                 tracing::warn!("shacl_studio: standards seed failed: {e}");
             }

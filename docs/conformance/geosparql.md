@@ -23,18 +23,18 @@ via [`tests/ogc_geosparql_shacl_roundtrip.rs`](../../tests/ogc_geosparql_shacl_r
 brief asked for: *GeoSPARQL data, validated by GeoSPARQL's own SHACL shapes, by our own
 validator.*
 
-### Scorecard (2026-06-10)
+### Scorecard (2026-06-11)
 
 | | count |
 |---|---|
-| **Examples matching the OGC oracle** | **44** |
-| Known deviations (ratcheted) | 4 |
+| **Examples matching the OGC oracle** | **46** |
+| Known deviations (ratcheted) | 2 |
 | Total examples | 48 |
 | **Waalbrug dataset round-trip** | **conforms ✓** |
 
-Known deviations (same two-way ratchet as the W3C suite): node-level
-lexical-form/datatype checks on string focus nodes (2 — same root cause as the W3C
-category-1 gaps) and two validator `sh:sparql` subtleties.
+Known deviations (same two-way ratchet as the W3C suite): two validator
+`sh:sparql` subtleties. The two node-level lexical-form/datatype deviations were
+fixed by the typed focus-node engine refactor (see `docs/conformance/shacl.md`).
 
 ### Why this suite mattered
 

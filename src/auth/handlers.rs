@@ -3108,6 +3108,23 @@ pub async fn patch_dataset_graph_role(
         db.set_dataset_graph_role(&dataset_id, &req.graph_iri, graph_role)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // "Set role: Shapes" — adopt the graph into the SHACL Studio Library
+        // and bind it to the dataset so the shapes become visible and effective
+        // (idempotent; best-effort, never fails the role update).
+        if graph_role == Some(GraphKind::Shapes) {
+            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                &state,
+                &dataset,
+                &req.graph_iri,
+                Some(&current_user.user_id),
+            ) {
+                tracing::warn!(
+                    "failed to auto-register shapes graph <{}> for dataset {dataset_id}: {e}",
+                    req.graph_iri
+                );
+            }
+        }
+
         // Rewrite DCAT metadata graph to reflect updated ots:graphRole triples.
         refresh_dataset_metadata(&state, &dataset_id);
     }
@@ -3475,6 +3492,7 @@ pub async fn delete_user(
 pub async fn update_dataset_shacl(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     Json(req): Json<DatasetShaclRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -3496,6 +3514,27 @@ pub async fn update_dataset_shacl(
         req.shapes_graph_iri.as_deref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Newly-linked shapes: adopt the graph into the SHACL Studio Library and
+    // bind it to the dataset (idempotent; best-effort, never fails the update).
+    if let Some(iri) = req
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let mut ds_after = dataset.clone();
+        ds_after.shapes_graph_iri = Some(iri.to_string());
+        if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+            &state,
+            &ds_after,
+            iri,
+            Some(&current_user.user_id),
+        ) {
+            tracing::warn!(
+                "failed to auto-register shapes graph <{iri}> for dataset {dataset_id}: {e}"
+            );
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3533,6 +3572,25 @@ pub async fn update_dataset_role(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     db.update_dataset_graphs_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Shapes role: every dataset graph now carries SHACL — adopt each into the
+    // SHACL Studio Library and bind it to the dataset so the shapes become
+    // visible and effective (idempotent; best-effort, never fails the update).
+    if graph_role == Some(GraphKind::Shapes) {
+        let graphs = db.list_dataset_graphs(&dataset_id).unwrap_or_default();
+        for iri in graphs {
+            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                &state,
+                &dataset,
+                &iri,
+                Some(&current_user.user_id),
+            ) {
+                tracing::warn!(
+                    "failed to auto-register shapes graph <{iri}> for dataset {dataset_id}: {e}"
+                );
+            }
+        }
+    }
 
     // Promote the dataset into the model / vocabulary registry so it shows up in
     // those listings *with its data* — a published 1.0.0 version whose graphs hold
