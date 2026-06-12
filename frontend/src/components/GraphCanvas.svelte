@@ -56,15 +56,19 @@
   // We suppress viewport-driven minimap renders until layoutstop.
   let layoutRunning = true; // assume true on init; set false by first layoutstop
   let tooltip = { visible: false, x: 0, y: 0, label: '', type: '', iri: '', value: '', datatype: '', language: '' };
-  // Node inspector panel state — see buildInspector().
-  let inspected = null;       // built model for the tapped node, or null when closed
-  let inspectedId = null;     // its node id, so we can rebuild on graph changes
-  // Edge / predicate info panel state — see buildEdgeInspector(). Mutually
-  // exclusive with the node inspector (only one panel is ever open).
+  // Node inspector panels — several can be open at once (one per node, deduped
+  // by node id), each draggable and z-stacked. The count is capped by viewport
+  // width so panels never bury the graph on small screens. See openInspector().
+  /** @type {Array<{id:string, model:any, pos:{x:number,y:number}, z:number, seq:number, incomingLimit:number}>} */
+  let inspPanels = [];
+  let inspZTop = 25;   // stacking order base (panel CSS z-index starts here)
+  let inspSeq = 0;     // cascade counter so new panels don't open exactly on top
+  let inspDrag = null; // { id, dx, dy } while dragging a panel by its header
+  // Edge / predicate info panel state — see buildEdgeInspector(). Single
+  // instance (one edge panel at a time); node panels stay open alongside it.
   let inspectedEdge = null;   // built model for the tapped edge, or null when closed
   let inspectedEdgeId = null; // its edge id, so we can rebuild / clear on graph changes
-  let inspectorIncomingLimit = 25;
-  let copiedInspector = false;
+  let copiedInspector = '';   // `${panelId}` that just copied (checkmark flash)
   let inspectorAutoExpanded = new Set(); // blank-node ids we've asked the host to load
   let spinnerPos = null; // { x, y } rendered px — drives HTML spinner overlay
   let pinnedNodes = new Set();
@@ -489,7 +493,7 @@
 
     // Tap on empty canvas closes whichever panel is open (node taps set
     // evt.target to the node, edge taps to the edge).
-    cy.on('tap', (evt) => { if (evt.target === cy) { closeInspector(); closeEdgeInspector(); } });
+    cy.on('tap', (evt) => { if (evt.target === cy) { closeInspectorOnCanvasTap(); closeEdgeInspector(); } });
 
     // Context menu (right-click)
     cy.on('cxttap', 'node', (evt) => {
@@ -907,14 +911,33 @@
     };
   }
 
+  // How many panels fit comfortably: panels are 320px wide; leave room for the
+  // graph itself. 1 on narrow screens, up to 4 on wide ones.
+  function maxInspPanels() {
+    const w = typeof window === 'undefined' ? 1280 : window.innerWidth;
+    return Math.max(1, Math.min(4, Math.floor(w / 380)));
+  }
+
   function openInspector(node) {
     if (!inspector || !node) return;
-    // Node and edge panels are mutually exclusive — opening one closes the other.
+    // An edge panel occupies the same default spot — close it; node panels the
+    // user has arranged stay open (multi-panel comparison is the whole point).
     closeEdgeInspector();
-    inspectedId = node.id();
-    inspectorIncomingLimit = 25;
-    inspectorAutoExpanded = new Set();
-    inspected = buildInspector(node);
+    const id = node.id();
+    const existing = inspPanels.find((p) => p.id === id);
+    if (existing) {
+      // Same node tapped again: refresh its content and bring it to front.
+      existing.model = buildInspector(node);
+      focusInspPanel(id);
+      return;
+    }
+    const cascade = (inspSeq % 5) * 28;
+    inspPanels = [
+      ...inspPanels,
+      { id, model: buildInspector(node), pos: { x: cascade, y: cascade }, z: ++inspZTop, seq: inspSeq++, incomingLimit: 25 },
+    ];
+    const cap = maxInspPanels();
+    if (inspPanels.length > cap) inspPanels = inspPanels.slice(inspPanels.length - cap);
     autoExpandBlankChildren(node);
   }
   // When the inspected node — or a blank node it points at — has no contents in
@@ -934,27 +957,62 @@
     node.outgoers('edge').forEach((e) => requestExpand(e.target())); // blank nodes it points at
   }
   // Rebuild after the graph changes (e.g. a blank node was expanded) so newly
-  // arrived neighbours — like a geometry — appear in the open panel automatically.
+  // arrived neighbours — like a geometry — appear in every open panel
+  // automatically; panels whose node was removed close themselves.
   function refreshInspector() {
-    if (!inspectedId || !cy) return;
-    const n = cy.getElementById(inspectedId);
-    if (n && n.length) inspected = buildInspector(n);
-    else { inspected = null; inspectedId = null; }
+    if (!cy || !inspPanels.length) return;
+    inspPanels = inspPanels.flatMap((p) => {
+      const n = cy.getElementById(p.id);
+      return n && n.length ? [{ ...p, model: buildInspector(n) }] : [];
+    });
   }
-  function closeInspector() {
-    inspected = null;
-    inspectedId = null;
-    if (cy) cy.$(':selected').unselect();
+  function focusInspPanel(id) {
+    inspPanels = inspPanels.map((p) => (p.id === id ? { ...p, z: ++inspZTop } : p));
   }
-  function inspectorOpen() {
-    if (inspected?.iri) {
-      dispatch('nodeOpen', { id: inspected.id, fullIri: inspected.iri, nodeType: inspected.nodeType, label: inspected.label });
+  function closeInspPanel(id) {
+    inspPanels = inspPanels.filter((p) => p.id !== id);
+    if (!inspPanels.length && cy) cy.$('node:selected').unselect();
+  }
+  // Background tap: dismiss a lone panel (the familiar gesture), but never wipe
+  // out a multi-panel arrangement the user deliberately built.
+  function closeInspectorOnCanvasTap() {
+    if (inspPanels.length === 1) {
+      inspPanels = [];
+      if (cy) cy.$(':selected').unselect();
     }
   }
-  async function copyInspectorText(s) {
+  // Drag a panel by its header (pointer-only; controls stay accessible).
+  function startInspDrag(e, id) {
+    if (e.target.closest('button, a')) return;
+    const p = inspPanels.find((x) => x.id === id);
+    if (!p) return;
+    inspDrag = { id, dx: e.clientX - p.pos.x, dy: e.clientY - p.pos.y };
+    window.addEventListener('pointermove', onInspDrag);
+    window.addEventListener('pointerup', stopInspDrag, { once: true });
+  }
+  function onInspDrag(e) {
+    if (!inspDrag) return;
+    const { id, dx, dy } = inspDrag;
+    inspPanels = inspPanels.map((p) =>
+      p.id === id ? { ...p, pos: { x: e.clientX - dx, y: e.clientY - dy } } : p
+    );
+  }
+  function stopInspDrag() {
+    inspDrag = null;
+    window.removeEventListener('pointermove', onInspDrag);
+  }
+  function inspectorOpen(model) {
+    if (model?.iri) {
+      dispatch('nodeOpen', { id: model.id, fullIri: model.iri, nodeType: model.nodeType, label: model.label });
+    }
+  }
+  function bumpIncomingLimit(id) {
+    inspPanels = inspPanels.map((p) => (p.id === id ? { ...p, incomingLimit: p.incomingLimit + 25 } : p));
+  }
+  async function copyInspectorText(s, panelId = '') {
     if (await copyToClipboard(s)) {
-      copiedInspector = true;
-      setTimeout(() => (copiedInspector = false), 1200);
+      copiedInspector = panelId || 'x';
+      setTimeout(() => (copiedInspector = ''), 1200);
     }
   }
 
@@ -987,11 +1045,8 @@
 
   function openEdgeInspector(edge) {
     if (!inspector || !edge) return;
-    // Mutually exclusive with the node inspector. Clear the node panel + its
-    // node selection, but DON'T touch the just-tapped edge's selection so its
-    // highlight stays (closeInspector() would unselect everything, edge too).
-    inspected = null;
-    inspectedId = null;
+    // Node panels stay open (they're movable windows the user arranged); only
+    // shift the selection highlight from nodes to the just-tapped edge.
     if (cy) cy.$('node:selected').unselect();
     inspectedEdgeId = edge.id();
     inspectedEdge = buildEdgeInspector(edge);
@@ -1500,121 +1555,132 @@
     <span class="legend-dot" style="background:#a1a1aa" title={$t('pages.graphViz.legendBNodeTitle')}></span><span class="legend-txt">{$t('pages.graphViz.legendBNode')}</span>
   </div>
 
-  <!-- Node inspector (top-left) — opens on node click. Surfaces the node's
-       properties and, via blank-node traversal, the geometry / files / data that
-       would otherwise be hidden behind an anonymous node. -->
-  {#if inspector && inspected}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="inspector-panel" on:click|stopPropagation on:keydown|stopPropagation>
-      <div class="insp-header">
-        <span class="insp-type insp-type-{inspected.nodeType}">
-          {inspected.nodeType === 'literal' ? $t('pages.graphViz.typeLiteral')
-            : inspected.nodeType === 'bnode' ? $t('pages.graphViz.typeBnode')
-            : $t('pages.graphViz.typeUri')}
-        </span>
-        <button class="insp-close" on:click={closeInspector} aria-label={$t('pages.graphViz.inspectorClose')} title={$t('pages.graphViz.inspectorClose')}>
-          <X size={14} />
-        </button>
-      </div>
-
-      <div class="insp-body">
-        {#if inspected.nodeType === 'literal'}
-          <div class="insp-literal">{inspected.value}</div>
-        {:else}
-          <h4 class="insp-title">{inspected.label}</h4>
-        {/if}
-
-        <p class="insp-explain">
-          {inspected.nodeType === 'literal' ? $t('pages.graphViz.typeLiteralExplain')
-            : inspected.nodeType === 'bnode' ? $t('pages.graphViz.typeBnodeExplain')
-            : $t('pages.graphViz.typeUriExplain')}
-        </p>
-
-        {#if inspected.nodeType === 'literal'}
-          <div class="insp-meta-row">
-            {#if inspected.language}
-              <span class="insp-chip" title={$t('pages.graphViz.inspectorLanguage')}>@{inspected.language}</span>
-            {/if}
-            {#if inspected.datatype}
-              <span class="insp-chip mono" title={inspected.datatype}>{datatypeLabel(inspected.datatype)}</span>
-            {/if}
-            <button class="insp-mini-btn" on:click={() => copyInspectorText(inspected.value)} title={$t('pages.graphViz.inspectorCopyValue')}>
-              {#if copiedInspector}<Check size={12} />{:else}<Copy size={12} />{/if}
-            </button>
-          </div>
-        {:else if inspected.iri}
-          <div class="insp-iri-row">
-            <code class="insp-iri" title={inspected.iri}>{inspected.iri}</code>
-            <button class="insp-mini-btn" on:click={() => copyInspectorText(inspected.iri)} title={$t('pages.graphViz.inspectorCopyIri')}>
-              {#if copiedInspector}<Check size={12} />{:else}<Copy size={12} />{/if}
-            </button>
-          </div>
-          <button class="insp-open-btn" on:click={inspectorOpen}>
-            <ArrowUpRight size={13} /> {$t('pages.graphViz.inspectorOpenResource')}
+  <!-- Node inspectors — one per inspected node, all draggable and z-stacked.
+       Each surfaces its node's properties and, via blank-node traversal, the
+       geometry / files / data that would otherwise hide behind an anonymous
+       node. Clicking a panel brings it to the front. -->
+  {#if inspector}
+    {#each inspPanels as p (p.id)}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="inspector-panel"
+        style:transform={`translate(${p.pos.x}px, ${p.pos.y}px)`}
+        style:z-index={p.z}
+        on:pointerdown|capture={() => focusInspPanel(p.id)}
+        on:click|stopPropagation
+        on:keydown|stopPropagation
+      >
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="insp-header insp-draggable" on:pointerdown={(e) => startInspDrag(e, p.id)}>
+          <span class="insp-type insp-type-{p.model.nodeType}">
+            {p.model.nodeType === 'literal' ? $t('pages.graphViz.typeLiteral')
+              : p.model.nodeType === 'bnode' ? $t('pages.graphViz.typeBnode')
+              : $t('pages.graphViz.typeUri')}
+          </span>
+          <button class="insp-close" on:click={() => closeInspPanel(p.id)} aria-label={$t('pages.graphViz.inspectorClose')} title={$t('pages.graphViz.inspectorClose')}>
+            <X size={14} />
           </button>
-        {/if}
+        </div>
 
-        {#if inspected.rdfType}
-          <div class="insp-meta-row"><span class="insp-chip type">{inspected.rdfType}</span></div>
-        {/if}
+        <div class="insp-body">
+          {#if p.model.nodeType === 'literal'}
+            <div class="insp-literal">{p.model.value}</div>
+          {:else}
+            <h4 class="insp-title">{p.model.label}</h4>
+          {/if}
 
-        <!-- Connected data: geometry surfaced even when it sits behind a blank node -->
-        {#if inspected.geometries.length > 0}
-          <div class="insp-section">
-            <div class="insp-section-head"><MapPin size={12} /> {$t('pages.graphViz.inspectorConnectedData')}</div>
-            <GeoPreview wkts={inspected.geometries} height="150px" />
-          </div>
-        {/if}
+          <p class="insp-explain">
+            {p.model.nodeType === 'literal' ? $t('pages.graphViz.typeLiteralExplain')
+              : p.model.nodeType === 'bnode' ? $t('pages.graphViz.typeBnodeExplain')
+              : $t('pages.graphViz.typeUriExplain')}
+          </p>
 
-        <!-- Outgoing properties — blank-node values expand inline via ValueRenderer -->
-        {#if inspected.nodeType !== 'literal'}
-          <div class="insp-section">
-            <div class="insp-section-head">
-              <ArrowRight size={12} /> {$t('pages.graphViz.inspectorProperties')}
-              {#if inspected.props.length}<span class="insp-count">{inspected.props.length}</span>{/if}
+          {#if p.model.nodeType === 'literal'}
+            <div class="insp-meta-row">
+              {#if p.model.language}
+                <span class="insp-chip" title={$t('pages.graphViz.inspectorLanguage')}>@{p.model.language}</span>
+              {/if}
+              {#if p.model.datatype}
+                <span class="insp-chip mono" title={p.model.datatype}>{datatypeLabel(p.model.datatype)}</span>
+              {/if}
+              <button class="insp-mini-btn" on:click={() => copyInspectorText(p.model.value, p.id)} title={$t('pages.graphViz.inspectorCopyValue')}>
+                {#if copiedInspector === p.id}<Check size={12} />{:else}<Copy size={12} />{/if}
+              </button>
             </div>
-            {#if inspected.props.length === 0}
-              <p class="insp-empty">{$t('pages.graphViz.inspectorNoProps')}</p>
-              <p class="insp-hint">{$t('pages.graphViz.inspectorExpandHint')}</p>
-            {:else}
+          {:else if p.model.iri}
+            <div class="insp-iri-row">
+              <code class="insp-iri" title={p.model.iri}>{p.model.iri}</code>
+              <button class="insp-mini-btn" on:click={() => copyInspectorText(p.model.iri, p.id)} title={$t('pages.graphViz.inspectorCopyIri')}>
+                {#if copiedInspector === p.id}<Check size={12} />{:else}<Copy size={12} />{/if}
+              </button>
+            </div>
+            <button class="insp-open-btn" on:click={() => inspectorOpen(p.model)}>
+              <ArrowUpRight size={13} /> {$t('pages.graphViz.inspectorOpenResource')}
+            </button>
+          {/if}
+
+          {#if p.model.rdfType}
+            <div class="insp-meta-row"><span class="insp-chip type">{p.model.rdfType}</span></div>
+          {/if}
+
+          <!-- Connected data: geometry surfaced even when it sits behind a blank node -->
+          {#if p.model.geometries.length > 0}
+            <div class="insp-section">
+              <div class="insp-section-head"><MapPin size={12} /> {$t('pages.graphViz.inspectorConnectedData')}</div>
+              <GeoPreview wkts={p.model.geometries} height="150px" />
+            </div>
+          {/if}
+
+          <!-- Outgoing properties — blank-node values expand inline via ValueRenderer -->
+          {#if p.model.nodeType !== 'literal'}
+            <div class="insp-section">
+              <div class="insp-section-head">
+                <ArrowRight size={12} /> {$t('pages.graphViz.inspectorProperties')}
+                {#if p.model.props.length}<span class="insp-count">{p.model.props.length}</span>{/if}
+              </div>
+              {#if p.model.props.length === 0}
+                <p class="insp-empty">{$t('pages.graphViz.inspectorNoProps')}</p>
+                <p class="insp-hint">{$t('pages.graphViz.inspectorExpandHint')}</p>
+              {:else}
+                <div class="insp-props">
+                  {#each p.model.props as prop}
+                    <div class="insp-prop">
+                      <span class="insp-pred" title={prop.predicate}>{prop.predLabel}</span>
+                      <span class="insp-val">
+                        <ValueRenderer term={prop.o} predicate={prop.predicate} bnodes={p.model.bnodes} on:run-sparql={(e) => dispatch('runSparql', e.detail)} />
+                      </span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- Incoming links -->
+          {#if p.model.incoming.length > 0}
+            <div class="insp-section">
+              <div class="insp-section-head">
+                <ArrowDownLeft size={12} /> {$t('pages.graphViz.inspectorLinkedFrom')}
+                <span class="insp-count">{p.model.incoming.length}</span>
+              </div>
               <div class="insp-props">
-                {#each inspected.props as p}
-                  <div class="insp-prop">
-                    <span class="insp-pred" title={p.predicate}>{p.predLabel}</span>
-                    <span class="insp-val">
-                      <ValueRenderer term={p.o} predicate={p.predicate} bnodes={inspected.bnodes} on:run-sparql={(e) => dispatch('runSparql', e.detail)} />
-                    </span>
+                {#each p.model.incoming.slice(0, p.incomingLimit) as inc}
+                  <div class="insp-prop insp-prop-in">
+                    <span class="insp-val"><RdfTerm term={inc.s} /></span>
+                    <span class="insp-pred insp-pred-in" title={inc.predicate}>{inc.predLabel}</span>
                   </div>
                 {/each}
               </div>
-            {/if}
-          </div>
-        {/if}
-
-        <!-- Incoming links -->
-        {#if inspected.incoming.length > 0}
-          <div class="insp-section">
-            <div class="insp-section-head">
-              <ArrowDownLeft size={12} /> {$t('pages.graphViz.inspectorLinkedFrom')}
-              <span class="insp-count">{inspected.incoming.length}</span>
+              {#if p.model.incoming.length > p.incomingLimit}
+                <button class="insp-more" on:click={() => bumpIncomingLimit(p.id)}>
+                  {$t('pages.graphViz.inspectorMore', { values: { count: p.model.incoming.length - p.incomingLimit } })}
+                </button>
+              {/if}
             </div>
-            <div class="insp-props">
-              {#each inspected.incoming.slice(0, inspectorIncomingLimit) as inc}
-                <div class="insp-prop insp-prop-in">
-                  <span class="insp-val"><RdfTerm term={inc.s} /></span>
-                  <span class="insp-pred insp-pred-in" title={inc.predicate}>{inc.predLabel}</span>
-                </div>
-              {/each}
-            </div>
-            {#if inspected.incoming.length > inspectorIncomingLimit}
-              <button class="insp-more" on:click={() => (inspectorIncomingLimit += 25)}>
-                {$t('pages.graphViz.inspectorMore', { values: { count: inspected.incoming.length - inspectorIncomingLimit } })}
-              </button>
-            {/if}
-          </div>
-        {/if}
+          {/if}
+        </div>
       </div>
-    </div>
+    {/each}
   {/if}
 
   <!-- Predicate / edge info panel — opens on edge click. Mirrors the node
@@ -2226,6 +2292,7 @@
     border-bottom: 1px solid #eef2f7;
     flex-shrink: 0;
   }
+  .insp-draggable { cursor: move; user-select: none; touch-action: none; }
 
   .insp-type {
     font-size: 9px;

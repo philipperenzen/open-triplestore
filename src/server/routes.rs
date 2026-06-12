@@ -92,6 +92,11 @@ pub struct SparqlQueryParams {
 pub struct GraphStoreParams {
     pub graph: Option<String>,
     pub default: Option<String>,
+    /// Optional serialization override for browser-initiated downloads, where
+    /// setting an Accept header isn't possible: `turtle`/`ttl`, `ntriples`/`nt`,
+    /// `rdfxml`/`xml`, `jsonld`, `trig`, `nquads`/`nq`. Also switches the
+    /// response to `Content-Disposition: attachment`.
+    pub format: Option<String>,
 }
 
 impl GraphStoreParams {
@@ -936,7 +941,33 @@ async fn graph_store_get(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/turtle");
 
-    let format = negotiate_graph_format(accept);
+    // `?format=` wins over Accept — browser download links can't set headers.
+    let format = match params.format.as_deref() {
+        Some(p) => super::content_negotiation::graph_format_from_param(p).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "unknown format '{p}' (use turtle, ntriples, rdfxml, jsonld, trig or nquads)"
+            ))
+        })?,
+        None => negotiate_graph_format(accept),
+    };
+    // Explicit-format requests are downloads: attach a filename derived from
+    // the graph IRI so the browser saves e.g. `building.ttl`.
+    let download_disposition = params.format.as_ref().map(|_| {
+        let stem = params
+            .graph_iri()
+            .and_then(|iri| iri.rsplit(['/', '#']).find(|s| !s.is_empty()))
+            .unwrap_or("graph")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        format!("attachment; filename=\"{}.{}\"", stem, format.extension())
+    });
 
     // Graph-level access control: check visibility before serving graph data.
     if let Some(iri) = params.graph_iri() {
@@ -971,12 +1002,18 @@ async fn graph_store_get(
             .graph_store_get(Some(iri), format.to_rdf_format())?;
         let filtered = apply_triple_label_filter(user.as_deref(), bytes, iri, format, &state)
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        return Ok((
+        let mut resp = (
             StatusCode::OK,
             [(CONTENT_TYPE, format.content_type())],
             filtered,
         )
-            .into_response());
+            .into_response();
+        if let Some(d) = &download_disposition {
+            if let Ok(v) = axum::http::HeaderValue::from_str(d) {
+                resp.headers_mut().insert(CONTENT_DISPOSITION, v);
+            }
+        }
+        return Ok(resp);
     }
 
     // Stream the dump straight through the response body so multi-MB graphs
@@ -1004,11 +1041,13 @@ async fn graph_store_get(
         .map_err(|_| AppError::Internal("Dump task aborted".to_string()))??;
 
     let body = axum::body::Body::from_stream(receiver_stream(chunk_rx));
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
-        .header(CONTENT_TYPE, format.content_type())
-        .body(body)
-        .unwrap())
+        .header(CONTENT_TYPE, format.content_type());
+    if let Some(d) = &download_disposition {
+        builder = builder.header(CONTENT_DISPOSITION, d.as_str());
+    }
+    Ok(builder.body(body).unwrap())
 }
 
 /// Parse `bytes` as NTriples/Turtle in `iri`, filter triples whose security
@@ -3996,7 +4035,7 @@ fn asset_iri(base_url: &str, dataset_id: &str, asset_id: &str) -> String {
     format!("{}/datasets/{}/assets/{}", base_url, dataset_id, asset_id)
 }
 
-fn assets_graph_iri(base_url: &str, dataset_id: &str) -> String {
+pub(crate) fn assets_graph_iri(base_url: &str, dataset_id: &str) -> String {
     format!("{}/datasets/{}/assets", base_url, dataset_id)
 }
 
@@ -4012,7 +4051,7 @@ fn sparql_escape(s: &str) -> String {
 /// distribution, the node is typed by kind (schema.org class + DCMI Type) and
 /// carries kind-specific detail (image dimensions, PDF pages, 3D format, geo
 /// bbox/CRS, …) derived from the bytes. See `crate::assets`.
-fn insert_asset_triples(
+pub(crate) fn insert_asset_triples(
     state: &AppState,
     asset: &crate::auth::models::Asset,
     dataset_id: &str,
@@ -4524,15 +4563,37 @@ pub async fn download_asset(
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, String)> {
+    serve_asset(&state, Some(&current_user.user_id), &dataset_id, &asset_id).await
+}
+
+/// Anonymous-capable asset download (`…/assets/:id/download`, optional auth):
+/// dataset visibility decides — a public dataset's files (e.g. the original IFC
+/// behind a 3D model) are fetchable by the viewer without a session, exactly
+/// like its graphs are readable through the scoped SPARQL endpoint.
+pub async fn download_asset_public(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path((dataset_id, asset_id)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let user_id = user.as_deref().map(|u| u.user_id.as_str());
+    serve_asset(&state, user_id, &dataset_id, &asset_id).await
+}
+
+async fn serve_asset(
+    state: &AppState,
+    user_id: Option<&str>,
+    dataset_id: &str,
+    asset_id: &str,
+) -> Result<Response, (StatusCode, String)> {
     let dataset = state
         .auth_db
-        .get_dataset(&dataset_id)
+        .get_dataset(dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
     if !state
         .auth_db
-        .can_access_dataset(Some(&current_user.user_id), &dataset)
+        .can_access_dataset(user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));

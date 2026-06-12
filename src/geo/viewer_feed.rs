@@ -43,6 +43,9 @@ pub struct ViewerElement {
     pub files: Vec<(String, String)>,
     /// CRS URI of the stored geometry (default CRS84 when unprefixed).
     pub source_crs: Option<String>,
+    /// Source up-axis of the element's 3D model(s) (`ots:modelUpAxis`, e.g.
+    /// "Z" for Z-up STL exports) — viewers rotate into their own convention.
+    pub up_axis: Option<String>,
     /// Geometry as WKT in EPSG:4326, `(x y) = (lon lat)` — feeds map layers.
     pub wkt4326: Option<String>,
 }
@@ -75,7 +78,7 @@ pub fn build_viewer_feed(
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid ?up
         {from}
         WHERE {{
             {{ ?parent (bot:containsElement|bot:hasSubElement) ?el . }}
@@ -92,7 +95,8 @@ pub fn build_viewer_feed(
                         OPTIONAL {{ ?g geo:asWKT ?wkt }}
                         OPTIONAL {{ ?g geo:asGML ?gml }} }}
             OPTIONAL {{ ?el omg:hasGeometry ?og . ?og ?fp ?file .
-                        FILTER(STRSTARTS(STR(?fp), "{FOG_AS}")) }}
+                        FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }} }}
             OPTIONAL {{ ?el ?guidp ?guid . FILTER(STRENDS(STR(?guidp), "ifcGuid")) }}
         }}
         "#
@@ -123,6 +127,9 @@ pub fn build_viewer_feed(
         }
         if entry.ifc_guid.is_none() {
             entry.ifc_guid = sol.get("guid").map(term_value);
+        }
+        if entry.up_axis.is_none() {
+            entry.up_axis = sol.get("up").map(term_value);
         }
         if let (Some(fp), Some(file)) = (sol.get("fp").map(term_str), sol.get("file")) {
             let format = fp.trim_start_matches(FOG_AS).to_string();
@@ -235,7 +242,8 @@ mod tests {
             geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)"^^geo:wktLiteral ] ;
             omg:hasGeometry [ a omg:Geometry ;
                 fog:asGltf_v2.0-glb "https://files.example/arch.glb"^^xsd:anyURI ;
-                fog:asIfc_v4.0 "https://files.example/bridge.ifc#1aB2cD3eF4gH5iJ6kL7mNo"^^xsd:anyURI ] .
+                fog:asIfc_v4.0 "https://files.example/bridge.ifc#1aB2cD3eF4gH5iJ6kL7mNo"^^xsd:anyURI ;
+                <https://opentriplestore.org/ns#modelUpAxis> "Z" ] .
     "#;
 
     #[test]
@@ -252,6 +260,8 @@ mod tests {
             Some("https://files.example/arch.glb")
         );
         assert_eq!(arch.ifc_guid.as_deref(), Some("1aB2cD3eF4gH5iJ6kL7mNo"));
+        // The model-orientation annotation flows through to the client.
+        assert_eq!(arch.up_axis.as_deref(), Some("Z"));
         // RD point reprojected to lon/lat near Nijmegen.
         let wkt = arch.wkt4326.as_deref().unwrap();
         let nums: Vec<f64> = wkt

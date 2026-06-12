@@ -14,19 +14,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- None.
+- **IFC → linked data**: bulk import accepts `.ifc` files — stored as a downloadable
+  dataset asset and transformed into a BOT topology graph (storeys/elements,
+  property sets, FOG file references) plus a full ifcOWL-style instance lift
+  (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
+  trig/nquads) with download disposition, and assets gain an anonymous-capable
+  `…/download` route gated by dataset visibility.
+- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+  BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
+  with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
+- **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
+  clicking a beam opens that element's linked-data panel; multiple movable
+  element panels with a dock; map layer toggles + legend; "Show on map";
+  a model-format picker; ontology viewer standards header + full-page viewer.
 
 ### Changed
-- None.
+- App-wide motion polish: route transitions, staggered table rows, delayed
+  loading indicators (no sub-500 ms skeleton flash), reduced-motion guard.
+- SPARQL/read rate limit raised to an interactive burst (40 @ 60/min) and 429s
+  now carry a standard `Retry-After`; the web client retries them transparently.
 
 ### Deprecated
 - None.
 
 ### Fixed
-- None.
+- STL models rendered lying flat (Z-up vs Y-up) and basemap building extrusions
+  overlapping real 3D models on the map.
+- Boot seeding serialized + self-healing (a half-seeded instance left public
+  demo graphs registered but empty, so logged-out visitors saw no data and a
+  zero landing count); SQLite `busy_timeout` now precedes WAL setup.
+- Ontology viewer rendered empty for model-registry versions (preloaded store
+  now supersedes an empty SPARQL load).
 
 ### Security
-- None.
+- Authorization matrix tests (role × visibility × endpoint) pinning anonymous
+  access to public data across browse/SPARQL/GSP/datasets/service description.
 
 ## [0.3.0] — 2026-06-10
 
