@@ -178,11 +178,6 @@ impl GuardVerdict {
     }
 }
 
-/// Screen one user-supplied text (NL→SPARQL question, SHACL description).
-pub fn screen_text(text: &str) -> GuardVerdict {
-    screen_messages(std::iter::once(text))
-}
-
 /// Screen a whole conversation's user-supplied content. Size caps look at
 /// everything; blocklist/injection only at the content (the model's own
 /// earlier replies are echoed back by the client and must not trip phrase
