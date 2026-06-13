@@ -1,12 +1,15 @@
 <script>
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { getMe, updateMe, changePassword, listApiTokens, createApiToken, revokeApiToken, uploadUserAvatar, getUserAvatarUrl, selfDeactivate, selfPurge, logout } from '../lib/api.js';
+  import { getMe, updateMe, changePassword, changeEmail, resendVerification, totpSetup, totpEnable, totpDisable, listPasskeys, passkeyRegisterStart, passkeyRegisterFinish, deletePasskey, listApiTokens, createApiToken, revokeApiToken, uploadUserAvatar, getUserAvatarUrl, selfDeactivate, selfPurge, logout } from '../lib/api.js';
+  import { isPasskeySupported, createPasskey } from '../lib/webauthn.js';
   import { refreshUser, isAuthenticated, authInitialized } from '../lib/stores.js';
   import { TOKEN_SCOPES } from '../lib/permissions.js';
   import { copyToClipboard } from '../lib/clipboard.js';
+  import { validateEmail } from '../lib/validate.ts';
   import { navigate } from '../lib/router/index.js';
-  import { Key, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle } from 'lucide-svelte';
+  import { renderSVG } from 'uqr';
+  import { Key, KeyRound, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle, ShieldCheck, ShieldOff, MailCheck, MailWarning, Pencil } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
 
   let profile = null;
@@ -18,7 +21,6 @@
   let privacySuccess = '';
 
   let editUsername = '';
-  let editEmail = '';
   let editDisplayName = '';
   let editBio = '';
   let editWebsite = '';
@@ -55,14 +57,14 @@
     try {
       profile = await getMe();
       editUsername = profile.username;
-      editEmail = profile.email;
       editDisplayName = profile.display_name || '';
       editBio = profile.bio || '';
       editWebsite = profile.website || '';
       editPhone = profile.phone || '';
       editOrganization = profile.organization || '';
     } catch {}
-    await loadTokens();
+    passkeySupported = isPasskeySupported();
+    await Promise.all([loadTokens(), loadPasskeys()]);
   });
 
   async function handleAvatarUpload(e) {
@@ -111,7 +113,6 @@
     try {
       await updateMe({
         username: editUsername,
-        email: editEmail,
         display_name: editDisplayName || null,
         bio: editBio || null,
         website: editWebsite || null,
@@ -144,6 +145,206 @@
       pwError = e.message;
     }
     pwLoading = false;
+  }
+
+  async function reloadProfile() {
+    try {
+      profile = await getMe();
+    } catch {}
+  }
+
+  // ── Email change & verification ─────────────────────────────────────────────
+
+  let showEmailModal = false;
+  let newEmail = '';
+  let emailPassword = '';
+  let emailModalError = '';
+  let emailModalLoading = false;
+  let emailNotice = '';
+  let resendLoading = false;
+  let resendNotice = '';
+
+  function openEmailModal() {
+    newEmail = '';
+    emailPassword = '';
+    emailModalError = '';
+    showEmailModal = true;
+  }
+
+  async function handleChangeEmail() {
+    emailModalError = '';
+    if (validateEmail(newEmail)) {
+      emailModalError = $t('pages.settings.emailFormatError');
+      return;
+    }
+    emailModalLoading = true;
+    try {
+      const res = await changeEmail(newEmail.trim(), emailPassword);
+      showEmailModal = false;
+      emailNotice = res.pending
+        ? $t('pages.settings.emailChangePending', { values: { email: newEmail.trim() } })
+        : $t('pages.settings.emailChanged');
+      await reloadProfile();
+      await refreshUser();
+    } catch (e) {
+      emailModalError = e.message;
+    } finally {
+      emailModalLoading = false;
+    }
+  }
+
+  async function handleResendVerification() {
+    resendNotice = '';
+    resendLoading = true;
+    try {
+      await resendVerification();
+      resendNotice = $t('pages.settings.verificationSent');
+    } catch (e) {
+      resendNotice = e.message;
+    } finally {
+      resendLoading = false;
+    }
+  }
+
+  // ── Two-factor authentication ────────────────────────────────────────────────
+
+  // null | 'setup' | 'codes' | 'disable'
+  let totpModal = null;
+  let totpSecret = '';
+  let totpQrSvg = '';
+  let totpCode = '';
+  let totpError = '';
+  let totpLoading = false;
+  let recoveryCodes = [];
+  let codesCopied = false;
+  let disablePassword = '';
+  let disableCode = '';
+
+  async function startTotpSetup() {
+    totpError = '';
+    totpCode = '';
+    totpLoading = true;
+    try {
+      const res = await totpSetup();
+      totpSecret = res.secret;
+      totpQrSvg = renderSVG(res.otpauth_url);
+      totpModal = 'setup';
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      totpLoading = false;
+    }
+  }
+
+  async function confirmTotpEnable() {
+    totpError = '';
+    totpLoading = true;
+    try {
+      const res = await totpEnable(totpCode.trim());
+      recoveryCodes = res.recovery_codes || [];
+      codesCopied = false;
+      totpModal = 'codes';
+      await reloadProfile();
+      await refreshUser();
+    } catch (e) {
+      totpError = e.message;
+    } finally {
+      totpLoading = false;
+    }
+  }
+
+  function openTotpDisable() {
+    disablePassword = '';
+    disableCode = '';
+    totpError = '';
+    totpModal = 'disable';
+  }
+
+  async function confirmTotpDisable() {
+    totpError = '';
+    totpLoading = true;
+    try {
+      await totpDisable(disablePassword, disableCode.trim());
+      totpModal = null;
+      await reloadProfile();
+      await refreshUser();
+    } catch (e) {
+      totpError = e.message;
+    } finally {
+      totpLoading = false;
+    }
+  }
+
+  async function copyRecoveryCodes() {
+    codesCopied = await copyToClipboard(recoveryCodes.join('\n'));
+    if (codesCopied) setTimeout(() => codesCopied = false, 2000);
+  }
+
+  // ── Passkeys ─────────────────────────────────────────────────────────────────
+
+  let passkeys = [];
+  let passkeysLoading = false;
+  let passkeySupported = false;
+  // null | 'add' | 'remove'
+  let passkeyModal = null;
+  let passkeyName = '';
+  let passkeyError = '';
+  let passkeyBusy = false;
+  let removePasskeyId = null;
+  let removePasskeyPassword = '';
+
+  async function loadPasskeys() {
+    passkeysLoading = true;
+    try {
+      passkeys = await listPasskeys();
+    } catch {}
+    passkeysLoading = false;
+  }
+
+  function openPasskeyAdd() {
+    passkeyName = '';
+    passkeyError = '';
+    passkeyModal = 'add';
+  }
+
+  async function confirmPasskeyAdd() {
+    passkeyError = '';
+    passkeyBusy = true;
+    try {
+      const start = await passkeyRegisterStart();
+      const credential = await createPasskey(start.options.publicKey);
+      await passkeyRegisterFinish(start.challenge_id, passkeyName.trim() || null, credential);
+      passkeyModal = null;
+      await loadPasskeys();
+    } catch (e) {
+      // Dismissing the browser's passkey prompt is not an error.
+      if (e?.name !== 'NotAllowedError' && e?.name !== 'AbortError') {
+        passkeyError = e.message || String(e);
+      }
+    } finally {
+      passkeyBusy = false;
+    }
+  }
+
+  function openPasskeyRemove(id) {
+    removePasskeyId = id;
+    removePasskeyPassword = '';
+    passkeyError = '';
+    passkeyModal = 'remove';
+  }
+
+  async function confirmPasskeyRemove() {
+    passkeyError = '';
+    passkeyBusy = true;
+    try {
+      await deletePasskey(removePasskeyId, removePasskeyPassword);
+      passkeyModal = null;
+      await loadPasskeys();
+    } catch (e) {
+      passkeyError = e.message;
+    } finally {
+      passkeyBusy = false;
+    }
   }
 
   function toggleScope(scope) {
@@ -279,7 +480,29 @@
       </div>
       <div class="form-group">
         <label for="email">{$t('pages.settings.email')}</label>
-        <input id="email" type="email" bind:value={editEmail} required />
+        <div class="email-row">
+          <input id="email" type="email" value={profile?.email ?? ''} disabled />
+          <button type="button" class="btn btn-sm btn-ghost" on:click={openEmailModal}>
+            <Pencil size={14} /> {$t('pages.settings.changeEmail')}
+          </button>
+        </div>
+        {#if profile}
+          {#if profile.email_verified}
+            <p class="email-status verified"><MailCheck size={13} /> {$t('pages.settings.emailVerified')}</p>
+          {:else}
+            <p class="email-status unverified">
+              <MailWarning size={13} /> {$t('pages.settings.emailUnverified')}
+              <button type="button" class="linklike" on:click={handleResendVerification} disabled={resendLoading}>
+                {#if resendLoading}{$t('pages.settings.sending')}{:else}{$t('pages.settings.resendVerification')}{/if}
+              </button>
+            </p>
+            {#if resendNotice}<p class="hint">{resendNotice}</p>{/if}
+          {/if}
+          {#if profile.email_pending}
+            <p class="hint">{$t('pages.settings.emailPendingHint', { values: { email: profile.email_pending } })}</p>
+          {/if}
+          {#if emailNotice}<p class="success email-notice">{emailNotice}</p>{/if}
+        {/if}
       </div>
       <div class="form-group">
         <label for="settings-display-name">{$t('pages.settings.displayName')}</label>
@@ -339,6 +562,85 @@
         {#if pwLoading}<Loader2 size={14} class="animate-spin" /> {$t('pages.settings.changing')}{:else}{$t('pages.settings.changePasswordHeading')}{/if}
       </button>
     </form>
+  </div>
+
+  <div class="card">
+    <h2><ShieldCheck size={18} /> {$t('pages.settings.twoFactorHeading')}</h2>
+    <p class="hint">{$t('pages.settings.twoFactorHint')}</p>
+    {#if profile}
+      <div class="twofa-row">
+        <div>
+          <div class="twofa-status" class:on={profile.totp_enabled}>
+            {#if profile.totp_enabled}
+              <ShieldCheck size={16} /> {$t('pages.settings.twoFactorOn')}
+            {:else}
+              <ShieldOff size={16} /> {$t('pages.settings.twoFactorOff')}
+            {/if}
+          </div>
+          <p class="hint">
+            {#if profile.totp_enabled}
+              {$t('pages.settings.twoFactorOnHint')}
+            {:else}
+              {$t('pages.settings.twoFactorOffHint')}
+            {/if}
+          </p>
+        </div>
+        {#if profile.totp_enabled}
+          <button class="btn btn-sm btn-warn" on:click={openTotpDisable}>
+            {$t('pages.settings.twoFactorDisable')}
+          </button>
+        {:else}
+          <button class="btn btn-sm" on:click={startTotpSetup} disabled={totpLoading}>
+            {#if totpLoading}<Loader2 size={14} class="animate-spin" />{:else}<ShieldCheck size={14} />{/if}
+            {$t('pages.settings.twoFactorEnable')}
+          </button>
+        {/if}
+      </div>
+    {:else}
+      <p class="hint">{$t('system.loading')}</p>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h2><KeyRound size={18} /> {$t('pages.settings.passkeysHeading')}</h2>
+    <p class="hint">{$t('pages.settings.passkeysHint')}</p>
+    {#if passkeysLoading}
+      <p class="hint">{$t('system.loading')}</p>
+    {:else if passkeys.length === 0}
+      <p class="hint">{$t('pages.settings.passkeysNone')}</p>
+    {:else}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>{$t('pages.settings.name')}</th>
+            <th>{$t('pages.settings.passkeyCreated')}</th>
+            <th>{$t('pages.settings.lastUsed')}</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each passkeys as pk}
+            <tr>
+              <td>{pk.name}</td>
+              <td>{new Date(pk.created_at).toLocaleDateString()}</td>
+              <td>{pk.last_used_at ? new Date(pk.last_used_at).toLocaleDateString() : $t('pages.settings.never')}</td>
+              <td>
+                <button class="btn btn-sm btn-danger" on:click={() => openPasskeyRemove(pk.id)} title={$t('pages.settings.passkeyRemove')}>
+                  <Trash2 size={14} />
+                </button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+    {#if passkeySupported}
+      <button class="btn btn-sm passkey-add-btn" on:click={openPasskeyAdd}>
+        <Plus size={14} /> {$t('pages.settings.passkeyAdd')}
+      </button>
+    {:else}
+      <p class="hint">{$t('pages.settings.passkeyUnsupported')}</p>
+    {/if}
   </div>
 
   <div class="card">
@@ -572,6 +874,174 @@
           {#if dangerLoading}<Loader2 size={14} class="animate-spin" /> {$t('pages.settings.deleting')}{:else}{$t('pages.settings.deleteAccountForever')}{/if}
         </button>
       </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Change-email modal -->
+{#if showEmailModal}
+  <div class="modal-backdrop" on:click={() => showEmailModal = false} role="presentation" on:keydown={(e) => e.key === 'Escape' && (showEmailModal = false)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.changeEmailTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3 class="modal-title-plain"><Pencil size={18} /> {$t('pages.settings.changeEmailTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.changeEmailBody')}</p>
+      {#if emailModalError}<p class="error">{emailModalError}</p>{/if}
+      <form on:submit|preventDefault={handleChangeEmail}>
+        <div class="form-group">
+          <label for="settings-new-email">{$t('pages.settings.newEmail')}</label>
+          <input id="settings-new-email" type="email" bind:value={newEmail} required autocomplete="email" />
+        </div>
+        <div class="form-group">
+          <label for="settings-email-password">{$t('pages.settings.confirmWithPassword')}</label>
+          <input type="text" name="username" autocomplete="username" value={profile?.username ?? ''} hidden />
+          <input id="settings-email-password" type="password" bind:value={emailPassword} autocomplete="current-password" required placeholder={$t('pages.settings.currentPasswordPlaceholder')} />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => showEmailModal = false}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm" type="submit" disabled={emailModalLoading || !newEmail || !emailPassword}>
+            {#if emailModalLoading}<Loader2 size={14} class="animate-spin" /> {$t('pages.settings.sending')}{:else}{$t('pages.settings.changeEmail')}{/if}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- 2FA setup modal: secret + QR + first code -->
+{#if totpModal === 'setup'}
+  <div class="modal-backdrop" on:click={() => totpModal = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (totpModal = null)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.twoFactorSetupTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3 class="modal-title-plain"><ShieldCheck size={18} /> {$t('pages.settings.twoFactorSetupTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.twoFactorSetupBody')}</p>
+      <div class="totp-qr" aria-hidden="true">
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- SVG generated locally from the otpauth URL -->
+        {@html totpQrSvg}
+      </div>
+      <p class="totp-secret-label">{$t('pages.settings.twoFactorManualEntry')}</p>
+      <code class="totp-secret">{totpSecret}</code>
+      {#if totpError}<p class="error">{totpError}</p>{/if}
+      <form on:submit|preventDefault={confirmTotpEnable}>
+        <div class="form-group">
+          <label for="settings-totp-code">{$t('pages.settings.twoFactorEnterCode')}</label>
+          <input id="settings-totp-code" bind:value={totpCode} required inputmode="numeric" autocomplete="one-time-code" placeholder="123456" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => totpModal = null}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm" type="submit" disabled={totpLoading || !totpCode.trim()}>
+            {#if totpLoading}<Loader2 size={14} class="animate-spin" />{/if}
+            {$t('pages.settings.twoFactorActivate')}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- 2FA recovery-codes modal (shown exactly once) -->
+{#if totpModal === 'codes'}
+  <div class="modal-backdrop" role="presentation">
+    <div class="modal-box" role="dialog" aria-modal="true" aria-label={$t('pages.settings.recoveryCodesTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3 class="modal-title-plain"><Key size={18} /> {$t('pages.settings.recoveryCodesTitle')}</h3>
+      </div>
+      <p><strong>{$t('pages.settings.recoveryCodesOnce')}</strong> {$t('pages.settings.recoveryCodesBody')}</p>
+      <div class="recovery-codes">
+        {#each recoveryCodes as code}
+          <code>{code}</code>
+        {/each}
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm" on:click={copyRecoveryCodes}>
+          {#if codesCopied}<Check size={14} /> {$t('system.copied')}{:else}<Copy size={14} /> {$t('system.copy')}{/if}
+        </button>
+        <button class="btn btn-sm btn-ghost" on:click={() => totpModal = null}>{$t('pages.settings.recoveryCodesDone')}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Passkey add modal: name, then the browser's creation ceremony -->
+{#if passkeyModal === 'add'}
+  <div class="modal-backdrop" on:click={() => passkeyModal = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (passkeyModal = null)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.passkeyAddTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3 class="modal-title-plain"><KeyRound size={18} /> {$t('pages.settings.passkeyAddTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.passkeyAddBody')}</p>
+      {#if passkeyError}<p class="error">{passkeyError}</p>{/if}
+      <form on:submit|preventDefault={confirmPasskeyAdd}>
+        <div class="form-group">
+          <label for="settings-passkey-name">{$t('pages.settings.name')}</label>
+          <input id="settings-passkey-name" bind:value={passkeyName} maxlength="100" placeholder={$t('pages.settings.passkeyNamePlaceholder')} />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => passkeyModal = null}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm" type="submit" disabled={passkeyBusy}>
+            {#if passkeyBusy}<Loader2 size={14} class="animate-spin" /> {$t('pages.settings.passkeyCreating')}{:else}<KeyRound size={14} /> {$t('pages.settings.passkeyCreate')}{/if}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Passkey remove modal: password confirm -->
+{#if passkeyModal === 'remove'}
+  <div class="modal-backdrop" on:click={() => passkeyModal = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (passkeyModal = null)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.passkeyRemoveTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3><AlertTriangle size={18} /> {$t('pages.settings.passkeyRemoveTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.passkeyRemoveBody')}</p>
+      {#if passkeyError}<p class="error">{passkeyError}</p>{/if}
+      <form on:submit|preventDefault={confirmPasskeyRemove}>
+        <div class="form-group">
+          <label for="settings-passkey-remove-password">{$t('pages.settings.confirmWithPassword')}</label>
+          <input type="text" name="username" autocomplete="username" value={profile?.username ?? ''} hidden />
+          <input id="settings-passkey-remove-password" type="password" bind:value={removePasskeyPassword} autocomplete="current-password" required placeholder={$t('pages.settings.currentPasswordPlaceholder')} />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => passkeyModal = null}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm btn-danger" type="submit" disabled={passkeyBusy || !removePasskeyPassword}>
+            {#if passkeyBusy}<Loader2 size={14} class="animate-spin" />{/if}
+            {$t('pages.settings.passkeyRemove')}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- 2FA disable modal -->
+{#if totpModal === 'disable'}
+  <div class="modal-backdrop" on:click={() => totpModal = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (totpModal = null)}>
+    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$t('pages.settings.twoFactorDisableTitle')} tabindex="-1">
+      <div class="modal-header">
+        <h3><AlertTriangle size={18} /> {$t('pages.settings.twoFactorDisableTitle')}</h3>
+      </div>
+      <p>{$t('pages.settings.twoFactorDisableBody')}</p>
+      {#if totpError}<p class="error">{totpError}</p>{/if}
+      <form on:submit|preventDefault={confirmTotpDisable}>
+        <div class="form-group">
+          <label for="settings-2fa-disable-password">{$t('pages.settings.confirmWithPassword')}</label>
+          <input type="text" name="username" autocomplete="username" value={profile?.username ?? ''} hidden />
+          <input id="settings-2fa-disable-password" type="password" bind:value={disablePassword} autocomplete="current-password" required placeholder={$t('pages.settings.currentPasswordPlaceholder')} />
+        </div>
+        <div class="form-group">
+          <label for="settings-2fa-disable-code">{$t('pages.settings.twoFactorDisableCode')}</label>
+          <input id="settings-2fa-disable-code" bind:value={disableCode} required autocomplete="one-time-code" placeholder="123456" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-sm btn-ghost" type="button" on:click={() => totpModal = null}>{$t('system.cancel')}</button>
+          <button class="btn btn-sm btn-warn" type="submit" disabled={totpLoading || !disablePassword || !disableCode.trim()}>
+            {#if totpLoading}<Loader2 size={14} class="animate-spin" />{/if}
+            {$t('pages.settings.twoFactorDisable')}
+          </button>
+        </div>
+      </form>
     </div>
   </div>
 {/if}
@@ -828,6 +1298,94 @@
   }
   .settings-linked-data-hint code { font-size: 0.75rem; background: var(--bg-accent-soft); padding: 1px 5px; border-radius: 4px; }
 
+  /* Email verification + change */
+  .email-row { display: flex; gap: 0.5rem; align-items: center; }
+  .email-row input { flex: 1; }
+  .email-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin: 0.35rem 0 0;
+    font-size: 0.8rem;
+  }
+  .email-status.verified { color: #2d7d46; }
+  .email-status.unverified { color: #e65100; }
+  .email-notice { margin-top: 0.5rem; }
+  .linklike {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--brand-600);
+    cursor: pointer;
+    font-size: inherit;
+    text-decoration: underline;
+  }
+  .linklike:disabled { opacity: 0.6; cursor: default; }
+
+  /* Two-factor */
+  .twofa-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .twofa-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 0.25rem;
+    color: var(--ink-500);
+  }
+  .twofa-status.on { color: #2d7d46; }
+  .passkey-add-btn { margin-top: 0.75rem; }
+  .totp-qr {
+    display: grid;
+    place-items: center;
+    margin: 0.5rem 0;
+  }
+  .totp-qr :global(svg) {
+    width: 180px;
+    height: 180px;
+    background: white;
+    padding: 8px;
+    border-radius: 10px;
+    border: 1px solid var(--line-soft);
+  }
+  .totp-secret-label {
+    font-size: 0.78rem;
+    color: var(--ink-400);
+    margin: 0.5rem 0 0.25rem;
+  }
+  .totp-secret {
+    display: block;
+    padding: 0.5rem;
+    background: var(--bg-accent, #f8f9fa);
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    word-break: break-all;
+    margin-bottom: 0.75rem;
+    user-select: all;
+  }
+  .recovery-codes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+    margin: 0.75rem 0;
+  }
+  .recovery-codes code {
+    padding: 0.35rem 0.5rem;
+    background: var(--bg-accent, #f8f9fa);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    font-size: 0.82rem;
+    text-align: center;
+    user-select: all;
+  }
+  .modal-title-plain { color: inherit !important; }
+
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */
   :global(:is([data-theme="dark"], .dark)) .success { background: rgba(16,185,129,0.14); color: #6ee7b7; }
   :global(:is([data-theme="dark"], .dark)) .token-created { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); }
@@ -845,4 +1403,9 @@
   :global(:is([data-theme="dark"], .dark)) .btn-warn { color: #fcd34d; border-color: rgba(245,158,11,0.4); }
   :global(:is([data-theme="dark"], .dark)) .btn-warn:hover { background: rgba(245,158,11,0.14); }
   :global(:is([data-theme="dark"], .dark)) .modal-box { background: var(--bg-strong); }
+  :global(:is([data-theme="dark"], .dark)) .email-status.verified,
+  :global(:is([data-theme="dark"], .dark)) .twofa-status.on { color: #6ee7b7; }
+  :global(:is([data-theme="dark"], .dark)) .email-status.unverified { color: #fcd34d; }
+  :global(:is([data-theme="dark"], .dark)) .totp-secret,
+  :global(:is([data-theme="dark"], .dark)) .recovery-codes code { background: var(--bg-soft); }
 </style>
