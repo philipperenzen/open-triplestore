@@ -1227,7 +1227,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Oxigraph RocksDB TryFromIntError on macOS arm64 in test context - works in Docker/Linux"]
+    #[cfg_attr(
+        all(target_os = "macos", target_arch = "aarch64"),
+        ignore = "Oxigraph RocksDB TryFromIntError on macOS arm64 in test context — runs on Linux/CI"
+    )]
     fn test_persistent_store() {
         // Use a unique subdirectory to avoid RocksDB lock conflicts
         let tmp = TempDir::new().unwrap();

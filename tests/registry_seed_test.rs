@@ -21,7 +21,8 @@ fn seeding_standard_vocabularies_is_idempotent() {
     let second = seed_vocab::seed_standard_vocabularies(&state);
     assert_eq!(second, 0, "re-seeding must not create duplicate entries");
 
-    // A known vocab is present with exactly one published 1.0.0 version (no dupes).
+    // A known vocab is present with exactly one published version (no dupes).
+    // rdf seeds at its real W3C version (1.1) since #130, not the old synthetic 1.0.0.
     assert!(registry::data_model_exists(
         &state.store,
         &state.base_url,
@@ -31,7 +32,7 @@ fn seeding_standard_vocabularies_is_idempotent() {
         &state.store,
         &state.base_url,
         "rdf",
-        "1.0.0"
+        "1.1"
     ));
     let versions = registry::list_versions(&state.store, &state.base_url, "rdf");
     assert_eq!(

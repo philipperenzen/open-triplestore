@@ -287,6 +287,10 @@ pub struct WriteGate<'a> {
 /// Per-file parse errors are recorded in the result without aborting siblings;
 /// only store-level errors (`BulkError::Failed`) and authorization rejections
 /// (`BulkError::Forbidden`) propagate as `Err`.
+///
+/// Convenience wrapper used by tests; production always supplies a SHACL gate
+/// via [`parse_and_load_bulk_gated`].
+#[cfg(test)]
 pub fn parse_and_load_bulk(
     store: &TripleStore,
     inputs: Vec<InputFile>,
@@ -296,7 +300,8 @@ pub fn parse_and_load_bulk(
     parse_and_load_bulk_gated(store, inputs, authorize, before_replace, None)
 }
 
-/// [`parse_and_load_bulk`] with an optional SHACL [`WriteGate`].
+/// Bulk-load `inputs`, validating each touched graph through an optional SHACL
+/// [`WriteGate`].
 ///
 /// The gate runs after `authorize` and before the replace-delete / insert pair:
 /// for each touched graph where `gate.applies` is true, the incoming quads for
