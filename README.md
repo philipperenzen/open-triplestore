@@ -788,18 +788,6 @@ open-triplestore
 
 ---
 
-## Performance (Apple M3 Pro, release build)
-
-| Operation | Dataset | Median |
-|---|---|---|
-| Bulk load | 100 K triples | 98 ms (~1 M t/s) |
-| Simple SELECT | 10 K triples | 980 µs |
-| Simple SELECT LIMIT 10 | 100 K triples | 22 µs |
-| 2-way join | 10 K triples | 1.8 ms |
-| COUNT(*) | 100 K triples | 14 ms |
-
----
-
 ## Conformance
 
 | Test suite | Tests | Pass |
