@@ -1105,7 +1105,9 @@
       "couldNotLoadVersion": "Kon versie {version} niet laden (HTTP {status})",
       "failedToLoadVersion": "Laden van versie mislukt",
       "viewer3d": "3D- & kaartviewer",
-      "viewer3dDesc": "Bekijk onderdelen op de kaart en in 3D, met hun linked data"
+      "viewer3dDesc": "Bekijk onderdelen op de kaart en in 3D, met hun linked data",
+      "viewerMap": "Kaartviewer",
+      "viewerMapDesc": "Bekijk gelokaliseerde objecten op een interactieve kaart, met hun linked data"
     },
     "validation": {
       "title": "SHACL-validatie",

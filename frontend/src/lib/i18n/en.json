@@ -1105,7 +1105,9 @@
       "couldNotLoadVersion": "Could not load version {version} (HTTP {status})",
       "failedToLoadVersion": "Failed to load version",
       "viewer3d": "3D & map viewer",
-      "viewer3dDesc": "Inspect parts on the map and in 3D, with their linked data"
+      "viewer3dDesc": "Inspect parts on the map and in 3D, with their linked data",
+      "viewerMap": "Map viewer",
+      "viewerMapDesc": "See located features on an interactive map, with their linked data"
     },
     "validation": {
       "title": "SHACL Validation",
