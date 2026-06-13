@@ -10,12 +10,12 @@
 //! `urn:system:` graphs (validation layer, commit log, dataset metadata, version
 //! snapshots, the built-in SHACL-SHACL graph) are skipped — they are plumbing.
 
-use oxigraph::model::Term;
+use oxigraph::model::{NamedNode, Term};
 use oxigraph::sparql::QueryResults;
 use serde::Serialize;
 
 use crate::store::engine::StoreError;
-use crate::store::TripleStore;
+use crate::store::{escape_sparql_iri, TripleStore};
 
 /// A graph that contains SHACL shapes, with its shape counts. The cheap,
 /// always-loaded top level of the catalog.
@@ -111,12 +111,19 @@ pub fn catalog_graph_summary(store: &TripleStore) -> Vec<GraphSummary> {
 /// The IRI-named SHACL shapes in **one** graph. Aggregated per shape (a shape
 /// with several `sh:targetClass` values collapses into one entry).
 pub fn catalog_shapes(store: &TripleStore, graph: &str) -> Vec<CatalogShape> {
+    // Refuse a malformed graph IRI rather than interpolate it into SPARQL: a value
+    // that isn't a well-formed IRI can't be a real graph anyway, and bailing here
+    // closes the `format!`-interpolation injection surface. Real callers pass IRIs.
+    if NamedNode::new(graph).is_err() {
+        return Vec::new();
+    }
+    let graph_iri = escape_sparql_iri(graph);
     let q = format!(
         r#"
         PREFIX sh: <http://www.w3.org/ns/shacl#>
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         SELECT ?shape ?t ?label ?tc ?path WHERE {{
-          GRAPH <{graph}> {{
+          GRAPH <{graph_iri}> {{
             ?shape a ?t .
             FILTER(?t IN (sh:NodeShape, sh:PropertyShape))
             FILTER(isIRI(?shape))
@@ -181,7 +188,27 @@ pub fn import_shapes_into(
     target_graph: &str,
     shapes: &[(String, String)],
 ) -> Result<usize, StoreError> {
+    // Reject malformed IRIs before building the UPDATE rather than interpolate
+    // them into SPARQL — this closes the `format!`-injection surface for the
+    // target graph, every source graph, and every shape subject. Real callers
+    // pass well-formed IRIs, so this never fires for legitimate input.
+    if NamedNode::new(target_graph).is_err() {
+        return Err(StoreError::Parse(format!(
+            "Invalid target graph IRI: {target_graph}"
+        )));
+    }
+    let target_graph = escape_sparql_iri(target_graph);
     for (src, shape) in shapes {
+        if NamedNode::new(src.as_str()).is_err() {
+            return Err(StoreError::Parse(format!(
+                "Invalid source graph IRI: {src}"
+            )));
+        }
+        if NamedNode::new(shape.as_str()).is_err() {
+            return Err(StoreError::Parse(format!("Invalid shape IRI: {shape}")));
+        }
+        let src = escape_sparql_iri(src);
+        let shape = escape_sparql_iri(shape);
         let q = format!(
             r#"INSERT {{ GRAPH <{target_graph}> {{ ?s ?p ?o }} }}
                WHERE {{ GRAPH <{src}> {{
