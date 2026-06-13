@@ -228,8 +228,7 @@ fn migrate_synthetic_versions(state: &AppState) -> usize {
         // admin who claimed or re-versioned the vocab keeps their copy untouched.
         let system_owned = record.owner_id.is_none() && record.created_by.is_none();
         let versions = registry::list_versions(&state.store, &state.base_url, v.id);
-        let only_synthetic =
-            versions.len() == 1 && versions[0].version == LEGACY_SYNTHETIC_VERSION;
+        let only_synthetic = versions.len() == 1 && versions[0].version == LEGACY_SYNTHETIC_VERSION;
         if !(system_owned && only_synthetic) {
             continue;
         }
@@ -445,7 +444,12 @@ mod tests {
             "upgraded to its real version"
         );
         assert!(
-            !registry::version_exists(&state.store, &state.base_url, "owl", LEGACY_SYNTHETIC_VERSION),
+            !registry::version_exists(
+                &state.store,
+                &state.base_url,
+                "owl",
+                LEGACY_SYNTHETIC_VERSION
+            ),
             "synthetic 1.0.0 version removed"
         );
     }
