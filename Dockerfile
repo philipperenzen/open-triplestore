@@ -59,6 +59,17 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 2b: cook dependencies (cached unless recipe.json changes), then build.
 FROM chef AS builder
 ARG CARGO_PROFILE
+# Cap cargo's parallelism (and therefore the number of concurrent -O3 C++ compiles
+# in heavy build scripts like oxrocksdb-sys/RocksDB). The default job count = #CPUs,
+# which on a 24-core host fans out enough simultaneous cc1plus processes to spike
+# memory and trip a compiler ICE/segfault. 8 keeps the build fast while bounding the
+# peak. Override with `--build-arg CARGO_BUILD_JOBS=N`.
+ARG CARGO_BUILD_JOBS=8
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+# Give rustc's codegen worker threads a larger stack. Optimizing LTO-heavy crates
+# (e.g. tantivy) under -O3 can overflow the default thread stack and SIGSEGV inside
+# LLVM's pass manager; rustc itself suggests raising this. 32 MiB is ample.
+ENV RUST_MIN_STACK=33554432
 COPY .cargo/ .cargo/
 COPY --from=planner /app/recipe.json recipe.json
 # This layer is cached as long as the dependency set is unchanged — source-only
