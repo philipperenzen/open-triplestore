@@ -47,8 +47,9 @@ saml            = ["dep:samael", "samael/xmlsec"]
 test-utils      = []
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
-## Optional SMTP alerting via lettre
-alerting        = ["dep:lettre"]
+## Optional SMTP alerting (lettre itself is a core dependency — the auth
+## mailer uses it unconditionally — this flag only gates the alerting module).
+alerting        = []
 ## Asset metadata extractors — heavier per-kind probers, off by default.
 ## (Image dimensions + geo bbox/CRS are always on; they reuse existing deps.)
 asset-pdf         = ["dep:lopdf"]            # PDF page count
@@ -102,7 +103,7 @@ percent-encoding = "2"
 url = "2"
 
 # HTTP client for prefix.cc lookup (rustls avoids system OpenSSL in Docker runtime)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Authentication & Identity
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
@@ -116,14 +117,21 @@ ipnet = "2"
 lru = "0.12"
 jsonwebtoken = "9"
 argon2 = "0.5"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+# TOTP two-factor codes (RFC 6238: HMAC-SHA1)
+hmac = "0.12"
+sha1 = "0.10"
+# WebAuthn / FIDO2 passkey login. In-progress challenge state stays in memory
+# (no danger-allow-state-serialisation), only finished credentials are stored.
+# conditional-ui enables the discoverable-credential login flow (no username).
+webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
 rand = "0.8"
 base64 = "0.22"
 flate2 = "1"
 age = { version = "0.10", optional = true }
-lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"], optional = true }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 
 # S3 object storage
 aws-sdk-s3 = "1"
@@ -186,6 +194,9 @@ tempfile = "3"
 tokio-test = "0.4"
 http-body-util = "0.1"
 percent-encoding = "2"
+# Software FIDO2 authenticator for passkey integration tests (no hardware).
+webauthn-authenticator-rs = { version = "0.5", features = ["softpasskey"] }
+webauthn-rs-proto = "0.5"
 
 [[bench]]
 name = "performance"

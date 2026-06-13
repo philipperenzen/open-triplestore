@@ -1,3 +1,4 @@
+
 const API_BASE = '';
 
 // In-memory token storage (M-2: avoids localStorage XSS exposure).
@@ -222,6 +223,40 @@ export const getMe = () => request('GET', '/api/auth/me');
 export const updateMe = (data) => request('PUT', '/api/auth/me', data);
 export const changePassword = (current_password, new_password) =>
   request('POST', '/api/auth/change-password', { current_password, new_password });
+
+// Account recovery, email verification & two-factor login
+export const getAuthFeatures = () => request('GET', '/api/auth/features');
+export const forgotPassword = (identifier) =>
+  request('POST', '/api/auth/forgot-password', { identifier });
+export const forgotUsername = (email) =>
+  request('POST', '/api/auth/forgot-username', { email });
+export const resetPassword = (token, new_password) =>
+  request('POST', '/api/auth/reset-password', { token, new_password });
+export const verifyEmail = (token) =>
+  request('POST', '/api/auth/verify-email', { token });
+export const resendVerification = () =>
+  request('POST', '/api/auth/verify-email/resend');
+export const changeEmail = (new_email, password) =>
+  request('POST', '/api/auth/change-email', { new_email, password });
+export const verify2fa = (mfa_token, code) =>
+  request('POST', '/api/auth/2fa/verify', { mfa_token, code });
+export const totpSetup = () => request('POST', '/api/auth/2fa/setup');
+export const totpEnable = (code) => request('POST', '/api/auth/2fa/enable', { code });
+export const totpDisable = (password, code) =>
+  request('POST', '/api/auth/2fa/disable', { password, code });
+
+// WebAuthn passkeys
+export const listPasskeys = () => request('GET', '/api/auth/passkeys');
+export const passkeyRegisterStart = () =>
+  request('POST', '/api/auth/passkeys/register/start');
+export const passkeyRegisterFinish = (challenge_id, name, credential) =>
+  request('POST', '/api/auth/passkeys/register/finish', { challenge_id, name, credential });
+export const deletePasskey = (passkeyId, password) =>
+  request('DELETE', `/api/auth/passkeys/${passkeyId}`, { password });
+export const passkeyLoginStart = () =>
+  request('POST', '/api/auth/passkeys/login/start');
+export const passkeyLoginFinish = (challenge_id, credential) =>
+  request('POST', '/api/auth/passkeys/login/finish', { challenge_id, credential });
 
 // API Tokens
 export const listApiTokens = () => request('GET', '/api/auth/tokens');
@@ -689,6 +724,78 @@ export async function llmChat(messages, model = null) {
   }
   return res.json();
 }
+
+// Streaming variant of llmChat. Calls `onEvent` for every server-sent event —
+// status / delta / round_reset / query / query_result — and resolves with the
+// terminal `done` payload (the same shape llmChat returns). Throws on transport
+// errors, on a terminal `error` event, and when the server doesn't actually
+// stream (older server, buffering proxy) — callers fall back to llmChat then.
+// Abort via `signal` to stop generation (closing the stream stops the server-side
+// turn as well).
+export async function llmChatStream(messages, { model = null, signal, onEvent } = {}) {
+  const token = getAccessToken();
+  const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}/api/llm/chat/stream`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({ messages, model }),
+    signal,
+  });
+  if (!res.ok) {
+    const msg = await extractErrorMessage(res);
+    const err = new ApiError(msg);
+    err.status = res.status;
+    throw err;
+  }
+  const contentType = res.headers.get('content-type') || '';
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    throw new ApiError('streaming unavailable');
+  }
+  const { sseJsonEvents } = await import('./sse.js');
+  for await (const ev of sseJsonEvents(res.body)) {
+    if (ev?.type === 'done') return ev.response;
+    if (ev?.type === 'error') throw new ApiError(ev.message || 'chat failed');
+    onEvent?.(ev);
+  }
+  throw new ApiError('stream ended unexpectedly');
+}
+
+// ─── Spark chat history + memory (auth required; guests keep no history) ────
+export const llmConversations = () =>
+  request('GET', '/api/llm/conversations'); // { conversations: [{id,title,created_at,updated_at,message_count}] }
+export const llmCreateConversation = (title = '') =>
+  request('POST', '/api/llm/conversations', { title });
+export const llmGetConversation = (id) =>
+  request('GET', `/api/llm/conversations/${encodeURIComponent(id)}`); // { id, messages: [{role,content,queries?,model?,stopped?,created_at}] }
+export const llmRenameConversation = (id, title) =>
+  request('PATCH', `/api/llm/conversations/${encodeURIComponent(id)}`, { title });
+export const llmDeleteConversation = (id) =>
+  request('DELETE', `/api/llm/conversations/${encodeURIComponent(id)}`);
+// message: { role, content, queries?, model?, stopped? }
+export const llmAppendMessage = (id, message) =>
+  request('POST', `/api/llm/conversations/${encodeURIComponent(id)}/messages`, message);
+export const llmMemory = () =>
+  request('GET', '/api/llm/memory'); // { instructions, enabled }
+export const llmSetMemory = (instructions, enabled = true) =>
+  request('PUT', '/api/llm/memory', { instructions, enabled });
+
+// ─── Admin: LLM request telemetry (admin only; server enforces) ─────────────
+export const adminLlmRequests = (opts: { limit?: number; offset?: number; status?: string; endpoint?: string; user_id?: string; since?: string } = {}) => {
+  const p = new URLSearchParams();
+  for (const k of ['limit', 'offset', 'status', 'endpoint', 'user_id', 'since'] as const) {
+    if (opts[k] !== undefined && opts[k] !== '') p.set(k, String(opts[k]));
+  }
+  const qs = p.toString();
+  return request('GET', `/api/admin/llm/requests${qs ? `?${qs}` : ''}`); // { requests, limit, offset }
+};
+export const adminLlmStats = () =>
+  request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
+
+// SHACL
+// Returns { report, run_id, ran_at } — the run is persisted server-side.
+// Pass { test: true } for a dry run that validates but is NOT recorded.
 export const validateDataset = (datasetId, data = {}, opts: { test?: boolean } = {}) =>
   request('POST', `/api/datasets/${datasetId}/validate${opts.test ? '?test=true' : ''}`, data);
 export const getShapes = (datasetId) =>
