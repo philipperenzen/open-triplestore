@@ -6,7 +6,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use super::bulk::{parse_and_load_bulk, BulkError, BulkResult, GraphChange, InputFile};
+use super::bulk::{
+    parse_and_load_bulk_gated, BulkError, BulkResult, GraphChange, InputFile, WriteGate,
+};
 use crate::auth::dataset_graph;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::data_models::upload::{format_from_filename, format_from_media_type, parse_quads};
@@ -304,6 +306,14 @@ pub async fn bulk_import(
         _ => None,
     };
 
+    // IFC STEP files take a different pipeline: the bytes are stored as a
+    // downloadable dataset asset and *transformed* to linked data (BOT topology
+    // + full ifcOWL lift) rather than parsed as RDF. Split them out here; they
+    // are processed after the RDF batch below.
+    let (ifc_files, raw_files): (Vec<_>, Vec<_>) = raw_files
+        .into_iter()
+        .partition(|(filename, content_type, _)| super::ifc::is_ifc_file(filename, content_type));
+
     let inputs: Vec<InputFile> = raw_files
         .into_iter()
         .map(|(filename, content_type, bytes)| {
@@ -424,8 +434,40 @@ pub async fn bulk_import(
         Ok(())
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        parse_and_load_bulk(&store, inputs, authorize, before_replace)
+    // SHACL write-gating: bulk import honours the same gates as the GSP write
+    // path (gate_writes pipelines, validation-layer bindings, and the owning
+    // dataset's shacl_on_write). The `applies` pre-check is metadata-only, so
+    // ungated imports (the common case, e.g. large IFC loads) skip validation
+    // and quad buffering entirely.
+    let gate_store = state.store.clone();
+    let gate_db = state.auth_db.clone();
+    let gate_base = state.base_url.clone();
+
+    let mut result = tokio::task::spawn_blocking(move || {
+        let studio = crate::shacl_studio::store::ShaclStudioStore::new(gate_db.pool());
+        let gate = WriteGate {
+            applies: Box::new(|g| {
+                crate::shacl_studio::gate::import_gates_apply(
+                    &gate_store,
+                    &gate_db,
+                    &studio,
+                    &gate_base,
+                    g,
+                )
+            }),
+            check: Box::new(|g, quads| {
+                crate::shacl_studio::gate::check_import_gates(
+                    &gate_store,
+                    &gate_db,
+                    &studio,
+                    &gate_base,
+                    g,
+                    quads,
+                )
+                .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
+            }),
+        };
+        parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate))
     })
     .await
     .map_err(|e| AppError::Internal(format!("Bulk import task failed: {e}")))?
@@ -435,9 +477,88 @@ pub async fn bulk_import(
         BulkError::Failed(m) => AppError::BadRequest(m),
     })?;
 
+    // ── IFC files: stored as assets + transformed to linked data ──────────────
+    for (filename, _content_type, bytes) in ifc_files {
+        let Some(ds_id) = meta.dataset_id.as_deref() else {
+            result.failed_count += 1;
+            result.file_results.push(crate::imports::bulk::FileResult {
+                filename,
+                status: "error",
+                error: Some("IFC import requires a dataset_id".to_string()),
+                graph_iris: Vec::new(),
+                quad_count: None,
+            });
+            continue;
+        };
+        let target = meta
+            .targets
+            .get(&filename)
+            .cloned()
+            .or_else(|| meta.default_target_graph.clone());
+        // Same write-scope rule as the RDF path: non-admins may only target
+        // graphs registered solely to this dataset or under its IRI namespace.
+        if !authz_is_admin {
+            if let Some(t) = target.as_deref() {
+                let namespace =
+                    format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), ds_id);
+                let registered = state.auth_db.list_dataset_graphs(ds_id).unwrap_or_default();
+                let owned_by_other = state
+                    .auth_db
+                    .graph_has_other_dataset_refs(t, ds_id)
+                    .unwrap_or(true);
+                let in_scope = registered.iter().any(|g| g == t) || t.starts_with(&namespace);
+                if owned_by_other || !in_scope {
+                    return Err(AppError::Forbidden(format!(
+                        "Target graph <{t}> is outside dataset '{ds_id}'"
+                    )));
+                }
+            }
+        }
+        match crate::imports::ifc::import_ifc_bytes(
+            &state,
+            ds_id,
+            &user.user_id,
+            &filename,
+            bytes,
+            target,
+            false,
+            true,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                result.success_count += 1;
+                let mut graphs = vec![outcome.bot_graph.clone()];
+                if let Some(g) = &outcome.ifcowl_graph {
+                    graphs.push(g.clone());
+                }
+                result.file_results.push(crate::imports::bulk::FileResult {
+                    filename,
+                    status: "ok",
+                    error: None,
+                    graph_iris: graphs,
+                    quad_count: Some(outcome.stats.bot_triples + outcome.stats.ifcowl_triples),
+                });
+            }
+            Err(e) => {
+                result.failed_count += 1;
+                result.file_results.push(crate::imports::bulk::FileResult {
+                    filename,
+                    status: "error",
+                    error: Some(e),
+                    graph_iris: Vec::new(),
+                    quad_count: None,
+                });
+            }
+        }
+    }
+
     // Best-effort: register newly-touched graphs against the dataset and
     // auto-detect + store graph_role for each.
     if let Some(ds_id) = meta.dataset_id.as_deref() {
+        let dataset_record = state.auth_db.get_dataset(ds_id).ok().flatten();
         for file_result in &result.file_results {
             if file_result.status != "ok" {
                 continue;
@@ -452,18 +573,44 @@ pub async fn bulk_import(
                     tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to register graph in dataset");
                     continue;
                 }
-                if let Some(role) = explicit_role {
+                let role = if let Some(role) = explicit_role {
                     // User picked a role: apply it (overrides any prior/auto value).
                     let _ = state.auth_db.set_dataset_graph_role(ds_id, iri, Some(role));
-                } else if let Ok(entries) = state.auth_db.list_dataset_graph_entries(ds_id) {
-                    // Auto-detect role from stored quads if no role was already set.
-                    let already_has_role = entries
-                        .iter()
-                        .find(|e| e.graph_iri == *iri)
-                        .and_then(|e| e.graph_role)
-                        .is_some();
-                    if !already_has_role {
-                        detect_and_store_graph_role(&state, ds_id, iri);
+                    Some(role)
+                } else {
+                    // Keep a previously-stored role; otherwise auto-detect from
+                    // the stored quads.
+                    let existing = state
+                        .auth_db
+                        .list_dataset_graph_entries(ds_id)
+                        .ok()
+                        .and_then(|entries| {
+                            entries
+                                .iter()
+                                .find(|e| e.graph_iri == *iri)
+                                .and_then(|e| e.graph_role)
+                        });
+                    match existing {
+                        Some(r) => Some(r),
+                        None => detect_and_store_graph_role(&state, ds_id, iri),
+                    }
+                };
+                // Uploaded SHACL: adopt the graph into the SHACL Studio Library
+                // and bind it to the dataset in the validation layer, so the
+                // shapes are immediately visible in the Studio and effective for
+                // validation. Best-effort — never fails the import.
+                if role == Some(crate::auth::models::GraphKind::Shapes) {
+                    if let Some(ds) = dataset_record.as_ref() {
+                        if let Err(e) =
+                            crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                                &state,
+                                ds,
+                                iri,
+                                Some(&user.user_id),
+                            )
+                        {
+                            tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to auto-register imported shapes graph in SHACL Studio");
+                        }
                     }
                 }
             }
@@ -506,23 +653,25 @@ pub async fn bulk_import(
 }
 
 /// Run `kind_detector::detect` on a graph's quads and store the inferred role.
-fn detect_and_store_graph_role(state: &AppState, dataset_id: &str, graph_iri: &str) {
+/// Returns the role that was stored (`None` when detection was inconclusive or
+/// the graph could not be read).
+pub(crate) fn detect_and_store_graph_role(
+    state: &AppState,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> Option<crate::auth::models::GraphKind> {
     use oxigraph::model::GraphNameRef;
-    let Ok(graph_name) = oxigraph::model::NamedNode::new(graph_iri) else {
-        return;
-    };
-    let Ok(quads) = state
+    let graph_name = oxigraph::model::NamedNode::new(graph_iri).ok()?;
+    let quads = state
         .store
         .quads_for_graph(GraphNameRef::NamedNode(graph_name.as_ref()))
-    else {
-        return;
-    };
+        .ok()?;
     let detected = kind_detector::detect(&quads);
-    if let Some(role) = detected.to_graph_role() {
-        let _ = state
-            .auth_db
-            .set_dataset_graph_role(dataset_id, graph_iri, Some(role));
-    }
+    let role = detected.to_graph_role()?;
+    let _ = state
+        .auth_db
+        .set_dataset_graph_role(dataset_id, graph_iri, Some(role));
+    Some(role)
 }
 
 // ─── Per-split result ─────────────────────────────────────────────────────────
@@ -593,10 +742,12 @@ pub async fn analyze_import(mut multipart: Multipart) -> Result<impl IntoRespons
 
     let total_triples = quads.len();
 
-    // Count triples per detected role.
+    // Count triples per detected role, using the same subject-tree
+    // classification as the actual auto-split (`do_split`) so the preview and
+    // the import agree on where each quad would land.
+    let roles = kind_detector::classify_quad_roles(&quads);
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for q in &quads {
-        let role = kind_detector::classify_quad_role(q);
+    for role in &roles {
         *counts.entry(role.as_str().to_string()).or_default() += 1;
     }
 

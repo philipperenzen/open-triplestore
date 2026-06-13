@@ -13,6 +13,8 @@
   import ChatChart from './ChatChart.svelte';
   import ChatMap from './ChatMap.svelte';
   import ChatInfoCard from './ChatInfoCard.svelte';
+  import ChatModel3D from './ChatModel3D.svelte';
+  import ChatFileCard from './ChatFileCard.svelte';
   import CsvPreview from './CsvPreview.svelte';
 
   export let content = '';
@@ -56,9 +58,13 @@
   {:else if seg.kind === 'chart'}
     <ChatChart spec={seg.spec} />
   {:else if seg.kind === 'map'}
-    <ChatMap features={seg.features} />
+    <ChatMap features={seg.features} models={seg.models || []} />
   {:else if seg.kind === 'card'}
     <ChatInfoCard card={seg.card} />
+  {:else if seg.kind === 'model3d'}
+    <ChatModel3D models={seg.models} />
+  {:else if seg.kind === 'file'}
+    <ChatFileCard file={seg.file} />
   {:else if seg.kind === 'csv'}
     <CsvPreview columns={seg.columns} rows={seg.rows} raw={seg.raw} />
   {:else if seg.kind === 'broken'}

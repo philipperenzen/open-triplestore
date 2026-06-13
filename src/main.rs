@@ -18,6 +18,7 @@ mod dcat;
 mod docs;
 mod email;
 mod geo;
+mod ifc;
 mod imports;
 mod kind_detector;
 #[cfg(feature = "ldp")]

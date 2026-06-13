@@ -3854,6 +3854,72 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Post, o("LLM", "Submit LLM feedback", "Record approve/edit/reject feedback on a generated query to improve future suggestions.",
             vec![], vec![("204", "Feedback recorded")], false)),
     ]);
+    mount(paths, "/api/llm/chat", vec![
+        (M::Post, o("LLM", "Spark chat (buffered)", "One grounded chat turn against the caller's accessible platform state; may run scoped read-only SPARQL rounds. Guarded (rate limit, size caps, injection screen) and logged for admins.",
+            vec![], vec![("200", "{ answer, model, queries[], … }"), ("400", "Guard rejected the request"), ("429", "Per-user AI rate limit")], false)),
+    ]);
+    mount(paths, "/api/llm/chat/stream", vec![
+        (M::Post, o("LLM", "Spark chat (SSE stream)", "The same grounded chat turn streamed as server-sent events: status/delta/query/query_result events, terminated by done (full response) or error.",
+            vec![], vec![("200", "text/event-stream"), ("400", "Guard rejected the request"), ("429", "Per-user AI rate limit")], false)),
+    ]);
+    mount(
+        paths,
+        "/api/llm/shacl",
+        vec![(
+            M::Post,
+            o(
+                "LLM",
+                "SHACL assistant",
+                "Draft, explain or improve SHACL shapes via the configured LLM gateway.",
+                vec![],
+                vec![("200", "{ turtle | explanation }")],
+                false,
+            ),
+        )],
+    );
+    mount(paths, "/api/llm/conversations", vec![
+        (M::Get, o("LLM", "List chat conversations", "The caller's saved Spark conversations, newest first.",
+            vec![], vec![("200", "{ conversations[] }"), ("401", "Authentication required")], true)),
+        (M::Post, o("LLM", "Create chat conversation", "Start a saved conversation; the title derives from the first message when empty.",
+            vec![], vec![("200", "Conversation"), ("401", "Authentication required")], true)),
+    ]);
+    mount(paths, "/api/llm/conversations/:id", vec![
+        (M::Get, o("LLM", "Get chat conversation", "All messages of one owned conversation, including each turn's retrieval trail.",
+            vec![], vec![("200", "{ id, messages[] }"), ("404", "Not found / not owned")], true)),
+        (M::Patch, o("LLM", "Rename chat conversation", "Set the conversation title.",
+            vec![], vec![("200", "Renamed"), ("404", "Not found / not owned")], true)),
+        (M::Delete, o("LLM", "Delete chat conversation", "Delete the conversation and its messages.",
+            vec![], vec![("200", "Deleted"), ("404", "Not found / not owned")], true)),
+    ]);
+    mount(paths, "/api/llm/conversations/:id/messages", vec![
+        (M::Post, o("LLM", "Append chat message", "Append one finished turn message (user or assistant, with optional queries trail) to an owned conversation.",
+            vec![], vec![("200", "Appended"), ("404", "Not found / not owned")], true)),
+    ]);
+    mount(paths, "/api/llm/memory", vec![
+        (M::Get, o("LLM", "Get chat memory", "The caller's standing Spark preferences and whether they are applied.",
+            vec![], vec![("200", "{ instructions, enabled }")], true)),
+        (M::Put, o("LLM", "Set chat memory", "Save standing preferences injected into the Spark system prompt. Screened against prompt-injection phrasing.",
+            vec![], vec![("200", "Saved"), ("400", "Too long or injection-like")], true)),
+    ]);
+    mount(paths, "/api/admin/llm/requests", vec![
+        (M::Get, o("Admin", "LLM request log", "Admin telemetry for every LLM-backed request: outcome, latency, time-to-first-token, sizes and guard flags. Filter by status, endpoint, user_id, since.",
+            vec![], vec![("200", "{ requests[] }"), ("403", "Admin role required")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/admin/llm/stats",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "LLM request stats",
+                "24h aggregates (by status, average latency/TTFT) and 7-day top users.",
+                vec![],
+                vec![("200", "Aggregates"), ("403", "Admin role required")],
+                true,
+            ),
+        )],
+    );
 
     // ═══════════════════════════════════════════════════════════════════════
     // Linked Data

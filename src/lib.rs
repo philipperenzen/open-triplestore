@@ -40,6 +40,7 @@ pub mod dcat;
 pub mod docs;
 pub mod email;
 pub mod geo;
+pub mod ifc;
 pub mod imports;
 pub mod kind_detector;
 #[cfg(feature = "ldp")]
