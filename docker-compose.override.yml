@@ -1,0 +1,16 @@
+# Local-only override (auto-merged by `docker compose`). Builds the triplestore
+# with the `release-dev` profile (thin LTO, 16 codegen units) instead of the
+# default fat-LTO `release`. The fat-LTO cross-language path (-C linker-plugin-lto
+# -C codegen-units=1) deterministically SIGSEGVs LLVM while optimizing the tantivy
+# crate on this toolchain (rustc 1.91.1 / LLVM 21); thin LTO sidesteps it and links
+# far faster. Delete this file to go back to the production release build.
+services:
+  triplestore:
+    build:
+      args:
+        CARGO_PROFILE: release-dev
+        # Minimal parallelism: at most ~2 concurrent heavy compiles, to stay well
+        # clear of the memory/CPU-instability threshold that was tripping random
+        # compiler SIGSEGVs under high load. Slow, but maximizes the chance of a
+        # clean build (and is a diagnostic: a crash even at jobs=2 implicates HW).
+        CARGO_BUILD_JOBS: "2"
