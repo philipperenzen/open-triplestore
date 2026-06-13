@@ -167,8 +167,14 @@ mod tests {
         authenticator: &mut WebauthnAuthenticator<SoftPasskey>,
         registered: &RegisterPublicKeyCredential,
     ) -> (StatusCode, serde_json::Value, String) {
-        let (status, body, text) =
-            send(state, Method::POST, "/api/auth/passkeys/login/start", None, None).await;
+        let (status, body, text) = send(
+            state,
+            Method::POST,
+            "/api/auth/passkeys/login/start",
+            None,
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let challenge_id = body["challenge_id"].as_str().unwrap().to_string();
         let mut options: RequestChallengeResponse =
@@ -210,8 +216,14 @@ mod tests {
         let mut authenticator = WebauthnAuthenticator::new(SoftPasskey::new(true));
 
         // No passkeys to start with.
-        let (status, body, _) =
-            send(&state, Method::GET, "/api/auth/passkeys", Some(&token), None).await;
+        let (status, body, _) = send(
+            &state,
+            Method::GET,
+            "/api/auth/passkeys",
+            Some(&token),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body.as_array().unwrap().len(), 0);
 
@@ -220,8 +232,14 @@ mod tests {
             enroll_passkey(&state, &token, &mut authenticator, "Test key").await;
 
         // It shows up in the list, unused.
-        let (status, body, _) =
-            send(&state, Method::GET, "/api/auth/passkeys", Some(&token), None).await;
+        let (status, body, _) = send(
+            &state,
+            Method::GET,
+            "/api/auth/passkeys",
+            Some(&token),
+            None,
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let list = body.as_array().unwrap();
         assert_eq!(list.len(), 1);
@@ -231,18 +249,35 @@ mod tests {
         // Passkey login issues a session that works against /api/auth/me.
         let (status, body, text) = passkey_login(&state, &mut authenticator, &registered).await;
         assert_eq!(status, StatusCode::OK, "{text}");
-        let access = body["access_token"].as_str().expect("session token").to_string();
+        let access = body["access_token"]
+            .as_str()
+            .expect("session token")
+            .to_string();
         assert_eq!(body["user"]["username"], "alice");
-        let (status, body, _) = send(&state, Method::GET, "/api/auth/me", Some(&access), None).await;
+        let (status, body, _) =
+            send(&state, Method::GET, "/api/auth/me", Some(&access), None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["username"], "alice");
 
         // Sign-in is recorded with method=passkey, and usage metadata updated.
-        let events = state.audit.list(10, 0, Some("login_success"), None, None).unwrap();
+        let events = state
+            .audit
+            .list(10, 0, Some("login_success"), None, None)
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].details.as_ref().unwrap()["method"], "passkey");
-        let (_, body, _) = send(&state, Method::GET, "/api/auth/passkeys", Some(&token), None).await;
-        assert!(body[0]["last_used_at"].is_string(), "last_used_at after login");
+        let (_, body, _) = send(
+            &state,
+            Method::GET,
+            "/api/auth/passkeys",
+            Some(&token),
+            None,
+        )
+        .await;
+        assert!(
+            body[0]["last_used_at"].is_string(),
+            "last_used_at after login"
+        );
         let registered_events = state
             .audit
             .list(10, 0, Some("passkey_registered"), None, None)
@@ -269,7 +304,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
-        let (_, body, _) = send(&state, Method::GET, "/api/auth/passkeys", Some(&token), None).await;
+        let (_, body, _) = send(
+            &state,
+            Method::GET,
+            "/api/auth/passkeys",
+            Some(&token),
+            None,
+        )
+        .await;
         assert_eq!(body.as_array().unwrap().len(), 0);
         let removed_events = state
             .audit
@@ -337,7 +379,11 @@ mod tests {
             Some(finish_body.clone()),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "cross-user finish must fail");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "cross-user finish must fail"
+        );
 
         // …and consuming it (even unsuccessfully) spends it: Alice gets 400 too.
         let (status, _, _) = send(
@@ -360,8 +406,14 @@ mod tests {
         let (registered, _) = enroll_passkey(&state, &token, &mut authenticator, "Key").await;
 
         // Start one login, capture the assertion, finish it twice.
-        let (_, body, _) =
-            send(&state, Method::POST, "/api/auth/passkeys/login/start", None, None).await;
+        let (_, body, _) = send(
+            &state,
+            Method::POST,
+            "/api/auth/passkeys/login/start",
+            None,
+            None,
+        )
+        .await;
         let challenge_id = body["challenge_id"].as_str().unwrap().to_string();
         let mut options: RequestChallengeResponse =
             serde_json::from_value(body["options"].clone()).unwrap();
@@ -396,7 +448,11 @@ mod tests {
             Some(finish_body),
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "assertion replay must fail");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "assertion replay must fail"
+        );
     }
 
     // ─── Account-state interactions ───────────────────────────────────────────
@@ -431,7 +487,10 @@ mod tests {
             TEST_JWT_SECRET,
         )
         .unwrap();
-        state.auth_db.set_totp_secret("u1", Some(&secret_enc)).unwrap();
+        state
+            .auth_db
+            .set_totp_secret("u1", Some(&secret_enc))
+            .unwrap();
         state.auth_db.set_totp_enabled("u1", true).unwrap();
 
         // Password login demands the second factor…
@@ -488,6 +547,10 @@ mod tests {
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "UV-less attestation must be rejected");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "UV-less attestation must be rejected"
+        );
     }
 }

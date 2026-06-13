@@ -141,12 +141,10 @@ impl Mailer {
                     }
                 };
                 let builder = if let (Some(u), Some(p)) = (username, password) {
-                    builder.credentials(
-                        lettre::transport::smtp::authentication::Credentials::new(
-                            u.clone(),
-                            p.clone(),
-                        ),
-                    )
+                    builder.credentials(lettre::transport::smtp::authentication::Credentials::new(
+                        u.clone(),
+                        p.clone(),
+                    ))
                 } else {
                     builder
                 };

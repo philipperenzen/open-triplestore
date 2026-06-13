@@ -123,15 +123,12 @@ fn build_webauthn(base_url: &str) -> Result<Webauthn, (StatusCode, String)> {
             format!("Invalid PUBLIC_BASE_URL for WebAuthn: {e}"),
         )
     })?;
-    let rp_id = origin
-        .host_str()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "PUBLIC_BASE_URL has no host — cannot derive WebAuthn RP id".to_string(),
-            )
-        })?;
+    let rp_id = origin.host_str().map(str::to_string).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PUBLIC_BASE_URL has no host — cannot derive WebAuthn RP id".to_string(),
+        )
+    })?;
     let mut builder = WebauthnBuilder::new(&rp_id, &origin)
         .map_err(|e| {
             (
@@ -268,7 +265,10 @@ pub async fn register_start(
         .collect();
 
     let webauthn = build_webauthn(&state.base_url)?;
-    let display_name = user.display_name.clone().unwrap_or_else(|| user.username.clone());
+    let display_name = user
+        .display_name
+        .clone()
+        .unwrap_or_else(|| user.username.clone());
     let (options, reg_state) = webauthn
         .start_passkey_registration(
             stable_user_uuid(&user.id),
@@ -388,10 +388,11 @@ pub async fn register_finish(
     .map_err(internal)?;
 
     {
-        let mut b = AuditEventBuilder::new(AuditEventType::PasskeyRegistered, AuditOutcome::Success)
-            .actor(&user.id, &user.username, user.role.as_str())
-            .resource("passkey", &id)
-            .details(serde_json::json!({ "name": name }));
+        let mut b =
+            AuditEventBuilder::new(AuditEventType::PasskeyRegistered, AuditOutcome::Success)
+                .actor(&user.id, &user.username, user.role.as_str())
+                .resource("passkey", &id)
+                .details(serde_json::json!({ "name": name }));
         b.ip_address = audit::client_ip(&headers, None);
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);

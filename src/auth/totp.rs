@@ -181,7 +181,15 @@ mod tests {
 
     #[test]
     fn base32_round_trip() {
-        for data in [&b"12345678901234567890"[..], b"", b"a", b"ab", b"abc", b"abcd", b"abcde"] {
+        for data in [
+            &b"12345678901234567890"[..],
+            b"",
+            b"a",
+            b"ab",
+            b"abc",
+            b"abcd",
+            b"abcde",
+        ] {
             let enc = base32_encode(data);
             assert_eq!(base32_decode(&enc).unwrap(), data, "{enc}");
         }
@@ -223,7 +231,9 @@ mod tests {
         assert_eq!(set.len(), 10);
         for c in &codes {
             assert_eq!(c.len(), 14);
-            assert!(c.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'));
+            assert!(c
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'));
         }
     }
 

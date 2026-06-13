@@ -130,22 +130,22 @@ mod tests {
             "missing-domain@",
             "@missing-local.org",
             "two@@ats.org",
-            "user@localhost",      // dotless domain
-            "user@example",        // dotless domain
-            "user@.example.org",   // empty label
-            "user@example..org",   // empty label
-            "user@example.org.",   // trailing dot → empty label
-            "user@-bad.org",       // label starts with hyphen
-            "user@bad-.org",       // label ends with hyphen
-            "user@exa mple.org",   // space in domain
-            "us er@example.org",   // space in local
-            ".user@example.org",   // leading dot
-            "user.@example.org",   // trailing dot
-            "us..er@example.org",  // double dot
-            "user@example.123",    // all-numeric TLD
-            "user@example.o",      // 1-char TLD
-            "user@127.0.0.1",      // IP-style domain
-            "user@exam\nple.org",  // embedded control char (leading/trailing are trimmed)
+            "user@localhost",     // dotless domain
+            "user@example",       // dotless domain
+            "user@.example.org",  // empty label
+            "user@example..org",  // empty label
+            "user@example.org.",  // trailing dot → empty label
+            "user@-bad.org",      // label starts with hyphen
+            "user@bad-.org",      // label ends with hyphen
+            "user@exa mple.org",  // space in domain
+            "us er@example.org",  // space in local
+            ".user@example.org",  // leading dot
+            "user.@example.org",  // trailing dot
+            "us..er@example.org", // double dot
+            "user@example.123",   // all-numeric TLD
+            "user@example.o",     // 1-char TLD
+            "user@127.0.0.1",     // IP-style domain
+            "user@exam\nple.org", // embedded control char (leading/trailing are trimmed)
             "<script>@example.org",
         ] {
             assert!(validate_email(bad).is_err(), "{bad:?} should be rejected");
@@ -169,17 +169,20 @@ mod tests {
             assert!(validate_username(ok).is_ok(), "{ok} should be accepted");
         }
         for bad in [
-            "ab",                  // too short
-            &"x".repeat(51),       // too long
-            "-lead",               // bad first char
-            ".lead",               // bad first char
-            "has space",           // space
-            "tab\there",           // control
-            "emoji😀",             // non-ASCII
-            "semi;colon",          // punctuation
-            "slash/name",          // path-ish
+            "ab",            // too short
+            &"x".repeat(51), // too long
+            "-lead",         // bad first char
+            ".lead",         // bad first char
+            "has space",     // space
+            "tab\there",     // control
+            "emoji😀",       // non-ASCII
+            "semi;colon",    // punctuation
+            "slash/name",    // path-ish
         ] {
-            assert!(validate_username(bad).is_err(), "{bad:?} should be rejected");
+            assert!(
+                validate_username(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
     }
 

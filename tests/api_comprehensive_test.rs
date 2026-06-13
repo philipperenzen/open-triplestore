@@ -48,7 +48,9 @@ mod helpers {
             backup: None,
             jwt_config: Arc::new(JwtConfig::new(JWT_SECRET.to_string(), 30, 30)),
             object_store: Arc::new(ObjectStore::noop()),
-            mailer: Arc::new(open_triplestore::email::Mailer::log_only("http://localhost:7878")),
+            mailer: Arc::new(open_triplestore::email::Mailer::log_only(
+                "http://localhost:7878",
+            )),
             base_url: Arc::new("http://localhost:7878".to_string()),
             oauth_sessions: new_session_store(),
             passkey_sessions: open_triplestore::auth::passkey::new_session_store(),

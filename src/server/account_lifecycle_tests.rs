@@ -90,7 +90,13 @@ mod tests {
     fn seed_admin(state: &AppState) {
         state
             .auth_db
-            .create_user("admin0", "admin", "admin@test.com", "h", SystemRole::SuperAdmin)
+            .create_user(
+                "admin0",
+                "admin",
+                "admin@test.com",
+                "h",
+                SystemRole::SuperAdmin,
+            )
             .unwrap();
     }
 
@@ -114,7 +120,12 @@ mod tests {
     }
 
     /// Insert an email action token directly and return the raw token value.
-    fn mint_email_token(state: &AppState, user_id: &str, kind: &str, new_email: Option<&str>) -> String {
+    fn mint_email_token(
+        state: &AppState,
+        user_id: &str,
+        kind: &str,
+        new_email: Option<&str>,
+    ) -> String {
         let raw = format!("test-token-{}", uuid::Uuid::new_v4());
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
         state
@@ -224,7 +235,14 @@ mod tests {
     async fn verify_email_token_is_single_use() {
         let state = test_state();
         seed_user(&state, "u1", "alice", "alice@example.org", "longenough123");
-        assert!(!state.auth_db.get_user_by_id("u1").unwrap().unwrap().email_verified);
+        assert!(
+            !state
+                .auth_db
+                .get_user_by_id("u1")
+                .unwrap()
+                .unwrap()
+                .email_verified
+        );
 
         let raw = mint_email_token(&state, "u1", "verify_email", None);
 
@@ -238,7 +256,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert_eq!(body["verified"], true);
-        assert!(state.auth_db.get_user_by_id("u1").unwrap().unwrap().email_verified);
+        assert!(
+            state
+                .auth_db
+                .get_user_by_id("u1")
+                .unwrap()
+                .unwrap()
+                .email_verified
+        );
 
         // Replay must fail with the generic message.
         let (status, _, _) = send(
@@ -294,7 +319,14 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
 
         // Completing the reset proves mailbox control.
-        assert!(state.auth_db.get_user_by_id("u1").unwrap().unwrap().email_verified);
+        assert!(
+            state
+                .auth_db
+                .get_user_by_id("u1")
+                .unwrap()
+                .unwrap()
+                .email_verified
+        );
 
         // The token is spent.
         let (status, _, _) = send(
@@ -412,7 +444,9 @@ mod tests {
             Method::POST,
             "/api/auth/change-email",
             Some(&token),
-            Some(serde_json::json!({ "new_email": "bob@example.org", "password": "longenough123" })),
+            Some(
+                serde_json::json!({ "new_email": "bob@example.org", "password": "longenough123" }),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -424,7 +458,9 @@ mod tests {
             Method::POST,
             "/api/auth/change-email",
             Some(&token),
-            Some(serde_json::json!({ "new_email": "new@example.org", "password": "longenough123" })),
+            Some(
+                serde_json::json!({ "new_email": "new@example.org", "password": "longenough123" }),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{text}");
@@ -482,7 +518,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{text}");
         let secret = body["secret"].as_str().unwrap().to_string();
-        assert!(body["otpauth_url"].as_str().unwrap().starts_with("otpauth://totp/"));
+        assert!(body["otpauth_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/"));
 
         // Enable with a live code → recovery codes (exactly once).
         let code = totp::code_at_step(&secret, totp::current_step()).unwrap();
@@ -502,7 +541,14 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert_eq!(recovery.len(), 10);
-        assert!(state.auth_db.get_user_by_id("u1").unwrap().unwrap().totp_enabled);
+        assert!(
+            state
+                .auth_db
+                .get_user_by_id("u1")
+                .unwrap()
+                .unwrap()
+                .totp_enabled
+        );
 
         // Password login now returns an MFA challenge instead of a session.
         let (status, body, text) = send(
@@ -516,10 +562,14 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{text}");
         assert_eq!(body["mfa_required"], true);
         let mfa_token = body["mfa_token"].as_str().unwrap().to_string();
-        assert!(body.get("access_token").is_none(), "no session before the second factor");
+        assert!(
+            body.get("access_token").is_none(),
+            "no session before the second factor"
+        );
 
         // The challenge token must NOT work as an access token.
-        let (status, _, _) = send(&state, Method::GET, "/api/auth/me", Some(&mfa_token), None).await;
+        let (status, _, _) =
+            send(&state, Method::GET, "/api/auth/me", Some(&mfa_token), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         // The code consumed during enablement can't be replayed; the next
@@ -532,7 +582,11 @@ mod tests {
             Some(serde_json::json!({ "mfa_token": mfa_token, "code": code })),
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "TOTP replay must be rejected");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "TOTP replay must be rejected"
+        );
 
         let next_code = totp::code_at_step(&secret, totp::current_step() + 1).unwrap();
         let (status, body, text) = send(
@@ -584,7 +638,11 @@ mod tests {
             Some(serde_json::json!({ "mfa_token": mfa_token3, "code": recovery[0] })),
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "recovery codes are single-use");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "recovery codes are single-use"
+        );
     }
 
     #[tokio::test]
@@ -593,7 +651,14 @@ mod tests {
         seed_user(&state, "u1", "alice", "alice@example.org", "longenough123");
         let token = bearer_for("u1", "alice");
 
-        let (_, body, _) = send(&state, Method::POST, "/api/auth/2fa/setup", Some(&token), None).await;
+        let (_, body, _) = send(
+            &state,
+            Method::POST,
+            "/api/auth/2fa/setup",
+            Some(&token),
+            None,
+        )
+        .await;
         let secret = body["secret"].as_str().unwrap().to_string();
         let code = totp::code_at_step(&secret, totp::current_step()).unwrap();
         let (status, _, text) = send(
@@ -649,7 +714,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{text}");
-        assert!(body["access_token"].is_string(), "plain session after disable");
+        assert!(
+            body["access_token"].is_string(),
+            "plain session after disable"
+        );
     }
 
     // ─── Admin validation ─────────────────────────────────────────────────────
@@ -695,7 +763,12 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED, "{text}");
         let id = body["id"].as_str().unwrap();
         assert!(
-            state.auth_db.get_user_by_id(id).unwrap().unwrap().email_verified,
+            state
+                .auth_db
+                .get_user_by_id(id)
+                .unwrap()
+                .unwrap()
+                .email_verified,
             "admin-provisioned addresses count as verified"
         );
     }

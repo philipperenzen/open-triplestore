@@ -1360,7 +1360,11 @@ impl AuthDb {
     }
 
     /// Replace the user's recovery codes with a fresh set (stored hashed).
-    pub fn replace_recovery_codes(&self, user_id: &str, code_hashes: &[String]) -> anyhow::Result<()> {
+    pub fn replace_recovery_codes(
+        &self,
+        user_id: &str,
+        code_hashes: &[String],
+    ) -> anyhow::Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -1428,7 +1432,16 @@ impl AuthDb {
             "INSERT INTO webauthn_credentials
                  (id, user_id, credential_id, public_key, counter, transports, name, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![id, user_id, credential_id, public_key, counter, transports, name, now],
+            params![
+                id,
+                user_id,
+                credential_id,
+                public_key,
+                counter,
+                transports,
+                name,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -2231,8 +2244,9 @@ impl AuthDb {
             .query_map(params![org_id], |row| {
                 let user = read_user(row)?;
                 // Role is appended after the USER_COLS_U columns.
-                let role_str: String =
-                    row.get::<_, Option<String>>(USER_COLS_LEN)?.unwrap_or_default();
+                let role_str: String = row
+                    .get::<_, Option<String>>(USER_COLS_LEN)?
+                    .unwrap_or_default();
                 Ok((user, Role::from_str(&role_str).unwrap_or(Role::Member)))
             })?
             // Skip any row that fails to map rather than 500-ing the whole list.
@@ -2495,8 +2509,9 @@ impl AuthDb {
             .query_map(params![group_id], |row| {
                 let user = read_user(row)?;
                 // Role is appended after the USER_COLS_U columns.
-                let role_str: String =
-                    row.get::<_, Option<String>>(USER_COLS_LEN)?.unwrap_or_default();
+                let role_str: String = row
+                    .get::<_, Option<String>>(USER_COLS_LEN)?
+                    .unwrap_or_default();
                 Ok((user, Role::from_str(&role_str).unwrap_or(Role::Member)))
             })?
             .filter_map(|r| r.ok())

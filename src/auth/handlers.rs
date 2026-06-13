@@ -648,7 +648,13 @@ pub async fn register(
 
     // Send the email-verification link (best-effort; logged when SMTP is not
     // configured). Failures never block registration.
-    match issue_email_token(&db, &user.id, "verify_email", None, EMAIL_TOKEN_TTL_HOURS * 60) {
+    match issue_email_token(
+        &db,
+        &user.id,
+        "verify_email",
+        None,
+        EMAIL_TOKEN_TTL_HOURS * 60,
+    ) {
         Ok(token) => state
             .mailer
             .send_verification_email(&user.email, &user.username, &token),
@@ -721,8 +727,7 @@ pub(crate) fn issue_email_token(
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let token =
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
+    let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
 
     db.invalidate_email_tokens(user_id, kind)?;
     let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(ttl_minutes)).to_rfc3339();
@@ -923,10 +928,17 @@ pub async fn verify_2fa(
     headers: HeaderMap,
     Json(req): Json<MfaVerifyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let claims = jwt::verify_token(&jwt_config, &req.mfa_token)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired login".to_string()))?;
+    let claims = jwt::verify_token(&jwt_config, &req.mfa_token).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired login".to_string(),
+        )
+    })?;
     if claims.token_type != "mfa" {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid or expired login".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired login".to_string(),
+        ));
     }
 
     let ip = audit::client_ip(&headers, None);
@@ -936,10 +948,18 @@ pub async fn verify_2fa(
     let user = db
         .get_user_by_id(&claims.sub)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired login".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Invalid or expired login".to_string(),
+            )
+        })?;
 
     if !user.is_active || !user.totp_enabled {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid or expired login".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired login".to_string(),
+        ));
     }
 
     // The same per-account lockout as the password step: codes are 6 digits,
@@ -951,12 +971,20 @@ pub async fn verify_2fa(
     let secret_enc = db
         .get_totp_secret(&user.id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired login".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Invalid or expired login".to_string(),
+            )
+        })?;
     let secret_b32 = secret::decrypt_secret(&secret_enc, &jwt_config.secret)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Try a TOTP code first; fall back to a single-use recovery code.
-    let min_step = db.get_totp_last_step(&user.id).unwrap_or(0).saturating_add(1);
+    let min_step = db
+        .get_totp_last_step(&user.id)
+        .unwrap_or(0)
+        .saturating_add(1);
     let mfa_method = if let Some(step) = totp::verify_code(&secret_b32, &req.code, min_step) {
         // Compare-and-set the replay guard: if another login just consumed
         // this step, reject this one.
@@ -1514,8 +1542,14 @@ pub async fn resend_verification(
                 .to_string(),
         ));
     }
-    let token = issue_email_token(&db, &user.id, "verify_email", None, EMAIL_TOKEN_TTL_HOURS * 60)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let token = issue_email_token(
+        &db,
+        &user.id,
+        "verify_email",
+        None,
+        EMAIL_TOKEN_TTL_HOURS * 60,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     state
         .mailer
         .send_verification_email(&user.email, &user.username, &token);
@@ -1737,12 +1771,10 @@ pub async fn change_email(
             .send_change_email_confirmation(&new_email, &user.username, &token);
 
         {
-            let mut b = AuditEventBuilder::new(
-                AuditEventType::EmailChangeRequested,
-                AuditOutcome::Success,
-            )
-            .actor(&user.id, &user.username, user.role.as_str())
-            .details(serde_json::json!({ "new_email": new_email }));
+            let mut b =
+                AuditEventBuilder::new(AuditEventType::EmailChangeRequested, AuditOutcome::Success)
+                    .actor(&user.id, &user.username, user.role.as_str())
+                    .details(serde_json::json!({ "new_email": new_email }));
             b.ip_address = audit::client_ip(&headers, None);
             b.user_agent = audit::user_agent(&headers);
             b.request_id = audit::request_id_from_headers(&headers);
@@ -1767,10 +1799,9 @@ pub async fn change_email(
         }
 
         {
-            let mut b =
-                AuditEventBuilder::new(AuditEventType::EmailChanged, AuditOutcome::Success)
-                    .actor(&user.id, &user.username, user.role.as_str())
-                    .details(serde_json::json!({ "email": new_email, "direct": true }));
+            let mut b = AuditEventBuilder::new(AuditEventType::EmailChanged, AuditOutcome::Success)
+                .actor(&user.id, &user.username, user.role.as_str())
+                .details(serde_json::json!({ "email": new_email, "direct": true }));
             b.ip_address = audit::client_ip(&headers, None);
             b.user_agent = audit::user_agent(&headers);
             b.request_id = audit::request_id_from_headers(&headers);
@@ -1916,11 +1947,19 @@ pub async fn totp_disable(
     let secret_enc = db
         .get_totp_secret(&user.id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "2FA state corrupt".to_string()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "2FA state corrupt".to_string(),
+            )
+        })?;
     let secret_b32 = secret::decrypt_secret(&secret_enc, &jwt_config.secret)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let min_step = db.get_totp_last_step(&user.id).unwrap_or(0).saturating_add(1);
+    let min_step = db
+        .get_totp_last_step(&user.id)
+        .unwrap_or(0)
+        .saturating_add(1);
     let code_ok = match totp::verify_code(&secret_b32, &req.code, min_step) {
         Some(step) => db.try_advance_totp_step(&user.id, step).unwrap_or(false),
         None => {
@@ -1938,9 +1977,11 @@ pub async fn totp_disable(
     let _ = db.clear_recovery_codes(&user.id);
 
     {
-        let mut b =
-            AuditEventBuilder::new(AuditEventType::TwoFactorDisabled, AuditOutcome::Success)
-                .actor(&user.id, &user.username, user.role.as_str());
+        let mut b = AuditEventBuilder::new(
+            AuditEventType::TwoFactorDisabled,
+            AuditOutcome::Success,
+        )
+        .actor(&user.id, &user.username, user.role.as_str());
         b.ip_address = audit::client_ip(&headers, None);
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);

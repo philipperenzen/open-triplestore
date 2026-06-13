@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod account_lifecycle_tests;
 pub mod content_negotiation;
 pub mod error;
 mod linked_data;
@@ -6,12 +8,10 @@ pub mod llm_history;
 pub mod llm_sparql;
 pub mod openapi;
 #[cfg(test)]
+mod passkey_tests;
+#[cfg(test)]
 mod role_visibility_tests;
 pub mod routes;
-#[cfg(test)]
-mod account_lifecycle_tests;
-#[cfg(test)]
-mod passkey_tests;
 #[cfg(test)]
 mod security_regression_tests;
 #[cfg(test)]
@@ -1553,7 +1553,9 @@ pub async fn run(
 
     // Transactional account email (verification, password reset). Logs-only
     // until SMTP_HOST is configured; links default to the public base URL.
-    let mailer = Arc::new(crate::email::Mailer::from_env(base_url.trim_end_matches('/')));
+    let mailer = Arc::new(crate::email::Mailer::from_env(
+        base_url.trim_end_matches('/'),
+    ));
     if mailer.smtp_configured() {
         tracing::info!("email: SMTP relay configured — account emails will be delivered");
     } else {
