@@ -70,7 +70,7 @@ pub fn prepare_run(
 
     let (graphs, version_label, is_live) = match query.scope {
         QueryScope::Dataset => {
-            resolve_dataset_scope(state, sq_store, &query.id, &query.owner_id, req)?
+            resolve_dataset_scope(state, sq_store, &query.id, &query.owner_id, user_id, req)?
         }
         QueryScope::Organisation | QueryScope::Group => {
             (resolve_owner_union(state, query, user_id)?, None, true)
@@ -94,65 +94,129 @@ fn live_graphs(state: &AppState, dataset_id: &str) -> Result<HashSet<String>, Ap
         .collect())
 }
 
+/// Whether `user_id` may write the dataset (editor/admin). Anonymous callers and
+/// users with no effective role never can. Mirrors the dataset-service path in
+/// `routes.rs`, which gates private-graph visibility on write access.
+fn caller_can_write_dataset(state: &AppState, dataset_id: &str, user_id: Option<&str>) -> bool {
+    let uid = match user_id {
+        Some(u) => u,
+        None => return false,
+    };
+    let dataset = match state.auth_db.get_dataset(dataset_id) {
+        Ok(Some(d)) => d,
+        _ => return false,
+    };
+    state
+        .auth_db
+        .can_write_dataset(uid, &dataset)
+        .unwrap_or(false)
+}
+
+/// Drop graphs flagged `private` for callers who cannot write the dataset, so a
+/// viewer (or anonymous user on a public dataset API service) cannot read a
+/// sub-graph the owner marked private. Mirrors the dataset-service filter in
+/// `routes.rs` (`list_dataset_graph_entries` + the `private` flag). Writers and
+/// admins keep full visibility.
+fn filter_private_for_reader(
+    state: &AppState,
+    dataset_id: &str,
+    user_id: Option<&str>,
+    graphs: HashSet<String>,
+) -> HashSet<String> {
+    if caller_can_write_dataset(state, dataset_id, user_id) {
+        return graphs;
+    }
+    let private: HashSet<String> = state
+        .auth_db
+        .list_dataset_graph_entries(dataset_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.private)
+        .map(|e| e.graph_iri)
+        .collect();
+    graphs
+        .into_iter()
+        .filter(|g| !private.contains(g))
+        .collect()
+}
+
 fn resolve_dataset_scope(
     state: &AppState,
     sq_store: &SavedQueryStore,
     query_id: &str,
     dataset_id: &str,
+    user_id: Option<&str>,
     req: &VersionRequest,
 ) -> Result<(HashSet<String>, Option<String>, bool), AppError> {
     let base = state.base_url.as_str();
-    match req {
-        VersionRequest::Latest => Ok((live_graphs(state, dataset_id)?, None, true)),
+    let (graphs, version_label, is_live) = match req {
+        VersionRequest::Latest => (live_graphs(state, dataset_id)?, None, true),
         VersionRequest::Pinned(v) => {
             let ver = registry::get_version(&state.store, base, dataset_id, v)
                 .ok_or_else(|| AppError::NotFound(format!("dataset version '{v}' not found")))?;
-            Ok((
+            (
                 ver.snapshot_graphs.into_iter().collect(),
                 Some(ver.version),
                 false,
-            ))
+            )
         }
-        VersionRequest::Default => {
-            let versions = registry::list_versions(&state.store, base, dataset_id);
-            // Most recent version (newest first) with a passing recorded test.
-            for v in &versions {
-                if let Some(t) = sq_store
-                    .latest_test_for_version(query_id, &v.version)
-                    .map_err(|e| AppError::Internal(e.to_string()))?
-                {
-                    if t.status == "ok" {
-                        return Ok((
-                            v.snapshot_graphs.iter().cloned().collect(),
-                            Some(v.version.clone()),
-                            false,
-                        ));
-                    }
-                }
-            }
-            // Else the latest published version.
-            let (published, _draft) = registry::get_pointers(&state.store, base, dataset_id);
-            if let Some(pl) = published {
-                if let Some(ver) = registry::get_version(&state.store, base, dataset_id, &pl) {
-                    return Ok((
-                        ver.snapshot_graphs.into_iter().collect(),
-                        Some(ver.version),
-                        false,
-                    ));
-                }
-            }
-            // Else the newest version that exists.
-            if let Some(v) = versions.first() {
+        VersionRequest::Default => resolve_default_scope(state, sq_store, query_id, dataset_id)?,
+    };
+
+    // Subtract private graphs for non-writers, regardless of whether the graphs
+    // came from live data or a frozen snapshot — a snapshot can still contain a
+    // graph the owner has since (or always) marked private.
+    let graphs = filter_private_for_reader(state, dataset_id, user_id, graphs);
+    Ok((graphs, version_label, is_live))
+}
+
+/// Resolve the graph set for a `Default` version request: the newest version with
+/// a passing test, else the latest published version, else the newest version,
+/// else live data.
+fn resolve_default_scope(
+    state: &AppState,
+    sq_store: &SavedQueryStore,
+    query_id: &str,
+    dataset_id: &str,
+) -> Result<(HashSet<String>, Option<String>, bool), AppError> {
+    let base = state.base_url.as_str();
+    let versions = registry::list_versions(&state.store, base, dataset_id);
+    // Most recent version (newest first) with a passing recorded test.
+    for v in &versions {
+        if let Some(t) = sq_store
+            .latest_test_for_version(query_id, &v.version)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        {
+            if t.status == "ok" {
                 return Ok((
                     v.snapshot_graphs.iter().cloned().collect(),
                     Some(v.version.clone()),
                     false,
                 ));
             }
-            // Else live data (no versions captured yet).
-            Ok((live_graphs(state, dataset_id)?, None, true))
         }
     }
+    // Else the latest published version.
+    let (published, _draft) = registry::get_pointers(&state.store, base, dataset_id);
+    if let Some(pl) = published {
+        if let Some(ver) = registry::get_version(&state.store, base, dataset_id, &pl) {
+            return Ok((
+                ver.snapshot_graphs.into_iter().collect(),
+                Some(ver.version),
+                false,
+            ));
+        }
+    }
+    // Else the newest version that exists.
+    if let Some(v) = versions.first() {
+        return Ok((
+            v.snapshot_graphs.iter().cloned().collect(),
+            Some(v.version.clone()),
+            false,
+        ));
+    }
+    // Else live data (no versions captured yet).
+    Ok((live_graphs(state, dataset_id)?, None, true))
 }
 
 /// Graphs an organisation/group query may read: the union of the live graphs of
