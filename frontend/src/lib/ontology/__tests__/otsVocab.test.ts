@@ -1,12 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { parseTurtle } from '../loader';
 import { indexStore } from '../termDictionary';
 
 // Validates the hand-authored OTS vocabulary asset so authoring mistakes (a typo'd
 // IRI, a missing label/definition) fail CI without needing a running server.
-const ttl = readFileSync(resolve(process.cwd(), 'public/vocab/ots.ttl'), 'utf8');
+// Resolve against this file (not process.cwd()) so the test is launch-directory
+// independent. ../../../.. → frontend/. (new URL(..., import.meta.url) can't be
+// used: vite rewrites it into a dev-server asset URL.)
+const FRONTEND_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const ttl = readFileSync(resolve(FRONTEND_ROOT, 'public/vocab/ots.ttl'), 'utf8');
 
 const O = 'https://opentriplestore.org/ontology/';
 const NS = 'https://opentriplestore.org/ns#';
