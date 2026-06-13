@@ -27,12 +27,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   clicking a beam opens that element's linked-data panel; multiple movable
   element panels with a dock; map layer toggles + legend; "Show on map";
   a model-format picker; ontology viewer standards header + full-page viewer.
+- **Spark chat v2**: signed-in users keep their conversations — a history
+  sidebar (new / open / rename / delete), restored with their full retrieval
+  trail and widgets — plus editable "memory" (standing preferences injected
+  into the system prompt, screened for injection at save time). New answer
+  widgets: `model3d` (orbit viewer), `file` (preview/download card), and
+  `map` with georeferenced 3D `models`. An "About Spark" panel surfaces the
+  live model/gateway and grounding/privacy notes.
+- **Admin → AI Requests** (`/admin/llm`): a request log for every LLM-backed
+  call (chat, NL→SPARQL, SHACL) — outcome, latency, time-to-first-token,
+  sizes and the guard rule that fired — with 24h/7-day aggregates. Message
+  contents are never stored, only a short question preview (`LLM_LOG_*`).
+- **vLLM serving profile** (`docker compose --profile llm-vllm`, NVIDIA GPU):
+  automatic prefix caching reuses Spark's shared system prompt across turns
+  for near-instant time-to-first-token; the bundled Ollama profile now keeps
+  the model resident (`OLLAMA_KEEP_ALIVE`) and serves requests in parallel.
 
 ### Changed
 - App-wide motion polish: route transitions, staggered table rows, delayed
   loading indicators (no sub-500 ms skeleton flash), reduced-motion guard.
 - SPARQL/read rate limit raised to an interactive burst (40 @ 60/min) and 429s
   now carry a standard `Retry-After`; the web client retries them transparently.
+- **Developer build speed**: a hot-reload loop (`make watch` / `watch-check` via
+  cargo-watch), `make nextest` for parallel tests, dependency-only debuginfo
+  stripping for faster debug/test links, a `CARGO_PROFILE` Docker build-arg for
+  fast `release-dev` local images, BuildKit cargo/npm cache mounts plus `npm ci`,
+  and a separate rust-analyzer target dir to avoid build-lock contention. New
+  guide: [`docs/development.md`](docs/development.md).
+- Spark chat streams over SSE for fast first tokens; the server keeps a pooled
+  gateway connection and builds the prompt deterministically so gateway-side
+  prompt caches hit.
 
 ### Deprecated
 - None.
@@ -45,10 +69,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   zero landing count); SQLite `busy_timeout` now precedes WAL setup.
 - Ontology viewer rendered empty for model-registry versions (preloaded store
   now supersedes an empty SPARQL load).
+- **Spark**: a guard-rejected question (prompt-injection / rate limit) is no
+  longer replayed as context on later turns — one blocked message used to
+  re-block every following turn and freeze the chat; rejected questions stay
+  visible but dimmed and are excluded from the conversation and from history.
 
 ### Security
 - Authorization matrix tests (role × visibility × endpoint) pinning anonymous
   access to public data across browse/SPARQL/GSP/datasets/service description.
+- **LLM guard rails** on every Spark endpoint: a per-principal request rate
+  limit (separate from the global governor), size caps, a configurable phrase
+  blocklist and prompt-injection heuristics on user input
+  (`LLM_GUARD_INJECTION_ACTION` block/flag/off), plus an output screen that
+  redacts verbatim system-prompt leaks. Stored chat memory is screened the same
+  way at save time. All verdicts land in the admin request log.
 
 ## [0.3.0] — 2026-06-10
 

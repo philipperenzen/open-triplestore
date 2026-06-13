@@ -18,8 +18,28 @@ use super::jwt::{self, hash_token, JwtConfig};
 use super::middleware::AuthenticatedUser;
 use super::models::*;
 use super::password;
-use super::{dataset_graph, user_graph};
+use super::{dataset_graph, secret, totp, user_graph, validate};
 use crate::server::{AppState, CookieConfig};
+
+/// Lifetime of email-verification and change-email links.
+pub(crate) const EMAIL_TOKEN_TTL_HOURS: i64 = 24;
+/// Lifetime of password-reset links.
+const RESET_TOKEN_TTL_MINUTES: i64 = 60;
+/// Minimum seconds between two emails of the same kind to one account.
+const EMAIL_RESEND_THROTTLE_SECS: i64 = 600;
+/// Number of single-use 2FA recovery codes issued on enablement.
+const RECOVERY_CODE_COUNT: usize = 10;
+/// Issuer label shown in authenticator apps.
+const TOTP_ISSUER: &str = "Open Triplestore";
+
+/// True when password logins require a verified email address
+/// (`OTS_REQUIRE_VERIFIED_EMAIL=1`). Off by default so existing deployments
+/// and local development keep working without an SMTP relay.
+pub(crate) fn require_verified_email() -> bool {
+    std::env::var("OTS_REQUIRE_VERIFIED_EMAIL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 // ─── Request / Response types ─────────────────────────────────────────────────
 
@@ -49,6 +69,14 @@ pub struct UserResponse {
     pub id: String,
     pub username: String,
     pub email: String,
+    /// Whether ownership of `email` has been confirmed.
+    pub email_verified: bool,
+    /// Whether TOTP two-factor login is active.
+    pub totp_enabled: bool,
+    /// A requested new email address awaiting confirmation, if any.
+    /// Populated only by GET /api/auth/me.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_pending: Option<String>,
     pub role: SystemRole,
     pub is_active: bool,
     pub is_public: bool,
@@ -70,6 +98,9 @@ impl From<User> for UserResponse {
             id: u.id,
             username: u.username,
             email: u.email,
+            email_verified: u.email_verified,
+            totp_enabled: u.totp_enabled,
+            email_pending: None,
             role: u.role,
             is_active: u.is_active,
             is_public: u.is_public,
@@ -108,6 +139,82 @@ pub struct ChangePasswordRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub refresh_token: String,
+}
+
+// ─── Account recovery / verification / 2FA request types ─────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ForgotPasswordRequest {
+    /// Username or email address.
+    pub identifier: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ForgotUsernameRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct VerifyEmailRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangeEmailRequest {
+    pub new_email: String,
+    /// Current password — an email change is an account-takeover lever, so a
+    /// hijacked session alone must not be enough.
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TotpEnableRequest {
+    /// A current code from the authenticator app, proving enrollment worked.
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TotpDisableRequest {
+    pub password: String,
+    /// A current TOTP code or an unused recovery code.
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MfaVerifyRequest {
+    /// The short-lived `mfa_token` returned by POST /api/auth/login.
+    pub mfa_token: String,
+    /// A TOTP code or an unused recovery code.
+    pub code: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TotpSetupResponse {
+    /// Base32 shared secret (for manual entry).
+    pub secret: String,
+    /// otpauth:// provisioning URI (rendered as a QR code by the frontend).
+    pub otpauth_url: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TotpEnableResponse {
+    /// Single-use recovery codes — shown exactly once.
+    pub recovery_codes: Vec<String>,
+}
+
+/// Returned by POST /api/auth/login when the account has 2FA enabled: the
+/// password was correct, but a code is required to finish signing in.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MfaRequiredResponse {
+    pub mfa_required: bool,
+    pub mfa_token: String,
+    pub expires_in: u64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -342,7 +449,7 @@ pub struct UpdateServiceRequest {
 
 /// Issue an access + refresh token pair, storing the refresh token hash in DB.
 /// Build `Set-Cookie` headers for access and refresh tokens (M-2: HttpOnly cookies).
-fn auth_cookie_headers(
+pub(crate) fn auth_cookie_headers(
     access_token: &str,
     refresh_token: &str,
     access_expiry_secs: u64,
@@ -390,7 +497,7 @@ fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
 /// brand-new family id; a rotation passes the family of the token being rotated,
 /// so every token from one login shares a family and reuse-detection can be scoped
 /// to that single session.
-fn issue_tokens(
+pub(crate) fn issue_tokens(
     jwt_config: &JwtConfig,
     auth_db: &AuthDb,
     user: &User,
@@ -478,19 +585,13 @@ pub async fn register(
     State(state): State<AppState>,
     State(cookie_config): State<CookieConfig>,
     Json(req): Json<RegisterRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if req.username.len() < 3 || req.username.len() > 50 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Username must be 3-50 characters".to_string(),
-        ));
-    }
-    if req.password.len() < 8 || req.password.len() > 1024 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Password must be between 8 and 1024 characters".to_string(),
-        ));
-    }
+) -> Result<Response, (StatusCode, String)> {
+    validate::validate_username(&req.username)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    validate::validate_password(&req.password)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let email = req.email.trim().to_string();
+    validate::validate_email(&email).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Operators can disable open self-registration with OTS_DISABLE_REGISTRATION=1
     // (provision users out-of-band instead). The very FIRST account is still allowed
@@ -520,6 +621,15 @@ pub async fn register(
     {
         return Err((StatusCode::CONFLICT, "Username already taken".to_string()));
     }
+    // Pre-check the email too: the column is UNIQUE, and a constraint violation
+    // would surface as an opaque 500 instead of a clean 409.
+    if db
+        .get_user_by_email(&email)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some()
+    {
+        return Err((StatusCode::CONFLICT, "Email already in use".to_string()));
+    }
 
     let hash = password::hash_password(&req.password)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -533,8 +643,23 @@ pub async fn register(
 
     let id = uuid::Uuid::new_v4().to_string();
     let user = db
-        .create_user(&id, &req.username, &req.email, &hash, role)
+        .create_user(&id, &req.username, &email, &hash, role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Send the email-verification link (best-effort; logged when SMTP is not
+    // configured). Failures never block registration.
+    match issue_email_token(
+        &db,
+        &user.id,
+        "verify_email",
+        None,
+        EMAIL_TOKEN_TTL_HOURS * 60,
+    ) {
+        Ok(token) => state
+            .mailer
+            .send_verification_email(&user.email, &user.username, &token),
+        Err(e) => tracing::warn!("register: could not issue verification token: {e}"),
+    }
 
     // Write the FOAF/VCARD profile named graph for the new user.
     user_graph::write_user_profile_graph(&state.store, &state.base_url, &user);
@@ -548,6 +673,19 @@ pub async fn register(
         tokio::task::spawn_blocking(move || {
             crate::saved_queries::seed::seed_open_triplestore(&seed_state)
         });
+    }
+
+    // When verified email is required for login, registration must not hand
+    // out a session either — the account first has to confirm its inbox.
+    if require_verified_email() && !matches!(role, SystemRole::SuperAdmin) {
+        return Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "verification_required": true,
+                "user": UserResponse::from(user),
+            })),
+        )
+            .into_response());
     }
 
     // Registration auto-logs the new user in — a fresh session family.
@@ -572,7 +710,50 @@ pub async fn register(
             expires_in,
             user: user.into(),
         }),
-    ))
+    )
+        .into_response())
+}
+
+/// Mint a single-use email action token: random 256-bit value, stored hashed.
+/// Outstanding tokens of the same kind are voided first (newest link wins).
+/// Returns the raw token for inclusion in the email link.
+pub(crate) fn issue_email_token(
+    db: &AuthDb,
+    user_id: &str,
+    kind: &str,
+    new_email: Option<&str>,
+    ttl_minutes: i64,
+) -> anyhow::Result<String> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
+
+    db.invalidate_email_tokens(user_id, kind)?;
+    let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(ttl_minutes)).to_rfc3339();
+    db.create_email_token(
+        &uuid::Uuid::new_v4().to_string(),
+        user_id,
+        kind,
+        &hash_token(&token),
+        new_email,
+        &expires_at,
+    )?;
+    Ok(token)
+}
+
+/// Per-account resend throttle: true when a still-valid token of `kind` was
+/// minted within the last [`EMAIL_RESEND_THROTTLE_SECS`].
+pub(crate) fn email_recently_sent(db: &AuthDb, user_id: &str, kind: &str) -> bool {
+    db.latest_email_token_created_at(user_id, kind)
+        .ok()
+        .flatten()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds()
+                < EMAIL_RESEND_THROTTLE_SECS
+        })
+        .unwrap_or(false)
 }
 
 /// A fixed, valid Argon2id hash used to equalize login timing for unknown
@@ -592,9 +773,10 @@ pub async fn login(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(audit_log): State<Arc<AuditLogger>>,
     State(cookie_config): State<CookieConfig>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     let ip = audit::client_ip(&headers, None);
     let ua = audit::user_agent(&headers);
     let req_id = audit::request_id_from_headers(&headers);
@@ -654,6 +836,48 @@ pub async fn login(
         return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
     }
 
+    // Optional verified-email gate (OTS_REQUIRE_VERIFIED_EMAIL=1). The caller
+    // has already proven the password, so a specific message is not an
+    // enumeration oracle. A fresh link is auto-(re)sent, throttled per account.
+    if require_verified_email() && !user.email_verified {
+        if !email_recently_sent(&db, &user.id, "verify_email") {
+            match issue_email_token(
+                &db,
+                &user.id,
+                "verify_email",
+                None,
+                EMAIL_TOKEN_TTL_HOURS * 60,
+            ) {
+                Ok(token) => {
+                    state
+                        .mailer
+                        .send_verification_email(&user.email, &user.username, &token)
+                }
+                Err(e) => tracing::warn!("login: could not issue verification token: {e}"),
+            }
+        }
+        log_failure(&user.username, "email_not_verified", Some(user.id.clone()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Email address not verified. A confirmation link has been sent to your inbox."
+                .to_string(),
+        ));
+    }
+
+    // Two-factor: the password alone is not enough. Hand back a short-lived
+    // challenge token; the session is only minted by POST /api/auth/2fa/verify.
+    if user.totp_enabled {
+        let mfa_token =
+            jwt::issue_mfa_token(&jwt_config, &user.id, &user.username, user.role.as_str())
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Json(MfaRequiredResponse {
+            mfa_required: true,
+            mfa_token,
+            expires_in: jwt::MFA_TOKEN_EXPIRY_MINUTES * 60,
+        })
+        .into_response());
+    }
+
     // Successful authentication — reset the failure counter.
     let _ = db.clear_login_attempts(&req.username);
 
@@ -669,6 +893,139 @@ pub async fn login(
         b.ip_address = ip;
         b.user_agent = ua;
         b.request_id = req_id;
+        audit_log.log(b);
+    }
+
+    let cookie_headers = auth_cookie_headers(
+        &access_token,
+        &refresh_token,
+        expires_in,
+        jwt_config.refresh_expiry_days * 86400,
+        cookie_config.secure,
+    );
+
+    Ok((
+        cookie_headers,
+        Json(AuthResponse {
+            access_token,
+            refresh_token,
+            expires_in,
+            user: user.into(),
+        }),
+    )
+        .into_response())
+}
+
+/// POST /api/auth/2fa/verify — finish a two-factor login.
+///
+/// Public (the caller is not signed in yet) and behind the auth rate limiter.
+/// Failed codes count toward the same per-account lockout as bad passwords.
+pub async fn verify_2fa(
+    State(db): State<Arc<AuthDb>>,
+    State(jwt_config): State<Arc<JwtConfig>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    State(cookie_config): State<CookieConfig>,
+    headers: HeaderMap,
+    Json(req): Json<MfaVerifyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let claims = jwt::verify_token(&jwt_config, &req.mfa_token).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired login".to_string(),
+        )
+    })?;
+    if claims.token_type != "mfa" {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired login".to_string(),
+        ));
+    }
+
+    let ip = audit::client_ip(&headers, None);
+    let ua = audit::user_agent(&headers);
+    let req_id = audit::request_id_from_headers(&headers);
+
+    let user = db
+        .get_user_by_id(&claims.sub)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Invalid or expired login".to_string(),
+            )
+        })?;
+
+    if !user.is_active || !user.totp_enabled {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired login".to_string(),
+        ));
+    }
+
+    // The same per-account lockout as the password step: codes are 6 digits,
+    // so unthrottled guessing would be feasible.
+    if db.is_login_locked(&user.username).unwrap_or(false) {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid code".to_string()));
+    }
+
+    let secret_enc = db
+        .get_totp_secret(&user.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Invalid or expired login".to_string(),
+            )
+        })?;
+    let secret_b32 = secret::decrypt_secret(&secret_enc, &jwt_config.secret)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Try a TOTP code first; fall back to a single-use recovery code.
+    let min_step = db
+        .get_totp_last_step(&user.id)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mfa_method = if let Some(step) = totp::verify_code(&secret_b32, &req.code, min_step) {
+        // Compare-and-set the replay guard: if another login just consumed
+        // this step, reject this one.
+        match db.try_advance_totp_step(&user.id, step) {
+            Ok(true) => Some("totp"),
+            _ => None,
+        }
+    } else {
+        let normalized = req.code.trim().to_lowercase();
+        match db.consume_recovery_code(&user.id, &hash_token(&normalized)) {
+            Ok(true) => Some("recovery_code"),
+            _ => None,
+        }
+    };
+
+    let Some(mfa_method) = mfa_method else {
+        let _ = db.record_login_failure(&user.username);
+        let mut b = AuditEventBuilder::new(AuditEventType::LoginFailure, AuditOutcome::Failure)
+            .actor_username(user.username.clone())
+            .details(serde_json::json!({ "reason": "bad_2fa_code" }));
+        b.actor_id = Some(user.id.clone());
+        b.ip_address = ip;
+        b.user_agent = ua;
+        b.request_id = req_id;
+        audit_log.log(b);
+        return Err((StatusCode::UNAUTHORIZED, "Invalid code".to_string()));
+    };
+
+    let _ = db.clear_login_attempts(&user.username);
+
+    let family_id = uuid::Uuid::new_v4().to_string();
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
+
+    {
+        let mut b = AuditEventBuilder::new(AuditEventType::LoginSuccess, AuditOutcome::Success)
+            .actor(&user.id, &user.username, user.role.as_str())
+            .details(serde_json::json!({ "mfa": mfa_method }));
+        b.ip_address = audit::client_ip(&headers, None);
+        b.user_agent = audit::user_agent(&headers);
+        b.request_id = audit::request_id_from_headers(&headers);
         audit_log.log(b);
     }
 
@@ -917,7 +1274,11 @@ pub async fn me(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(UserResponse::from(user)))
+    let mut resp = UserResponse::from(user);
+    resp.email_pending = db
+        .pending_email_change(&current_user.user_id)
+        .unwrap_or(None);
+    Ok(Json(resp))
 }
 
 /// PUT /api/auth/me
@@ -932,13 +1293,14 @@ pub async fn update_me(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    // Update username / email (fall back to current values when not provided).
+    // Update the username (fall back to the current value when not provided).
     let username = req.username.as_deref().unwrap_or(&user.username);
-    let email = req.email.as_deref().unwrap_or(&user.email);
 
     // Pre-check uniqueness so a collision returns a clean 409 rather than a 500 that
     // would leak the SQLite constraint text (and confirm the value is taken).
     if username != user.username {
+        validate::validate_username(username)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
         if let Some(other) = db
             .get_user_by_username(username)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -948,18 +1310,18 @@ pub async fn update_me(
             }
         }
     }
-    if email != user.email {
-        if let Some(other) = db
-            .get_user_by_email(email)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
-            if other.id != current_user.user_id {
-                return Err((StatusCode::CONFLICT, "Email already in use".to_string()));
-            }
+    // The email address is identity-bearing and switches only after the new
+    // mailbox is confirmed — POST /api/auth/change-email owns that flow.
+    if let Some(ref email) = req.email {
+        if email.trim() != user.email {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Email changes must use POST /api/auth/change-email".to_string(),
+            ));
         }
     }
 
-    db.update_user(&current_user.user_id, username, email)
+    db.update_user(&current_user.user_id, username, &user.email)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Update FOAF profile fields when this looks like a full profile update
@@ -1049,6 +1411,577 @@ pub async fn change_password(
     {
         let mut b = AuditEventBuilder::new(AuditEventType::PasswordChanged, AuditOutcome::Success)
             .actor(&current_user.user_id, &user.username, user.role.as_str());
+        b.ip_address = audit::client_ip(&headers, None);
+        b.user_agent = audit::user_agent(&headers);
+        b.request_id = audit::request_id_from_headers(&headers);
+        audit_log.log(b);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Email verification / account recovery / 2FA handlers ────────────────────
+
+/// GET /api/auth/features — public capability flags the auth UI adapts to
+/// (e.g. wording flows differently when no SMTP relay is configured).
+pub async fn auth_features(
+    State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        && db.count_users().unwrap_or(0) > 0;
+    Ok(Json(serde_json::json!({
+        "email_delivery": state.mailer.smtp_configured(),
+        "require_verified_email": require_verified_email(),
+        "registration_disabled": registration_disabled,
+    })))
+}
+
+/// POST /api/auth/verify-email — redeem an emailed confirmation link.
+///
+/// Public: handles both first-time address verification and the confirmation
+/// step of an email change. One generic error for every invalid case so the
+/// endpoint can't be used to probe token state.
+pub async fn verify_email(
+    State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<VerifyEmailRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    const INVALID: (StatusCode, &str) = (StatusCode::BAD_REQUEST, "Invalid or expired link");
+    let invalid = || (INVALID.0, INVALID.1.to_string());
+
+    let token = db
+        .get_email_token_by_hash(&hash_token(req.token.trim()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(invalid)?;
+    if token.used_at.is_some() || token.is_expired() {
+        return Err(invalid());
+    }
+    let user = db
+        .get_user_by_id(&token.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(invalid)?;
+
+    let (event, email_now) = match token.kind.as_str() {
+        "verify_email" => {
+            db.set_email_verified(&user.id, true)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            (AuditEventType::EmailVerified, user.email.clone())
+        }
+        "change_email" => {
+            let new_email = token.new_email.clone().ok_or_else(invalid)?;
+            // Re-check uniqueness — another account may have claimed the
+            // address between request and confirmation.
+            if let Some(other) = db
+                .get_user_by_email(&new_email)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                if other.id != user.id {
+                    return Err((StatusCode::CONFLICT, "Email already in use".to_string()));
+                }
+            }
+            db.update_user_email_verified(&user.id, &new_email)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            (AuditEventType::EmailChanged, new_email)
+        }
+        // reset_password tokens are redeemed at POST /api/auth/reset-password.
+        _ => return Err(invalid()),
+    };
+
+    db.mark_email_token_used(&token.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Keep the FOAF/VCARD profile graph in sync with the confirmed address.
+    if let Ok(Some(updated)) = db.get_user_by_id(&user.id) {
+        user_graph::write_user_profile_graph(&state.store, &state.base_url, &updated);
+    }
+
+    {
+        let mut b = AuditEventBuilder::new(event, AuditOutcome::Success)
+            .actor(&user.id, &user.username, user.role.as_str())
+            .details(serde_json::json!({ "email": email_now }));
+        b.ip_address = audit::client_ip(&headers, None);
+        b.user_agent = audit::user_agent(&headers);
+        b.request_id = audit::request_id_from_headers(&headers);
+        audit_log.log(b);
+    }
+
+    Ok(Json(serde_json::json!({
+        "verified": true,
+        "kind": token.kind,
+        "email": email_now,
+    })))
+}
+
+/// POST /api/auth/verify-email/resend — mail a fresh confirmation link to the
+/// signed-in (but unverified) account. Throttled per account.
+pub async fn resend_verification(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let user = db
+        .get_user_by_id(&current_user.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    if user.email_verified {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Email address is already verified".to_string(),
+        ));
+    }
+    if email_recently_sent(&db, &user.id, "verify_email") {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "A confirmation link was sent recently — check your inbox or try again later"
+                .to_string(),
+        ));
+    }
+    let token = issue_email_token(
+        &db,
+        &user.id,
+        "verify_email",
+        None,
+        EMAIL_TOKEN_TTL_HOURS * 60,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state
+        .mailer
+        .send_verification_email(&user.email, &user.username, &token);
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "sent": true })),
+    ))
+}
+
+/// POST /api/auth/forgot-password — start self-service password recovery.
+///
+/// Public and deliberately enumeration-safe: the response is identical whether
+/// or not the identifier matches an account, and delivery happens on a
+/// background task so timing reveals nothing either.
+pub async fn forgot_password(
+    State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ForgotPasswordRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let identifier = req.identifier.trim();
+    let user = if identifier.contains('@') {
+        db.get_user_by_email(identifier)
+    } else {
+        db.get_user_by_username(identifier)
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(user) = user.filter(|u| u.is_active) {
+        if !email_recently_sent(&db, &user.id, "reset_password") {
+            match issue_email_token(
+                &db,
+                &user.id,
+                "reset_password",
+                None,
+                RESET_TOKEN_TTL_MINUTES,
+            ) {
+                Ok(token) => {
+                    state
+                        .mailer
+                        .send_password_reset_email(&user.email, &user.username, &token);
+                    let mut b = AuditEventBuilder::new(
+                        AuditEventType::PasswordResetRequested,
+                        AuditOutcome::Success,
+                    )
+                    .actor_username(user.username.clone());
+                    b.actor_id = Some(user.id.clone());
+                    b.ip_address = audit::client_ip(&headers, None);
+                    b.user_agent = audit::user_agent(&headers);
+                    b.request_id = audit::request_id_from_headers(&headers);
+                    audit_log.log(b);
+                }
+                Err(e) => tracing::warn!("forgot-password: could not issue token: {e}"),
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "message": "If the account exists, a password reset link has been sent to its email address."
+    })))
+}
+
+/// POST /api/auth/reset-password — redeem a reset link and set a new password.
+pub async fn reset_password(
+    State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    headers: HeaderMap,
+    Json(req): Json<ResetPasswordRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let invalid = || {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid or expired link".to_string(),
+        )
+    };
+    validate::validate_password(&req.new_password)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let token = db
+        .get_email_token_by_hash(&hash_token(req.token.trim()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(invalid)?;
+    if token.kind != "reset_password" || token.used_at.is_some() || token.is_expired() {
+        return Err(invalid());
+    }
+    let user = db
+        .get_user_by_id(&token.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter(|u| u.is_active)
+        .ok_or_else(invalid)?;
+
+    let new_hash = password::hash_password(&req.new_password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db.update_password(&user.id, &new_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db.mark_email_token_used(&token.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = db.invalidate_email_tokens(&user.id, "reset_password");
+
+    // Completing the reset proves mailbox control — the address is verified.
+    let _ = db.set_email_verified(&user.id, true);
+    // A reset must cut off every existing (possibly attacker-held) session,
+    // and a locked-out rightful owner gets back in immediately.
+    let _ = db.revoke_all_user_refresh_tokens(&user.id);
+    let _ = db.clear_login_attempts(&user.username);
+
+    {
+        let mut b = AuditEventBuilder::new(AuditEventType::PasswordChanged, AuditOutcome::Success)
+            .actor(&user.id, &user.username, user.role.as_str())
+            .details(serde_json::json!({ "via": "reset_token" }));
+        b.ip_address = audit::client_ip(&headers, None);
+        b.user_agent = audit::user_agent(&headers);
+        b.request_id = audit::request_id_from_headers(&headers);
+        audit_log.log(b);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/auth/forgot-username — mail the username tied to an address.
+/// Public and enumeration-safe, like forgot-password.
+pub async fn forgot_username(
+    State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ForgotUsernameRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let email = req.email.trim();
+    if validate::validate_email(email).is_ok() {
+        if let Ok(Some(user)) = db.get_user_by_email(email) {
+            if user.is_active {
+                state
+                    .mailer
+                    .send_username_reminder_email(&user.email, &[user.username.clone()]);
+                let mut b = AuditEventBuilder::new(
+                    AuditEventType::UsernameReminderRequested,
+                    AuditOutcome::Success,
+                )
+                .actor_username(user.username.clone());
+                b.actor_id = Some(user.id.clone());
+                b.ip_address = audit::client_ip(&headers, None);
+                b.user_agent = audit::user_agent(&headers);
+                b.request_id = audit::request_id_from_headers(&headers);
+                audit_log.log(b);
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "message": "If the address belongs to an account, its username has been sent there."
+    })))
+}
+
+/// POST /api/auth/change-email — start (or, without SMTP, apply) an email change.
+///
+/// With a mail relay configured the new address only takes effect once its
+/// mailbox confirms via the emailed link; without one the change applies
+/// immediately but the address is marked unverified.
+pub async fn change_email(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ChangeEmailRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let new_email = req.new_email.trim().to_string();
+    validate::validate_email(&new_email).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let user = db
+        .get_user_by_id(&current_user.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let valid = password::verify_password(&req.password, &user.password_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Current password is incorrect".to_string(),
+        ));
+    }
+
+    if new_email == user.email {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This is already the account's email address".to_string(),
+        ));
+    }
+    if let Some(other) = db
+        .get_user_by_email(&new_email)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        if other.id != user.id {
+            return Err((StatusCode::CONFLICT, "Email already in use".to_string()));
+        }
+    }
+
+    if state.mailer.smtp_configured() {
+        if email_recently_sent(&db, &user.id, "change_email") {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "A confirmation link was sent recently — check the new inbox or try again later"
+                    .to_string(),
+            ));
+        }
+        let token = issue_email_token(
+            &db,
+            &user.id,
+            "change_email",
+            Some(&new_email),
+            EMAIL_TOKEN_TTL_HOURS * 60,
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        state
+            .mailer
+            .send_change_email_confirmation(&new_email, &user.username, &token);
+
+        {
+            let mut b =
+                AuditEventBuilder::new(AuditEventType::EmailChangeRequested, AuditOutcome::Success)
+                    .actor(&user.id, &user.username, user.role.as_str())
+                    .details(serde_json::json!({ "new_email": new_email }));
+            b.ip_address = audit::client_ip(&headers, None);
+            b.user_agent = audit::user_agent(&headers);
+            b.request_id = audit::request_id_from_headers(&headers);
+            audit_log.log(b);
+        }
+
+        Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "pending": true,
+                "message": "Confirmation link sent to the new address — the change applies once confirmed.",
+            })),
+        ))
+    } else {
+        // No relay: apply directly but flag the address as unverified.
+        db.update_user(&user.id, &user.username, &new_email)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        db.set_email_verified(&user.id, false)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Ok(Some(updated)) = db.get_user_by_id(&user.id) {
+            user_graph::write_user_profile_graph(&state.store, &state.base_url, &updated);
+        }
+
+        {
+            let mut b = AuditEventBuilder::new(AuditEventType::EmailChanged, AuditOutcome::Success)
+                .actor(&user.id, &user.username, user.role.as_str())
+                .details(serde_json::json!({ "email": new_email, "direct": true }));
+            b.ip_address = audit::client_ip(&headers, None);
+            b.user_agent = audit::user_agent(&headers);
+            b.request_id = audit::request_id_from_headers(&headers);
+            audit_log.log(b);
+        }
+
+        Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "pending": false })),
+        ))
+    }
+}
+
+// ─── TOTP two-factor handlers ─────────────────────────────────────────────────
+
+/// POST /api/auth/2fa/setup — begin TOTP enrollment: mint a secret and return
+/// it (with the otpauth:// URI) for the authenticator app. 2FA only becomes
+/// active once POST /api/auth/2fa/enable proves a correct code.
+pub async fn totp_setup(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(db): State<Arc<AuthDb>>,
+    State(jwt_config): State<Arc<JwtConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let user = db
+        .get_user_by_id(&current_user.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    if user.totp_enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            "Two-factor authentication is already enabled — disable it first to re-enroll"
+                .to_string(),
+        ));
+    }
+
+    let secret_b32 = totp::generate_secret();
+    let secret_enc = secret::encrypt_secret(&secret_b32, &jwt_config.secret)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db.set_totp_secret(&user.id, Some(&secret_enc))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let otpauth_url = totp::otpauth_url(&secret_b32, &user.username, TOTP_ISSUER);
+    Ok(Json(TotpSetupResponse {
+        secret: secret_b32,
+        otpauth_url,
+    }))
+}
+
+/// POST /api/auth/2fa/enable — confirm enrollment with a live code; returns
+/// the single-use recovery codes (shown exactly once).
+pub async fn totp_enable(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(db): State<Arc<AuthDb>>,
+    State(jwt_config): State<Arc<JwtConfig>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    headers: HeaderMap,
+    Json(req): Json<TotpEnableRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let user = db
+        .get_user_by_id(&current_user.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    if user.totp_enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            "Two-factor authentication is already enabled".to_string(),
+        ));
+    }
+    let secret_enc = db
+        .get_totp_secret(&user.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "No pending enrollment — call POST /api/auth/2fa/setup first".to_string(),
+            )
+        })?;
+    let secret_b32 = secret::decrypt_secret(&secret_enc, &jwt_config.secret)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let step = totp::verify_code(&secret_b32, &req.code, 0).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Incorrect code — check the authenticator app and try again".to_string(),
+        )
+    })?;
+    let _ = db.try_advance_totp_step(&user.id, step);
+
+    let codes = totp::generate_recovery_codes(RECOVERY_CODE_COUNT);
+    let hashes: Vec<String> = codes.iter().map(|c| hash_token(c)).collect();
+    db.replace_recovery_codes(&user.id, &hashes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    db.set_totp_enabled(&user.id, true)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    {
+        let mut b = AuditEventBuilder::new(AuditEventType::TwoFactorEnabled, AuditOutcome::Success)
+            .actor(&user.id, &user.username, user.role.as_str());
+        b.ip_address = audit::client_ip(&headers, None);
+        b.user_agent = audit::user_agent(&headers);
+        b.request_id = audit::request_id_from_headers(&headers);
+        audit_log.log(b);
+    }
+
+    Ok(Json(TotpEnableResponse {
+        recovery_codes: codes,
+    }))
+}
+
+/// POST /api/auth/2fa/disable — turn 2FA off. Requires the current password
+/// AND a live TOTP code (or an unused recovery code): a hijacked session must
+/// not be able to strip the second factor.
+pub async fn totp_disable(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(db): State<Arc<AuthDb>>,
+    State(jwt_config): State<Arc<JwtConfig>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    headers: HeaderMap,
+    Json(req): Json<TotpDisableRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let user = db
+        .get_user_by_id(&current_user.user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let valid = password::verify_password(&req.password, &user.password_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Current password is incorrect".to_string(),
+        ));
+    }
+    if !user.totp_enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Two-factor authentication is not enabled".to_string(),
+        ));
+    }
+
+    let secret_enc = db
+        .get_totp_secret(&user.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "2FA state corrupt".to_string(),
+            )
+        })?;
+    let secret_b32 = secret::decrypt_secret(&secret_enc, &jwt_config.secret)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let min_step = db
+        .get_totp_last_step(&user.id)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let code_ok = match totp::verify_code(&secret_b32, &req.code, min_step) {
+        Some(step) => db.try_advance_totp_step(&user.id, step).unwrap_or(false),
+        None => {
+            let normalized = req.code.trim().to_lowercase();
+            db.consume_recovery_code(&user.id, &hash_token(&normalized))
+                .unwrap_or(false)
+        }
+    };
+    if !code_ok {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid code".to_string()));
+    }
+
+    db.set_totp_secret(&user.id, None)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = db.clear_recovery_codes(&user.id);
+
+    {
+        let mut b = AuditEventBuilder::new(
+            AuditEventType::TwoFactorDisabled,
+            AuditOutcome::Success,
+        )
+        .actor(&user.id, &user.username, user.role.as_str());
         b.ip_address = audit::client_ip(&headers, None);
         b.user_agent = audit::user_agent(&headers);
         b.request_id = audit::request_id_from_headers(&headers);
@@ -1229,18 +2162,12 @@ pub async fn admin_create_user(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     authz::require_admin(&current_user)?;
 
-    if req.username.len() < 3 || req.username.len() > 50 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Username must be 3-50 characters".to_string(),
-        ));
-    }
-    if req.password.len() < 8 || req.password.len() > 1024 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Password must be between 8 and 1024 characters".to_string(),
-        ));
-    }
+    validate::validate_username(&req.username)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    validate::validate_password(&req.password)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let email = req.email.trim().to_string();
+    validate::validate_email(&email).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     if db
         .get_user_by_username(&req.username)
@@ -1248,6 +2175,13 @@ pub async fn admin_create_user(
         .is_some()
     {
         return Err((StatusCode::CONFLICT, "Username already taken".to_string()));
+    }
+    if db
+        .get_user_by_email(&email)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_some()
+    {
+        return Err((StatusCode::CONFLICT, "Email already in use".to_string()));
     }
 
     let role = req
@@ -1273,8 +2207,11 @@ pub async fn admin_create_user(
 
     let id = uuid::Uuid::new_v4().to_string();
     let user = db
-        .create_user(&id, &req.username, &req.email, &hash, role)
+        .create_user(&id, &req.username, &email, &hash, role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // An admin vouches for the address they provision — mark it verified.
+    let _ = db.set_email_verified(&id, true);
 
     if req.can_publish == Some(true) {
         let _ = db.update_user_can_publish(&id, true);
@@ -1365,8 +2302,22 @@ pub async fn admin_update_user(
     }
 
     if let Some(ref email) = req.email {
+        let email = email.trim();
+        validate::validate_email(email).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Some(other) = db
+            .get_user_by_email(email)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            if other.id != user_id {
+                return Err((StatusCode::CONFLICT, "Email already in use".to_string()));
+            }
+        }
         db.update_user(&user_id, &target.username, email)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Admin-set addresses are treated as verified.
+        if email != target.email {
+            let _ = db.set_email_verified(&user_id, true);
+        }
     }
 
     if let Some(ref role_str) = req.role {
@@ -3108,6 +4059,23 @@ pub async fn patch_dataset_graph_role(
         db.set_dataset_graph_role(&dataset_id, &req.graph_iri, graph_role)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // "Set role: Shapes" — adopt the graph into the SHACL Studio Library
+        // and bind it to the dataset so the shapes become visible and effective
+        // (idempotent; best-effort, never fails the role update).
+        if graph_role == Some(GraphKind::Shapes) {
+            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                &state,
+                &dataset,
+                &req.graph_iri,
+                Some(&current_user.user_id),
+            ) {
+                tracing::warn!(
+                    "failed to auto-register shapes graph <{}> for dataset {dataset_id}: {e}",
+                    req.graph_iri
+                );
+            }
+        }
+
         // Rewrite DCAT metadata graph to reflect updated ots:graphRole triples.
         refresh_dataset_metadata(&state, &dataset_id);
     }
@@ -3475,6 +4443,7 @@ pub async fn delete_user(
 pub async fn update_dataset_shacl(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(db): State<Arc<AuthDb>>,
+    State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     Json(req): Json<DatasetShaclRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -3496,6 +4465,27 @@ pub async fn update_dataset_shacl(
         req.shapes_graph_iri.as_deref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Newly-linked shapes: adopt the graph into the SHACL Studio Library and
+    // bind it to the dataset (idempotent; best-effort, never fails the update).
+    if let Some(iri) = req
+        .shapes_graph_iri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let mut ds_after = dataset.clone();
+        ds_after.shapes_graph_iri = Some(iri.to_string());
+        if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+            &state,
+            &ds_after,
+            iri,
+            Some(&current_user.user_id),
+        ) {
+            tracing::warn!(
+                "failed to auto-register shapes graph <{iri}> for dataset {dataset_id}: {e}"
+            );
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3533,6 +4523,25 @@ pub async fn update_dataset_role(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     db.update_dataset_graphs_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Shapes role: every dataset graph now carries SHACL — adopt each into the
+    // SHACL Studio Library and bind it to the dataset so the shapes become
+    // visible and effective (idempotent; best-effort, never fails the update).
+    if graph_role == Some(GraphKind::Shapes) {
+        let graphs = db.list_dataset_graphs(&dataset_id).unwrap_or_default();
+        for iri in graphs {
+            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                &state,
+                &dataset,
+                &iri,
+                Some(&current_user.user_id),
+            ) {
+                tracing::warn!(
+                    "failed to auto-register shapes graph <{iri}> for dataset {dataset_id}: {e}"
+                );
+            }
+        }
+    }
 
     // Promote the dataset into the model / vocabulary registry so it shows up in
     // those listings *with its data* — a published 1.0.0 version whose graphs hold
