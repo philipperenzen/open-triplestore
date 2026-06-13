@@ -2411,7 +2411,7 @@ mod performance {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "perf stress test: 100k-triple bulk insert; slow + timing-sensitive, run explicitly with `cargo test -- --ignored`"]
     async fn bulk_insert_100k() {
         bulk_insert_ntriples(100_000, 60).await;
     }
