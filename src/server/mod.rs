@@ -1291,6 +1291,26 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .with_state(state.clone()),
         );
 
+    // OGC API – Features (Core, P4). Nested router so `optional_auth` populates
+    // AuthenticatedUser for logged-in callers while public datasets stay
+    // anonymously reachable (handlers gate on can_access_dataset).
+    router = router.merge(
+        Router::new()
+            .merge(crate::ogcapi::ogcapi_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone()),
+    );
+
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    #[cfg(feature = "geometry3d")]
+    {
+        let tiles3d_routes = Router::new()
+            .merge(crate::tiles3d::tiles3d_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone());
+        router = router.merge(tiles3d_routes);
+    }
+
     #[cfg(feature = "ldp")]
     {
         router = router.merge(ldp_router);

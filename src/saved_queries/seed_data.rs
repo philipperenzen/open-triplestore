@@ -367,6 +367,63 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
                  SELECT ?concept ?label WHERE { ?concept a skos:Concept ; skos:prefLabel ?label } ORDER BY ?label",
             ),
         ],
+        "viewer-3d-demo" => vec![
+            svc(
+                "Features by geometry type",
+                "geometry-types",
+                "GeoSPARQL — every geo:asWKT geometry with the WKT type keyword (POINT/LINESTRING/POLYGON/POLYHEDRALSURFACE …).",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>\n\
+                 SELECT ?feature ?label ?geomType WHERE { \
+                   ?feature geo:hasGeometry/geo:asWKT ?wkt . \
+                   OPTIONAL { ?feature rdfs:label ?label } \
+                   BIND(IF(CONTAINS(STR(?wkt), \">\"), STRAFTER(STR(?wkt), \"> \"), STR(?wkt)) AS ?body) \
+                   BIND(STRBEFORE(?body, \"(\") AS ?geomType) \
+                 } ORDER BY ?geomType ?label",
+            ),
+            svc(
+                "Volumetric (3D) geometries",
+                "volumetric-geometries",
+                "GeoSPARQL — the native WKT-Z solids (POLYHEDRALSURFACE/TIN/SOLID/Z) the 3D engine reasons over.",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>\n\
+                 SELECT ?feature ?label ?wkt WHERE { \
+                   ?feature geo:hasGeometry/geo:asWKT ?wkt . \
+                   OPTIONAL { ?feature rdfs:label ?label } \
+                   BIND(UCASE(STR(?wkt)) AS ?u) \
+                   FILTER(CONTAINS(?u, \"POLYHEDRALSURFACE\") || CONTAINS(?u, \"SOLID\") \
+                       || CONTAINS(?u, \"TIN\") || CONTAINS(?u, \" Z \") || CONTAINS(?u, \" Z(\")) \
+                 } ORDER BY ?label",
+            ),
+            svc(
+                "3D model files (FOG)",
+                "model-files",
+                "OMG/FOG — every linked 3D-model file (glTF/STL/CityJSON/CityGML/IFC) referenced via fog:as….",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX omg:  <https://w3id.org/omg#>\n\
+                 SELECT ?feature ?label ?format ?file WHERE { \
+                   ?feature omg:hasGeometry ?g . ?g ?p ?file . \
+                   FILTER(STRSTARTS(STR(?p), \"https://w3id.org/fog#as\")) \
+                   BIND(STRAFTER(STR(?p), \"https://w3id.org/fog#as\") AS ?format) \
+                   OPTIONAL { ?feature rdfs:label ?label } \
+                 } ORDER BY ?format ?label",
+            ),
+            svc(
+                "Latest sensor observations",
+                "latest-observations",
+                "SOSA/SSN — the digital-twin observations: sensor, feature of interest, observed property, result and time.",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX sosa: <http://www.w3.org/ns/sosa/>\n\
+                 SELECT ?observation ?sensor ?feature ?property ?result ?time WHERE { \
+                   ?observation a sosa:Observation ; \
+                     sosa:madeBySensor ?sensor ; \
+                     sosa:hasFeatureOfInterest ?feature ; \
+                     sosa:observedProperty ?property ; \
+                     sosa:hasSimpleResult ?result ; \
+                     sosa:resultTime ?time . \
+                 } ORDER BY DESC(?time)",
+            ),
+        ],
         _ => Vec::new(),
     }
 }
@@ -460,11 +517,20 @@ static DATASETS: &[DatasetSpec] = &[
                       ifcOWL lift), so storeys, walls and beams are individually selectable; the \
                       surrounding real city block from 3DBAG (LoD2.2 CityJSON, © 3DBAG by tudelft3d \
                       and 3DGI, CC BY 4.0); and real Wikidata landmarks (CC0) whose open 3D models \
-                      live on Wikimedia Commons. Served per element by the \
+                      live on Wikimedia Commons. Worked examples cover every supported geo \
+                      feature and format: mixed GeoSPARQL geometry types (point/line/polygon) for \
+                      the 2D map, native WKT-Z volumetric solids (POLYHEDRALSURFACE Z) for the 3D \
+                      engine, a second LoD2 CityJSON zone, a SOSA/SSN digital-twin sensor layer, \
+                      and an OTL/IMBOR asset-management alignment. Served per element by the \
                       /api/datasets/:id/viewer-feed endpoint, reprojected to WGS84/Web Mercator.",
         graphs: &[
             GraphSpec { suffix: "landmarks", role: GraphKind::Instances, fmt: Fmt::Turtle, data: LANDMARKS_TTL },
             GraphSpec { suffix: "context", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SCHEPENDOM_CONTEXT_TTL },
+            GraphSpec { suffix: "geo-features", role: GraphKind::Instances, fmt: Fmt::Turtle, data: GEO_FEATURES_TTL },
+            GraphSpec { suffix: "volumes-3d", role: GraphKind::Instances, fmt: Fmt::Turtle, data: VOLUMES_3D_TTL },
+            GraphSpec { suffix: "zones", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ZONES_3DBAG_TTL },
+            GraphSpec { suffix: "sensors", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SENSORS_SOSA_TTL },
+            GraphSpec { suffix: "assets", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ASSETS_OTL_TTL },
         ],
     },
 ];
@@ -476,6 +542,16 @@ static DATASETS: &[DatasetSpec] = &[
 const LANDMARKS_TTL: &str = include_str!("data/landmarks.ttl");
 /// Real 3DBAG city-block context around the Schependomlaan site (CC BY 4.0).
 const SCHEPENDOM_CONTEXT_TTL: &str = include_str!("data/schependomlaan-context.ttl");
+/// Mixed GeoSPARQL geometry types (POINT/LINESTRING/POLYGON) for the 2D map.
+const GEO_FEATURES_TTL: &str = include_str!("data/geo-features.ttl");
+/// Native WKT-Z volumetric solids (POLYHEDRALSURFACE Z) for the 3D engine/viewer.
+const VOLUMES_3D_TTL: &str = include_str!("data/volumes-3d.ttl");
+/// A second 3DBAG-style zone with several LoD2 CityJSON building elements.
+const ZONES_3DBAG_TTL: &str = include_str!("data/zones-3dbag.ttl");
+/// SOSA/SSN digital-twin layer: sensors + observations on the demo features.
+const SENSORS_SOSA_TTL: &str = include_str!("data/sensors-sosa.ttl");
+/// OTL/IMBOR-style asset-management alignment (third-party vocab not bundled).
+const ASSETS_OTL_TTL: &str = include_str!("data/assets-otl.ttl");
 
 /// OWL/RDFS data model for the `ots:` terms the codebase uses. Two namespaces
 /// are in play: `…/ns#` (Standard, AuthMethod, conformance) and `…/ontology/`

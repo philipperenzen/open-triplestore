@@ -1,0 +1,69 @@
+# Digital-twin layer — SOSA/SSN sensors & observations on the demo features.
+#
+# Sensors are hosted by building features from the zones graph (sosa:isHostedBy),
+# each making sosa:Observations with a sosa:observedProperty, a sosa:resultTime
+# and a sosa:hasSimpleResult, about a sosa:hasFeatureOfInterest — the standard
+# W3C/OGC SOSA shape for a digital twin overlaid on the linked-building-data
+# topology. (SSN ssn:System / ssn:hasSubSystem could nest these; SOSA is the
+# lightweight core used here.)
+#
+# The features of interest live in zones-3dbag.ttl (z2:) and volumes-3d.ttl
+# (v3:) — both seeded into the same dataset, so the cross-graph references
+# resolve in the union.
+
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix sosa:    <http://www.w3.org/ns/sosa/> .
+@prefix z2:      <https://opentriplestore.org/demo/viewer-3d-demo/zones#> .
+@prefix v3:      <https://opentriplestore.org/demo/viewer-3d-demo/volumes#> .
+@prefix dt:      <https://opentriplestore.org/demo/viewer-3d-demo/twin#> .
+
+# ── Observable properties ──
+dt:indoorTemperature a sosa:ObservableProperty ;
+    rdfs:label "Indoor temperature"@en .
+dt:energyUse a sosa:ObservableProperty ;
+    rdfs:label "Electrical energy use"@en .
+dt:structuralTilt a sosa:ObservableProperty ;
+    rdfs:label "Structural tilt"@en .
+
+# ── A temperature sensor hosted by the neighbour house ──
+dt:TempSensor01 a sosa:Sensor ;
+    rdfs:label "Indoor temperature sensor"@en ;
+    sosa:isHostedBy z2:NeighbourHouse ;
+    sosa:observes dt:indoorTemperature .
+
+dt:Obs-Temp-01 a sosa:Observation ;
+    rdfs:label "Temperature reading"@en ;
+    sosa:madeBySensor dt:TempSensor01 ;
+    sosa:hasFeatureOfInterest z2:NeighbourHouse ;
+    sosa:observedProperty dt:indoorTemperature ;
+    sosa:resultTime "2026-06-12T08:15:00Z"^^xsd:dateTime ;
+    sosa:hasSimpleResult "21.4"^^xsd:double .
+
+# ── An energy meter hosted by the same house ──
+dt:EnergyMeter01 a sosa:Sensor ;
+    rdfs:label "Energy meter"@en ;
+    sosa:isHostedBy z2:NeighbourHouse ;
+    sosa:observes dt:energyUse .
+
+dt:Obs-Energy-01 a sosa:Observation ;
+    rdfs:label "Energy-use reading"@en ;
+    sosa:madeBySensor dt:EnergyMeter01 ;
+    sosa:hasFeatureOfInterest z2:NeighbourHouse ;
+    sosa:observedProperty dt:energyUse ;
+    sosa:resultTime "2026-06-12T08:15:00Z"^^xsd:dateTime ;
+    sosa:hasSimpleResult "3.8"^^xsd:double .
+
+# ── A structural tilt sensor hosted by an extruded block (volumetric feature) ──
+dt:TiltSensor01 a sosa:Sensor ;
+    rdfs:label "Structural tilt sensor"@en ;
+    sosa:isHostedBy v3:BlockA ;
+    sosa:observes dt:structuralTilt .
+
+dt:Obs-Tilt-01 a sosa:Observation ;
+    rdfs:label "Tilt reading"@en ;
+    sosa:madeBySensor dt:TiltSensor01 ;
+    sosa:hasFeatureOfInterest v3:BlockA ;
+    sosa:observedProperty dt:structuralTilt ;
+    sosa:resultTime "2026-06-12T08:20:00Z"^^xsd:dateTime ;
+    sosa:hasSimpleResult "0.12"^^xsd:double .
