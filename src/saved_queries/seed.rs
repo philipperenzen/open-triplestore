@@ -126,10 +126,16 @@ pub fn seed_open_triplestore(state: &AppState) {
 }
 
 fn try_seed(state: &AppState) -> anyhow::Result<()> {
-    // Owner of the demo content: a super_admin (preferred) or any active admin.
-    // On a brand-new install before any admin exists, skip quietly — the boot
-    // seeder retries on the next start, once the first user (who is promoted to
-    // super_admin on registration) exists.
+    // Owner of the *owner-attributed* demo content (saved-query services, the IFC
+    // import, org membership): a super_admin (preferred) or any active admin.
+    //
+    // The organisation itself and all its PUBLIC data — datasets, named graphs,
+    // metadata, branding — are created regardless of whether an admin exists yet,
+    // so on a brand-new install they appear on first boot, before anyone has
+    // registered, and logged-out visitors see the public demo immediately. Only
+    // the content that must be attributed to a user waits: it is back-filled
+    // idempotently once the first admin exists (the registration handler reseeds,
+    // and every boot reseeds anyway).
     let owner = {
         let users = state.auth_db.list_users()?;
         users
@@ -137,13 +143,6 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
             .find(|u| matches!(u.role, SystemRole::SuperAdmin) && u.is_active)
             .or_else(|| users.iter().find(|u| u.role.is_admin() && u.is_active))
             .cloned()
-    };
-    let owner = match owner {
-        Some(u) => u,
-        None => {
-            tracing::info!("open-triplestore seed: no admin user yet; will retry on next start");
-            return Ok(());
-        }
     };
 
     // Resolve or create the public demo organisation. We deliberately do NOT bail
@@ -172,15 +171,23 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
                 Some(ORG_DESCRIPTION),
                 None,
             )?;
-            let _ = state
-                .auth_db
-                .add_org_member(&owner.id, &org_id, Role::Admin);
             org_graph::write_org_metadata_graph(&state.store, &state.base_url, &org, &[]);
             // Give the public org page a branded logo + banner out of the box.
             seed_org_branding(state, &org_id, true, true);
             org_id
         }
     };
+
+    // Make the first admin an Admin member of the org. Idempotent (INSERT OR
+    // REPLACE), so it's safe whether we just created the org or are back-filling
+    // membership on a later reseed once the first admin exists. Skipped entirely
+    // on a brand-new install with no users yet — the org stands member-less until
+    // then, which is fine for a public demo org.
+    if let Some(ref owner) = owner {
+        let _ = state
+            .auth_db
+            .add_org_member(&owner.id, &org_id, Role::Admin);
+    }
 
     let sq = SavedQueryStore::new(state.auth_db.pool());
     let mut graph_count = 0usize;
@@ -255,42 +262,52 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
             );
         }
 
-        // Saved-query services — create only when the dataset has none yet, so a
-        // reseed on every boot doesn't pile up duplicate services.
-        let has_services = sq
-            .list(QueryScope::Dataset, &ds_id)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
-        if !has_services {
-            for req in seed_data::services_for(ds.slug) {
-                match sq.create(QueryScope::Dataset, &ds_id, &req, &owner.id) {
-                    Ok(svc) => {
-                        metadata::record_service(&state.store, &state.base_url, &svc);
-                        metadata::record_revision(
-                            &state.store,
-                            &state.base_url,
-                            &svc.id,
-                            svc.current_revision,
-                            req.version_name.as_deref(),
-                            req.note.as_deref(),
-                            svc.sparql.as_deref().unwrap_or(&req.sparql),
-                            "manual",
-                            &svc.created_by,
-                            &svc.created_at,
-                        );
-                        service_count += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("open-triplestore seed: service '{}' failed: {e}", req.name)
+        // Saved-query services are attributed to the owning admin, so they wait
+        // until one exists (back-filled on the reseed after the first admin
+        // registers). Create only when the dataset has none yet, so a reseed on
+        // every boot doesn't pile up duplicate services.
+        if let Some(ref owner) = owner {
+            let has_services = sq
+                .list(QueryScope::Dataset, &ds_id)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !has_services {
+                for req in seed_data::services_for(ds.slug) {
+                    match sq.create(QueryScope::Dataset, &ds_id, &req, &owner.id) {
+                        Ok(svc) => {
+                            metadata::record_service(&state.store, &state.base_url, &svc);
+                            metadata::record_revision(
+                                &state.store,
+                                &state.base_url,
+                                &svc.id,
+                                svc.current_revision,
+                                req.version_name.as_deref(),
+                                req.note.as_deref(),
+                                svc.sparql.as_deref().unwrap_or(&req.sparql),
+                                "manual",
+                                &svc.created_by,
+                                &svc.created_at,
+                            );
+                            service_count += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "open-triplestore seed: service '{}' failed: {e}",
+                                req.name
+                            )
+                        }
                     }
                 }
             }
         }
     }
 
-    // The Schependomlaan IFC (layered Dutch BIM demo) is downloaded + converted
-    // on first boot — and back-filled on later boots if a download once failed.
-    seed_schependomlaan_ifc(state, &owner.id);
+    // The Schependomlaan IFC (layered Dutch BIM demo) is attributed to the owning
+    // admin, so it waits until one exists; downloaded + converted on the first
+    // boot/reseed after that, and back-filled on later boots if a download failed.
+    if let Some(ref owner) = owner {
+        seed_schependomlaan_ifc(state, &owner.id);
+    }
 
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
@@ -310,6 +327,12 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         backfilled,
         service_count
     );
+    if owner.is_none() {
+        tracing::info!(
+            "open-triplestore seed: org + public data created on first load; saved-query \
+             services, the IFC demo and org membership are deferred until the first admin registers"
+        );
+    }
     Ok(())
 }
 
@@ -523,4 +546,118 @@ fn load_graph(state: &AppState, graph_iri: &str, g: &GraphSpec) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+
+    /// Run the demo seed the way production does — on the blocking pool, so the
+    /// branding helpers' `Handle::current().block_on` has a runtime to use and the
+    /// seeder's internal `block_on`s don't panic on an async worker. An empty
+    /// `SEED_IFC_URL` keeps the seeder off the network (no IFC download).
+    async fn run_seed(state: &AppState) {
+        std::env::set_var("SEED_IFC_URL", "");
+        let s = state.clone();
+        tokio::task::spawn_blocking(move || seed_open_triplestore(&s))
+            .await
+            .unwrap();
+    }
+
+    /// The org and all its PUBLIC data are created on first boot, before anyone
+    /// has registered — the headline fix. Owner-attributed content (membership +
+    /// saved-query services) is deferred until an admin exists.
+    #[tokio::test]
+    async fn creates_org_and_public_data_on_first_load_without_any_user() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        assert_eq!(state.auth_db.count_users().unwrap(), 0, "fresh install");
+
+        run_seed(&state).await;
+
+        let org = state
+            .auth_db
+            .get_organisation_by_slug(ORG_SLUG)
+            .unwrap()
+            .expect("org is created on first load, not first login");
+        assert_eq!(org.name, ORG_NAME);
+
+        // Every public demo dataset exists already.
+        for ds in seed_data::datasets() {
+            assert!(
+                matches!(state.auth_db.get_dataset(ds.slug), Ok(Some(_))),
+                "dataset '{}' created on first load",
+                ds.slug
+            );
+        }
+
+        // Owner-attributed content is deferred: no members, no services yet.
+        assert!(
+            state.auth_db.list_org_members(&org.id).unwrap().is_empty(),
+            "org has no members until the first admin registers"
+        );
+        let sq = SavedQueryStore::new(state.auth_db.pool());
+        for ds in seed_data::datasets() {
+            assert!(
+                sq.list(QueryScope::Dataset, ds.slug)
+                    .unwrap_or_default()
+                    .is_empty(),
+                "saved-query services deferred for '{}'",
+                ds.slug
+            );
+        }
+    }
+
+    /// Once the first admin exists, the (idempotent) reseed back-fills the
+    /// owner-attributed content the first-load seed deferred.
+    #[tokio::test]
+    async fn backfills_membership_and_services_once_an_admin_exists() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+
+        // First boot, no users: org + public data, services deferred.
+        run_seed(&state).await;
+        let demo_ds = seed_data::datasets()[0].slug;
+        let sq = SavedQueryStore::new(state.auth_db.pool());
+        assert!(
+            sq.list(QueryScope::Dataset, demo_ds)
+                .unwrap_or_default()
+                .is_empty(),
+            "no services before an admin exists"
+        );
+
+        // The first admin appears (promoted to super_admin in the real flow).
+        let admin = state
+            .auth_db
+            .create_user(
+                "admin-1",
+                "admin",
+                "admin@x.test",
+                "hash",
+                SystemRole::SuperAdmin,
+            )
+            .unwrap();
+
+        // Reseed, exactly as the registration handler does on first admin.
+        run_seed(&state).await;
+
+        let org = state
+            .auth_db
+            .get_organisation_by_slug(ORG_SLUG)
+            .unwrap()
+            .unwrap();
+        let members = state.auth_db.list_org_members(&org.id).unwrap();
+        assert!(
+            members
+                .iter()
+                .any(|(u, r)| u.id == admin.id && matches!(r, Role::Admin)),
+            "first admin back-filled as an Admin member of the org"
+        );
+        assert!(
+            !sq.list(QueryScope::Dataset, demo_ds)
+                .unwrap_or_default()
+                .is_empty(),
+            "saved-query services back-filled once an owner exists"
+        );
+    }
 }
