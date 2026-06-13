@@ -94,6 +94,19 @@ cargo test --all-features
 > For day-to-day work use `cargo check` / a debug build; use
 > `cargo build --profile release-dev` for a fast release-like binary.
 
+For a hot-reloading loop, install [`cargo-watch`](https://crates.io/crates/cargo-watch)
+and [`cargo-nextest`](https://nexte.st) and use the `make` shortcuts:
+
+```bash
+cargo install cargo-watch cargo-nextest
+make watch        # rebuild + restart the server on every change
+make watch-check  # type-check only — the fastest feedback
+make nextest      # run tests in parallel (faster than cargo test)
+```
+
+The full build-performance guide — profiles, linker, Docker cache mounts, and
+rust-analyzer tuning — is in [`docs/development.md`](docs/development.md).
+
 ### Frontend (Node 20+)
 
 ```bash
