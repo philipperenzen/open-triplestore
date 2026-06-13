@@ -6995,3 +6995,33 @@ pub async fn viewer_feed(
         "elements": elements,
     })))
 }
+
+/// GET /api/datasets/:dataset_id/geo-stats — cheap geo capability summary that
+/// gates the UI: whether the dataset has mappable coordinates (2D map), loadable
+/// 3D models and/or volumetric geometry (3D viewer). Anonymous access works for
+/// public datasets, mirroring the viewer feed.
+pub async fn geo_stats(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+    if !state
+        .auth_db
+        .can_access_dataset(user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+    let data_graphs = state
+        .auth_db
+        .list_dataset_graphs(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
+    Ok(Json(stats))
+}

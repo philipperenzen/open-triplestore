@@ -52,6 +52,83 @@ pub struct ViewerElement {
 
 const FOG_AS: &str = "https://w3id.org/fog#as";
 
+/// Lightweight geo capability summary for a dataset/scope — drives the UI gating
+/// (show a 2D map when there are coordinates; show the 3D viewer only when there
+/// is 3D data). Computed with cheap `ASK`/`COUNT` queries rather than building
+/// the full feed, so it is safe to call per-dataset on list pages.
+#[derive(Debug, Clone, Serialize, ToSchema, Default)]
+pub struct GeoStats {
+    /// Any feature carries a `geo:asWKT` / `geo:asGML` geometry (mappable in 2D).
+    pub has_coordinates: bool,
+    /// Any feature links a loadable 3D model file (glTF/STL/CityJSON/CityGML/IFC).
+    pub has_models: bool,
+    /// Any stored WKT geometry is volumetric (`POLYHEDRALSURFACE`/`TIN`/`SOLID`/Z).
+    pub has_3d_geometry: bool,
+    /// Convenience: a 3D viewer is worthwhile (models or volumetric geometry).
+    pub has_3d: bool,
+    /// Number of distinct geometry-bearing features.
+    pub element_count: usize,
+}
+
+/// Compute the [`GeoStats`] for `data_graphs` (empty = default graph).
+pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStats {
+    let from: String = data_graphs
+        .iter()
+        .map(|g| format!("FROM <{g}> "))
+        .collect::<Vec<_>>()
+        .join("");
+
+    let ask = |where_clause: &str| -> bool {
+        let q = format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>\n\
+             PREFIX omg: <https://w3id.org/omg#>\n\
+             ASK {from} WHERE {{ {where_clause} }}"
+        );
+        matches!(store.query(&q), Ok(oxigraph::sparql::QueryResults::Boolean(true)))
+    };
+
+    let has_coordinates = ask(
+        "?s geo:hasGeometry ?g . { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w }",
+    );
+    let has_models = ask(
+        "?el omg:hasGeometry ?g . ?g ?p ?f . \
+         FILTER(STRSTARTS(STR(?p), \"https://w3id.org/fog#as\")) \
+         FILTER(REGEX(STR(?p), \"Gltf|Stl|Cityjson|Citygml|Ifc|Obj\", \"i\"))",
+    );
+    let has_3d_geometry = ask(
+        "?s geo:hasGeometry/geo:asWKT ?w . BIND(UCASE(STR(?w)) AS ?u) \
+         FILTER(CONTAINS(?u, \"POLYHEDRALSURFACE\") || CONTAINS(?u, \"TIN Z\") \
+             || CONTAINS(?u, \"TIN (\") || CONTAINS(?u, \"SOLID\") \
+             || CONTAINS(?u, \" Z (\") || CONTAINS(?u, \" Z(\"))",
+    );
+
+    let element_count = {
+        let q = format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>\n\
+             PREFIX omg: <https://w3id.org/omg#>\n\
+             SELECT (COUNT(DISTINCT ?el) AS ?c) {from} \
+             WHERE {{ ?el (geo:hasGeometry|omg:hasGeometry) ?x }}"
+        );
+        match store.query(&q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                .next()
+                .and_then(|s| s.ok())
+                .and_then(|s| s.get("c").map(term_value))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0),
+            _ => 0,
+        }
+    };
+
+    GeoStats {
+        has_coordinates,
+        has_models,
+        has_3d_geometry,
+        has_3d: has_models || has_3d_geometry,
+        element_count,
+    }
+}
+
 /// Build the viewer feed over `data_graphs` (empty = default graph). With
 /// `root`, only that object and its directly contained elements are returned.
 pub fn build_viewer_feed(
@@ -279,6 +356,33 @@ mod tests {
             bridge.wkt4326.as_deref().unwrap().starts_with("LINESTRING"),
             "root keeps its linestring"
         );
+    }
+
+    #[test]
+    fn geo_stats_detects_2d_models_and_3d() {
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(DATA, RdfFormat::Turtle, None).unwrap();
+        let s = dataset_geo_stats(&store, &[]);
+        assert!(s.has_coordinates, "DATA has geo:asWKT");
+        assert!(s.has_models, "DATA has fog:asGltf + fog:asIfc");
+        assert!(s.has_3d, "models ⇒ 3D viewer worthwhile");
+        assert!(!s.has_3d_geometry, "DATA's WKT is 2D (LINESTRING/POINT)");
+        assert_eq!(s.element_count, 2, "Bridge + Arch");
+
+        // A volumetric solid flips has_3d_geometry.
+        let store3d = TripleStore::in_memory().unwrap();
+        store3d
+            .load_str(
+                "@prefix geo: <http://www.opengis.net/ont/geosparql#> .\n\
+                 @prefix ex: <http://example.org/> .\n\
+                 ex:b geo:hasGeometry [ geo:asWKT \"POLYHEDRALSURFACE Z (((0 0 0,1 0 0,1 1 0,0 0 0)))\"^^geo:wktLiteral ] .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let s3 = dataset_geo_stats(&store3d, &[]);
+        assert!(s3.has_coordinates && s3.has_3d_geometry && s3.has_3d);
+        assert!(!s3.has_models);
     }
 
     #[test]

@@ -901,6 +901,11 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/viewer-feed",
             get(routes::viewer_feed),
         )
+        // Geo capability summary (gates the map / 3D-viewer UI affordances).
+        .route(
+            "/api/datasets/:dataset_id/geo-stats",
+            get(routes::geo_stats),
+        )
         // Anonymous-capable asset download (dataset visibility decides) — the
         // viewer fetches e.g. the original IFC file through this without auth.
         .route(
