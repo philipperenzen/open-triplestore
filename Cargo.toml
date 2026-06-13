@@ -222,3 +222,17 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 strip = false
+
+# ── Faster everyday debug + test builds ──
+# Dependencies are almost never stepped through in a debugger, but their debug
+# info dominates link time for a binary with this many crates. Drop debuginfo for
+# dependencies only (the `"*"` override does not touch our own workspace crates),
+# so backtraces and breakpoints in our code are unchanged while every plain
+# `cargo build`, `cargo test`, and `make watch` link step gets noticeably faster.
+[profile.dev.package."*"]
+debug = false
+
+# The test profile links the same heavy dependency set into every test binary;
+# give it the same treatment so `cargo test` / `cargo nextest` link faster too.
+[profile.test.package."*"]
+debug = false

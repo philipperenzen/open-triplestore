@@ -7,6 +7,12 @@
 #
 # macOS is intentionally left on its default linker — the system linker is
 # already fast there and this keeps local dev builds dependency-free.
+#
+# Want it even faster? `mold` links several times quicker than lld on large
+# binaries. Install it (`apt-get install mold` / `brew install mold`) and either
+# build with `mold -run cargo build`, or swap the linker below for
+# `-fuse-ld=mold`. lld is the committed default because CI and the Docker builder
+# already install it.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
