@@ -103,11 +103,10 @@ impl CommitRecord {
     }
 }
 
-/// SPARQL string-literal escaping (matches the registry modules).
+/// SPARQL string-literal escaping. Delegates to the canonical
+/// [`crate::store::escape_sparql_literal`] (handles `\ " \n \r \t`).
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+    crate::store::escape_sparql_literal(s)
 }
 
 fn term_to_string(t: &Term) -> String {
@@ -142,10 +141,16 @@ pub fn insert_commit(
         format!("    ver:removed \"{}\"^^xsd:integer ;", rec.removed),
     ];
     if let Some(a) = &rec.actor_iri {
-        lines.push(format!("    prov:wasAssociatedWith <{a}> ;"));
+        lines.push(format!(
+            "    prov:wasAssociatedWith <{}> ;",
+            crate::store::escape_sparql_iri(a)
+        ));
     }
     if let Some(s) = &rec.subject_iri {
-        lines.push(format!("    ver:onSubject <{s}> ;"));
+        lines.push(format!(
+            "    ver:onSubject <{}> ;",
+            crate::store::escape_sparql_iri(s)
+        ));
     }
     if let Some(v) = &rec.version {
         lines.push(format!("    ver:onVersion \"{}\" ;", esc(v)));
@@ -163,7 +168,10 @@ pub fn insert_commit(
         lines.push(format!("    ver:metadata \"{}\" ;", esc(&m.to_string())));
     }
     for g in &rec.affected_graphs {
-        lines.push(format!("    ver:affectedGraph <{g}> ;"));
+        lines.push(format!(
+            "    ver:affectedGraph <{}> ;",
+            crate::store::escape_sparql_iri(g)
+        ));
     }
     // Terminate with the timestamp.
     lines.push(format!(
@@ -244,7 +252,10 @@ pub fn list_commits(
     // projected (SELECT DISTINCT collapses the per-graph row fan-out).
     match scope {
         CommitScope::Subject(subject) => {
-            where_lines.push(format!("?c ver:onSubject <{subject}> ."));
+            where_lines.push(format!(
+                "?c ver:onSubject <{}> .",
+                crate::store::escape_sparql_iri(subject)
+            ));
         }
         CommitScope::Graphs(graphs) => {
             if graphs.is_empty() {
@@ -252,7 +263,7 @@ pub fn list_commits(
             }
             let in_list = graphs
                 .iter()
-                .map(|g| format!("<{g}>"))
+                .map(|g| format!("<{}>", crate::store::escape_sparql_iri(g)))
                 .collect::<Vec<_>>()
                 .join(", ");
             where_lines.push("?c ver:affectedGraph ?g .".to_string());
@@ -478,5 +489,24 @@ mod tests {
             &wrong_branch,
         )
         .is_empty());
+    }
+
+    // SECURITY: actor / subject / affected-graph IRIs are escaped before being
+    // interpolated into the commit-log INSERT DATA, so a crafted IRI cannot break
+    // out of `<...>` and inject extra triples.
+    #[test]
+    fn insert_commit_escapes_injected_iris() {
+        let store = TripleStore::in_memory().unwrap();
+        let mut r = CommitRecord::new(CommitKind::Dataset, "msg");
+        r.actor_iri = Some("http://x/a> . <urn:evil> <urn:evil> <urn:evil> . <http://x/b".into());
+        r.affected_graphs = vec!["http://x/g1".into()];
+        insert_commit(&store, "http://localhost", &r).unwrap();
+        let injected = matches!(
+            store
+                .query("ASK { GRAPH ?g { <urn:evil> <urn:evil> <urn:evil> } }")
+                .unwrap(),
+            oxigraph::sparql::QueryResults::Boolean(true)
+        );
+        assert!(!injected, "crafted actor IRI must be escaped, not injected");
     }
 }

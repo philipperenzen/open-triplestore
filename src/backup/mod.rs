@@ -422,6 +422,87 @@ fn validate_backup_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reject a manifest file-name (`rdf_path` / `sqlite_path`) that could escape the
+/// per-backup directory. Manifests are written by us, but they live on disk and
+/// could be tampered with, so these names are untrusted when read back: require a
+/// bare file name with no path separators, `..`, or absolute-path prefix before
+/// it is `join`ed onto the backup dir.
+fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || Path::new(name).is_absolute()
+    {
+        anyhow::bail!("invalid backup file name");
+    }
+    Ok(())
+}
+
+/// Restore a backup into `store` and the SQLite identity DB at `target_sqlite`,
+/// **replacing** current data. SHA-256 checksums are verified before anything is
+/// touched, so a corrupt backup aborts without destroying the live store.
+///
+/// Offline operation for the `--restore` CLI path: the server must not be serving
+/// and the identity DB must be closed (its file is atomically replaced).
+/// Age-encrypted backups are not restored automatically — the system keeps only
+/// the public recipient, so decrypt them with your age identity first.
+pub fn restore_backup(
+    backup_dir: &Path,
+    id: &str,
+    store: &TripleStore,
+    target_sqlite: &Path,
+) -> anyhow::Result<BackupManifest> {
+    validate_backup_id(id)?;
+    let dir = backup_dir.join(id);
+    let manifest: BackupManifest = serde_json::from_slice(
+        &fs::read(dir.join("manifest.json"))
+            .with_context(|| format!("read manifest for backup {id}"))?,
+    )?;
+    validate_backup_file_name(&manifest.rdf_path)?;
+    validate_backup_file_name(&manifest.sqlite_path)?;
+
+    // Verify integrity BEFORE replacing any live data.
+    let rdf_raw = fs::read(dir.join(&manifest.rdf_path))?;
+    let sqlite_raw = fs::read(dir.join(&manifest.sqlite_path))?;
+    if sha256_hex(&rdf_raw) != manifest.rdf_sha256
+        || sha256_hex(&sqlite_raw) != manifest.sqlite_sha256
+    {
+        anyhow::bail!("backup {id} failed checksum verification; refusing to restore");
+    }
+    if manifest.encrypted {
+        anyhow::bail!(
+            "backup {id} is age-encrypted; automated restore of encrypted backups is not \
+             supported (only the public recipient is stored). Decrypt {} and {} with your age \
+             identity (`age -d -i <key>`) and restore the plaintext files manually.",
+            manifest.rdf_path,
+            manifest.sqlite_path
+        );
+    }
+
+    // ── RDF: clear the store, then stream the gzipped N-Quads dump back in. ──
+    store
+        .update("DROP ALL")
+        .map_err(|e| anyhow::anyhow!("clear store before restore: {e}"))?;
+    let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(&rdf_raw[..]));
+    store
+        .load_reader(reader, oxigraph::io::RdfFormat::NQuads, None)
+        .map_err(|e| anyhow::anyhow!("load N-Quads dump: {e}"))?;
+
+    // ── SQLite: atomically replace the identity DB (drop stale WAL/SHM). ──
+    let tmp = target_sqlite.with_extension("restore-tmp");
+    write_secure(&tmp, &sqlite_raw)?;
+    for ext in ["-wal", "-shm"] {
+        let mut p = target_sqlite.as_os_str().to_os_string();
+        p.push(ext);
+        let _ = fs::remove_file(PathBuf::from(p));
+    }
+    fs::rename(&tmp, target_sqlite)
+        .with_context(|| format!("replace identity DB at {}", target_sqlite.display()))?;
+
+    Ok(manifest)
+}
+
 /// Upload a backup directory's files to S3 under `backups/<id>/...`. No-op
 /// if `BACKUP_S3_ENABLED` is not "true" or the ObjectStore is not configured.
 pub async fn maybe_upload_to_s3(
@@ -486,6 +567,55 @@ mod tests {
     use crate::auth::db::AuthDb;
     use crate::store::TripleStore;
     use oxigraph::io::RdfFormat;
+
+    /// Restore round-trip: take a backup, mutate the store, restore — the store
+    /// must return to the backup snapshot (checksums are verified first).
+    #[test]
+    fn restore_round_trips_unencrypted_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "@prefix ex: <http://example.org/> . ex:a ex:b ex:c . ex:d ex:e ex:f .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+
+        // TripleStore is Arc-backed, so the manager shares the same store.
+        let mgr = BackupManager::new(
+            backup_dir.clone(),
+            sqlite_path.clone(),
+            store.clone(),
+            audit,
+            7,
+            false,
+            None,
+        )
+        .unwrap();
+        let manifest = mgr.run_once().unwrap();
+        assert_eq!(manifest.rdf_quad_count, 2);
+
+        // Mutate the store after the backup was taken.
+        store
+            .update("INSERT DATA { <http://example.org/x> <http://example.org/y> <http://example.org/z> }")
+            .unwrap();
+        assert_eq!(store.len().unwrap(), 3);
+
+        // Restoring returns the store to the 2-quad snapshot.
+        let restored = restore_backup(&backup_dir, &manifest.id, &store, &sqlite_path).unwrap();
+        assert_eq!(restored.id, manifest.id);
+        assert_eq!(
+            store.len().unwrap(),
+            2,
+            "store must match the restored backup snapshot"
+        );
+    }
 
     /// End-to-end (unencrypted) backup: dump RDF + SQLite, write a manifest with
     /// checksums, then verify those checksums round-trip and detect tampering.
