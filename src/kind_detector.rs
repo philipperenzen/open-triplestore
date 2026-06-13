@@ -171,10 +171,11 @@ impl Detected {
     }
 
     /// True when the scan saw any SHACL shape signal, regardless of the
-    /// file-level `primary` verdict. Mixed OWL+SHACL files classify as
-    /// [`RegistryKind::DataModel`] (the shapes verdict requires `tbox == 0`),
-    /// so callers that must not hide embedded shapes (shape registration,
-    /// auto-split routing) check this instead of `primary`.
+    /// file-level `primary` verdict (mixed OWL+SHACL files classify as
+    /// [`RegistryKind::DataModel`], since the shapes verdict requires
+    /// `tbox == 0`). Exposed for tests that assert embedded-shape detection
+    /// independently of the `primary` verdict.
+    #[cfg(test)]
     pub fn has_shapes(&self) -> bool {
         self.evidence.shacl_shapes > 0
     }
