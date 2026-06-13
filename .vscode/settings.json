@@ -1,4 +1,9 @@
 {
+    // Give rust-analyzer its own target directory so its background `cargo check`
+    // doesn't contend on the build lock with `cargo run` / `make watch` — the IDE
+    // and your dev server stop blocking each other, so both feel much faster.
+    // (target/rust-analyzer is under the already-gitignored target/.)
+    "rust-analyzer.cargo.targetDir": true,
     "workbench.colorCustomizations": {
         "editor.lineHighlightBackground": "#06c1ff24",
         "editor.selectionBackground": "#fb00ff52",

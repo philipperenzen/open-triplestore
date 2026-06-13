@@ -51,6 +51,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Spark chat streams over SSE for fast first tokens; the server keeps a pooled
   gateway connection and builds the prompt deterministically so gateway-side
   prompt caches hit.
+- **Developer build speed**: a hot-reload loop (`make watch` / `watch-check` via
+  cargo-watch), `make nextest` for parallel tests, dependency-only debuginfo
+  stripping for faster debug/test links, a `CARGO_PROFILE` Docker build-arg for
+  fast `release-dev` local images, BuildKit cargo/npm cache mounts plus `npm ci`,
+  and a separate rust-analyzer target dir to avoid build-lock contention. New
+  guide: [`docs/development.md`](docs/development.md).
 
 ### Deprecated
 - None.

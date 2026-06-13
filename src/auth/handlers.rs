@@ -539,10 +539,11 @@ pub async fn register(
     // Write the FOAF/VCARD profile named graph for the new user.
     user_graph::write_user_profile_graph(&state.store, &state.base_url, &user);
 
-    // First-admin bootstrap: on a brand-new install the startup seed runs before
-    // any admin exists and therefore skips. This is the moment the first admin
-    // appears, so kick off the (idempotent) demo seed now instead of waiting for
-    // the next restart.
+    // First-admin bootstrap: the startup seed creates the org and its public data
+    // on first boot, but defers content that must be attributed to a user
+    // (saved-query services, the IFC demo, org membership) until an admin exists.
+    // This is the moment the first admin appears, so kick off the (idempotent)
+    // reseed now to back-fill that content instead of waiting for the next restart.
     if matches!(role, SystemRole::SuperAdmin) {
         let seed_state = state.clone();
         tokio::task::spawn_blocking(move || {
