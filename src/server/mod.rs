@@ -1,6 +1,8 @@
 pub mod content_negotiation;
 pub mod error;
 mod linked_data;
+pub mod llm_guard;
+pub mod llm_history;
 pub mod llm_sparql;
 pub mod openapi;
 #[cfg(test)]
@@ -608,7 +610,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/admin/backup/:id/verify",
             post(crate::backup::admin_verify_backup),
         )
+        .route(
+            "/api/admin/llm/requests",
+            get(llm_guard::admin_list_llm_requests),
+        )
+        .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
+    // Spark chat history + user memory (strictly per-user, so auth required).
+    let llm_history_routes = llm_history::llm_history_routes()
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1190,6 +1202,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(rml_preview_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
+        .merge(llm_history_routes)
         .merge(graph_store_write_routes)
         .merge(bulk_import_routes)
         .merge(batch_update_routes)

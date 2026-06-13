@@ -146,6 +146,14 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llm up 
 
 The first start downloads the model (~5 GB); AI features turn on once it is ready (check `GET /api/llm/health`). Prefer a hosted model? Skip the `llm` profile and point `LLM_GATEWAY_URL` (+ `LLM_API_KEY`) at your endpoint, with `LLM_MODEL` for the model name. The NVIDIA GPU path needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
+On an NVIDIA GPU the bundled [vLLM](https://docs.vllm.ai) profile serves faster under load — its automatic prefix caching reuses the chat's shared system prompt across turns and users for near-instant first tokens:
+
+```bash
+docker compose --profile llm-vllm up -d   # then set in .env:
+# LLM_GATEWAY_URL=http://vllm:8000
+# LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+```
+
 ### Native (requires Rust 1.88+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus

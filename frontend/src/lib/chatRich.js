@@ -1,16 +1,25 @@
 // Spark chat answers are markdown plus a small set of fenced "widget" blocks the
 // model may emit (see CHAT_SYSTEM_PROMPT in src/server/llm_sparql.rs):
 //
-//   ```sparql  → runnable query card            ```chart → JSON chart spec
-//   ```api     → runnable GET /api/... call     ```map   → JSON WKT feature map
-//   ```csv     → table preview with download    ```card  → entity info card
+//   ```sparql  → runnable query card            ```chart   → JSON chart spec
+//   ```api     → runnable GET /api/... call     ```map     → JSON WKT feature map
+//   ```csv     → table preview with download    ```card    → entity info card
+//   ```file    → downloadable file card         ```model3d → 3D model orbit viewer
+//
+// A ```map spec may also carry "models": URL-referenced 3D models anchored at a
+// WKT POINT, rendered on the georeferenced MapLibre viewer instead of Leaflet.
 //
 // parseChatBlocks() splits a message into ordered segments: plain markdown runs
 // (rendered by the caller through renderMarkdown) interleaved with typed widget
 // segments. Unknown / malformed blocks fall back into the markdown flow (or a
 // 'broken' segment with the raw text), so a model that gets a spec wrong still
 // produces a readable answer. Everything here is pure parsing — no DOM except
-// decorateApiLinks(), which post-processes already-sanitized HTML.
+// decorateApiLinks(), which post-processes already-sanitized HTML, and the
+// safeUrl scheme gate (which resolves model/file URLs against window.location).
+
+import { modelFormatFromUrl } from './viewer/detect';
+import { parseWktGeometry } from './ontology/valueType';
+import { safeExternalUrl } from './safeUrl';
 
 /** A fence opener/closer: ``` or ~~~, optionally with a language tag. */
 const FENCE_RE = /^\s*(```+|~~~+)\s*([\w+-]*)\s*$/;
@@ -20,13 +29,15 @@ const MAX_CHART_POINTS = 100;
 const MAX_MAP_FEATURES = 200;
 const MAX_CARD_FACTS = 24;
 const MAX_CSV_ROWS = 500;
+const MAX_3D_MODELS = 8;
 
 /**
  * Split an assistant message into renderable segments.
  * @param {string} source - the raw markdown answer
  * @returns {Array<object>} segments: {kind:'md', source} | {kind:'sparql', code}
- *   | {kind:'api', method, path} | {kind:'chart', spec} | {kind:'map', features}
+ *   | {kind:'api', method, path} | {kind:'chart', spec} | {kind:'map', features, models}
  *   | {kind:'card', card} | {kind:'csv', columns, rows, raw}
+ *   | {kind:'model3d', models} | {kind:'file', file}
  *   | {kind:'broken', label, error, raw}
  */
 export function parseChatBlocks(source) {
@@ -98,7 +109,21 @@ function specialSegment(lang, body) {
       const r = parseMapSpec(code);
       return r.error
         ? { kind: 'broken', label: 'map', error: r.error, raw: code }
-        : { kind: 'map', features: r.features };
+        : { kind: 'map', features: r.features, models: r.models };
+    }
+    // model3d / file fire on the explicit fence tag only — sniffLang never
+    // returns them, so untagged JSON stays in the markdown flow.
+    case 'model3d': {
+      const r = parseModel3dSpec(code);
+      return r.error
+        ? { kind: 'broken', label: 'model3d', error: r.error, raw: code }
+        : { kind: 'model3d', models: r.models };
+    }
+    case 'file': {
+      const r = parseFileSpec(code);
+      return r.error
+        ? { kind: 'broken', label: 'file', error: r.error, raw: code }
+        : { kind: 'file', file: r.file };
     }
     case 'card':
     case 'infocard':
@@ -291,19 +316,53 @@ export function parseChartSpec(text) {
 }
 
 /**
- * Parse a ```map spec: {"features":[{label?, iri?, wkt}]}, a bare JSON array, or
- * plain newline-separated WKT strings.
- * @returns {{features?: Array<{label, iri, wkt}>, error?: string}}
+ * A model/file URL is loadable when its scheme passes the shared allowlist
+ * (http/https or a same-origin-safe relative reference) AND its extension maps
+ * to a viewer format. Returns the detected format, or null.
+ */
+function safeModelFormat(url) {
+  if (!url || safeExternalUrl(url) === undefined) return null;
+  return modelFormatFromUrl(url);
+}
+
+/**
+ * Validate the optional "models" of a ```map spec: each needs a scheme-safe URL
+ * with a detectable 3D format and a parseable WKT POINT anchor (a line/area
+ * doesn't tell the viewer where the model stands). Invalid entries drop.
+ */
+function normMapModels(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((m) => {
+      if (!m || typeof m !== 'object') return null;
+      const url = str(m.url ?? m.href);
+      const wkt = str(m.wkt ?? m.geometry);
+      const format = safeModelFormat(url);
+      if (!format || parseWktGeometry(wkt)?.kind !== 'point') return null;
+      return { label: str(m.label ?? m.name), url, format, wkt };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_3D_MODELS);
+}
+
+/**
+ * Parse a ```map spec: {"features":[{label?, iri?, wkt}], "models":[{label?,
+ * url, wkt}]?}, a bare JSON array, or plain newline-separated WKT strings.
+ * When every model is invalid but features remain, the map renders features
+ * only (models: []).
+ * @returns {{features?: Array<{label, iri, wkt}>, models?: Array<{label, url, format, wkt}>, error?: string}}
  */
 export function parseMapSpec(text) {
   const t = String(text ?? '').trim();
   let features = [];
+  let models = [];
   if (t.startsWith('{') || t.startsWith('[')) {
     const raw = lenientJsonParse(t);
     if (raw === undefined) return { error: 'invalid JSON' };
     const arr = Array.isArray(raw) ? raw : raw?.features;
-    if (!Array.isArray(arr)) return { error: 'missing "features" array' };
-    features = arr
+    models = Array.isArray(raw) ? [] : normMapModels(raw?.models);
+    if (!Array.isArray(arr) && !models.length) return { error: 'missing "features" array' };
+    features = (Array.isArray(arr) ? arr : [])
       .map((f) =>
         typeof f === 'string'
           ? { wkt: f.trim(), label: '', iri: '' }
@@ -320,8 +379,68 @@ export function parseMapSpec(text) {
       .map((wkt) => ({ wkt, label: '', iri: '' }));
   }
   features = features.slice(0, MAX_MAP_FEATURES);
-  if (!features.length) return { error: 'no features' };
-  return { features };
+  if (!features.length && !models.length) return { error: 'no features' };
+  return { features, models };
+}
+
+/**
+ * Parse a ```model3d spec: {"models":[{label?, url}]} — a single {"url": …}
+ * object or a bare array are tolerated. A model is kept only when its URL is
+ * scheme-safe and its extension maps to a loadable format (glb/gltf/stl/ifc/
+ * CityJSON/CityGML — see viewer/detect.ts); when none survive the block is
+ * reported broken.
+ * @returns {{models?: Array<{id, label, url, format}>, error?: string}}
+ */
+export function parseModel3dSpec(text) {
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
+  if (!raw || typeof raw !== 'object') return { error: 'not an object' };
+  const arr = Array.isArray(raw) ? raw : Array.isArray(raw.models) ? raw.models : [raw];
+  const models = arr
+    .map((m) => {
+      if (!m || typeof m !== 'object') return null;
+      const url = str(m.url ?? m.href);
+      const format = safeModelFormat(url);
+      return format ? { label: str(m.label ?? m.name), url, format } : null;
+    })
+    .filter(Boolean)
+    .slice(0, MAX_3D_MODELS)
+    .map((m, i) => ({ id: `m${i}`, ...m }));
+  if (!models.length) return { error: 'no loadable model URLs' };
+  return { models };
+}
+
+/**
+ * Parse a ```file spec: {"label?", "url", "filename?"}. The URL goes through
+ * the shared scheme allowlist; an unsafe scheme (javascript:, data:, …) yields
+ * a *blocked* card — the segment keeps the name for display but carries an
+ * empty url, so no renderer can turn it into a clickable link.
+ * @returns {{file?: {label, url, filename, blocked}, error?: string}}
+ */
+export function parseFileSpec(text) {
+  const raw = lenientJsonParse(text);
+  if (raw === undefined) return { error: 'invalid JSON' };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'not an object' };
+  const url = str(raw.url ?? raw.href);
+  if (!url) return { error: 'missing url' };
+  const safe = safeExternalUrl(url);
+  let filename = str(raw.filename ?? raw.name);
+  if (!filename && safe) {
+    const last = safe.split(/[?#]/)[0].split('/').pop() || '';
+    try {
+      filename = decodeURIComponent(last);
+    } catch {
+      filename = last;
+    }
+  }
+  return {
+    file: {
+      label: str(raw.label ?? raw.title),
+      filename,
+      url: safe ?? '',
+      blocked: safe === undefined,
+    },
+  };
 }
 
 /**

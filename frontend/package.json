@@ -21,7 +21,7 @@
     "@eslint/js": "^9.0.0",
     "@playwright/test": "^1.49.0",
     "@rdfjs/types": "^2.0.1",
-    "@sveltejs/vite-plugin-svelte": "^5.1.1",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@testing-library/jest-dom": "^6.0.0",
     "@testing-library/svelte": "^5.0.0",
     "@types/n3": "^1.26.1",
@@ -33,11 +33,11 @@
     "jsdom": "^29.1.1",
     "svelte": "^5.54.0",
     "typescript": "^6.0.3",
-    "vite": "^6.4.1",
+    "vite": "^8.0.16",
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "esbuild": "^0.25.0"
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

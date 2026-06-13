@@ -407,9 +407,12 @@
   .meta-card { padding: 0.85rem 1.1rem !important; margin-bottom: 0.85rem; }
   :global(.editor-page .back) { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; color: #2F7A8C; text-decoration: none; margin-bottom: 0.45rem; }
   :global(.editor-page .back:hover) { text-decoration: underline; }
-  .meta-row { display: flex; gap: 1rem; align-items: flex-start; justify-content: space-between; }
-  .meta-main { flex: 1; min-width: 0; }
-  .meta-main h2 { margin: 0 0 0.2rem; font-size: 1.15rem; }
+  /* Stacked, not side-by-side: with this many actions the toolbar's intrinsic
+     width would otherwise crush the (often machine-generated, very long) name
+     into a one-word-per-line column. */
+  .meta-row { display: flex; flex-direction: column; gap: 0.65rem; }
+  .meta-main { min-width: 0; }
+  .meta-main h2 { margin: 0 0 0.2rem; font-size: 1.15rem; overflow-wrap: anywhere; }
   .meta-desc { margin: 0 0 0.5rem; color: #64748b; font-size: 0.85rem; }
   .meta-chips, .targets { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
   .targets { margin-top: 0.45rem; }
@@ -434,7 +437,7 @@
   .status-staged { background: #fef3c7; color: #92400e; }
   .status-published { background: #dcfce7; color: #166534; }
   .status-deprecated { background: #fee2e2; color: #991b1b; }
-  .meta-actions { display: flex; gap: 0.4rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+  .meta-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
   .meta-verdict { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 600; font-size: 0.9rem; color: #991b1b; margin: 0 0 0.6rem; }
   .meta-verdict.ok { color: #166534; }
