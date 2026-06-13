@@ -14,6 +14,31 @@ pub const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
 /// GML literal datatype IRI
 pub const GML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#gmlLiteral";
 
+// ─── 3D / volumetric datatypes (additive; spec §3.3) ───
+
+/// A CityJSON geometry object embedded as a JSON literal (loss-free 3D BAG).
+pub const CITYJSON_LITERAL: &str = "https://open-triplestore.org/def/cityjsonGeometryLiteral";
+/// A base64 glTF/GLB fragment or a URI to one (render-ready).
+pub const GLTF_LITERAL: &str = "https://open-triplestore.org/def/gltfGeometryLiteral";
+
+// ─── ots-geof: 3D function IRIs (additive; spec §3.4) ───
+// Namespace https://open-triplestore.org/def/function/geo3d/ — never collides
+// with geof:, so GeoSPARQL 1.1 stays conformant.
+
+pub const OTS3D_DISTANCE3D: &str = "https://open-triplestore.org/def/function/geo3d/distance3d";
+pub const OTS3D_VOLUME: &str = "https://open-triplestore.org/def/function/geo3d/volume";
+pub const OTS3D_AREA3D: &str = "https://open-triplestore.org/def/function/geo3d/area3d";
+pub const OTS3D_ZMIN: &str = "https://open-triplestore.org/def/function/geo3d/zMin";
+pub const OTS3D_ZMAX: &str = "https://open-triplestore.org/def/function/geo3d/zMax";
+pub const OTS3D_HEIGHT: &str = "https://open-triplestore.org/def/function/geo3d/height";
+pub const OTS3D_BBOX3D: &str = "https://open-triplestore.org/def/function/geo3d/boundingBox3d";
+pub const OTS3D_CENTROID3D: &str = "https://open-triplestore.org/def/function/geo3d/centroid3d";
+pub const OTS3D_FOOTPRINT2D: &str = "https://open-triplestore.org/def/function/geo3d/footprint2d";
+pub const OTS3D_EXTRUDE: &str = "https://open-triplestore.org/def/function/geo3d/extrude";
+pub const OTS3D_SF_INTERSECTS: &str =
+    "https://open-triplestore.org/def/function/geo3d/sf3dIntersects";
+pub const OTS3D_SF_DISJOINT: &str = "https://open-triplestore.org/def/function/geo3d/sf3dDisjoint";
+
 // ─── Simple Features topological function IRIs ───
 
 pub const SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";

@@ -303,6 +303,13 @@ impl TripleStore {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 
+        // Register the additive ots-geof: 3D functions (spec §3.4). Separate
+        // namespace, so GeoSPARQL 1.1 results are unchanged.
+        #[cfg(feature = "geometry3d")]
+        for (iri, handler) in crate::geo::functions3d::all_functions_3d() {
+            opts = opts.with_custom_function(iri, move |args| handler(args));
+        }
+
         // Register RDF 1.2 SPARQL built-in functions (rdf-12 feature)
         #[cfg(feature = "rdf-12")]
         for (iri, handler) in crate::sparql::rdf12_functions::all_functions() {

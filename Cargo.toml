@@ -41,6 +41,10 @@ ldp             = []
 shex            = []
 ## SWRL (Semantic Web Rule Language) rule engine
 swrl            = []
+## Additive 3D / volumetric geometry: the ots-geof: 3D function surface, WKT-Z
+## parsing and the 3D R-tree (spec §3). Pure-Rust baseline (reuses rstar); the
+## parry3d/SFCGAL exact kernel arrives behind a later `sfcgal3d` flag.
+geometry3d      = []
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
@@ -60,7 +64,7 @@ asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
 ## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
