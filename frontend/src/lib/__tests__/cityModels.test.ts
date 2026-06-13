@@ -1,19 +1,26 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import type { Mesh, MeshStandardMaterial } from 'three';
 import { epsgFromReference, toLonLat } from '../viewer/crs';
 import { parseCityJSON, parseCityGML } from '../viewer/cityjson';
 import { modelFormatFromUrl, modelRefOf, modelRefsOf, isGeometryPredicate, isIfcGuidPredicate } from '../viewer/detect';
 import { elementsToGeoJSON, modelAnchor } from '../viewer/geometry';
 
+// Fixtures resolve relative to this test file (not process.cwd()) so the suite
+// passes whatever directory vitest is launched from. ../../.. → frontend/.
+// (new URL(..., import.meta.url) can't be used: vite rewrites that pattern into a
+// dev-server asset URL, so fileURLToPath then rejects the non-file scheme.)
+const FRONTEND_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+
 // Synthetic two-building sample — kept as a compact parser fixture.
-const SAMPLE_PATH = resolve(process.cwd(), 'public/samples/nijmegen-buildings.city.json');
+const SAMPLE_PATH = resolve(FRONTEND_ROOT, 'public/samples/nijmegen-buildings.city.json');
 const sample = JSON.parse(readFileSync(SAMPLE_PATH, 'utf8'));
 // The REAL bundled demo excerpt (3DBAG LoD2.2 around the Schependomlaan site,
 // referenced by the seeded viewer-3d-demo context graph) — parsing it here
 // keeps the shipped file valid.
-const BAG_PATH = resolve(process.cwd(), 'public/samples/schependomlaan-3dbag.city.json');
+const BAG_PATH = resolve(FRONTEND_ROOT, 'public/samples/schependomlaan-3dbag.city.json');
 const bagSample = JSON.parse(readFileSync(BAG_PATH, 'utf8'));
 
 describe('crs', () => {
