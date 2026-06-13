@@ -152,6 +152,17 @@ services:
       # Browser CORS allowlist for direct ollama calls. Follows the triplestore's
       # CORS_ORIGINS unless OLLAMA_ORIGINS is set explicitly; "*" reflects any origin.
       - OLLAMA_ORIGINS=${OLLAMA_ORIGINS:-${CORS_ORIGINS:-}}
+      # ── Time-to-first-token tuning ──
+      # Keep the model resident between chats: the default 5m unload means the
+      # next question pays the full model load (tens of seconds on CPU) before
+      # the first token. 1h trades RAM/VRAM for instant warm starts.
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-1h}
+      # Serve a few requests concurrently (chat + NL→SPARQL from another tab)
+      # instead of queueing them behind one generation.
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      # Flash attention reduces prompt-processing time on supported GPUs; it is
+      # ignored on CPU, so the default is safe everywhere.
+      - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
     volumes:
       - ollama_models:/root/.ollama
     restart: unless-stopped
@@ -176,10 +187,58 @@ services:
     command: ["pull", "${LLM_MODEL:-qwen2.5:7b}"]
     restart: "no"
 
+  # ── vLLM (optional, profile: llm-vllm — NVIDIA GPU required) ───────────────
+  # Higher-throughput alternative to Ollama with automatic prefix caching: the
+  # chat's large shared system prompt is computed once and reused across turns
+  # and users, which cuts time-to-first-token dramatically under load. Enable
+  # with `--profile llm-vllm` and point the triplestore at it in .env:
+  #   LLM_GATEWAY_URL=http://vllm:8000
+  #   LLM_MODEL=${VLLM_MODEL}   (the served model name below)
+  # The model downloads from Hugging Face into the hf_cache volume on first start
+  # (several GB — AWQ 7B ≈ 5.6 GB). Gated models need HUGGING_FACE_HUB_TOKEN.
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    container_name: triplestore-vllm
+    profiles: ["llm-vllm"]
+    ports:
+      - "${VLLM_BIND:-127.0.0.1}:8000:8000"
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}"
+      # Bound the KV cache: the chat prompt (system + context + a few rounds)
+      # fits comfortably in 16k, and a smaller window leaves VRAM for the
+      # prefix cache on consumer GPUs.
+      - "--max-model-len"
+      - "${VLLM_MAX_MODEL_LEN:-16384}"
+      - "--gpu-memory-utilization"
+      - "${VLLM_GPU_MEM:-0.90}"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=3)\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      # First start downloads + loads the model; give it plenty of room.
+      start_period: 600s
+      retries: 10
+
 volumes:
   triplestore_data:
     driver: local
   minio_data:
     driver: local
   ollama_models:
+    driver: local
+  hf_cache:
     driver: local

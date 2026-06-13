@@ -831,6 +831,69 @@ impl AuthDb {
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_docs_category ON docs(category, sort_order);
+
+            -- ── Spark chat history ────────────────────────────────────────────
+            -- Per-user chat conversations with the Spark assistant. The client
+            -- appends messages after each turn; the assistant's retrieval trail
+            -- (queries JSON) rides along so a restored conversation renders its
+            -- widgets and query disclosures exactly like the live turn did.
+            CREATE TABLE IF NOT EXISTS chat_conversations (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_conversations_user ON chat_conversations(user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+                content TEXT NOT NULL,
+                queries TEXT,
+                model TEXT,
+                stopped INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conversation_id, seq);
+
+            -- Standing user preferences injected into the Spark system prompt
+            -- (\"answer in Dutch\", \"I mostly work with the bridges dataset\", …).
+            CREATE TABLE IF NOT EXISTS chat_user_memory (
+                user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                instructions TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+
+            -- ── LLM request telemetry (admin-visible) ─────────────────────────
+            -- One row per LLM-backed request (chat turn, NL→SPARQL, SHACL assist):
+            -- who, which endpoint/model, outcome (ok|error|blocked), latency,
+            -- time-to-first-token for streamed turns, size metrics and the guard
+            -- rule that fired, if any. Message *contents* are not stored — only
+            -- an optional short preview of the question (LLM_LOG_PREVIEW_DISABLED
+            -- turns that off too).
+            CREATE TABLE IF NOT EXISTS llm_request_log (
+                id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                user_id TEXT,
+                endpoint TEXT NOT NULL,
+                model TEXT,
+                status TEXT NOT NULL CHECK(status IN ('ok','error','blocked')),
+                guard_flag TEXT,
+                duration_ms INTEGER,
+                ttft_ms INTEGER,
+                prompt_chars INTEGER,
+                answer_chars INTEGER,
+                query_rounds INTEGER,
+                question_preview TEXT,
+                ip_address TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_request_log_ts ON llm_request_log(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_llm_request_log_user ON llm_request_log(user_id, timestamp DESC);
         ")?;
 
         // Additive column upgrades for databases created before the current schema.
