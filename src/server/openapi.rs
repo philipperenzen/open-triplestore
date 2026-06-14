@@ -305,14 +305,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     ]))
                     .description(Some("How the value is rendered into the SPARQL text.")),
             )
-            .property(
-                "required",
-                ObjectBuilder::new().schema_type(Type::Boolean),
-            )
-            .property(
-                "default",
-                ObjectBuilder::new().schema_type(Type::String),
-            )
+            .property("required", ObjectBuilder::new().schema_type(Type::Boolean))
+            .property("default", ObjectBuilder::new().schema_type(Type::String))
             .property(
                 "description",
                 ObjectBuilder::new().schema_type(Type::String),
