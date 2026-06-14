@@ -383,17 +383,12 @@ struct IfcBuildingSeed {
     label: &'static str,
 }
 
-/// The demo IFC buildings. The first (Schependomlaan) honours `SEED_IFC_URL`;
-/// the small KIT FZK-Haus + buildingSMART Duplex (~2.5 MB each) add more rich
-/// IFC data (full BOT topology, property sets, ifcOWL) without a slow download.
+/// The demo IFC buildings. The small KIT FZK-Haus + buildingSMART Duplex
+/// (~2.5 MB each) come FIRST so a couple of rich IFC buildings appear within
+/// seconds of first boot; the 49 MB Schependomlaan (which honours `SEED_IFC_URL`)
+/// imports last so it doesn't hold the others up. All carry full BOT topology,
+/// property sets and an ifcOWL lift.
 const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
-    IfcBuildingSeed {
-        name: "Schependomlaan.ifc",
-        url: SCHEPENDOMLAAN_IFC_URL,
-        anchor: "POINT(5.83373 51.84114)",
-        graph_suffix: "building",
-        label: "Schependomlaan",
-    },
     IfcBuildingSeed {
         name: "FZK-Haus.ifc",
         url: "https://raw.githubusercontent.com/tum-gis/ifc-to-citygml3/master/input/AC20-FZK-Haus.ifc",
@@ -407,6 +402,13 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         anchor: "POINT(5.83180 51.84050)",
         graph_suffix: "building-duplex",
         label: "Duplex Apartment",
+    },
+    IfcBuildingSeed {
+        name: "Schependomlaan.ifc",
+        url: SCHEPENDOMLAAN_IFC_URL,
+        anchor: "POINT(5.83373 51.84114)",
+        graph_suffix: "building",
+        label: "Schependomlaan",
     },
 ];
 
@@ -428,13 +430,15 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
         tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
         return;
     }
-    for (i, b) in IFC_BUILDINGS.iter().enumerate() {
+    for b in IFC_BUILDINGS.iter() {
         let bot_graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, b.graph_suffix);
         if state.store.graph_count_cached(Some(&bot_graph)).unwrap_or(0) > 0 {
             continue; // already seeded
         }
-        let url = match (i, env_url.as_deref()) {
-            (0, Some(u)) if !u.trim().is_empty() => u.to_string(),
+        // SEED_IFC_URL overrides only the Schependomlaan source (the headline
+        // building), regardless of its position in the list.
+        let url = match env_url.as_deref() {
+            Some(u) if b.label == "Schependomlaan" && !u.trim().is_empty() => u.to_string(),
             _ => b.url.to_string(),
         };
         tracing::info!("seed: downloading {} IFC ({url}) — first boot only", b.label);
