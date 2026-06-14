@@ -2149,6 +2149,58 @@ fn is_pinned_version(version: &str) -> bool {
     !matches!(version.trim(), "" | "live" | "latest" | "current")
 }
 
+/// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` whose SOURCE
+/// (live) graph is flagged `private`.
+///
+/// A version snapshot copies *all* of a dataset's selected graphs — including
+/// private ones — into version-scoped IRIs (`{base}/dataset/{id}/version/{v}/…`).
+/// Those snapshot IRIs are absent from `list_dataset_graph_entries` (which only
+/// records the LIVE graphs), so a naive `private.contains(snapshot_iri)` check
+/// never matches and would leak private data to viewers through a pinned-version
+/// read. To filter correctly we map each snapshot graph back to its source via
+/// the version's `source_map` and drop snapshots whose source is private.
+///
+/// Returns an empty set for live/unknown versions or when the version has no
+/// recorded source mapping (older snapshots), which is the safe default for the
+/// *writer* fast-path — callers MUST only apply this filter to non-writers.
+fn private_snapshot_graphs(
+    state: &AppState,
+    dataset_id: &str,
+    version: &str,
+) -> std::collections::HashSet<String> {
+    if !is_pinned_version(version) {
+        return std::collections::HashSet::new();
+    }
+    // Live graph IRIs the owner marked private for this dataset.
+    let private_sources: std::collections::HashSet<String> = state
+        .auth_db
+        .list_dataset_graph_entries(dataset_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.private)
+        .map(|e| e.graph_iri)
+        .collect();
+    if private_sources.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    // Map snapshot → source via the version's recorded graph map, keeping the
+    // snapshot IRIs whose source is private.
+    match crate::dataset_versions::registry::get_version(
+        &state.store,
+        state.base_url.as_str(),
+        dataset_id,
+        version,
+    ) {
+        Some(ver) => ver
+            .source_map
+            .into_iter()
+            .filter(|m| private_sources.contains(&m.source_graph))
+            .map(|m| m.snapshot_graph)
+            .collect(),
+        None => std::collections::HashSet::new(),
+    }
+}
+
 /// Resolve the scoped named-graph set for a set of datasets, honouring an
 /// optional per-dataset version map. For a pinned version we authorise at the
 /// dataset level (the snapshot graphs are not in the live accessible-graph set)
@@ -2192,8 +2244,23 @@ fn scope_dataset_graphs(
                 if !allowed {
                     continue;
                 }
+                // A snapshot copies private graphs too; their version-scoped IRIs are
+                // not in the accessible set, so the live private filter can't see them.
+                // For callers who cannot WRITE the dataset, drop snapshot graphs whose
+                // SOURCE (live) graph is private so a viewer can't read it via a version.
+                let can_write = match (user_id, &ds) {
+                    (Some(uid), Some(d)) if !is_admin => {
+                        state.auth_db.can_write_dataset(uid, d).unwrap_or(false)
+                    }
+                    _ => is_admin,
+                };
                 if let Some(snap) = version_snapshot_graphs(state, id, Some(v.as_str()))? {
-                    out.extend(snap);
+                    if can_write {
+                        out.extend(snap);
+                    } else {
+                        let private = private_snapshot_graphs(state, id, v.as_str());
+                        out.extend(snap.into_iter().filter(|g| !private.contains(g)));
+                    }
                 }
                 continue;
             }
@@ -2238,6 +2305,20 @@ fn is_authorized_version_graph(
                         .can_access_dataset(user_id, &d)
                         .map_err(|e| AppError::Internal(e.to_string()))?
                     {
+                        // A snapshot of a PRIVATE source graph may only be read by a
+                        // caller who can write the dataset — otherwise a viewer could
+                        // read private data by drilling straight into the snapshot IRI.
+                        if private_snapshot_graphs(state, ds_id, v.as_str()).contains(graph) {
+                            let can_write = match user_id {
+                                Some(uid) => {
+                                    state.auth_db.can_write_dataset(uid, &d).unwrap_or(false)
+                                }
+                                None => false,
+                            };
+                            if !can_write {
+                                continue;
+                            }
+                        }
                         return Ok(true);
                     }
                 }
@@ -3383,7 +3464,7 @@ async fn execute_dataset_query(
     let graphs: Vec<String> = if can_write {
         graphs
     } else {
-        let private: std::collections::HashSet<String> = state
+        let mut private: std::collections::HashSet<String> = state
             .auth_db
             .list_dataset_graph_entries(dataset_id)
             .unwrap_or_default()
@@ -3391,6 +3472,14 @@ async fn execute_dataset_query(
             .filter(|e| e.private)
             .map(|e| e.graph_iri)
             .collect();
+        // For a pinned version, `graphs` are SNAPSHOT IRIs that do not appear in
+        // `list_dataset_graph_entries`; without mapping them back to their source
+        // the private filter above is a no-op and private data leaks to viewers.
+        // Add the snapshot IRIs whose SOURCE (live) graph is private (no-op for
+        // live reads, where `private_snapshot_graphs` returns empty).
+        if let Some(v) = version {
+            private.extend(private_snapshot_graphs(state, dataset_id, v));
+        }
         graphs
             .into_iter()
             .filter(|g| !private.contains(g))

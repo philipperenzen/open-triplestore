@@ -28,9 +28,28 @@ pub fn escape_sparql_iri(iri: &str) -> String {
     out
 }
 
+/// Escape a string for use inside a SPARQL/Turtle double-quoted string literal
+/// (`"..."`). Escapes `\`, `"`, and the CR/LF/TAB control characters that are
+/// illegal raw inside a `STRING_LITERAL_QUOTE`. Pair with [`escape_sparql_iri`]
+/// for IRIs when building SPARQL via `format!`.
+pub fn escape_sparql_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::escape_sparql_iri;
+    use super::{escape_sparql_iri, escape_sparql_literal};
 
     #[test]
     fn valid_iri_unchanged() {
@@ -48,5 +67,12 @@ mod tests {
         assert!(!escaped.contains('{'));
         assert!(!escaped.contains('}'));
         assert!(!escaped.contains(' '));
+    }
+
+    #[test]
+    fn literal_escapes_quote_backslash_and_controls() {
+        assert_eq!(escape_sparql_literal("a\"b"), "a\\\"b");
+        assert_eq!(escape_sparql_literal("a\\b"), "a\\\\b");
+        assert_eq!(escape_sparql_literal("a\nb\rc\td"), "a\\nb\\rc\\td");
     }
 }

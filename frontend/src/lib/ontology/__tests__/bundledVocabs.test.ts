@@ -1,13 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { parseTurtle } from '../loader';
 import { indexStore, VOCAB_FILES } from '../termDictionary';
 
 // Validates the bundled vocabulary assets (public/vocab/*.ttl) the same way the
 // app does at runtime — parse with n3, index with indexStore — so a corrupt or
 // unparseable download fails CI rather than silently showing no definitions.
-const VOCAB_DIR = resolve(process.cwd(), 'public/vocab');
+// Resolve against this file (not process.cwd()) so the test is launch-directory
+// independent. ../../../.. → frontend/. (new URL(..., import.meta.url) can't be
+// used: vite rewrites it into a dev-server asset URL.)
+const VOCAB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..', 'public/vocab');
 const files = readdirSync(VOCAB_DIR).filter((f) => f.endsWith('.ttl'));
 
 const load = async (file: string) =>
