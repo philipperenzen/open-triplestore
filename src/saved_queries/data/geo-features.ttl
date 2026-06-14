@@ -1,0 +1,38 @@
+# Mixed GeoSPARQL features around the Schependomlaan / Waalbrug site in Nijmegen.
+#
+# A small "all the 2D geometry types" sample for the map viewer: a POINT, a
+# LINESTRING and a POLYGON, each a real geo:Feature with a geo:hasGeometry /
+# geo:asWKT GeoSPARQL geometry. Coordinates are WGS84 lon/lat (CRS84, the
+# GeoSPARQL default — no <crs> prefix needed), so they pass straight through the
+# viewer feed's reprojection onto the map. These exercise the GeoSPARQL geof:
+# relation/measurement functions (sfWithin, distance, …) and the 2D map layers.
+#
+# Coordinates are plausible real-world positions near the Schependomlaan block
+# (≈ 5.834 E, 51.841 N); the LINESTRING traces the street, the POLYGON a small
+# park parcel beside it.
+
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix gf:      <https://opentriplestore.org/demo/viewer-3d-demo/features#> .
+
+# ── A point of interest: the Schependomlaan street centroid ──
+gf:SchependomlaanPoint a geo:Feature ;
+    rdfs:label "Schependomlaan (street centroid)"@en ;
+    dcterms:type "point-of-interest" ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(5.83373 51.84114)"^^geo:wktLiteral ] .
+
+# ── A linear feature: the Schependomlaan street alignment ──
+gf:SchependomlaanRoad a geo:Feature ;
+    rdfs:label "Schependomlaan (alignment)"@en ;
+    dcterms:type "road-centreline" ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "LINESTRING(5.83210 51.84060, 5.83373 51.84114, 5.83540 51.84168)"^^geo:wktLiteral ] .
+
+# ── An areal feature: a small park parcel beside the block ──
+gf:KwakkenbergPark a geo:Feature ;
+    rdfs:label "Park parcel (Schependomlaan)"@en ;
+    dcterms:type "green-space" ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POLYGON((5.83420 51.84150, 5.83520 51.84150, 5.83520 51.84200, 5.83420 51.84200, 5.83420 51.84150))"^^geo:wktLiteral ] .

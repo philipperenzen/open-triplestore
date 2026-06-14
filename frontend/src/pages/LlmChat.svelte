@@ -64,6 +64,17 @@
   onMount(() => {
     llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
     if ($isAuthenticated) loadConversations();
+    // A "Ask Spark" handoff (e.g. from a term-definition card or the 3D viewer)
+    // stashes its prompt here — prefill the composer and auto-send it, mirroring
+    // the SPARQL editor's 'ots_sparql_load' handoff.
+    try {
+      const prompt = sessionStorage.getItem('ots_spark_prompt');
+      if (prompt) {
+        sessionStorage.removeItem('ots_spark_prompt');
+        input = prompt;
+        tick().then(() => send(prompt));
+      }
+    } catch {}
   });
 
   onDestroy(() => abortCtl?.abort());

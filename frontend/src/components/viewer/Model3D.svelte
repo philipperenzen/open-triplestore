@@ -77,7 +77,7 @@
       scene.add(group);
       groupsById.set(ref.id, group);
       try {
-        const model = (await loadModel(ref.url, ref.format, { upAxis: ref.upAxis })).clone(true);
+        const model = (await loadModel(ref.url, ref.format, { upAxis: ref.upAxis, guids: ref.guids })).clone(true);
         if (refs !== wanted) return; // a newer refs set superseded this load
         // clone(true) shares material instances with the loadModel cache -
         // clone materials per instance so highlight()/theming never mutates

@@ -464,6 +464,90 @@ fn emit_dataset_entry(
         writeln!(out, "    ] ;").unwrap();
     }
 
+    // Geospatial distributions — only when the dataset actually carries geometry.
+    // DCAT 2 §4.3/§5.3: advertise the OGC API – Features, 3D Tiles, and viewer
+    // services as `dcat:Distribution`/`dcat:accessService` nodes so harvesters can
+    // discover the spatial access paths alongside the SPARQL/GSP ones above.
+    // Exclude the verbose ifcOWL lift graph (`…/ifcowl`) just like the viewer-feed
+    // and geo-stats handlers do (routes.rs): it is the full 1:1 IFC schema (millions
+    // of triples), carries none of the geometry the probe looks for, and its
+    // unbounded scan would dominate the per-dataset capability check run here.
+    let data_graphs: Vec<String> = graph_entries
+        .iter()
+        .filter(|e| !e.graph_iri.starts_with("urn:system:"))
+        .filter(|e| !e.graph_iri.ends_with("/ifcowl"))
+        .map(|e| e.graph_iri.clone())
+        .collect();
+    let geo = crate::geo::viewer_feed::dataset_geo_stats(store, &data_graphs);
+    if geo.has_coordinates || geo.has_3d {
+        // OGC API – Features landing for this dataset (GeoJSON FeatureCollection).
+        writeln!(out, "    dcat:distribution [").unwrap();
+        writeln!(out, "        a dcat:Distribution ;").unwrap();
+        writeln!(out, "        dct:title \"OGC API – Features (GeoJSON)\" ;").unwrap();
+        writeln!(
+            out,
+            "        dcat:accessURL <{base_url}/api/ogc/collections/{id}/items> ;",
+            id = ds.id
+        )
+        .unwrap();
+        writeln!(out, "        dcat:mediaType <https://www.iana.org/assignments/media-types/application/geo+json> ;").unwrap();
+        writeln!(
+            out,
+            "        dct:conformsTo <http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core> ;"
+        )
+        .unwrap();
+        // General OGC API – Features service endpoint backing this distribution.
+        writeln!(out, "        dcat:accessService [").unwrap();
+        writeln!(out, "            a dcat:DataService ;").unwrap();
+        writeln!(out, "            dct:title \"OGC API – Features\" ;").unwrap();
+        writeln!(out, "            dcat:endpointURL <{base_url}/api/ogc> ;").unwrap();
+        writeln!(
+            out,
+            "            dct:conformsTo <http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core>"
+        )
+        .unwrap();
+        writeln!(out, "        ]").unwrap();
+        writeln!(out, "    ] ;").unwrap();
+
+        // 3D Tiles tileset — only when the dataset has volumetric/model 3D data.
+        if geo.has_3d {
+            writeln!(out, "    dcat:distribution [").unwrap();
+            writeln!(out, "        a dcat:Distribution ;").unwrap();
+            writeln!(out, "        dct:title \"OGC 3D Tiles 1.1\" ;").unwrap();
+            writeln!(
+                out,
+                "        dcat:accessURL <{base_url}/api/datasets/{id}/3dtiles/tileset.json> ;",
+                id = ds.id
+            )
+            .unwrap();
+            writeln!(out, "        dcat:mediaType \"application/json\" ;").unwrap();
+            writeln!(
+                out,
+                "        dct:conformsTo <https://docs.ogc.org/cs/22-025r4/22-025r4.html>"
+            )
+            .unwrap();
+            writeln!(out, "    ] ;").unwrap();
+        }
+
+        // Viewer-feed JSON (per-element geometry + 3D-file references).
+        writeln!(out, "    dcat:distribution [").unwrap();
+        writeln!(out, "        a dcat:Distribution ;").unwrap();
+        writeln!(out, "        dct:title \"Viewer Feed (JSON)\" ;").unwrap();
+        writeln!(
+            out,
+            "        dcat:accessURL <{base_url}/api/datasets/{id}/viewer-feed> ;",
+            id = ds.id
+        )
+        .unwrap();
+        writeln!(out, "        dcat:mediaType \"application/json\"").unwrap();
+        writeln!(out, "    ] ;").unwrap();
+
+        // TODO(dcat §6.4.3): when this dataset has registered versions, advertise
+        // the version-scoped geometry endpoints via `dct:hasVersion` on each
+        // distribution. Dataset version records are not readily available in this
+        // generation pass, so the per-version geometry links are deferred.
+    }
+
     let landing = ds
         .landing_page
         .as_deref()

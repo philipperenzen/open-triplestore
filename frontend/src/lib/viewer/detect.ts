@@ -17,6 +17,76 @@ export function modelFormatFromUrl(url: string): ModelFormat | null {
   return null;
 }
 
+/** What a file-like resource string points at — drives the FileViewer's renderer. */
+export type FileResourceKind = 'model3d' | 'image' | 'pdf' | 'text' | 'json' | 'binary';
+
+export interface FileResource {
+  kind: FileResourceKind;
+  /** Present only when `kind === 'model3d'` — the resolved 3D model format. */
+  format?: ModelFormat;
+}
+
+// Extension → renderer kind. The double-extension `.city.json` is handled by
+// modelFormatFromUrl before this map is consulted, so plain `.json` lands here.
+const TEXT_EXTS = new Set([
+  'txt', 'csv', 'tsv', 'md', 'ttl', 'nt', 'rdf', 'xml', 'obj',
+]);
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg']);
+const JSON_EXTS = new Set(['json', 'geojson']);
+
+/**
+ * Classify a resource string as a *file* (vs. an RDF resource IRI) and pick the
+ * renderer for it. Returns non-null only when the string looks like a file:
+ *
+ *   - a site-relative path (starts with `/`, `./` or `../`), or
+ *   - an http(s) URL whose path (before `?`/`#`) ends in a known extension.
+ *
+ * Plain RDF resource IRIs with no file extension — `https://data.3dbag.nl/def/Building`,
+ * `http://example.org/Thing` — return null and stay on the normal resource flow.
+ *
+ * Extensions map: glb/gltf/stl/cityjson/city.json/citygml/gml/ifc → model3d
+ * (via {@link modelFormatFromUrl}); png/jpg/jpeg/gif/webp/svg → image; pdf → pdf;
+ * json/geojson → json; txt/csv/tsv/md/ttl/nt/rdf/xml/obj → text; anything else
+ * with an extension → binary.
+ */
+export function fileResourceKind(url: string | null | undefined): FileResource | null {
+  if (!url) return null;
+  const s = String(url).trim();
+  if (!s) return null;
+
+  const siteRelative = s.startsWith('/') || s.startsWith('./') || s.startsWith('../');
+  const isHttp = /^https?:\/\//i.test(s);
+  // Only site-relative paths and http(s) URLs can be files; bare IRIs in other
+  // schemes (urn:, mailto:, _:bnode…) are never file resources here.
+  if (!siteRelative && !isHttp) return null;
+
+  // 3D models reuse the shared detector so the double-extension `.city.json`
+  // and the same site-relative/http rules stay in one place.
+  const format = modelFormatFromUrl(s);
+  if (format) return { kind: 'model3d', format };
+
+  // Isolate the path component, then its trailing extension.
+  let path = s.split(/[?#]/)[0];
+  if (isHttp) {
+    try {
+      path = new URL(s).pathname;
+    } catch {
+      // Malformed http(s) URL — fall through with the naive split above.
+    }
+  }
+  const dot = path.lastIndexOf('.');
+  const slash = path.lastIndexOf('/');
+  // No extension (or the dot is in a directory segment) → an RDF IRI, not a file.
+  if (dot === -1 || dot < slash || dot === path.length - 1) return null;
+  const ext = path.slice(dot + 1).toLowerCase();
+
+  if (IMAGE_EXTS.has(ext)) return { kind: 'image' };
+  if (ext === 'pdf') return { kind: 'pdf' };
+  if (JSON_EXTS.has(ext)) return { kind: 'json' };
+  if (TEXT_EXTS.has(ext)) return { kind: 'text' };
+  return { kind: 'binary' };
+}
+
 /** FOG format key (the local name after `fog:as`, e.g. `Gltf_v2.0-glb`) → format. */
 function formatFromFogKey(key: string): ModelFormat | null {
   const k = key.toLowerCase();

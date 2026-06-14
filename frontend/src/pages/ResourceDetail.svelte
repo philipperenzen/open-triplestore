@@ -10,7 +10,8 @@
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
   import GeoPreview from '../components/GeoPreview.svelte';
-  import { modelFormatFromUrl, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
+  import FileViewer from '../components/viewer/FileViewer.svelte';
+  import { modelFormatFromUrl, fileResourceKind, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
 
   // Model3D pulls the heavy three.js chunk; this page is in the main bundle,
   // so load the viewer only when the resource actually has a 3D model.
@@ -89,7 +90,7 @@
     ArrowLeft, ArrowRight, ArrowDownLeft,
     BookOpen, Tag, Layers, Copy, Check, MapPin, Image as ImageIcon, Link2, Info,
     Search, X, ArrowDownUp, LayoutGrid, List, Network, Table2, ChevronDown, ChevronRight, Share2,
-    Hash, CalendarClock, Boxes,
+    Hash, CalendarClock, Boxes, FileText,
   } from 'lucide-svelte';
   import { tick } from 'svelte';
   import { detectValueKind, datatypeLabel } from '../lib/ontology/valueType.js';
@@ -166,6 +167,11 @@
   let data = null;
   let error = '';
   let loading = false;
+  // When the ?iri= is actually a file (a samples/asset path or an http(s) URL
+  // ending in a known extension), we render a FileViewer instead of resolving it
+  // as an RDF resource — browseResource would otherwise throw "IRI must be
+  // absolute" for a site-relative path like "/samples/x.city.json".
+  let fileResource = null;
   let graphElements = { nodes: [], edges: [] };
   let types = [];
   let showLdMenu = false;
@@ -218,6 +224,14 @@
     incomingCollapsed = new Set();
     flash = '';
     activeTab = 'overview';
+    // A file (relative samples/asset path or an http(s) URL with a known
+    // extension) is rendered by FileViewer — never sent to browseResource, which
+    // rejects non-absolute IRIs ("IRI must be absolute").
+    fileResource = fileResourceKind(iri);
+    if (fileResource) {
+      loading = false;
+      return;
+    }
     try {
       data = await browseResource(iri, graphScope || undefined);
       buildGraph();
@@ -625,6 +639,26 @@
       </span>
     {/if}
   </div>
+
+  {#if fileResource}
+    <!-- File resource: a samples/asset path or a file URL — render the file
+         directly instead of resolving it as an RDF resource. -->
+    <div class="card file-header">
+      <div class="file-title">
+        <FileText size={16} />
+        <h2>{shortenIRI(iri)}</h2>
+      </div>
+      <div class="iri-full">
+        <span class="truncate">{iri}</span>
+        <button class="icon-btn" on:click={copyIri} title={$i18nT('pages.resource.copyIri')}>
+          {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
+        </button>
+      </div>
+    </div>
+    <div class="card">
+      <FileViewer url={iri} height="360px" />
+    </div>
+  {:else}
 
   <!-- Header -->
   <div class="card resource-header">
@@ -1174,6 +1208,7 @@
       </div>
     {/if}
   {/if}
+  {/if}
 </div>
 
 <style>
@@ -1196,6 +1231,9 @@
 
   /* Header card */
   .resource-header { background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%); }
+  .file-header { display: flex; flex-direction: column; gap: 0.4rem; }
+  .file-title { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--ink-800, #2b3445); }
+  .file-title h2 { margin: 0; }
   .vocab-def-card { border-left: 3px solid #6366f1; }
   .vocab-def-title { margin: 0 0 0.5rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #6366f1; }
   .header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }

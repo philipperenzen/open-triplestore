@@ -901,6 +901,14 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/viewer-feed",
             get(routes::viewer_feed),
         )
+        // Geo capability summary (gates the map / 3D-viewer UI affordances).
+        .route(
+            "/api/datasets/:dataset_id/geo-stats",
+            get(routes::geo_stats),
+        )
+        // Batched, scope-wide geo capability — one OR-aggregated probe instead of
+        // one `/geo-stats` request per dataset (the triple browser's Map gate).
+        .route("/api/geo-stats", get(routes::geo_stats_batch))
         // Anonymous-capable asset download (dataset visibility decides) — the
         // viewer fetches e.g. the original IFC file through this without auth.
         .route(
@@ -1285,6 +1293,26 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
                 .with_state(state.clone()),
         );
+
+    // OGC API – Features (Core, P4). Nested router so `optional_auth` populates
+    // AuthenticatedUser for logged-in callers while public datasets stay
+    // anonymously reachable (handlers gate on can_access_dataset).
+    router = router.merge(
+        Router::new()
+            .merge(crate::ogcapi::ogcapi_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone()),
+    );
+
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    #[cfg(feature = "geometry3d")]
+    {
+        let tiles3d_routes = Router::new()
+            .merge(crate::tiles3d::tiles3d_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone());
+        router = router.merge(tiles3d_routes);
+    }
 
     #[cfg(feature = "ldp")]
     {

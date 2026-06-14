@@ -7,6 +7,7 @@
 //! one-file-per-request path used by the legacy `DataImport` wizard.
 
 pub mod bulk;
+pub mod cityjson;
 pub mod handlers;
 pub mod ifc;
 pub mod routes;

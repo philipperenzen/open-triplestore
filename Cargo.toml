@@ -41,6 +41,15 @@ ldp             = []
 shex            = []
 ## SWRL (Semantic Web Rule Language) rule engine
 swrl            = []
+## Additive 3D / volumetric geometry: the ots-geof: 3D function surface, WKT-Z
+## parsing and the 3D R-tree (spec §3). The exact narrow-phase / hull kernel is
+## backed by `parry3d-f64` (pure Rust, no native dep — it re-exports nalgebra,
+## which we reach as `parry3d_f64::na` to avoid a separate, skew-prone dep).
+geometry3d      = ["dep:parry3d-f64"]
+## Certified constructive solid geometry (boolean union/intersection/difference
+## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
+## `full`: it links the native libSFCGAL C library, which CI does not provide.
+sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
@@ -60,7 +69,7 @@ asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
 ## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
@@ -158,6 +167,14 @@ rayon = "1"
 
 # Spatial R-tree index (GeoSPARQL pre-filtering)
 rstar = "0.12"
+
+# Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
+# parry3d-f64 re-exports nalgebra as `parry3d_f64::na`; we use that re-export
+# rather than adding a separate `nalgebra` dependency, to avoid version skew.
+parry3d-f64 = { version = "0.17", optional = true }
+# Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
+# libSFCGAL C library, so it is excluded from `full` and the default CI build.
+sfcgal = { version = "0.7", optional = true }
 
 # RML mapping sources
 csv = "1"

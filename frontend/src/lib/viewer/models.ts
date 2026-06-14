@@ -31,6 +31,17 @@ export function defaultMaterial(dark: boolean): THREE.Material {
 
 const modelCache = new Map<string, Promise<THREE.Group>>();
 
+/** Order-independent digest of a guid set for cache keys (length + a 32-bit
+ *  hash of the sorted ids) — keeps a 900-element storey from making a 20 KB key. */
+function digestGuids(guids: string[]): string {
+  let h = 5381;
+  for (const g of [...guids].sort()) {
+    for (let i = 0; i < g.length; i++) h = ((h * 33) ^ g.charCodeAt(i)) >>> 0;
+    h = (h ^ 0x2d) >>> 0; // separator so [ab,c] != [a,bc]
+  }
+  return h.toString(36);
+}
+
 /**
  * Load a model into a normalised group (unit-ish bounding box, sitting on the
  * ground plane, centred on x/z) with [ModelGeoData] in `userData`. Cached per
@@ -46,10 +57,14 @@ const modelCache = new Map<string, Promise<THREE.Group>>();
 export function loadModel(
   url: string,
   format: ModelFormat,
-  opts: { upAxis?: string | null } = {},
+  opts: { upAxis?: string | null; guids?: string[] } = {},
 ): Promise<THREE.Group> {
   const upAxis = (opts.upAxis || '').toUpperCase() === 'Z' ? 'Z' : null;
-  const key = `${format}:${upAxis ?? '-'}:${url}`;
+  // A subtree (an IFC container's descendant leaf guids) must not collide in the
+  // cache with the whole model or with another subtree of the same file: fold a
+  // compact, order-independent digest of the guid set into the key.
+  const guidKey = opts.guids?.length ? `${opts.guids.length}~${digestGuids(opts.guids)}` : '-';
+  const key = `${format}:${upAxis ?? '-'}:${guidKey}:${url}`;
   let p = modelCache.get(key);
   if (!p) {
     p = (async () => {
@@ -66,7 +81,7 @@ export function loadModel(
         // web-ifc (WASM) loads on demand; a `#GlobalId` fragment isolates one
         // element. Meshes carry `userData.ifcGuid` for per-element picking.
         const { loadIfcGroup } = await import('./ifc');
-        group.add(await loadIfcGroup(url));
+        group.add(await loadIfcGroup(url, { guids: opts.guids }));
       } else {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`fetch failed: ${res.status}`);

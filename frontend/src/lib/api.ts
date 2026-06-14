@@ -586,6 +586,24 @@ export const getViewerFeed = (datasetId, root = null) => {
   const qs = root ? `?root=${encodeURIComponent(root)}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
 };
+
+// Cheap geo capability summary that gates the map / 3D-viewer UI affordances.
+// { has_coordinates, has_models, has_3d_geometry, has_3d, element_count }.
+export interface GeoStats {
+  has_coordinates: boolean;
+  has_models: boolean;
+  has_3d_geometry: boolean;
+  has_3d: boolean;
+  element_count: number;
+}
+export const getGeoStats = (datasetId): Promise<GeoStats> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/geo-stats`);
+// OR-aggregated geo capability across a whole browse scope in ONE request, so the
+// Map/3D gate costs a single probe instead of one getGeoStats per dataset.
+export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
+  const qs = new URLSearchParams({ datasets: (datasetIds || []).join(',') }).toString();
+  return request('GET', `/api/geo-stats?${qs}`);
+};
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.

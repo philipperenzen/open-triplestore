@@ -32,9 +32,13 @@ impl Crs {
     /// common EPSG and OGC forms; returns `None` for an unsupported CRS.
     pub fn from_uri(uri: &str) -> Option<Crs> {
         let u = uri.trim_end_matches('>').trim_start_matches('<');
-        if u.ends_with("CRS84") || u.ends_with("/4326") || u.ends_with(":4326") {
+        if u.ends_with("CRS84h") || u.ends_with("CRS84") || u.ends_with("/4326") || u.ends_with(":4326") {
             Some(Crs::Wgs84)
-        } else if u.ends_with("/28992") || u.ends_with(":28992") {
+        } else if u.ends_with("/28992") || u.ends_with(":28992")
+            // EPSG:7415 = RD New (28992) + NAP height: horizontally identical to
+            // RD New; the NAP Z ordinate passes through reprojection unchanged.
+            || u.ends_with("/7415") || u.ends_with(":7415")
+        {
             Some(Crs::RdNew)
         } else if u.ends_with("/3857") || u.ends_with(":3857") || u.ends_with("/900913") {
             Some(Crs::WebMercator)

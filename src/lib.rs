@@ -45,6 +45,7 @@ pub mod imports;
 pub mod kind_detector;
 #[cfg(feature = "ldp")]
 pub mod ldp;
+pub mod ogcapi;
 pub mod prefixes;
 pub mod reasoning;
 pub mod rml;
@@ -60,5 +61,7 @@ pub mod storage;
 pub mod store;
 #[cfg(feature = "swrl")]
 pub mod swrl;
+#[cfg(feature = "geometry3d")]
+pub mod tiles3d;
 #[cfg(feature = "text-search")]
 pub mod text_search;
