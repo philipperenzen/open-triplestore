@@ -2679,7 +2679,8 @@
       "openResource": "Open resource",
       "empty": "Geen onderdelen met geometrie of 3D-modellen in deze dataset.",
       "cesium3d": "3D Tiles",
-      "cesium3dDesc": "Open de CesiumJS 3D Tiles-viewer (globe + terrein, klik een object voor zijn linked data)"
+      "cesium3dDesc": "Schakel het canvas naar de CesiumJS 3D Tiles-globe (klik een object voor zijn linked data; de inspector opent gewoon)",
+      "mapMode": "Kaart"
     },
     "recovery": {
       "heading": "Accountherstel",

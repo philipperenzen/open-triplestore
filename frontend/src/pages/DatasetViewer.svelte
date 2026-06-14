@@ -14,6 +14,7 @@
   import { modelRefs } from '../lib/viewer/geometry';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
   import Model3D from '../components/viewer/Model3D.svelte';
+  import CesiumViewer from '../components/viewer/CesiumViewer.svelte';
   import ElementModal from '../components/viewer/ElementModal.svelte';
 
   export let id = '';
@@ -26,6 +27,12 @@
   let query = '';
   let mapComponent;
   let dlOpen = false;
+  // Central canvas render mode. 'map' = MapLibre + three.js (the full-feature
+  // explorer: located dots/lines/areas, to-scale glTF/IFC/CityJSON/STL models,
+  // and click → the ElementModal inspector with the BOT/IFC decomposition tree).
+  // 'cesium' = the CesiumJS 3D-Tiles globe view (a toggle, not a separate page,
+  // so it sacrifices none of those features — a pick still opens the inspector).
+  let canvasMode = 'map';
 
   // Download sources: the original IFC file (fragment-less) and every dataset
   // graph in the user's preferred RDF serialization.
@@ -164,9 +171,17 @@
       <span class="count-chip">{elements.length} {$i18nT('pages.datasetViewer.elements').toLowerCase()}</span>
     {/if}
     {#if !loading && has3dContent}
-      <Link to={`/datasets/${id}/cesium`} class="btn btn-sm cesium-link" title={$i18nT('pages.datasetViewer.cesium3dDesc')}>
-        <Boxes size={14} /> {$i18nT('pages.datasetViewer.cesium3d')}
-      </Link>
+      <!-- Render-mode toggle: the full MapLibre+three.js explorer (default) vs.
+           the CesiumJS 3D-Tiles globe. A toggle, not a separate page — the side
+           list + ElementModal inspector stay in both. -->
+      <div class="canvas-mode" role="group" aria-label={$i18nT('pages.datasetViewer.cesium3dDesc')}>
+        <button class:active={canvasMode === 'map'} on:click={() => (canvasMode = 'map')} title={$i18nT('pages.datasetViewer.mapMode')}>
+          <MapPin size={13} /> {$i18nT('pages.datasetViewer.mapMode')}
+        </button>
+        <button class:active={canvasMode === 'cesium'} on:click={() => (canvasMode = 'cesium')} title={$i18nT('pages.datasetViewer.cesium3dDesc')}>
+          <Boxes size={13} /> {$i18nT('pages.datasetViewer.cesium3d')}
+        </button>
+      </div>
     {/if}
     {#if !loading && (ifcUrl || graphs.length)}
       <div class="dl-wrap">
@@ -249,7 +264,11 @@
       </aside>
 
       <section class="canvas card-flat">
-        {#if hasGeo}
+        {#if canvasMode === 'cesium'}
+          <!-- 3D Tiles globe. Embedded: a pick dispatches `select`, opening the
+               same ElementModal inspector the map view uses (no lost features). -->
+          <CesiumViewer datasetId={id} {selected} embedded on:select={onMapSelect} height="100%" />
+        {:else if hasGeo}
           <ViewerMap
             bind:this={mapComponent}
             {elements}
@@ -429,6 +448,34 @@
   }
   .hint.error {
     color: var(--danger-500, #c0392b);
+  }
+
+  /* Canvas render-mode toggle (Map ↔ 3D Tiles) */
+  .canvas-mode {
+    display: inline-flex;
+    border: 1px solid var(--line-soft, #e2e8f0);
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--bg-soft, #f1f5f9);
+  }
+  .canvas-mode button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    border: 0;
+    background: transparent;
+    padding: 4px 11px;
+    font-size: 0.76rem;
+    color: var(--muted, #64748b);
+    cursor: pointer;
+  }
+  .canvas-mode button + button {
+    border-left: 1px solid var(--line-soft, #e2e8f0);
+  }
+  .canvas-mode button.active {
+    background: var(--bg-accent-soft, #e7f0fb);
+    color: var(--brand-600, #2563a8);
+    font-weight: 600;
   }
 
   /* Download menu (IFC + linked-data formats) */

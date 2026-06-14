@@ -10,7 +10,7 @@
   // NOT suffer the MapLibre+three.js satellite/tilt/z-fight failure modes the
   // 2D viewer works around — switching imagery here is a plain layer swap with
   // no custom WebGL layer to collapse.
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import { Boxes, X, MapPin, Satellite, ExternalLink, Sparkles, Loader2 } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.ts';
   import { navigate } from '../../lib/router/index.js';
@@ -26,6 +26,16 @@
   /** @type {string} dataset id whose 3D Tiles tileset is loaded. */
   export let datasetId = '';
   export let height = '100%';
+  // Embedded mode: hosted inside the dataset explorer's canvas next to the
+  // element list + the rich ElementModal inspector. A pick then dispatches
+  // `select` to the parent (which opens the inspector, with the IFC/BOT
+  // decomposition + sub-element tree) instead of showing this component's own
+  // lightweight SPARQL panel — so switching to 3D Tiles sacrifices no features.
+  export let embedded = false;
+  /** Currently-selected element id (from the parent) to highlight in the scene. */
+  export let selected = '';
+
+  const dispatch = createEventDispatcher();
 
   // Cesium fetches its workers / glsl / Assets relative to CESIUM_BASE_URL. We
   // point it at the matching CDN build so the static assets resolve without any
@@ -128,12 +138,17 @@
           picked.getProperty('name') ||
           (iri ? shortenIRI(iri) : '');
         highlightFeature(picked);
-        if (iri) selectFeature(iri, label);
+        if (iri) {
+          // Embedded: hand the pick to the parent's rich inspector. Standalone:
+          // show this component's own SPARQL property panel.
+          if (embedded) dispatch('select', { id: iri });
+          else selectFeature(iri, label);
+        }
         return;
       }
       // Clicking empty space clears the selection + highlight.
       clearHighlight();
-      closePanel();
+      if (!embedded) closePanel();
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
   }
 
@@ -240,6 +255,10 @@
     init();
   });
 
+  // Embedded mode: reflect the parent explorer's selection into the scene by
+  // colour-styling the matching feature (reverse binding §7.3).
+  $: if (embedded && tileset && Cesium) styleByIri(selected || '');
+
   onDestroy(() => {
     handler?.destroy?.();
     handler = null;
@@ -280,7 +299,7 @@
     ><MapPin size={14} /></button>
   </div>
 
-  {#if selectedIri}
+  {#if selectedIri && !embedded}
     <aside class="info-panel" aria-label="Feature properties">
       <header class="info-head">
         <Boxes size={14} />

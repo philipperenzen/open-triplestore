@@ -302,12 +302,13 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
-    // The Schependomlaan IFC (layered Dutch BIM demo) is attributed to the owning
-    // admin, so it waits until one exists; downloaded + converted on the first
-    // boot/reseed after that, and back-filled on later boots if a download failed.
-    if let Some(ref owner) = owner {
-        seed_schependomlaan_ifc(state, &owner.id);
-    }
+    // The Schependomlaan IFC (layered Dutch BIM demo: BOT topology + full ifcOWL
+    // lift, every storey/wall/beam individually addressable) loads on first boot
+    // so the public demo shows the IFC decomposition immediately. With an admin
+    // owner it is also stored as a downloadable asset; without one (brand-new
+    // install) the asset is skipped and the FOG file reference points at the
+    // source URL — the linked data + decomposition are present either way.
+    seed_schependomlaan_ifc(state, owner.as_ref().map(|o| o.id.as_str()).unwrap_or(""));
 
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
