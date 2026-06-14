@@ -3,6 +3,11 @@
 //! the tree for candidate IRIs whose AABBs overlap, then the exact `ots-geof:`
 //! test runs only on those candidates (the standard PostGIS/CGAL two-phase
 //! pattern). Mirrors the 2D [`super::spatial_index`] but keyed by `[f64; 3]`.
+//!
+//! Built and exercised by tests today; wiring it into the Graph-Store write path
+//! (transactional AABB upserts on commit) and the OGC API/3D-Tiles broad phase
+//! is the P1.5 task, so the public API is `allow(dead_code)` until then.
+#![allow(dead_code)]
 
 use rstar::{RTree, RTreeObject, AABB};
 

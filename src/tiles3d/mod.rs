@@ -375,7 +375,10 @@ async fn tileset_json(
     let content_uri = format!("/api/datasets/{dataset_id}/3dtiles/content.glb");
 
     let tileset = serde_json::json!({
-        "asset": { "version": "1.1", "tilesetVersion": "1.0" },
+        // gltfUpAxis Z: our GLB POSITION accessors are already absolute ECEF
+        // (Z-up geocentric, EPSG:4978) with an identity tile transform, so Cesium
+        // must NOT apply the default glTF Y-up→Z-up rotation.
+        "asset": { "version": "1.1", "tilesetVersion": "1.0", "gltfUpAxis": "Z" },
         "geometricError": geometric_error,
         "root": {
             "boundingVolume": { "region": region_arr },

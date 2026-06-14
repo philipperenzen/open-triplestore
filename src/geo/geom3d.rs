@@ -93,6 +93,8 @@ impl Aabb3 {
 /// Heuristic: does this WKT body carry 3D geometry? True when it tags `Z`/`ZM`
 /// or names a natively-3D type (`POLYHEDRALSURFACE`/`TIN`/`SOLID`). A plain 2D
 /// `POINT(..)` is false so the existing GEOS 2D path keeps owning it.
+/// Exposed for the datatypes-routing rule (spec §3.3); not yet wired internally.
+#[allow(dead_code)]
 pub fn wkt_is_3d(wkt: &str) -> bool {
     let upper = wkt.trim().to_ascii_uppercase();
     upper.contains(" Z ")
