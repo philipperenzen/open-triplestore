@@ -64,7 +64,10 @@ pub fn wkt_to_geojson(wkt: &str) -> Option<Value> {
             // Both `MULTIPOINT(1 2, 3 4)` and `MULTIPOINT((1 2),(3 4))` are legal.
             let inner = strip_parens(rest)?;
             let coords = if inner.contains('(') {
-                parse_rings(inner)?.into_iter().filter_map(|r| r.into_iter().next()).collect()
+                parse_rings(inner)?
+                    .into_iter()
+                    .filter_map(|r| r.into_iter().next())
+                    .collect()
             } else {
                 parse_coord_list(inner)?
             };
@@ -110,7 +113,12 @@ fn geojson_bbox(geom: &Value) -> Option<BBox> {
     let mut bb: Option<BBox> = None;
     let mut extend = |x: f64, y: f64| {
         bb = Some(match bb {
-            None => BBox { min_x: x, min_y: y, max_x: x, max_y: y },
+            None => BBox {
+                min_x: x,
+                min_y: y,
+                max_x: x,
+                max_y: y,
+            },
             Some(b) => BBox {
                 min_x: b.min_x.min(x),
                 min_y: b.min_y.min(y),
@@ -151,7 +159,9 @@ fn geojson_bbox(geom: &Value) -> Option<BBox> {
 /// dimensionality flag and `EMPTY`) from the rest of the string.
 fn split_kind(s: &str) -> Option<(String, &str)> {
     let s = s.trim_start();
-    let end = s.find(|c: char| c == '(' || c.is_whitespace()).unwrap_or(s.len());
+    let end = s
+        .find(|c: char| c == '(' || c.is_whitespace())
+        .unwrap_or(s.len());
     let kind = s[..end].to_ascii_uppercase();
     if kind.is_empty() {
         return None;
@@ -310,8 +320,8 @@ mod tests {
 
     #[test]
     fn multipolygon() {
-        let g = wkt_to_geojson("MULTIPOLYGON(((0 0, 1 0, 1 1, 0 0)),((2 2, 3 2, 3 3, 2 2)))")
-            .unwrap();
+        let g =
+            wkt_to_geojson("MULTIPOLYGON(((0 0, 1 0, 1 1, 0 0)),((2 2, 3 2, 3 3, 2 2)))").unwrap();
         assert_eq!(g["type"], "MultiPolygon");
         let polys = g["coordinates"].as_array().unwrap();
         assert_eq!(polys.len(), 2);
@@ -331,7 +341,9 @@ mod tests {
 
     #[test]
     fn crs_prefixed_is_rejected() {
-        assert!(wkt_to_geojson("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(0 0)").is_none());
+        assert!(
+            wkt_to_geojson("<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(0 0)").is_none()
+        );
     }
 
     #[test]
@@ -345,28 +357,77 @@ mod tests {
     #[test]
     fn bbox_of_polygon() {
         let bb = wkt_bbox("POLYGON((0 0, 4 0, 4 3, 0 3, 0 0))").unwrap();
-        assert_eq!(bb, BBox { min_x: 0.0, min_y: 0.0, max_x: 4.0, max_y: 3.0 });
+        assert_eq!(
+            bb,
+            BBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 4.0,
+                max_y: 3.0
+            }
+        );
     }
 
     #[test]
     fn bbox_of_point() {
         let bb = wkt_bbox("POINT(5.86 51.85)").unwrap();
-        assert_eq!(bb, BBox { min_x: 5.86, min_y: 51.85, max_x: 5.86, max_y: 51.85 });
+        assert_eq!(
+            bb,
+            BBox {
+                min_x: 5.86,
+                min_y: 51.85,
+                max_x: 5.86,
+                max_y: 51.85
+            }
+        );
     }
 
     #[test]
     fn bbox_of_collection() {
         let bb = wkt_bbox("GEOMETRYCOLLECTION(POINT(0 0), POINT(10 20))").unwrap();
-        assert_eq!(bb, BBox { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 20.0 });
+        assert_eq!(
+            bb,
+            BBox {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 20.0
+            }
+        );
     }
 
     #[test]
     fn bbox_intersection() {
-        let a = BBox { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 };
-        let inside = BBox { min_x: 1.0, min_y: 1.0, max_x: 2.0, max_y: 2.0 };
-        let overlap = BBox { min_x: 5.0, min_y: 5.0, max_x: 15.0, max_y: 15.0 };
-        let disjoint = BBox { min_x: 20.0, min_y: 20.0, max_x: 30.0, max_y: 30.0 };
-        let edge = BBox { min_x: 10.0, min_y: 10.0, max_x: 12.0, max_y: 12.0 };
+        let a = BBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 10.0,
+            max_y: 10.0,
+        };
+        let inside = BBox {
+            min_x: 1.0,
+            min_y: 1.0,
+            max_x: 2.0,
+            max_y: 2.0,
+        };
+        let overlap = BBox {
+            min_x: 5.0,
+            min_y: 5.0,
+            max_x: 15.0,
+            max_y: 15.0,
+        };
+        let disjoint = BBox {
+            min_x: 20.0,
+            min_y: 20.0,
+            max_x: 30.0,
+            max_y: 30.0,
+        };
+        let edge = BBox {
+            min_x: 10.0,
+            min_y: 10.0,
+            max_x: 12.0,
+            max_y: 12.0,
+        };
         assert!(a.intersects(&inside));
         assert!(a.intersects(&overlap));
         assert!(!a.intersects(&disjoint));

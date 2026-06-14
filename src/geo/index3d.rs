@@ -267,7 +267,10 @@ mod tests {
 
         // A box only over the flat 2D footprint returns nothing (it isn't indexed).
         let none = idx.query_intersecting(&bbox([10.2, 10.2, -1.0], [10.8, 10.8, 1.0]));
-        assert!(none.is_empty(), "2D footprint must not be a 3D candidate: {none:?}");
+        assert!(
+            none.is_empty(),
+            "2D footprint must not be a 3D candidate: {none:?}"
+        );
     }
 
     #[test]

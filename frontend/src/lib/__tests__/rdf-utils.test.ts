@@ -54,6 +54,25 @@ describe('detectGraphRolesFromContent', () => {
     expect(roles['http://example.org/g/vocab']).toBe('vocabulary');
   });
 
+  it('classifies a property-only graph (R-Box) as vocabulary, classes as model', () => {
+    const trig = `
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix ex: <http://example.org/> .
+
+      <http://example.org/g/classes> {
+        ex:Person a owl:Class .
+      }
+
+      <http://example.org/g/props> {
+        ex:knows a owl:ObjectProperty .
+        ex:age a owl:DatatypeProperty .
+      }
+    `;
+    const roles = detectGraphRolesFromContent('data.trig', trig);
+    expect(roles['http://example.org/g/classes']).toBe('model');
+    expect(roles['http://example.org/g/props']).toBe('vocabulary');
+  });
+
   it('resolves prefixed TriG graph names via @prefix declarations', () => {
     const trig = `
       @prefix g: <http://example.org/g/> .

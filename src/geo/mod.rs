@@ -10,8 +10,8 @@ pub mod vocabulary;
 // GeoSPARQL 1.1 surface stays byte-for-byte conformant. Gated by the
 // `geometry3d` feature (enabled in `full`).
 #[cfg(feature = "geometry3d")]
-pub mod geom3d;
-#[cfg(feature = "geometry3d")]
 pub mod functions3d;
+#[cfg(feature = "geometry3d")]
+pub mod geom3d;
 #[cfg(feature = "geometry3d")]
 pub mod index3d;

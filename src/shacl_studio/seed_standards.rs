@@ -442,7 +442,7 @@ ots:StandardShape a sh:NodeShape ;
         run_inference: false,
         ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix otso: <https://opentriplestore.org/ontology/> .
+@prefix otso: <https://opentriplestore.org/ns#> .
 # Every graph-role individual must be labelled (model hygiene for the ots terms).
 [] a sh:NodeShape ;
    sh:targetClass otso:GraphRole ;
