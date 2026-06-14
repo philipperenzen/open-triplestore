@@ -423,8 +423,8 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
                      sosa:resultTime ?time . \
                  } ORDER BY DESC(?time)",
             ),
-        ],
-        "buildings-bim" => vec![
+            // BOT building-structure queries — the merged-in Buildings & BIM data
+            // and the IFC buildings all carry bot:Building / bot:hasStorey.
             svc(
                 "Buildings by storey count",
                 "buildings-by-storeys",
@@ -548,12 +548,15 @@ static DATASETS: &[DatasetSpec] = &[
     },
     DatasetSpec {
         slug: "viewer-3d-demo",
-        name: "3D & Map Viewer Demo",
-        description: "Geometry-rich linked data for the map and 3D viewers: the Schependomlaan \
-                      house project in Nijmegen (the canonical open Dutch BIM dataset, CC BY 4.0) — \
-                      its IFC design model is downloaded on first boot, stored as a downloadable \
-                      asset and transformed to linked data (BOT topology, property sets and a full \
-                      ifcOWL lift), so storeys, walls and beams are individually selectable; the \
+        name: "3D, Map & BIM Demo",
+        description: "Geometry-rich linked data for the map and 3D viewers: three open IFC \
+                      buildings — the Schependomlaan house project (Nijmegen, the canonical open \
+                      Dutch BIM dataset, CC BY 4.0), the KIT FZK-Haus and the buildingSMART Duplex \
+                      Apartment — are downloaded on first boot, stored as downloadable assets and \
+                      transformed to linked data (BOT topology, property sets and a full ifcOWL \
+                      lift), so storeys, walls and beams are individually selectable; a \
+                      neighbourhood of authored LoD2 CityJSON buildings (a townhouse, corner shop, \
+                      apartment block and office; the townhouse fully BOT-decomposed); the \
                       surrounding real city block from 3DBAG (LoD2.2 CityJSON, © 3DBAG by tudelft3d \
                       and 3DGI, CC BY 4.0); and real Wikidata landmarks (CC0) whose open 3D models \
                       live on Wikimedia Commons. Worked examples cover every supported geo \
@@ -570,23 +573,9 @@ static DATASETS: &[DatasetSpec] = &[
             GraphSpec { suffix: "zones", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ZONES_3DBAG_TTL },
             GraphSpec { suffix: "sensors", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SENSORS_SOSA_TTL },
             GraphSpec { suffix: "assets", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ASSETS_OTL_TTL },
-        ],
-    },
-    DatasetSpec {
-        slug: "buildings-bim",
-        name: "Buildings & BIM",
-        description: "A small neighbourhood of buildings that loads well — the lightweight, \
-                      reliable counterpart to the per-element IFC demo. The 3D viewer, the 2D map \
-                      and the BOT structure tree all work together: four authored LoD2 CityJSON \
-                      buildings (a townhouse, a corner shop, an apartment block and an office, \
-                      parsed client-side and coloured by semantic surface, CC0), the real 3DBAG \
-                      LoD2.2 city block (© 3DBAG by tudelft3d and 3DGI, CC BY 4.0), and native \
-                      WKT-Z volumetric solids (POLYHEDRALSURFACE Z, EPSG:7415) for the 3D engine \
-                      and 3D-Tiles pipeline. Every building carries a CRS84 map anchor clustered \
-                      near the Schependomlaan site in Nijmegen, and the townhouse is fully \
-                      decomposed into storeys, spaces and elements (BOT topology) so the structure \
-                      tab shows a real building tree.",
-        graphs: &[
+            // Merged-in "Buildings & BIM": authored LoD2 CityJSON buildings + a
+            // fully BOT-decomposed townhouse — the lightweight, reliable
+            // counterpart to the per-element IFC, in the SAME unified dataset.
             GraphSpec { suffix: "buildings", role: GraphKind::Instances, fmt: Fmt::Turtle, data: BUILDINGS_BIM_TTL },
         ],
     },

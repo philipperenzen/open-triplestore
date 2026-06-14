@@ -243,7 +243,10 @@
     }
     if (ghost) {
       mat.transparent = true;
-      mat.opacity = Math.min(mat.userData.origOpacity, 0.13);
+      // Translucent, but still clearly visible — at 0.13 the whole building read
+      // as "disappeared" when one element was selected. ~0.32 keeps it as a
+      // see-through shell so the picked element shows through without vanishing.
+      mat.opacity = Math.min(mat.userData.origOpacity, 0.32);
       mat.depthWrite = false; // don't occlude the selected element behind it
     } else {
       mat.opacity = mat.userData.origOpacity;
