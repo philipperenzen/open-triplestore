@@ -12,10 +12,12 @@
 //!   → `iri` → SPARQL.
 //!
 //! The encoder is intentionally minimal: one buffer, hand-laid bufferViews and
-//! accessors, f32 `POSITION`, u32 indices, a `u8`/`u16` feature id, and a
-//! UTF-8 values + offsets pair for the STRING property. No Draco, no normals, no
-//! materials, no implicit tiling. Coordinates are expected to be **ECEF metres**
-//! (EPSG:4978); the tile transform is identity (see `mod.rs`).
+//! accessors, f32 `POSITION`, computed flat `NORMAL` (so Cesium PBR can shade the
+//! tiles instead of rendering flat-white blocks), u32 indices, a `u8`/`u16`
+//! feature id, a UTF-8 values + offsets pair for the STRING property, and one
+//! matte light-grey material. No Draco, no implicit tiling. Coordinates are
+//! expected to be **ECEF metres** (EPSG:4978); the tile transform is identity
+//! (see `mod.rs`).
 //!
 //! Everything is built with byte buffers and `to_le_bytes` — no new crates.
 
@@ -88,6 +90,41 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
     let index_count = indices.len();
     let feature_count = features.len();
 
+    // Per-vertex normals (area-weighted from the triangles in `indices`), so the
+    // PBR material can actually be shaded — without a NORMAL attribute Cesium
+    // can't light the surface and every tile renders as a flat white block.
+    // Works for indexed meshes and the synthesised non-indexed triangle soup
+    // alike. Positions are big absolute ECEF metres but the demo features are
+    // large flat-faced solids, so f32 face normals are accurate enough to shade.
+    let mut normals = vec![0.0f32; positions.len()];
+    for tri in indices.chunks_exact(3) {
+        let (i0, i1, i2) = (tri[0] as usize * 3, tri[1] as usize * 3, tri[2] as usize * 3);
+        let ux = positions[i1] - positions[i0];
+        let uy = positions[i1 + 1] - positions[i0 + 1];
+        let uz = positions[i1 + 2] - positions[i0 + 2];
+        let vx = positions[i2] - positions[i0];
+        let vy = positions[i2 + 1] - positions[i0 + 1];
+        let vz = positions[i2 + 2] - positions[i0 + 2];
+        let nx = uy * vz - uz * vy;
+        let ny = uz * vx - ux * vz;
+        let nz = ux * vy - uy * vx;
+        for &i in &[i0, i1, i2] {
+            normals[i] += nx;
+            normals[i + 1] += ny;
+            normals[i + 2] += nz;
+        }
+    }
+    for n in normals.chunks_exact_mut(3) {
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len > 0.0 {
+            n[0] /= len;
+            n[1] /= len;
+            n[2] /= len;
+        } else {
+            n[2] = 1.0; // degenerate triangle → arbitrary unit normal
+        }
+    }
+
     // Feature ids fit in u8 when there are ≤ 256 features, else u16.
     let fid_u16 = feature_count > 256;
 
@@ -152,18 +189,30 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         bin.push(0);
     }
 
+    // NORMAL (VEC3 f32) — appended last so the bufferView offsets above (which the
+    // property table references by index) are left untouched.
+    let nrm_offset = bin.len();
+    for v in &normals {
+        bin.extend_from_slice(&v.to_le_bytes());
+    }
+    let nrm_len = bin.len() - nrm_offset;
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+
     let total_buffer_len = bin.len();
 
     // ── 3. Assemble the glTF JSON referencing the bufferViews above ────────────
     // bufferView indices (declaration order):
     //   0 POSITION, 1 indices, 2 _FEATURE_ID_0,
-    //   3 iri values, 4 iri string-offsets
+    //   3 iri values, 4 iri string-offsets, 5 NORMAL
     let buffer_views = json!([
         { "buffer": 0, "byteOffset": pos_offset, "byteLength": pos_len, "target": 34962 },
         { "buffer": 0, "byteOffset": idx_offset, "byteLength": idx_len, "target": 34963 },
         { "buffer": 0, "byteOffset": fid_offset, "byteLength": fid_len },
         { "buffer": 0, "byteOffset": iri_val_offset, "byteLength": iri_val_len },
-        { "buffer": 0, "byteOffset": iri_off_offset, "byteLength": iri_off_len }
+        { "buffer": 0, "byteOffset": iri_off_offset, "byteLength": iri_off_len },
+        { "buffer": 0, "byteOffset": nrm_offset, "byteLength": nrm_len, "target": 34962 }
     ]);
 
     // POSITION accessor needs min/max for the bounding box (cgltf/Cesium require it).
@@ -185,15 +234,17 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         { "bufferView": 0, "componentType": 5126, "count": vertex_count,
           "type": "VEC3", "min": min, "max": max },
         { "bufferView": 1, "componentType": 5125, "count": index_count, "type": "SCALAR" },
-        { "bufferView": 2, "componentType": fid_component_type, "count": vertex_count, "type": "SCALAR" }
+        { "bufferView": 2, "componentType": fid_component_type, "count": vertex_count, "type": "SCALAR" },
+        { "bufferView": 5, "componentType": 5126, "count": vertex_count, "type": "VEC3" }
     ]);
 
     // EXT_mesh_features: one feature-id set sourced from the _FEATURE_ID_0 attribute,
     // and bound to property-table 0 so a picked feature resolves to metadata.
     let primitive = json!({
-        "attributes": { "POSITION": 0, "_FEATURE_ID_0": 2 },
+        "attributes": { "POSITION": 0, "NORMAL": 3, "_FEATURE_ID_0": 2 },
         "indices": 1,
         "mode": 4,
+        "material": 0,
         "extensions": {
             "EXT_mesh_features": {
                 "featureIds": [
@@ -241,6 +292,20 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         "scenes": [ { "nodes": [0] } ],
         "nodes": [ { "mesh": 0 } ],
         "meshes": [ { "primitives": [ primitive ] } ],
+        "materials": [
+            {
+                "name": "ots_building",
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [0.80, 0.82, 0.85, 1.0],
+                    "metallicFactor": 0.0,
+                    "roughnessFactor": 0.9
+                },
+                // Small ambient lift so faces turned away from Cesium's lone sun
+                // don't fall to near-black (the viewer sets up no IBL/ambient).
+                "emissiveFactor": [0.16, 0.17, 0.19],
+                "doubleSided": true
+            }
+        ],
         "buffers": [ { "byteLength": total_buffer_len } ],
         "bufferViews": buffer_views,
         "accessors": accessors
@@ -346,6 +411,26 @@ mod tests {
             .as_u64()
             .unwrap();
         assert_eq!(count, 2, "two features → two property-table rows");
+
+        // ── Shading: a NORMAL attribute + a material so Cesium doesn't render
+        //    flat-white blocks. Two triangles → 6 verts → 6 unit normals. ──
+        assert_eq!(
+            parsed["meshes"][0]["primitives"][0]["attributes"]["NORMAL"],
+            json!(3),
+            "primitive carries a NORMAL attribute (accessor 3)"
+        );
+        assert_eq!(
+            parsed["meshes"][0]["primitives"][0]["material"],
+            json!(0),
+            "primitive references the building material"
+        );
+        let materials = parsed["materials"].as_array().unwrap();
+        assert_eq!(materials.len(), 1, "one material emitted");
+        assert_eq!(
+            materials[0]["pbrMetallicRoughness"]["metallicFactor"],
+            json!(0.0),
+            "matte (non-metallic) so it reads as a diffuse surface, not white"
+        );
 
         // ── BIN chunk: declared length consistent, type 'BIN\0' ──
         let bin_chunk_start = json_end;
