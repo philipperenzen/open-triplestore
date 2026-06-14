@@ -1,0 +1,59 @@
+# 3D BAG vocabulary — terms used by the 3D BAG dataset (3dbag.nl), a national 3D
+# model of the Netherlands that combines building footprints from the Dutch BAG
+# registry (Basisregistratie Adressen en Gebouwen) with height data. The classes
+# and properties below mirror the BAG registry attributes as surfaced by 3D BAG.
+# Hand-authored term subset bundled for the demo data.
+# Source: https://docs.3dbag.nl  (ns https://data.3dbag.nl/def/)
+@prefix bag:  <https://data.3dbag.nl/def/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<https://data.3dbag.nl/def/> a owl:Ontology ;
+  rdfs:label "3D BAG vocabulary"@en ;
+  rdfs:comment "Terms used by the 3D BAG dataset, mirroring attributes of the Dutch BAG building registry."@en ;
+  owl:versionInfo "1.0" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+bag:Building a owl:Class ;
+  rdfs:label "Building"@en ;
+  rdfs:comment "A building (pand) from the Dutch BAG registry as modelled in 3D BAG."@en ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .
+
+bag:BuildingPart a owl:Class ;
+  rdfs:label "Building Part"@en ;
+  rdfs:comment "A geometric part of a 3D BAG building, typically one part per level of detail or per distinct roof segment."@en ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .
+
+bag:Bridge a owl:Class ;
+  rdfs:label "Bridge"@en ;
+  rdfs:comment "A bridge feature modelled in 3D BAG."@en ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .
+
+# ── Datatype properties (mirroring BAG registry attributes) ──────────────────
+
+bag:identificatie a owl:DatatypeProperty ;
+  rdfs:label "identificatie"@en ;
+  rdfs:comment "The unique identifier of the object in the Dutch BAG registry."@en ;
+  rdfs:range xsd:string ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .
+
+bag:bouwjaar a owl:DatatypeProperty ;
+  rdfs:label "bouwjaar (year of construction)"@en ;
+  rdfs:comment "The year of construction of the building, as recorded in the Dutch BAG registry."@en ;
+  rdfs:range xsd:gYear ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .
+
+bag:status a owl:DatatypeProperty ;
+  rdfs:label "status"@en ;
+  rdfs:comment "The lifecycle status of the building in the Dutch BAG registry, for example in use, under construction or demolished."@en ;
+  rdfs:range xsd:string ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .
+
+bag:lod a owl:DatatypeProperty ;
+  rdfs:label "level of detail (LoD)"@en ;
+  rdfs:comment "The CityGML level of detail at which a building part is modelled in 3D BAG, for example 1.2, 1.3 or 2.2."@en ;
+  rdfs:range xsd:string ;
+  rdfs:isDefinedBy <https://data.3dbag.nl/def/> .

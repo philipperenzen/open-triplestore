@@ -40,6 +40,7 @@
   import LazyPage from './components/LazyPage.svelte';
   const lazySparqlEditor     = () => import('./pages/SparqlEditor.svelte');
   const lazyDatasetViewer    = () => import('./pages/DatasetViewer.svelte');
+  const lazyCesiumView       = () => import('./pages/CesiumView.svelte');
   const lazyApiServices      = () => import('./pages/ApiServices.svelte');
   // /graph-viz is deprecated: the unified browse page (/browse?view=graph) now
   // owns the graph viz. Keep a thin redirect so deep-links don't 404.
@@ -619,6 +620,9 @@
         <Route path="/datasets" component={Datasets} />
         <Route path="/datasets/:id/viewer" let:params>
           <LazyPage loader={lazyDatasetViewer} id={params.id} />
+        </Route>
+        <Route path="/datasets/:id/cesium" let:params>
+          <LazyPage loader={lazyCesiumView} id={params.id} />
         </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />

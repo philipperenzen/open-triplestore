@@ -44,6 +44,11 @@
   const RAY_B = new THREE.Vector3();
   const RAY_HIT = new THREE.Vector3();
   const RAY = new THREE.Ray();
+  // Precise sub-element picking. A model whose meshes carry IFC GlobalIds (an
+  // IFC building standing on its Site anchor) is one entry but many elements;
+  // a triangle raycast resolves the exact wall/slab/door under the cursor.
+  // Click-only — a per-frame triangle cast over a whole building would jank.
+  const RAYCASTER = new THREE.Raycaster();
 
   let mapEl;
   let map = null;
@@ -84,7 +89,13 @@
   // and folding the mercator offset into a CPU-side double-precision matrix
   // avoids the float32 jitter that placing geometry at raw mercator
   // coordinates causes at street-level zooms.
-  const modelLayer = {
+  // A fresh custom-layer object per add: MapLibre does NOT reliably re-accept the
+  // *same* custom-layer instance after setStyle({diff:false}) (the basemap/theme
+  // swap), so re-adding the one const object silently no-ops — which is why the
+  // 3D models vanished when switching to satellite. A new object each time (its
+  // methods still close over the component-scoped renderer/entries) re-adds
+  // cleanly on every style, raster included.
+  const makeModelLayer = () => ({
     id: 'ots-3d-models',
     type: 'custom',
     renderingMode: '3d',
@@ -109,7 +120,7 @@
       renderer?.dispose();
       renderer = null;
     },
-  };
+  });
 
   /** Model-local (y-up metres, normalised) → mercator placement matrix. */
   function mercMatrixFor(lonLat, meters) {
@@ -170,7 +181,13 @@
       // CityJSON/CityGML carry their own georeference — trust it over the WKT dot.
       const anchor = cached.userData.geo?.anchorLonLat ?? entry.anchor;
       if (!anchor) return;
-      const meters = realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
+      // A declared real-world size (ots:modelSizeMeters) wins over guessing from
+      // the model's own units — STL landmarks (Big Ben, Empire State) have
+      // arbitrary units, so without this they fall back to ~90 m and look tiny.
+      const meters =
+        el.size_meters && el.size_meters > 0
+          ? el.size_meters
+          : realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
       const box = new THREE.Box3().setFromObject(model);
       const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.62;
       const holder = new THREE.Group();
@@ -180,9 +197,11 @@
       entry.scene = buildEntryScene(holder);
       entry.meters = meters;
       entry.anchorUsed = anchor;
+      entry.isIfc = ref.format === 'ifc'; // multi-element model → eligible for x-ray
       entry.mercMatrix = mercMatrixFor(anchor, meters);
       themeMaterials();
       highlightModels();
+      updateWalkSuggest(); // a building may have loaded while already zoomed in
       map?.triggerRepaint();
     } catch {
       /* model failed to load — the vector dot remains */
@@ -199,20 +218,143 @@
     map?.triggerRepaint();
   }
 
+  /** GlobalId of an IFC mesh (or its nearest ancestor that owns one). */
+  function meshGuid(obj) {
+    for (let n = obj; n; n = n.parent) {
+      if (n.userData && n.userData.ifcGuid) return n.userData.ifcGuid;
+    }
+    return null;
+  }
+
+  const HL_COLOR = 0xff6a00; // vivid highlight for the selected element(s)
+
+  /** Stash a material's original render flags once, so any paint is reversible. */
+  function stashMat(m) {
+    if (m.userData.origOpacity === undefined) {
+      m.userData.origOpacity = m.opacity;
+      m.userData.origTransparent = m.transparent;
+      m.userData.origDepthWrite = m.depthWrite;
+      m.userData.origDepthTest = m.depthTest;
+    }
+  }
+
+  /**
+   * Paint a material for one of four states:
+   *  - `selected`     — glow (whole non-IFC model picked); normal depth.
+   *  - `selectedXray` — glow AND render ON TOP (depthTest off) so the picked IFC
+   *                     sub-element is always visible through the ghosted shell.
+   *  - `ghost`        — faint, see-through, doesn't occlude (x-ray of the rest).
+   *  - `normal`       — restore the stashed original flags.
+   */
+  function paintMat(m, state) {
+    if (!m) return;
+    stashMat(m);
+    const emis = 'emissive' in m;
+    if (state === 'selected' || state === 'selectedXray') {
+      if (emis) {
+        m.emissive.setHex(HL_COLOR);
+        m.emissiveIntensity = 0.55;
+      }
+      // A selected element is always SOLID, even if its IFC material was glassy /
+      // semi-transparent — otherwise the highlight reads as see-through.
+      m.opacity = 1;
+      m.transparent = false;
+      m.depthWrite = true;
+      m.depthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
+    } else if (state === 'ghost') {
+      if (emis) {
+        m.emissive.setHex(0x000000);
+        m.emissiveIntensity = 0;
+      }
+      m.transparent = true;
+      m.opacity = Math.min(m.userData.origOpacity, 0.16);
+      m.depthWrite = false; // don't occlude the selected element behind it
+      m.depthTest = m.userData.origDepthTest;
+    } else {
+      if (emis) {
+        m.emissive.setHex(0x000000);
+        m.emissiveIntensity = 0;
+      }
+      m.opacity = m.userData.origOpacity;
+      m.transparent = m.userData.origTransparent;
+      m.depthWrite = m.userData.origDepthWrite;
+      m.depthTest = m.userData.origDepthTest;
+    }
+  }
+
+  /** Does this model own a mesh for any of these GlobalIds? (cheap early-out) */
+  function modelHasGuid(e, guidSet) {
+    let found = false;
+    e.modelGroup?.traverse((n) => {
+      if (!found && n.isMesh && n.userData.ifcGuid && guidSet.has(n.userData.ifcGuid)) found = true;
+    });
+    return found;
+  }
+
+  // Children index (parent id → child elements) for subtree highlighting, so
+  // selecting a storey lights every wall/slab it contains. Rebuilt per elements.
+  let childrenByParent = new Map();
+  $: {
+    const m = new Map();
+    for (const el of elements) {
+      if (el.parent) {
+        const arr = m.get(el.parent);
+        if (arr) arr.push(el);
+        else m.set(el.parent, [el]);
+      }
+    }
+    childrenByParent = m;
+  }
+
+  /** GlobalIds of an element + all its BOT descendants (a container's subtree). */
+  function descendantGuidSet(id) {
+    const set = new Set();
+    const self = elements.find((e) => e.id === id);
+    if (self?.ifc_guid) set.add(self.ifc_guid);
+    const stack = [id];
+    const seen = new Set([id]);
+    while (stack.length) {
+      for (const k of childrenByParent.get(stack.pop()) || []) {
+        if (seen.has(k.id)) continue;
+        seen.add(k.id);
+        if (k.ifc_guid) set.add(k.ifc_guid);
+        stack.push(k.id);
+      }
+    }
+    return set;
+  }
+
   function highlightModels() {
+    // Light the selected element's meshes by GlobalId. For a spatial container
+    // (storey/building) that owns no mesh, light its whole subtree (every wall /
+    // slab it contains). For a model with no IFC guids, light it whole by id.
+    // Inside a multi-element IFC model, also x-ray: ghost everything that isn't
+    // selected so the picked element is visible through the obstructing walls.
+    const selGuids = selected ? descendantGuidSet(selected) : null;
+    const byGuid = selGuids && selGuids.size > 0;
     for (const [id, e] of entries) {
+      const xray = byGuid && e.isIfc && modelHasGuid(e, selGuids);
       e.modelGroup?.traverse((n) => {
-        if (n.isMesh && n.material && 'emissive' in n.material) {
-          n.material.emissive.setHex(id === selected ? 0xe8590c : 0x000000);
-          n.material.emissiveIntensity = id === selected ? 0.45 : 0;
-        }
+        if (!n.isMesh || !n.material) return;
+        const on = byGuid ? selGuids.has(n.userData.ifcGuid) : id === selected;
+        const state = on ? (xray ? 'selectedXray' : 'selected') : xray ? 'ghost' : 'normal';
+        // Draw the picked element last so it sits on top of the ghosted shell.
+        n.renderOrder = state === 'selectedXray' ? 12 : 0;
+        const mats = Array.isArray(n.material) ? n.material : [n.material];
+        for (const m of mats) paintMat(m, state);
       });
     }
     map?.triggerRepaint();
   }
 
-  /** Screen point → model id, by casting a ray against each model's box. */
-  function raycastModels(point) {
+  /**
+   * Screen point → `{ id, guid }` by casting a ray against each model. A cheap
+   * box test rejects misses and orders entries; when `precise` (a click), a
+   * triangle raycast against the actual meshes resolves the exact IFC
+   * sub-element (GlobalId) under the cursor. `guid` is null for single-element
+   * models or when the ray grazes the box but misses every triangle.
+   */
+  function raycastModels(point, precise = false) {
     if (!lastProj || !map) return null;
     const canvas = map.getCanvas();
     const w = canvas.clientWidth || 1;
@@ -223,6 +365,7 @@
     let best = null;
     for (const [id, e] of entries) {
       if (!e.scene || !e.mercMatrix || !e.box) continue;
+      if (e.modelGroup && !e.modelGroup.visible) continue; // respect the layer toggle
       const fwd = RAY_FWD.multiplyMatrices(proj, e.mercMatrix); // local → NDC
       if (Math.abs(fwd.determinant()) < 1e-20) continue;
       const inv = RAY_INV.copy(fwd).invert();
@@ -232,14 +375,29 @@
       if (!dir.lengthSq()) continue;
       RAY.origin.copy(a);
       RAY.direction.copy(dir).normalize();
-      if (RAY.intersectBox(e.box, RAY_HIT)) {
-        // Model-local distances are not comparable across entries (each local
-        // space has its own metres scale); compare NDC depth instead.
-        const d = RAY_HIT.applyMatrix4(fwd).z;
-        if (!best || d < best.d) best = { id, d };
+      if (!RAY.intersectBox(e.box, RAY_HIT)) continue;
+      // Model-local distances are not comparable across entries (each local
+      // space has its own metres scale); compare NDC depth instead.
+      const d = RAY_HIT.applyMatrix4(fwd).z;
+      let guid = null;
+      if (precise && e.modelGroup) {
+        e.scene.updateMatrixWorld(); // refresh world matrices if a frame hasn't since load
+        RAYCASTER.ray.origin.copy(RAY.origin);
+        RAYCASTER.ray.direction.copy(RAY.direction);
+        const hits = RAYCASTER.intersectObject(e.modelGroup, true);
+        // Take the nearest hit that actually owns a GlobalId — IFC openings and
+        // other non-rooted meshes carry none and would otherwise swallow the pick.
+        for (const hit of hits) {
+          const g = meshGuid(hit.object);
+          if (g) {
+            guid = g;
+            break;
+          }
+        }
       }
+      if (!best || d < best.d) best = { id, guid, d };
     }
-    return best?.id ?? null;
+    return best ? { id: best.id, guid: best.guid } : null;
   }
 
   // ── Vector overlays (re-added after every style swap) ──────────────────────
@@ -296,7 +454,7 @@
         } });
     }
     add3dBuildings(map, dark);
-    if (!map.getLayer('ots-3d-models')) map.addLayer(modelLayer);
+    if (!map.getLayer('ots-3d-models')) map.addLayer(makeModelLayer());
     applySelectedPaint();
     applyLayerVisibility();
     suppressBasemapBuildingsUnderModels();
@@ -311,39 +469,52 @@
   let suppressedIds = new Set();
   function suppressBasemapBuildingsUnderModels() {
     if (!map || !map.getLayer(BUILDINGS_LAYER_ID)) return;
-    let changed = false;
     for (const e of entries.values()) {
       const anchor = e.anchorUsed ?? e.anchor;
-      if (!anchor || !e.modelGroup) continue;
-      let feats = [];
+      // Skip hidden models (3D-models layer toggled off) and unbuilt entries.
+      if (!anchor || !e.modelGroup || e.modelGroup.visible === false || !e.box) continue;
+      e.suppressed ??= new Set();
       try {
         const c = map.project({ lng: anchor[0], lat: anchor[1] });
-        // Query the model's whole FOOTPRINT, not just the anchor pixel — a tall
-        // model can poke through neighbouring extrusion footprints too. Radius =
-        // half the model's real size, converted to screen pixels at this zoom.
         const mpp =
           (156543.03392 * Math.cos((anchor[1] * Math.PI) / 180)) / Math.pow(2, map.getZoom());
-        const r = Math.min(140, Math.max(4, (e.meters || 50) / 2 / Math.max(mpp, 1e-6)));
-        feats = map.queryRenderedFeatures(
-          [
-            [c.x - r, c.y - r],
-            [c.x + r, c.y + r],
-          ],
+        // Radius = the model's real FOOTPRINT (horizontal extent), NOT its height.
+        // The old height-based radius made a 96 m tower (Big Ben) blank out a 96 m
+        // circle of neighbouring blocks that never came back; we only want to hide
+        // the OSM block(s) the model actually stands on. `box` is normalised units,
+        // so scale the horizontal extent by meters/largest-dim to get real metres.
+        const sx = e.box.max.x - e.box.min.x;
+        const sy = e.box.max.y - e.box.min.y;
+        const sz = e.box.max.z - e.box.min.z;
+        const maxDim = Math.max(sx, sy, sz) || 1;
+        const footprintM = (e.meters || 30) * (Math.max(sx, sz) / maxDim);
+        const r = Math.min(70, Math.max(3, footprintM / 2 / Math.max(mpp, 1e-6)));
+        const feats = map.queryRenderedFeatures(
+          [[c.x - r, c.y - r], [c.x + r, c.y + r]],
           { layers: [BUILDINGS_LAYER_ID] }
         );
+        for (const f of feats) if (f.id !== undefined) e.suppressed.add(f.id);
       } catch {
         continue;
       }
-      for (const f of feats) {
-        if (f.id !== undefined && !suppressedIds.has(f.id)) {
-          suppressedIds.add(f.id);
-          changed = true;
-        }
+    }
+    // The active filter is the union over CURRENTLY VISIBLE models — so toggling
+    // the 3D-models layer off (or a model that unloaded) brings its basemap blocks
+    // back, while a block under a standing model stays hidden. Each model keeps
+    // its own accumulated id set, so there is no query→hide→re-query flicker.
+    const next = new Set();
+    for (const e of entries.values()) {
+      if (e.modelGroup && e.modelGroup.visible !== false && e.suppressed) {
+        for (const id of e.suppressed) next.add(id);
       }
     }
-    if (changed) {
-      map.setFilter(BUILDINGS_LAYER_ID, ['!', ['in', ['id'], ['literal', [...suppressedIds]]]]);
-    }
+    const same = next.size === suppressedIds.size && [...next].every((id) => suppressedIds.has(id));
+    if (same) return;
+    suppressedIds = next;
+    map.setFilter(
+      BUILDINGS_LAYER_ID,
+      next.size ? ['!', ['in', ['id'], ['literal', [...next]]]] : null
+    );
   }
 
   function setLayerVis(id, on) {
@@ -367,6 +538,9 @@
   function toggleLayer(key) {
     layersOn = { ...layersOn, [key]: !layersOn[key] };
     applyLayerVisibility();
+    // Toggling models on/off changes which basemap blocks should be hidden, but
+    // doesn't move the map (no 'idle'), so re-evaluate the suppression now.
+    if (key === 'models' || key === 'osm3d') suppressBasemapBuildingsUnderModels();
   }
 
   function applySelectedPaint() {
@@ -399,7 +573,13 @@
       const anchor = modelAnchor(el);
       const entry = { anchor, anchorUsed: null, scene: null, modelGroup: null, box: null, mercMatrix: null };
       entries.set(el.id, entry);
-      if (anchor || modelRefOf(el)) attachModel(entry, el);
+      // Load a model only when it can actually be placed: it has an anchor, or
+      // it self-georeferences (CityJSON/CityGML). Anchorless IFC *element* refs
+      // (a `#GlobalId` fragment with no WKT) would just parse the whole building
+      // and bail — the anchored Site already stands it on the map.
+      const ref = modelRefOf(el);
+      const selfPlaces = ref && (ref.format === 'cityjson' || ref.format === 'citygml');
+      if (anchor || selfPlaces) attachModel(entry, el);
     }
     ensureOverlays();
     if (!fitted) {
@@ -417,9 +597,18 @@
   /** Pan/fly to an element (used when selecting from the list). */
   export function focusElement(id) {
     if (!map) return;
-    const el = elements.find((e) => e.id === id);
+    let el = elements.find((e) => e.id === id);
     if (!el) return;
-    const entry = entries.get(id);
+    // An element with no geometry of its own (an IFC sub-element — a wall, a
+    // door) flies to its nearest located ancestor (the building's Site anchor).
+    // Its own mesh still lights up, driven by `selected`.
+    const seen = new Set();
+    while (el && !el.wkt4326 && !entries.get(el.id)?.anchorUsed && el.parent && !seen.has(el.id)) {
+      seen.add(el.id);
+      el = elements.find((e) => e.id === el.parent) || null;
+    }
+    if (!el) return;
+    const entry = entries.get(el.id);
     const f = toMapFeature(el);
     if (f && f.kind !== 'point') {
       const b = featureBounds([f]);
@@ -437,14 +626,47 @@
     }
   }
 
+  // ── "Walk through this building" suggestion ─────────────────────────────────
+  // When the user is zoomed in close on an IFC building, tell the parent which
+  // one, so it can offer a first-person walkthrough of that model.
+  let walkSuggestId = null;
+  function updateWalkSuggest() {
+    if (!map) return;
+    let suggest = null;
+    if (map.getZoom() >= 18.2) {
+      const c = map.getCenter();
+      const bounds = map.getBounds();
+      let best = null;
+      for (const [id, e] of entries) {
+        if (!e.isIfc || !e.modelGroup || e.modelGroup.visible === false) continue;
+        const a = e.anchorUsed ?? e.anchor;
+        if (!a || !bounds.contains(a)) continue;
+        const dx = a[0] - c.lng;
+        const dy = a[1] - c.lat;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { id, d };
+      }
+      if (best) {
+        const el = elements.find((x) => x.id === best.id);
+        suggest = { id: best.id, label: el?.label || best.id.split(/[/#]/).pop() };
+      }
+    }
+    if ((suggest?.id || null) !== walkSuggestId) {
+      walkSuggestId = suggest?.id || null;
+      dispatch('walksuggest', suggest);
+    }
+  }
+
   // ── Interaction ─────────────────────────────────────────────────────────────
   const HIT_LAYERS = ['ots-point', 'ots-line', 'ots-fill'];
   const hitLayers = () => HIT_LAYERS.filter((l) => map.getLayer(l));
 
   function onClick(e) {
-    const modelId = raycastModels(e.point);
-    if (modelId) {
-      dispatch('select', { id: modelId });
+    const pick = raycastModels(e.point, true);
+    if (pick) {
+      // guid → DatasetViewer resolves it to the specific IFC sub-element and
+      // opens that element's window; id is the whole-model fallback.
+      dispatch('select', { id: pick.id, guid: pick.guid });
       return;
     }
     const pad = 6;
@@ -453,13 +675,22 @@
     if (fs.length) dispatch('select', { id: fs[0].properties.id });
   }
 
+  let lastHoverTs = 0;
   function onMouseMove(e) {
     if (!map) return;
     let label = null;
-    const modelId = raycastModels(e.point);
-    if (modelId) {
-      const el = elements.find((x) => x.id === modelId);
-      label = el?.label || modelId.split(/[/#]/).pop();
+    // Precise (triangle) pick on hover, throttled, so the tooltip names the exact
+    // wall/slab/door under the cursor. The cheap box test rejects off-model hovers
+    // first, so the triangle cast only runs while actually over a building.
+    const now = (typeof performance !== 'undefined' ? performance.now() : 0);
+    const precise = now - lastHoverTs > 80;
+    if (precise) lastHoverTs = now;
+    const pick = raycastModels(e.point, precise);
+    if (pick) {
+      const el =
+        (pick.guid && elements.find((x) => x.ifc_guid === pick.guid)) ||
+        elements.find((x) => x.id === pick.id);
+      label = el?.label || (pick.guid || pick.id).split(/[/#]/).pop();
     } else {
       const pad = 4;
       const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
@@ -498,7 +729,8 @@
       attributionControl: extraAttribution
         ? { compact: true, customAttribution: extraAttribution }
         : { compact: true },
-      maxPitch: 70,
+      maxPitch: 80, // low angle for inspecting building facades
+      maxZoom: 23.5, // zoom right in on individual walls/beams (basemap over-zooms)
     });
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-left');
@@ -509,6 +741,7 @@
       themeMaterials();
     });
     map.on('idle', suppressBasemapBuildingsUnderModels);
+    map.on('moveend', updateWalkSuggest);
     map.on('click', onClick);
     map.on('mousemove', onMouseMove);
     map.on('mouseout', () => {

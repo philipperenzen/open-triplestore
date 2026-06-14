@@ -19,6 +19,9 @@ export interface ViewerElement {
   wkt4326?: string | null;
   /** Source up-axis of the element's 3D model(s), from `ots:modelUpAxis`. */
   up_axis?: string | null;
+  /** Real-world largest extent (m) from `ots:modelSizeMeters` — scales unit-less
+   *  STL landmarks to true size on the map instead of guessing. */
+  size_meters?: number | null;
 }
 
 export type LatLng = [number, number];

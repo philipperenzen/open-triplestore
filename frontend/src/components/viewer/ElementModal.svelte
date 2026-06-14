@@ -43,6 +43,33 @@
   let error = '';
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
+  // The Structure tab is only useful when there's containment to show — a parent
+  // ("part of") or sub-elements. Hide it for a standalone element with neither.
+  $: hasStructure = (children.length > 0 || !!element?.parent);
+  // Don't strand the user on a now-hidden Structure tab (element switch).
+  $: if (tab === 'structure' && !hasStructure) tab = 'properties';
+  // GlobalIds of all descendant leaf elements (BFS over the BOT parent links), so
+  // a spatial container (storey / building / space) — which owns no geometry of
+  // its own — can isolate its whole subtree in the IFC loader instead of falling
+  // back to the entire building. Empty for a leaf element (it has no children),
+  // so leaf picks keep isolating their single atom via the URL #GlobalId.
+  $: descendantGuids = (() => {
+    if (!element) return [];
+    const out = [];
+    const seen = new Set([element.id]);
+    const stack = [element.id];
+    while (stack.length) {
+      const id = stack.pop();
+      for (const e of elements) {
+        if (e.parent === id && !seen.has(e.id)) {
+          seen.add(e.id);
+          if (e.ifc_guid) out.push(e.ifc_guid);
+          stack.push(e.id);
+        }
+      }
+    }
+    return out;
+  })();
   // All linked 3D representations of this element (glTF / CityJSON / STL /
   // IFC …). The user can switch between them in the 3D tab; the preferred
   // format is the default.
@@ -154,10 +181,12 @@
       <button class:active={tab === 'properties'} on:click={() => (tab = 'properties')}>
         {$i18nT('viewer.properties')}
       </button>
-      <button class:active={tab === 'structure'} on:click={() => (tab = 'structure')}>
-        {$i18nT('viewer.structure')}
-        {#if children.length}<span class="count">{children.length}</span>{/if}
-      </button>
+      {#if hasStructure}
+        <button class:active={tab === 'structure'} on:click={() => (tab = 'structure')}>
+          {$i18nT('viewer.structure')}
+          {#if children.length}<span class="count">{children.length}</span>{/if}
+        </button>
+      {/if}
       {#if modelRef}
         <button class:active={tab === '3d'} on:click={() => (tab = '3d')}>
           {$i18nT('viewer.model3d')}
@@ -167,7 +196,7 @@
       {#if mapTargetId}
         <!-- span wrapper: `.tabs > button` styles direct children as tabs -->
         <span class="map-action">
-          <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: mapTargetId })}>
+          <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: element.id })}>
             <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
           </button>
         </span>
@@ -213,6 +242,14 @@
           </table>
         {/if}
       {:else if tab === 'structure'}
+        <!-- The containment context (what this is "part of") leads, so you see
+             where you are before drilling down into the contained parts. -->
+        {#if element.parent}
+          <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
+            ↑ {$i18nT('viewer.parent')}:
+            {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
+          </button>
+        {/if}
         {#if children.length === 0}
           <p class="hint">{$i18nT('viewer.noChildren')}</p>
         {:else}
@@ -231,12 +268,6 @@
               </li>
             {/each}
           </ul>
-        {/if}
-        {#if element.parent}
-          <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
-            ↑ {$i18nT('viewer.parent')}:
-            {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
-          </button>
         {/if}
       {:else if tab === '3d' && modelRef}
         {#if lite}
@@ -259,7 +290,7 @@
               </div>
             {/if}
             <Model3D
-              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis }]}
+              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis, guids: modelRef.format === 'ifc' ? descendantGuids : undefined }]}
               on:select={(e) => {
                 // Picking an IFC mesh selects that atom (beam, slab, …): resolve
                 // its GlobalId to the feed element and open that panel.

@@ -951,3 +951,15 @@ export function detectGraphRolesFromContent(
 
   return roles;
 }
+
+// ── Map-view gating for the result explorers ───────────────────────────────────
+// Re-exported from the viewer module so the SPARQL editor / Triple Browser can
+// import the scope-aware Map-tab helpers from rdf-utils alongside the rest of the
+// result-shaping helpers. The implementation lives in lib/viewer/results.ts
+// (kept there so its Leaflet/three-free geometry deps stay viewer-local).
+export {
+  detectGeoBindings,
+  resultsToViewerElements,
+  triplesToResults,
+} from './viewer/results';
+export type { SelectResults } from './viewer/results';

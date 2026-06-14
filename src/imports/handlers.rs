@@ -313,6 +313,14 @@ pub async fn bulk_import(
     let (ifc_files, raw_files): (Vec<_>, Vec<_>) = raw_files
         .into_iter()
         .partition(|(filename, content_type, _)| super::ifc::is_ifc_file(filename, content_type));
+    // CityJSON (3D BAG) files are geometry-bearing: converted to RDF (BOT + WKT-Z
+    // + ots:cityjsonGeometryLiteral) rather than parsed as RDF. `.city.json`/
+    // `.cityjson` only — a plain `.json` stays on the RDF (JSON-LD) path.
+    let (cityjson_files, raw_files): (Vec<_>, Vec<_>) = raw_files
+        .into_iter()
+        .partition(|(filename, content_type, _)| {
+            super::cityjson::is_cityjson_file(filename, content_type)
+        });
 
     let inputs: Vec<InputFile> = raw_files
         .into_iter()
@@ -540,6 +548,77 @@ pub async fn bulk_import(
                     error: None,
                     graph_iris: graphs,
                     quad_count: Some(outcome.stats.bot_triples + outcome.stats.ifcowl_triples),
+                });
+            }
+            Err(e) => {
+                result.failed_count += 1;
+                result.file_results.push(crate::imports::bulk::FileResult {
+                    filename,
+                    status: "error",
+                    error: Some(e),
+                    graph_iris: Vec::new(),
+                    quad_count: None,
+                });
+            }
+        }
+    }
+
+    // ── CityJSON files: stored as assets + converted to RDF (spec §4.1) ───────
+    for (filename, _content_type, bytes) in cityjson_files {
+        let Some(ds_id) = meta.dataset_id.as_deref() else {
+            result.failed_count += 1;
+            result.file_results.push(crate::imports::bulk::FileResult {
+                filename,
+                status: "error",
+                error: Some("CityJSON import requires a dataset_id".to_string()),
+                graph_iris: Vec::new(),
+                quad_count: None,
+            });
+            continue;
+        };
+        let target = meta
+            .targets
+            .get(&filename)
+            .cloned()
+            .or_else(|| meta.default_target_graph.clone());
+        // Same write-scope rule as the IFC/RDF paths.
+        if !authz_is_admin {
+            if let Some(t) = target.as_deref() {
+                let namespace =
+                    format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), ds_id);
+                let registered = state.auth_db.list_dataset_graphs(ds_id).unwrap_or_default();
+                let owned_by_other = state
+                    .auth_db
+                    .graph_has_other_dataset_refs(t, ds_id)
+                    .unwrap_or(true);
+                let in_scope = registered.iter().any(|g| g == t) || t.starts_with(&namespace);
+                if owned_by_other || !in_scope {
+                    return Err(AppError::Forbidden(format!(
+                        "Target graph <{t}> is outside dataset '{ds_id}'"
+                    )));
+                }
+            }
+        }
+        match crate::imports::cityjson::import_cityjson_bytes(
+            &state,
+            ds_id,
+            &user.user_id,
+            &filename,
+            bytes,
+            target,
+            false,
+            None,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                result.success_count += 1;
+                result.file_results.push(crate::imports::bulk::FileResult {
+                    filename,
+                    status: "ok",
+                    error: None,
+                    graph_iris: vec![outcome.graph.clone()],
+                    quad_count: Some(outcome.stats.triples),
                 });
             }
             Err(e) => {

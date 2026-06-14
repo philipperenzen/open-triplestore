@@ -1,0 +1,147 @@
+# SOSA (Sensor, Observation, Sample, and Actuator) — the lightweight core of the
+# W3C/OGC SSN ontology, used to describe sensors, the observations they make, the
+# features and properties they observe, the procedures used, sampling, and
+# actuation. Hand-authored term subset bundled so SOSA terms in the demo data
+# render with full definitions.
+# Source: https://www.w3.org/TR/vocab-ssn/  (ns http://www.w3.org/ns/sosa/)
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<http://www.w3.org/ns/sosa/> a owl:Ontology ;
+  rdfs:label "Sensor, Observation, Sample, and Actuator (SOSA)"@en ;
+  rdfs:comment "The lightweight core of the W3C/OGC SSN ontology for describing sensors, observations, samples and actuators."@en ;
+  owl:versionInfo "2017-10-19" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+sosa:Sensor a owl:Class ;
+  rdfs:label "Sensor"@en ;
+  rdfs:comment "A device, agent or software that detects or measures a property and produces an observation; it implements a procedure."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Observation a owl:Class ;
+  rdfs:label "Observation"@en ;
+  rdfs:comment "An act of carrying out a procedure to estimate or calculate a value of a property of a feature of interest."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:FeatureOfInterest a owl:Class ;
+  rdfs:label "Feature of Interest"@en ;
+  rdfs:comment "The thing whose property is being estimated or calculated in the course of an observation, or whose property is being manipulated by an actuator."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:ObservableProperty a owl:Class ;
+  rdfs:label "Observable Property"@en ;
+  rdfs:comment "An observable quality (property, characteristic) of a feature of interest, such as temperature or height."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Result a owl:Class ;
+  rdfs:label "Result"@en ;
+  rdfs:comment "The result of an observation, actuation or sampling — an estimate or calculated value of a property of a feature of interest."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Platform a owl:Class ;
+  rdfs:label "Platform"@en ;
+  rdfs:comment "An entity that hosts other entities, particularly sensors, actuators, samplers and other platforms."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Actuator a owl:Class ;
+  rdfs:label "Actuator"@en ;
+  rdfs:comment "A device that is used by, or implements, a procedure that changes the state of the world."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Sample a owl:Class ;
+  rdfs:label "Sample"@en ;
+  rdfs:comment "A feature on which observations may be made that is intended to be representative of a larger feature of interest."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Sampler a owl:Class ;
+  rdfs:label "Sampler"@en ;
+  rdfs:comment "A device or entity that is used to retrieve, prepare or provide one or more samples."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:Sampling a owl:Class ;
+  rdfs:label "Sampling"@en ;
+  rdfs:comment "An act of creating or transforming one or more samples, carried out by a sampler implementing a sampling procedure."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+sosa:isHostedBy a owl:ObjectProperty ;
+  rdfs:label "is hosted by"@en ;
+  rdfs:comment "Relates a sensor, actuator or sampler to the platform that hosts it."@en ;
+  rdfs:range sosa:Platform ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:hosts a owl:ObjectProperty ;
+  rdfs:label "hosts"@en ;
+  rdfs:comment "Relates a platform to a sensor, actuator, sampler or platform that it hosts."@en ;
+  rdfs:domain sosa:Platform ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:madeBySensor a owl:ObjectProperty ;
+  rdfs:label "made by sensor"@en ;
+  rdfs:comment "Relates an observation to the sensor that made it."@en ;
+  rdfs:domain sosa:Observation ;
+  rdfs:range sosa:Sensor ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:madeObservation a owl:ObjectProperty ;
+  rdfs:label "made observation"@en ;
+  rdfs:comment "Relates a sensor to an observation it has made."@en ;
+  rdfs:domain sosa:Sensor ;
+  rdfs:range sosa:Observation ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:observes a owl:ObjectProperty ;
+  rdfs:label "observes"@en ;
+  rdfs:comment "Relates a sensor to an observable property that it is capable of sensing."@en ;
+  rdfs:domain sosa:Sensor ;
+  rdfs:range sosa:ObservableProperty ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:observedProperty a owl:ObjectProperty ;
+  rdfs:label "observed property"@en ;
+  rdfs:comment "Relates an observation to the observable property that was estimated or calculated."@en ;
+  rdfs:domain sosa:Observation ;
+  rdfs:range sosa:ObservableProperty ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:hasFeatureOfInterest a owl:ObjectProperty ;
+  rdfs:label "has feature of interest"@en ;
+  rdfs:comment "Relates an observation, actuation or sampling to the feature of interest it is about."@en ;
+  rdfs:range sosa:FeatureOfInterest ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:isFeatureOfInterestOf a owl:ObjectProperty ;
+  rdfs:label "is feature of interest of"@en ;
+  rdfs:comment "Relates a feature of interest to the observation, actuation or sampling that is about it."@en ;
+  rdfs:domain sosa:FeatureOfInterest ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:phenomenonTime a owl:ObjectProperty ;
+  rdfs:label "phenomenon time"@en ;
+  rdfs:comment "The time the result of an observation, actuation or sampling applies to the feature of interest."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:resultTime a owl:DatatypeProperty ;
+  rdfs:label "result time"@en ;
+  rdfs:comment "The instant of time when an observation, actuation or sampling activity was completed."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:hasResult a owl:ObjectProperty ;
+  rdfs:label "has result"@en ;
+  rdfs:comment "Relates an observation, actuation or sampling to a result, which contains a value representing the value associated with the observed property."@en ;
+  rdfs:range sosa:Result ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:hasSimpleResult a owl:DatatypeProperty ;
+  rdfs:label "has simple result"@en ;
+  rdfs:comment "The simple value of an observation, actuation or sampling, expressed directly as a literal."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
+
+sosa:usedProcedure a owl:ObjectProperty ;
+  rdfs:label "used procedure"@en ;
+  rdfs:comment "Relates an observation, actuation or sampling to the procedure (method or workflow) that was used to carry it out."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/sosa/> .
