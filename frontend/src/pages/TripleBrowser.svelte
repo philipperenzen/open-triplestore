@@ -3,9 +3,10 @@
   import { delayedLoading } from '../lib/delayedLoading';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
-  import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
+  import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, resultsToViewerElements, triplesToResults } from '../lib/rdf-utils.js';
   import DataTable from '../components/DataTable.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
+  import ViewerMap from '../components/viewer/ViewerMap.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import FacetRail from '../components/browse/FacetRail.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
@@ -14,7 +15,7 @@
     Download, Copy, ChevronLeft, ChevronRight, Search, X,
     Network, Table2, Maximize2, Share2, Unlink, ExternalLink, Plus,
     FileText, Image, Filter, LayoutList, Building2, Database, History,
-    Sparkles, SlidersHorizontal, Code2, HelpCircle,
+    Sparkles, SlidersHorizontal, Code2, HelpCircle, Map as MapIcon,
   } from 'lucide-svelte';
   import { slide } from 'svelte/transition';
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
@@ -25,7 +26,7 @@
   import Combobox from '../components/Combobox.svelte';
 
   // ─── View mode ────────────────────────────────────────────────────────────
-  let viewMode = 'table'; // 'table' | 'graph'
+  let viewMode = 'table'; // 'table' | 'graph' | 'map'
   function switchView(mode) {
     viewMode = mode;
     syncViewToUrl(mode);
@@ -33,6 +34,16 @@
       fetchGraphData();
     }
   }
+
+  // ─── Map view gating ──────────────────────────────────────────────────────
+  // The Map tab is offered ONLY when the current table page carries mappable
+  // (WGS84) geometry — so browsing non-spatial data hides it. Triples are
+  // adapted to the SELECT-results shape the detection/conversion helpers expect.
+  $: mapResults = triplesToResults(triples);
+  $: canMap = detectGeoBindings(mapResults);
+  $: mapElements = viewMode === 'map' && canMap ? resultsToViewerElements(mapResults) : [];
+  // Never strand the user on the Map tab once the new page loses its geometry.
+  $: if (viewMode === 'map' && !canMap) switchView('table');
 
   function syncViewToUrl(mode) {
     if (typeof window === 'undefined') return;
@@ -1345,6 +1356,11 @@
         <button class="vtoggle-btn" class:vtoggle-active={viewMode === 'graph'}
           on:click={() => switchView('graph')} title={$i18nT('pages.tripleBrowser.graphView')}
         ><Network size={14} /><span class="vtoggle-label">{$i18nT('pages.tripleBrowser.graph')}</span></button>
+        {#if canMap}
+          <button class="vtoggle-btn" class:vtoggle-active={viewMode === 'map'}
+            on:click={() => switchView('map')} title={$i18nT('pages.tripleBrowser.mapView')}
+          ><MapIcon size={14} /><span class="vtoggle-label">{$i18nT('pages.tripleBrowser.mapLabel')}</span></button>
+        {/if}
       </div>
 
       <span class="count-badge">
@@ -1643,7 +1659,7 @@
       {/if}
 
       <!-- Facet rail (left) + the active view (right) -->
-      <div class="browser-body" class:body-graph={viewMode === 'graph'}>
+      <div class="browser-body" class:body-graph={viewMode === 'graph'} class:body-map={viewMode === 'map'}>
         <FacetRail
           facets={facets}
           loading={facetsLoading}
@@ -1777,6 +1793,21 @@
           <div class="edge-card">
             <button class="edge-card-x" on:click={() => (browseEdgePredicate = null)} title={$i18nT('system.close')} aria-label={$i18nT('system.close')}>✕</button>
             <TermDefinitionCard iri={browseEdgePredicate} variant="rich" />
+          </div>
+        {/if}
+      </div>
+
+    <!-- ─── Map view ─────────────────────────────────────────────────────────── -->
+    {:else if viewMode === 'map'}
+      <div class="map-area">
+        {#if mapElements.length > 0}
+          <ViewerMap elements={mapElements} height="100%"
+            on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && !e.detail.id.startsWith('_:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+        {:else}
+          <div class="graph-empty">
+            <MapIcon size={52} strokeWidth={1} />
+            <p class="graph-empty-title">{$i18nT('pages.tripleBrowser.noMappable')}</p>
+            <p class="graph-empty-sub">{$i18nT('pages.tripleBrowser.noMappableSub')}</p>
           </div>
         {/if}
       </div>
@@ -2008,6 +2039,9 @@
      graph grows to take the rest of the space (rather than a fixed 62vh box).
      Reset the table-mode max-height so the graph can grow taller than 72vh. */
   .browser-body.body-graph { height: calc(100vh - 235px); min-height: 460px; max-height: none; }
+  /* Map view: same viewport-bounded layout as the graph so the ViewerMap fills
+     the remaining height (it sizes itself to 100% of .map-area). */
+  .browser-body.body-map { height: calc(100vh - 235px); min-height: 460px; max-height: none; }
   .view-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
   /* ─── View toggle ────────────────────────────────────────────────────────── */
@@ -2323,6 +2357,10 @@
   .graph-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; }
   /* Inside the viewport-bounded body the graph fills the remaining height. */
   .body-graph .graph-area { height: auto; flex: 1 1 auto; min-height: 0; }
+  /* Map view shares the graph's framing: a fixed box by default, growing to
+     fill the viewport-bounded body when the Map tab is active. */
+  .map-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; display: flex; }
+  .body-map .map-area { height: auto; flex: 1 1 auto; min-height: 0; }
   .graph-hint {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
     background: rgba(15, 23, 42, 0.92); color: #f1f5f9; font-size: 0.78rem;
