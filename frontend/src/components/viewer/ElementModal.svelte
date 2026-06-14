@@ -43,6 +43,11 @@
   let error = '';
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
+  // The Structure tab is only useful when there's containment to show — a parent
+  // ("part of") or sub-elements. Hide it for a standalone element with neither.
+  $: hasStructure = (children.length > 0 || !!element?.parent);
+  // Don't strand the user on a now-hidden Structure tab (element switch).
+  $: if (tab === 'structure' && !hasStructure) tab = 'properties';
   // GlobalIds of all descendant leaf elements (BFS over the BOT parent links), so
   // a spatial container (storey / building / space) — which owns no geometry of
   // its own — can isolate its whole subtree in the IFC loader instead of falling
@@ -176,10 +181,12 @@
       <button class:active={tab === 'properties'} on:click={() => (tab = 'properties')}>
         {$i18nT('viewer.properties')}
       </button>
-      <button class:active={tab === 'structure'} on:click={() => (tab = 'structure')}>
-        {$i18nT('viewer.structure')}
-        {#if children.length}<span class="count">{children.length}</span>{/if}
-      </button>
+      {#if hasStructure}
+        <button class:active={tab === 'structure'} on:click={() => (tab = 'structure')}>
+          {$i18nT('viewer.structure')}
+          {#if children.length}<span class="count">{children.length}</span>{/if}
+        </button>
+      {/if}
       {#if modelRef}
         <button class:active={tab === '3d'} on:click={() => (tab = '3d')}>
           {$i18nT('viewer.model3d')}
