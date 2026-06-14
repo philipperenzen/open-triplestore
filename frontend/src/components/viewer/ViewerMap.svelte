@@ -201,6 +201,7 @@
       entry.mercMatrix = mercMatrixFor(anchor, meters);
       themeMaterials();
       highlightModels();
+      updateWalkSuggest(); // a building may have loaded while already zoomed in
       map?.triggerRepaint();
     } catch {
       /* model failed to load — the vector dot remains */
@@ -252,11 +253,13 @@
     if (state === 'selected' || state === 'selectedXray') {
       if (emis) {
         m.emissive.setHex(HL_COLOR);
-        m.emissiveIntensity = 0.95;
+        m.emissiveIntensity = 0.55;
       }
-      m.opacity = m.userData.origOpacity;
-      m.transparent = m.userData.origTransparent;
-      m.depthWrite = m.userData.origDepthWrite;
+      // A selected element is always SOLID, even if its IFC material was glassy /
+      // semi-transparent — otherwise the highlight reads as see-through.
+      m.opacity = 1;
+      m.transparent = false;
+      m.depthWrite = true;
       m.depthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
     } else if (state === 'ghost') {
       if (emis) {
@@ -623,6 +626,37 @@
     }
   }
 
+  // ── "Walk through this building" suggestion ─────────────────────────────────
+  // When the user is zoomed in close on an IFC building, tell the parent which
+  // one, so it can offer a first-person walkthrough of that model.
+  let walkSuggestId = null;
+  function updateWalkSuggest() {
+    if (!map) return;
+    let suggest = null;
+    if (map.getZoom() >= 18.2) {
+      const c = map.getCenter();
+      const bounds = map.getBounds();
+      let best = null;
+      for (const [id, e] of entries) {
+        if (!e.isIfc || !e.modelGroup || e.modelGroup.visible === false) continue;
+        const a = e.anchorUsed ?? e.anchor;
+        if (!a || !bounds.contains(a)) continue;
+        const dx = a[0] - c.lng;
+        const dy = a[1] - c.lat;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { id, d };
+      }
+      if (best) {
+        const el = elements.find((x) => x.id === best.id);
+        suggest = { id: best.id, label: el?.label || best.id.split(/[/#]/).pop() };
+      }
+    }
+    if ((suggest?.id || null) !== walkSuggestId) {
+      walkSuggestId = suggest?.id || null;
+      dispatch('walksuggest', suggest);
+    }
+  }
+
   // ── Interaction ─────────────────────────────────────────────────────────────
   const HIT_LAYERS = ['ots-point', 'ots-line', 'ots-fill'];
   const hitLayers = () => HIT_LAYERS.filter((l) => map.getLayer(l));
@@ -707,6 +741,7 @@
       themeMaterials();
     });
     map.on('idle', suppressBasemapBuildingsUnderModels);
+    map.on('moveend', updateWalkSuggest);
     map.on('click', onClick);
     map.on('mousemove', onMouseMove);
     map.on('mouseout', () => {

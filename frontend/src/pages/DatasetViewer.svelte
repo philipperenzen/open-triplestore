@@ -9,13 +9,14 @@
   import { Link } from '../lib/router/index.js';
   import { getViewerFeed, listDatasetGraphs } from '../lib/api.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
-  import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown } from 'lucide-svelte';
+  import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown, Footprints } from 'lucide-svelte';
   import { modelRefOf } from '../lib/viewer/detect';
   import { modelRefs } from '../lib/viewer/geometry';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
   import Model3D from '../components/viewer/Model3D.svelte';
   import CesiumViewer from '../components/viewer/CesiumViewer.svelte';
   import ElementModal from '../components/viewer/ElementModal.svelte';
+  import Walkthrough from '../components/viewer/Walkthrough.svelte';
 
   export let id = '';
 
@@ -236,6 +237,30 @@
     if (elId) open(elId, { fly: false });
   }
 
+  // ── First-person walkthrough ────────────────────────────────────────────────
+  // ViewerMap suggests an IFC building to walk through once you're zoomed in on
+  // it; clicking the prompt opens the whole-building model in a first-person view.
+  let walkSuggest = null; // { id, label } | null
+  let walkthrough = null; // { url, format, upAxis, label } | null
+  function onWalkSuggest(e) {
+    walkSuggest = e.detail || null;
+  }
+  function openWalkthrough() {
+    const el = walkSuggest && elements.find((x) => x.id === walkSuggest.id);
+    const ref = el && modelRefOf(el);
+    if (!ref) return;
+    walkthrough = {
+      url: ref.url.split('#')[0], // the whole building, not one element fragment
+      format: ref.format,
+      upAxis: ref.upAxis,
+      label: walkSuggest.label,
+    };
+  }
+  function walkInspect(e) {
+    walkthrough = null; // leave the immersive view to show the full RDF panel
+    onMapSelect(e);
+  }
+
   load();
 </script>
 
@@ -406,8 +431,14 @@
             {selected}
             extraAttribution={mapAttribution}
             on:select={onMapSelect}
+            on:walksuggest={onWalkSuggest}
             height="100%"
           />
+          {#if walkSuggest && !walkthrough}
+            <button class="walk-suggest" on:click={openWalkthrough}>
+              <Footprints size={16} /> {$i18nT('viewer.walkThroughBuilding')}
+            </button>
+          {/if}
         {:else}
           <Model3D refs={fallbackRefs} {selected} on:select={onMapSelect} height="100%" />
         {/if}
@@ -453,6 +484,18 @@
   </div>
 {/if}
 
+{#if walkthrough}
+  <Walkthrough
+    url={walkthrough.url}
+    format={walkthrough.format}
+    upAxis={walkthrough.upAxis}
+    label={walkthrough.label}
+    {elements}
+    on:close={() => (walkthrough = null)}
+    on:inspect={walkInspect}
+  />
+{/if}
+
 <style>
   .explorer-page {
     display: flex;
@@ -493,6 +536,36 @@
     border-radius: var(--radius-lg, 12px);
     background: var(--bg-elevated, #fff);
     overflow: hidden;
+  }
+  .canvas {
+    position: relative; /* anchor the floating "walk through" prompt */
+  }
+  .walk-suggest {
+    position: absolute;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    z-index: 6;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 17px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--brand-600, #2563a8);
+    color: #fff;
+    font-size: 0.84rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 18px rgba(37, 99, 168, 0.45);
+    animation: walkPulse 2.6s ease-in-out infinite;
+  }
+  .walk-suggest:hover {
+    background: #e8590c;
+  }
+  @keyframes walkPulse {
+    0%, 100% { box-shadow: 0 4px 18px rgba(37, 99, 168, 0.45); }
+    50% { box-shadow: 0 6px 24px rgba(232, 89, 12, 0.55); }
   }
   .search {
     display: flex;
