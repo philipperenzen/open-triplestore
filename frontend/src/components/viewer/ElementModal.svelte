@@ -167,7 +167,7 @@
       {#if mapTargetId}
         <!-- span wrapper: `.tabs > button` styles direct children as tabs -->
         <span class="map-action">
-          <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: mapTargetId })}>
+          <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: element.id })}>
             <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
           </button>
         </span>

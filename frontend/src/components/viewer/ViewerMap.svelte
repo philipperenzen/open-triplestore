@@ -44,6 +44,11 @@
   const RAY_B = new THREE.Vector3();
   const RAY_HIT = new THREE.Vector3();
   const RAY = new THREE.Ray();
+  // Precise sub-element picking. A model whose meshes carry IFC GlobalIds (an
+  // IFC building standing on its Site anchor) is one entry but many elements;
+  // a triangle raycast resolves the exact wall/slab/door under the cursor.
+  // Click-only — a per-frame triangle cast over a whole building would jank.
+  const RAYCASTER = new THREE.Raycaster();
 
   let mapEl;
   let map = null;
@@ -205,20 +210,44 @@
     map?.triggerRepaint();
   }
 
+  /** GlobalId of an IFC mesh (or its nearest ancestor that owns one). */
+  function meshGuid(obj) {
+    for (let n = obj; n; n = n.parent) {
+      if (n.userData && n.userData.ifcGuid) return n.userData.ifcGuid;
+    }
+    return null;
+  }
+
+  function setEmissive(mat, on) {
+    if (!mat || !('emissive' in mat)) return;
+    mat.emissive.setHex(on ? 0xe8590c : 0x000000);
+    mat.emissiveIntensity = on ? 0.5 : 0;
+  }
+
   function highlightModels() {
+    // When the selected element is one element *inside* a multi-element model
+    // (an IFC building), light only its meshes — matched by GlobalId. Otherwise
+    // light the whole model when its own id is selected.
+    const selGuid = elements.find((x) => x.id === selected)?.ifc_guid || null;
     for (const [id, e] of entries) {
       e.modelGroup?.traverse((n) => {
-        if (n.isMesh && n.material && 'emissive' in n.material) {
-          n.material.emissive.setHex(id === selected ? 0xe8590c : 0x000000);
-          n.material.emissiveIntensity = id === selected ? 0.45 : 0;
-        }
+        if (!n.isMesh || !n.material) return;
+        const on = selGuid ? n.userData.ifcGuid === selGuid : id === selected;
+        if (Array.isArray(n.material)) n.material.forEach((m) => setEmissive(m, on));
+        else setEmissive(n.material, on);
       });
     }
     map?.triggerRepaint();
   }
 
-  /** Screen point → model id, by casting a ray against each model's box. */
-  function raycastModels(point) {
+  /**
+   * Screen point → `{ id, guid }` by casting a ray against each model. A cheap
+   * box test rejects misses and orders entries; when `precise` (a click), a
+   * triangle raycast against the actual meshes resolves the exact IFC
+   * sub-element (GlobalId) under the cursor. `guid` is null for single-element
+   * models or when the ray grazes the box but misses every triangle.
+   */
+  function raycastModels(point, precise = false) {
     if (!lastProj || !map) return null;
     const canvas = map.getCanvas();
     const w = canvas.clientWidth || 1;
@@ -229,6 +258,7 @@
     let best = null;
     for (const [id, e] of entries) {
       if (!e.scene || !e.mercMatrix || !e.box) continue;
+      if (e.modelGroup && !e.modelGroup.visible) continue; // respect the layer toggle
       const fwd = RAY_FWD.multiplyMatrices(proj, e.mercMatrix); // local → NDC
       if (Math.abs(fwd.determinant()) < 1e-20) continue;
       const inv = RAY_INV.copy(fwd).invert();
@@ -238,14 +268,21 @@
       if (!dir.lengthSq()) continue;
       RAY.origin.copy(a);
       RAY.direction.copy(dir).normalize();
-      if (RAY.intersectBox(e.box, RAY_HIT)) {
-        // Model-local distances are not comparable across entries (each local
-        // space has its own metres scale); compare NDC depth instead.
-        const d = RAY_HIT.applyMatrix4(fwd).z;
-        if (!best || d < best.d) best = { id, d };
+      if (!RAY.intersectBox(e.box, RAY_HIT)) continue;
+      // Model-local distances are not comparable across entries (each local
+      // space has its own metres scale); compare NDC depth instead.
+      const d = RAY_HIT.applyMatrix4(fwd).z;
+      let guid = null;
+      if (precise && e.modelGroup) {
+        e.scene.updateMatrixWorld(); // refresh world matrices if a frame hasn't since load
+        RAYCASTER.ray.origin.copy(RAY.origin);
+        RAYCASTER.ray.direction.copy(RAY.direction);
+        const hits = RAYCASTER.intersectObject(e.modelGroup, true);
+        if (hits.length) guid = meshGuid(hits[0].object);
       }
+      if (!best || d < best.d) best = { id, guid, d };
     }
-    return best?.id ?? null;
+    return best ? { id: best.id, guid: best.guid } : null;
   }
 
   // ── Vector overlays (re-added after every style swap) ──────────────────────
@@ -405,7 +442,13 @@
       const anchor = modelAnchor(el);
       const entry = { anchor, anchorUsed: null, scene: null, modelGroup: null, box: null, mercMatrix: null };
       entries.set(el.id, entry);
-      if (anchor || modelRefOf(el)) attachModel(entry, el);
+      // Load a model only when it can actually be placed: it has an anchor, or
+      // it self-georeferences (CityJSON/CityGML). Anchorless IFC *element* refs
+      // (a `#GlobalId` fragment with no WKT) would just parse the whole building
+      // and bail — the anchored Site already stands it on the map.
+      const ref = modelRefOf(el);
+      const selfPlaces = ref && (ref.format === 'cityjson' || ref.format === 'citygml');
+      if (anchor || selfPlaces) attachModel(entry, el);
     }
     ensureOverlays();
     if (!fitted) {
@@ -423,9 +466,18 @@
   /** Pan/fly to an element (used when selecting from the list). */
   export function focusElement(id) {
     if (!map) return;
-    const el = elements.find((e) => e.id === id);
+    let el = elements.find((e) => e.id === id);
     if (!el) return;
-    const entry = entries.get(id);
+    // An element with no geometry of its own (an IFC sub-element — a wall, a
+    // door) flies to its nearest located ancestor (the building's Site anchor).
+    // Its own mesh still lights up, driven by `selected`.
+    const seen = new Set();
+    while (el && !el.wkt4326 && !entries.get(el.id)?.anchorUsed && el.parent && !seen.has(el.id)) {
+      seen.add(el.id);
+      el = elements.find((e) => e.id === el.parent) || null;
+    }
+    if (!el) return;
+    const entry = entries.get(el.id);
     const f = toMapFeature(el);
     if (f && f.kind !== 'point') {
       const b = featureBounds([f]);
@@ -448,9 +500,11 @@
   const hitLayers = () => HIT_LAYERS.filter((l) => map.getLayer(l));
 
   function onClick(e) {
-    const modelId = raycastModels(e.point);
-    if (modelId) {
-      dispatch('select', { id: modelId });
+    const pick = raycastModels(e.point, true);
+    if (pick) {
+      // guid → DatasetViewer resolves it to the specific IFC sub-element and
+      // opens that element's window; id is the whole-model fallback.
+      dispatch('select', { id: pick.id, guid: pick.guid });
       return;
     }
     const pad = 6;
@@ -462,10 +516,10 @@
   function onMouseMove(e) {
     if (!map) return;
     let label = null;
-    const modelId = raycastModels(e.point);
-    if (modelId) {
-      const el = elements.find((x) => x.id === modelId);
-      label = el?.label || modelId.split(/[/#]/).pop();
+    const pick = raycastModels(e.point); // box-level only — keep hover cheap
+    if (pick) {
+      const el = elements.find((x) => x.id === pick.id);
+      label = el?.label || pick.id.split(/[/#]/).pop();
     } else {
       const pad = 4;
       const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];

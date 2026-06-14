@@ -9,7 +9,7 @@
   import { Link } from '../lib/router/index.js';
   import { getViewerFeed, listDatasetGraphs } from '../lib/api.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
-  import { ChevronLeft, Search, Boxes, MapPin, X, Download, FileDown } from 'lucide-svelte';
+  import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown } from 'lucide-svelte';
   import { modelRefOf } from '../lib/viewer/detect';
   import { modelRefs } from '../lib/viewer/geometry';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
@@ -80,6 +80,74 @@
     elements.some((e) => /POLYHEDRALSURFACE|\bTIN\b|\bSOLID\b| Z[ (]/i.test(e.wkt4326 || ''));
 
   const hasModel = (el) => !!modelRefOf(el);
+  const nodeLabel = (el) => el?.label || shortenIRI(el?.id || '');
+
+  // ── Structural tree ─────────────────────────────────────────────────────────
+  // Arrange the side list by the BOT/IFC spatial structure — Site → Building →
+  // Storey → Space → Element — so the parts of one building stay together and a
+  // 3000-element model is navigable by drilling in. Datasets with no parent
+  // links (a flat set of geo features) keep the located / unlocated split, and
+  // an active search always shows a flat result list.
+  $: byId = new Map(elements.map((e) => [e.id, e]));
+  $: childrenOf = (() => {
+    const m = new Map();
+    for (const e of elements) {
+      if (e.parent && byId.has(e.parent)) {
+        if (!m.has(e.parent)) m.set(e.parent, []);
+        m.get(e.parent).push(e.id);
+      }
+    }
+    const lbl = (cid) => byId.get(cid)?.label || cid;
+    for (const kids of m.values()) kids.sort((a, b) => lbl(a).localeCompare(lbl(b)));
+    return m;
+  })();
+  $: roots = elements
+    .filter((e) => !e.parent || !byId.has(e.parent))
+    .sort((a, b) => nodeLabel(a).localeCompare(nodeLabel(b)));
+  $: hasStructure = childrenOf.size > 0;
+
+  let expanded = new Set();
+  let treeInit = false;
+  // Open the top two structural levels on first load (Site → Building →
+  // Storeys), leaving deeper containers collapsed.
+  $: if (elements.length && !treeInit && childrenOf) {
+    treeInit = true;
+    const next = new Set();
+    const seed = (eid, depth) => {
+      const kids = childrenOf.get(eid) || [];
+      if (kids.length && depth < 2) {
+        next.add(eid);
+        kids.forEach((k) => seed(k, depth + 1));
+      }
+    };
+    roots.forEach((r) => seed(r.id, 0));
+    expanded = next;
+  }
+  function toggle(eid) {
+    const next = new Set(expanded);
+    next.has(eid) ? next.delete(eid) : next.add(eid);
+    expanded = next;
+  }
+  function expandAll() {
+    expanded = new Set(childrenOf.keys());
+  }
+  function collapseAll() {
+    expanded = new Set();
+  }
+  // Flatten the tree to the rows currently visible (depth for indentation,
+  // child count for the disclosure caret).
+  $: treeRows = (() => {
+    const rows = [];
+    const walk = (eid, depth) => {
+      const el = byId.get(eid);
+      if (!el) return;
+      const kids = childrenOf.get(eid) || [];
+      rows.push({ el, depth, count: kids.length, open: expanded.has(eid) });
+      if (kids.length && expanded.has(eid)) kids.forEach((k) => walk(k, depth + 1));
+    };
+    roots.forEach((r) => walk(r.id, 0));
+    return rows;
+  })();
 
   async function load() {
     loading = true;
@@ -102,7 +170,9 @@
   function open(elId, { fly = true } = {}) {
     selected = elId;
     const el = elements.find((e) => e.id === elId);
-    if (el && fly && el.wkt4326) mapComponent?.focusElement(elId);
+    // Fly even for an element with no geometry of its own — the map walks up to
+    // its located ancestor (the building) and lights this element's mesh.
+    if (el && fly && hasGeo) mapComponent?.focusElement(elId);
     if (!el) return;
     if (panels.some((p) => p.id === elId)) {
       focusPanel(elId);
@@ -239,32 +309,84 @@
             aria-label={$i18nT('viewer.search')}
           />
         </label>
+        {#if hasStructure && !query}
+          <div class="tree-tools">
+            <button class="link-btn" on:click={expandAll}>{$i18nT('viewer.expandAll')}</button>
+            <span class="dot-sep">·</span>
+            <button class="link-btn" on:click={collapseAll}>{$i18nT('viewer.collapseAll')}</button>
+          </div>
+        {/if}
         <div class="list-scroll">
-          {#if located.length}
-            <div class="group-label"><MapPin size={12} /> {$i18nT('viewer.located')}</div>
+          {#if query}
+            <!-- Search: flat result list across the whole dataset. -->
             <ul>
-              {#each located as el}
+              {#each filtered as el (el.id)}
                 <li>
-                  <button class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
-                    <span class="label">{el.label || shortenIRI(el.id)}</span>
+                  <button class="row" class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
+                    <span class="label">{nodeLabel(el)}</span>
+                    {#if el.wkt4326}<span class="loc-i"><MapPin size={11} /></span>{/if}
                     {#if hasModel(el)}<span class="badge">3D</span>{/if}
                   </button>
                 </li>
               {/each}
+              {#if !filtered.length}<li class="empty-row">{$i18nT('viewer.noMatches')}</li>{/if}
             </ul>
-          {/if}
-          {#if unlocated.length}
-            <div class="group-label"><Boxes size={12} /> {$i18nT('viewer.noLocation')}</div>
-            <ul>
-              {#each unlocated as el}
-                <li>
-                  <button class:active={el.id === selected} on:click={() => open(el.id, { fly: false })} title={el.id}>
-                    <span class="label">{el.label || shortenIRI(el.id)}</span>
-                    {#if hasModel(el)}<span class="badge">3D</span>{/if}
+          {:else if hasStructure}
+            <!-- Structural tree: Site → Building → Storey → Space → Element. -->
+            <ul class="tree">
+              {#each treeRows as r (r.el.id)}
+                <li
+                  class="tree-row"
+                  class:active={r.el.id === selected}
+                  style:--depth={r.depth}
+                >
+                  {#if r.count}
+                    <button
+                      class="twist"
+                      class:open={r.open}
+                      on:click={() => toggle(r.el.id)}
+                      aria-label={r.open ? $i18nT('viewer.collapse') : $i18nT('viewer.expand')}
+                    ><ChevronRight size={13} /></button>
+                  {:else}
+                    <span class="twist-spacer"></span>
+                  {/if}
+                  <button class="row row-main" on:click={() => open(r.el.id)} title={r.el.id}>
+                    <span class="label">{nodeLabel(r.el)}</span>
+                    {#if r.count}<span class="cnt">{r.count}</span>{/if}
+                    {#if r.el.wkt4326}<span class="loc-i"><MapPin size={11} /></span>{/if}
+                    {#if hasModel(r.el)}<span class="badge">3D</span>{/if}
                   </button>
                 </li>
               {/each}
             </ul>
+          {:else}
+            <!-- Flat dataset (no spatial structure): located / unlocated split. -->
+            {#if located.length}
+              <div class="group-label"><MapPin size={12} /> {$i18nT('viewer.located')}</div>
+              <ul>
+                {#each located as el (el.id)}
+                  <li>
+                    <button class="row" class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
+                      <span class="label">{nodeLabel(el)}</span>
+                      {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if unlocated.length}
+              <div class="group-label"><Boxes size={12} /> {$i18nT('viewer.noLocation')}</div>
+              <ul>
+                {#each unlocated as el (el.id)}
+                  <li>
+                    <button class="row" class:active={el.id === selected} on:click={() => open(el.id, { fly: false })} title={el.id}>
+                      <span class="label">{nodeLabel(el)}</span>
+                      {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           {/if}
         </div>
         <p class="side-hint">{$i18nT('viewer.zoomHint')}</p>
@@ -442,6 +564,94 @@
     border-radius: 99px;
     background: rgba(232, 89, 12, 0.13);
     color: #e8590c;
+  }
+
+  /* Structural tree (Site → Building → Storey → Space → Element) */
+  .tree-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 12px 0;
+  }
+  .link-btn {
+    border: 0;
+    background: transparent;
+    color: var(--brand-600, #2563a8);
+    cursor: pointer;
+    padding: 2px 0;
+    font-size: 0.7rem;
+  }
+  .link-btn:hover {
+    text-decoration: underline;
+  }
+  .dot-sep {
+    color: var(--muted, #94a3b8);
+    font-size: 0.7rem;
+  }
+  .tree-row {
+    display: flex;
+    align-items: center;
+    border-radius: var(--radius-sm, 7px);
+    padding-left: calc(var(--depth, 0) * 13px);
+  }
+  .tree-row:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+  }
+  .tree-row.active {
+    background: var(--bg-accent-soft, #e7f0fb);
+  }
+  .tree-row.active .label {
+    font-weight: 600;
+  }
+  .tree-row .twist {
+    flex: none;
+    width: 22px;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    background: transparent;
+    color: var(--muted, #64748b);
+    cursor: pointer;
+    padding: 0;
+  }
+  .tree-row .twist :global(svg) {
+    transition: transform 0.12s ease;
+  }
+  .tree-row .twist.open :global(svg) {
+    transform: rotate(90deg);
+  }
+  .twist-spacer {
+    flex: none;
+    width: 22px;
+  }
+  .tree-row .row-main {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+    background: transparent;
+  }
+  .tree-row .row-main:hover {
+    background: transparent;
+  }
+  .cnt {
+    flex: none;
+    font-size: 0.64rem;
+    padding: 0 6px;
+    border-radius: 99px;
+    background: var(--bg-soft, #eef2f6);
+    color: var(--muted, #64748b);
+  }
+  .loc-i {
+    flex: none;
+    display: inline-flex;
+    color: var(--brand-500, #2f88d8);
+  }
+  .empty-row {
+    padding: 10px 8px;
+    color: var(--muted, #64748b);
+    font-size: 0.8rem;
   }
   .side-hint {
     margin: 0;
