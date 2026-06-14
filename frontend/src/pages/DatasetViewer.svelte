@@ -137,10 +137,17 @@
   }
 
   // Fly the map to a located element (panels stay open; the flown-to element
-  // gets the selection highlight so it's findable among the rooftops).
+  // gets the selection highlight so it's findable among the rooftops). When the
+  // canvas is in 3D-Tiles (Cesium) mode the MapLibre component isn't mounted, so
+  // switch back to the map first and focus once it has initialised.
   function showOnMap(elId) {
     selected = elId;
-    mapComponent?.focusElement(elId);
+    if (canvasMode === 'cesium') {
+      canvasMode = 'map';
+      setTimeout(() => mapComponent?.focusElement(elId), 650);
+    } else {
+      mapComponent?.focusElement(elId);
+    }
   }
 
   function onMapSelect(event) {

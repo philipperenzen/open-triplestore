@@ -424,6 +424,45 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
                  } ORDER BY DESC(?time)",
             ),
         ],
+        "buildings-bim" => vec![
+            svc(
+                "Buildings by storey count",
+                "buildings-by-storeys",
+                "BOT — each bot:Building with the number of bot:Storey levels it decomposes into (bot:hasStorey).",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX bot:  <https://w3id.org/bot#>\n\
+                 SELECT ?building ?label (COUNT(?storey) AS ?storeys) WHERE { \
+                   ?building a bot:Building . \
+                   OPTIONAL { ?building rdfs:label ?label } \
+                   OPTIONAL { ?building bot:hasStorey ?storey } \
+                 } GROUP BY ?building ?label ORDER BY DESC(?storeys) ?label",
+            ),
+            svc(
+                "Building map anchors",
+                "building-footprints",
+                "GeoSPARQL — the CRS84 POINT map anchor of every building in the neighbourhood.",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>\n\
+                 SELECT ?building ?label ?wkt WHERE { \
+                   ?building a <https://w3id.org/bot#Building> ; geo:hasGeometry/geo:asWKT ?wkt . \
+                   FILTER(STRSTARTS(STR(?wkt), \"POINT\")) \
+                   OPTIONAL { ?building rdfs:label ?label } \
+                 } ORDER BY ?label",
+            ),
+            svc(
+                "Rooms by storey",
+                "rooms-by-storey",
+                "BOT — the storeys, the spaces (rooms) they contain and the elements on each (bot:hasStorey / bot:hasSpace / bot:hasElement).",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX bot:  <https://w3id.org/bot#>\n\
+                 SELECT ?building ?storey ?part ?kind ?label WHERE { \
+                   ?building a bot:Building ; bot:hasStorey ?storey . \
+                   { ?storey bot:hasSpace ?part . BIND(\"Space\" AS ?kind) } UNION \
+                   { ?storey bot:hasElement ?part . BIND(\"Element\" AS ?kind) } \
+                   OPTIONAL { ?part rdfs:label ?label } \
+                 } ORDER BY ?building ?storey ?kind ?label",
+            ),
+        ],
         _ => Vec::new(),
     }
 }
@@ -533,6 +572,24 @@ static DATASETS: &[DatasetSpec] = &[
             GraphSpec { suffix: "assets", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ASSETS_OTL_TTL },
         ],
     },
+    DatasetSpec {
+        slug: "buildings-bim",
+        name: "Buildings & BIM",
+        description: "A small neighbourhood of buildings that loads well — the lightweight, \
+                      reliable counterpart to the per-element IFC demo. The 3D viewer, the 2D map \
+                      and the BOT structure tree all work together: four authored LoD2 CityJSON \
+                      buildings (a townhouse, a corner shop, an apartment block and an office, \
+                      parsed client-side and coloured by semantic surface, CC0), the real 3DBAG \
+                      LoD2.2 city block (© 3DBAG by tudelft3d and 3DGI, CC BY 4.0), and native \
+                      WKT-Z volumetric solids (POLYHEDRALSURFACE Z, EPSG:7415) for the 3D engine \
+                      and 3D-Tiles pipeline. Every building carries a CRS84 map anchor clustered \
+                      near the Schependomlaan site in Nijmegen, and the townhouse is fully \
+                      decomposed into storeys, spaces and elements (BOT topology) so the structure \
+                      tab shows a real building tree.",
+        graphs: &[
+            GraphSpec { suffix: "buildings", role: GraphKind::Instances, fmt: Fmt::Turtle, data: BUILDINGS_BIM_TTL },
+        ],
+    },
 ];
 
 /// Seed copies of the viewer-demo fixtures. Canonical sources live under
@@ -552,6 +609,10 @@ const ZONES_3DBAG_TTL: &str = include_str!("data/zones-3dbag.ttl");
 const SENSORS_SOSA_TTL: &str = include_str!("data/sensors-sosa.ttl");
 /// OTL/IMBOR-style asset-management alignment (third-party vocab not bundled).
 const ASSETS_OTL_TTL: &str = include_str!("data/assets-otl.ttl");
+/// Buildings & BIM neighbourhood: LoD2 CityJSON + 3DBAG + WKT-Z solids, with a
+/// fully BOT-decomposed townhouse (storeys → spaces → elements) for the
+/// structure tab. The lightweight, reliable alternative to the per-element IFC.
+const BUILDINGS_BIM_TTL: &str = include_str!("data/buildings-bim.ttl");
 
 /// OWL/RDFS data model for the `ots:` terms the codebase uses. Two namespaces
 /// are in play: `…/ns#` (Standard, AuthMethod, conformance) and `…/ontology/`

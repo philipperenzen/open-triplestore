@@ -145,10 +145,13 @@ pub fn build_viewer_feed(
         Some(r) => format!("FILTER(?el = <{r}> || ?parent = <{r}>)"),
         None => String::new(),
     };
-    // Roots (subjects of bot:containsElement that are nobody's child) appear as
-    // rows with unbound ?parent; children come from the containment closure. The
-    // third arm admits plain geo/omg subjects outside any BOT containment, also
-    // as parentless roots — a dataset needs no BOT topology to feed the viewer.
+    // Containment follows the BOT hierarchy — bot:containsElement / hasSubElement
+    // (used by the IFC importer) plus bot:hasStorey / hasSpace / hasElement (the
+    // Site→Building→Storey→Space→Element decomposition). Roots (containment
+    // subjects that are nobody's child) appear as rows with unbound ?parent;
+    // children come from the closure. The third arm admits plain geo/omg subjects
+    // outside any BOT topology, also as parentless roots — a dataset needs no BOT
+    // topology to feed the viewer.
     let query = format!(
         r#"
         PREFIX bot:  <https://w3id.org/bot#>
@@ -158,13 +161,13 @@ pub fn build_viewer_feed(
         SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid ?up
         {from}
         WHERE {{
-            {{ ?parent (bot:containsElement|bot:hasSubElement) ?el . }}
+            {{ ?parent (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el . }}
             UNION
-            {{ ?el bot:containsElement ?child .
-               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement) ?el }} }}
+            {{ ?el (bot:containsElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?child .
+               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el }} }}
             UNION
             {{ ?el (geo:hasGeometry|omg:hasGeometry) ?anyg .
-               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement) ?el }} }}
+               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el }} }}
             {root_filter}
             OPTIONAL {{ ?el rdfs:label ?label }}
             OPTIONAL {{ ?el a ?type }}
