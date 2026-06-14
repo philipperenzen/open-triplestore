@@ -191,9 +191,11 @@
   }
   function closePanel(id) {
     panels = panels.filter((p) => p.id !== id);
+    if (!panels.length) selected = ''; // clear the highlight + x-ray when nothing is open
   }
   function closeAll() {
     panels = [];
+    selected = '';
   }
   // Promote an info-only panel to a live 3D viewer, evicting the oldest one when
   // the model cap is reached — so the user can always inspect the 3D they want.

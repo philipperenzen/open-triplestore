@@ -191,6 +191,7 @@
       entry.scene = buildEntryScene(holder);
       entry.meters = meters;
       entry.anchorUsed = anchor;
+      entry.isIfc = ref.format === 'ifc'; // multi-element model → eligible for x-ray
       entry.mercMatrix = mercMatrixFor(anchor, meters);
       themeMaterials();
       highlightModels();
@@ -222,6 +223,36 @@
     if (!mat || !('emissive' in mat)) return;
     mat.emissive.setHex(on ? 0xe8590c : 0x000000);
     mat.emissiveIntensity = on ? 0.5 : 0;
+  }
+
+  // X-ray: ghost the meshes that occlude a selection so the picked element shows
+  // through the walls. The original opacity/flags are stashed once per material
+  // so the effect is fully reversible (already-glass elements restore correctly).
+  function setGhost(mat, ghost) {
+    if (!mat) return;
+    if (mat.userData.origOpacity === undefined) {
+      mat.userData.origOpacity = mat.opacity;
+      mat.userData.origTransparent = mat.transparent;
+      mat.userData.origDepthWrite = mat.depthWrite;
+    }
+    if (ghost) {
+      mat.transparent = true;
+      mat.opacity = Math.min(mat.userData.origOpacity, 0.13);
+      mat.depthWrite = false; // don't occlude the selected element behind it
+    } else {
+      mat.opacity = mat.userData.origOpacity;
+      mat.transparent = mat.userData.origTransparent;
+      mat.depthWrite = mat.userData.origDepthWrite;
+    }
+  }
+
+  /** Does this model own a mesh for any of these GlobalIds? (cheap early-out) */
+  function modelHasGuid(e, guidSet) {
+    let found = false;
+    e.modelGroup?.traverse((n) => {
+      if (!found && n.isMesh && n.userData.ifcGuid && guidSet.has(n.userData.ifcGuid)) found = true;
+    });
+    return found;
   }
 
   // Children index (parent id → child elements) for subtree highlighting, so
@@ -261,14 +292,21 @@
     // Light the selected element's meshes by GlobalId. For a spatial container
     // (storey/building) that owns no mesh, light its whole subtree (every wall /
     // slab it contains). For a model with no IFC guids, light it whole by id.
+    // Inside a multi-element IFC model, also x-ray: ghost everything that isn't
+    // selected so the picked element is visible through the obstructing walls.
     const selGuids = selected ? descendantGuidSet(selected) : null;
     const byGuid = selGuids && selGuids.size > 0;
     for (const [id, e] of entries) {
+      const xray = byGuid && e.isIfc && modelHasGuid(e, selGuids);
       e.modelGroup?.traverse((n) => {
         if (!n.isMesh || !n.material) return;
         const on = byGuid ? selGuids.has(n.userData.ifcGuid) : id === selected;
-        if (Array.isArray(n.material)) n.material.forEach((m) => setEmissive(m, on));
-        else setEmissive(n.material, on);
+        const ghost = xray && !on;
+        const mats = Array.isArray(n.material) ? n.material : [n.material];
+        for (const m of mats) {
+          setEmissive(m, on);
+          setGhost(m, ghost);
+        }
       });
     }
     map?.triggerRepaint();
