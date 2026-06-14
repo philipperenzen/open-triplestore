@@ -2,8 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { delayedLoading } from '../lib/delayedLoading';
   import { autofocus } from '../lib/actions/autofocus.js';
-  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
-  import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, resultsToViewerElements, triplesToResults } from '../lib/rdf-utils.js';
+  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth, getViewerFeed, getGeoStats } from '../lib/api.js';
+  import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, triplesToResults } from '../lib/rdf-utils.js';
   import DataTable from '../components/DataTable.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
@@ -15,7 +15,7 @@
     Download, Copy, ChevronLeft, ChevronRight, Search, X,
     Network, Table2, Maximize2, Share2, Unlink, ExternalLink, Plus,
     FileText, Image, Filter, LayoutList, Building2, Database, History,
-    Sparkles, SlidersHorizontal, Code2, HelpCircle, Map as MapIcon,
+    Sparkles, SlidersHorizontal, Code2, HelpCircle, Map as MapIcon, Boxes,
   } from 'lucide-svelte';
   import { slide } from 'svelte/transition';
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
@@ -27,23 +27,97 @@
 
   // ─── View mode ────────────────────────────────────────────────────────────
   let viewMode = 'table'; // 'table' | 'graph' | 'map'
+  // Map data is the WHOLE scope's geometry (not the current page): the merged
+  // viewer feed of every scoped dataset — the same rich ViewerElement[] the
+  // dataset viewer feeds to ViewerMap (2D vectors + to-scale 3D models).
+  let mapElements = [];
+  let mapLoading = false;
+  let mapLoadedKey = ''; // scope signature the current mapElements reflect
+  const scopeKey = () => scopedDatasetIds.slice().sort().join(',');
+
+  async function loadMapElements() {
+    const key = scopeKey();
+    if (mapLoadedKey === key && mapElements.length) return; // already current
+    mapLoading = true;
+    try {
+      const feeds = await Promise.all(
+        scopedDatasetIds.map((id) =>
+          getViewerFeed(id).then((d) => d?.elements || []).catch(() => [])
+        )
+      );
+      if (scopeKey() !== key) return; // scope changed mid-flight — drop stale result
+      // Dedupe by id across datasets (BOT/IFC ids could in principle recur).
+      const byId = new Map();
+      for (const el of feeds.flat()) if (el && el.id != null && !byId.has(el.id)) byId.set(el.id, el);
+      mapElements = [...byId.values()];
+      mapLoadedKey = key;
+    } finally {
+      if (scopeKey() === key) mapLoading = false;
+    }
+  }
+
   function switchView(mode) {
     viewMode = mode;
     syncViewToUrl(mode);
     if (mode === 'graph' && graphNodes.length === 0 && graphEdges.length === 0 && !graphLoading) {
       fetchGraphData();
     }
+    if (mode === 'map') loadMapElements();
+  }
+  // Reload the map when the scope changes while the Map tab is already open.
+  $: if (viewMode === 'map' && scopedDatasetIds && scopeKey() !== mapLoadedKey && !mapLoading) {
+    loadMapElements();
   }
 
-  // ─── Map view gating ──────────────────────────────────────────────────────
-  // The Map tab is offered ONLY when the current table page carries mappable
-  // (WGS84) geometry — so browsing non-spatial data hides it. Triples are
-  // adapted to the SELECT-results shape the detection/conversion helpers expect.
-  $: mapResults = triplesToResults(triples);
-  $: canMap = detectGeoBindings(mapResults);
-  $: mapElements = viewMode === 'map' && canMap ? resultsToViewerElements(mapResults) : [];
-  // Never strand the user on the Map tab once the new page loses its geometry.
-  $: if (viewMode === 'map' && !canMap) switchView('table');
+  // ─── Map view gating (SCOPE-aware) ────────────────────────────────────────
+  // The Map tab is offered when the browse SCOPE — not just the current page —
+  // carries geometry. getGeoStats is the cheap per-dataset probe; OR-aggregate
+  // it across scopedDatasetIds (which already expands org items to their
+  // datasets). getGeoStats/getViewerFeed are single-dataset only, so we fan out
+  // client-side and cache per dataset like ensureDsVersions/ensureDsGraphs do.
+  let geoStatsByDs = {}; // dsId -> GeoStats | null (null = loaded-but-failed)
+  let geoStatsKey = ''; // scope signature geoStatsByDs reflects (de-dupes + races)
+  async function loadGeoStats(k, ids) {
+    // Collect into one array and assign ONCE — per-id `{...geoStatsByDs,[id]:x}`
+    // reassignments from N concurrent probes clobber each other. Also cap the
+    // concurrency (a big org scope would otherwise burst N requests and trip the
+    // rate limiter, failing most of them).
+    const entries = [];
+    const pool = ids.slice();
+    const worker = async () => {
+      while (pool.length) {
+        const id = pool.shift();
+        try {
+          entries.push([id, await getGeoStats(id)]);
+        } catch {
+          entries.push([id, null]);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+    if (geoStatsKey !== k) return; // scope changed mid-load — drop stale result
+    geoStatsByDs = Object.fromEntries(entries);
+  }
+  $: {
+    const k = scopedDatasetIds.slice().sort().join(',');
+    if (k && k !== geoStatsKey) {
+      geoStatsKey = k;
+      loadGeoStats(k, scopedDatasetIds.slice());
+    }
+  }
+  $: geoStatsSettled =
+    scopedDatasetIds.length > 0 && scopedDatasetIds.every((id) => id in geoStatsByDs);
+  $: scopeHasGeo = scopedDatasetIds.some(
+    (id) => geoStatsByDs[id]?.has_coordinates || geoStatsByDs[id]?.has_3d
+  );
+  $: scopeHas3d = scopedDatasetIds.some((id) => geoStatsByDs[id]?.has_3d);
+  // Per-page fallback: even before the scope probe settles, a page that itself
+  // carries WGS84 rows can already offer the map (graceful; old behaviour).
+  $: pageCanMap = detectGeoBindings(triplesToResults(triples));
+  $: canMap = scopeHasGeo || pageCanMap;
+  // Only bump the user off Map once the scope probe has SETTLED and there is
+  // genuinely no geo — never mid-load (that would bounce them during the probe).
+  $: if (viewMode === 'map' && geoStatsSettled && !canMap && !pageCanMap) switchView('table');
 
   function syncViewToUrl(mode) {
     if (typeof window === 'undefined') return;
@@ -1359,7 +1433,7 @@
         {#if canMap}
           <button class="vtoggle-btn" class:vtoggle-active={viewMode === 'map'}
             on:click={() => switchView('map')} title={$i18nT('pages.tripleBrowser.mapView')}
-          ><MapIcon size={14} /><span class="vtoggle-label">{$i18nT('pages.tripleBrowser.mapLabel')}</span></button>
+          >{#if scopeHas3d}<Boxes size={14} />{:else}<MapIcon size={14} />{/if}<span class="vtoggle-label">{scopeHas3d ? $i18nT('pages.tripleBrowser.mapAnd3dLabel') : $i18nT('pages.tripleBrowser.mapLabel')}</span></button>
         {/if}
       </div>
 
@@ -1803,6 +1877,11 @@
         {#if mapElements.length > 0}
           <ViewerMap elements={mapElements} height="100%"
             on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && !e.detail.id.startsWith('_:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+        {:else if mapLoading}
+          <div class="graph-empty">
+            <MapIcon size={52} strokeWidth={1} />
+            <p class="graph-empty-title">{$i18nT('pages.tripleBrowser.mapLoading')}</p>
+          </div>
         {:else}
           <div class="graph-empty">
             <MapIcon size={52} strokeWidth={1} />
