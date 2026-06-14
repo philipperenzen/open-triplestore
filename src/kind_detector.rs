@@ -169,6 +169,16 @@ impl Detected {
     pub fn to_graph_role(&self) -> Option<GraphKind> {
         Some(self.primary?.to_graph_role())
     }
+
+    /// True when the scan saw any SHACL shape signal, regardless of the
+    /// file-level `primary` verdict (mixed OWL+SHACL files classify as
+    /// [`RegistryKind::DataModel`], since the shapes verdict requires
+    /// `tbox == 0`). Exposed for tests that assert embedded-shape detection
+    /// independently of the `primary` verdict.
+    #[cfg(test)]
+    pub fn has_shapes(&self) -> bool {
+        self.evidence.shacl_shapes > 0
+    }
 }
 
 // ─── Detection ────────────────────────────────────────────────────────────────
@@ -370,6 +380,225 @@ pub fn classify_quad_role(q: &Quad) -> GraphKind {
     GraphKind::Instances
 }
 
+// ─── Subject-tree role classification ─────────────────────────────────────────
+
+const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
+
+/// Per-quad signal for the subject-tree classifier. Type-derived signals
+/// (`*Type`) outrank predicate-namespace fallbacks (`*Pred`): an instance with
+/// an `rdfs:label` stays an instance, a SKOS concept with OWL annotations stays
+/// vocabulary.
+enum TreeSignal {
+    Shapes,
+    Entailment,
+    ModelType,
+    VocabType,
+    InstanceType,
+    ModelPred,
+    VocabPred,
+    Neutral,
+}
+
+fn tree_signal(q: &Quad) -> TreeSignal {
+    let p = q.predicate.as_str();
+    if p == RDF_TYPE {
+        return match &q.object {
+            Term::NamedNode(obj) => {
+                let o = obj.as_str();
+                match o {
+                    SH_NODE_SHAPE | SH_PROPERTY_SHAPE => TreeSignal::Shapes,
+                    SWRL_IMP => TreeSignal::Entailment,
+                    SKOS_CONCEPT_SCHEME | SKOS_CONCEPT => TreeSignal::VocabType,
+                    OWL_NAMED_INDIVIDUAL => TreeSignal::InstanceType,
+                    // Remaining schema-namespace types (owl:Class, properties,
+                    // owl:Restriction, …) are model constructs.
+                    _ if SCHEMA_TYPE_OBJECTS.contains(&o) => TreeSignal::ModelType,
+                    _ => TreeSignal::InstanceType,
+                }
+            }
+            _ => TreeSignal::Neutral,
+        };
+    }
+    if p == SH_TARGET_CLASS || p.starts_with(SH_NS) {
+        TreeSignal::Shapes
+    } else if p == SPIN_RULE || p.starts_with(SP_NS) {
+        TreeSignal::Entailment
+    } else if p.starts_with(SKOS_NS) {
+        TreeSignal::VocabPred
+    } else if p.starts_with("http://www.w3.org/2002/07/owl#")
+        || p.starts_with("http://www.w3.org/2000/01/rdf-schema#")
+    {
+        TreeSignal::ModelPred
+    } else {
+        TreeSignal::Neutral
+    }
+}
+
+#[derive(Default)]
+struct TreeTally {
+    shapes: usize,
+    entailment: usize,
+    model_type: usize,
+    vocab_type: usize,
+    instance_type: usize,
+    model_pred: usize,
+    vocab_pred: usize,
+}
+
+impl TreeTally {
+    fn add(&mut self, s: TreeSignal) {
+        match s {
+            TreeSignal::Shapes => self.shapes += 1,
+            TreeSignal::Entailment => self.entailment += 1,
+            TreeSignal::ModelType => self.model_type += 1,
+            TreeSignal::VocabType => self.vocab_type += 1,
+            TreeSignal::InstanceType => self.instance_type += 1,
+            TreeSignal::ModelPred => self.model_pred += 1,
+            TreeSignal::VocabPred => self.vocab_pred += 1,
+            TreeSignal::Neutral => {}
+        }
+    }
+
+    /// Priority: any SHACL signal makes the whole tree a shape (a shape's
+    /// `rdfs:label` must not pull it into the model graph), then rules, then
+    /// type-derived verdicts, then predicate-namespace fallbacks.
+    fn decide(&self) -> GraphKind {
+        if self.shapes > 0 {
+            return GraphKind::Shapes;
+        }
+        if self.entailment > 0 {
+            return GraphKind::Entailment;
+        }
+        if self.model_type > 0 {
+            return GraphKind::Model;
+        }
+        if self.vocab_type > 0 {
+            return GraphKind::Vocabulary;
+        }
+        if self.instance_type > 0 {
+            return GraphKind::Instances;
+        }
+        if self.vocab_pred > self.model_pred {
+            return GraphKind::Vocabulary;
+        }
+        if self.model_pred > 0 {
+            return GraphKind::Model;
+        }
+        GraphKind::Instances
+    }
+}
+
+/// Root a subject tree resolves to: a named IRI or a top-level blank node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TreeRoot<'a> {
+    Iri(&'a str),
+    Bnode(&'a str),
+}
+
+/// Classify every quad by its *subject tree* instead of in isolation, so the
+/// whole tree lands in one sub-graph when splitting.
+///
+/// Per-quad classification ([`classify_quad_role`]) severs RDF structure:
+/// `rdf:first`/`rdf:rest` list spines under `sh:in` / `sh:or` / `owl:unionOf`
+/// fall through to Instances, and `rdfs:label` on a shape goes to Model. Here:
+///
+/// 1. every blank node is owned by the (root) subject from which it is
+///    reachable as an object — including through `rdf:first`/`rdf:rest`
+///    chains and nested property shapes;
+/// 2. each root (named subject, or a top-level blank node such as
+///    `[] a sh:NodeShape`) is classified once from the signals of *all* quads
+///    in its tree;
+/// 3. every quad of the tree — bnode closure and annotation triples included —
+///    gets the root's role.
+///
+/// Quads whose subject cannot be tied to a tree (RDF-star quoted subjects)
+/// keep the legacy per-quad classification. Returns one [`GraphKind`] per
+/// quad, parallel to `quads`.
+pub fn classify_quad_roles(quads: &[Quad]) -> Vec<GraphKind> {
+    use oxigraph::model::Subject;
+    use std::collections::HashMap;
+
+    // (1) Blank-node ownership: first quad in which the bnode appears as an
+    // object wins (a serialised bnode has at most one such occurrence).
+    let mut owner: HashMap<&str, &Subject> = HashMap::new();
+    for q in quads {
+        if let Term::BlankNode(b) = &q.object {
+            owner.entry(b.as_str()).or_insert(&q.subject);
+        }
+    }
+
+    // Resolve a blank node to its tree root by chasing the ownership chain.
+    // Unowned blank nodes root their own tree; ownership cycles (pathological)
+    // collapse onto a stable member so resolution is deterministic.
+    fn resolve<'a>(
+        start: &'a str,
+        owner: &HashMap<&'a str, &'a Subject>,
+        memo: &mut HashMap<&'a str, TreeRoot<'a>>,
+    ) -> TreeRoot<'a> {
+        if let Some(r) = memo.get(start) {
+            return *r;
+        }
+        let mut path: Vec<&'a str> = vec![start];
+        let mut cur = start;
+        let root = loop {
+            match owner.get(cur) {
+                Some(Subject::NamedNode(n)) => break TreeRoot::Iri(n.as_str()),
+                Some(Subject::BlankNode(b)) => {
+                    let next = b.as_str();
+                    if let Some(r) = memo.get(next) {
+                        break *r;
+                    }
+                    if path.contains(&next) {
+                        break TreeRoot::Bnode(path.iter().copied().min().unwrap_or(next));
+                    }
+                    path.push(next);
+                    cur = next;
+                }
+                // Quoted-triple owner or no owner at all: this bnode is a root.
+                _ => break TreeRoot::Bnode(cur),
+            }
+        };
+        for p in path {
+            memo.insert(p, root);
+        }
+        root
+    }
+
+    let mut memo: HashMap<&str, TreeRoot> = HashMap::new();
+    let roots: Vec<Option<TreeRoot>> = quads
+        .iter()
+        .map(|q| match &q.subject {
+            Subject::NamedNode(n) => Some(TreeRoot::Iri(n.as_str())),
+            Subject::BlankNode(b) => Some(resolve(b.as_str(), &owner, &mut memo)),
+            _ => None,
+        })
+        .collect();
+
+    // (2) Tally signals per root over the whole tree.
+    let mut tallies: HashMap<TreeRoot, TreeTally> = HashMap::new();
+    for (q, root) in quads.iter().zip(&roots) {
+        if let Some(root) = root {
+            tallies.entry(*root).or_default().add(tree_signal(q));
+        }
+    }
+
+    // (3) Every quad inherits its root's verdict.
+    let mut decided: HashMap<TreeRoot, GraphKind> = HashMap::with_capacity(tallies.len());
+    quads
+        .iter()
+        .zip(&roots)
+        .map(|(q, root)| match root {
+            Some(r) => *decided.entry(*r).or_insert_with(|| {
+                tallies
+                    .get(r)
+                    .map(TreeTally::decide)
+                    .unwrap_or(GraphKind::Instances)
+            }),
+            None => classify_quad_role(q),
+        })
+        .collect()
+}
+
 // ─── Override parsing ─────────────────────────────────────────────────────────
 
 /// Parse a `?kind=` query param into a [`RegistryKind`].
@@ -533,6 +762,161 @@ mod tests {
         assert_eq!(parse_kind_override("shapes"), Some(RegistryKind::Shapes));
         assert_eq!(parse_kind_override("abox"), Some(RegistryKind::Instances));
         assert_eq!(parse_kind_override("nope"), None);
+    }
+
+    // ─── Subject-tree classification (classify_quad_roles) ────────────────────
+
+    /// Roles for all quads whose subject-tree root role we want to inspect,
+    /// keyed by a human-readable triple rendering for failure messages.
+    fn roles_by_triple(ttl: &str) -> Vec<(String, GraphKind)> {
+        let quads = parse(ttl);
+        let roles = classify_quad_roles(&quads);
+        quads
+            .iter()
+            .zip(roles)
+            .map(|(q, r)| (format!("{} {} {}", q.subject, q.predicate, q.object), r))
+            .collect()
+    }
+
+    #[test]
+    fn sh_in_list_stays_with_its_shape() {
+        let ttl = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:StatusShape a sh:NodeShape ;
+                sh:targetClass ex:Thing ;
+                sh:property [
+                    sh:path ex:status ;
+                    sh:in ( "open" "closed" "pending" ) ;
+                ] .
+        "#;
+        for (t, role) in roles_by_triple(ttl) {
+            assert_eq!(
+                role,
+                GraphKind::Shapes,
+                "quad must stay in the shapes tree: {t}"
+            );
+        }
+        // The fixture really contains a severable list spine.
+        assert!(roles_by_triple(ttl)
+            .iter()
+            .any(|(t, _)| t.contains("rdf-syntax-ns#first")));
+    }
+
+    #[test]
+    fn owl_unionof_list_stays_with_its_class() {
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix ex: <http://example.org/> .
+            ex:Vehicle a owl:Class ;
+                owl:unionOf ( ex:Car ex:Bike ) .
+        "#;
+        for (t, role) in roles_by_triple(ttl) {
+            assert_eq!(
+                role,
+                GraphKind::Model,
+                "quad must stay in the class's model tree: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn rdfs_label_on_shape_stays_in_shapes() {
+        let ttl = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix ex: <http://example.org/> .
+            ex:PersonShape a sh:NodeShape ;
+                rdfs:label "Person shape" ;
+                rdfs:comment "Validates people" ;
+                sh:targetClass ex:Person .
+        "#;
+        for (t, role) in roles_by_triple(ttl) {
+            assert_eq!(
+                role,
+                GraphKind::Shapes,
+                "annotation severed from shape: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn anonymous_root_shape_tree_is_shapes() {
+        let ttl = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            [] a sh:NodeShape ;
+                sh:targetClass ex:Person ;
+                sh:property [ sh:path ex:age ; sh:in ( 1 2 3 ) ] .
+        "#;
+        for (t, role) in roles_by_triple(ttl) {
+            assert_eq!(role, GraphKind::Shapes, "anonymous shape tree severed: {t}");
+        }
+    }
+
+    #[test]
+    fn plain_instances_unaffected() {
+        let ttl = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Alice a foaf:Person ; foaf:name "Alice" ; rdfs:label "Alice" .
+            ex:Bob a foaf:Person ; foaf:knows ex:Alice .
+        "#;
+        for (t, role) in roles_by_triple(ttl) {
+            assert_eq!(
+                role,
+                GraphKind::Instances,
+                "instance quad misclassified: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_owl_shacl_trees_split_per_root() {
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix sh:  <http://www.w3.org/ns/shacl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix ex:  <http://example.org/> .
+            ex:Vehicle a owl:Class ; rdfs:label "Vehicle" ; owl:unionOf ( ex:Car ex:Bike ) .
+            ex:VehicleShape a sh:NodeShape ;
+                sh:targetClass ex:Vehicle ;
+                sh:property [ sh:path ex:kind ; sh:in ( "car" "bike" ) ] .
+        "#;
+        let quads = parse(ttl);
+        let roles = classify_quad_roles(&quads);
+        let mut model = 0usize;
+        let mut shapes = 0usize;
+        for (q, role) in quads.iter().zip(&roles) {
+            match role {
+                GraphKind::Model => model += 1,
+                GraphKind::Shapes => shapes += 1,
+                other => panic!("unexpected role {other:?} for {q}"),
+            }
+        }
+        // Class tree: type + label + unionOf + 4 list-spine quads = 7.
+        assert_eq!(model, 7, "owl:Class tree (incl. union list) → model");
+        // Shape tree: type + targetClass + property + (path + in) + 4 spine = 9.
+        assert_eq!(shapes, 9, "shape tree (incl. sh:in list) → shapes");
+
+        // File-level verdict stays single-role (Model) but exposes the shapes.
+        let d = detect(&quads);
+        assert_eq!(d.primary, Some(RegistryKind::DataModel));
+        assert!(d.has_shapes(), "mixed file must surface embedded shapes");
+    }
+
+    #[test]
+    fn skos_concept_with_rdfs_annotations_stays_vocabulary() {
+        let ttl = r#"
+            @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix ex: <http://example.org/> .
+            ex:Red a skos:Concept ; skos:prefLabel "Red" ; rdfs:comment "A colour" .
+        "#;
+        for (t, role) in roles_by_triple(ttl) {
+            assert_eq!(role, GraphKind::Vocabulary, "concept tree severed: {t}");
+        }
     }
 
     #[test]

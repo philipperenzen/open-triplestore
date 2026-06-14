@@ -5,6 +5,10 @@ export interface User {
   id: string;
   username: string;
   email: string;
+  email_verified: boolean;
+  totp_enabled: boolean;
+  /** New email address awaiting confirmation (from GET /api/auth/me). */
+  email_pending?: string;
   role: string;
   is_active: boolean;
   can_publish: boolean;

@@ -152,3 +152,127 @@ async fn ldp_if_match_precondition_failed() {
         "a stale If-Match must yield 412, got {st}"
     );
 }
+
+// ─── Security regressions ───────────────────────────────────────────────────────
+
+// SECURITY: the LDP router must require authentication. Mounted unauthenticated, an
+// anonymous PATCH applied a raw SPARQL Update (e.g. `DROP ALL`) to the shared store.
+#[tokio::test]
+async fn ldp_requires_authentication() {
+    let (state, _token) = admin_state();
+    let app = test_app(state);
+    // Unauthenticated POST (member creation) must be rejected.
+    let (st, _h, _b) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1",
+        None,
+        &[("Content-Type", "text/turtle"), ("Slug", "x")],
+        "<http://example.org/x> <http://example.org/p> \"v\" .",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated LDP POST must be 401, got {st}"
+    );
+    // Unauthenticated PATCH (raw SPARQL Update) must be rejected before it runs.
+    let (st, _h, _b) = send(
+        &app,
+        Method::PATCH,
+        "/ldp/c1",
+        None,
+        &[("Content-Type", "application/sparql-update")],
+        "DROP ALL",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated LDP PATCH must be 401, got {st}"
+    );
+}
+
+// SECURITY: a Slug with SPARQL/IRI metacharacters must be sanitised, not injected
+// into the member triples' `<member_iri>` context.
+#[tokio::test]
+async fn ldp_slug_injection_is_sanitised() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    // Seed a member so we can detect a destructive injection.
+    let (st, _h) = post_member(&app, &token, "keep").await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    let malicious = "evil> } ; DROP ALL ; INSERT DATA { <urn:x> <urn:y> <urn:z";
+    let (st, hdrs) = post_member(&app, &token, malicious).await;
+    assert_eq!(
+        st,
+        StatusCode::CREATED,
+        "crafted Slug should create a sanitised member, got {st}"
+    );
+    let loc = hdrs
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        !loc.contains('>') && !loc.contains(' ') && !loc.contains(';') && !loc.contains('{'),
+        "member Location must be a sanitised IRI, got {loc:?}"
+    );
+
+    // The seeded member must still be present — proves no DROP ALL executed.
+    let (st, _h, body) = send(&app, Method::GET, "/ldp/c1", Some(&token), &[], "").await;
+    assert!(
+        st.is_success(),
+        "container must still be readable, got {st}"
+    );
+    assert!(
+        body.contains("c1/keep"),
+        "seeded member must survive the injection attempt; body: {body}"
+    );
+}
+
+// SECURITY: a Non-RDF Source uploaded as text/html must not be reflected as
+// text/html on GET (stored XSS); it degrades to a safe type with nosniff.
+#[tokio::test]
+async fn ldp_binary_content_type_is_sanitised() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let (st, hdrs, _b) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1",
+        Some(&token),
+        &[("Content-Type", "text/html"), ("Slug", "xss")],
+        "<script>alert(1)</script>",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CREATED,
+        "binary POST should create, got {st}"
+    );
+    let loc = hdrs
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let path = loc.strip_prefix("http://localhost:7878").unwrap_or(&loc);
+
+    let (st, hdrs, _b) = send(&app, Method::GET, path, Some(&token), &[], "").await;
+    assert!(st.is_success(), "GET binary must succeed, got {st}");
+    let ct = hdrs
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        !ct.contains("text/html"),
+        "served Content-Type must not be text/html, got {ct:?}"
+    );
+    assert_eq!(
+        hdrs.get("x-content-type-options")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "nosniff",
+        "must set X-Content-Type-Options: nosniff"
+    );
+}

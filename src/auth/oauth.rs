@@ -471,6 +471,12 @@ pub fn provision_or_link_user(
         derived_role,
     )?;
 
+    // Carry over the IdP's verified-email assertion (fallback addresses and
+    // unverified IdP emails stay unverified).
+    if email.is_some() && email_verified {
+        let _ = auth_db.set_email_verified(&user.id, true);
+    }
+
     // Link identity
     auth_db.upsert_oauth_identity(
         &Uuid::new_v4().to_string(),

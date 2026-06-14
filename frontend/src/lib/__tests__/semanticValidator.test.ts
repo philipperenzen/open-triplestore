@@ -86,4 +86,90 @@ describe('validateSemantics', () => {
     const lastErrIdx = issues.map(i => i.severity).lastIndexOf('error');
     expect(lastErrIdx).toBeLessThan(firstWarnIdx === -1 ? Infinity : firstWarnIdx);
   });
+
+  // ── SHACL structural checks ────────────────────────────────────────────────
+
+  it('flags sh:path on a node shape as an error', () => {
+    const issues = validateSemantics(storeOf(`ex:S a sh:NodeShape ; sh:path ex:p .`));
+    const hit = issues.find(i => i.code === 'shacl-path-on-nodeshape');
+    expect(hit).toBeTruthy();
+    expect(hit!.severity).toBe('error');
+    // a property shape with a path is fine
+    expect(codes(`ex:P a sh:PropertyShape ; sh:path ex:p .`)).not.toContain('shacl-path-on-nodeshape');
+  });
+
+  it('flags sh:targetClass on a property shape as a warning', () => {
+    const issues = validateSemantics(storeOf(`
+      ex:P a sh:PropertyShape ; sh:path ex:p ; sh:targetClass ex:T .
+      ex:T a owl:Class .
+    `));
+    const hit = issues.find(i => i.code === 'shacl-target-on-propertyshape');
+    expect(hit).toBeTruthy();
+    expect(hit!.severity).toBe('warning');
+    // node shapes may declare targets, and blank property shapes via sh:property count too
+    expect(codes(`ex:S a sh:NodeShape ; sh:targetClass ex:T . ex:T a owl:Class .`))
+      .not.toContain('shacl-target-on-propertyshape');
+    expect(codes(`
+      ex:S a sh:NodeShape ; sh:property [ sh:path ex:p ; sh:targetClass ex:T ] .
+      ex:T a owl:Class .
+    `)).toContain('shacl-target-on-propertyshape');
+  });
+
+  it('flags sh:qualifiedMinCount greater than sh:qualifiedMaxCount', () => {
+    const issues = validateSemantics(storeOf(`
+      ex:S a sh:NodeShape ;
+        sh:property [ sh:path ex:p ; sh:qualifiedValueShape [ sh:class ex:T ] ;
+                      sh:qualifiedMinCount 5 ; sh:qualifiedMaxCount 2 ] .
+    `));
+    const hit = issues.find(i => i.code === 'shacl-qualified-min-gt-max');
+    expect(hit).toBeTruthy();
+    expect(hit!.severity).toBe('error');
+    expect(codes(`
+      ex:S a sh:NodeShape ;
+        sh:property [ sh:path ex:p ; sh:qualifiedValueShape [ sh:class ex:T ] ;
+                      sh:qualifiedMinCount 1 ; sh:qualifiedMaxCount 2 ] .
+    `)).not.toContain('shacl-qualified-min-gt-max');
+  });
+
+  it('flags sh:and/or/xone values that are not RDF lists', () => {
+    for (const op of ['and', 'or', 'xone']) {
+      const issues = validateSemantics(storeOf(`ex:S a sh:NodeShape ; sh:${op} ex:NotAList .`));
+      const hit = issues.find(i => i.code === 'shacl-logic-not-list');
+      expect(hit, `sh:${op}`).toBeTruthy();
+      expect(hit!.severity).toBe('error');
+    }
+    expect(codes(`ex:S a sh:NodeShape ; sh:or ( [ sh:path ex:a ; sh:minCount 1 ] [ sh:path ex:b ; sh:minCount 1 ] ) .`))
+      .not.toContain('shacl-logic-not-list');
+  });
+
+  it('flags invalid path expressions', () => {
+    // empty sequence list
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path ( ) ; sh:minCount 1 ] .`))
+      .toContain('shacl-path-invalid');
+    // single-member sequence
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path ( ex:a ) ; sh:minCount 1 ] .`))
+      .toContain('shacl-path-invalid');
+    // unrecognised expression
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path [ ex:weird ex:thing ] ; sh:minCount 1 ] .`))
+      .toContain('shacl-path-invalid');
+    // valid forms pass
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path ( ex:a ex:b ) ; sh:minCount 1 ] .`))
+      .not.toContain('shacl-path-invalid');
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path [ sh:inversePath ex:p ] ; sh:minCount 1 ] .`))
+      .not.toContain('shacl-path-invalid');
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path [ sh:alternativePath ( ex:a ex:b ) ] ] .`))
+      .not.toContain('shacl-path-invalid');
+  });
+
+  it('flags property shapes without sh:path', () => {
+    const issues = validateSemantics(storeOf(`
+      ex:S a sh:NodeShape ; sh:property [ sh:minCount 1 ; sh:datatype xsd:string ] .
+    `));
+    const hit = issues.find(i => i.code === 'shacl-propertyshape-no-path');
+    expect(hit).toBeTruthy();
+    expect(hit!.severity).toBe('error');
+    expect(codes(`ex:P a sh:PropertyShape ; sh:minCount 1 .`)).toContain('shacl-propertyshape-no-path');
+    expect(codes(`ex:S a sh:NodeShape ; sh:property [ sh:path ex:p ; sh:minCount 1 ] .`))
+      .not.toContain('shacl-propertyshape-no-path');
+  });
 });
