@@ -153,7 +153,7 @@ nom = "7"
 rayon = "1"
 
 # Spatial R-tree index (GeoSPARQL pre-filtering)
-rstar = "0.12"
+rstar = "0.13"
 
 # RML mapping sources
 csv = "1"
