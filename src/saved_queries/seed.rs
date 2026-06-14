@@ -302,12 +302,13 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
-    // The Schependomlaan IFC (layered Dutch BIM demo) is attributed to the owning
-    // admin, so it waits until one exists; downloaded + converted on the first
-    // boot/reseed after that, and back-filled on later boots if a download failed.
-    if let Some(ref owner) = owner {
-        seed_schependomlaan_ifc(state, &owner.id);
-    }
+    // The Schependomlaan IFC (layered Dutch BIM demo: BOT topology + full ifcOWL
+    // lift, every storey/wall/beam individually addressable) loads on first boot
+    // so the public demo shows the IFC decomposition immediately. With an admin
+    // owner it is also stored as a downloadable asset; without one (brand-new
+    // install) the asset is skipped and the FOG file reference points at the
+    // source URL — the linked data + decomposition are present either way.
+    seed_ifc_buildings(state, owner.as_ref().map(|o| o.id.as_str()).unwrap_or(""));
 
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
@@ -363,77 +364,119 @@ fn block_on_anywhere<T: Send>(
 /// seed with `SEED_STANDARDS_DEMO=false`.
 const SCHEPENDOMLAAN_IFC_URL: &str = "https://raw.githubusercontent.com/jakob-beetz/DataSetSchependomlaan/master/Design%20model%20IFC/IFC%20Schependomlaan.ifc";
 
-/// Download the Schependomlaan IFC (~49 MB, first boot only) and run it through
-/// the same IFC import pipeline users get: stored as a public dataset asset,
-/// converted to a BOT topology graph + a full ifcOWL lift, every storey, wall
-/// and beam individually addressable. Skips instantly when the building graph
-/// already has data; a failed download just retries on the next boot.
-fn seed_schependomlaan_ifc(state: &AppState, owner_id: &str) {
+/// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
+/// once (first boot), stored as a public asset, and lifted to BOT + ifcOWL in its
+/// OWN graph; the WKT anchor overrides the file's IfcSite (exporters leave default
+/// locations) so the buildings cluster as a little BIM neighbourhood near the
+/// Schependomlaan site in Nijmegen. URLs are CORS-enabled (raw.githubusercontent)
+/// so the web-ifc viewer can fetch them client-side too.
+struct IfcBuildingSeed {
+    /// Stored asset filename.
+    name: &'static str,
+    /// Open IFC download URL.
+    url: &'static str,
+    /// `POINT(lon lat)` map anchor (overrides the file's own IfcSite georef).
+    anchor: &'static str,
+    /// Distinct BOT graph suffix per building so they don't collide.
+    graph_suffix: &'static str,
+    /// Short label for logs.
+    label: &'static str,
+}
+
+/// The demo IFC buildings. The small KIT FZK-Haus + buildingSMART Duplex
+/// (~2.5 MB each) come FIRST so a couple of rich IFC buildings appear within
+/// seconds of first boot; the 49 MB Schependomlaan (which honours `SEED_IFC_URL`)
+/// imports last so it doesn't hold the others up. All carry full BOT topology,
+/// property sets and an ifcOWL lift.
+const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
+    IfcBuildingSeed {
+        name: "FZK-Haus.ifc",
+        url: "https://raw.githubusercontent.com/tum-gis/ifc-to-citygml3/master/input/AC20-FZK-Haus.ifc",
+        anchor: "POINT(5.83602 51.84182)",
+        graph_suffix: "building-fzk",
+        label: "FZK-Haus",
+    },
+    IfcBuildingSeed {
+        name: "Duplex.ifc",
+        url: "https://raw.githubusercontent.com/MadsHolten/BOT-Duplex-house/master/Model%20files/IFC/Duplex.ifc",
+        anchor: "POINT(5.83180 51.84050)",
+        graph_suffix: "building-duplex",
+        label: "Duplex Apartment",
+    },
+    IfcBuildingSeed {
+        name: "Schependomlaan.ifc",
+        url: SCHEPENDOMLAAN_IFC_URL,
+        anchor: "POINT(5.83373 51.84114)",
+        graph_suffix: "building",
+        label: "Schependomlaan",
+    },
+];
+
+/// Download each demo IFC building (first boot only) and run it through the same
+/// IFC import pipeline users get: stored as a public dataset asset, converted to
+/// a BOT topology graph + a full ifcOWL lift, every storey, wall and beam
+/// individually addressable. Each building skips instantly when its graph already
+/// has data; a failed download just retries on the next boot.
+fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     const DS: &str = "viewer-3d-demo";
-    let bot_graph = format!("{}/{}/building", seed_data::DEMO_BASE, DS);
-    if state
-        .store
-        .graph_count_cached(Some(&bot_graph))
-        .unwrap_or(0)
-        > 0
-    {
-        return;
-    }
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
         return;
     }
-    let url = std::env::var("SEED_IFC_URL").unwrap_or_else(|_| SCHEPENDOMLAAN_IFC_URL.to_string());
-    // An explicitly empty SEED_IFC_URL disables the IFC demo (also used by
-    // tests, which must never reach out to the network).
-    if url.trim().is_empty() {
-        tracing::info!("SEED_IFC_URL is empty — skipping the Schependomlaan IFC demo");
+    // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
+    // tests, which must never reach out to the network). A custom value overrides
+    // only the first (Schependomlaan) building.
+    let env_url = std::env::var("SEED_IFC_URL").ok();
+    if env_url.as_deref().map(str::trim) == Some("") {
+        tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
         return;
     }
-    tracing::info!("seed: downloading Schependomlaan IFC ({url}) — first boot only");
-    let downloaded = block_on_anywhere(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(600))
-            .build()?;
-        let bytes = client
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        anyhow::Ok(bytes.to_vec())
-    })
-    .and_then(|r| r);
-    let bytes = match downloaded {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                "schependomlaan seed skipped (download failed, will retry next boot): {e}"
-            );
-            return;
+    for b in IFC_BUILDINGS.iter() {
+        let bot_graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, b.graph_suffix);
+        if state.store.graph_count_cached(Some(&bot_graph)).unwrap_or(0) > 0 {
+            continue; // already seeded
         }
-    };
-    let imported = block_on_anywhere(crate::imports::ifc::import_ifc_bytes(
-        state,
-        DS,
-        owner_id,
-        "Schependomlaan.ifc",
-        bytes,
-        Some(bot_graph),
-        true,
-        true,
-        Some(url),
-        // The file's IfcSite carries an exporter-default location; anchor the
-        // demo at the real Schependomlaan site (PDOK street centroid) instead.
-        Some("POINT(5.83373 51.84114)".to_string()),
-    ))
-    .and_then(|r| r.map_err(anyhow::Error::msg));
-    match imported {
-        Ok(o) => tracing::info!(
-            "seeded Schependomlaan: {} elements / {} storeys / {} spaces; BOT {} + ifcOWL {} triples",
-            o.stats.elements, o.stats.storeys, o.stats.spaces, o.stats.bot_triples, o.stats.ifcowl_triples
-        ),
-        Err(e) => tracing::warn!("schependomlaan seed failed: {e}"),
+        // SEED_IFC_URL overrides only the Schependomlaan source (the headline
+        // building), regardless of its position in the list.
+        let url = match env_url.as_deref() {
+            Some(u) if b.label == "Schependomlaan" && !u.trim().is_empty() => u.to_string(),
+            _ => b.url.to_string(),
+        };
+        tracing::info!("seed: downloading {} IFC ({url}) — first boot only", b.label);
+        let downloaded = block_on_anywhere(async {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(600))
+                .build()?;
+            let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+            anyhow::Ok(bytes.to_vec())
+        })
+        .and_then(|r| r);
+        let bytes = match downloaded {
+            Ok(b2) => b2,
+            Err(e) => {
+                tracing::warn!("{} IFC seed skipped (download failed, retries next boot): {e}", b.label);
+                continue;
+            }
+        };
+        let imported = block_on_anywhere(crate::imports::ifc::import_ifc_bytes(
+            state,
+            DS,
+            owner_id,
+            b.name,
+            bytes,
+            Some(bot_graph),
+            true,
+            true,
+            Some(url),
+            Some(b.anchor.to_string()),
+        ))
+        .and_then(|r| r.map_err(anyhow::Error::msg));
+        match imported {
+            Ok(o) => tracing::info!(
+                "seeded {}: {} elements / {} storeys / {} spaces; BOT {} + ifcOWL {} triples",
+                b.label, o.stats.elements, o.stats.storeys, o.stats.spaces, o.stats.bot_triples, o.stats.ifcowl_triples
+            ),
+            Err(e) => tracing::warn!("{} IFC seed failed: {e}", b.label),
+        }
     }
 }
 

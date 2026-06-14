@@ -131,8 +131,11 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
           }
         });
 
-        // IFC is Z-up; three.js is Y-up.
-        master.rotation.x = -Math.PI / 2;
+        // web-ifc (0.0.x) already emits Y-up geometry — verified empirically: the
+        // Schependomlaan storeys (foundation → roof) stack along +Y here, not +Z.
+        // So NO Z-up→Y-up rotation is applied; the canonical "IFC is Z-up" -90°
+        // about X would lay the building on its side. The master stays Y-up, like
+        // glTF/CityJSON, which the orbit camera and the map's mercMatrixFor expect.
         master.updateMatrixWorld(true);
         return { master, guids };
       } finally {
@@ -150,21 +153,30 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
  * fragment) as a fresh three.js group. Clones share geometry with the cached
  * master parse, so repeated loads are cheap.
  */
-export async function loadIfcGroup(url: string): Promise<THREE.Group> {
+export async function loadIfcGroup(
+  url: string,
+  opts: { guids?: string[] } = {},
+): Promise<THREE.Group> {
   const base = ifcBaseUrl(url);
-  const guid = ifcGuidFragment(url);
+  const fragGuid = ifcGuidFragment(url);
   const { master, guids } = await parseIfc(base);
-  // An element fragment isolates that element's meshes — unless the element has
-  // no geometry of its own (e.g. a storey), in which case show the whole model.
-  if (guid && guids.has(guid)) {
-    const sub = new THREE.Group();
-    for (const child of master.children) {
-      if ((child as THREE.Mesh).userData?.ifcGuid === guid) {
-        sub.add(child.clone());
-      }
-    }
-    sub.rotation.copy(master.rotation);
-    return sub;
+  // Decide which GlobalIds to isolate. A `#GlobalId` fragment isolates that one
+  // element (a wall, a beam). `opts.guids` — a spatial container's descendant
+  // leaf elements — isolates a whole subtree, which is how a storey/building is
+  // shown: spatial containers own NO mesh of their own, so isolating *their* guid
+  // is futile; isolating their descendants is what makes their contents visible.
+  // Only requested guids that actually own meshes are kept.
+  const wanted = new Set<string>();
+  if (fragGuid && guids.has(fragGuid)) wanted.add(fragGuid);
+  for (const g of opts.guids || []) if (guids.has(g)) wanted.add(g);
+  // Nothing renderable requested (the whole-building ref, or a bare container ref
+  // with no descendant set) → return the whole model, preserving prior behaviour.
+  if (wanted.size === 0) return master.clone();
+  const sub = new THREE.Group();
+  for (const child of master.children) {
+    const g = (child as THREE.Mesh).userData?.ifcGuid;
+    if (g && wanted.has(g)) sub.add(child.clone());
   }
-  return master.clone();
+  sub.rotation.copy(master.rotation);
+  return sub;
 }

@@ -171,6 +171,76 @@ const VOCABS: &[StdVocab] = &[
         version: "1.0", // file owl:versionInfo "1.0"
         ttl: include_str!("../../frontend/public/vocab/ots.ttl"),
     },
+    // ── Standards & Ontologies set: the BIM / sensor / asset-management domain
+    // packs the demo data draws on. Each is a curated term subset (header in the
+    // .ttl cites the source); these render with full definitions in the UI and
+    // are browsable/queryable as public reference models alongside the core
+    // standards above. NB: the large ifcOWL and Brick schemas are intentionally
+    // *not* bundled here (too large for an include_str! seed) — import them as a
+    // user model if needed.
+    StdVocab {
+        id: "bot",
+        title: "Building Topology Ontology (BOT)",
+        namespace: "https://w3id.org/bot#",
+        version: "0.3.2", // file owl:versionInfo "0.3.2"
+        ttl: include_str!("../../frontend/public/vocab/bot.ttl"),
+    },
+    StdVocab {
+        id: "omg",
+        title: "Ontology for Managing Geometry (OMG)",
+        namespace: "https://w3id.org/omg#",
+        version: "0.0.1", // file owl:versionInfo
+        ttl: include_str!("../../frontend/public/vocab/omg.ttl"),
+    },
+    StdVocab {
+        id: "fog",
+        title: "File Ontology for Geometry formats (FOG)",
+        namespace: "https://w3id.org/fog#",
+        version: "0.0.1", // file owl:versionInfo "0.0.1"
+        ttl: include_str!("../../frontend/public/vocab/fog.ttl"),
+    },
+    StdVocab {
+        id: "sosa",
+        title: "Sensor, Observation, Sample, and Actuator (SOSA)",
+        namespace: "http://www.w3.org/ns/sosa/",
+        version: "2017-10-19", // file owl:versionInfo, SSN/SOSA W3C Rec date
+        ttl: include_str!("../../frontend/public/vocab/sosa.ttl"),
+    },
+    StdVocab {
+        id: "bag",
+        title: "3DBAG Vocabulary",
+        namespace: "https://data.3dbag.nl/def/",
+        version: "1.0", // bundled 3DBAG term excerpt
+        ttl: include_str!("../../frontend/public/vocab/bag.ttl"),
+    },
+    StdVocab {
+        id: "saref",
+        title: "Smart Applications REFerence ontology (SAREF)",
+        namespace: "https://saref.etsi.org/core/",
+        version: "3.1.1", // ETSI SAREF core, file owl:versionInfo
+        ttl: include_str!("../../frontend/public/vocab/saref.ttl"),
+    },
+    StdVocab {
+        id: "ssn",
+        title: "Semantic Sensor Network ontology (SSN)",
+        namespace: "http://www.w3.org/ns/ssn/",
+        version: "2017-10-19", // SSN/SOSA W3C Rec date, file owl:versionInfo
+        ttl: include_str!("../../frontend/public/vocab/ssn.ttl"),
+    },
+    StdVocab {
+        id: "otl",
+        title: "RWS Object Type Library (OTL) — excerpt",
+        namespace: "https://data.rws.nl/otl/def/",
+        version: "excerpt", // hand-authored RWS OTL excerpt, not the full library
+        ttl: include_str!("../../frontend/public/vocab/otl.ttl"),
+    },
+    StdVocab {
+        id: "imbor",
+        title: "CROW IMBOR — excerpt",
+        namespace: "https://data.crow.nl/imbor/def/",
+        version: "excerpt", // hand-authored CROW IMBOR excerpt, not the full model
+        ttl: include_str!("../../frontend/public/vocab/imbor.ttl"),
+    },
 ];
 
 /// Seed every standard vocabulary that isn't already in the registry. Returns the

@@ -1,8 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { sparqlQuery, datasetSparqlQuery, listDatasets, listOrganisations, listServices, listDatasetGraphs, listDatasetVersions, getDataset, getOrganisation, nlToSparql, sendLlmFeedback, llmHealth } from '../lib/api.js';
-  import { graphResultsToElements, resultsToCsv, downloadFile, parseNTriplesToBindings } from '../lib/rdf-utils.js';
+  import { graphResultsToElements, resultsToCsv, downloadFile, parseNTriplesToBindings, detectGeoBindings, resultsToViewerElements } from '../lib/rdf-utils.js';
   import GraphCanvas from '../components/GraphCanvas.svelte';
+  import ViewerMap from '../components/viewer/ViewerMap.svelte';
   import SparqlEditorCM from '../components/SparqlEditorCM.svelte';
   import Select from '../components/Select.svelte';
   import DataTable from '../components/DataTable.svelte';
@@ -798,6 +799,14 @@ LIMIT 25`;
 
   $: canGraph = graphElements.nodes.length > 0;
 
+  // Map tab is offered only when the current SELECT result set contains mappable
+  // (WGS84) geometry — so loading non-spatial data hides it (scope-aware gating).
+  $: canMap = detectGeoBindings(results);
+  // Never strand the user on a hidden tab: if the active tab's gate dropped
+  // (new results lost their geometry / graph shape), fall back to the table.
+  $: if ((activeTab === 'map' && !canMap) || (activeTab === 'graph' && !canGraph)) activeTab = 'table';
+  $: mapElements = canMap && activeTab === 'map' ? resultsToViewerElements(results) : [];
+
   $: rowCount = results?.results?.bindings?.length ?? 0;
 </script>
 
@@ -1120,6 +1129,11 @@ LIMIT 25`;
               {$i18nT('pages.sparql.graph')}
             </button>
           {/if}
+          {#if canMap}
+            <button class="tab" class:active={activeTab === 'map'} on:click={() => activeTab = 'map'}>
+              {$i18nT('pages.sparql.map')}
+            </button>
+          {/if}
         </div>
         <div class="export-actions">
           {#if results?.results}
@@ -1160,6 +1174,16 @@ LIMIT 25`;
       {#if activeTab === 'graph' && canGraph}
         <GraphCanvas nodes={graphElements.nodes} edges={graphElements.edges} height="480px"
           on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)} />
+      {/if}
+
+      <!-- Map tab — plots rows that carry WGS84 geometry on the shared viewer map. -->
+      {#if activeTab === 'map' && canMap}
+        {#if mapElements.length > 0}
+          <ViewerMap elements={mapElements} height="480px"
+            on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+        {:else}
+          <p class="no-results">{$i18nT('pages.sparql.noMappable')}</p>
+        {/if}
       {/if}
     </div>
   {/if}
