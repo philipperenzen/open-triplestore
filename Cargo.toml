@@ -143,7 +143,11 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 
 # OpenAPI documentation
-utoipa = { version = "4", features = ["axum_extras"] }
+# NB: utoipa-swagger-ui stays on 7.x — it pairs with utoipa 5 and targets axum
+# 0.7. Bumping it to 8/9 would force an axum 0.8 migration. (Swagger UI itself is
+# disabled at runtime; only the JSON spec is served.) swagger-ui 7 carries its
+# own utoipa 4 transitively, which coexists fine with our utoipa 5.
+utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 # SHACL Compact Syntax parser

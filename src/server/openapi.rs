@@ -177,7 +177,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     let mut spec = ApiDoc::openapi();
 
     use serde_json::{json, Value};
-    use utoipa::openapi::path::PathItemType as M;
+    use utoipa::openapi::path::HttpMethod as M;
     use utoipa::openapi::path::*;
     use utoipa::openapi::request_body::{RequestBody, RequestBodyBuilder};
     use utoipa::openapi::*;
@@ -192,7 +192,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             } else {
                 Required::False
             })
-            .schema(Some(ObjectBuilder::new().schema_type(SchemaType::String)))
+            .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
             .description(Some(desc))
             .build()
     }
@@ -201,7 +201,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             .name(name)
             .parameter_in(ParameterIn::Path)
             .required(Required::True)
-            .schema(Some(ObjectBuilder::new().schema_type(SchemaType::String)))
+            .schema(Some(ObjectBuilder::new().schema_type(Type::String)))
             .build()
     }
     fn sec() -> SecurityRequirement {
@@ -272,7 +272,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             .content(
                 "application/json",
                 ContentBuilder::new()
-                    .schema(Ref::from_schema_name(schema))
+                    .schema(Some(Ref::from_schema_name(schema)))
                     .example(Some(example))
                     .build(),
             )
@@ -285,7 +285,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             .content(
                 "application/json",
                 ContentBuilder::new()
-                    .schema(schema)
+                    .schema(Some(schema))
                     .example(Some(example))
                     .build(),
             )
@@ -295,11 +295,11 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     /// The rich create/update body for a saved-query "API service".
     fn api_service_body(create: bool) -> RequestBody {
         let param_item = ObjectBuilder::new()
-            .property("name", ObjectBuilder::new().schema_type(SchemaType::String))
+            .property("name", ObjectBuilder::new().schema_type(Type::String))
             .property(
                 "type",
                 ObjectBuilder::new()
-                    .schema_type(SchemaType::String)
+                    .schema_type(Type::String)
                     .enum_values(Some([
                         "iri", "string", "integer", "decimal", "boolean", "date", "dateTime",
                     ]))
@@ -307,15 +307,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             )
             .property(
                 "required",
-                ObjectBuilder::new().schema_type(SchemaType::Boolean),
+                ObjectBuilder::new().schema_type(Type::Boolean),
             )
             .property(
                 "default",
-                ObjectBuilder::new().schema_type(SchemaType::String),
+                ObjectBuilder::new().schema_type(Type::String),
             )
             .property(
                 "description",
-                ObjectBuilder::new().schema_type(SchemaType::String),
+                ObjectBuilder::new().schema_type(Type::String),
             )
             .required("name");
 
@@ -323,20 +323,20 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             .property(
                 "name",
                 ObjectBuilder::new()
-                    .schema_type(SchemaType::String)
+                    .schema_type(Type::String)
                     .description(Some("Human-readable service name.")),
             )
             .property(
                 "slug",
                 ObjectBuilder::new()
-                    .schema_type(SchemaType::String)
+                    .schema_type(Type::String)
                     .description(Some("Optional URL-safe id; defaults to a slugified name.")),
             )
-            .property("description", ObjectBuilder::new().schema_type(SchemaType::String))
+            .property("description", ObjectBuilder::new().schema_type(Type::String))
             .property(
                 "sparql",
                 ObjectBuilder::new()
-                    .schema_type(SchemaType::String)
+                    .schema_type(Type::String)
                     .description(Some("SPARQL text. Use {{name}} placeholders for parameters.")),
             )
             .property(
@@ -354,7 +354,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             .property(
                 "visibility",
                 ObjectBuilder::new()
-                    .schema_type(SchemaType::String)
+                    .schema_type(Type::String)
                     .description(Some("\"public\" | \"private\"; defaults to the owner's visibility.")),
             );
 
@@ -376,13 +376,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 .property(
                     "note",
                     ObjectBuilder::new()
-                        .schema_type(SchemaType::String)
+                        .schema_type(Type::String)
                         .description(Some("Revision note, stored when `sparql` changes.")),
                 )
                 .property(
                     "is_active",
                     ObjectBuilder::new()
-                        .schema_type(SchemaType::Boolean)
+                        .schema_type(Type::Boolean)
                         .description(Some("Deactivate to hide the service without deleting it.")),
                 );
             json!({
@@ -411,7 +411,10 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             for n in &names {
                 b = b.parameter(pp(n));
             }
-            item.operations.insert(method, b.build());
+            // utoipa 5: PathItem no longer exposes an `operations` map; operations
+            // live in per-method fields. Merge in a single-method PathItem (each
+            // method appears once per path, so there's nothing to clobber).
+            item.merge_operations(PathItem::new(method, b.build()));
         }
         paths.paths.insert(p, item);
     }
@@ -4100,12 +4103,39 @@ pub fn filtered_spec(user: Option<&AuthenticatedUser>) -> utoipa::openapi::OpenA
         !admin_only || is_admin
     };
 
+    // utoipa 5: a PathItem holds operations in per-method `Option<Operation>`
+    // fields rather than an `operations` map. Clear each method whose operation
+    // the caller can't see, then drop any path left with no operations.
     for item in spec.paths.paths.values_mut() {
-        item.operations.retain(|_, op| visible(op));
+        for slot in [
+            &mut item.get,
+            &mut item.put,
+            &mut item.post,
+            &mut item.delete,
+            &mut item.options,
+            &mut item.head,
+            &mut item.patch,
+            &mut item.trace,
+        ] {
+            if slot.as_ref().is_some_and(|op| !visible(op)) {
+                *slot = None;
+            }
+        }
     }
-    spec.paths
-        .paths
-        .retain(|_, item| !item.operations.is_empty());
+    spec.paths.paths.retain(|_, item| {
+        [
+            &item.get,
+            &item.put,
+            &item.post,
+            &item.delete,
+            &item.options,
+            &item.head,
+            &item.patch,
+            &item.trace,
+        ]
+        .iter()
+        .any(|op| op.is_some())
+    });
 
     spec
 }
