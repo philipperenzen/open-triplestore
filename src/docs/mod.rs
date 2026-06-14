@@ -308,6 +308,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 64,
     },
     Builtin {
+        slug: "geo-3d-platform",
+        title: "3D Geospatial Platform",
+        category: "Query & Search",
+        body: include_str!("../../docs/geo-3d-platform.md"),
+        admin_only: false,
+        sort: 65,
+    },
+    Builtin {
         slug: "spark",
         title: "Spark Chat Assistant",
         category: "Query & Search",
