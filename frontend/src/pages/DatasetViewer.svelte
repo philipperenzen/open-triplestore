@@ -66,6 +66,11 @@
   $: unlocated = filtered.filter((e) => !e.wkt4326);
   $: hasGeo = elements.some((e) => e.wkt4326);
   $: fallbackRefs = modelRefs(elements);
+  // 3D-Tiles-able content: any loadable 3D model, or volumetric WKT geometry
+  // (POLYHEDRALSURFACE / TIN / SOLID / Z) — gates the Cesium viewer entry point.
+  $: has3dContent =
+    elements.some((e) => modelRefOf(e)) ||
+    elements.some((e) => /POLYHEDRALSURFACE|\bTIN\b|\bSOLID\b| Z[ (]/i.test(e.wkt4326 || ''));
 
   const hasModel = (el) => !!modelRefOf(el);
 
@@ -157,6 +162,11 @@
     <h1>{$i18nT('pages.datasetViewer.title')}</h1>
     {#if !loading && elements.length}
       <span class="count-chip">{elements.length} {$i18nT('pages.datasetViewer.elements').toLowerCase()}</span>
+    {/if}
+    {#if !loading && has3dContent}
+      <Link to={`/datasets/${id}/cesium`} class="btn btn-sm cesium-link" title={$i18nT('pages.datasetViewer.cesium3dDesc')}>
+        <Boxes size={14} /> {$i18nT('pages.datasetViewer.cesium3d')}
+      </Link>
     {/if}
     {#if !loading && (ifcUrl || graphs.length)}
       <div class="dl-wrap">

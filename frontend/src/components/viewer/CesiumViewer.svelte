@@ -75,6 +75,9 @@
     } catch (e) {
       error = e?.message || 'Failed to initialise the 3D viewer.';
     } finally {
+      // Clear the overlay once the tileset is in the scene — the camera flight
+      // below must NOT gate the UI (zoomTo resolves only after the flight, which
+      // can stall on a degenerate bounding volume).
       loading = false;
     }
   }
@@ -88,7 +91,19 @@
       `/api/datasets/${encodeURIComponent(datasetId)}/3dtiles/tileset.json`,
     );
     viewer.scene.primitives.add(tileset);
-    await viewer.zoomTo(tileset);
+    // Fly to the tileset without blocking init: zoomTo awaits the camera flight,
+    // which can hang. Prefer the ready tileset's boundingSphere; fall back to
+    // zoomTo. Either way init() proceeds and the overlay clears.
+    try {
+      const bs = tileset.boundingSphere;
+      if (bs && Number.isFinite(bs.radius) && bs.radius > 0) {
+        viewer.camera.flyToBoundingSphere(bs, { duration: 0 });
+      } else {
+        viewer.zoomTo(tileset).catch(() => {});
+      }
+    } catch {
+      viewer.zoomTo(tileset).catch(() => {});
+    }
   }
 
   function attachPicking() {

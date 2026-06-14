@@ -84,7 +84,13 @@
   // and folding the mercator offset into a CPU-side double-precision matrix
   // avoids the float32 jitter that placing geometry at raw mercator
   // coordinates causes at street-level zooms.
-  const modelLayer = {
+  // A fresh custom-layer object per add: MapLibre does NOT reliably re-accept the
+  // *same* custom-layer instance after setStyle({diff:false}) (the basemap/theme
+  // swap), so re-adding the one const object silently no-ops — which is why the
+  // 3D models vanished when switching to satellite. A new object each time (its
+  // methods still close over the component-scoped renderer/entries) re-adds
+  // cleanly on every style, raster included.
+  const makeModelLayer = () => ({
     id: 'ots-3d-models',
     type: 'custom',
     renderingMode: '3d',
@@ -109,7 +115,7 @@
       renderer?.dispose();
       renderer = null;
     },
-  };
+  });
 
   /** Model-local (y-up metres, normalised) → mercator placement matrix. */
   function mercMatrixFor(lonLat, meters) {
@@ -296,7 +302,7 @@
         } });
     }
     add3dBuildings(map, dark);
-    if (!map.getLayer('ots-3d-models')) map.addLayer(modelLayer);
+    if (!map.getLayer('ots-3d-models')) map.addLayer(makeModelLayer());
     applySelectedPaint();
     applyLayerVisibility();
     suppressBasemapBuildingsUnderModels();

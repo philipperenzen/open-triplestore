@@ -2677,7 +2677,9 @@
       "back": "Dataset",
       "elements": "Elements",
       "openResource": "Open resource",
-      "empty": "No elements with geometry or 3D models in this dataset."
+      "empty": "No elements with geometry or 3D models in this dataset.",
+      "cesium3d": "3D Tiles",
+      "cesium3dDesc": "Open the CesiumJS 3D Tiles viewer (globe + terrain, click a feature for its linked data)"
     },
     "recovery": {
       "heading": "Account recovery",
