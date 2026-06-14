@@ -178,8 +178,8 @@ tantivy = { version = "0.22", optional = true }
 samael = { version = "0.0.18", optional = true }
 
 # OAuth 2.0 / OIDC
-openidconnect = { version = "3", default-features = false, features = ["reqwest", "rustls-tls"] }
-oauth2 = "4"
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
+oauth2 = "5"
 
 # Credential encryption (AES-256-GCM for stored OAuth client secrets)
 aes-gcm = "0.10"
