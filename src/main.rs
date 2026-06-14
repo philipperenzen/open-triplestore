@@ -16,6 +16,7 @@ mod data_models;
 mod dataset_versions;
 mod dcat;
 mod docs;
+mod email;
 mod geo;
 mod ifc;
 mod imports;
@@ -105,6 +106,12 @@ struct Cli {
     /// Promote an existing user to super_admin and exit
     #[arg(long)]
     promote_super_admin: Option<String>,
+
+    /// Restore the store + identity DB from a backup id (in BACKUP_DIR, default
+    /// {data-dir}/backups), REPLACING current data, then exit. Encrypted backups
+    /// must be decrypted manually first.
+    #[arg(long, value_name = "BACKUP_ID")]
+    restore: Option<String>,
 
     /// Allowed CORS origins, comma-separated (e.g. "https://app.example.com,https://admin.example.com").
     /// If empty, same-origin only.
@@ -267,6 +274,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Create data directory if it doesn't exist
     std::fs::create_dir_all(&cli.data_dir)?;
+
+    // Handle --restore: rebuild the store + identity DB from a backup, then exit.
+    // Runs before the identity DB is opened so its SQLite file can be replaced.
+    if let Some(ref id) = cli.restore {
+        let backup_dir = std::env::var("BACKUP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| cli.data_dir.join("backups"));
+        let target_sqlite = cli
+            .db_path
+            .clone()
+            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        info!("Restoring backup {id} from {}…", backup_dir.display());
+        let store = store::TripleStore::open(&cli.data_dir)?;
+        let manifest = backup::restore_backup(&backup_dir, id, &store, &target_sqlite)?;
+        info!(
+            "Restored backup {} ({} quads). Restart without --restore to run the server.",
+            manifest.id, manifest.rdf_quad_count
+        );
+        return Ok(());
+    }
 
     // Initialize the auth database (SQLite) — needed by --promote-super-admin and the server.
     // Opened before the RocksDB store so admin operations can run while the server is live.

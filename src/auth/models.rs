@@ -233,6 +233,13 @@ pub struct User {
     pub id: String,
     pub username: String,
     pub email: String,
+    /// Whether ownership of `email` was proven (confirmation link, or asserted
+    /// by a trusted IdP / admin). Accounts predating verification are
+    /// grandfathered as verified by the one-time migration.
+    pub email_verified: bool,
+    /// Whether TOTP two-factor login is active. The encrypted shared secret
+    /// itself never leaves the DB layer (see `AuthDb::get_totp_secret`).
+    pub totp_enabled: bool,
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub role: SystemRole,
@@ -261,6 +268,54 @@ impl User {
     pub fn is_publisher(&self) -> bool {
         self.role.is_admin() || self.can_publish
     }
+}
+
+// ─── Email action tokens ─────────────────────────────────────────────────────
+
+/// A single-use, expiring token mailed to a user to prove mailbox control:
+/// email verification, password reset, or an email-address change.
+/// Only the SHA-256 hash of the token is stored.
+#[derive(Debug, Clone)]
+pub struct EmailToken {
+    pub id: String,
+    pub user_id: String,
+    /// `verify_email` | `reset_password` | `change_email`
+    pub kind: String,
+    pub token_hash: String,
+    /// For `change_email`: the new address taking effect on confirmation.
+    pub new_email: Option<String>,
+    pub expires_at: String,
+    pub created_at: String,
+    pub used_at: Option<String>,
+}
+
+impl EmailToken {
+    pub fn is_expired(&self) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map(|t| t.with_timezone(&chrono::Utc) < chrono::Utc::now())
+            .unwrap_or(true)
+    }
+}
+
+// ─── WebAuthn passkeys ───────────────────────────────────────────────────────
+
+/// A registered WebAuthn/FIDO2 passkey credential.
+/// `public_key` is the serialized `webauthn_rs::prelude::Passkey` JSON.
+#[derive(Debug, Clone)]
+pub struct WebauthnCredential {
+    pub id: String,
+    pub user_id: String,
+    /// Credential ID, base64url (no padding) — unique across all users.
+    pub credential_id: String,
+    pub public_key: String,
+    /// Authenticator signature counter at last use (clone detection).
+    pub counter: i64,
+    /// JSON array of authenticator transports reported at registration.
+    pub transports: Option<String>,
+    /// User-chosen label ("MacBook Touch ID", "YubiKey 5"…).
+    pub name: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
 }
 
 // ─── API Token ───────────────────────────────────────────────────────────────

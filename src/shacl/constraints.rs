@@ -1,8 +1,14 @@
-use super::engine::FocusKind;
 use super::report::{Severity, ValidationResult};
 use super::shapes::*;
-use crate::store::{escape_sparql_iri, TripleStore};
-use std::collections::BTreeSet;
+use crate::store::TripleStore;
+use oxigraph::model::{GraphNameRef, Literal, NamedNodeRef, SubjectRef, Term};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
+
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+const RDFS_SUBCLASS: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 
 /// Maximum nesting depth for recursive shape evaluation (sh:node / sh:and / sh:or
 /// / sh:xone / sh:not / sh:qualifiedValueShape). A shapes graph with a cycle
@@ -35,13 +41,26 @@ impl Drop for ShapeDepthGuard {
     }
 }
 
+/// Display form used in validation reports: bare IRI for named nodes, lexical
+/// value for literals, `_:label` for blank nodes. This is the historical report
+/// format — the HTTP layer and UI consume these strings, so it must not change.
+pub fn display_term(term: &Term) -> String {
+    match term {
+        Term::NamedNode(nn) => nn.as_str().to_string(),
+        Term::Literal(lit) => lit.value().to_string(),
+        Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
+        other => other.to_string(),
+    }
+}
+
 /// Validate all constraints of an inline `Shape` against `focus_node` and return violations.
 ///
-/// Used by logical constraint operators (sh:not, sh:and, sh:or, sh:xone) and sh:node.
+/// Used by logical constraint operators (sh:not, sh:and, sh:or, sh:xone), sh:node
+/// and sh:qualifiedValueShape.
 fn validate_inline_shape(
     store: &TripleStore,
     shapes: &[Shape],
-    focus_node: &str,
+    focus_node: &Term,
     shape: &Shape,
     data_graphs: &[String],
     severity: &Severity,
@@ -61,16 +80,12 @@ fn validate_inline_shape(
     let mut results = Vec::new();
     let shape_iri = &shape.iri;
 
-    // Inline shapes validate *value nodes*, whose term kind was never recorded
-    // (they come from lexical value lookups) — node-kind checks fall back to
-    // the lexical heuristic.
     for constraint in &shape.constraints {
         results.extend(evaluate_constraint(
             store,
             shapes,
             shape_iri,
             focus_node,
-            FocusKind::Unknown,
             constraint,
             None,
             data_graphs,
@@ -86,7 +101,6 @@ fn validate_inline_shape(
                 shapes,
                 ps_iri,
                 focus_node,
-                FocusKind::Unknown,
                 constraint,
                 Some(&prop_shape.path),
                 data_graphs,
@@ -98,139 +112,84 @@ fn validate_inline_shape(
     results
 }
 
-/// Try to parse a string as f64 for numeric range comparisons.
-fn parse_numeric(s: &str) -> Option<f64> {
-    s.parse::<f64>().ok()
-}
-
-/// Evaluate a constraint against a focus node. `focus_kind` is the focus
-/// node's term kind when target resolution could record it (see
-/// [`FocusKind`]); `FocusKind::Unknown` falls back to lexical heuristics.
+/// Evaluate a constraint against a (typed) focus node.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_constraint(
     store: &TripleStore,
     shapes: &[Shape],
     shape_iri: &str,
-    focus_node: &str,
-    focus_kind: FocusKind,
+    focus_node: &Term,
     constraint: &Constraint,
     path: Option<&PropertyPath>,
     data_graphs: &[String],
     severity: &Severity,
 ) -> Vec<ValidationResult> {
     let mut results = Vec::new();
+    let focus_str = display_term(focus_node);
+    let path_str = || path.map(|p| p.to_sparql());
+    // sh:value for value-node-oriented results (SHACL sets it to the offending
+    // value node — the focus itself in a node-shape context).
+    let mk = |value: Option<String>,
+              path: Option<String>,
+              source_constraint: String,
+              message: String|
+     -> ValidationResult {
+        ValidationResult {
+            severity: severity.clone(),
+            focus_node: focus_str.clone(),
+            path,
+            value,
+            source_shape: shape_iri.to_string(),
+            source_constraint,
+            message,
+        }
+    };
 
     match constraint {
         Constraint::Class(class_iri) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            if values.is_empty() && path.is_none() {
-                // Node shape class constraint: check if focus node is instance of class.
-                // Scope to the data graphs — the instance triple lives there, not in
-                // the (unscoped) default graph; an unscoped ASK made every class check
-                // fail for datasets that use named graphs (e.g. sh:qualifiedValueShape).
-                let query = format!(
-                    "ASK {{ {} }}",
-                    super::engine::graph_scoped(
-                        data_graphs,
-                        &format!(
-                            "<{}> a <{}>",
-                            escape_sparql_iri(focus_node),
-                            escape_sparql_iri(class_iri)
-                        )
-                    )
-                );
-                if let Ok(oxigraph::sparql::QueryResults::Boolean(is_instance)) =
-                    store.query(&query)
-                {
-                    if !is_instance {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: None,
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:class <{}>", class_iri),
-                            message: format!("Value does not have class <{}>", class_iri),
-                        });
-                    }
-                }
-            } else {
-                for value in &values {
-                    if value.starts_with("http://")
-                        || value.starts_with("https://")
-                        || value.starts_with("urn:")
-                    {
-                        let query = format!(
-                            "ASK {{ {} }}",
-                            super::engine::graph_scoped(
-                                data_graphs,
-                                &format!(
-                                    "<{}> a <{}>",
-                                    escape_sparql_iri(value),
-                                    escape_sparql_iri(class_iri)
-                                )
-                            )
-                        );
-                        if let Ok(oxigraph::sparql::QueryResults::Boolean(is_instance)) =
-                            store.query(&query)
-                        {
-                            if !is_instance {
-                                results.push(ValidationResult {
-                                    severity: severity.clone(),
-                                    focus_node: focus_node.to_string(),
-                                    path: path.map(|p| p.to_sparql()),
-                                    value: Some(value.clone()),
-                                    source_shape: shape_iri.to_string(),
-                                    source_constraint: format!("sh:class <{}>", class_iri),
-                                    message: format!(
-                                        "Value <{}> does not have class <{}>",
-                                        value, class_iri
-                                    ),
-                                });
-                            }
-                        }
-                    }
+            // Every value node must be a SHACL instance of the class
+            // (rdf:type/rdfs:subClassOf*). Literals are never instances.
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                if !is_instance_of(store, &v, class_iri, data_graphs) {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:class <{}>", class_iri),
+                        format!("Value does not have class <{}>", class_iri),
+                    ));
                 }
             }
         }
 
         Constraint::Datatype(dt_iri) => {
-            let values = get_value_terms(store, focus_node, path, data_graphs);
-            for (value, datatype, _lang) in &values {
-                if datatype.as_deref() != Some(dt_iri.as_str()) {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:datatype <{}>", dt_iri),
-                        message: format!("Value has wrong datatype, expected <{}>", dt_iri),
-                    });
+            // The value must be a literal whose datatype IRI matches AND whose
+            // lexical form is valid for that datatype (ill-formed literals like
+            // "aldi"^^xsd:integer violate sh:datatype — SHACL §4.1.2).
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                let ok = match &v {
+                    Term::Literal(lit) => {
+                        lit.datatype().as_str() == dt_iri.as_str() && xsd_lexical_valid(lit)
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:datatype <{}>", dt_iri),
+                        format!("Value has wrong datatype, expected <{}>", dt_iri),
+                    ));
                 }
             }
         }
 
         Constraint::NodeKind(expected) => {
-            if path.is_none() {
-                // Node-level: the focus node itself must match the kind. Target
-                // resolution records the exact term kind where it can (class /
-                // subjectsOf / objectsOf / SPARQL targets); a string literal
-                // like "mailto:x@y.org" reached via sh:targetObjectsOf is then
-                // classified as a literal instead of being mistaken for an IRI
-                // by its scheme-shaped lexical form. Only when the kind is
-                // genuinely unknown (sh:targetNode, inline value-node
-                // recursion) do we fall back to the lexical heuristic: not a
-                // blank node and not scheme-shaped ⇒ literal.
-                let (is_iri, is_blank, is_literal) = match focus_kind {
-                    FocusKind::Iri => (true, false, false),
-                    FocusKind::BlankNode => (false, true, false),
-                    FocusKind::Literal => (false, false, true),
-                    FocusKind::Unknown => {
-                        let is_blank = focus_node.starts_with("_:");
-                        let is_iri = !is_blank && looks_like_iri(focus_node);
-                        (is_iri, is_blank, !is_blank && !is_iri)
-                    }
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                let (is_iri, is_blank, is_literal) = match &v {
+                    Term::NamedNode(_) => (true, false, false),
+                    Term::BlankNode(_) => (false, true, false),
+                    Term::Literal(_) => (false, false, true),
+                    _ => (false, false, false),
                 };
                 let is_valid = match expected {
                     NodeKind::IRI => is_iri,
@@ -241,108 +200,72 @@ pub fn evaluate_constraint(
                     NodeKind::BlankNodeOrLiteral => is_blank || is_literal,
                 };
                 if !is_valid {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: None,
-                        value: None,
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:nodeKind {:?}", expected),
-                        message: format!(
-                            "Focus node does not match expected node kind {:?}",
-                            expected
-                        ),
-                    });
-                }
-            } else {
-                // Property-level: every value at the path must match the kind.
-                for (value, dt, _lang) in get_value_terms(store, focus_node, path, data_graphs) {
-                    if !value_matches_node_kind(expected, &value, &dt) {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: Some(value),
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:nodeKind {:?}", expected),
-                            message: format!(
-                                "Value does not match expected node kind {:?}",
-                                expected
-                            ),
-                        });
-                    }
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:nodeKind {:?}", expected),
+                        format!("Value does not match expected node kind {:?}", expected),
+                    ));
                 }
             }
         }
 
         Constraint::MinCount(min) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            if values.len() < *min {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: format!("sh:minCount {}", min),
-                    message: format!("Expected at least {} values, found {}", min, values.len()),
-                });
+            let count = value_nodes(store, focus_node, path, data_graphs).len();
+            if count < *min {
+                results.push(mk(
+                    None,
+                    path_str(),
+                    format!("sh:minCount {}", min),
+                    format!("Expected at least {} values, found {}", min, count),
+                ));
             }
         }
 
         Constraint::MaxCount(max) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            if values.len() > *max {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: format!("sh:maxCount {}", max),
-                    message: format!("Expected at most {} values, found {}", max, values.len()),
-                });
+            let count = value_nodes(store, focus_node, path, data_graphs).len();
+            if count > *max {
+                results.push(mk(
+                    None,
+                    path_str(),
+                    format!("sh:maxCount {}", max),
+                    format!("Expected at most {} values, found {}", max, count),
+                ));
             }
         }
 
         Constraint::MinLength(min_len) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            for value in &values {
-                if value.len() < *min_len {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:minLength {}", min_len),
-                        message: format!(
-                            "Value length {} is less than minimum {}",
-                            value.len(),
-                            min_len
-                        ),
-                    });
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                // sh:minLength applies to the string representation of the value:
+                // literals by lexical form, IRIs by IRI string; blank nodes always violate.
+                let ok = match string_repr(&v) {
+                    Some(s) => s.chars().count() >= *min_len,
+                    None => false,
+                };
+                if !ok {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:minLength {}", min_len),
+                        format!("Value length is less than minimum {}", min_len),
+                    ));
                 }
             }
         }
 
         Constraint::MaxLength(max_len) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            for value in &values {
-                if value.len() > *max_len {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:maxLength {}", max_len),
-                        message: format!(
-                            "Value length {} exceeds maximum {}",
-                            value.len(),
-                            max_len
-                        ),
-                    });
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                let ok = match string_repr(&v) {
+                    Some(s) => s.chars().count() <= *max_len,
+                    None => false,
+                };
+                if !ok {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:maxLength {}", max_len),
+                        format!("Value length exceeds maximum {}", max_len),
+                    ));
                 }
             }
         }
@@ -355,19 +278,28 @@ pub fn evaluate_constraint(
             const MAX_PATTERN_LEN: usize = 1000;
             const MAX_PATTERN_VALUES: usize = 10_000;
             if pattern.len() > MAX_PATTERN_LEN {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: "sh:pattern".to_string(),
-                    message: "sh:pattern is too long to evaluate".to_string(),
-                });
+                results.push(mk(
+                    None,
+                    path_str(),
+                    "sh:pattern".to_string(),
+                    "sh:pattern is too long to evaluate".to_string(),
+                ));
                 return results;
             }
-            let values = get_values(store, focus_node, path, data_graphs);
-            for value in values.iter().take(MAX_PATTERN_VALUES) {
+            for v in value_nodes(store, focus_node, path, data_graphs)
+                .into_iter()
+                .take(MAX_PATTERN_VALUES)
+            {
+                // Blank nodes always violate sh:pattern (SHACL §4.4.2).
+                let Some(value) = string_repr(&v) else {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:pattern \"{}\"", pattern),
+                        format!("Value does not match pattern \"{}\"", pattern),
+                    ));
+                    continue;
+                };
                 let regex_flags = flags.as_deref().unwrap_or("");
                 // Escape BOTH backslash and quote: a trailing `\` would otherwise
                 // escape the closing quote and corrupt the query (and `\d`-style
@@ -375,128 +307,106 @@ pub fn evaluate_constraint(
                 let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
                 let query = format!(
                     "ASK {{ FILTER(REGEX(\"{}\", \"{}\", \"{}\")) }}",
-                    esc(value),
+                    esc(&value),
                     esc(pattern),
                     regex_flags.replace(['\\', '"'], "")
                 );
                 if let Ok(oxigraph::sparql::QueryResults::Boolean(matches)) = store.query(&query) {
                     if !matches {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: Some(value.clone()),
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:pattern \"{}\"", pattern),
-                            message: format!("Value does not match pattern \"{}\"", pattern),
-                        });
+                        results.push(mk(
+                            Some(value.clone()),
+                            path_str(),
+                            format!("sh:pattern \"{}\"", pattern),
+                            format!("Value does not match pattern \"{}\"", pattern),
+                        ));
                     }
                 }
             }
         }
 
         Constraint::HasValue(expected) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            let found = values.iter().any(|v| v == expected);
-            if !found {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: format!("sh:hasValue {}", expected),
-                    message: format!("Missing required value: {}", expected),
-                });
+            let values = value_nodes(store, focus_node, path, data_graphs);
+            if !values.iter().any(|v| v == expected) {
+                results.push(mk(
+                    None,
+                    path_str(),
+                    format!("sh:hasValue {}", display_term(expected)),
+                    format!("Missing required value: {}", display_term(expected)),
+                ));
             }
         }
 
         Constraint::In(allowed) => {
-            let values = get_values(store, focus_node, path, data_graphs);
-            for value in &values {
-                if !allowed.contains(value) {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: "sh:in".to_string(),
-                        message: format!("Value \"{}\" is not in the allowed list", value),
-                    });
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                if !allowed.iter().any(|a| a == &v) {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        "sh:in".to_string(),
+                        format!("Value \"{}\" is not in the allowed list", display_term(&v)),
+                    ));
                 }
             }
         }
 
         Constraint::UniqueLang(unique) => {
             if *unique {
-                let value_terms = get_value_terms(store, focus_node, path, data_graphs);
-                let mut seen_langs: Vec<String> = Vec::new();
-                for (_value, _dt, lang) in &value_terms {
-                    if let Some(lang) = lang {
-                        if seen_langs.contains(lang) {
-                            results.push(ValidationResult {
-                                severity: severity.clone(),
-                                focus_node: focus_node.to_string(),
-                                path: path.map(|p| p.to_sparql()),
-                                value: None,
-                                source_shape: shape_iri.to_string(),
-                                source_constraint: "sh:uniqueLang true".to_string(),
-                                message: format!("Duplicate language tag: {}", lang),
-                            });
+                // One result per language tag carried by more than one value node.
+                let mut langs: BTreeMap<String, usize> = BTreeMap::new();
+                for v in value_nodes(store, focus_node, path, data_graphs) {
+                    if let Term::Literal(lit) = &v {
+                        if let Some(lang) = lit.language() {
+                            *langs.entry(lang.to_ascii_lowercase()).or_insert(0) += 1;
                         }
-                        seen_langs.push(lang.clone());
+                    }
+                }
+                for (lang, n) in langs {
+                    if n > 1 {
+                        results.push(mk(
+                            None,
+                            path_str(),
+                            "sh:uniqueLang true".to_string(),
+                            format!("Duplicate language tag: {}", lang),
+                        ));
                     }
                 }
             }
         }
 
         Constraint::LanguageIn(allowed_langs) => {
-            let value_terms = get_value_terms(store, focus_node, path, data_graphs);
-            for (value, _dt, lang) in &value_terms {
-                match lang {
-                    Some(l) if allowed_langs.iter().any(|al| l.starts_with(al.as_str())) => {}
-                    _ => {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: Some(value.clone()),
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: "sh:languageIn".to_string(),
-                            message: "Language tag not in allowed list".to_string(),
-                        });
-                    }
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                let lang_ok = match &v {
+                    Term::Literal(lit) => lit
+                        .language()
+                        .map(|l| allowed_langs.iter().any(|al| lang_matches(l, al)))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if !lang_ok {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        "sh:languageIn".to_string(),
+                        "Language tag not in allowed list".to_string(),
+                    ));
                 }
             }
         }
 
-        Constraint::Closed { ignored_properties } => {
-            // Get all predicates used by the focus node
-            let query = format!("SELECT DISTINCT ?p WHERE {{ <{}> ?p ?o }}", focus_node);
-            if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
-                for solution in solutions.filter_map(|s| s.ok()) {
-                    if let Some(p) = solution.get("p") {
-                        let p_str = match p {
-                            oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
-                            _ => continue,
-                        };
-                        // Check if this property is declared in any property shape or in ignored list
-                        if !ignored_properties.contains(&p_str) {
-                            results.push(ValidationResult {
-                                severity: severity.clone(),
-                                focus_node: focus_node.to_string(),
-                                path: Some(p_str.clone()),
-                                value: None,
-                                source_shape: shape_iri.to_string(),
-                                source_constraint: "sh:closed true".to_string(),
-                                message: format!(
-                                    "Property <{}> is not allowed by closed shape",
-                                    p_str
-                                ),
-                            });
-                        }
-                    }
+        Constraint::Closed {
+            ignored_properties,
+            allowed_properties,
+        } => {
+            // One result per (predicate, value) pair on the focus node whose
+            // predicate is neither a declared property-shape path nor ignored.
+            for (p, o) in subject_predicate_objects(store, focus_node, data_graphs) {
+                if !ignored_properties.contains(&p) && !allowed_properties.contains(&p) {
+                    results.push(mk(
+                        Some(display_term(&o)),
+                        Some(format!("<{}>", p)),
+                        "sh:closed true".to_string(),
+                        format!("Property <{}> is not allowed by closed shape", p),
+                    ));
                 }
             }
         }
@@ -513,10 +423,13 @@ pub fn evaluate_constraint(
                 .unwrap_or_else(|| severity.clone());
             // SHACL-SPARQL: execute the SELECT with $this PRE-BOUND to the focus
             // node; each result row is a violation. $this must be bound (not
-            // textually replaced by `<iri>`), otherwise it cannot appear in the
-            // SELECT projection or GROUP BY of an aggregate query — `SELECT <iri>`
-            // / `GROUP BY <iri>` is invalid SPARQL. We therefore rewrite `$this`
-            // to `?this` and inject `VALUES ?this { <focus> }` into the WHERE block.
+            // textually replaced), otherwise it cannot appear in the SELECT
+            // projection or GROUP BY of an aggregate query. We therefore rewrite
+            // `$this` to `?this` and inject `VALUES ?this { <focus> }`.
+            // Blank-node focus nodes cannot be addressed from SPARQL — skip.
+            if matches!(focus_node, Term::BlankNode(_)) {
+                return results;
+            }
             let query = bind_this(select, focus_node, data_graphs);
             if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
                 for solution in solutions.filter_map(|s| s.ok()) {
@@ -526,8 +439,8 @@ pub fn evaluate_constraint(
 
                     results.push(ValidationResult {
                         severity: eff_severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path_val.or_else(|| path.map(|p| p.to_sparql())),
+                        focus_node: focus_str.clone(),
+                        path: path_val.or_else(path_str),
                         value,
                         source_shape: shape_iri.to_string(),
                         source_constraint: "sh:SPARQLConstraint".to_string(),
@@ -552,7 +465,6 @@ pub fn evaluate_constraint(
                     shapes,
                     shape_iri,
                     focus_node,
-                    focus_kind,
                     check,
                     Some(expr_path),
                     data_graphs,
@@ -560,205 +472,197 @@ pub fn evaluate_constraint(
                 ));
             }
             if !inner.is_empty() {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: Some(expr_path.to_sparql()),
-                    value: inner.into_iter().next().and_then(|r| r.value),
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: "sh:expression".to_string(),
-                    message: message
+                results.push(mk(
+                    inner.into_iter().next().and_then(|r| r.value),
+                    Some(expr_path.to_sparql()),
+                    "sh:expression".to_string(),
+                    message
                         .clone()
                         .unwrap_or_else(|| "sh:expression constraint not satisfied".to_string()),
-                });
+                ));
             }
         }
 
-        // ---- Numeric range constraints ----
-        Constraint::MinExclusive(min_val) => {
-            let values = get_value_terms(store, focus_node, path, data_graphs);
-            for (value, _dt, _lang) in &values {
-                let ok = match (parse_numeric(value), parse_numeric(min_val)) {
-                    (Some(v), Some(m)) => v > m,
-                    _ => true, // non-numeric: skip
-                };
-                if !ok {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:minExclusive {}", min_val),
-                        message: format!("Value {} is not > {}", value, min_val),
-                    });
+        // ---- Value range constraints ----
+        // Violation unless the comparison is *definitively* satisfied: literals of
+        // incomparable types, IRIs and blank nodes all violate (SHACL §4.3).
+        Constraint::MinExclusive(bound) => {
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                if !matches!(compare_terms(&v, bound), Some(Ordering::Greater)) {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:minExclusive {}", display_term(bound)),
+                        format!(
+                            "Value {} is not > {}",
+                            display_term(&v),
+                            display_term(bound)
+                        ),
+                    ));
                 }
             }
         }
 
-        Constraint::MinInclusive(min_val) => {
-            let values = get_value_terms(store, focus_node, path, data_graphs);
-            for (value, _dt, _lang) in &values {
-                let ok = match (parse_numeric(value), parse_numeric(min_val)) {
-                    (Some(v), Some(m)) => v >= m,
-                    _ => true,
-                };
-                if !ok {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:minInclusive {}", min_val),
-                        message: format!("Value {} is not >= {}", value, min_val),
-                    });
+        Constraint::MinInclusive(bound) => {
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                if !matches!(
+                    compare_terms(&v, bound),
+                    Some(Ordering::Greater | Ordering::Equal)
+                ) {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:minInclusive {}", display_term(bound)),
+                        format!(
+                            "Value {} is not >= {}",
+                            display_term(&v),
+                            display_term(bound)
+                        ),
+                    ));
                 }
             }
         }
 
-        Constraint::MaxExclusive(max_val) => {
-            let values = get_value_terms(store, focus_node, path, data_graphs);
-            for (value, _dt, _lang) in &values {
-                let ok = match (parse_numeric(value), parse_numeric(max_val)) {
-                    (Some(v), Some(m)) => v < m,
-                    _ => true,
-                };
-                if !ok {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:maxExclusive {}", max_val),
-                        message: format!("Value {} is not < {}", value, max_val),
-                    });
+        Constraint::MaxExclusive(bound) => {
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                if !matches!(compare_terms(&v, bound), Some(Ordering::Less)) {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:maxExclusive {}", display_term(bound)),
+                        format!(
+                            "Value {} is not < {}",
+                            display_term(&v),
+                            display_term(bound)
+                        ),
+                    ));
                 }
             }
         }
 
-        Constraint::MaxInclusive(max_val) => {
-            let values = get_value_terms(store, focus_node, path, data_graphs);
-            for (value, _dt, _lang) in &values {
-                let ok = match (parse_numeric(value), parse_numeric(max_val)) {
-                    (Some(v), Some(m)) => v <= m,
-                    _ => true,
-                };
-                if !ok {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: Some(value.clone()),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:maxInclusive {}", max_val),
-                        message: format!("Value {} is not <= {}", value, max_val),
-                    });
+        Constraint::MaxInclusive(bound) => {
+            for v in value_nodes(store, focus_node, path, data_graphs) {
+                if !matches!(
+                    compare_terms(&v, bound),
+                    Some(Ordering::Less | Ordering::Equal)
+                ) {
+                    results.push(mk(
+                        Some(display_term(&v)),
+                        path_str(),
+                        format!("sh:maxInclusive {}", display_term(bound)),
+                        format!(
+                            "Value {} is not <= {}",
+                            display_term(&v),
+                            display_term(bound)
+                        ),
+                    ));
                 }
             }
         }
 
-        // ---- Property comparison constraints ----
+        // ---- Property pair constraints ----
         Constraint::Equals(prop_iri) => {
-            let path_values: BTreeSet<String> = get_values(store, focus_node, path, data_graphs)
-                .into_iter()
-                .collect();
+            // One result per value in the symmetric difference of the two value sets.
+            let path_values = term_set(value_nodes(store, focus_node, path, data_graphs));
             let other_path = PropertyPath::Predicate(prop_iri.clone());
-            let other_values: BTreeSet<String> =
-                get_values(store, focus_node, Some(&other_path), data_graphs)
-                    .into_iter()
-                    .collect();
-            if path_values != other_values {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: None,
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: format!("sh:equals <{}>", prop_iri),
-                    message: format!(
+            let other_values = term_set(value_nodes(
+                store,
+                focus_node,
+                Some(&other_path),
+                data_graphs,
+            ));
+            for (_, v) in path_values
+                .iter()
+                .filter(|(k, _)| !other_values.contains_key(*k))
+                .chain(
+                    other_values
+                        .iter()
+                        .filter(|(k, _)| !path_values.contains_key(*k)),
+                )
+            {
+                results.push(mk(
+                    Some(display_term(v)),
+                    path_str(),
+                    format!("sh:equals <{}>", prop_iri),
+                    format!(
                         "Value set at path does not equal value set at <{}>",
                         prop_iri
                     ),
-                });
+                ));
             }
         }
 
         Constraint::Disjoint(prop_iri) => {
-            let path_values: BTreeSet<String> = get_values(store, focus_node, path, data_graphs)
-                .into_iter()
-                .collect();
+            let path_values = term_set(value_nodes(store, focus_node, path, data_graphs));
             let other_path = PropertyPath::Predicate(prop_iri.clone());
-            let other_values: BTreeSet<String> =
-                get_values(store, focus_node, Some(&other_path), data_graphs)
-                    .into_iter()
-                    .collect();
-            let intersection: BTreeSet<_> = path_values.intersection(&other_values).collect();
-            for v in intersection {
-                results.push(ValidationResult {
-                    severity: severity.clone(),
-                    focus_node: focus_node.to_string(),
-                    path: path.map(|p| p.to_sparql()),
-                    value: Some(v.clone()),
-                    source_shape: shape_iri.to_string(),
-                    source_constraint: format!("sh:disjoint <{}>", prop_iri),
-                    message: format!("Value \"{}\" appears in both path and <{}>", v, prop_iri),
-                });
+            let other_values = term_set(value_nodes(
+                store,
+                focus_node,
+                Some(&other_path),
+                data_graphs,
+            ));
+            for (_, v) in path_values
+                .iter()
+                .filter(|(k, _)| other_values.contains_key(*k))
+            {
+                results.push(mk(
+                    Some(display_term(v)),
+                    path_str(),
+                    format!("sh:disjoint <{}>", prop_iri),
+                    format!(
+                        "Value \"{}\" appears in both path and <{}>",
+                        display_term(v),
+                        prop_iri
+                    ),
+                ));
             }
         }
 
         Constraint::LessThan(prop_iri) => {
-            let path_values = get_values(store, focus_node, path, data_graphs);
+            let path_values = value_nodes(store, focus_node, path, data_graphs);
             let other_path = PropertyPath::Predicate(prop_iri.clone());
-            let other_values = get_values(store, focus_node, Some(&other_path), data_graphs);
+            let other_values = value_nodes(store, focus_node, Some(&other_path), data_graphs);
             for pv in &path_values {
                 for ov in &other_values {
-                    let violated = match (parse_numeric(pv), parse_numeric(ov)) {
-                        (Some(a), Some(b)) => a >= b,
-                        _ => pv >= ov, // lexicographic fallback
-                    };
-                    if violated {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: Some(pv.clone()),
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:lessThan <{}>", prop_iri),
-                            message: format!(
+                    // Violated unless definitively pv < ov (incomparable pairs violate).
+                    if !matches!(compare_terms(pv, ov), Some(Ordering::Less)) {
+                        results.push(mk(
+                            Some(display_term(pv)),
+                            path_str(),
+                            format!("sh:lessThan <{}>", prop_iri),
+                            format!(
                                 "Value {} is not < {} (value at <{}>)",
-                                pv, ov, prop_iri
+                                display_term(pv),
+                                display_term(ov),
+                                prop_iri
                             ),
-                        });
+                        ));
                     }
                 }
             }
         }
 
         Constraint::LessThanOrEquals(prop_iri) => {
-            let path_values = get_values(store, focus_node, path, data_graphs);
+            let path_values = value_nodes(store, focus_node, path, data_graphs);
             let other_path = PropertyPath::Predicate(prop_iri.clone());
-            let other_values = get_values(store, focus_node, Some(&other_path), data_graphs);
+            let other_values = value_nodes(store, focus_node, Some(&other_path), data_graphs);
             for pv in &path_values {
                 for ov in &other_values {
-                    let violated = match (parse_numeric(pv), parse_numeric(ov)) {
-                        (Some(a), Some(b)) => a > b,
-                        _ => pv > ov,
-                    };
-                    if violated {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: Some(pv.clone()),
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:lessThanOrEquals <{}>", prop_iri),
-                            message: format!(
+                    if !matches!(
+                        compare_terms(pv, ov),
+                        Some(Ordering::Less | Ordering::Equal)
+                    ) {
+                        results.push(mk(
+                            Some(display_term(pv)),
+                            path_str(),
+                            format!("sh:lessThanOrEquals <{}>", prop_iri),
+                            format!(
                                 "Value {} is not <= {} (value at <{}>)",
-                                pv, ov, prop_iri
+                                display_term(pv),
+                                display_term(ov),
+                                prop_iri
                             ),
-                        });
+                        ));
                     }
                 }
             }
@@ -781,15 +685,12 @@ pub fn evaluate_constraint(
                     severity,
                 );
                 if inner_violations.is_empty() {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: value_field(&value, focus_node),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: "sh:not".to_string(),
-                        message: "Value conforms to sh:not shape (must not conform)".to_string(),
-                    });
+                    results.push(mk(
+                        Some(display_term(&value)),
+                        path_str(),
+                        "sh:not".to_string(),
+                        "Value conforms to sh:not shape (must not conform)".to_string(),
+                    ));
                 }
             }
         }
@@ -803,15 +704,12 @@ pub fn evaluate_constraint(
                         .is_empty()
                 });
                 if fails {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: value_field(&value, focus_node),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: "sh:and".to_string(),
-                        message: "Value does not conform to all sh:and shapes".to_string(),
-                    });
+                    results.push(mk(
+                        Some(display_term(&value)),
+                        path_str(),
+                        "sh:and".to_string(),
+                        "Value does not conform to all sh:and shapes".to_string(),
+                    ));
                 }
             }
         }
@@ -824,15 +722,12 @@ pub fn evaluate_constraint(
                         .is_empty()
                 });
                 if !any_conforms {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: value_field(&value, focus_node),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: "sh:or".to_string(),
-                        message: "Value does not conform to any sh:or shape".to_string(),
-                    });
+                    results.push(mk(
+                        Some(display_term(&value)),
+                        path_str(),
+                        "sh:or".to_string(),
+                        "Value does not conform to any sh:or shape".to_string(),
+                    ));
                 }
             }
         }
@@ -848,52 +743,56 @@ pub fn evaluate_constraint(
                     })
                     .count();
                 if conforming_count != 1 {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: value_field(&value, focus_node),
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: "sh:xone".to_string(),
-                        message: format!(
+                    results.push(mk(
+                        Some(display_term(&value)),
+                        path_str(),
+                        "sh:xone".to_string(),
+                        format!(
                             "Value conforms to {} sh:xone shapes, expected exactly 1",
                             conforming_count
                         ),
-                    });
+                    ));
                 }
             }
         }
 
         // ---- Shape reference constraint ----
-        Constraint::Node(ref_shape_iri) => {
-            // Look up the referenced shape in the loaded shapes collection.
-            if let Some(ref_shape) = shapes.iter().find(|s| &s.iri == ref_shape_iri) {
-                let ref_shape = ref_shape.clone();
-                // Each value node must conform to the referenced shape; one
-                // violation per non-conforming value (sh:node, SHACL §4.6.3).
-                for value in value_nodes(store, focus_node, path, data_graphs) {
-                    let inner = validate_inline_shape(
-                        store,
-                        shapes,
-                        &value,
-                        &ref_shape,
-                        data_graphs,
-                        severity,
-                    );
-                    if !inner.is_empty() {
-                        results.push(ValidationResult {
-                            severity: severity.clone(),
-                            focus_node: focus_node.to_string(),
-                            path: path.map(|p| p.to_sparql()),
-                            value: value_field(&value, focus_node),
-                            source_shape: shape_iri.to_string(),
-                            source_constraint: format!("sh:node <{}>", ref_shape_iri),
-                            message: format!("Value does not conform to shape <{}>", ref_shape_iri),
-                        });
-                    }
+        Constraint::Node(ref_shape) => {
+            // Each value node must conform to the referenced shape; one
+            // violation per non-conforming value (sh:node, SHACL §4.6.3).
+            for value in value_nodes(store, focus_node, path, data_graphs) {
+                let inner =
+                    validate_inline_shape(store, shapes, &value, ref_shape, data_graphs, severity);
+                if !inner.is_empty() {
+                    results.push(mk(
+                        Some(display_term(&value)),
+                        path_str(),
+                        format!("sh:node <{}>", ref_shape.iri),
+                        format!("Value does not conform to shape <{}>", ref_shape.iri),
+                    ));
                 }
             }
-            // If shape not found, skip silently (may be in a different shapes graph).
+        }
+
+        // ---- Nested property shape (sh:property on a property shape) ----
+        Constraint::Property(inner_ps) => {
+            // Each value node along the outer path becomes the focus node of the
+            // nested property shape (SHACL §2.1.3).
+            let inner_iri = inner_ps.iri.as_deref().unwrap_or(shape_iri);
+            for value in value_nodes(store, focus_node, path, data_graphs) {
+                for c in &inner_ps.constraints {
+                    results.extend(evaluate_constraint(
+                        store,
+                        shapes,
+                        inner_iri,
+                        &value,
+                        c,
+                        Some(&inner_ps.path),
+                        data_graphs,
+                        severity,
+                    ));
+                }
+            }
         }
 
         // ---- Qualified value shape ----
@@ -901,47 +800,49 @@ pub fn evaluate_constraint(
             shape: qvs,
             min_count,
             max_count,
+            disjoint,
+            sibling_shapes,
         } => {
-            // Collect values along the path; count those that conform to the (inline)
-            // qualified value shape.
-            let values = get_values(store, focus_node, path, data_graphs);
+            // Count the values along the path that conform to the qualified value
+            // shape; with sh:qualifiedValueShapesDisjoint, values conforming to a
+            // sibling property shape's qualified value shape are excluded.
+            let values = value_nodes(store, focus_node, path, data_graphs);
             let conforming_count = values
                 .iter()
                 .filter(|v| {
                     validate_inline_shape(store, shapes, v, qvs, data_graphs, severity).is_empty()
+                        && !(*disjoint
+                            && sibling_shapes.iter().any(|sib| {
+                                validate_inline_shape(store, shapes, v, sib, data_graphs, severity)
+                                    .is_empty()
+                            }))
                 })
                 .count();
 
             if let Some(min) = min_count {
                 if conforming_count < *min {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: None,
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:qualifiedMinCount {}", min),
-                        message: format!(
+                    results.push(mk(
+                        None,
+                        path_str(),
+                        format!("sh:qualifiedMinCount {}", min),
+                        format!(
                             "Only {} values conform to qualified shape, expected at least {}",
                             conforming_count, min
                         ),
-                    });
+                    ));
                 }
             }
             if let Some(max) = max_count {
                 if conforming_count > *max {
-                    results.push(ValidationResult {
-                        severity: severity.clone(),
-                        focus_node: focus_node.to_string(),
-                        path: path.map(|p| p.to_sparql()),
-                        value: None,
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: format!("sh:qualifiedMaxCount {}", max),
-                        message: format!(
+                    results.push(mk(
+                        None,
+                        path_str(),
+                        format!("sh:qualifiedMaxCount {}", max),
+                        format!(
                             "{} values conform to qualified shape, expected at most {}",
                             conforming_count, max
                         ),
-                    });
+                    ));
                 }
             }
         }
@@ -955,9 +856,10 @@ pub fn evaluate_constraint(
 /// `$this`/`?this` is rewritten to `?this` and bound via a `VALUES` clause
 /// injected at the start of the outermost `WHERE { … }` block, so it works in the
 /// SELECT projection and `GROUP BY` of aggregate validators — unlike textual
-/// `<iri>` substitution, which yields invalid SPARQL (`SELECT <iri>` /
-/// `GROUP BY <iri>`).
-fn bind_this(select: &str, focus_node: &str, data_graphs: &[String]) -> String {
+/// substitution, which yields invalid SPARQL (`SELECT <iri>` / `GROUP BY <iri>`).
+fn bind_this(select: &str, focus_node: &Term, data_graphs: &[String]) -> String {
+    // N-Triples serialisation is valid in VALUES for IRIs and literals.
+    let focus_nt = focus_node.to_string();
     let with_var = select.replace("$this", "?this");
     let upper = with_var.to_uppercase();
     let (where_pos, brace_at) = match upper
@@ -965,15 +867,15 @@ fn bind_this(select: &str, focus_node: &str, data_graphs: &[String]) -> String {
         .and_then(|wp| with_var[wp..].find('{').map(|br| (wp, wp + br + 1)))
     {
         Some(v) => v,
-        // No WHERE block to rewrite into: fall back to textual IRI substitution.
-        None => return select.replace("$this", &format!("<{}>", focus_node)),
+        // No WHERE block to rewrite into: fall back to textual substitution.
+        None => return select.replace("$this", &focus_nt),
     };
     // `FROM <g>` makes the data graphs the query's default graph — SHACL-SPARQL
     // evaluates the constraint against the data graph, so default-graph patterns
     // like `?this ex:p ?v` must resolve there rather than the (empty) default graph.
     let from: String = data_graphs.iter().map(|g| format!("FROM <{g}> ")).collect();
     // `VALUES` pre-binds $this to the focus node (usable in SELECT/GROUP BY).
-    let values = format!("VALUES ?this {{ <{}> }} ", focus_node);
+    let values = format!("VALUES ?this {{ {} }} ", focus_nt);
     let mut q = String::with_capacity(with_var.len() + from.len() + values.len() + 2);
     q.push_str(&with_var[..where_pos]);
     q.push_str(&from);
@@ -984,231 +886,604 @@ fn bind_this(select: &str, focus_node: &str, data_graphs: &[String]) -> String {
     q
 }
 
+// ---------------------------------------------------------------------------
+// Value-node resolution
+// ---------------------------------------------------------------------------
+
 /// The value nodes a (possibly path-less) constraint applies to: the values
 /// along the path in a property-shape context, or the focus node itself in a
-/// node-shape context (SHACL §3.4). Distinct — SHACL counts value *nodes*, not
-/// SPARQL path bindings, so duplicates from diamond-shaped paths collapse.
+/// node-shape context (SHACL §3.4). Distinct — SHACL value nodes form a *set*,
+/// so duplicate bindings from diamond-shaped paths collapse.
 fn value_nodes(
     store: &TripleStore,
-    focus_node: &str,
+    focus_node: &Term,
     path: Option<&PropertyPath>,
     data_graphs: &[String],
-) -> Vec<String> {
+) -> Vec<Term> {
     match path {
-        None => vec![focus_node.to_string()],
-        Some(_) => {
-            let mut vals = get_values(store, focus_node, path, data_graphs);
-            let mut seen = BTreeSet::new();
-            vals.retain(|v| seen.insert(v.clone()));
-            vals
-        }
+        None => vec![focus_node.clone()],
+        Some(p) => get_path_values(store, focus_node, p, data_graphs),
     }
 }
 
-/// `sh:value` for a result: the offending value node in property context, or
-/// `None` when the "value" is just the focus node itself (node context).
-fn value_field(value: &str, focus_node: &str) -> Option<String> {
-    (value != focus_node).then(|| value.to_string())
+/// Distinct set of terms keyed by N-Triples form (Term is not Ord).
+fn term_set(values: Vec<Term>) -> BTreeMap<String, Term> {
+    values.into_iter().map(|t| (t.to_string(), t)).collect()
 }
 
-/// Get the string values for a focus node along a property path.
-fn get_values(
+/// Resolve the (distinct) value nodes along `path` from `focus`.
+///
+/// IRI focus nodes go through a single SPARQL property-path query (with the
+/// per-thread path cache); blank-node and literal focus nodes — which SPARQL
+/// surface syntax cannot address — are walked natively over the raw quad index.
+fn get_path_values(
     store: &TripleStore,
-    focus_node: &str,
-    path: Option<&PropertyPath>,
+    focus: &Term,
+    path: &PropertyPath,
     data_graphs: &[String],
-) -> Vec<String> {
-    let path = match path {
-        Some(p) => p,
-        None => return vec![focus_node.to_string()],
-    };
+) -> Vec<Term> {
+    if let Term::NamedNode(nn) = focus {
+        let path_sparql = path.to_sparql();
 
-    // Blank-node focus: SPARQL cannot address a specific stored blank node, so
-    // resolve a simple predicate path through the raw quad index instead. (A
-    // complex path from a blank focus falls through to the SPARQL branch, which
-    // only matches IRI subjects — an accepted, rare limitation.)
-    if let Some(label) = focus_node.strip_prefix("_:") {
-        if let PropertyPath::Predicate(pred) = path {
-            return store
-                .blank_subject_objects(label, pred, data_graphs)
+        // Check the per-thread path cache (stores N-Triples forms) first.
+        if let Some(cached) =
+            crate::store::path_cache::tl_get(store.cache_id(), nn.as_str(), &path_sparql)
+        {
+            return cached
                 .iter()
-                .map(term_to_value_string)
+                .filter_map(|s| Term::from_str(s).ok())
                 .collect();
         }
+
+        let query = format!(
+            "SELECT DISTINCT ?value WHERE {{ {} }}",
+            super::engine::graph_scoped(
+                data_graphs,
+                &format!("<{}> {} ?value", nn.as_str(), path_sparql)
+            )
+        );
+        let results: Vec<Term> =
+            if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
+                let mut seen = BTreeSet::new();
+                solutions
+                    .filter_map(|s| s.ok())
+                    .filter_map(|s| s.get("value").cloned())
+                    // DISTINCT already dedups within one branch; graph_scoped UNIONs
+                    // can still produce cross-graph duplicates.
+                    .filter(|t| seen.insert(t.to_string()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        crate::store::path_cache::tl_insert(
+            store.cache_id(),
+            nn.as_str().to_string(),
+            path_sparql,
+            results.iter().map(|t| t.to_string()).collect(),
+        );
+        return results;
     }
 
-    let path_sparql = path.to_sparql();
-
-    // Check the per-thread path cache before executing a SPARQL query
-    if let Some(cached) =
-        crate::store::path_cache::tl_get(store.cache_id(), focus_node, &path_sparql)
-    {
-        return cached;
+    // Blank-node (or literal) focus: native path evaluation.
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for t in eval_path_native(store, focus, path, data_graphs) {
+        if seen.insert(t.to_string()) {
+            out.push(t);
+        }
     }
+    out
+}
 
-    let query = format!(
-        "SELECT ?value WHERE {{ {} }}",
-        super::engine::graph_scoped(data_graphs, &format!("<{focus_node}> {path_sparql} ?value"))
-    );
-
-    let results =
-        if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
-            solutions
-                .filter_map(|s| s.ok())
-                .filter_map(|s| {
-                    s.get("value").map(|v| match v {
-                        oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
-                        oxigraph::model::Term::Literal(lit) => lit.value().to_string(),
-                        oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
-                        _ => v.to_string(),
-                    })
+/// Native SHACL path evaluation over the raw quad index, used for focus nodes
+/// SPARQL cannot address (stored blank nodes, literals). Mirrors SPARQL property
+/// path semantics, including the focus node itself for `zeroOrMore`/`zeroOrOne`.
+fn eval_path_native(
+    store: &TripleStore,
+    from: &Term,
+    path: &PropertyPath,
+    data_graphs: &[String],
+) -> Vec<Term> {
+    match path {
+        PropertyPath::Predicate(pred) => step(store, from, pred, false, data_graphs),
+        PropertyPath::Inverse(inner) => match inner.as_ref() {
+            PropertyPath::Predicate(pred) => step(store, from, pred, true, data_graphs),
+            // Inverse of a composite path: push the inversion inwards.
+            PropertyPath::Sequence(parts) => {
+                let reversed = PropertyPath::Sequence(
+                    parts
+                        .iter()
+                        .rev()
+                        .map(|p| PropertyPath::Inverse(Box::new(p.clone())))
+                        .collect(),
+                );
+                eval_path_native(store, from, &reversed, data_graphs)
+            }
+            PropertyPath::Alternative(parts) => parts
+                .iter()
+                .flat_map(|p| {
+                    eval_path_native(
+                        store,
+                        from,
+                        &PropertyPath::Inverse(Box::new(p.clone())),
+                        data_graphs,
+                    )
                 })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-    crate::store::path_cache::tl_insert(
-        store.cache_id(),
-        focus_node.to_string(),
-        path_sparql,
-        results.clone(),
-    );
-    results
-}
-
-/// Get value terms with datatype and language information.
-fn get_value_terms(
-    store: &TripleStore,
-    focus_node: &str,
-    path: Option<&PropertyPath>,
-    data_graphs: &[String],
-) -> Vec<(String, Option<String>, Option<String>)> {
-    let path = match path {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-
-    // Blank-node focus: see `get_values` — resolve a simple predicate path via
-    // the raw quad index, since SPARQL cannot reference a stored blank node.
-    if let Some(label) = focus_node.strip_prefix("_:") {
-        if let PropertyPath::Predicate(pred) = path {
-            return store
-                .blank_subject_objects(label, pred, data_graphs)
-                .iter()
-                .map(term_to_value_triple)
-                .collect();
-        }
-    }
-
-    let path_sparql = path.to_sparql();
-    let query = format!(
-        "SELECT ?value (DATATYPE(?value) AS ?dt) (LANG(?value) AS ?lang) WHERE {{ {} }}",
-        super::engine::graph_scoped(data_graphs, &format!("<{focus_node}> {path_sparql} ?value"))
-    );
-
-    if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
-        solutions
-            .filter_map(|s| s.ok())
-            .map(|s| {
-                let value = s
-                    .get("value")
-                    .map(|v| match v {
-                        oxigraph::model::Term::Literal(lit) => lit.value().to_string(),
-                        oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
-                        _ => v.to_string(),
-                    })
-                    .unwrap_or_default();
-
-                let dt = s.get("dt").and_then(|v| match v {
-                    oxigraph::model::Term::NamedNode(nn) => Some(nn.as_str().to_string()),
-                    _ => None,
-                });
-
-                let lang = s.get("lang").and_then(|v| match v {
-                    oxigraph::model::Term::Literal(lit) => {
-                        let l = lit.value().to_string();
-                        if l.is_empty() {
-                            None
-                        } else {
-                            Some(l)
+                .collect(),
+            PropertyPath::Inverse(inner2) => eval_path_native(store, from, inner2, data_graphs),
+            PropertyPath::ZeroOrMore(p) => eval_path_native(
+                store,
+                from,
+                &PropertyPath::ZeroOrMore(Box::new(PropertyPath::Inverse(p.clone()))),
+                data_graphs,
+            ),
+            PropertyPath::OneOrMore(p) => eval_path_native(
+                store,
+                from,
+                &PropertyPath::OneOrMore(Box::new(PropertyPath::Inverse(p.clone()))),
+                data_graphs,
+            ),
+            PropertyPath::ZeroOrOne(p) => eval_path_native(
+                store,
+                from,
+                &PropertyPath::ZeroOrOne(Box::new(PropertyPath::Inverse(p.clone()))),
+                data_graphs,
+            ),
+        },
+        PropertyPath::Sequence(parts) => {
+            let mut frontier = vec![from.clone()];
+            for part in parts {
+                let mut next = Vec::new();
+                let mut seen = BTreeSet::new();
+                for node in &frontier {
+                    for t in eval_path_native(store, node, part, data_graphs) {
+                        if seen.insert(t.to_string()) {
+                            next.push(t);
                         }
                     }
-                    _ => None,
-                });
+                }
+                frontier = next;
+                if frontier.is_empty() {
+                    break;
+                }
+            }
+            frontier
+        }
+        PropertyPath::Alternative(parts) => parts
+            .iter()
+            .flat_map(|p| eval_path_native(store, from, p, data_graphs))
+            .collect(),
+        PropertyPath::ZeroOrMore(inner) => closure(store, from, inner, true, data_graphs),
+        PropertyPath::OneOrMore(inner) => closure(store, from, inner, false, data_graphs),
+        PropertyPath::ZeroOrOne(inner) => {
+            let mut out = vec![from.clone()];
+            out.extend(eval_path_native(store, from, inner, data_graphs));
+            out
+        }
+    }
+}
 
-                (value, dt, lang)
-            })
-            .collect()
+/// Transitive closure of `inner` starting at `from` (BFS with a visited set);
+/// `include_start` distinguishes `*` from `+`.
+fn closure(
+    store: &TripleStore,
+    from: &Term,
+    inner: &PropertyPath,
+    include_start: bool,
+    data_graphs: &[String],
+) -> Vec<Term> {
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited.insert(from.to_string());
+    if include_start {
+        out.push(from.clone());
+    }
+    queue.push_back(from.clone());
+    while let Some(node) = queue.pop_front() {
+        for next in eval_path_native(store, &node, inner, data_graphs) {
+            if visited.insert(next.to_string()) {
+                out.push(next.clone());
+                queue.push_back(next);
+            }
+        }
+    }
+    out
+}
+
+/// One forward (`from p ?o`) or inverse (`?s p from`) predicate step over the
+/// raw quad index, scoped to the data graphs (empty = default graph).
+fn step(
+    store: &TripleStore,
+    from: &Term,
+    predicate: &str,
+    inverse: bool,
+    data_graphs: &[String],
+) -> Vec<Term> {
+    let Ok(pred) = NamedNodeRef::new(predicate) else {
+        return Vec::new();
+    };
+    let raw = store.store();
+    let mut out = Vec::new();
+    let mut for_graph = |graph: GraphNameRef<'_>| {
+        if inverse {
+            let term_ref = from.as_ref();
+            for q in raw
+                .quads_for_pattern(None, Some(pred), Some(term_ref), Some(graph))
+                .flatten()
+            {
+                match q.subject {
+                    oxigraph::model::Subject::NamedNode(nn) => out.push(Term::NamedNode(nn)),
+                    oxigraph::model::Subject::BlankNode(bn) => out.push(Term::BlankNode(bn)),
+                    _ => {} // RDF-star subjects are out of scope here
+                }
+            }
+        } else {
+            let subj: SubjectRef<'_> = match from {
+                Term::NamedNode(nn) => SubjectRef::NamedNode(nn.as_ref()),
+                Term::BlankNode(bn) => SubjectRef::BlankNode(bn.as_ref()),
+                _ => return, // literals have no outgoing edges
+            };
+            for q in raw
+                .quads_for_pattern(Some(subj), Some(pred), None, Some(graph))
+                .flatten()
+            {
+                out.push(q.object);
+            }
+        }
+    };
+    if data_graphs.is_empty() {
+        for_graph(GraphNameRef::DefaultGraph);
     } else {
-        Vec::new()
-    }
-}
-
-/// Stringify a value term the same way the SPARQL value lookups do: IRIs and
-/// literal lexical forms as-is, blank nodes as `_:label`.
-fn term_to_value_string(term: &oxigraph::model::Term) -> String {
-    match term {
-        oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
-        oxigraph::model::Term::Literal(lit) => lit.value().to_string(),
-        oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
-        other => other.to_string(),
-    }
-}
-
-/// `(value, datatype, lang)` for a value term, mirroring the SPARQL
-/// `DATATYPE()`/`LANG()` projection: a literal carries its datatype (and lang
-/// for language-tagged literals); IRIs and blank nodes carry neither.
-fn term_to_value_triple(term: &oxigraph::model::Term) -> (String, Option<String>, Option<String>) {
-    match term {
-        oxigraph::model::Term::NamedNode(nn) => (nn.as_str().to_string(), None, None),
-        oxigraph::model::Term::BlankNode(bn) => (format!("_:{}", bn.as_str()), None, None),
-        oxigraph::model::Term::Literal(lit) => {
-            let lang = lit.language().map(|l| l.to_string());
-            let dt = Some(lit.datatype().as_str().to_string());
-            (lit.value().to_string(), dt, lang)
+        for g in data_graphs {
+            if let Ok(gn) = NamedNodeRef::new(g) {
+                for_graph(GraphNameRef::NamedNode(gn));
+            }
         }
-        other => (other.to_string(), None, None),
     }
+    out
 }
 
-/// Scheme-shaped heuristic for classifying a lexical focus node as an IRI:
-/// `scheme:rest` with an alpha-led scheme and no whitespace. Misclassifies rare
-/// literals like bare time strings ("12:30:00"), which is accepted — the
-/// alternative (treating every focus as non-literal) failed all node-level
-/// `sh:nodeKind sh:Literal` checks.
-fn looks_like_iri(s: &str) -> bool {
-    if s.contains(char::is_whitespace) {
-        return false;
-    }
-    match s.split_once(':') {
-        Some((scheme, _)) => {
-            !scheme.is_empty()
-                && scheme
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic())
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+/// All `(predicate, object)` pairs of `focus` in the data graphs — used by
+/// `sh:closed`. Works for IRI and blank-node focus nodes alike.
+fn subject_predicate_objects(
+    store: &TripleStore,
+    focus: &Term,
+    data_graphs: &[String],
+) -> Vec<(String, Term)> {
+    let subj: SubjectRef<'_> = match focus {
+        Term::NamedNode(nn) => SubjectRef::NamedNode(nn.as_ref()),
+        Term::BlankNode(bn) => SubjectRef::BlankNode(bn.as_ref()),
+        _ => return Vec::new(),
+    };
+    let raw = store.store();
+    let mut out = Vec::new();
+    let mut for_graph = |graph: GraphNameRef<'_>| {
+        for q in raw
+            .quads_for_pattern(Some(subj), None, None, Some(graph))
+            .flatten()
+        {
+            out.push((q.predicate.as_str().to_string(), q.object));
         }
-        None => false,
+    };
+    if data_graphs.is_empty() {
+        for_graph(GraphNameRef::DefaultGraph);
+    } else {
+        for g in data_graphs {
+            if let Ok(gn) = NamedNodeRef::new(g) {
+                for_graph(GraphNameRef::NamedNode(gn));
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Term classification & comparison
+// ---------------------------------------------------------------------------
+
+/// SHACL instance check with subclass closure: `term rdf:type/rdfs:subClassOf* class`.
+/// Literals are never instances; blank-node focus types are resolved through the
+/// raw quad index (SPARQL cannot re-address a stored blank node).
+fn is_instance_of(
+    store: &TripleStore,
+    term: &Term,
+    class_iri: &str,
+    data_graphs: &[String],
+) -> bool {
+    match term {
+        Term::Literal(_) => false,
+        Term::NamedNode(nn) => {
+            let query = format!(
+                "ASK {{ {} }}",
+                super::engine::graph_scoped(
+                    data_graphs,
+                    &format!(
+                        "<{}> <{RDF_TYPE}>/<{RDFS_SUBCLASS}>* <{}>",
+                        crate::store::escape_sparql_iri(nn.as_str()),
+                        crate::store::escape_sparql_iri(class_iri)
+                    )
+                )
+            );
+            matches!(
+                store.query(&query),
+                Ok(oxigraph::sparql::QueryResults::Boolean(true))
+            )
+        }
+        Term::BlankNode(_) => {
+            // Types of the blank node, then subclass closure per type.
+            for ty in step(store, term, RDF_TYPE, false, data_graphs) {
+                if let Term::NamedNode(ty_nn) = ty {
+                    if ty_nn.as_str() == class_iri {
+                        return true;
+                    }
+                    let query = format!(
+                        "ASK {{ {} }}",
+                        super::engine::graph_scoped(
+                            data_graphs,
+                            &format!(
+                                "<{}> <{RDFS_SUBCLASS}>* <{}>",
+                                crate::store::escape_sparql_iri(ty_nn.as_str()),
+                                crate::store::escape_sparql_iri(class_iri)
+                            )
+                        )
+                    );
+                    if matches!(
+                        store.query(&query),
+                        Ok(oxigraph::sparql::QueryResults::Boolean(true))
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        _ => false,
     }
 }
 
-/// Whether a value term (as produced by `get_value_terms`) matches an expected
-/// node kind. A datatype marks a literal; a `_:` prefix marks a blank node;
-/// anything else is treated as an IRI.
-fn value_matches_node_kind(expected: &NodeKind, value: &str, dt: &Option<String>) -> bool {
-    let is_literal = dt.is_some();
-    let is_blank = !is_literal && value.starts_with("_:");
-    let is_iri = !is_literal && !is_blank;
-    match expected {
-        NodeKind::IRI => is_iri,
-        NodeKind::BlankNode => is_blank,
-        NodeKind::Literal => is_literal,
-        NodeKind::BlankNodeOrIRI => is_blank || is_iri,
-        NodeKind::IRIOrLiteral => is_iri || is_literal,
-        NodeKind::BlankNodeOrLiteral => is_blank || is_literal,
+/// String representation for sh:minLength/maxLength/pattern: literals by lexical
+/// form, IRIs by IRI string; blank nodes have none (and always violate).
+fn string_repr(term: &Term) -> Option<String> {
+    match term {
+        Term::NamedNode(nn) => Some(nn.as_str().to_string()),
+        Term::Literal(lit) => Some(lit.value().to_string()),
+        _ => None,
+    }
+}
+
+/// Basic language-range match for sh:languageIn: exact tag or a `tag-…` extension,
+/// ASCII case-insensitive (BCP47).
+fn lang_matches(lang: &str, range: &str) -> bool {
+    if lang.len() == range.len() {
+        return lang.eq_ignore_ascii_case(range);
+    }
+    lang.len() > range.len()
+        && lang.as_bytes()[range.len()] == b'-'
+        && lang[..range.len()].eq_ignore_ascii_case(range)
+}
+
+const NUMERIC_TYPES: &[&str] = &[
+    "integer",
+    "decimal",
+    "float",
+    "double",
+    "long",
+    "int",
+    "short",
+    "byte",
+    "nonNegativeInteger",
+    "nonPositiveInteger",
+    "negativeInteger",
+    "positiveInteger",
+    "unsignedLong",
+    "unsignedInt",
+    "unsignedShort",
+    "unsignedByte",
+];
+
+fn is_numeric_datatype(dt: &str) -> bool {
+    dt.strip_prefix(XSD)
+        .is_some_and(|local| NUMERIC_TYPES.contains(&local))
+}
+
+fn is_string_datatype(dt: &str) -> bool {
+    dt == "http://www.w3.org/2001/XMLSchema#string"
+}
+
+/// Definite comparison of two terms per SPARQL operator semantics, with XSD
+/// partial-order rules for dateTime/date mixing timezoned and naive values.
+/// `None` = not definitively comparable (which range/pair constraints treat as
+/// a violation). Only literals are comparable.
+fn compare_terms(a: &Term, b: &Term) -> Option<Ordering> {
+    let (Term::Literal(la), Term::Literal(lb)) = (a, b) else {
+        return None;
+    };
+    let dta = la.datatype().as_str().to_string();
+    let dtb = lb.datatype().as_str().to_string();
+
+    if is_numeric_datatype(&dta) && is_numeric_datatype(&dtb) {
+        let va: f64 = la.value().trim().parse().ok()?;
+        let vb: f64 = lb.value().trim().parse().ok()?;
+        return va.partial_cmp(&vb);
+    }
+
+    if dta == format!("{XSD}dateTime") && dtb == format!("{XSD}dateTime") {
+        return cmp_temporal(
+            parse_xsd_date_time(la.value())?,
+            parse_xsd_date_time(lb.value())?,
+        );
+    }
+    if dta == format!("{XSD}date") && dtb == format!("{XSD}date") {
+        return cmp_temporal(parse_xsd_date(la.value())?, parse_xsd_date(lb.value())?);
+    }
+
+    if dta == format!("{XSD}boolean") && dtb == format!("{XSD}boolean") {
+        let pb = |s: &str| match s {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        };
+        return Some(pb(la.value())?.cmp(&pb(lb.value())?));
+    }
+
+    // Plain / xsd:string literals compare lexically (SPARQL `<`/`>` on strings).
+    if is_string_datatype(&dta) && is_string_datatype(&dtb) {
+        return Some(la.value().cmp(lb.value()));
+    }
+
+    None
+}
+
+/// XSD temporal comparison. Values are `(utc_epoch_seconds, has_timezone)`.
+/// Same timezone-presence compares directly; mixed presence is definite only
+/// when the values are more than ±14h apart (XSD 1.1 partial order).
+fn cmp_temporal(a: (f64, bool), b: (f64, bool)) -> Option<Ordering> {
+    if a.1 == b.1 {
+        return a.0.partial_cmp(&b.0);
+    }
+    const WINDOW: f64 = 14.0 * 3600.0;
+    let (alo, ahi) = if a.1 {
+        (a.0, a.0)
+    } else {
+        (a.0 - WINDOW, a.0 + WINDOW)
+    };
+    let (blo, bhi) = if b.1 {
+        (b.0, b.0)
+    } else {
+        (b.0 - WINDOW, b.0 + WINDOW)
+    };
+    if ahi < blo {
+        Some(Ordering::Less)
+    } else if alo > bhi {
+        Some(Ordering::Greater)
+    } else {
+        None
+    }
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian civil date.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Parse a timezone suffix (`Z` | `±HH:MM` | empty) → (offset_seconds, has_tz, rest_len_consumed_from_end).
+fn split_timezone(s: &str) -> (f64, bool, &str) {
+    if let Some(rest) = s.strip_suffix('Z') {
+        return (0.0, true, rest);
+    }
+    if s.len() >= 6 {
+        let (head, tz) = s.split_at(s.len() - 6);
+        let bytes = tz.as_bytes();
+        if (bytes[0] == b'+' || bytes[0] == b'-') && bytes[3] == b':' {
+            if let (Ok(h), Ok(m)) = (tz[1..3].parse::<i64>(), tz[4..6].parse::<i64>()) {
+                let sign = if bytes[0] == b'-' { -1.0 } else { 1.0 };
+                return ((h * 3600 + m * 60) as f64 * sign, true, head);
+            }
+        }
+    }
+    (0.0, false, s)
+}
+
+/// Parse `YYYY-MM-DD` (no timezone handling — caller splits it off first).
+fn parse_ymd(s: &str) -> Option<(i64, u32, u32)> {
+    let mut parts = s.splitn(3, '-');
+    // Negative years would produce an empty first segment; not supported.
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some((y, m, d))
+}
+
+/// Parse an `xsd:dateTime` lexical form → `(utc_epoch_seconds, has_timezone)`.
+fn parse_xsd_date_time(s: &str) -> Option<(f64, bool)> {
+    let (offset, has_tz, body) = split_timezone(s.trim());
+    let (date, time) = body.split_once('T')?;
+    let (y, m, d) = parse_ymd(date)?;
+    let mut tparts = time.splitn(3, ':');
+    let hh: u32 = tparts.next()?.parse().ok()?;
+    let mm: u32 = tparts.next()?.parse().ok()?;
+    let ss: f64 = tparts.next()?.parse().ok()?;
+    if hh > 24 || mm > 59 || !(0.0..62.0).contains(&ss) {
+        return None;
+    }
+    let epoch =
+        days_from_civil(y, m, d) as f64 * 86_400.0 + hh as f64 * 3600.0 + mm as f64 * 60.0 + ss
+            - offset;
+    Some((epoch, has_tz))
+}
+
+/// Parse an `xsd:date` lexical form → `(utc_epoch_seconds_at_midnight, has_timezone)`.
+fn parse_xsd_date(s: &str) -> Option<(f64, bool)> {
+    let (offset, has_tz, body) = split_timezone(s.trim());
+    let (y, m, d) = parse_ymd(body)?;
+    Some((days_from_civil(y, m, d) as f64 * 86_400.0 - offset, has_tz))
+}
+
+/// Whether a literal's lexical form is valid for its (known XSD) datatype —
+/// `"aldi"^^xsd:integer` and `"300"^^xsd:byte` are ill-formed and violate
+/// `sh:datatype`. Unknown datatypes are assumed valid (the engine cannot judge).
+fn xsd_lexical_valid(lit: &Literal) -> bool {
+    let Some(local) = lit.datatype().as_str().strip_prefix(XSD) else {
+        return true; // rdf:langString, rdf:HTML, custom datatypes: no lexical check
+    };
+    let v = lit.value();
+    let int_in = |min: i128, max: i128| -> bool {
+        v.parse::<i128>()
+            .map(|n| n >= min && n <= max)
+            .unwrap_or(false)
+    };
+    match local {
+        "string" | "anyURI" | "normalizedString" | "token" | "language" | "Name" | "NCName"
+        | "NMTOKEN" | "anySimpleType" | "hexBinary" | "base64Binary" | "duration" | "gYear"
+        | "gYearMonth" | "gMonth" | "gMonthDay" | "gDay" | "QName" | "NOTATION" => true,
+        "boolean" => matches!(v, "true" | "false" | "1" | "0"),
+        "integer" => v.parse::<i128>().is_ok(),
+        "nonNegativeInteger" => v.parse::<i128>().map(|n| n >= 0).unwrap_or(false),
+        "positiveInteger" => v.parse::<i128>().map(|n| n > 0).unwrap_or(false),
+        "nonPositiveInteger" => v.parse::<i128>().map(|n| n <= 0).unwrap_or(false),
+        "negativeInteger" => v.parse::<i128>().map(|n| n < 0).unwrap_or(false),
+        "long" => int_in(i64::MIN as i128, i64::MAX as i128),
+        "int" => int_in(i32::MIN as i128, i32::MAX as i128),
+        "short" => int_in(i16::MIN as i128, i16::MAX as i128),
+        "byte" => int_in(i8::MIN as i128, i8::MAX as i128),
+        "unsignedLong" => int_in(0, u64::MAX as i128),
+        "unsignedInt" => int_in(0, u32::MAX as i128),
+        "unsignedShort" => int_in(0, u16::MAX as i128),
+        "unsignedByte" => int_in(0, u8::MAX as i128),
+        "decimal" => {
+            let t = v.strip_prefix(['+', '-']).unwrap_or(v);
+            !t.is_empty()
+                && t.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && t.matches('.').count() <= 1
+                && t.chars().any(|c| c.is_ascii_digit())
+        }
+        "float" | "double" => {
+            matches!(v, "NaN" | "INF" | "-INF" | "+INF") || v.parse::<f64>().is_ok()
+        }
+        "dateTime" => parse_xsd_date_time(v).is_some(),
+        "date" => parse_xsd_date(v).is_some(),
+        "time" => {
+            let (_, _, body) = split_timezone(v.trim());
+            let mut tparts = body.splitn(3, ':');
+            (|| -> Option<()> {
+                let hh: u32 = tparts.next()?.parse().ok()?;
+                let mm: u32 = tparts.next()?.parse().ok()?;
+                let ss: f64 = tparts.next()?.parse().ok()?;
+                (hh <= 24 && mm <= 59 && (0.0..62.0).contains(&ss)).then_some(())
+            })()
+            .is_some()
+        }
+        _ => true,
     }
 }

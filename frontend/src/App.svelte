@@ -14,13 +14,16 @@
     Upload, Database, Building2, BookOpen, HelpCircle,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield,
-    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon
+    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
 
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
   import Register from './pages/Register.svelte';
+  import ForgotPassword from './pages/ForgotPassword.svelte';
+  import ResetPassword from './pages/ResetPassword.svelte';
+  import VerifyEmail from './pages/VerifyEmail.svelte';
   import OAuthCallback from './pages/OAuthCallback.svelte';
   import Settings from './pages/Settings.svelte';
   import Datasets from './pages/Datasets.svelte';
@@ -50,6 +53,7 @@
   const lazyShaclResults        = () => import('./pages/ShaclResults.svelte');
   const lazyAdminUsers          = () => import('./pages/AdminUsers.svelte');
   const lazyAdminSecurity       = () => import('./pages/AdminSecurity.svelte');
+  const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
   const lazyModelRegistry       = () => import('./pages/ModelRegistry.svelte');
   const lazyModelDetail         = () => import('./pages/ModelDetail.svelte');
@@ -222,6 +226,7 @@
       ['/login', 'pages.login.title', 'pages.login.detail'],
       ['/register', 'pages.register.title', 'pages.register.detail'],
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
+      ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
       ['/docs', 'pages.documentation.title', 'pages.documentation.detail'],
@@ -394,6 +399,10 @@
                 <Shield size={16} />
                 <span class="nav-item-label">{$t('nav.securityAcl')}</span>
               </Link>
+              <Link to="/admin/llm" class={`nav-item ${currentPath.startsWith('/admin/llm') ? 'selected' : ''}`} on:click={navClick}>
+                <Activity size={16} />
+                <span class="nav-item-label">{$t('nav.adminLlm')}</span>
+              </Link>
               <Link to="/admin/docs" class={`nav-item ${currentPath.startsWith('/admin/docs') ? 'selected' : ''}`} on:click={navClick}>
                 <SettingsIcon size={16} />
                 <span class="nav-item-label">{$t('nav.documentation')}</span>
@@ -551,6 +560,9 @@
         <Route path="/" component={Home} />
         <Route path="/login" component={Login} />
         <Route path="/register" component={Register} />
+        <Route path="/forgot-password" component={ForgotPassword} />
+        <Route path="/reset-password" component={ResetPassword} />
+        <Route path="/verify-email" component={VerifyEmail} />
         <Route path="/oauth/callback" component={OAuthCallback} />
         <Route path="/browse">
           <LazyPage loader={lazyTripleBrowser} />
@@ -621,6 +633,9 @@
         </Route>
         <Route path="/admin/security">
           <LazyPage loader={lazyAdminSecurity} />
+        </Route>
+        <Route path="/admin/llm">
+          <LazyPage loader={lazyAdminLlm} />
         </Route>
         <Route path="/admin/docs">
           <LazyPage loader={lazyDocEditor} />

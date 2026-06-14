@@ -48,8 +48,12 @@ mod helpers {
             backup: None,
             jwt_config: Arc::new(JwtConfig::new(JWT_SECRET.to_string(), 30, 30)),
             object_store: Arc::new(ObjectStore::noop()),
+            mailer: Arc::new(open_triplestore::email::Mailer::log_only(
+                "http://localhost:7878",
+            )),
             base_url: Arc::new("http://localhost:7878".to_string()),
             oauth_sessions: new_session_store(),
+            passkey_sessions: open_triplestore::auth::passkey::new_session_store(),
             auth_ext: Arc::new(open_triplestore::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
             secure_cookies: false,
@@ -2407,7 +2411,7 @@ mod performance {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "perf stress test: 100k-triple bulk insert; slow + timing-sensitive, run explicitly with `cargo test -- --ignored`"]
     async fn bulk_insert_100k() {
         bulk_insert_ntriples(100_000, 60).await;
     }

@@ -2149,6 +2149,58 @@ fn is_pinned_version(version: &str) -> bool {
     !matches!(version.trim(), "" | "live" | "latest" | "current")
 }
 
+/// The set of SNAPSHOT graph IRIs in `version` of `dataset_id` whose SOURCE
+/// (live) graph is flagged `private`.
+///
+/// A version snapshot copies *all* of a dataset's selected graphs — including
+/// private ones — into version-scoped IRIs (`{base}/dataset/{id}/version/{v}/…`).
+/// Those snapshot IRIs are absent from `list_dataset_graph_entries` (which only
+/// records the LIVE graphs), so a naive `private.contains(snapshot_iri)` check
+/// never matches and would leak private data to viewers through a pinned-version
+/// read. To filter correctly we map each snapshot graph back to its source via
+/// the version's `source_map` and drop snapshots whose source is private.
+///
+/// Returns an empty set for live/unknown versions or when the version has no
+/// recorded source mapping (older snapshots), which is the safe default for the
+/// *writer* fast-path — callers MUST only apply this filter to non-writers.
+fn private_snapshot_graphs(
+    state: &AppState,
+    dataset_id: &str,
+    version: &str,
+) -> std::collections::HashSet<String> {
+    if !is_pinned_version(version) {
+        return std::collections::HashSet::new();
+    }
+    // Live graph IRIs the owner marked private for this dataset.
+    let private_sources: std::collections::HashSet<String> = state
+        .auth_db
+        .list_dataset_graph_entries(dataset_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.private)
+        .map(|e| e.graph_iri)
+        .collect();
+    if private_sources.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    // Map snapshot → source via the version's recorded graph map, keeping the
+    // snapshot IRIs whose source is private.
+    match crate::dataset_versions::registry::get_version(
+        &state.store,
+        state.base_url.as_str(),
+        dataset_id,
+        version,
+    ) {
+        Some(ver) => ver
+            .source_map
+            .into_iter()
+            .filter(|m| private_sources.contains(&m.source_graph))
+            .map(|m| m.snapshot_graph)
+            .collect(),
+        None => std::collections::HashSet::new(),
+    }
+}
+
 /// Resolve the scoped named-graph set for a set of datasets, honouring an
 /// optional per-dataset version map. For a pinned version we authorise at the
 /// dataset level (the snapshot graphs are not in the live accessible-graph set)
@@ -2192,8 +2244,23 @@ fn scope_dataset_graphs(
                 if !allowed {
                     continue;
                 }
+                // A snapshot copies private graphs too; their version-scoped IRIs are
+                // not in the accessible set, so the live private filter can't see them.
+                // For callers who cannot WRITE the dataset, drop snapshot graphs whose
+                // SOURCE (live) graph is private so a viewer can't read it via a version.
+                let can_write = match (user_id, &ds) {
+                    (Some(uid), Some(d)) if !is_admin => {
+                        state.auth_db.can_write_dataset(uid, d).unwrap_or(false)
+                    }
+                    _ => is_admin,
+                };
                 if let Some(snap) = version_snapshot_graphs(state, id, Some(v.as_str()))? {
-                    out.extend(snap);
+                    if can_write {
+                        out.extend(snap);
+                    } else {
+                        let private = private_snapshot_graphs(state, id, v.as_str());
+                        out.extend(snap.into_iter().filter(|g| !private.contains(g)));
+                    }
                 }
                 continue;
             }
@@ -2238,6 +2305,20 @@ fn is_authorized_version_graph(
                         .can_access_dataset(user_id, &d)
                         .map_err(|e| AppError::Internal(e.to_string()))?
                     {
+                        // A snapshot of a PRIVATE source graph may only be read by a
+                        // caller who can write the dataset — otherwise a viewer could
+                        // read private data by drilling straight into the snapshot IRI.
+                        if private_snapshot_graphs(state, ds_id, v.as_str()).contains(graph) {
+                            let can_write = match user_id {
+                                Some(uid) => {
+                                    state.auth_db.can_write_dataset(uid, &d).unwrap_or(false)
+                                }
+                                None => false,
+                            };
+                            if !can_write {
+                                continue;
+                            }
+                        }
                         return Ok(true);
                     }
                 }
@@ -3383,7 +3464,7 @@ async fn execute_dataset_query(
     let graphs: Vec<String> = if can_write {
         graphs
     } else {
-        let private: std::collections::HashSet<String> = state
+        let mut private: std::collections::HashSet<String> = state
             .auth_db
             .list_dataset_graph_entries(dataset_id)
             .unwrap_or_default()
@@ -3391,6 +3472,14 @@ async fn execute_dataset_query(
             .filter(|e| e.private)
             .map(|e| e.graph_iri)
             .collect();
+        // For a pinned version, `graphs` are SNAPSHOT IRIs that do not appear in
+        // `list_dataset_graph_entries`; without mapping them back to their source
+        // the private filter above is a no-op and private data leaks to viewers.
+        // Add the snapshot IRIs whose SOURCE (live) graph is private (no-op for
+        // live reads, where `private_snapshot_graphs` returns empty).
+        if let Some(v) = version {
+            private.extend(private_snapshot_graphs(state, dataset_id, v));
+        }
         graphs
             .into_iter()
             .filter(|g| !private.contains(g))
@@ -5146,15 +5235,106 @@ pub async fn linked_data_asset(
 
 // ─── SHACL handlers ──────────────────────────────────────────────────────────
 
+/// Shapes-graph sources for a dataset, in resolution order: the configured
+/// `shapes_graph_iri` (legacy column), SHACL Studio validation-layer bindings,
+/// and dataset graphs carrying the `shapes` role.
+struct DatasetShapesSources {
+    configured: Option<String>,
+    bound: Vec<String>,
+    role_graphs: Vec<String>,
+}
+
+impl DatasetShapesSources {
+    fn is_empty(&self) -> bool {
+        self.configured.is_none() && self.bound.is_empty() && self.role_graphs.is_empty()
+    }
+}
+
+fn dataset_shapes_sources(
+    state: &AppState,
+    dataset: &crate::auth::models::Dataset,
+) -> DatasetShapesSources {
+    let configured = dataset.shapes_graph_iri.clone().filter(|s| !s.is_empty());
+    let studio = crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool());
+    let bound: Vec<String> = crate::shacl_studio::bindings::effective_shape_graphs_for_dataset(
+        &state.store,
+        &state.auth_db,
+        &studio,
+        &state.base_url,
+        dataset,
+    )
+    .into_iter()
+    .map(|s| s.graph_iri)
+    .collect();
+    let role_graphs: Vec<String> = state
+        .auth_db
+        .list_dataset_graph_entries(&dataset.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.graph_role == Some(crate::auth::models::GraphKind::Shapes))
+        .map(|e| e.graph_iri)
+        .collect();
+    DatasetShapesSources {
+        configured,
+        bound,
+        role_graphs,
+    }
+}
+
+/// Union of every shapes source — configured `shapes_graph_iri`, Studio
+/// bindings, and shapes-role dataset graphs — deduped, in that order. The
+/// union (rather than first-source-wins) keeps validation consistent with the
+/// dataset page's "Effective shapes" panel: everything the user sees attached
+/// is what actually validates.
+fn resolve_shapes_graphs(sources: DatasetShapesSources) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let candidates = sources
+        .configured
+        .into_iter()
+        .chain(sources.bound)
+        .chain(sources.role_graphs);
+    for iri in candidates {
+        if !out.contains(&iri) {
+            out.push(iri);
+        }
+    }
+    out
+}
+
+const NO_SHAPES_GRAPH_MSG: &str = "No shapes graph found for this dataset. Upload a SHACL \
+     shapes file, set a graph's role to 'shapes', or bind a shape graph in SHACL Studio.";
+
+/// Merge per-shapes-graph validation reports into one: conforms = all conform,
+/// results concatenated, results_count = sum.
+fn merge_validation_reports(
+    reports: Vec<crate::shacl::report::ValidationReport>,
+) -> crate::shacl::report::ValidationReport {
+    let mut conforms = true;
+    let mut results = Vec::new();
+    for r in reports {
+        conforms &= r.conforms;
+        results.extend(r.results);
+    }
+    let results_count = results.len();
+    crate::shacl::report::ValidationReport {
+        conforms,
+        results,
+        results_count,
+    }
+}
+
 /// POST /api/datasets/:dataset_id/validate — validate dataset against SHACL shapes
 ///
-/// Uses the dataset's own shapes graph if configured, otherwise falls back to
-/// SHACL shapes found in the linked ontology version graph.
+/// Shapes resolution order: explicit `shapes_graph` in the JSON body, the
+/// dataset's configured `shapes_graph_iri`, SHACL Studio bindings, then dataset
+/// graphs with the `shapes` role (auto-registered into the Studio on use).
+/// Multiple shapes graphs are each validated and merged into one report.
 pub async fn validate_dataset(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     Query(q): Query<ValidateQuery>,
+    body: Option<Json<ValidateBody>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Bound concurrent expensive operations (SHACL validation) — see expensive_semaphore.
     let _permit = state.expensive_semaphore.acquire().await.map_err(|_| {
@@ -5177,31 +5357,73 @@ pub async fn validate_dataset(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    // Resolve shapes graph: dataset-specific shapes, or from linked ontology version
-    let shapes_graph_iri = if let Some(ref iri) = dataset.shapes_graph_iri {
-        iri.clone()
-    } else if let (Some(ref onto_id), Some(ref onto_ver)) =
-        (&dataset.conforms_to_ontology, &dataset.conforms_to_version)
-    {
-        return Err((StatusCode::BAD_REQUEST, format!(
-            "Linked ontology {onto_id} version {onto_ver}: ontology registry is no longer supported. Configure a shapes_graph_iri on the dataset instead."
-        )));
+    // Resolve the shapes graph(s): explicit body override, else configured /
+    // bound / shapes-role sources.
+    let explicit = body
+        .as_ref()
+        .and_then(|b| b.shapes_graph.clone())
+        .filter(|s| !s.trim().is_empty());
+    let shapes_graphs: Vec<String> = if let Some(iri) = explicit {
+        validate_iri(&iri).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid shapes_graph IRI: contains disallowed characters or is not absolute"
+                    .to_string(),
+            )
+        })?;
+        if !crate::auth::acl::check_graph_permission(
+            Some(&current_user),
+            &iri,
+            "read",
+            &state.auth_db,
+        ) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Read access denied for shapes graph <{iri}>"),
+            ));
+        }
+        vec![iri]
     } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "No shapes graph configured and no ontology linked".to_string(),
-        ));
+        let sources = dataset_shapes_sources(&state, &dataset);
+        if sources.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, NO_SHAPES_GRAPH_MSG.to_string()));
+        }
+        let resolved = resolve_shapes_graphs(sources);
+        // Self-heal: shapes graphs that never made it into the Studio Library
+        // get adopted + bound now (idempotent, best-effort).
+        for iri in &resolved {
+            if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                &state,
+                &dataset,
+                iri,
+                Some(&current_user.user_id),
+            ) {
+                debug!("auto-register of shapes graph <{iri}> skipped: {e}");
+            }
+        }
+        resolved
     };
 
-    // Get data graphs for this dataset
-    let data_graphs = state
+    // Data graphs for this dataset, excluding the persisted-report graph.
+    // Shapes graphs stay IN the data set: SHACL allows the shapes graph and
+    // data graph to coincide (merged uploads), and excluding them would make
+    // a merged shapes+instances graph validate vacuously to "conforms".
+    let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .collect();
 
-    // Run SHACL validation
-    let report = crate::shacl::validate(&state.store, &shapes_graph_iri, &data_graphs)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Run SHACL validation once per shapes graph and merge into one report.
+    let mut reports = Vec::with_capacity(shapes_graphs.len());
+    for shapes_graph_iri in &shapes_graphs {
+        let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        reports.push(report);
+    }
+    let report = merge_validation_reports(reports);
 
     // A test run validates but records nothing — no run row, so it doesn't
     // count officially and the dataset's stored status is left unchanged.
@@ -5266,6 +5488,13 @@ pub async fn validate_dataset(
 #[derive(Debug, Deserialize)]
 pub struct ValidateQuery {
     pub test: Option<bool>,
+}
+
+/// Optional JSON body for `validate_dataset`. `shapes_graph` overrides the
+/// dataset's resolved shapes graph(s) for this run.
+#[derive(Debug, Deserialize)]
+pub struct ValidateBody {
+    pub shapes_graph: Option<String>,
 }
 
 /// Count severities, serialize the report, and store a validation run.
@@ -5442,12 +5671,12 @@ pub async fn get_shapes(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    let shapes_iri = dataset.shapes_graph_iri.as_deref().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "No shapes graph configured".to_string(),
-        )
-    })?;
+    // Same resolution order as validate_dataset: configured shapes_graph_iri,
+    // Studio bindings, then shapes-role dataset graphs.
+    let shapes_graphs = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
+    if shapes_graphs.is_empty() {
+        return Err((StatusCode::NOT_FOUND, NO_SHAPES_GRAPH_MSG.to_string()));
+    }
 
     // Detect SHACLC format request via query param or Accept header
     let want_shaclc = fmt_params
@@ -5461,15 +5690,34 @@ pub async fn get_shapes(
             .unwrap_or(false);
 
     if want_shaclc {
-        let shaclc = crate::shaclc::serialize(&state.store, shapes_iri)
+        // SHACLC documents cannot be concatenated (single BASE/prefix block),
+        // so the compact syntax is only available for a single shapes graph.
+        if shapes_graphs.len() > 1 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "SHACLC export supports a single shapes graph, but this dataset resolves to \
+                 several. Request Turtle instead."
+                    .to_string(),
+            ));
+        }
+        let shaclc = crate::shaclc::serialize(&state.store, &shapes_graphs[0])
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         return Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response());
     }
 
-    let data = state
-        .store
-        .graph_store_get(Some(shapes_iri), oxigraph::io::RdfFormat::Turtle)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Merge the Turtle of every resolved shapes graph (Turtle allows repeated
+    // @prefix directives, so concatenation stays valid).
+    let mut data: Vec<u8> = Vec::new();
+    for iri in &shapes_graphs {
+        let ttl = state
+            .store
+            .graph_store_get(Some(iri), oxigraph::io::RdfFormat::Turtle)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if !data.is_empty() {
+            data.extend_from_slice(b"\n");
+        }
+        data.extend_from_slice(&ttl);
+    }
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], data).into_response())
 }
@@ -5528,6 +5776,21 @@ pub async fn put_shapes(
         .update_dataset_shacl(&dataset_id, dataset.shacl_on_write, Some(&shapes_iri))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Adopt the uploaded shapes into the SHACL Studio Library + validation
+    // layer so they are visible and effective (idempotent, best-effort).
+    let mut ds_after = dataset.clone();
+    ds_after.shapes_graph_iri = Some(shapes_iri.clone());
+    if let Err(e) = crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+        &state,
+        &ds_after,
+        &shapes_iri,
+        Some(&current_user.user_id),
+    ) {
+        tracing::warn!(
+            "failed to auto-register uploaded shapes graph <{shapes_iri}> for dataset {dataset_id}: {e}"
+        );
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5558,20 +5821,26 @@ pub async fn infer_dataset(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
-    let shapes_graph_iri = dataset.shapes_graph_iri.as_deref().ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "No shapes graph configured".to_string(),
-        )
-    })?;
+    // Same shapes resolution as validate_dataset: configured field, Studio
+    // bindings, and shapes-role graphs (union, deduped).
+    let shapes_graphs = resolve_shapes_graphs(dataset_shapes_sources(&state, &dataset));
+    if shapes_graphs.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, NO_SHAPES_GRAPH_MSG.to_string()));
+    }
 
-    let data_graphs = state
+    let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .collect();
 
-    let count = crate::shacl::infer(&state.store, shapes_graph_iri, &data_graphs)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut count = 0usize;
+    for shapes_graph_iri in &shapes_graphs {
+        count += crate::shacl::infer(&state.store, shapes_graph_iri, &data_graphs)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(Json(serde_json::json!({
         "inferred_triples": count,
@@ -6571,8 +6840,8 @@ pub struct DetectShapesParams {
 ///
 /// Checks whether the named graph identified by `graph` contains any SHACL
 /// NodeShape or PropertyShape declarations.  Also returns the count of shapes
-/// found and a list of datasets whose `shapes_graph_iri` is not yet set — these
-/// are candidates the caller can offer to link.
+/// found and the accessible datasets as link candidates, each flagged with
+/// `has_shapes` when the dataset already resolves a shapes graph.
 pub async fn detect_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -6606,8 +6875,10 @@ pub async fn detect_shapes(
 
     let shapes_detected = shape_count > 0;
 
-    // Return datasets accessible to this user that have no shapes graph yet —
-    // these are the candidates to which the detected shapes could be linked.
+    // Return every dataset accessible to this user as a link candidate. Datasets
+    // that already resolve shapes (configured, bound, or via a shapes-role
+    // graph) are included too — flagged with `has_shapes` so the caller can
+    // render them differently instead of hiding them.
     let accessible_datasets = state
         .auth_db
         .list_accessible_datasets(Some(&current_user.user_id))
@@ -6615,8 +6886,10 @@ pub async fn detect_shapes(
 
     let suggested: Vec<serde_json::Value> = accessible_datasets
         .into_iter()
-        .filter(|d| d.shapes_graph_iri.is_none())
-        .map(|d| serde_json::json!({ "id": d.id, "name": d.name }))
+        .map(|d| {
+            let has_shapes = !dataset_shapes_sources(&state, &d).is_empty();
+            serde_json::json!({ "id": d.id, "name": d.name, "has_shapes": has_shapes })
+        })
         .collect();
 
     Ok(Json(serde_json::json!({
@@ -6626,11 +6899,13 @@ pub async fn detect_shapes(
     })))
 }
 
-/// GET /api/shacl/shape-graphs
+/// GET /api/shacl/dataset-shape-graphs
 ///
-/// Returns all datasets accessible to the current user that have a
-/// `shapes_graph_iri` configured.  This powers the shape-graph selector in the
-/// Validation page so users only see shapes for data they can access.
+/// Returns the shapes graphs of every dataset accessible to the current user —
+/// the configured `shapes_graph_iri`, SHACL Studio bindings, and shapes-role
+/// dataset graphs (one entry per dataset × graph, deduped). This powers the
+/// shape-graph selector in the Validation page so users only see shapes for
+/// data they can access.
 pub async fn list_accessible_shape_graphs(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -6640,18 +6915,34 @@ pub async fn list_accessible_shape_graphs(
         .list_accessible_datasets(Some(&current_user.user_id))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let shape_graphs: Vec<serde_json::Value> = datasets
-        .into_iter()
-        .filter_map(|d| {
-            d.shapes_graph_iri.clone().map(|iri| {
-                serde_json::json!({
-                    "dataset_id": d.id,
-                    "dataset_name": d.name,
-                    "shapes_graph_iri": iri,
-                })
-            })
-        })
-        .collect();
+    let mut shape_graphs: Vec<serde_json::Value> = Vec::new();
+    for d in datasets {
+        let sources = dataset_shapes_sources(&state, &d);
+        let mut iris: Vec<String> = Vec::new();
+        if let Some(iri) = sources.configured.clone() {
+            iris.push(iri);
+        }
+        for iri in sources.bound.iter().chain(sources.role_graphs.iter()) {
+            if !iris.contains(iri) {
+                iris.push(iri.clone());
+            }
+        }
+        for iri in iris {
+            let source = if sources.configured.as_deref() == Some(iri.as_str()) {
+                "configured"
+            } else if sources.bound.contains(&iri) {
+                "binding"
+            } else {
+                "graph_role"
+            };
+            shape_graphs.push(serde_json::json!({
+                "dataset_id": d.id,
+                "dataset_name": d.name,
+                "shapes_graph_iri": iri,
+                "source": source,
+            }));
+        }
+    }
 
     Ok(Json(serde_json::json!({ "shape_graphs": shape_graphs })))
 }

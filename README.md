@@ -146,6 +146,14 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llm up 
 
 The first start downloads the model (~5 GB); AI features turn on once it is ready (check `GET /api/llm/health`). Prefer a hosted model? Skip the `llm` profile and point `LLM_GATEWAY_URL` (+ `LLM_API_KEY`) at your endpoint, with `LLM_MODEL` for the model name. The NVIDIA GPU path needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
+On an NVIDIA GPU the bundled [vLLM](https://docs.vllm.ai) profile serves faster under load — its automatic prefix caching reuses the chat's shared system prompt across turns and users for near-instant first tokens:
+
+```bash
+docker compose --profile llm-vllm up -d   # then set in .env:
+# LLM_GATEWAY_URL=http://vllm:8000
+# LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+```
+
 ### Native (requires Rust 1.88+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
@@ -267,6 +275,9 @@ npm install
 npm run dev       # starts on http://localhost:5173 (proxied to :7878)
 npm run build     # production build → frontend/dist/
 ```
+
+Pair this with `make watch` for a hot-reloading backend (see the
+[fast dev loop](#fast-dev-loop) and [docs/development.md](docs/development.md)).
 
 #### Service discovery (optional)
 
@@ -777,18 +788,6 @@ open-triplestore
 
 ---
 
-## Performance (Apple M3 Pro, release build)
-
-| Operation | Dataset | Median |
-|---|---|---|
-| Bulk load | 100 K triples | 98 ms (~1 M t/s) |
-| Simple SELECT | 10 K triples | 980 µs |
-| Simple SELECT LIMIT 10 | 100 K triples | 22 µs |
-| 2-way join | 10 K triples | 1.8 ms |
-| COUNT(*) | 100 K triples | 14 ms |
-
----
-
 ## Conformance
 
 | Test suite | Tests | Pass |
@@ -821,6 +820,27 @@ npm run build             # production build
 docker build -t open-triplestore .
 docker run --rm -p 7878:7878 -v ./data:/data open-triplestore
 ```
+
+### Fast dev loop
+
+For day-to-day work, run the server natively and let it rebuild on save instead
+of rebuilding Docker each time. The `make` targets wrap the usual `cargo`
+commands:
+
+```bash
+cargo install cargo-watch cargo-nextest   # one-time
+
+make watch        # hot reload: rebuild + restart the server on every change
+make watch-check  # fastest feedback: type-check only (errors in ~seconds)
+make nextest      # run the test suite in parallel (faster than cargo test)
+make dev-release  # run the fast-to-link, optimised `release-dev` profile
+
+# Faster local Docker image (skips the slow fat-LTO link):
+docker build --build-arg CARGO_PROFILE=release-dev -t open-triplestore:dev .
+```
+
+See **[docs/development.md](docs/development.md)** for the full build-performance
+guide — profiles, the linker, Docker cache mounts, and rust-analyzer tuning.
 
 ---
 

@@ -4,6 +4,7 @@ use oxigraph::io::RdfFormat;
 use oxigraph::model::{GraphName, NamedNode, Quad};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::models::GraphKind;
 use crate::data_models::upload::{format_from_filename, format_from_media_type, parse_quads};
 use crate::kind_detector;
 use crate::store::TripleStore;
@@ -143,16 +144,28 @@ fn parse_one(input: &InputFile) -> Result<(Vec<Quad>, Vec<String>), String> {
     // auto_split only applies to triple formats (force_target is true for those).
     let do_split = input.auto_split && force_target;
 
+    // Subject-tree role assignment for auto_split: roles are decided per root
+    // subject (with its blank-node closure), not per quad, so RDF lists under
+    // sh:in / sh:or / owl:unionOf and annotations like rdfs:label stay in the
+    // same sub-graph as their owning shape/class. SHACL subject-trees land in
+    // the shapes sub-graph even when the file-level verdict is Model (mixed
+    // OWL+SHACL files).
+    let split: Option<(String, Vec<GraphKind>)> = if do_split {
+        let base = match &target_node {
+            Some(GraphName::NamedNode(nn)) => nn.as_str().to_string(),
+            _ => return Err("auto_split requires a target_graph IRI".to_string()),
+        };
+        Some((base, kind_detector::classify_quad_roles(&parsed)))
+    } else {
+        None
+    };
+
     let mut touched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut out: Vec<Quad> = Vec::with_capacity(parsed.len());
 
-    for q in parsed {
-        let final_graph = if do_split {
-            let base = match &target_node {
-                Some(GraphName::NamedNode(nn)) => nn.as_str().to_string(),
-                _ => return Err("auto_split requires a target_graph IRI".to_string()),
-            };
-            let role = kind_detector::classify_quad_role(&q);
+    for (idx, q) in parsed.into_iter().enumerate() {
+        let final_graph = if let Some((base, roles)) = &split {
+            let role = roles[idx];
             let sub_iri = format!("{}/{}", base, role.as_str());
             GraphName::NamedNode(
                 NamedNode::new(&sub_iri)
@@ -231,6 +244,27 @@ fn live_triple_keys(
     Ok(quads.iter().map(triple_key).collect())
 }
 
+/// SHACL write gate consulted per target graph before anything is committed.
+///
+/// Bulk import has no access to `AppState` (it runs on a plain `TripleStore`
+/// inside `spawn_blocking`), so the caller supplies the gate as closures —
+/// typically built from `crate::shacl_studio::gate::{import_gates_apply,
+/// check_import_gates}` plus the owning dataset's `shacl_on_write` flag.
+pub struct WriteGate<'a> {
+    /// Cheap pre-check (pipeline/binding/dataset lookups only), invoked once
+    /// per touched graph. Quads are only buffered per graph — and `check` only
+    /// invoked — for graphs where this returns true, so imports with no gates
+    /// configured (the common case, e.g. large IFC loads) pay a few metadata
+    /// lookups and nothing else.
+    #[allow(clippy::type_complexity)]
+    pub applies: Box<dyn Fn(&str) -> bool + Send + Sync + 'a>,
+    /// Validate the incoming quads destined for one gated graph. `Err` carries
+    /// a human-readable violation summary and aborts the whole batch *before*
+    /// any delete or insert, so nothing is half-committed.
+    #[allow(clippy::type_complexity)]
+    pub check: Box<dyn Fn(&str, &[Quad]) -> Result<(), String> + Send + Sync + 'a>,
+}
+
 /// Parse all files (in parallel) and load them into the store with a single
 /// bulk-delete + bulk-insert pair.
 ///
@@ -253,11 +287,33 @@ fn live_triple_keys(
 /// Per-file parse errors are recorded in the result without aborting siblings;
 /// only store-level errors (`BulkError::Failed`) and authorization rejections
 /// (`BulkError::Forbidden`) propagate as `Err`.
+///
+/// Convenience wrapper used by tests; production always supplies a SHACL gate
+/// via [`parse_and_load_bulk_gated`].
+#[cfg(test)]
 pub fn parse_and_load_bulk(
     store: &TripleStore,
     inputs: Vec<InputFile>,
     authorize: impl FnOnce(&[String]) -> Result<(), String>,
     before_replace: impl FnOnce(&[GraphChange]) -> Result<(), String>,
+) -> Result<BulkResult, BulkError> {
+    parse_and_load_bulk_gated(store, inputs, authorize, before_replace, None)
+}
+
+/// Bulk-load `inputs`, validating each touched graph through an optional SHACL
+/// [`WriteGate`].
+///
+/// The gate runs after `authorize` and before the replace-delete / insert pair:
+/// for each touched graph where `gate.applies` is true, the incoming quads for
+/// that graph are validated via `gate.check`; a failure aborts the batch with
+/// [`BulkError::Failed`] (mapped to HTTP 400 by the handler) and writes
+/// nothing.
+pub fn parse_and_load_bulk_gated(
+    store: &TripleStore,
+    inputs: Vec<InputFile>,
+    authorize: impl FnOnce(&[String]) -> Result<(), String>,
+    before_replace: impl FnOnce(&[GraphChange]) -> Result<(), String>,
+    write_gate: Option<&WriteGate<'_>>,
 ) -> Result<BulkResult, BulkError> {
     use rayon::prelude::*;
 
@@ -318,6 +374,30 @@ pub fn parse_and_load_bulk(
     // It runs before the replace/delete and the insert, so a rejected target
     // neither wipes existing data nor adds new triples.
     authorize(&graph_list).map_err(BulkError::Forbidden)?;
+
+    // SHACL write gate: validate the incoming quads for every gated graph
+    // before the first destructive operation (the replace-delete below) and
+    // before the insert, so a rejected batch commits nothing. The `applies`
+    // pre-check keeps the no-gates path free of any quad buffering.
+    if let Some(gate) = write_gate {
+        for g in graph_list.iter().filter(|g| (gate.applies)(g)) {
+            let incoming: Vec<Quad> = all_quads
+                .iter()
+                .filter(
+                    |q| matches!(&q.graph_name, GraphName::NamedNode(nn) if nn.as_str() == g.as_str()),
+                )
+                .cloned()
+                .collect();
+            if incoming.is_empty() {
+                continue;
+            }
+            (gate.check)(g, &incoming).map_err(|e| {
+                BulkError::Failed(format!(
+                    "SHACL write gate rejected import into graph <{g}>: {e}"
+                ))
+            })?;
+        }
+    }
 
     if !replace_list.is_empty() {
         // Compare each replace target's incoming triples against what is already
@@ -821,6 +901,180 @@ mod tests {
         assert_eq!(store.count_graph(Some(target)).unwrap(), 1);
         assert_eq!(store.count_graph(Some(unnamed)).unwrap(), 0);
         assert_eq!(store.count_graph(None).unwrap(), 0);
+    }
+
+    #[test]
+    fn auto_split_keeps_closures_with_their_roots() {
+        let store = TripleStore::in_memory().unwrap();
+        // Mixed OWL + SHACL + instances. Pre-fix, the rdf:first/rdf:rest list
+        // spines and the rdfs:label annotations were severed into the wrong
+        // sub-graphs; subject-tree splitting keeps each closure intact.
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix sh:  <http://www.w3.org/ns/shacl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            @prefix ex:  <http://example.org/> .
+            ex:Vehicle a owl:Class ; rdfs:label "Vehicle" ; owl:unionOf ( ex:Car ex:Bike ) .
+            ex:VehicleShape a sh:NodeShape ;
+                rdfs:label "Vehicle shape" ;
+                sh:targetClass ex:Vehicle ;
+                sh:property [ sh:path ex:kind ; sh:in ( "car" "bike" ) ] .
+            ex:v1 a ex:Vehicle ; ex:kind "car" .
+        "#;
+        let mut input = ttl_input("mixed.ttl", ttl, G, false);
+        input.auto_split = true;
+
+        let res = parse_and_load_bulk(&store, vec![input], |_| Ok(()), |_| Ok(())).unwrap();
+
+        let model = format!("{G}/model");
+        let shapes = format!("{G}/shapes");
+        let instances = format!("{G}/instances");
+        // Class tree: type + label + unionOf + 4 list-spine quads.
+        assert_eq!(store.count_graph(Some(&model)).unwrap(), 7);
+        // Shape tree: type + label + targetClass + property + path + in + 4 spine.
+        // Pre-fix the 4 spine quads landed in /instances and the label in /model.
+        assert_eq!(store.count_graph(Some(&shapes)).unwrap(), 10);
+        // Instance tree only: type + kind.
+        assert_eq!(store.count_graph(Some(&instances)).unwrap(), 2);
+        // A Model-verdict file still yields a shapes sub-graph (mixed OWL+SHACL).
+        assert_eq!(res.graph_iris, vec![instances, model, shapes]);
+    }
+
+    #[test]
+    fn auto_split_routes_plain_instances_unchanged() {
+        let store = TripleStore::in_memory().unwrap();
+        let ttl = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix foaf: <http://xmlns.com/foaf/0.1/> .
+            ex:Alice a foaf:Person ; foaf:name "Alice" .
+            ex:Bob a foaf:Person .
+        "#;
+        let mut input = ttl_input("inst.ttl", ttl, G, false);
+        input.auto_split = true;
+        parse_and_load_bulk(&store, vec![input], |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(
+            store.count_graph(Some(&format!("{G}/instances"))).unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn write_gate_not_invoked_when_no_gate_applies() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let store = TripleStore::in_memory().unwrap();
+        let applies_calls = AtomicUsize::new(0);
+        let check_calls = AtomicUsize::new(0);
+        let gate = WriteGate {
+            applies: Box::new(|_| {
+                applies_calls.fetch_add(1, Ordering::SeqCst);
+                false
+            }),
+            check: Box::new(|_, _| {
+                check_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        };
+        let input = ttl_input(
+            "a.ttl",
+            "<http://example.org/new> <http://example.org/p> <http://example.org/o> .",
+            G,
+            false,
+        );
+        parse_and_load_bulk_gated(&store, vec![input], |_| Ok(()), |_| Ok(()), Some(&gate))
+            .unwrap();
+        // The cheap pre-check ran once per touched graph; no quads were
+        // buffered or validated, and the data landed.
+        assert_eq!(applies_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(check_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+    }
+
+    #[test]
+    fn write_gate_rejection_aborts_batch_before_any_write() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, G);
+        let g_other = "http://example.org/other";
+
+        // Two files: the gated replace target plus an innocent sibling. A gate
+        // failure must abort the WHOLE batch — no clear, no insert anywhere.
+        let gated = ttl_input(
+            "gated.ttl",
+            "<http://example.org/new> <http://example.org/p> <http://example.org/o> .",
+            G,
+            true, // replace: would clear G if the gate did not fire first
+        );
+        let sibling = ttl_input(
+            "ok.ttl",
+            "<http://example.org/s2> <http://example.org/p> <http://example.org/o> .",
+            g_other,
+            false,
+        );
+        let gate = WriteGate {
+            applies: Box::new(|g| g == G),
+            check: Box::new(|_, _| Err("1 validation result(s) — missing ex:name".to_string())),
+        };
+        let err = parse_and_load_bulk_gated(
+            &store,
+            vec![gated, sibling],
+            |_| Ok(()),
+            |_| Ok(()),
+            Some(&gate),
+        )
+        .unwrap_err();
+
+        let BulkError::Failed(msg) = err else {
+            panic!("expected BulkError::Failed");
+        };
+        assert!(msg.contains("SHACL write gate rejected"), "{msg}");
+        assert!(msg.contains(G), "error names the gated graph: {msg}");
+        assert!(msg.contains("missing ex:name"), "violation summary: {msg}");
+        // Replace target untouched (old triple intact), sibling not committed.
+        let keys = live_triple_keys(&store, G).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.iter().any(|k| k.contains("http://example.org/old")));
+        assert_eq!(store.count_graph(Some(g_other)).unwrap(), 0);
+    }
+
+    #[test]
+    fn write_gate_checks_only_quads_for_the_gated_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        let g_other = "http://example.org/other";
+        let gated = ttl_input(
+            "gated.ttl",
+            "<http://example.org/a> <http://example.org/p> <http://example.org/o> .\n\
+             <http://example.org/b> <http://example.org/p> <http://example.org/o> .",
+            G,
+            false,
+        );
+        let free = ttl_input(
+            "free.ttl",
+            "<http://example.org/c> <http://example.org/p> <http://example.org/o> .",
+            g_other,
+            false,
+        );
+
+        let seen = std::sync::Mutex::new(Vec::<(String, usize)>::new());
+        let gate = WriteGate {
+            applies: Box::new(|g| g == G),
+            check: Box::new(|g, quads| {
+                seen.lock().unwrap().push((g.to_string(), quads.len()));
+                Ok(())
+            }),
+        };
+        parse_and_load_bulk_gated(
+            &store,
+            vec![gated, free],
+            |_| Ok(()),
+            |_| Ok(()),
+            Some(&gate),
+        )
+        .unwrap();
+
+        // Exactly one check, for the gated graph, with only its two quads.
+        assert_eq!(*seen.lock().unwrap(), vec![(G.to_string(), 2)]);
+        // A passing gate commits everything.
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 2);
+        assert_eq!(store.count_graph(Some(g_other)).unwrap(), 1);
     }
 
     #[test]

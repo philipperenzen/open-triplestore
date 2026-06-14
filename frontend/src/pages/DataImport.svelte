@@ -12,6 +12,7 @@
     bulkImport, analyzeImport,
   } from '../lib/api.js';
   import { detectRdfFormat, parseNTriplesToBindings, isValidIri, parseSparqlUpdatePreview, detectContentKindFromText, detectGraphRolesFromContent } from '../lib/rdf-utils.js';
+  import { collectGraphIris, aggregateShapesProbe } from '../lib/shapesProbe.js';
   import SparqlEditorCM from '../components/SparqlEditorCM.svelte';
   import StepIndicator from '../components/StepIndicator.svelte';
   import Select from '../components/Select.svelte';
@@ -284,10 +285,14 @@ INTO GRAPH <http://example.org/import/loaded>`,
   let serviceGraphResult = null; // { success, registered, failed }
 
   // SHACL shapes auto-detect (shown after successful import)
-  let shapesDetectResult = null; // { shapes_detected, shape_count, suggested_datasets }
+  // Aggregated over every imported graph (incl. auto-split '{target}/shapes'
+  // subgraphs): { shapesDetected, totalShapeCount, shapeGraphs, suggestedDatasets }.
+  let shapesDetectResult = null;
   let shapesLinkTargetId = ''; // dataset id to link detected shapes to
   let shapesLinking = false;
-  let shapesLinkDone = false;
+  let shapesLinkDone = false;      // a link actually succeeded
+  let shapesLinkDismissed = false; // the prompt was dismissed without linking
+  let shapesLinkError = '';
 
   $: stepLabels = [
     $i18nT('pages.import.step1'),
@@ -997,7 +1002,10 @@ INTO GRAPH <http://example.org/import/loaded>`,
             || Object.values(f.graphIriRenameMap || {}).find(v => v && isValidIri(v))
             || f.graphIri
             || '';
-          return { name: f.file.name, status: 'ok', graphIri };
+          // Keep every graph the file produced — auto-split can route shapes
+          // into a '{target}/shapes' subgraph beyond graph_iris[0].
+          const graphIris = (r.graph_iris || []).length ? r.graph_iris : (graphIri ? [graphIri] : []);
+          return { name: f.file.name, status: 'ok', graphIri, graphIris };
         });
 
         importProgress = { current: files.length, total: files.length, currentFile: '' };
@@ -1020,13 +1028,20 @@ INTO GRAPH <http://example.org/import/loaded>`,
           importError = $i18nT('pages.import.someFilesFailed', { values: { failed: failedFiles.length, total: files.length } });
         }
 
-        // Auto-detect SHACL shapes in successfully imported graphs
-        if (successFiles.length > 0 && uploadedIris.length > 0 && authed) {
-          try {
-            shapesDetectResult = await detectShapes(uploadedIris[0]);
-          } catch (_) {
-            // non-critical — silently ignore
+        // Auto-detect SHACL shapes across ALL successfully imported graphs
+        // (every file, every graph — auto-split shapes subgraphs included).
+        if (successFiles.length > 0 && authed) {
+          const probeIris = collectGraphIris(fileResults);
+          const probes = [];
+          for (const iri of probeIris) {
+            try {
+              probes.push({ graphIri: iri, result: await detectShapes(iri) });
+            } catch (_) {
+              // non-critical — skip this graph
+            }
           }
+          const agg = aggregateShapesProbe(probes);
+          shapesDetectResult = agg.shapesDetected ? agg : null;
         }
       }
     } catch (e) {
@@ -1064,6 +1079,8 @@ INTO GRAPH <http://example.org/import/loaded>`,
     shapesLinkTargetId = '';
     shapesLinking = false;
     shapesLinkDone = false;
+    shapesLinkDismissed = false;
+    shapesLinkError = '';
   }
 
   $: ownerLabel = ownerType === 'personal'
@@ -2230,34 +2247,45 @@ INTO GRAPH <http://example.org/import/loaded>`,
               {/if}
 
               <!-- SHACL shapes auto-detect card -->
-              {#if shapesDetectResult?.shapes_detected && !shapesLinkDone}
+              {#if shapesDetectResult?.shapesDetected && !shapesLinkDone && !shapesLinkDismissed}
                 <div class="rounded-xl border border-yellow-300 bg-yellow-50 p-4 space-y-3">
                   <div class="flex items-center gap-2">
                     <Shield size={18} class="text-yellow-600 shrink-0" />
                     <div>
                       <h4 class="text-sm font-semibold text-yellow-900">{$i18nT('pages.import.shaclShapesDetected')}</h4>
-                      <p class="text-xs text-yellow-700">{$i18nT('pages.import.shapesFoundPrompt', { values: { count: shapesDetectResult.shape_count } })}</p>
+                      <p class="text-xs text-yellow-700">{$i18nT('pages.import.shapesFoundPromptMulti', { values: { count: shapesDetectResult.totalShapeCount, graphs: shapesDetectResult.shapeGraphs.length } })}</p>
                     </div>
                   </div>
-                  {#if shapesDetectResult.suggested_datasets?.length > 0}
+                  <ul class="space-y-1">
+                    {#each shapesDetectResult.shapeGraphs as sg (sg.graphIri)}
+                      <li class="flex items-center gap-2 text-xs text-yellow-800">
+                        <code class="font-mono truncate min-w-0" title={sg.graphIri}>{sg.graphIri}</code>
+                        <span class="shrink-0 opacity-75">{$i18nT('pages.import.shapesInGraph', { values: { count: sg.shapeCount } })}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                  {#if shapesDetectResult.suggestedDatasets?.length > 0}
                     <div class="flex flex-wrap items-center gap-2">
                       <Select
                         class="flex-1 min-w-0"
                         size="sm"
                         bind:value={shapesLinkTargetId}
                         placeholder={$i18nT('pages.import.selectDatasetToLink')}
-                        options={[{ value: '', label: $i18nT('pages.import.selectDatasetToLink') }, ...shapesDetectResult.suggested_datasets.map(ds => ({ value: ds.id, label: ds.name }))]}
+                        options={[{ value: '', label: $i18nT('pages.import.selectDatasetToLink') }, ...shapesDetectResult.suggestedDatasets.map(ds => ({ value: ds.id, label: ds.has_shapes ? `${ds.name} ${$i18nT('pages.import.alreadyHasShapes')}` : ds.name }))]}
                       />
                       <button class="btn btn-sm"
                         disabled={!shapesLinkTargetId || shapesLinking}
                         on:click={async () => {
                           shapesLinking = true;
+                          shapesLinkError = '';
                           try {
-                            const graphIri = importResult?.graphIri || '';
+                            // Link the graph where shapes were actually detected
+                            // (not the first imported graph — they can differ).
+                            const graphIri = shapesDetectResult.shapeGraphs[0]?.graphIri || '';
                             await updateDatasetShacl(shapesLinkTargetId, { shacl_on_write: false, shapes_graph_iri: graphIri });
                             shapesLinkDone = true;
-                          } catch (_) {
-                            // ignore
+                          } catch (e) {
+                            shapesLinkError = $i18nT('pages.import.shapesLinkFailed', { values: { message: e.message || '' } });
                           } finally {
                             shapesLinking = false;
                           }
@@ -2265,17 +2293,22 @@ INTO GRAPH <http://example.org/import/loaded>`,
                         {#if shapesLinking}<Loader2 size={13} class="animate-spin" />{:else}<Shield size={13} />{/if}
                         {$i18nT('pages.import.linkShapes')}
                       </button>
-                      <button class="btn btn-sm btn-ghost text-xs" on:click={() => shapesLinkDone = true}>{$i18nT('pages.import.dismiss')}</button>
+                      <button class="btn btn-sm btn-ghost text-xs" on:click={() => shapesLinkDismissed = true}>{$i18nT('pages.import.dismiss')}</button>
                     </div>
+                    {#if shapesLinkError}
+                      <p class="text-xs text-red-600">{shapesLinkError}</p>
+                    {/if}
                   {:else}
                     <p class="text-xs text-yellow-700">{$i18nT('pages.import.noDatasetsWithoutShapes')}</p>
-                    <button class="btn btn-sm btn-ghost text-xs" on:click={() => shapesLinkDone = true}>{$i18nT('pages.import.dismiss')}</button>
+                    <button class="btn btn-sm btn-ghost text-xs" on:click={() => shapesLinkDismissed = true}>{$i18nT('pages.import.dismiss')}</button>
                   {/if}
                 </div>
               {/if}
-              {#if shapesLinkDone && shapesDetectResult?.shapes_detected}
+              {#if shapesLinkDone && shapesDetectResult?.shapesDetected}
                 <div class="flex items-center gap-2 p-3 rounded-xl bg-green-50 border border-green-200 text-green-800 text-sm">
-                  <Check size={15} /> {$i18nT('pages.import.shapesLinkedSuccess')}
+                  <Check size={15} />
+                  <span class="flex-1 min-w-0">{$i18nT('pages.import.shapesLinkedSuccess')}</span>
+                  <Link to="/shacl/shapes" class="btn btn-sm btn-ghost shrink-0">{$i18nT('pages.import.openInShaclStudio')}</Link>
                 </div>
               {/if}
 

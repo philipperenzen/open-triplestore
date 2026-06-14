@@ -20,6 +20,11 @@ pub enum AppError {
     UnsupportedMediaType(String),
     /// 422 Unprocessable Entity — SHACL validation failed
     ValidationFailed(crate::shacl::report::ValidationReport),
+    /// 429 Too Many Requests — carries the Retry-After hint in seconds
+    RateLimited {
+        retry_after_secs: u64,
+        message: String,
+    },
     /// 500 Internal Server Error — message is logged server-side only
     Internal(String),
 }
@@ -35,6 +40,7 @@ impl AppError {
             | AppError::UnsupportedMediaType(m)
             | AppError::Internal(m) => m.clone(),
             AppError::Conflict(v) => v.to_string(),
+            AppError::RateLimited { message, .. } => message.clone(),
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
         }
     }
@@ -62,6 +68,18 @@ impl IntoResponse for AppError {
                 (StatusCode::UNPROCESSABLE_ENTITY, axum::Json(body)).into_response()
             }
             AppError::Conflict(body) => (StatusCode::CONFLICT, axum::Json(body)).into_response(),
+            AppError::RateLimited {
+                retry_after_secs,
+                message,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_secs.to_string(),
+                )],
+                message,
+            )
+                .into_response(),
             other => {
                 let (status, message) = match other {
                     AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
@@ -78,7 +96,9 @@ impl IntoResponse for AppError {
                             "Internal server error".to_string(),
                         )
                     }
-                    AppError::ValidationFailed(_) | AppError::Conflict(_) => unreachable!(),
+                    AppError::ValidationFailed(_)
+                    | AppError::Conflict(_)
+                    | AppError::RateLimited { .. } => unreachable!(),
                 };
                 (status, message).into_response()
             }

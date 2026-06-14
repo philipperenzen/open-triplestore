@@ -9,6 +9,12 @@ export interface ShaclConstraintCard {
   what: string;
   example: string;
   template: string;
+  /**
+   * True for cards whose output the visual builder doesn't model (SPARQL
+   * constraints/rules). They are only editable in the Turtle source; the
+   * model still preserves them verbatim through round-trips.
+   */
+  sourceOnly?: boolean;
 }
 
 export const SHACL_CONSTRAINT_CARDS: ShaclConstraintCard[] = [
@@ -187,6 +193,7 @@ export const SHACL_CONSTRAINT_CARDS: ShaclConstraintCard[] = [
     what: 'Custom validation via a SPARQL SELECT that returns violations (sh:sparql).',
     example: 'sh:sparql [\n  sh:message "End date must be after start date." ;\n  sh:select """\n    SELECT $this WHERE {\n      $this ex:startDate ?s ; ex:endDate ?e .\n      FILTER (?e < ?s)\n    }""" ;\n] ;',
     template: 'sh:sparql [\n  sh:message "Describe the violation" ;\n  sh:select """\n    SELECT $this WHERE {\n      # TODO: pattern that matches invalid nodes\n    }""" ;\n] ;',
+    sourceOnly: true,
   },
   {
     id: 'ruleSparql',
@@ -195,6 +202,7 @@ export const SHACL_CONSTRAINT_CARDS: ShaclConstraintCard[] = [
     what: 'Derive new triples via a SPARQL CONSTRUCT rule (sh:rule / SHACL-AF).',
     example: 'sh:rule [\n  a sh:SPARQLRule ;\n  sh:construct """\n    CONSTRUCT { $this ex:area ?a }\n    WHERE { $this ex:w ?w ; ex:h ?h . BIND(?w * ?h AS ?a) }""" ;\n] ;',
     template: 'sh:rule [\n  a sh:SPARQLRule ;\n  sh:construct """\n    CONSTRUCT { $this ex:newProperty ?value }\n    WHERE {\n      # TODO: rule logic\n    }""" ;\n] ;',
+    sourceOnly: true,
   },
 ];
 
