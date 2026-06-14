@@ -55,6 +55,57 @@ fn build_link_header(ct: &ContainerType, base_url: &str) -> String {
     parts.join(", ")
 }
 
+// ─── Security helpers ───────────────────────────────────────────────────────────
+
+/// Validate that a computed resource IRI is a syntactically valid IRI before it is
+/// interpolated into any SPARQL string. A crafted request path (or `Slug`) could
+/// otherwise smuggle SPARQL/IRI-breaking characters (`<` `>` `"` `{` `}` space,
+/// control chars) into `INSERT DATA` / `DELETE WHERE`; `NamedNode::new` rejects them.
+fn valid_iri(iri: &str) -> bool {
+    oxigraph::model::NamedNode::new(iri).is_ok()
+}
+
+/// Sanitise a client-supplied `Slug` into a safe IRI path segment: only
+/// `[A-Za-z0-9._-]` survive; every other character (whitespace and SPARQL/IRI
+/// metacharacters like `>` `<` `{` `}` `"` `;`) collapses to `-`, so the slug
+/// cannot break out of the `<member_iri>` context in the member triples.
+fn sanitize_slug(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Clamp the stored `Content-Type` of a Non-RDF Source to a safe family before
+/// reflecting it on GET. Anything outside the allow-list (notably `text/html` and
+/// `image/svg+xml`, which execute script in the browser) degrades to
+/// `application/octet-stream`, defusing stored XSS via an uploaded binary resource.
+fn safe_binary_content_type(ct: &str) -> String {
+    let base = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let safe = matches!(
+        base.as_str(),
+        "application/pdf" | "application/octet-stream" | "text/plain"
+    ) || (base.starts_with("image/") && base != "image/svg+xml")
+        || base.starts_with("video/")
+        || base.starts_with("audio/");
+    if safe {
+        base
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 // ─── Query parameters ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +320,9 @@ pub async fn ldp_get(
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
+    if !valid_iri(&iri) {
+        return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
 
     let page_size = params.page_size.unwrap_or(100).min(1000);
     let page = params.page.unwrap_or(0);
@@ -281,10 +335,18 @@ pub async fn ldp_get(
         return match container::get_binary_resource(&state.store, &iri) {
             Ok(Some((content_type, data))) => {
                 let mut resp_headers = HeaderMap::new();
+                // Clamp the reflected Content-Type to a safe family and forbid MIME
+                // sniffing — prevents stored XSS via an uploaded text/html or
+                // image/svg+xml Non-RDF Source.
+                let safe_ct = safe_binary_content_type(&content_type);
                 resp_headers.insert(
                     axum::http::header::CONTENT_TYPE,
-                    HeaderValue::from_str(&content_type)
+                    HeaderValue::from_str(&safe_ct)
                         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+                );
+                resp_headers.insert(
+                    HeaderName::from_static("x-content-type-options"),
+                    HeaderValue::from_static("nosniff"),
                 );
                 let link_val = build_link_header(&ct, base);
                 resp_headers.insert(
@@ -458,6 +520,9 @@ pub async fn ldp_post(
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let container_iri = resource_iri(base, &path);
+    if !valid_iri(&container_iri) {
+        return (StatusCode::BAD_REQUEST, "Invalid container path").into_response();
+    }
 
     // Determine container type before creating member
     let container_ct = container::get_container_type(&state.store, &container_iri);
@@ -473,12 +538,15 @@ pub async fn ldp_post(
     let slug = headers
         .get("slug")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().replace(' ', "-"))
+        .map(sanitize_slug)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let container_base = container_iri.trim_end_matches('/');
     let member_iri = format!("{container_base}/{slug}");
+    if !valid_iri(&member_iri) {
+        return (StatusCode::BAD_REQUEST, "Invalid member IRI").into_response();
+    }
 
     // Determine content type from request header
     let content_type = headers
@@ -625,6 +693,9 @@ pub async fn ldp_put(
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
+    if !valid_iri(&iri) {
+        return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
 
     // If-Match check
     if let Some(if_match) = headers.get("if-match") {
@@ -727,6 +798,9 @@ pub async fn ldp_patch(
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
+    if !valid_iri(&iri) {
+        return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
 
     // 415 if wrong Content-Type
     let content_type = headers
@@ -788,6 +862,9 @@ pub async fn ldp_delete(State(state): State<AppState>, path: Option<Path<String>
     let path = path.map(|p| p.0).unwrap_or_default();
     let base = state.base_url.as_ref();
     let iri = resource_iri(base, &path);
+    if !valid_iri(&iri) {
+        return (StatusCode::BAD_REQUEST, "Invalid resource path").into_response();
+    }
     let container = container_iri_for(base, &path);
 
     // REVIEW: a DELETE to the bare root container `/ldp/` (empty path) wipes the

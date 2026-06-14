@@ -98,6 +98,23 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::handlers::ChangePasswordRequest,
             crate::auth::handlers::RefreshRequest,
             crate::auth::handlers::LogoutRequest,
+            crate::auth::handlers::ForgotPasswordRequest,
+            crate::auth::handlers::ForgotUsernameRequest,
+            crate::auth::handlers::ResetPasswordRequest,
+            crate::auth::handlers::VerifyEmailRequest,
+            crate::auth::handlers::ChangeEmailRequest,
+            crate::auth::handlers::TotpEnableRequest,
+            crate::auth::handlers::TotpDisableRequest,
+            crate::auth::handlers::MfaVerifyRequest,
+            crate::auth::handlers::TotpSetupResponse,
+            crate::auth::handlers::TotpEnableResponse,
+            crate::auth::handlers::MfaRequiredResponse,
+            crate::auth::passkey::RegisterStartResponse,
+            crate::auth::passkey::RegisterFinishRequest,
+            crate::auth::passkey::LoginStartResponse,
+            crate::auth::passkey::LoginFinishRequest,
+            crate::auth::passkey::DeletePasskeyRequest,
+            crate::auth::passkey::PasskeySummary,
             crate::auth::handlers::CreateApiTokenRequest,
             crate::auth::handlers::ApiTokenResponse,
             crate::auth::handlers::ApiTokenCreatedResponse,
@@ -2349,7 +2366,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Auth",
                 "Register",
-                "Register a new user. The first registered user becomes super_admin.",
+                "Register a new user (email, username and password are validated; a verification link is emailed). The first registered user becomes super_admin.",
                 vec![],
                 ref_body(
                     "RegisterRequest",
@@ -2368,7 +2385,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ob(
                 "Auth",
                 "Login",
-                "Authenticate and receive access + refresh tokens (also set as HttpOnly cookies).",
+                "Authenticate and receive access + refresh tokens (also set as HttpOnly cookies). Accounts with two-factor enabled instead receive `{ mfa_required, mfa_token }` to redeem at /api/auth/2fa/verify.",
                 vec![],
                 ref_body(
                     "LoginRequest",
@@ -2433,7 +2450,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     vec![],
                     ref_body(
                         "UpdateProfileRequest",
-                        json!({ "email": "alice@new.example.org", "display_name": "Alice" }),
+                        json!({ "username": "alice", "display_name": "Alice" }),
                     ),
                     vec![("200", "Updated user"), ("401", "Authentication required")],
                     true,
@@ -2460,6 +2477,319 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     ("401", "Authentication required"),
                 ],
                 true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/features",
+        vec![(
+            M::Get,
+            o(
+                "Auth",
+                "Auth capability flags",
+                "Public flags the auth UI adapts to: whether account email is actually delivered (SMTP configured), whether verified email is required for password login, and whether self-registration is closed.",
+                vec![],
+                vec![("200", "Capability flags")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/forgot-password",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Forgot password",
+                "Start self-service password recovery. Always answers 200 with the same body (no account enumeration); when the identifier matches an active account, a single-use reset link (1h) is emailed.",
+                vec![],
+                ref_body(
+                    "ForgotPasswordRequest",
+                    json!({ "identifier": "alice" }),
+                ),
+                vec![("200", "Generic acknowledgement")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/forgot-username",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Forgot username",
+                "Email the username tied to an address. Always answers 200 with the same body (no account enumeration).",
+                vec![],
+                ref_body(
+                    "ForgotUsernameRequest",
+                    json!({ "email": "alice@example.org" }),
+                ),
+                vec![("200", "Generic acknowledgement")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/reset-password",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Reset password",
+                "Redeem an emailed reset token and set a new password. Revokes every existing session and marks the email verified (mailbox control was proven).",
+                vec![],
+                ref_body(
+                    "ResetPasswordRequest",
+                    json!({ "token": "…from the email link…", "new_password": "new-stronger-pass" }),
+                ),
+                vec![("204", "Password reset"), ("400", "Invalid or expired link")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/verify-email",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Verify email",
+                "Redeem an emailed confirmation link: first-time address verification or the confirmation step of an email change.",
+                vec![],
+                ref_body(
+                    "VerifyEmailRequest",
+                    json!({ "token": "…from the email link…" }),
+                ),
+                vec![("200", "Email verified"), ("400", "Invalid or expired link")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/verify-email/resend",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Resend verification email",
+                "Mail a fresh confirmation link to the signed-in (unverified) account. Throttled per account.",
+                vec![],
+                vec![
+                    ("202", "Sent"),
+                    ("400", "Already verified"),
+                    ("429", "Sent too recently"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/change-email",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Change email",
+                "Start an email change (requires the current password). With SMTP configured the new address only takes effect once its mailbox confirms the emailed link; without SMTP the change applies immediately but is marked unverified.",
+                vec![],
+                ref_body(
+                    "ChangeEmailRequest",
+                    json!({ "new_email": "alice@new.example.org", "password": "s3cret-passphrase" }),
+                ),
+                vec![
+                    ("200", "Changed directly (no SMTP)"),
+                    ("202", "Confirmation link sent"),
+                    ("401", "Wrong password"),
+                    ("409", "Email already in use"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/setup",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Begin 2FA enrollment",
+                "Mint a TOTP shared secret and otpauth:// URI for the authenticator app. 2FA only activates after /api/auth/2fa/enable proves a correct code.",
+                vec![],
+                vec![("200", "Secret + otpauth URL"), ("409", "Already enabled")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/enable",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Activate 2FA",
+                "Confirm enrollment with a live TOTP code. Returns ten single-use recovery codes — shown exactly once.",
+                vec![],
+                ref_body("TotpEnableRequest", json!({ "code": "123456" })),
+                vec![("200", "Recovery codes"), ("400", "Incorrect code")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/disable",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Disable 2FA",
+                "Turn two-factor off. Requires the current password AND a live TOTP code (or an unused recovery code).",
+                vec![],
+                ref_body(
+                    "TotpDisableRequest",
+                    json!({ "password": "s3cret-passphrase", "code": "123456" }),
+                ),
+                vec![("204", "Disabled"), ("401", "Wrong password or code")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/2fa/verify",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Finish 2FA login",
+                "Second step of a two-factor login: exchange the short-lived `mfa_token` from POST /api/auth/login plus a TOTP or recovery code for a session.",
+                vec![],
+                ref_body(
+                    "MfaVerifyRequest",
+                    json!({ "mfa_token": "…from login…", "code": "123456" }),
+                ),
+                vec![("200", "Auth tokens"), ("401", "Invalid code or expired login")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys",
+        vec![(
+            M::Get,
+            o(
+                "Auth",
+                "List passkeys",
+                "WebAuthn passkeys registered to the current account.",
+                vec![],
+                vec![("200", "Passkey list")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/register/start",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Begin passkey registration",
+                "Mint a WebAuthn creation challenge for the signed-in user. Pass the returned `options.publicKey` to `navigator.credentials.create()` and redeem the result at /api/auth/passkeys/register/finish within 5 minutes.",
+                vec![],
+                vec![("200", "challenge_id + creation options"), ("400", "Passkey limit reached")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/register/finish",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Finish passkey registration",
+                "Verify the authenticator's response and store the new credential under the given name.",
+                vec![],
+                ref_body(
+                    "RegisterFinishRequest",
+                    json!({ "challenge_id": "…from register/start…", "name": "MacBook Touch ID", "credential": { "id": "…", "rawId": "…", "response": {}, "type": "public-key" } }),
+                ),
+                vec![
+                    ("201", "Passkey registered"),
+                    ("400", "Unknown/expired challenge or invalid attestation"),
+                    ("409", "Credential already registered"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/:credential_id",
+        vec![(
+            M::Delete,
+            ob(
+                "Auth",
+                "Remove a passkey",
+                "Delete one of the account's passkeys. Requires the current password — a hijacked session must not be able to strip credentials.",
+                vec![],
+                ref_body(
+                    "DeletePasskeyRequest",
+                    json!({ "password": "s3cret-passphrase" }),
+                ),
+                vec![
+                    ("204", "Removed"),
+                    ("401", "Wrong password"),
+                    ("404", "No such passkey"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/login/start",
+        vec![(
+            M::Post,
+            o(
+                "Auth",
+                "Begin passkey login",
+                "Mint a discoverable-credential WebAuthn challenge (no username needed). Pass the returned `options.publicKey` to `navigator.credentials.get()` and redeem at /api/auth/passkeys/login/finish.",
+                vec![],
+                vec![("200", "challenge_id + request options")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/auth/passkeys/login/finish",
+        vec![(
+            M::Post,
+            ob(
+                "Auth",
+                "Finish passkey login",
+                "Verify the authenticator's assertion and receive the same access + refresh tokens (and HttpOnly cookies) as POST /api/auth/login.",
+                vec![],
+                ref_body(
+                    "LoginFinishRequest",
+                    json!({ "challenge_id": "…from login/start…", "credential": { "id": "…", "rawId": "…", "response": {}, "type": "public-key" } }),
+                ),
+                vec![("200", "Auth tokens"), ("401", "Invalid credentials")],
+                false,
             ),
         )],
     );
@@ -3524,6 +3854,72 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Post, o("LLM", "Submit LLM feedback", "Record approve/edit/reject feedback on a generated query to improve future suggestions.",
             vec![], vec![("204", "Feedback recorded")], false)),
     ]);
+    mount(paths, "/api/llm/chat", vec![
+        (M::Post, o("LLM", "Spark chat (buffered)", "One grounded chat turn against the caller's accessible platform state; may run scoped read-only SPARQL rounds. Guarded (rate limit, size caps, injection screen) and logged for admins.",
+            vec![], vec![("200", "{ answer, model, queries[], … }"), ("400", "Guard rejected the request"), ("429", "Per-user AI rate limit")], false)),
+    ]);
+    mount(paths, "/api/llm/chat/stream", vec![
+        (M::Post, o("LLM", "Spark chat (SSE stream)", "The same grounded chat turn streamed as server-sent events: status/delta/query/query_result events, terminated by done (full response) or error.",
+            vec![], vec![("200", "text/event-stream"), ("400", "Guard rejected the request"), ("429", "Per-user AI rate limit")], false)),
+    ]);
+    mount(
+        paths,
+        "/api/llm/shacl",
+        vec![(
+            M::Post,
+            o(
+                "LLM",
+                "SHACL assistant",
+                "Draft, explain or improve SHACL shapes via the configured LLM gateway.",
+                vec![],
+                vec![("200", "{ turtle | explanation }")],
+                false,
+            ),
+        )],
+    );
+    mount(paths, "/api/llm/conversations", vec![
+        (M::Get, o("LLM", "List chat conversations", "The caller's saved Spark conversations, newest first.",
+            vec![], vec![("200", "{ conversations[] }"), ("401", "Authentication required")], true)),
+        (M::Post, o("LLM", "Create chat conversation", "Start a saved conversation; the title derives from the first message when empty.",
+            vec![], vec![("200", "Conversation"), ("401", "Authentication required")], true)),
+    ]);
+    mount(paths, "/api/llm/conversations/:id", vec![
+        (M::Get, o("LLM", "Get chat conversation", "All messages of one owned conversation, including each turn's retrieval trail.",
+            vec![], vec![("200", "{ id, messages[] }"), ("404", "Not found / not owned")], true)),
+        (M::Patch, o("LLM", "Rename chat conversation", "Set the conversation title.",
+            vec![], vec![("200", "Renamed"), ("404", "Not found / not owned")], true)),
+        (M::Delete, o("LLM", "Delete chat conversation", "Delete the conversation and its messages.",
+            vec![], vec![("200", "Deleted"), ("404", "Not found / not owned")], true)),
+    ]);
+    mount(paths, "/api/llm/conversations/:id/messages", vec![
+        (M::Post, o("LLM", "Append chat message", "Append one finished turn message (user or assistant, with optional queries trail) to an owned conversation.",
+            vec![], vec![("200", "Appended"), ("404", "Not found / not owned")], true)),
+    ]);
+    mount(paths, "/api/llm/memory", vec![
+        (M::Get, o("LLM", "Get chat memory", "The caller's standing Spark preferences and whether they are applied.",
+            vec![], vec![("200", "{ instructions, enabled }")], true)),
+        (M::Put, o("LLM", "Set chat memory", "Save standing preferences injected into the Spark system prompt. Screened against prompt-injection phrasing.",
+            vec![], vec![("200", "Saved"), ("400", "Too long or injection-like")], true)),
+    ]);
+    mount(paths, "/api/admin/llm/requests", vec![
+        (M::Get, o("Admin", "LLM request log", "Admin telemetry for every LLM-backed request: outcome, latency, time-to-first-token, sizes and guard flags. Filter by status, endpoint, user_id, since.",
+            vec![], vec![("200", "{ requests[] }"), ("403", "Admin role required")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/admin/llm/stats",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "LLM request stats",
+                "24h aggregates (by status, average latency/TTFT) and 7-day top users.",
+                vec![],
+                vec![("200", "Aggregates"), ("403", "Admin role required")],
+                true,
+            ),
+        )],
+    );
 
     // ═══════════════════════════════════════════════════════════════════════
     // Linked Data

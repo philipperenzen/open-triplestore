@@ -159,7 +159,7 @@ pub async fn import_ifc_bytes(
 
     // 3. Register the graphs on the dataset so scoping/visibility apply.
     let _ = state.auth_db.add_dataset_graph(dataset_id, &bot_graph);
-    super::handlers::detect_and_store_graph_role(state, dataset_id, &bot_graph);
+    let _ = super::handlers::detect_and_store_graph_role(state, dataset_id, &bot_graph);
     if let Some(g) = &ifcowl_graph {
         let _ = state.auth_db.add_dataset_graph(dataset_id, g);
     }

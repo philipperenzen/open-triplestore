@@ -229,6 +229,10 @@ pub fn insert_data_model(
         _ => String::new(),
     };
     let is_public_str = if is_public { "true" } else { "false" };
+    // Escape user-supplied literals before interpolating them into the SPARQL
+    // string (mirrors the description/owner escaping above).
+    let title_e = crate::store::escape_sparql_literal(title);
+    let namespace_e = crate::store::escape_sparql_literal(namespace);
     let q = format!(
         r#"
         PREFIX ver: <{VER}>
@@ -236,8 +240,8 @@ pub fn insert_data_model(
         INSERT DATA {{
           GRAPH <{REGISTRY_GRAPH}> {{
             <{ont_iri}> a ver:DataModel ;
-              dct:title "{title}"@en ;
-              ver:namespace "{namespace}" ;
+              dct:title "{title_e}"@en ;
+              ver:namespace "{namespace_e}" ;
               ver:isPublic "{is_public_str}" ;
               {owner_triples}{description_triple}
               {creator_triple}
