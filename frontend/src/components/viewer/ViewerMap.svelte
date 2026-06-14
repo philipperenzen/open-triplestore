@@ -225,33 +225,57 @@
     return null;
   }
 
-  function setEmissive(mat, on) {
-    if (!mat || !('emissive' in mat)) return;
-    mat.emissive.setHex(on ? 0xe8590c : 0x000000);
-    mat.emissiveIntensity = on ? 0.5 : 0;
+  const HL_COLOR = 0xff6a00; // vivid highlight for the selected element(s)
+
+  /** Stash a material's original render flags once, so any paint is reversible. */
+  function stashMat(m) {
+    if (m.userData.origOpacity === undefined) {
+      m.userData.origOpacity = m.opacity;
+      m.userData.origTransparent = m.transparent;
+      m.userData.origDepthWrite = m.depthWrite;
+      m.userData.origDepthTest = m.depthTest;
+    }
   }
 
-  // X-ray: ghost the meshes that occlude a selection so the picked element shows
-  // through the walls. The original opacity/flags are stashed once per material
-  // so the effect is fully reversible (already-glass elements restore correctly).
-  function setGhost(mat, ghost) {
-    if (!mat) return;
-    if (mat.userData.origOpacity === undefined) {
-      mat.userData.origOpacity = mat.opacity;
-      mat.userData.origTransparent = mat.transparent;
-      mat.userData.origDepthWrite = mat.depthWrite;
-    }
-    if (ghost) {
-      mat.transparent = true;
-      // Translucent, but still clearly visible — at 0.13 the whole building read
-      // as "disappeared" when one element was selected. ~0.32 keeps it as a
-      // see-through shell so the picked element shows through without vanishing.
-      mat.opacity = Math.min(mat.userData.origOpacity, 0.32);
-      mat.depthWrite = false; // don't occlude the selected element behind it
+  /**
+   * Paint a material for one of four states:
+   *  - `selected`     — glow (whole non-IFC model picked); normal depth.
+   *  - `selectedXray` — glow AND render ON TOP (depthTest off) so the picked IFC
+   *                     sub-element is always visible through the ghosted shell.
+   *  - `ghost`        — faint, see-through, doesn't occlude (x-ray of the rest).
+   *  - `normal`       — restore the stashed original flags.
+   */
+  function paintMat(m, state) {
+    if (!m) return;
+    stashMat(m);
+    const emis = 'emissive' in m;
+    if (state === 'selected' || state === 'selectedXray') {
+      if (emis) {
+        m.emissive.setHex(HL_COLOR);
+        m.emissiveIntensity = 0.95;
+      }
+      m.opacity = m.userData.origOpacity;
+      m.transparent = m.userData.origTransparent;
+      m.depthWrite = m.userData.origDepthWrite;
+      m.depthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
+    } else if (state === 'ghost') {
+      if (emis) {
+        m.emissive.setHex(0x000000);
+        m.emissiveIntensity = 0;
+      }
+      m.transparent = true;
+      m.opacity = Math.min(m.userData.origOpacity, 0.16);
+      m.depthWrite = false; // don't occlude the selected element behind it
+      m.depthTest = m.userData.origDepthTest;
     } else {
-      mat.opacity = mat.userData.origOpacity;
-      mat.transparent = mat.userData.origTransparent;
-      mat.depthWrite = mat.userData.origDepthWrite;
+      if (emis) {
+        m.emissive.setHex(0x000000);
+        m.emissiveIntensity = 0;
+      }
+      m.opacity = m.userData.origOpacity;
+      m.transparent = m.userData.origTransparent;
+      m.depthWrite = m.userData.origDepthWrite;
+      m.depthTest = m.userData.origDepthTest;
     }
   }
 
@@ -310,12 +334,11 @@
       e.modelGroup?.traverse((n) => {
         if (!n.isMesh || !n.material) return;
         const on = byGuid ? selGuids.has(n.userData.ifcGuid) : id === selected;
-        const ghost = xray && !on;
+        const state = on ? (xray ? 'selectedXray' : 'selected') : xray ? 'ghost' : 'normal';
+        // Draw the picked element last so it sits on top of the ghosted shell.
+        n.renderOrder = state === 'selectedXray' ? 12 : 0;
         const mats = Array.isArray(n.material) ? n.material : [n.material];
-        for (const m of mats) {
-          setEmissive(m, on);
-          setGhost(m, ghost);
-        }
+        for (const m of mats) paintMat(m, state);
       });
     }
     map?.triggerRepaint();
@@ -359,7 +382,15 @@
         RAYCASTER.ray.origin.copy(RAY.origin);
         RAYCASTER.ray.direction.copy(RAY.direction);
         const hits = RAYCASTER.intersectObject(e.modelGroup, true);
-        if (hits.length) guid = meshGuid(hits[0].object);
+        // Take the nearest hit that actually owns a GlobalId — IFC openings and
+        // other non-rooted meshes carry none and would otherwise swallow the pick.
+        for (const hit of hits) {
+          const g = meshGuid(hit.object);
+          if (g) {
+            guid = g;
+            break;
+          }
+        }
       }
       if (!best || d < best.d) best = { id, guid, d };
     }
@@ -610,13 +641,22 @@
     if (fs.length) dispatch('select', { id: fs[0].properties.id });
   }
 
+  let lastHoverTs = 0;
   function onMouseMove(e) {
     if (!map) return;
     let label = null;
-    const pick = raycastModels(e.point); // box-level only — keep hover cheap
+    // Precise (triangle) pick on hover, throttled, so the tooltip names the exact
+    // wall/slab/door under the cursor. The cheap box test rejects off-model hovers
+    // first, so the triangle cast only runs while actually over a building.
+    const now = (typeof performance !== 'undefined' ? performance.now() : 0);
+    const precise = now - lastHoverTs > 80;
+    if (precise) lastHoverTs = now;
+    const pick = raycastModels(e.point, precise);
     if (pick) {
-      const el = elements.find((x) => x.id === pick.id);
-      label = el?.label || pick.id.split(/[/#]/).pop();
+      const el =
+        (pick.guid && elements.find((x) => x.ifc_guid === pick.guid)) ||
+        elements.find((x) => x.id === pick.id);
+      label = el?.label || (pick.guid || pick.id).split(/[/#]/).pop();
     } else {
       const pad = 4;
       const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
@@ -655,7 +695,8 @@
       attributionControl: extraAttribution
         ? { compact: true, customAttribution: extraAttribution }
         : { compact: true },
-      maxPitch: 70,
+      maxPitch: 80, // low angle for inspecting building facades
+      maxZoom: 23.5, // zoom right in on individual walls/beams (basemap over-zooms)
     });
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-left');
