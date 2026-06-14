@@ -296,13 +296,14 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
             {
                 "name": "ots_building",
                 "pbrMetallicRoughness": {
-                    "baseColorFactor": [0.80, 0.82, 0.85, 1.0],
+                    "baseColorFactor": [0.58, 0.60, 0.64, 1.0],
                     "metallicFactor": 0.0,
                     "roughnessFactor": 0.9
                 },
                 // Small ambient lift so faces turned away from Cesium's lone sun
                 // don't fall to near-black (the viewer sets up no IBL/ambient).
-                "emissiveFactor": [0.16, 0.17, 0.19],
+                // Kept modest so flat sun-facing roofs read grey, not white.
+                "emissiveFactor": [0.10, 0.105, 0.115],
                 "doubleSided": true
             }
         ],

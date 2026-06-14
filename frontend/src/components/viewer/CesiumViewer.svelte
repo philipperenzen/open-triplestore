@@ -88,6 +88,11 @@
       });
       // Hide the default Cesium credit overlay clutter; keep the logo.
       viewer.scene.globe.depthTestAgainstTerrain = false;
+      // Soften the lighting. Cesium's default sun (intensity 2.0) blows the flat,
+      // sun-facing roofs of our short tiles out to pure white when viewed near
+      // top-down. A dimmer sun + the GLB material's small emissive floor make the
+      // tiles read as shaded grey buildings instead of white squares.
+      viewer.scene.light = new Cesium.SunLight({ intensity: 0.5 });
 
       await loadTileset();
       attachPicking();
