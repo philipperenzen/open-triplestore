@@ -43,6 +43,28 @@
   let error = '';
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
+  // GlobalIds of all descendant leaf elements (BFS over the BOT parent links), so
+  // a spatial container (storey / building / space) — which owns no geometry of
+  // its own — can isolate its whole subtree in the IFC loader instead of falling
+  // back to the entire building. Empty for a leaf element (it has no children),
+  // so leaf picks keep isolating their single atom via the URL #GlobalId.
+  $: descendantGuids = (() => {
+    if (!element) return [];
+    const out = [];
+    const seen = new Set([element.id]);
+    const stack = [element.id];
+    while (stack.length) {
+      const id = stack.pop();
+      for (const e of elements) {
+        if (e.parent === id && !seen.has(e.id)) {
+          seen.add(e.id);
+          if (e.ifc_guid) out.push(e.ifc_guid);
+          stack.push(e.id);
+        }
+      }
+    }
+    return out;
+  })();
   // All linked 3D representations of this element (glTF / CityJSON / STL /
   // IFC …). The user can switch between them in the 3D tab; the preferred
   // format is the default.
@@ -259,7 +281,7 @@
               </div>
             {/if}
             <Model3D
-              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis }]}
+              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis, guids: modelRef.format === 'ifc' ? descendantGuids : undefined }]}
               on:select={(e) => {
                 // Picking an IFC mesh selects that atom (beam, slab, …): resolve
                 // its GlobalId to the feed element and open that panel.

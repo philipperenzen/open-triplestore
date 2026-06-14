@@ -224,15 +224,49 @@
     mat.emissiveIntensity = on ? 0.5 : 0;
   }
 
+  // Children index (parent id → child elements) for subtree highlighting, so
+  // selecting a storey lights every wall/slab it contains. Rebuilt per elements.
+  let childrenByParent = new Map();
+  $: {
+    const m = new Map();
+    for (const el of elements) {
+      if (el.parent) {
+        const arr = m.get(el.parent);
+        if (arr) arr.push(el);
+        else m.set(el.parent, [el]);
+      }
+    }
+    childrenByParent = m;
+  }
+
+  /** GlobalIds of an element + all its BOT descendants (a container's subtree). */
+  function descendantGuidSet(id) {
+    const set = new Set();
+    const self = elements.find((e) => e.id === id);
+    if (self?.ifc_guid) set.add(self.ifc_guid);
+    const stack = [id];
+    const seen = new Set([id]);
+    while (stack.length) {
+      for (const k of childrenByParent.get(stack.pop()) || []) {
+        if (seen.has(k.id)) continue;
+        seen.add(k.id);
+        if (k.ifc_guid) set.add(k.ifc_guid);
+        stack.push(k.id);
+      }
+    }
+    return set;
+  }
+
   function highlightModels() {
-    // When the selected element is one element *inside* a multi-element model
-    // (an IFC building), light only its meshes — matched by GlobalId. Otherwise
-    // light the whole model when its own id is selected.
-    const selGuid = elements.find((x) => x.id === selected)?.ifc_guid || null;
+    // Light the selected element's meshes by GlobalId. For a spatial container
+    // (storey/building) that owns no mesh, light its whole subtree (every wall /
+    // slab it contains). For a model with no IFC guids, light it whole by id.
+    const selGuids = selected ? descendantGuidSet(selected) : null;
+    const byGuid = selGuids && selGuids.size > 0;
     for (const [id, e] of entries) {
       e.modelGroup?.traverse((n) => {
         if (!n.isMesh || !n.material) return;
-        const on = selGuid ? n.userData.ifcGuid === selGuid : id === selected;
+        const on = byGuid ? selGuids.has(n.userData.ifcGuid) : id === selected;
         if (Array.isArray(n.material)) n.material.forEach((m) => setEmissive(m, on));
         else setEmissive(n.material, on);
       });
