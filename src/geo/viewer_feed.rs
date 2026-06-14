@@ -46,6 +46,10 @@ pub struct ViewerElement {
     /// Source up-axis of the element's 3D model(s) (`ots:modelUpAxis`, e.g.
     /// "Z" for Z-up STL exports) — viewers rotate into their own convention.
     pub up_axis: Option<String>,
+    /// Real-world largest extent of the model in metres (`ots:modelSizeMeters`) —
+    /// lets the map scale a unit-less STL (a landmark) to true size instead of
+    /// guessing. `None` when the model's own units are already trustworthy.
+    pub size_meters: Option<f64>,
     /// Geometry as WKT in EPSG:4326, `(x y) = (lon lat)` — feeds map layers.
     pub wkt4326: Option<String>,
 }
@@ -158,7 +162,7 @@ pub fn build_viewer_feed(
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid ?up
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid ?up ?msize
         {from}
         WHERE {{
             {{ ?parent (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el . }}
@@ -176,7 +180,8 @@ pub fn build_viewer_feed(
                         OPTIONAL {{ ?g geo:asGML ?gml }} }}
             OPTIONAL {{ ?el omg:hasGeometry ?og . ?og ?fp ?file .
                         FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
-                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }} }}
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }}
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelSizeMeters> ?msize }} }}
             OPTIONAL {{ ?el ?guidp ?guid . FILTER(STRENDS(STR(?guidp), "ifcGuid")) }}
         }}
         "#
@@ -210,6 +215,13 @@ pub fn build_viewer_feed(
         }
         if entry.up_axis.is_none() {
             entry.up_axis = sol.get("up").map(term_value);
+        }
+        if entry.size_meters.is_none() {
+            entry.size_meters = sol
+                .get("msize")
+                .map(term_value)
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|m| m.is_finite() && *m > 0.0);
         }
         if let (Some(fp), Some(file)) = (sol.get("fp").map(term_str), sol.get("file")) {
             let format = fp.trim_start_matches(FOG_AS).to_string();

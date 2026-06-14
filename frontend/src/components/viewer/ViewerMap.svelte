@@ -181,7 +181,13 @@
       // CityJSON/CityGML carry their own georeference — trust it over the WKT dot.
       const anchor = cached.userData.geo?.anchorLonLat ?? entry.anchor;
       if (!anchor) return;
-      const meters = realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
+      // A declared real-world size (ots:modelSizeMeters) wins over guessing from
+      // the model's own units — STL landmarks (Big Ben, Empire State) have
+      // arbitrary units, so without this they fall back to ~90 m and look tiny.
+      const meters =
+        el.size_meters && el.size_meters > 0
+          ? el.size_meters
+          : realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
       const box = new THREE.Box3().setFromObject(model);
       const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.62;
       const holder = new THREE.Group();
@@ -426,39 +432,52 @@
   let suppressedIds = new Set();
   function suppressBasemapBuildingsUnderModels() {
     if (!map || !map.getLayer(BUILDINGS_LAYER_ID)) return;
-    let changed = false;
     for (const e of entries.values()) {
       const anchor = e.anchorUsed ?? e.anchor;
-      if (!anchor || !e.modelGroup) continue;
-      let feats = [];
+      // Skip hidden models (3D-models layer toggled off) and unbuilt entries.
+      if (!anchor || !e.modelGroup || e.modelGroup.visible === false || !e.box) continue;
+      e.suppressed ??= new Set();
       try {
         const c = map.project({ lng: anchor[0], lat: anchor[1] });
-        // Query the model's whole FOOTPRINT, not just the anchor pixel — a tall
-        // model can poke through neighbouring extrusion footprints too. Radius =
-        // half the model's real size, converted to screen pixels at this zoom.
         const mpp =
           (156543.03392 * Math.cos((anchor[1] * Math.PI) / 180)) / Math.pow(2, map.getZoom());
-        const r = Math.min(140, Math.max(4, (e.meters || 50) / 2 / Math.max(mpp, 1e-6)));
-        feats = map.queryRenderedFeatures(
-          [
-            [c.x - r, c.y - r],
-            [c.x + r, c.y + r],
-          ],
+        // Radius = the model's real FOOTPRINT (horizontal extent), NOT its height.
+        // The old height-based radius made a 96 m tower (Big Ben) blank out a 96 m
+        // circle of neighbouring blocks that never came back; we only want to hide
+        // the OSM block(s) the model actually stands on. `box` is normalised units,
+        // so scale the horizontal extent by meters/largest-dim to get real metres.
+        const sx = e.box.max.x - e.box.min.x;
+        const sy = e.box.max.y - e.box.min.y;
+        const sz = e.box.max.z - e.box.min.z;
+        const maxDim = Math.max(sx, sy, sz) || 1;
+        const footprintM = (e.meters || 30) * (Math.max(sx, sz) / maxDim);
+        const r = Math.min(70, Math.max(3, footprintM / 2 / Math.max(mpp, 1e-6)));
+        const feats = map.queryRenderedFeatures(
+          [[c.x - r, c.y - r], [c.x + r, c.y + r]],
           { layers: [BUILDINGS_LAYER_ID] }
         );
+        for (const f of feats) if (f.id !== undefined) e.suppressed.add(f.id);
       } catch {
         continue;
       }
-      for (const f of feats) {
-        if (f.id !== undefined && !suppressedIds.has(f.id)) {
-          suppressedIds.add(f.id);
-          changed = true;
-        }
+    }
+    // The active filter is the union over CURRENTLY VISIBLE models — so toggling
+    // the 3D-models layer off (or a model that unloaded) brings its basemap blocks
+    // back, while a block under a standing model stays hidden. Each model keeps
+    // its own accumulated id set, so there is no query→hide→re-query flicker.
+    const next = new Set();
+    for (const e of entries.values()) {
+      if (e.modelGroup && e.modelGroup.visible !== false && e.suppressed) {
+        for (const id of e.suppressed) next.add(id);
       }
     }
-    if (changed) {
-      map.setFilter(BUILDINGS_LAYER_ID, ['!', ['in', ['id'], ['literal', [...suppressedIds]]]]);
-    }
+    const same = next.size === suppressedIds.size && [...next].every((id) => suppressedIds.has(id));
+    if (same) return;
+    suppressedIds = next;
+    map.setFilter(
+      BUILDINGS_LAYER_ID,
+      next.size ? ['!', ['in', ['id'], ['literal', [...next]]]] : null
+    );
   }
 
   function setLayerVis(id, on) {
@@ -482,6 +501,9 @@
   function toggleLayer(key) {
     layersOn = { ...layersOn, [key]: !layersOn[key] };
     applyLayerVisibility();
+    // Toggling models on/off changes which basemap blocks should be hidden, but
+    // doesn't move the map (no 'idle'), so re-evaluate the suppression now.
+    if (key === 'models' || key === 'osm3d') suppressBasemapBuildingsUnderModels();
   }
 
   function applySelectedPaint() {

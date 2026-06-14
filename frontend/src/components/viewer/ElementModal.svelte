@@ -235,6 +235,14 @@
           </table>
         {/if}
       {:else if tab === 'structure'}
+        <!-- The containment context (what this is "part of") leads, so you see
+             where you are before drilling down into the contained parts. -->
+        {#if element.parent}
+          <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
+            ↑ {$i18nT('viewer.parent')}:
+            {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
+          </button>
+        {/if}
         {#if children.length === 0}
           <p class="hint">{$i18nT('viewer.noChildren')}</p>
         {:else}
@@ -253,12 +261,6 @@
               </li>
             {/each}
           </ul>
-        {/if}
-        {#if element.parent}
-          <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
-            ↑ {$i18nT('viewer.parent')}:
-            {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
-          </button>
         {/if}
       {:else if tab === '3d' && modelRef}
         {#if lite}
