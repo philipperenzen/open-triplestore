@@ -27,7 +27,6 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
-    reqwest::async_http_client,
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
@@ -57,6 +56,21 @@ pub type OAuthSessions = Arc<DashMap<String, OAuthSession>>;
 
 pub fn new_session_store() -> OAuthSessions {
     Arc::new(DashMap::new())
+}
+
+/// Build the HTTP client used for all IdP calls (metadata discovery + token
+/// exchange).
+///
+/// openidconnect 4 / oauth2 5 dropped the stateless `reqwest::async_http_client`
+/// function in favour of an explicit, reusable client passed to each request.
+/// Redirects are disabled as an SSRF guard so a malicious or misconfigured IdP
+/// can't bounce discovery/token fetches at internal hosts — this complements the
+/// https pin in `is_secure_idp_url`.
+fn oidc_http_client() -> anyhow::Result<openidconnect::reqwest::Client> {
+    openidconnect::reqwest::ClientBuilder::new()
+        .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build OIDC HTTP client: {e}"))
 }
 
 /// Hard cap on concurrent in-flight OAuth/PKCE sessions, bounding memory if an
@@ -125,7 +139,8 @@ pub async fn begin_oidc_flow(
             .to_string(),
     )?;
 
-    let provider_metadata = CoreProviderMetadata::discover_async(issuer, async_http_client).await?;
+    let http_client = oidc_http_client()?;
+    let provider_metadata = CoreProviderMetadata::discover_async(issuer, &http_client).await?;
 
     let oidc_client = CoreClient::from_provider_metadata(
         provider_metadata,
@@ -228,7 +243,8 @@ pub async fn complete_oidc_flow(
             .trim_end_matches("/.well-known/openid-configuration")
             .to_string(),
     )?;
-    let provider_metadata = CoreProviderMetadata::discover_async(issuer, async_http_client).await?;
+    let http_client = oidc_http_client()?;
+    let provider_metadata = CoreProviderMetadata::discover_async(issuer, &http_client).await?;
 
     let client_id = provider
         .client_id
@@ -243,9 +259,9 @@ pub async fn complete_oidc_flow(
     .set_redirect_uri(RedirectUrl::new(redirect_uri.to_string())?);
 
     let token_response = oidc_client
-        .exchange_code(AuthorizationCode::new(code.to_string()))
+        .exchange_code(AuthorizationCode::new(code.to_string()))?
         .set_pkce_verifier(session.pkce_verifier)
-        .request_async(async_http_client)
+        .request_async(&http_client)
         .await?;
 
     let id_token = token_response
