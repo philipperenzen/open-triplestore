@@ -44,6 +44,39 @@ pub const OTS3D_SF_INTERSECTS: &str =
     "https://open-triplestore.org/def/function/geo3d/sf3dIntersects";
 pub const OTS3D_SF_DISJOINT: &str = "https://open-triplestore.org/def/function/geo3d/sf3dDisjoint";
 
+// ─── ots-geof: exact 3D solid-kernel function IRIs (parry3d narrow phase) ───
+// The `sf3dContains`/`sf3dWithin` point-in-solid predicates and the convex hull
+// constructor. Exact (not AABB broad-phase). Same geo3d/ namespace.
+
+/// Convex hull of a 3D geometry as a `POLYHEDRALSURFACE Z` solid.
+pub const OTS3D_CONVEXHULL3D: &str =
+    "https://open-triplestore.org/def/function/geo3d/convexHull3d";
+/// Exact "first solid contains the second" (every vertex of B inside A's volume).
+pub const OTS3D_SF_CONTAINS: &str =
+    "https://open-triplestore.org/def/function/geo3d/sf3dContains";
+/// Exact "first geometry is within the second solid" (inverse of contains).
+pub const OTS3D_SF_WITHIN: &str = "https://open-triplestore.org/def/function/geo3d/sf3dWithin";
+
+// ─── ots-geof: certified CSG function IRIs (SFCGAL; sfcgal3d feature only) ───
+// These are advertised only when the platform is built with `sfcgal3d`; the
+// default build neither registers nor resolves them.
+
+/// Boolean union of two solids (certified, SFCGAL).
+#[allow(dead_code)]
+pub const OTS3D_UNION3D: &str = "https://open-triplestore.org/def/function/geo3d/union3d";
+/// Boolean intersection of two solids (certified, SFCGAL).
+#[allow(dead_code)]
+pub const OTS3D_INTERSECTION3D: &str =
+    "https://open-triplestore.org/def/function/geo3d/intersection3d";
+/// Boolean difference of two solids (certified, SFCGAL).
+#[allow(dead_code)]
+pub const OTS3D_DIFFERENCE3D: &str =
+    "https://open-triplestore.org/def/function/geo3d/difference3d";
+/// Certified exact volume of a closed solid (SFCGAL, exact arithmetic).
+#[allow(dead_code)]
+pub const OTS3D_VOLUME_EXACT: &str =
+    "https://open-triplestore.org/def/function/geo3d/volumeExact";
+
 // ─── Simple Features topological function IRIs ───
 
 pub const SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";

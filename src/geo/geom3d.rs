@@ -496,6 +496,46 @@ impl Geometry3D {
         out
     }
 
+    /// Indexed triangle mesh: a deduplicated vertex list plus a triangle index
+    /// list (`[u32; 3]` into the vertex list). This is the buffer layout the
+    /// exact `parry3d` kernel (`TriMesh`, `convex_hull`) and any glTF/3D-Tiles
+    /// exporter want. Returns `None` when the geometry has no faces (a point or
+    /// line). Pure-Rust — no `parry3d` import lives here.
+    ///
+    /// Vertices are deduplicated by exact bit pattern (`to_bits`), which is what
+    /// shared ring/face corners produce in practice; it does not weld vertices
+    /// that merely round to the same value.
+    ///
+    /// Indexed-mesh form for a `parry3d` `TriMesh`; the exact narrow phase is
+    /// currently a self-contained Möller test, so this is wired in only once the
+    /// parry 0.17 `TriMesh::new` signature is pinned (see functions3d TODO).
+    #[allow(dead_code)]
+    pub fn trimesh(&self) -> Option<(Vec<[f64; 3]>, Vec<[u32; 3]>)> {
+        use std::collections::HashMap;
+        let tris = self.triangles();
+        if tris.is_empty() {
+            return None;
+        }
+        let mut verts: Vec<[f64; 3]> = Vec::new();
+        let mut idx: Vec<[u32; 3]> = Vec::with_capacity(tris.len());
+        // Key vertices by their exact f64 bit patterns so identical corners fold.
+        let mut seen: HashMap<[u64; 3], u32> = HashMap::new();
+        let mut intern = |c: Coord3| -> u32 {
+            let key = [c.x.to_bits(), c.y.to_bits(), c.z.to_bits()];
+            if let Some(&i) = seen.get(&key) {
+                return i;
+            }
+            let i = verts.len() as u32;
+            verts.push([c.x, c.y, c.z]);
+            seen.insert(key, i);
+            i
+        };
+        for [a, b, c] in &tris {
+            idx.push([intern(*a), intern(*b), intern(*c)]);
+        }
+        Some((verts, idx))
+    }
+
     /// Total surface area (sum of triangle areas), metres² in a metric CRS.
     pub fn area3d(&self) -> f64 {
         self.triangles()
@@ -886,6 +926,27 @@ mod tests {
         let wkt = to_wkt3d(&cube);
         let reparsed = parse_wkt3d(&wkt).unwrap();
         assert!((reparsed.volume() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trimesh_of_cube_dedups_corners() {
+        let cube = parse_wkt3d(CUBE).unwrap();
+        let (verts, idx) = cube.trimesh().unwrap();
+        // A cube has 8 distinct corners and 12 triangles (6 quad faces × 2).
+        assert_eq!(verts.len(), 8, "deduped vertices {}", verts.len());
+        assert_eq!(idx.len(), 12, "triangles {}", idx.len());
+        // Every index is in range.
+        for t in &idx {
+            for &i in t {
+                assert!((i as usize) < verts.len());
+            }
+        }
+    }
+
+    #[test]
+    fn trimesh_of_point_is_none() {
+        let p = parse_wkt3d("POINT Z (1 2 3)").unwrap();
+        assert!(p.trimesh().is_none());
     }
 
     #[test]

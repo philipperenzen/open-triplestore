@@ -13,6 +13,8 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::geo::functions as geo_fns;
+#[cfg(feature = "geometry3d")]
+use crate::geo::index3d::SpatialIndex3D;
 use crate::geo::spatial_index::SpatialIndex;
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
@@ -175,6 +177,11 @@ pub struct TripleStore {
     store: Arc<Store>,
     graph_index: GraphIndex,
     spatial_index: SpatialIndex,
+    /// 3D R*-tree over volumetric-geometry AABBs — the broad phase for `ots-geof:`
+    /// 3D relations and the 3D-Tiles/OGC bbox pre-filter. Lazily rebuilt on dirty,
+    /// mirroring [`spatial_index`](Self::spatial_index).
+    #[cfg(feature = "geometry3d")]
+    spatial_index_3d: SpatialIndex3D,
     /// In-memory subject-sharded read accelerator: a decomposable aggregate/ASK is
     /// answered across cores instead of on one. Derived from `store`, rebuilt
     /// lazily after writes, and bounded by a triple-count cap (see
@@ -205,10 +212,18 @@ impl TripleStore {
         graph_index.rebuild(&store);
         let spatial_index = SpatialIndex::new();
         spatial_index.rebuild(&store);
+        #[cfg(feature = "geometry3d")]
+        let spatial_index_3d = {
+            let idx = SpatialIndex3D::new();
+            idx.rebuild(&store);
+            idx
+        };
         Ok(Self {
             store: Arc::new(store),
             graph_index,
             spatial_index,
+            #[cfg(feature = "geometry3d")]
+            spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
@@ -221,10 +236,14 @@ impl TripleStore {
         let store = Store::new()?;
         let graph_index = GraphIndex::new();
         let spatial_index = SpatialIndex::new();
+        #[cfg(feature = "geometry3d")]
+        let spatial_index_3d = SpatialIndex3D::new();
         Ok(Self {
             store: Arc::new(store),
             graph_index,
             spatial_index,
+            #[cfg(feature = "geometry3d")]
+            spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
@@ -549,6 +568,8 @@ impl TripleStore {
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
+            #[cfg(feature = "geometry3d")]
+            self.spatial_index_3d.mark_dirty();
             self.note_write();
             return Ok(());
         }
@@ -579,6 +600,8 @@ impl TripleStore {
         info!("Data loaded successfully");
         self.graph_index.rebuild(&self.store);
         self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
         self.note_write();
         Ok(())
     }
@@ -791,6 +814,8 @@ impl TripleStore {
         if !quads.is_empty() {
             self.store.bulk_loader().load_quads(quads)?;
             self.spatial_index.mark_dirty();
+            #[cfg(feature = "geometry3d")]
+            self.spatial_index_3d.mark_dirty();
         }
 
         // Register (or recount) only the affected graphs in the index.
@@ -891,6 +916,25 @@ impl TripleStore {
     /// Rebuild the spatial index explicitly.
     pub fn rebuild_spatial_index(&self) {
         self.spatial_index.rebuild(&self.store);
+    }
+
+    /// Access the 3D R*-tree index (volumetric broad phase for `ots-geof:` 3D
+    /// relations and the 3D-Tiles/OGC bbox pre-filter).
+    ///
+    /// Lazily rebuilds the index if marked dirty (after writes to `geo:asWKT`
+    /// triples), exactly mirroring [`spatial_index`](Self::spatial_index).
+    #[cfg(feature = "geometry3d")]
+    pub fn spatial_index_3d(&self) -> &SpatialIndex3D {
+        if self.spatial_index_3d.is_dirty() {
+            self.spatial_index_3d.rebuild(&self.store);
+        }
+        &self.spatial_index_3d
+    }
+
+    /// Rebuild the 3D spatial index explicitly.
+    #[cfg(feature = "geometry3d")]
+    pub fn rebuild_spatial_index_3d(&self) {
+        self.spatial_index_3d.rebuild(&self.store);
     }
 
     /// Iterate quads matching a specific predicate (P-S-O index).

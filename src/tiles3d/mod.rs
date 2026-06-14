@@ -167,21 +167,36 @@ fn authorize(
 /// Collect every geometry-bearing feature's raw stored WKT (keeping Z and the
 /// optional `<crs>` prefix), reproject XY to WGS84 and triangulate, returning the
 /// geographic features plus the accumulated bounding region.
+///
+/// When `query_bbox` is given (a 3D AABB in the *stored* coordinate frame), the
+/// engine's 3D R*-tree is asked first for the candidate geometry IRIs whose AABB
+/// overlaps the box — the broad phase (spec §3.5). Only those geometries are then
+/// triangulated/reprojected (the narrow phase). When no bbox is given, or the 3D
+/// index is empty (no volumetric data / `geometry3d` disabled), this falls back to
+/// the full scan, so behaviour is unchanged for the existing whole-dataset routes.
 fn collect_features(
     store: &crate::store::TripleStore,
     data_graphs: &[String],
+    query_bbox: Option<&Aabb3Frame>,
 ) -> (Vec<GeoFeature>, RegionAccum) {
+    // ── Broad phase ──────────────────────────────────────────────────────────
+    // Pre-filter to candidate geometry-node IRIs via the 3D index when a query
+    // box is supplied and the index actually holds volumetric geometry. The set
+    // is matched against `?g` (the `geo:hasGeometry` node carrying `geo:asWKT`).
+    let candidate_filter = broad_phase_filter(store, query_bbox);
+
     let from: String = data_graphs
         .iter()
         .map(|g| format!("FROM <{g}> "))
         .collect::<Vec<_>>()
         .join("");
     // Raw geo:asWKT per feature — we need the unflattened Z, so we go to the store
-    // directly rather than through the (2D-reprojected) viewer feed.
+    // directly rather than through the (2D-reprojected) viewer feed. `?g` is bound
+    // so a VALUES-based broad-phase candidate set can constrain the geometry node.
     let query = format!(
         "PREFIX geo: <http://www.opengis.net/ont/geosparql#>\n\
          SELECT ?el ?wkt {from} \
-         WHERE {{ ?el geo:hasGeometry/geo:asWKT ?wkt }} ORDER BY ?el"
+         WHERE {{ ?el geo:hasGeometry ?g . ?g geo:asWKT ?wkt {candidate_filter} }} ORDER BY ?el"
     );
 
     let mut region = RegionAccum::new();
@@ -209,6 +224,52 @@ fn collect_features(
         }
     }
     (features, region)
+}
+
+/// A query bounding box in the stored coordinate frame. Aliased to the engine's
+/// [`crate::geo::geom3d::Aabb3`] when the `geometry3d` feature is on; otherwise a
+/// stub (no 3D index exists to query, so the broad phase is a no-op).
+#[cfg(feature = "geometry3d")]
+type Aabb3Frame = crate::geo::geom3d::Aabb3;
+#[cfg(not(feature = "geometry3d"))]
+type Aabb3Frame = ();
+
+/// Build a SPARQL graph-pattern fragment constraining `?g` to the broad-phase
+/// candidate geometry nodes, or an empty string when no pre-filter applies.
+///
+/// Returns `""` (full scan) when: no query box is given; the `geometry3d` feature
+/// is off; or the 3D index is empty. A `VALUES ?g { … }` block is emitted only
+/// when the index returns a candidate set — keeping the whole-dataset routes on
+/// their existing, unfiltered path.
+#[cfg(feature = "geometry3d")]
+fn broad_phase_filter(
+    store: &crate::store::TripleStore,
+    query_bbox: Option<&Aabb3Frame>,
+) -> String {
+    let Some(bbox) = query_bbox else {
+        return String::new();
+    };
+    let index = store.spatial_index_3d();
+    if index.is_empty() {
+        return String::new(); // no volumetric data indexed → fall back to full scan
+    }
+    let candidates = index.query_intersecting(bbox);
+    // Bind the candidate geometry nodes; an empty set yields `VALUES ?g {}` which
+    // correctly selects nothing (the box overlaps no indexed 3D geometry).
+    let values: String = candidates
+        .iter()
+        .map(|iri| format!("<{iri}> "))
+        .collect();
+    format!("VALUES ?g {{ {values}}}")
+}
+
+/// No 3D index without the feature → always the full scan.
+#[cfg(not(feature = "geometry3d"))]
+fn broad_phase_filter(
+    _store: &crate::store::TripleStore,
+    _query_bbox: Option<&Aabb3Frame>,
+) -> String {
+    String::new()
 }
 
 /// Reproject a stored WKT literal to WGS84 `(lon, lat, h)` and triangulate it into
@@ -360,7 +421,9 @@ async fn tileset_json(
     Path(dataset_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let data_graphs = authorize(&state, &user, &dataset_id)?;
-    let (_features, region) = collect_features(&state.store, &data_graphs);
+    // Whole-dataset tileset: no query bbox, so the broad phase is skipped and the
+    // full scan runs (a future `?bbox=` param plugs straight in here).
+    let (_features, region) = collect_features(&state.store, &data_graphs, None);
 
     let region_arr = region.region();
     // Geometric error: a coarse heuristic from the region's diagonal extent so the
@@ -405,7 +468,8 @@ async fn content_glb(
     Path(dataset_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let data_graphs = authorize(&state, &user, &dataset_id)?;
-    let (features, _region) = collect_features(&state.store, &data_graphs);
+    // Whole-dataset content: no query bbox → broad phase skipped, full scan runs.
+    let (features, _region) = collect_features(&state.store, &data_graphs, None);
 
     // Project each feature's geographic triangles into ECEF metres and hand them to
     // the GLB encoder. The encoder assigns each feature its index as the GPU
@@ -495,7 +559,7 @@ mod tests {
         "#;
         let store = TripleStore::in_memory().unwrap();
         store.load_str(data, RdfFormat::Turtle, None).unwrap();
-        let (features, region) = collect_features(&store, &[]);
+        let (features, region) = collect_features(&store, &[], None);
         assert_eq!(features.len(), 1, "one meshable feature: {features:?}");
         assert_eq!(features[0].iri, "http://example.org/b");
         assert!(!features[0].tri_lonlath.is_empty(), "has triangles");
@@ -515,7 +579,7 @@ mod tests {
         "#;
         let store = TripleStore::in_memory().unwrap();
         store.load_str(data, RdfFormat::Turtle, None).unwrap();
-        let (features, _region) = collect_features(&store, &[]);
+        let (features, _region) = collect_features(&store, &[], None);
         assert!(features.is_empty(), "UTM metres must not be meshed: {features:?}");
     }
 
@@ -529,7 +593,7 @@ mod tests {
         "#;
         let store = TripleStore::in_memory().unwrap();
         store.load_str(data, RdfFormat::Turtle, None).unwrap();
-        let (features, _region) = collect_features(&store, &[]);
+        let (features, _region) = collect_features(&store, &[], None);
         assert_eq!(features.len(), 2);
 
         let glb_features: Vec<GlbFeature> = features
@@ -556,5 +620,40 @@ mod tests {
         // per the glTF EXT_structural_metadata STRING encoding — not the JSON.
         let blob = String::from_utf8_lossy(&glb);
         assert!(blob.contains("example.org/a") && blob.contains("example.org/b"));
+    }
+
+    #[cfg(feature = "geometry3d")]
+    #[test]
+    fn broad_phase_bbox_prefilters_features() {
+        use crate::geo::geom3d::Aabb3;
+
+        // Two 3D buildings, far apart in XY (WGS84 degrees) and with vertical
+        // extent so both enter the 3D index. The geometry nodes are *named* (the
+        // index — like the 2D one — keys on a NamedNode geometry-node IRI).
+        let data = r#"
+            @prefix geo: <http://www.opengis.net/ont/geosparql#> .
+            @prefix ex:  <http://example.org/> .
+            ex:a  geo:hasGeometry ex:ga .
+            ex:ga geo:asWKT "POLYHEDRALSURFACE Z (((0 0 0,0 0.001 0,0.001 0.001 0,0.001 0 0,0 0 0)),((0 0 0,0 0 5,0 0.001 5,0 0.001 0,0 0 0)),((0 0 5,0.001 0 5,0.001 0.001 5,0 0.001 5,0 0 5)))"^^geo:wktLiteral .
+            ex:b  geo:hasGeometry ex:gb .
+            ex:gb geo:asWKT "POLYHEDRALSURFACE Z (((10 10 0,10 10.001 0,10.001 10.001 0,10.001 10 0,10 10 0)),((10 10 0,10 10 5,10 10.001 5,10 10.001 0,10 10 0)),((10 10 5,10.001 10 5,10.001 10.001 5,10 10.001 5,10 10 5)))"^^geo:wktLiteral .
+        "#;
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(data, RdfFormat::Turtle, None).unwrap();
+
+        // No bbox → full scan returns both.
+        let (all, _r) = collect_features(&store, &[], None);
+        assert_eq!(all.len(), 2, "full scan: {all:?}");
+
+        // A box around building `a` only → the broad phase returns just `a`.
+        let around_a = Aabb3 { min: [-0.5, -0.5, -1.0], max: [0.5, 0.5, 6.0] };
+        let (just_a, _r) = collect_features(&store, &[], Some(&around_a));
+        assert_eq!(just_a.len(), 1, "broad phase narrowed to one: {just_a:?}");
+        assert_eq!(just_a[0].iri, "http://example.org/a");
+
+        // A box over empty space → the broad phase returns nothing.
+        let empty_region = Aabb3 { min: [100.0, 100.0, 0.0], max: [101.0, 101.0, 1.0] };
+        let (none, _r) = collect_features(&store, &[], Some(&empty_region));
+        assert!(none.is_empty(), "no candidates over empty space: {none:?}");
     }
 }
