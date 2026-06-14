@@ -3186,6 +3186,7 @@
       "source": "Vocabulary source",
       "deprecated": "deprecated",
       "moreDetails": "More details",
+      "askSpark": "Ask Spark to explain",
       "version": "Version",
       "definition": "Definition",
       "comment": "Comment",
@@ -3673,5 +3674,23 @@
     "download": "Download",
     "downloadIfc": "IFC model (.ifc)",
     "downloadLd": "Linked data (per graph)"
+  },
+  "fileViewer": {
+    "kind3d": "3D model",
+    "kindModel3d": "3D model",
+    "kindImage": "Image",
+    "kindPdf": "PDF",
+    "kindText": "Text",
+    "kindJson": "JSON",
+    "kindBinary": "File",
+    "openInNewTab": "Open in new tab",
+    "download": "Download",
+    "loading": "Loading file…",
+    "fetchError": "Could not load this file: {error}",
+    "truncated": "Preview truncated — open or download the file to see the rest.",
+    "previewFailed": "Could not render a preview for this file.",
+    "unsafeUrl": "This URL can't be shown safely.",
+    "unknownFile": "Unrecognised file type.",
+    "binaryDesc": "This file type has no inline preview. Download it or open it in a new tab."
   }
 }

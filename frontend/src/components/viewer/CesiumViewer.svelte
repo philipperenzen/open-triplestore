@@ -11,8 +11,17 @@
   // 2D viewer works around — switching imagery here is a plain layer swap with
   // no custom WebGL layer to collapse.
   import { onMount, onDestroy } from 'svelte';
-  import { Boxes, X, MapPin, Satellite, ExternalLink, Loader2 } from 'lucide-svelte';
+  import { Boxes, X, MapPin, Satellite, ExternalLink, Sparkles, Loader2 } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.ts';
+  import { navigate } from '../../lib/router/index.js';
+  import { openSparkExplain } from '../../lib/sparkHelp.js';
+
+  // Open the resource page for a predicate/object IRI (in-app navigation so it
+  // shares the SPA session) — bnodes (_:…) are not dereferenceable, so callers
+  // must gate on isBnode before invoking this.
+  function openResource(iri) {
+    navigate(`/resource?iri=${encodeURIComponent(iri)}`);
+  }
 
   /** @type {string} dataset id whose 3D Tiles tileset is loaded. */
   export let datasetId = '';
@@ -183,11 +192,18 @@
       if (!res.ok) throw new Error(`SPARQL ${res.status}`);
       const json = await res.json();
       const bindings = json?.results?.bindings || [];
-      rows = bindings.map((b) => ({
-        p: b.p?.value ?? '',
-        o: b.o?.value ?? '',
-        isIri: b.o?.type === 'uri',
-      }));
+      rows = bindings.map((b) => {
+        const o = b.o?.value ?? '';
+        // Blank nodes ('_:b0' / bnode-typed bindings) are not dereferenceable, so
+        // they render as plain text rather than a /resource link.
+        const isBnode = b.o?.type === 'bnode' || o.startsWith('_:');
+        return {
+          p: b.p?.value ?? '',
+          o,
+          isIri: b.o?.type === 'uri' && !isBnode,
+          isBnode,
+        };
+      });
     } catch (e) {
       queryError = e?.message || 'Query failed.';
     } finally {
@@ -269,6 +285,14 @@
       <header class="info-head">
         <Boxes size={14} />
         <span class="info-title" title={selectedIri}>{selectedLabel}</span>
+        <button
+          class="info-link"
+          on:click={() => openSparkExplain({ iri: selectedIri, label: selectedLabel })}
+          title="Ask Spark to explain"
+          aria-label="Ask Spark to explain"
+        >
+          <Sparkles size={13} />
+        </button>
         <a class="info-link" href={`/resource?iri=${encodeURIComponent(selectedIri)}`} target="_blank" rel="noopener" title="Open resource">
           <ExternalLink size={13} />
         </a>
@@ -288,10 +312,14 @@
             <tbody>
               {#each rows as r}
                 <tr>
-                  <th title={r.p}>{shortenIRI(r.p)}</th>
+                  <th>
+                    <button class="pred-link" on:click={() => openResource(r.p)} title={r.p}>{shortenIRI(r.p)}</button>
+                  </th>
                   <td title={r.o}>
                     {#if r.isIri}
                       <a href={`/resource?iri=${encodeURIComponent(r.o)}`} target="_blank" rel="noopener">{shortenIRI(r.o)}</a>
+                    {:else if r.isBnode}
+                      <span class="bnode" title="Blank node (not dereferenceable)">{r.o}</span>
                     {:else}
                       {r.o}
                     {/if}
@@ -483,6 +511,28 @@
   }
   .info-table a:hover {
     text-decoration: underline;
+  }
+  /* Predicate cell is a button that opens its term's resource page. Styled to
+     read as a quiet link, not a chrome button. */
+  .pred-link {
+    border: 0;
+    background: none;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    text-align: left;
+    color: var(--ink-700, #334155);
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .pred-link:hover {
+    color: var(--brand-600, #1d6fb8);
+    text-decoration: underline;
+  }
+  /* Blank-node object: shown for context but never linked (not dereferenceable). */
+  .bnode {
+    color: var(--muted, #64748b);
+    font-style: italic;
   }
 
   @media (max-width: 640px) {

@@ -1,0 +1,132 @@
+# Building Topology Ontology (BOT) — a minimal core ontology by the W3C Linked
+# Building Data Community Group for describing the topology of buildings: zones
+# (sites, buildings, storeys, spaces), the building elements they contain, and
+# the interfaces between them. Hand-authored term subset bundled so BOT terms in
+# the demo data render with full definitions.
+# Source: https://w3c-lbd-cg.github.io/bot/  (ns https://w3id.org/bot#)
+@prefix bot:  <https://w3id.org/bot#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+bot: a owl:Ontology ;
+  rdfs:label "Building Topology Ontology (BOT)"@en ;
+  rdfs:comment "A minimal core ontology for describing the topology of buildings: zones, elements and the interfaces between them."@en ;
+  owl:versionInfo "0.3.2" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+bot:Zone a owl:Class ;
+  rdfs:label "Zone"@en ;
+  rdfs:comment "A part of the physical world or a virtual world whose 3D spatial extent is bounded. Site, Building, Storey and Space are all subclasses of Zone."@en ;
+  rdfs:isDefinedBy bot: .
+
+bot:Site a owl:Class ;
+  rdfs:label "Site"@en ;
+  rdfs:comment "An area containing one or more buildings; a subclass of bot:Zone."@en ;
+  rdfs:subClassOf bot:Zone ;
+  rdfs:isDefinedBy bot: .
+
+bot:Building a owl:Class ;
+  rdfs:label "Building"@en ;
+  rdfs:comment "An independent structure that comprises one or more storeys; a subclass of bot:Zone."@en ;
+  rdfs:subClassOf bot:Zone ;
+  rdfs:isDefinedBy bot: .
+
+bot:Storey a owl:Class ;
+  rdfs:label "Storey"@en ;
+  rdfs:comment "A level part of a building situated at one elevation; a subclass of bot:Zone."@en ;
+  rdfs:subClassOf bot:Zone ;
+  rdfs:isDefinedBy bot: .
+
+bot:Space a owl:Class ;
+  rdfs:label "Space"@en ;
+  rdfs:comment "A limited three-dimensional extent defined physically or notionally, for example a room; a subclass of bot:Zone."@en ;
+  rdfs:subClassOf bot:Zone ;
+  rdfs:isDefinedBy bot: .
+
+bot:Element a owl:Class ;
+  rdfs:label "Element"@en ;
+  rdfs:comment "A constituent of a construction entity with a characteristic technical function, form or position, such as a wall, slab, door or window."@en ;
+  rdfs:isDefinedBy bot: .
+
+bot:Interface a owl:Class ;
+  rdfs:label "Interface"@en ;
+  rdfs:comment "A connection that is established between zones, between elements, or between a zone and an element."@en ;
+  rdfs:isDefinedBy bot: .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+bot:containsZone a owl:ObjectProperty ;
+  rdfs:label "contains zone"@en ;
+  rdfs:comment "Relates a bot:Zone to another bot:Zone that it contains, for example a building containing its storeys."@en ;
+  rdfs:domain bot:Zone ;
+  rdfs:range bot:Zone ;
+  rdfs:isDefinedBy bot: .
+
+bot:containsElement a owl:ObjectProperty ;
+  rdfs:label "contains element"@en ;
+  rdfs:comment "Relates a bot:Zone to a bot:Element that is contained within it, regardless of whether the element touches the zone's bounding elements."@en ;
+  rdfs:domain bot:Zone ;
+  rdfs:range bot:Element ;
+  rdfs:isDefinedBy bot: .
+
+bot:hasSubElement a owl:ObjectProperty ;
+  rdfs:label "has sub element"@en ;
+  rdfs:comment "Relates a bot:Element to another bot:Element that is one of its parts, for example a wall having a window as a sub-element."@en ;
+  rdfs:domain bot:Element ;
+  rdfs:range bot:Element ;
+  rdfs:isDefinedBy bot: .
+
+bot:hasStorey a owl:ObjectProperty ;
+  rdfs:label "has storey"@en ;
+  rdfs:comment "Relates a bot:Building to a bot:Storey it contains; a sub-property of bot:containsZone."@en ;
+  rdfs:subPropertyOf bot:containsZone ;
+  rdfs:domain bot:Building ;
+  rdfs:range bot:Storey ;
+  rdfs:isDefinedBy bot: .
+
+bot:hasSpace a owl:ObjectProperty ;
+  rdfs:label "has space"@en ;
+  rdfs:comment "Relates a bot:Zone (typically a storey) to a bot:Space it contains; a sub-property of bot:containsZone."@en ;
+  rdfs:subPropertyOf bot:containsZone ;
+  rdfs:range bot:Space ;
+  rdfs:isDefinedBy bot: .
+
+bot:hasElement a owl:ObjectProperty ;
+  rdfs:label "has element"@en ;
+  rdfs:comment "Relates a bot:Zone to a bot:Element that touches (bounds) it, for example a space and the walls that enclose it."@en ;
+  rdfs:domain bot:Zone ;
+  rdfs:range bot:Element ;
+  rdfs:isDefinedBy bot: .
+
+bot:adjacentZone a owl:ObjectProperty ;
+  rdfs:label "adjacent zone"@en ;
+  rdfs:comment "Relates a bot:Zone to another bot:Zone with which it shares an adjacent boundary."@en ;
+  rdfs:domain bot:Zone ;
+  rdfs:range bot:Zone ;
+  rdfs:isDefinedBy bot: .
+
+bot:adjacentElement a owl:ObjectProperty ;
+  rdfs:label "adjacent element"@en ;
+  rdfs:comment "Relates a bot:Zone to a bot:Element that bounds it from the outside without being contained in it."@en ;
+  rdfs:domain bot:Zone ;
+  rdfs:range bot:Element ;
+  rdfs:isDefinedBy bot: .
+
+bot:interfaceOf a owl:ObjectProperty ;
+  rdfs:label "interface of"@en ;
+  rdfs:comment "Relates a bot:Interface to the bot:Zone or bot:Element that it connects."@en ;
+  rdfs:domain bot:Interface ;
+  rdfs:isDefinedBy bot: .
+
+bot:hasInterface a owl:ObjectProperty ;
+  rdfs:label "has interface"@en ;
+  rdfs:comment "Relates a bot:Zone or bot:Element to a bot:Interface in which it participates."@en ;
+  rdfs:range bot:Interface ;
+  rdfs:isDefinedBy bot: .
+
+bot:has3DModel a owl:ObjectProperty ;
+  rdfs:label "has 3D model"@en ;
+  rdfs:comment "Relates a bot:Element or bot:Zone to a resource holding its three-dimensional geometric model."@en ;
+  rdfs:isDefinedBy bot: .

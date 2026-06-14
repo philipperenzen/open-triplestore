@@ -3186,6 +3186,7 @@
       "source": "Vocabulairebron",
       "deprecated": "verouderd",
       "moreDetails": "Meer details",
+      "askSpark": "Vraag Spark om uitleg",
       "version": "Versie",
       "definition": "Definitie",
       "comment": "Toelichting",
@@ -3673,5 +3674,23 @@
     "download": "Downloaden",
     "downloadIfc": "IFC-model (.ifc)",
     "downloadLd": "Linked data (per graaf)"
+  },
+  "fileViewer": {
+    "kind3d": "3D-model",
+    "kindModel3d": "3D-model",
+    "kindImage": "Afbeelding",
+    "kindPdf": "PDF",
+    "kindText": "Tekst",
+    "kindJson": "JSON",
+    "kindBinary": "Bestand",
+    "openInNewTab": "Openen in nieuw tabblad",
+    "download": "Downloaden",
+    "loading": "Bestand laden…",
+    "fetchError": "Kon dit bestand niet laden: {error}",
+    "truncated": "Voorbeeld ingekort — open of download het bestand om de rest te zien.",
+    "previewFailed": "Kon geen voorbeeld van dit bestand weergeven.",
+    "unsafeUrl": "Deze URL kan niet veilig worden weergegeven.",
+    "unknownFile": "Onbekend bestandstype.",
+    "binaryDesc": "Dit bestandstype heeft geen inline voorbeeld. Download het of open het in een nieuw tabblad."
   }
 }
