@@ -1639,10 +1639,16 @@ impl AuthDb {
     /// Record a failed login for `username`, locking the account once
     /// `LOGIN_LOCK_THRESHOLD` failures accumulate within `LOGIN_LOCK_WINDOW_SECS`.
     pub fn record_login_failure(&self, username: &str) -> anyhow::Result<()> {
-        let conn = self.pool.get()?;
+        let mut conn = self.pool.get()?;
         let now = chrono::Utc::now();
         let now_s = now.to_rfc3339();
-        let row: Option<(i64, Option<String>)> = conn
+        // IMMEDIATE acquires the write lock up front, so the SELECT below cannot be
+        // interleaved with another writer's increment for the same row — concurrent
+        // failed attempts serialize and each sees a fresh `failed_count` rather than
+        // racing on a stale read and under-counting (which would let an attacker stay
+        // under the lock threshold).
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(i64, Option<String>)> = tx
             .query_row(
                 "SELECT failed_count, first_failed_at FROM login_attempts WHERE username = ?1",
                 [username],
@@ -1664,12 +1670,13 @@ impl AuthDb {
         let locked_until = (new_count >= Self::LOGIN_LOCK_THRESHOLD).then(|| {
             (now + chrono::Duration::seconds(Self::LOGIN_LOCK_DURATION_SECS)).to_rfc3339()
         });
-        conn.execute(
+        tx.execute(
             "INSERT INTO login_attempts (username, failed_count, first_failed_at, locked_until) \
              VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT(username) DO UPDATE SET failed_count = ?2, first_failed_at = ?3, locked_until = ?4",
             params![username, new_count, new_first, locked_until],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -4257,16 +4264,22 @@ impl AuthDb {
         priority: i64,
     ) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        conn.execute(
+        let affected = conn.execute(
             "UPDATE endpoint_acl SET path_pattern=?1, http_methods=?2, effect=?3, priority=?4 WHERE id=?5",
             params![path_pattern, http_methods, effect, priority, id],
         )?;
+        if affected == 0 {
+            anyhow::bail!("endpoint ACL rule not found");
+        }
         Ok(())
     }
 
     pub fn delete_endpoint_acl_rule(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        conn.execute("DELETE FROM endpoint_acl WHERE id=?1", params![id])?;
+        let affected = conn.execute("DELETE FROM endpoint_acl WHERE id=?1", params![id])?;
+        if affected == 0 {
+            anyhow::bail!("endpoint ACL rule not found");
+        }
         Ok(())
     }
 
@@ -4399,6 +4412,16 @@ impl AuthDb {
     ) -> anyhow::Result<GraphAclRule> {
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
+        // Public grants have no meaningful principal_id; canonicalize it to '*' so
+        // the stored row matches what check_graph_permission enforces. Without this a
+        // public grant written with some other principal_id would be listed
+        // (get_graph_acl_readable_iris ignores principal_id for public) yet 403 on
+        // access (enforcement matched only '*'), making it "discoverable but dead".
+        let principal_id = if principal_type == "public" {
+            "*"
+        } else {
+            principal_id
+        };
         conn.execute(
             "INSERT OR IGNORE INTO graph_acl (id, graph_iri, principal_type, principal_id, permission, created_at, created_by)
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -4444,7 +4467,10 @@ impl AuthDb {
 
     pub fn revoke_graph_permission(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        conn.execute("DELETE FROM graph_acl WHERE id=?1", params![id])?;
+        let affected = conn.execute("DELETE FROM graph_acl WHERE id=?1", params![id])?;
+        if affected == 0 {
+            anyhow::bail!("graph ACL rule not found");
+        }
         Ok(())
     }
 
@@ -4567,10 +4593,23 @@ impl AuthDb {
             .collect::<Vec<_>>()
             .join(",");
 
-        // Check public, role, user, org, group
+        // Public grants are matched on principal_type alone — principal_id is not
+        // meaningful for them. This mirrors get_graph_acl_readable_iris (which
+        // ignores principal_id for public) so enforcement and discoverability agree,
+        // and it tolerates legacy rows whose principal_id is not '*'.
+        {
+            let sql = format!(
+                "SELECT 1 FROM graph_acl WHERE graph_iri=?1 AND principal_type='public' AND permission IN ({perms_list}) LIMIT 1"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            if stmt.exists(params![graph_iri])? {
+                return Ok(true);
+            }
+        }
+
+        // Remaining principals genuinely key on principal_id: role, user, org, group.
         let principals: Vec<(String, String)> = {
             let mut v = vec![
-                ("public".to_string(), "*".to_string()),
                 ("role".to_string(), role.to_string()),
                 ("user".to_string(), user_id.to_string()),
             ];
@@ -4663,10 +4702,13 @@ impl AuthDb {
 
     pub fn delete_triple_security_label(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        conn.execute(
+        let affected = conn.execute(
             "DELETE FROM triple_security_labels WHERE id=?1",
             params![id],
         )?;
+        if affected == 0 {
+            anyhow::bail!("triple security label not found");
+        }
         Ok(())
     }
 
@@ -4750,7 +4792,9 @@ impl AuthDb {
                 p.entity_id,
                 p.sso_url,
                 p.idp_certificate,
-                p.scopes,
+                // `scopes` is NOT NULL; an omitted value (None) must fall back to the
+                // column default rather than binding an explicit NULL (500).
+                p.scopes_or_default(),
                 p.role_claim_map,
                 p.auto_provision as i32,
                 p.default_role,
@@ -4858,7 +4902,9 @@ impl AuthDb {
                 p.entity_id,
                 p.sso_url,
                 p.idp_certificate,
-                p.scopes,
+                // `scopes` is NOT NULL; an omitted value (None) must fall back to the
+                // column default rather than binding an explicit NULL (500).
+                p.scopes_or_default(),
                 p.role_claim_map,
                 p.auto_provision as i32,
                 p.default_role,
@@ -5550,5 +5596,190 @@ mod tests {
         );
         assert!(db.get_active_family_head("famA").unwrap().is_none());
         assert_eq!(db.get_active_family_head("famB").unwrap().unwrap().id, "b1");
+    }
+
+    // ─── [CB13] login-failure increments are atomic and never lost ────────────
+
+    // Each failed attempt must increment by exactly one. If increments were lost
+    // (the pre-fix read-modify-write race), `LOGIN_LOCK_THRESHOLD` failures would
+    // not be enough to lock the account. Driving exactly the threshold and
+    // asserting the account flips locked proves no increment was dropped.
+    #[test]
+    fn test_record_login_failure_increments_reach_threshold() {
+        let db = AuthDb::in_memory().unwrap();
+        let user = "attacker-target";
+
+        // One short of the threshold: still unlocked.
+        for _ in 0..(AuthDb::LOGIN_LOCK_THRESHOLD - 1) {
+            db.record_login_failure(user).unwrap();
+            assert!(
+                !db.is_login_locked(user).unwrap(),
+                "should not lock before the threshold is crossed"
+            );
+        }
+
+        // The threshold-th failure locks the account.
+        db.record_login_failure(user).unwrap();
+        assert!(
+            db.is_login_locked(user).unwrap(),
+            "exactly LOGIN_LOCK_THRESHOLD failures must lock the account (no lost increments)"
+        );
+
+        // A successful login clears the throttle.
+        db.clear_login_attempts(user).unwrap();
+        assert!(!db.is_login_locked(user).unwrap());
+    }
+
+    // Concurrent failed attempts against the same account must not lose updates.
+    // The in-memory pool shares a single connection, so r2d2 serializes access;
+    // combined with the BEGIN IMMEDIATE transaction this guarantees each spawned
+    // attempt observes a fresh count. We assert the total reaches the lock.
+    #[test]
+    fn test_record_login_failure_concurrent_not_lost() {
+        use std::sync::Arc;
+        let db = Arc::new(AuthDb::in_memory().unwrap());
+        let user = "concurrent-target";
+
+        let mut handles = Vec::new();
+        for _ in 0..AuthDb::LOGIN_LOCK_THRESHOLD {
+            let db = Arc::clone(&db);
+            let user = user.to_string();
+            handles.push(std::thread::spawn(move || {
+                db.record_login_failure(&user).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(
+            db.is_login_locked(user).unwrap(),
+            "concurrent failures totalling the threshold must still lock the account"
+        );
+    }
+
+    // ─── [S16] mutating ops on a missing id must error, not silently succeed ──
+
+    #[test]
+    fn test_mutations_on_missing_id_return_err() {
+        let db = AuthDb::in_memory().unwrap();
+
+        // update_endpoint_acl_rule
+        assert!(
+            db.update_endpoint_acl_rule("no-such-id", "/x", "*", "allow", 0)
+                .is_err(),
+            "updating a non-existent endpoint ACL rule must error"
+        );
+        // delete_endpoint_acl_rule
+        assert!(
+            db.delete_endpoint_acl_rule("no-such-id").is_err(),
+            "deleting a non-existent endpoint ACL rule must error"
+        );
+        // revoke_graph_permission
+        assert!(
+            db.revoke_graph_permission("no-such-id").is_err(),
+            "revoking a non-existent graph ACL rule must error"
+        );
+        // delete_triple_security_label
+        assert!(
+            db.delete_triple_security_label("no-such-id").is_err(),
+            "deleting a non-existent triple security label must error"
+        );
+
+        // Sanity: each method succeeds on a row that actually exists.
+        db.create_endpoint_acl_rule("e1", "role", "user", "/api/*", "*", "allow", 0, "admin")
+            .unwrap();
+        db.update_endpoint_acl_rule("e1", "/api/v2/*", "GET", "deny", 5)
+            .unwrap();
+        db.delete_endpoint_acl_rule("e1").unwrap();
+
+        db.grant_graph_permission("g1", "urn:graph:1", "user", "u1", "read", "admin")
+            .unwrap();
+        db.revoke_graph_permission("g1").unwrap();
+
+        db.create_triple_security_label(
+            "t1",
+            "urn:s",
+            "urn:p",
+            "o",
+            "urn:graph:1",
+            "urn:label:secret",
+        )
+        .unwrap();
+        db.delete_triple_security_label("t1").unwrap();
+    }
+
+    // ─── [S11] public graph grants: write-normalization + enforcement parity ──
+
+    #[test]
+    fn test_public_graph_grant_normalized_and_enforced() {
+        let db = AuthDb::in_memory().unwrap();
+        let graph = "urn:public:graph";
+
+        // A public grant created with a non-'*' principal_id is canonicalized.
+        let rule = db
+            .grant_graph_permission("p1", graph, "public", "ignored", "read", "admin")
+            .unwrap();
+        assert_eq!(
+            rule.principal_id, "*",
+            "public grants must store principal_id='*'"
+        );
+
+        // It is both discoverable (listing) and enforceable (access check).
+        let readable = db.get_graph_acl_readable_iris("u1", "user").unwrap();
+        assert!(
+            readable.contains(&graph.to_string()),
+            "public grant must be discoverable"
+        );
+        assert!(
+            db.check_graph_permission("u1", "user", graph, "read")
+                .unwrap(),
+            "public grant must grant read to any user"
+        );
+        // Anonymous callers (acl.rs passes an empty user_id and the role 'public') also pass.
+        assert!(
+            db.check_graph_permission("", "public", graph, "read")
+                .unwrap(),
+            "public grant must grant read to anonymous callers"
+        );
+
+        // Enforcement ignores principal_id for public, so even a *legacy* row whose
+        // principal_id is not '*' (written before normalization existed) is honored,
+        // matching get_graph_acl_readable_iris. Insert such a row directly to
+        // bypass grant_graph_permission's normalization and exercise the check path.
+        let legacy = "urn:public:legacy";
+        {
+            let conn = db.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO graph_acl (id, graph_iri, principal_type, principal_id, permission, created_at, created_by)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    "p2",
+                    legacy,
+                    "public",
+                    "legacy-id",
+                    "write",
+                    chrono::Utc::now().to_rfc3339(),
+                    "admin"
+                ],
+            )
+            .unwrap();
+        }
+        assert!(
+            db.check_graph_permission("u2", "user", legacy, "read")
+                .unwrap(),
+            "legacy public grant (principal_id != '*') must satisfy a read requirement"
+        );
+        assert!(
+            db.check_graph_permission("u2", "user", legacy, "write")
+                .unwrap(),
+            "write-level public grant must satisfy a write requirement"
+        );
+        assert!(
+            db.get_graph_acl_readable_iris("u2", "user")
+                .unwrap()
+                .contains(&legacy.to_string()),
+            "legacy public grant must be discoverable (parity with enforcement)"
+        );
     }
 }

@@ -1139,11 +1139,19 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // LDP routes (feature-gated)
+    // LDP routes (feature-gated). Mounted behind `require_auth`: the LDP handlers
+    // read/write the shared store via raw SPARQL with no per-graph scoping, so an
+    // unauthenticated mount allowed anonymous `PATCH /ldp/*` (arbitrary SPARQL
+    // UPDATE — e.g. `DROP GRAPH`) and `Slug`/path SPARQL injection against ANY
+    // tenant's graphs. Requiring auth closes the anonymous-access hole; full
+    // per-graph ACL scoping for authenticated LDP writes is tracked as a follow-up.
     #[cfg(feature = "ldp")]
     let ldp_router = {
         use crate::ldp::ldp_routes;
-        ldp_routes().with_state(state.clone())
+        Router::new()
+            .merge(ldp_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+            .with_state(state.clone())
     };
 
     // ── ACL management routes (admin required) ────────────────────────────

@@ -664,10 +664,11 @@ pub async fn register(
     // Write the FOAF/VCARD profile named graph for the new user.
     user_graph::write_user_profile_graph(&state.store, &state.base_url, &user);
 
-    // First-admin bootstrap: on a brand-new install the startup seed runs before
-    // any admin exists and therefore skips. This is the moment the first admin
-    // appears, so kick off the (idempotent) demo seed now instead of waiting for
-    // the next restart.
+    // First-admin bootstrap: the startup seed creates the org and its public data
+    // on first boot, but defers content that must be attributed to a user
+    // (saved-query services, the IFC demo, org membership) until an admin exists.
+    // This is the moment the first admin appears, so kick off the (idempotent)
+    // reseed now to back-fill that content instead of waiting for the next restart.
     if matches!(role, SystemRole::SuperAdmin) {
         let seed_state = state.clone();
         tokio::task::spawn_blocking(move || {
@@ -2499,8 +2500,11 @@ pub async fn admin_reset_password(
     db.update_password(&user_id, &new_hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Revoke all refresh tokens to force re-login
+    // Revoke all refresh and API tokens to force re-login (mirrors change_password
+    // and the deactivation paths — a forced reset must not leave long-lived API
+    // tokens valid for the old credentials).
     let _ = db.revoke_all_user_refresh_tokens(&user_id);
+    let _ = db.revoke_all_user_api_tokens(&user_id);
 
     {
         let mut b =
@@ -3315,6 +3319,21 @@ pub async fn update_group(
         }
     }
 
+    // Confirm the group belongs to this organisation BEFORE mutating. The org-Admin
+    // membership check above only proves authority over `org_id`; without this guard
+    // an org admin could mutate a group belonging to a *different* org by naming it
+    // in the path. Mirrors get_group's org-scope guard.
+    let existing = db
+        .get_group(&group_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Group not found".to_string()))?;
+    if existing.org_id != org_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Group not found in this organisation".to_string(),
+        ));
+    }
+
     db.update_group(&group_id, &req.name, req.parent_group_id.as_deref())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -3340,6 +3359,21 @@ pub async fn delete_group(
             Some(Role::Admin) => {}
             _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
         }
+    }
+
+    // Confirm the group belongs to this organisation BEFORE deleting. The org-Admin
+    // membership check above only proves authority over `org_id`; without this guard
+    // an org admin could delete a group belonging to a *different* org by naming it
+    // in the path. Mirrors get_group's org-scope guard.
+    let existing = db
+        .get_group(&group_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Group not found".to_string()))?;
+    if existing.org_id != org_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Group not found in this organisation".to_string(),
+        ));
     }
 
     db.delete_group(&group_id)
@@ -3805,12 +3839,15 @@ pub async fn delete_dataset(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Deleting a dataset is a destructive/structural operation, not a plain data
+    // write: gate it on manage (owner/admin), matching update_dataset's policy for
+    // structural changes. A mere Editor must not be able to delete the dataset.
     if !state
         .auth_db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     // Delete all named graphs associated with this dataset from Oxigraph,
@@ -4457,6 +4494,34 @@ pub async fn update_dataset_shacl(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+
+    // The caller-supplied shapes graph IRI is persisted verbatim and later dumped by
+    // GET /shapes, so it is a read target on this dataset just like a registered
+    // graph. `can_write_dataset` only proves the caller may write *into this
+    // dataset*; without this gate a writer could point shapes_graph_iri at another
+    // tenant's private graph and exfiltrate it via get_shapes. Constrain non-admins
+    // to the dataset's own namespace or an unclaimed external graph, reusing the
+    // same boundary as add_dataset_graph. Admins are unrestricted.
+    if !current_user.is_admin() {
+        if let Some(shapes_iri) = req.shapes_graph_iri.as_deref() {
+            if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
+                &db,
+                &state.base_url,
+                &dataset_id,
+                shapes_iri,
+            ) {
+                state.audit.log_denied(
+                    Some(current_user.user_id.clone()),
+                    None,
+                    "dataset_shacl",
+                    &dataset_id,
+                    "set_shapes_graph",
+                    None,
+                );
+                return Err((StatusCode::FORBIDDEN, msg));
+            }
+        }
     }
 
     db.update_dataset_shacl(
