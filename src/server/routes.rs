@@ -6983,10 +6983,17 @@ pub async fn viewer_feed(
         validate_iri(root)
             .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid root IRI".to_string()))?;
     }
-    let data_graphs = state
+    // Exclude the verbose ifcOWL lift graph (`…/ifcowl`): it is the full 1:1 IFC
+    // schema (millions of triples) and carries none of the BOT/OMG/FOG/GeoSPARQL
+    // the feed resolves, but its unbounded predicate scan dominates the query
+    // time. The BOT topology + geometry live in the sibling building graph.
+    let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.ends_with("/ifcowl"))
+        .collect();
     let elements =
         crate::geo::viewer_feed::build_viewer_feed(&state.store, &data_graphs, q.root.as_deref());
     Ok(Json(serde_json::json!({
@@ -7018,10 +7025,15 @@ pub async fn geo_stats(
     {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
-    let data_graphs = state
+    // Skip the verbose ifcOWL lift graph (see viewer_feed) — it has no geometry
+    // and only slows the capability probe.
+    let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.ends_with("/ifcowl"))
+        .collect();
     let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
     Ok(Json(stats))
 }
