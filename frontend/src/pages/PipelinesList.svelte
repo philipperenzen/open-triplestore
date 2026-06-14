@@ -7,6 +7,7 @@
   import { listPipelines, runPipeline, listLatestPipelineRuns } from '../lib/api.js';
   import { Workflow, Play, Loader2, Clock, ShieldCheck, Zap, GitMerge, AlertTriangle, Check, X, Calendar } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
+  import { shortenIRI } from '../lib/rdf-utils.js';
   import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
   import { isAuthenticated, authInitialized } from '../lib/stores.js';
   import { toastError, toastSuccess } from '../lib/toast.ts';
@@ -50,6 +51,23 @@
     }
   }
 
+  // Compact scope rollup: n datasets / n graphs / n meta shape graphs, with the
+  // first few names in a title tooltip. Reads both the new `targets` array and
+  // the legacy dataset_ids/graph_iris (Sets dedupe the mirrored values).
+  function scopeOf(p) {
+    const tg = p.targets || [];
+    const ds = [...new Set([...(p.dataset_ids || []), ...tg.filter((t) => t.kind === 'dataset').map((t) => t.id)])];
+    const gr = [...new Set([...(p.graph_iris || []), ...tg.filter((t) => t.kind === 'graph').map((t) => t.id)])];
+    const meta = [...new Set(tg.filter((t) => t.kind === 'shapegraph').map((t) => t.id))];
+    const few = (arr, fmt) => arr.slice(0, 4).map(fmt).join(', ') + (arr.length > 4 ? ` (+${arr.length - 4})` : '');
+    const tooltip = [
+      ds.length ? `${$t('pages.pipelinesList.scopeTipDatasets')}: ${few(ds, (x) => x)}` : '',
+      gr.length ? `${$t('pages.pipelinesList.scopeTipGraphs')}: ${few(gr, shortenIRI)}` : '',
+      meta.length ? `${$t('pages.pipelinesList.scopeTipMeta')}: ${few(meta, (x) => x)}` : '',
+    ].filter(Boolean).join('\n');
+    return { ds: ds.length, gr: gr.length, meta: meta.length, tooltip };
+  }
+
   function relativeTime(iso) {
     if (!iso) return '';
     const sec = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
@@ -86,6 +104,7 @@
     <ul class="pipe-list">
       {#each pipelines as p (p.id)}
         {@const last = latest[p.id]}
+        {@const scope = scopeOf(p)}
         <li class="pipe-card">
           <div class="pipe-main">
             <div class="pipe-head">
@@ -109,7 +128,12 @@
             <div class="pipe-meta">
               <span><strong>{p.shape_graph_ids.length}</strong> {$t('pages.pipelinesList.shapeGraphsLabel', { values: { count: p.shape_graph_ids.length } })}</span>
               <span>·</span>
-              <span><strong>{p.dataset_ids.length || p.graph_iris.length}</strong> {p.graph_iris.length ? $t('pages.pipelinesList.graphsInScopeLabel', { values: { count: p.graph_iris.length } }) : $t('pages.pipelinesList.datasetsInScopeLabel', { values: { count: p.dataset_ids.length } })}</span>
+              <span class="scope-bits" title={scope.tooltip}>
+                {#if scope.ds}<span><strong>{scope.ds}</strong> {$t('pages.pipelinesList.datasetsInScopeLabel', { values: { count: scope.ds } })}</span>{/if}
+                {#if scope.gr}<span><strong>{scope.gr}</strong> {$t('pages.pipelinesList.graphsInScopeLabel', { values: { count: scope.gr } })}</span>{/if}
+                {#if scope.meta}<span><strong>{scope.meta}</strong> {$t('pages.pipelinesList.metaInScopeLabel', { values: { count: scope.meta } })}</span>{/if}
+                {#if !scope.ds && !scope.gr && !scope.meta}<span class="dim">{$t('pages.pipelinesList.emptyScope')}</span>{/if}
+              </span>
               <span>·</span>
               <span class="dim">{$t('pages.pipelinesList.severityThreshold', { values: { value: p.severity_threshold } })}</span>
             </div>
@@ -162,6 +186,7 @@
   .pipe-desc { margin: 0; color: #64748b; font-size: 0.85rem; }
   .pipe-meta { font-size: 0.78rem; color: #64748b; display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .pipe-meta strong { color: #1e293b; }
+  .scope-bits { display: inline-flex; gap: 0.4rem; flex-wrap: wrap; }
   .pipe-last { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: #475569; }
   .pipe-last-time { display: inline-flex; align-items: center; gap: 0.25rem; color: #94a3b8; font-size: 0.75rem; }
   .pipe-last-counts { display: inline-flex; gap: 0.25rem; }

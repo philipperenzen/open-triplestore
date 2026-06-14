@@ -74,3 +74,48 @@ pub fn migrate_legacy(
     }
     Ok(created)
 }
+
+/// Boot-time self-healing sweep for existing deployments: every dataset with a
+/// `shapes_graph_iri` and every dataset graph carrying the `shapes` role is
+/// adopted into the Library and bound to its dataset (both idempotent — see
+/// [`super::registration::auto_register_dataset_shapes_graph`]). Failures are
+/// logged per graph and never abort boot. Returns the number of graphs swept.
+pub fn backfill_dataset_shapes(state: &crate::server::AppState) -> usize {
+    use crate::auth::models::GraphKind;
+
+    let datasets = match state.auth_db.list_datasets() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("shacl_studio: shapes backfill could not list datasets: {e}");
+            return 0;
+        }
+    };
+
+    let mut swept = 0usize;
+    for d in datasets {
+        let mut graph_iris: Vec<String> = Vec::new();
+        if let Some(iri) = d.shapes_graph_iri.clone().filter(|s| !s.is_empty()) {
+            graph_iris.push(iri);
+        }
+        if let Ok(entries) = state.auth_db.list_dataset_graph_entries(&d.id) {
+            for e in entries {
+                if e.graph_role == Some(GraphKind::Shapes) && !graph_iris.contains(&e.graph_iri) {
+                    graph_iris.push(e.graph_iri);
+                }
+            }
+        }
+        for iri in graph_iris {
+            match super::registration::auto_register_dataset_shapes_graph(state, &d, &iri, None) {
+                Ok(_) => swept += 1,
+                Err(e) => tracing::warn!(
+                    "shacl_studio: shapes backfill failed for dataset {} graph <{iri}>: {e}",
+                    d.id
+                ),
+            }
+        }
+    }
+    if swept > 0 {
+        tracing::info!("shacl_studio: shapes backfill swept {swept} dataset shapes graph(s)");
+    }
+    swept
+}
