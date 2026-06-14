@@ -468,9 +468,14 @@ fn emit_dataset_entry(
     // DCAT 2 §4.3/§5.3: advertise the OGC API – Features, 3D Tiles, and viewer
     // services as `dcat:Distribution`/`dcat:accessService` nodes so harvesters can
     // discover the spatial access paths alongside the SPARQL/GSP ones above.
+    // Exclude the verbose ifcOWL lift graph (`…/ifcowl`) just like the viewer-feed
+    // and geo-stats handlers do (routes.rs): it is the full 1:1 IFC schema (millions
+    // of triples), carries none of the geometry the probe looks for, and its
+    // unbounded scan would dominate the per-dataset capability check run here.
     let data_graphs: Vec<String> = graph_entries
         .iter()
         .filter(|e| !e.graph_iri.starts_with("urn:system:"))
+        .filter(|e| !e.graph_iri.ends_with("/ifcowl"))
         .map(|e| e.graph_iri.clone())
         .collect();
     let geo = crate::geo::viewer_feed::dataset_geo_stats(store, &data_graphs);

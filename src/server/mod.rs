@@ -906,6 +906,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/geo-stats",
             get(routes::geo_stats),
         )
+        // Batched, scope-wide geo capability — one OR-aggregated probe instead of
+        // one `/geo-stats` request per dataset (the triple browser's Map gate).
+        .route("/api/geo-stats", get(routes::geo_stats_batch))
         // Anonymous-capable asset download (dataset visibility decides) — the
         // viewer fetches e.g. the original IFC file through this without auth.
         .route(

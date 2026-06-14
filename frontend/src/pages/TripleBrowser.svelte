@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { delayedLoading } from '../lib/delayedLoading';
   import { autofocus } from '../lib/actions/autofocus.js';
-  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth, getViewerFeed, getGeoStats } from '../lib/api.js';
+  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth, getViewerFeed, getGeoStatsBatch } from '../lib/api.js';
   import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, triplesToResults } from '../lib/rdf-utils.js';
   import DataTable from '../components/DataTable.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
@@ -71,46 +71,37 @@
 
   // ─── Map view gating (SCOPE-aware) ────────────────────────────────────────
   // The Map tab is offered when the browse SCOPE — not just the current page —
-  // carries geometry. getGeoStats is the cheap per-dataset probe; OR-aggregate
-  // it across scopedDatasetIds (which already expands org items to their
-  // datasets). getGeoStats/getViewerFeed are single-dataset only, so we fan out
-  // client-side and cache per dataset like ensureDsVersions/ensureDsGraphs do.
-  let geoStatsByDs = {}; // dsId -> GeoStats | null (null = loaded-but-failed)
-  let geoStatsKey = ''; // scope signature geoStatsByDs reflects (de-dupes + races)
+  // carries geometry. One batched probe OR-aggregates the capability across the
+  // whole scope (scopedDatasetIds already expands org items to their datasets):
+  // the server unions the datasets' graphs and answers in a single request, so a
+  // geometry-free scope costs one ASK no matter how many datasets it spans.
+  let scopeGeoStats = null; // GeoStats | null (null = loading or failed)
+  let geoStatsKey = ''; // scope signature scopeGeoStats reflects (de-dupes + races)
+  let geoStatsSettledKey = ''; // scope signature whose probe has resolved
   async function loadGeoStats(k, ids) {
-    // Collect into one array and assign ONCE — per-id `{...geoStatsByDs,[id]:x}`
-    // reassignments from N concurrent probes clobber each other. Also cap the
-    // concurrency (a big org scope would otherwise burst N requests and trip the
-    // rate limiter, failing most of them).
-    const entries = [];
-    const pool = ids.slice();
-    const worker = async () => {
-      while (pool.length) {
-        const id = pool.shift();
-        try {
-          entries.push([id, await getGeoStats(id)]);
-        } catch {
-          entries.push([id, null]);
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+    let stats = null;
+    try {
+      stats = await getGeoStatsBatch(ids);
+    } catch {
+      stats = null;
+    }
     if (geoStatsKey !== k) return; // scope changed mid-load — drop stale result
-    geoStatsByDs = Object.fromEntries(entries);
+    scopeGeoStats = stats;
+    geoStatsSettledKey = k;
   }
   $: {
     const k = scopedDatasetIds.slice().sort().join(',');
     if (k && k !== geoStatsKey) {
       geoStatsKey = k;
+      scopeGeoStats = null; // fall back to pageCanMap until the new probe resolves
       loadGeoStats(k, scopedDatasetIds.slice());
     }
   }
   $: geoStatsSettled =
-    scopedDatasetIds.length > 0 && scopedDatasetIds.every((id) => id in geoStatsByDs);
-  $: scopeHasGeo = scopedDatasetIds.some(
-    (id) => geoStatsByDs[id]?.has_coordinates || geoStatsByDs[id]?.has_3d
-  );
-  $: scopeHas3d = scopedDatasetIds.some((id) => geoStatsByDs[id]?.has_3d);
+    scopedDatasetIds.length > 0 &&
+    geoStatsSettledKey === scopedDatasetIds.slice().sort().join(',');
+  $: scopeHasGeo = !!(scopeGeoStats && (scopeGeoStats.has_coordinates || scopeGeoStats.has_3d));
+  $: scopeHas3d = !!(scopeGeoStats && scopeGeoStats.has_3d);
   // Per-page fallback: even before the scope probe settles, a page that itself
   // carries WGS84 rows can already offer the map (graceful; old behaviour).
   $: pageCanMap = detectGeoBindings(triplesToResults(triples));

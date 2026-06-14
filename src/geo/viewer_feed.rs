@@ -91,6 +91,15 @@ pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStat
         matches!(store.query(&q), Ok(oxigraph::sparql::QueryResults::Boolean(true)))
     };
 
+    // Cheap early-out: every flag below requires a `geo:hasGeometry` or
+    // `omg:hasGeometry` link (the same superset the element count walks), so a
+    // dataset with neither — the common case on a catalog/list page — is fully
+    // described by the default (all-false) stats after a single ASK, instead of
+    // running three more scans and a COUNT(DISTINCT) that can only return zero.
+    if !ask("?el (geo:hasGeometry|omg:hasGeometry) ?x") {
+        return GeoStats::default();
+    }
+
     let has_coordinates = ask(
         "?s geo:hasGeometry ?g . { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w }",
     );
@@ -398,6 +407,25 @@ mod tests {
         let s3 = dataset_geo_stats(&store3d, &[]);
         assert!(s3.has_coordinates && s3.has_3d_geometry && s3.has_3d);
         assert!(!s3.has_models);
+    }
+
+    #[test]
+    fn geo_stats_early_out_on_non_geo_dataset() {
+        // A dataset with no geo:/omg: geometry link (the common catalog/list case)
+        // must report empty stats via the single-ASK early-out, not four scans.
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "@prefix ex: <http://example.org/> .\n\
+                 ex:a ex:name \"Alice\" ; ex:knows ex:b .\n\
+                 ex:b ex:name \"Bob\" .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let s = dataset_geo_stats(&store, &[]);
+        assert!(!s.has_coordinates && !s.has_models && !s.has_3d_geometry && !s.has_3d);
+        assert_eq!(s.element_count, 0);
     }
 
     #[test]

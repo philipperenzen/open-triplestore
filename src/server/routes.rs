@@ -7037,3 +7037,81 @@ pub async fn geo_stats(
     let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
     Ok(Json(stats))
 }
+
+#[derive(Deserialize)]
+pub struct GeoStatsBatchQuery {
+    /// Comma-separated dataset ids to OR-aggregate the geo capability over.
+    pub datasets: Option<String>,
+}
+
+/// GET /api/geo-stats?datasets=a,b,c — geo capability summary OR-aggregated across
+/// a whole browse scope in ONE request. The triple browser gates its Map / 3D
+/// affordances on "does ANY dataset in scope carry geometry", which previously
+/// meant one `/geo-stats` request (4 SPARQL each) per dataset. This collapses that
+/// fan-out: the accessible datasets' graphs are unioned and probed once, so a
+/// geometry-free scope costs a single ASK regardless of how many datasets it spans.
+/// Inaccessible / unknown ids are silently skipped (mirrors per-dataset 403 → no map).
+pub async fn geo_stats_batch(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Query(q): Query<GeoStatsBatchQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Bound the request: a scope of more than a few hundred datasets is never a
+    // real UI gate, and an unbounded id list is a cheap way to fan out work.
+    const MAX_DATASETS: usize = 512;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+
+    let ids: Vec<&str> = q
+        .datasets
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .take(MAX_DATASETS)
+        .collect();
+
+    // Union the (ifcOWL-filtered) data graphs of every dataset the user may read.
+    // Probing the union answers "does the scope have geometry" in one shot, and an
+    // ASK/COUNT over the union is the exact OR-aggregate the per-dataset loop produced.
+    let mut data_graphs: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let dataset = match state
+            .auth_db
+            .get_dataset(id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            Some(d) => d,
+            None => continue,
+        };
+        if !state
+            .auth_db
+            .can_access_dataset(user_id, &dataset)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            continue;
+        }
+        for g in state
+            .auth_db
+            .list_dataset_graphs(id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .filter(|g| !g.ends_with("/ifcowl"))
+        {
+            data_graphs.push(g);
+        }
+    }
+
+    // No accessible/known datasets in scope: report empty stats. (An empty graph
+    // list would otherwise make `dataset_geo_stats` probe the default graph.)
+    if data_graphs.is_empty() {
+        return Ok(Json(crate::geo::viewer_feed::GeoStats::default()));
+    }
+
+    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
+    Ok(Json(stats))
+}

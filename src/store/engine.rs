@@ -214,8 +214,14 @@ impl TripleStore {
         spatial_index.rebuild(&store);
         #[cfg(feature = "geometry3d")]
         let spatial_index_3d = {
+            // Defer the (potentially large) WKT-Z scan: a persistent store may
+            // already hold geometry, but the 3D R*-tree is consumed only by the
+            // opt-in 3D-Tiles broad phase. Mark it dirty so the `spatial_index_3d()`
+            // accessor builds it lazily on the first 3D request — matching the 2D
+            // index's lazy `mark_dirty` write path — instead of paying a full scan
+            // + parse on every boot for deployments that never serve a 3D tile.
             let idx = SpatialIndex3D::new();
-            idx.rebuild(&store);
+            idx.mark_dirty();
             idx
         };
         Ok(Self {

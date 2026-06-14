@@ -598,6 +598,12 @@ export interface GeoStats {
 }
 export const getGeoStats = (datasetId): Promise<GeoStats> =>
   request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/geo-stats`);
+// OR-aggregated geo capability across a whole browse scope in ONE request, so the
+// Map/3D gate costs a single probe instead of one getGeoStats per dataset.
+export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
+  const qs = new URLSearchParams({ datasets: (datasetIds || []).join(',') }).toString();
+  return request('GET', `/api/geo-stats?${qs}`);
+};
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.
