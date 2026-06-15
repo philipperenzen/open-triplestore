@@ -1104,6 +1104,10 @@ fn last_user_text(req: &ChatRequest) -> &str {
 }
 
 /// One log row for a finished (non-blocked) chat turn.
+// Each argument is a distinct, independently-sourced field of the audit row
+// (endpoint, actor, IP, sizes, preview, guard flag, timings, result); bundling
+// them into a struct would only move the assembly elsewhere.
+#[allow(clippy::too_many_arguments)]
 fn log_chat_turn(
     state: &AppState,
     endpoint: &'static str,

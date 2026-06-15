@@ -1687,9 +1687,10 @@ pub async fn forgot_username(
     if validate::validate_email(email).is_ok() {
         if let Ok(Some(user)) = db.get_user_by_email(email) {
             if user.is_active {
-                state
-                    .mailer
-                    .send_username_reminder_email(&user.email, &[user.username.clone()]);
+                state.mailer.send_username_reminder_email(
+                    &user.email,
+                    std::slice::from_ref(&user.username),
+                );
                 let mut b = AuditEventBuilder::new(
                     AuditEventType::UsernameReminderRequested,
                     AuditOutcome::Success,
