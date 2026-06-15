@@ -166,7 +166,7 @@ nom = "7"
 rayon = "1"
 
 # Spatial R-tree index (GeoSPARQL pre-filtering)
-rstar = "0.12"
+rstar = "0.13"
 
 # Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
 # parry3d-f64 re-exports nalgebra as `parry3d_f64::na`; we use that re-export
