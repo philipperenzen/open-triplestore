@@ -34,6 +34,24 @@ const SWRL_IMP: &str = "http://www.w3.org/2003/11/swrl#Imp";
 const SPIN_RULE: &str = "http://spinrdf.org/spin#rule";
 const SP_NS: &str = "http://spinrdf.org/sp#";
 
+// Property (R-Box) axiom predicates — when seen as a predicate, the quad is
+// Vocabulary content even without an rdf:type on the subject in the same quad.
+const R_BOX_PREDICATES: &[&str] = &[
+    "http://www.w3.org/2000/01/rdf-schema#domain",
+    "http://www.w3.org/2000/01/rdf-schema#range",
+    "http://www.w3.org/2000/01/rdf-schema#subPropertyOf",
+    "http://www.w3.org/2002/07/owl#inverseOf",
+    "http://www.w3.org/2002/07/owl#propertyChainAxiom",
+    "http://www.w3.org/2002/07/owl#equivalentProperty",
+];
+
+// Class (T-Box) axiom predicates — the quad is Model content.
+const T_BOX_PREDICATES: &[&str] = &[
+    "http://www.w3.org/2000/01/rdf-schema#subClassOf",
+    "http://www.w3.org/2002/07/owl#equivalentClass",
+    "http://www.w3.org/2002/07/owl#disjointWith",
+];
+
 // IRIs whose objects are "schema-namespace" types when used as rdf:type objects
 // (so subjects typed with one of these are schema resources, not instance data).
 const SCHEMA_TYPE_OBJECTS: &[&str] = &[
@@ -63,15 +81,18 @@ const SCHEMA_TYPE_OBJECTS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RegistryKind {
-    /// OWL/RDFS terminological (Model) data; no dominant SHACL or instance signal.
+    /// Model (T-Box): class definitions and class axioms (`owl:Class`,
+    /// `rdfs:subClassOf`, restrictions). Dominant class signal.
     DataModel,
-    /// SKOS-dominant vocabulary.
+    /// Vocabulary (R-Box): object/datatype/annotation properties and relations,
+    /// plus SKOS concept schemes / controlled vocabularies. The terms that
+    /// describe how things relate, as opposed to the class structure.
     Vocabulary,
-    /// SHACL shapes graph (no significant OWL class definitions).
+    /// SHACL shapes graph (no significant class definitions).
     Shapes,
     /// Entailment / rule set (SWRL, SPIN).
     Entailment,
-    /// Instance data.
+    /// Instance data (A-Box).
     Instances,
 }
 
@@ -134,17 +155,30 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// OWL/RDFS model score (excludes SHACL).
-    fn tbox_score(&self) -> usize {
-        self.owl_ontology + self.owl_classes + self.owl_properties + self.rdfs_classes
+    /// Model score (T-Box): class definitions and class axioms. An `owl:Ontology`
+    /// header counts here but does not, on its own, make a graph "have classes"
+    /// (see [`Evidence::has_real_classes`]).
+    fn class_score(&self) -> usize {
+        self.owl_ontology + self.owl_classes + self.rdfs_classes
+    }
+
+    /// Vocabulary score (R-Box): object/datatype/annotation properties and
+    /// relations, plus SKOS concept schemes and concepts. This is where the
+    /// "vocabulary" of a model — the terms that describe how things relate —
+    /// lives, as opposed to the class structure (Model) or the data (Instances).
+    fn vocabulary_score(&self) -> usize {
+        self.owl_properties + self.skos_concept_schemes + self.skos_concepts
+    }
+
+    /// True when the graph declares at least one real class (not merely an
+    /// `owl:Ontology` header). Used to decide whether a property/SKOS-heavy graph
+    /// is a pure Vocabulary (no class anchor) or a mixed Model.
+    fn has_real_classes(&self) -> bool {
+        self.owl_classes + self.rdfs_classes > 0
     }
 
     fn shapes_score(&self) -> usize {
         self.shacl_shapes
-    }
-
-    fn vocabulary_score(&self) -> usize {
-        self.skos_concept_schemes + self.skos_concepts
     }
 
     fn entailment_score(&self) -> usize {
@@ -233,13 +267,19 @@ pub fn detect(quads: &[Quad]) -> Detected {
 }
 
 fn classify(ev: Evidence) -> Detected {
-    let tbox = ev.tbox_score();
-    let shapes = ev.shapes_score();
+    // The three logical layers plus the two orthogonal roles:
+    //   class  → Model (T-Box: classes / class axioms)
+    //   vocab  → Vocabulary (R-Box: properties / relations + SKOS concept schemes)
+    //   abox   → Instances (A-Box: real data)
+    //   shapes → Shapes (SHACL)   entail → Entailment (SWRL/SPIN)
+    let class = ev.class_score();
     let vocab = ev.vocabulary_score();
+    let shapes = ev.shapes_score();
     let entail = ev.entailment_score();
     let abox = ev.abox_score();
+    let has_classes = ev.has_real_classes();
 
-    let total_schema = tbox + shapes + vocab + entail;
+    let total_schema = class + shapes + vocab + entail;
 
     if total_schema == 0 && abox == 0 {
         return Detected {
@@ -250,8 +290,8 @@ fn classify(ev: Evidence) -> Detected {
     }
 
     // Entailment: SWRL/SPIN rules dominate with minimal other signals.
-    if entail > 0 && entail >= tbox.max(shapes).max(vocab).max(abox) {
-        let mixed = tbox + shapes + vocab + abox > 0;
+    if entail > 0 && entail >= class.max(shapes).max(vocab).max(abox) {
+        let mixed = class + shapes + vocab + abox > 0;
         return Detected {
             primary: Some(RegistryKind::Entailment),
             mixed,
@@ -259,8 +299,10 @@ fn classify(ev: Evidence) -> Detected {
         };
     }
 
-    // Shapes-dominant: SHACL shapes with no significant OWL class hierarchy.
-    if shapes > 0 && tbox == 0 && shapes >= vocab * 3 && shapes >= abox * 3 {
+    // Shapes-dominant: SHACL shapes with no real class hierarchy. (A graph that
+    // declares real classes alongside shapes is a Model that happens to carry
+    // shapes, not a Shapes graph.)
+    if shapes > 0 && !has_classes && shapes >= vocab * 3 && shapes >= abox * 3 {
         let mixed = vocab > 0 || entail > 0 || abox > 0;
         return Detected {
             primary: Some(RegistryKind::Shapes),
@@ -279,10 +321,10 @@ fn classify(ev: Evidence) -> Detected {
         };
     }
 
-    // Vocabulary-dominant SKOS.
-    let schema_for_vocab = tbox + shapes; // compare SKOS vs OWL/SHACL
-    if vocab > 0 && vocab >= schema_for_vocab * 3 && abox < vocab {
-        let mixed = schema_for_vocab > 0 || entail > 0;
+    // Vocabulary-dominant: property/relation or SKOS content with no class anchor
+    // (a pure R-Box graph — e.g. a SKOS concept scheme or a property-only file).
+    if vocab > 0 && !has_classes && abox < vocab {
+        let mixed = shapes > 0 || entail > 0 || abox > 0;
         return Detected {
             primary: Some(RegistryKind::Vocabulary),
             mixed,
@@ -290,29 +332,25 @@ fn classify(ev: Evidence) -> Detected {
         };
     }
 
-    // Model data (OWL/RDFS, possibly mixed with SHACL shapes).
-    if tbox > 0 && tbox >= vocab * 3 && abox <= tbox.max(shapes) {
-        let mixed = shapes > 0 || vocab > 0 || entail > 0 || abox > 0;
-        return Detected {
-            primary: Some(RegistryKind::DataModel),
-            mixed,
-            evidence: ev,
-        };
-    }
-
-    // Dominant vocabulary even when schema exists (original 3× rule for reverse case).
-    if vocab > 0 && schema_for_vocab > 0 {
-        if vocab >= schema_for_vocab * 3 {
+    // Both class and vocabulary content may be present (a typical OWL file mixes
+    // classes and properties). Dominant signal wins; ties go to Model because the
+    // class hierarchy anchors the schema. `mixed` is set whenever more than one
+    // logical layer is present.
+    if class > 0 || vocab > 0 {
+        let both = class > 0 && vocab > 0;
+        let mixed = both || shapes > 0 || entail > 0 || abox > 0;
+        if class >= vocab {
+            if abox <= class.max(shapes) {
+                return Detected {
+                    primary: Some(RegistryKind::DataModel),
+                    mixed,
+                    evidence: ev,
+                };
+            }
+        } else if abox <= vocab.max(shapes) {
             return Detected {
                 primary: Some(RegistryKind::Vocabulary),
-                mixed: true,
-                evidence: ev,
-            };
-        }
-        if schema_for_vocab >= vocab * 3 {
-            return Detected {
-                primary: Some(RegistryKind::DataModel),
-                mixed: true,
+                mixed,
                 evidence: ev,
             };
         }
@@ -343,18 +381,21 @@ pub fn classify_quad_role(q: &Quad) -> GraphKind {
             if matches!(obj_str, SWRL_IMP) {
                 return GraphKind::Entailment;
             }
+            // Classes (T-Box) → Model.
+            if matches!(obj_str, OWL_ONTOLOGY | OWL_CLASS | RDFS_CLASS) {
+                return GraphKind::Model;
+            }
+            // Properties / relations (R-Box) → Vocabulary.
             if matches!(
                 obj_str,
-                OWL_ONTOLOGY
-                    | OWL_CLASS
-                    | OWL_OBJECT_PROPERTY
+                OWL_OBJECT_PROPERTY
                     | OWL_DATATYPE_PROPERTY
                     | OWL_ANNOTATION_PROPERTY
                     | RDF_PROPERTY
-                    | RDFS_CLASS
             ) {
-                return GraphKind::Model;
+                return GraphKind::Vocabulary;
             }
+            // SKOS concept schemes / concepts → Vocabulary.
             if matches!(obj_str, SKOS_CONCEPT_SCHEME | SKOS_CONCEPT) {
                 return GraphKind::Vocabulary;
             }
@@ -370,7 +411,16 @@ pub fn classify_quad_role(q: &Quad) -> GraphKind {
         return GraphKind::Vocabulary;
     }
 
-    // Fallback: predicates in OWL/RDFS namespaces suggest model content.
+    // Predicate-level axiom routing (single-quad approximation): property axioms
+    // are R-Box (Vocabulary), class axioms are T-Box (Model).
+    if R_BOX_PREDICATES.contains(&p) {
+        return GraphKind::Vocabulary;
+    }
+    if T_BOX_PREDICATES.contains(&p) {
+        return GraphKind::Model;
+    }
+
+    // Fallback: residual predicates in OWL/RDFS namespaces suggest model content.
     if p.starts_with("http://www.w3.org/2002/07/owl#")
         || p.starts_with("http://www.w3.org/2000/01/rdf-schema#")
     {
@@ -631,7 +681,10 @@ mod tests {
     }
 
     #[test]
-    fn pure_owl_is_data_model() {
+    fn owl_classes_and_properties_is_model_mixed() {
+        // A typical OWL file mixes classes (T-Box → Model) and properties
+        // (R-Box → Vocabulary). The class signal anchors the primary kind, but
+        // the presence of properties flags it as mixed.
         let ttl = r#"
             @prefix owl: <http://www.w3.org/2002/07/owl#> .
             @prefix ex: <http://example.org/> .
@@ -641,9 +694,42 @@ mod tests {
         "#;
         let d = detect(&parse(ttl));
         assert_eq!(d.primary, Some(RegistryKind::DataModel));
-        assert!(!d.mixed);
+        assert!(d.mixed);
         assert_eq!(d.evidence.owl_ontology, 1);
         assert_eq!(d.evidence.owl_classes, 1);
+        assert_eq!(d.evidence.owl_properties, 1);
+    }
+
+    #[test]
+    fn property_only_is_vocabulary() {
+        // A graph of properties/relations with no class anchor is R-Box →
+        // Vocabulary, even though it lives in the owl: namespace.
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix ex: <http://example.org/> .
+            ex:knows a owl:ObjectProperty .
+            ex:name a owl:DatatypeProperty .
+            ex:label a owl:AnnotationProperty .
+        "#;
+        let d = detect(&parse(ttl));
+        assert_eq!(d.primary, Some(RegistryKind::Vocabulary));
+        assert!(!d.mixed);
+        assert_eq!(d.evidence.owl_properties, 3);
+    }
+
+    #[test]
+    fn ontology_header_with_properties_is_vocabulary() {
+        // An owl:Ontology header alone must not block a property-only file from
+        // classifying as Vocabulary (has_real_classes is false).
+        let ttl = r#"
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix ex: <http://example.org/> .
+            ex:Ont a owl:Ontology .
+            ex:knows a owl:ObjectProperty .
+            ex:likes a owl:ObjectProperty .
+        "#;
+        let d = detect(&parse(ttl));
+        assert_eq!(d.primary, Some(RegistryKind::Vocabulary));
     }
 
     #[test]
@@ -709,7 +795,9 @@ mod tests {
     }
 
     #[test]
-    fn balanced_mix_is_ambiguous() {
+    fn balanced_class_and_concept_is_model_mixed() {
+        // Classes (Model) tie with SKOS concepts (Vocabulary): ties go to Model
+        // because the class hierarchy anchors the schema; flagged mixed.
         let ttl = r#"
             @prefix owl: <http://www.w3.org/2002/07/owl#> .
             @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
@@ -720,7 +808,7 @@ mod tests {
             ex:Blue a skos:Concept .
         "#;
         let d = detect(&parse(ttl));
-        assert!(d.primary.is_none());
+        assert_eq!(d.primary, Some(RegistryKind::DataModel));
         assert!(d.mixed);
     }
 
@@ -935,5 +1023,42 @@ mod tests {
             RegistryKind::Instances.to_graph_role(),
             GraphKind::Instances
         );
+    }
+
+    #[test]
+    fn classify_quad_role_routes_classes_and_properties() {
+        let pfx = "@prefix owl: <http://www.w3.org/2002/07/owl#> . \
+                   @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . \
+                   @prefix skos: <http://www.w3.org/2004/02/skos/core#> . \
+                   @prefix ex: <http://example.org/> .\n";
+        let role1 = |triple: &str| classify_quad_role(&parse(&format!("{pfx}{triple}"))[0]);
+
+        // Classes (T-Box) → Model.
+        assert_eq!(role1("ex:Person a owl:Class ."), GraphKind::Model);
+        assert_eq!(
+            role1("ex:Student rdfs:subClassOf ex:Person ."),
+            GraphKind::Model
+        );
+        // Properties / relations (R-Box) → Vocabulary.
+        assert_eq!(
+            role1("ex:knows a owl:ObjectProperty ."),
+            GraphKind::Vocabulary
+        );
+        assert_eq!(
+            role1("ex:age a owl:DatatypeProperty ."),
+            GraphKind::Vocabulary
+        );
+        assert_eq!(
+            role1("ex:knows rdfs:domain ex:Person ."),
+            GraphKind::Vocabulary
+        );
+        assert_eq!(
+            role1("ex:knows rdfs:range ex:Person ."),
+            GraphKind::Vocabulary
+        );
+        // SKOS → Vocabulary.
+        assert_eq!(role1("ex:Red a skos:Concept ."), GraphKind::Vocabulary);
+        // Instance data → Instances.
+        assert_eq!(role1("ex:alice a ex:Person ."), GraphKind::Instances);
     }
 }

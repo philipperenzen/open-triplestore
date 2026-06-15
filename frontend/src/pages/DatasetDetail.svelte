@@ -461,7 +461,7 @@
   // Whether there is any rich metadata worth showing beyond the basics.
   $: hasRichMetadata = !!(dataset && (dataset.license || mdThemes.length || mdKeywords.length
     || dataset.adms_status || dataset.version_notes || dataset.spatial || dataset.landing_page
-    || hasContact || dataset.conforms_to_ontology));
+    || hasContact || dataset.conforms_to_model));
 
   // Breadcrumb: org name when dataset is org-owned
   let ownerOrgName = null;
@@ -760,7 +760,7 @@
   async function fetchDataset() {
     try {
       dataset = await getDataset(id);
-      editConformsToOntology = dataset.conforms_to_ontology || '';
+      editConformsToOntology = dataset.conforms_to_model || '';
       editConformsToVersion = dataset.conforms_to_version || '';
       imageKey = dataset.image_key;
       bannerKey = dataset.banner_key;
@@ -857,7 +857,7 @@
     try {
       dataset = await updateDataset(id, {
         ...e.detail,
-        conforms_to_ontology: editConformsToOntology || null,
+        conforms_to_model: editConformsToOntology || null,
         conforms_to_version: editConformsToVersion || null,
       });
       metadataDialogOpen = false;
@@ -1400,10 +1400,10 @@
       </div>
     {/if}
 
-    {#if dataset.conforms_to_ontology}
+    {#if dataset.conforms_to_model}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
-        <dd><a href="/models/{dataset.conforms_to_ontology}" class="md-link">{dataset.conforms_to_ontology}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
+        <dd><a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
       </div>
     {/if}
 

@@ -170,7 +170,6 @@ export const VOCAB_FILES: Record<string, VocabFileSpec> = {
   'http://www.w3.org/ns/shacl#': { file: 'shacl.ttl', source: 'sh' },
   'http://schema.org/': { file: 'schema.ttl', source: 'schema' },
   'https://schema.org/': { file: 'schema.ttl', source: 'schema' },
-  'https://opentriplestore.org/ontology/': { file: 'ots.ttl', source: 'ots' },
   'https://opentriplestore.org/ns#': { file: 'ots.ttl', source: 'ots' },
   'https://opentriplestore.org/ns/asset#': { file: 'ots.ttl', source: 'ots' },
 };

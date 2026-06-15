@@ -2,21 +2,22 @@
 
 How to model data so it stays consistent, valid, and discoverable. This is a working summary of the canonical **Linked Data Modelling Styleguide** ([read the full styleguide](/docs/linked-data-modelling-styleguide)) — the normative standard the triplestore and its companion tools all follow.
 
-## The three layers
+## The layers
 
-Every knowledge graph separates into three layers. Knowing which layer you are in is the single most important modelling habit — a class definition, a validation rule, and a fact about a real thing belong in three different graphs.
+Every knowledge graph separates into layers. Knowing which layer you are in is the single most important modelling habit — a class definition, a property definition, a validation rule, and a fact about a real thing belong in different graphs. The schema splits into two first-class halves: the **Model** (classes) and the **Vocabulary** (properties + concept schemes).
 
-| Layer | Question it answers | Vocabularies | Graph role |
-|---|---|---|---|
-| Knowledge Model | "What kinds of things exist and how do they relate?" | SKOS, RDFS, OWL | Vocabulary / Model |
-| Information Model | "What makes a piece of data valid?" | SHACL | Shapes |
-| Instance Data | "Which specific things are we describing?" | the model's own terms | Instances |
+| Layer | Question it answers | Holds | Vocabularies | Graph role | DL box |
+|---|---|---|---|---|---|
+| Model | "What *kinds of things* exist?" | classes & class axioms | RDFS, OWL | `model` | T-Box |
+| Vocabulary | "What *relations and terms* describe them?" | properties + SKOS concept schemes | SKOS, RDFS, OWL | `vocabulary` | R-Box |
+| Information Model | "What makes a piece of data valid?" | SHACL shapes | SHACL | `shapes` | — |
+| Instance Data | "Which specific things are we describing?" | the model's own terms | the model's own terms | `instances` | A-Box |
 
-These map directly onto the [graph roles](/docs/import) the store auto-detects, and the [Model & Vocabulary registries](/docs/models) that version them.
+These map directly onto the [graph roles](/docs/import) the store auto-detects (it routes classes to a Model graph, properties and concepts to a Vocabulary graph, and individuals to an Instances graph), and the [Model & Vocabulary registries](/docs/models) that version them.
 
-## Layer 1 — Knowledge Model (SKOS + OWL)
+## Layer 1 — Model + Vocabulary (SKOS + OWL)
 
-Define concepts with **dual typing** — each is both a `skos:Concept` (navigable, labelled, mappable) and an `owl:Class` (formally classifiable). Give every term bilingual labels (`@nl` and `@en`), a `skos:notation`, and a home in a `skos:ConceptScheme`.
+The schema has two halves. The **Model** (T-Box) declares the *classes*; the **Vocabulary** (R-Box) declares the *properties* and the SKOS *concept schemes*. Define concepts with **dual typing** — each is both a `skos:Concept` (navigable, labelled, mappable) and an `owl:Class` (formally classifiable). Give every term bilingual labels (`@nl` and `@en`), a `skos:notation`, and a home in a `skos:ConceptScheme`. Keep class-only axioms in the `model` graph and property definitions + concept schemes in the `vocabulary` graph.
 
 ```turtle
 @prefix ex:   <https://example.org/showcase/> .
@@ -128,7 +129,7 @@ ex:OldBookType
 
 ## Modelling rules
 
-- **One role per named graph** — Keep the Knowledge Model, Shapes, and Instances in separate graphs so the store classifies them correctly. Override an ambiguous mix with `?kind=` on upload.
+- **One role per named graph** — Keep the Model (classes), the Vocabulary (properties + concepts), Shapes, and Instances in separate graphs so the store classifies them correctly. A mixed upload is auto-split per role; override an ambiguous mix with `?kind=` on upload.
 - **Bilingual labels, one per language** — Every concept, class and property needs `skos:prefLabel` / `rdfs:label` in `@nl` and `@en`. Synonyms go in `skos:altLabel`.
 - **IRIs, not strings, for links** — `dct:creator`, `dct:publisher` and `dcat:accessURL` take IRIs. Use named nodes for concepts; reserve blank nodes for anonymous values like a geometry or contact card.
 - **Datatype every literal** — Dates as `xsd:date` / `xsd:dateTime`, numbers as `xsd:integer` / `xsd:decimal`; human labels always carry a language tag.

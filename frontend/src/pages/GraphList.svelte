@@ -146,7 +146,7 @@
         visibility: cdVisibility,
         owner_type: cdOwnerType,
         owner_id: cdOwnerType === 'organisation' ? cdOwnerOrgId : currentUser?.id,
-        conforms_to_ontology: null,
+        conforms_to_model: null,
         conforms_to_version: null,
         graph_role: null,
       });

@@ -118,7 +118,7 @@ const USER_COLS_LEN: usize = 18;
 
 /// Helper to read a Dataset from a row (24 columns, 0-indexed).
 /// Column order: id(0), name(1), description(2), owner_type(3), owner_id(4), visibility(5),
-///   shacl_on_write(6), shapes_graph_iri(7), conforms_to_ontology(8), conforms_to_version(9),
+///   shacl_on_write(6), shapes_graph_iri(7), conforms_to_model(8), conforms_to_version(9),
 ///   image_key(10), graph_role(11), created_at(12), updated_at(13),
 ///   license(14), themes(15), keywords(16), contact_name(17), contact_email(18),
 ///   contact_url(19), adms_status(20), version_notes(21), spatial(22), landing_page(23),
@@ -136,7 +136,7 @@ fn read_dataset_row(row: &rusqlite::Row) -> rusqlite::Result<Dataset> {
         visibility: Visibility::from_str(&vis_str).unwrap_or(Visibility::Private),
         shacl_on_write: row.get::<_, i32>(6)? != 0,
         shapes_graph_iri: row.get(7)?,
-        conforms_to_ontology: row.get(8)?,
+        conforms_to_model: row.get(8)?,
         conforms_to_version: row.get(9)?,
         image_key: row.get(10)?,
         banner_key: row.get(24)?,
@@ -470,7 +470,7 @@ impl AuthDb {
                 visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('public','members','private')),
                 shacl_on_write INTEGER NOT NULL DEFAULT 0,
                 shapes_graph_iri TEXT,
-                conforms_to_ontology TEXT,
+                conforms_to_model TEXT,
                 conforms_to_version TEXT,
                 image_key TEXT,
                 banner_key TEXT,
@@ -968,7 +968,7 @@ impl AuthDb {
             "ALTER TABLE users ADD COLUMN can_publish INTEGER NOT NULL DEFAULT 0",
             // Migrate legacy 'publisher' role rows: grant can_publish and reset to 'user'
             "UPDATE users SET can_publish=1, role='user' WHERE role='publisher'",
-            "ALTER TABLE datasets ADD COLUMN conforms_to_ontology TEXT",
+            "ALTER TABLE datasets ADD COLUMN conforms_to_model TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_version TEXT",
             "ALTER TABLE datasets ADD COLUMN graph_role TEXT",
             "ALTER TABLE assets ADD COLUMN title TEXT",
@@ -1047,6 +1047,27 @@ impl AuthDb {
                 "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;
                  UPDATE users SET email_verified = 1;",
             )?;
+        }
+
+        // One-time rename: datasets.conforms_to_ontology → conforms_to_model (the
+        // field was renamed when "ontology" stopped being the umbrella term — it is
+        // now "Model"). The additive upgrade above adds `conforms_to_model`; a DB
+        // created by a prior build still carries data in the legacy
+        // `conforms_to_ontology` column. Copy it across and drop the legacy column.
+        // Guarded on the legacy column's presence so it runs at most once.
+        let has_legacy_conforms = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('datasets') WHERE name='conforms_to_ontology'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if has_legacy_conforms {
+            let _ = conn.execute_batch(
+                "UPDATE datasets SET conforms_to_model = conforms_to_ontology \
+                 WHERE conforms_to_model IS NULL AND conforms_to_ontology IS NOT NULL; \
+                 ALTER TABLE datasets DROP COLUMN conforms_to_ontology;",
+            );
         }
 
         // One-time rebuild: widen `resource_access.principal_type` to allow
@@ -2594,7 +2615,7 @@ impl AuthDb {
             visibility,
             shacl_on_write: false,
             shapes_graph_iri: None,
-            conforms_to_ontology: None,
+            conforms_to_model: None,
             conforms_to_version: None,
             image_key: None,
             banner_key: None,
@@ -2617,7 +2638,7 @@ impl AuthDb {
     pub fn get_dataset(&self, id: &str) -> anyhow::Result<Option<Dataset>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_ontology, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets WHERE id = ?1",
+            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets WHERE id = ?1",
             params![id],
             read_dataset_row,
         )
@@ -2628,7 +2649,7 @@ impl AuthDb {
     pub fn list_datasets(&self) -> anyhow::Result<Vec<Dataset>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_ontology, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets ORDER BY name",
+            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets ORDER BY name",
         )?;
         let datasets = stmt
             .query_map([], read_dataset_row)?
@@ -2639,7 +2660,7 @@ impl AuthDb {
     pub fn list_datasets_by_org(&self, org_id: &str) -> anyhow::Result<Vec<Dataset>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_ontology, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets WHERE owner_type='organisation' AND owner_id = ?1 ORDER BY name",
+            "SELECT id, name, description, owner_type, owner_id, visibility, shacl_on_write, shapes_graph_iri, conforms_to_model, conforms_to_version, image_key, graph_role, created_at, updated_at, license, themes, keywords, contact_name, contact_email, contact_url, adms_status, version_notes, spatial, landing_page, banner_key FROM datasets WHERE owner_type='organisation' AND owner_id = ?1 ORDER BY name",
         )?;
         let datasets = stmt
             .query_map(params![org_id], read_dataset_row)?
@@ -2651,7 +2672,7 @@ impl AuthDb {
     pub fn find_dataset_by_graph_iri(&self, graph_iri: &str) -> anyhow::Result<Option<Dataset>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT d.id, d.name, d.description, d.owner_type, d.owner_id, d.visibility, d.shacl_on_write, d.shapes_graph_iri, d.conforms_to_ontology, d.conforms_to_version, d.image_key, d.graph_role, d.created_at, d.updated_at, d.license, d.themes, d.keywords, d.contact_name, d.contact_email, d.contact_url, d.adms_status, d.version_notes, d.spatial, d.landing_page, d.banner_key
+            "SELECT d.id, d.name, d.description, d.owner_type, d.owner_id, d.visibility, d.shacl_on_write, d.shapes_graph_iri, d.conforms_to_model, d.conforms_to_version, d.image_key, d.graph_role, d.created_at, d.updated_at, d.license, d.themes, d.keywords, d.contact_name, d.contact_email, d.contact_url, d.adms_status, d.version_notes, d.spatial, d.landing_page, d.banner_key
              FROM datasets d JOIN dataset_graphs dg ON d.id = dg.dataset_id
              WHERE dg.graph_iri = ?1 LIMIT 1",
             params![graph_iri],
@@ -2680,14 +2701,14 @@ impl AuthDb {
     pub fn update_dataset_conformance(
         &self,
         id: &str,
-        conforms_to_ontology: Option<&str>,
+        conforms_to_model: Option<&str>,
         conforms_to_version: Option<&str>,
     ) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE datasets SET conforms_to_ontology=?1, conforms_to_version=?2, updated_at=?3 WHERE id=?4",
-            params![conforms_to_ontology, conforms_to_version, now, id],
+            "UPDATE datasets SET conforms_to_model=?1, conforms_to_version=?2, updated_at=?3 WHERE id=?4",
+            params![conforms_to_model, conforms_to_version, now, id],
         )?;
         Ok(())
     }

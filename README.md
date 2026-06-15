@@ -56,7 +56,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | 🏠 **Overview** | Live triple & named-graph counts, suggested next steps, and quick links into every workflow |
 | ⌨️ **SPARQL workspace** | CodeMirror editor (`Ctrl+Enter` to run), Table / JSON / Graph result views, query history, CSV & JSON export, optional NL→SPARQL |
 | 🕸️ **Explore & visualize** | Facet triples by subject / predicate / object / graph, then expand resources visually to walk a graph's neighbourhood |
-| 📚 **Datasets · Models** | DCAT metadata, per-dataset SHACL, a unified model registry for ontologies & SKOS vocabularies, and version diffs |
+| 📚 **Datasets · Models** | DCAT metadata, per-dataset SHACL, a unified registry for models & vocabularies (classes, properties, SKOS concept schemes), and version diffs |
 | ✅ **Validate** | SHACL (Core + Advanced) and ShEx, with per-dataset reports and severity filters |
 | 🔐 **Admin** | Users, roles, and graph-level ACLs |
 

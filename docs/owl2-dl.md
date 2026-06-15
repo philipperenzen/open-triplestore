@@ -1,6 +1,6 @@
 # OWL 2 DL
 
-> **Open Triplestore role names:** TBox content = graph role **Model**; ABox content = graph role **Instances**.
+> **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The DL reasoner reasons over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
 OWL 2 DL (Description Logics, based on SROIQ(D)) is the most expressive OWL 2 profile and the basis for fully formal ontology engineering.  It is N2EXPTIME-complete, which means full reasoning requires a tableau algorithm with blocked-node merging.  This triplestore provides **native support** for all OWL 2 RL rules plus the DL-specific axioms that are expressible as SPARQL INSERT operations, and an **external reasoner bridge** for full tableau completion.
 

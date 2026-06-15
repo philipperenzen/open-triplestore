@@ -743,7 +743,7 @@ export function detectOntologyInfo(content: string, filename = ''): { isOntology
 //   kind: 'model' | 'vocabulary' | 'shapes' | 'entailment' | 'instances' | 'mixed' | 'unknown'
 //   confidence: 'high' | 'low'
 //
-// 'model' is kept as an alias for 'model' for backward compatibility.
+// Model = classes (T-Box); Vocabulary = properties/relations (R-Box) + SKOS.
 export function detectContentKindFromText(
   content: string
 ): { kind: 'model' | 'vocabulary' | 'shapes' | 'entailment' | 'instances' | 'mixed' | 'unknown'; confidence: 'high' | 'low' } {
@@ -762,7 +762,7 @@ export function detectContentKindFromText(
     /<http:\/\/www\.w3\.org\/2004\/02\/skos\/core#Concept>/,
   ];
 
-  // OWL/RDFS model signals (classes, properties — but NOT SHACL shapes)
+  // Model signals (T-Box: classes / class axioms) — NOT properties, NOT shapes.
   const owlOntologyPatterns = [
     /\ba\s+owl:Ontology\b/,
     /<owl:Ontology\b/,
@@ -772,11 +772,20 @@ export function detectContentKindFromText(
   const owlClassPatterns = [
     /\ba\s+owl:Class\b/,
     /\ba\s+rdfs:Class\b/,
-    /\ba\s+owl:ObjectProperty\b/,
-    /\ba\s+owl:DatatypeProperty\b/,
     /<owl:Class\b/,
     /<rdfs:Class\b/,
-    /<http:\/\/www\.w3\.org\/2002\/07\/owl#(?:Class|ObjectProperty|DatatypeProperty)>/,
+    /<http:\/\/www\.w3\.org\/2002\/07\/owl#Class>/,
+    /<http:\/\/www\.w3\.org\/2000\/01\/rdf-schema#Class>/,
+  ];
+  // Vocabulary signals (R-Box: object/datatype/annotation properties & relations).
+  const owlPropertyPatterns = [
+    /\ba\s+owl:ObjectProperty\b/,
+    /\ba\s+owl:DatatypeProperty\b/,
+    /\ba\s+owl:AnnotationProperty\b/,
+    /\ba\s+rdf:Property\b/,
+    /<owl:ObjectProperty\b/,
+    /<owl:DatatypeProperty\b/,
+    /<http:\/\/www\.w3\.org\/2002\/07\/owl#(?:ObjectProperty|DatatypeProperty|AnnotationProperty)>/,
   ];
 
   // SHACL shapes signals (distinct from OWL model content)
@@ -802,34 +811,31 @@ export function detectContentKindFromText(
   const hasSkosConcept = skosConceptPatterns.some(re => re.test(content));
   const hasOwlOntology = owlOntologyPatterns.some(re => re.test(content));
   const hasOwlClass = owlClassPatterns.some(re => re.test(content));
+  const hasOwlProperty = owlPropertyPatterns.some(re => re.test(content));
   const hasShaclShape = shaclShapePatterns.some(re => re.test(content));
   const hasEntailment = entailmentPatterns.some(re => re.test(content));
 
-  const isVocab = hasSkosScheme || hasSkosConcept;
+  // Model = classes (T-Box). Vocabulary = properties/relations (R-Box) + SKOS.
   const isModel = hasOwlOntology || hasOwlClass;
-  const isShapes = hasShaclShape && !hasOwlClass; // pure SHACL without OWL classes
-  const isModelWithShapes = hasShaclShape && hasOwlClass; // SHACL + OWL model content
+  const isVocab = hasSkosScheme || hasSkosConcept || hasOwlProperty;
+  const isShapes = hasShaclShape && !hasOwlClass; // pure SHACL without classes
   const isEntailment = hasEntailment;
 
   // Entailment takes precedence when clearly dominant
   if (isEntailment && !isVocab && !isModel && !isShapes) {
     return { kind: 'entailment', confidence: 'high' };
   }
-  // Pure SHACL (no OWL class definitions)
+  // Pure SHACL (no class definitions)
   if (isShapes && !isVocab && !isModel) {
     return { kind: 'shapes', confidence: 'high' };
   }
-  // Pure vocabulary
-  if (isVocab && !isModel && !isShapes && !isModelWithShapes) {
-    return { kind: 'vocabulary', confidence: hasSkosScheme ? 'high' : 'low' };
+  // Pure vocabulary: properties/relations or SKOS with no class anchor
+  if (isVocab && !isModel && !isShapes) {
+    return { kind: 'vocabulary', confidence: hasSkosScheme || hasOwlProperty ? 'high' : 'low' };
   }
-  // OWL/RDFS model content (possibly with SHACL shapes mixed in → still 'model')
-  if ((isModel || isModelWithShapes) && !isVocab) {
-    return { kind: 'model', confidence: hasOwlOntology ? 'high' : 'low' };
-  }
-  // Mixed model + vocabulary
-  if ((isModel || isModelWithShapes) && isVocab) {
-    return { kind: 'mixed', confidence: 'low' };
+  // Model content (classes; properties/shapes may be mixed in → ties go to model)
+  if (isModel) {
+    return { kind: 'model', confidence: hasOwlOntology || hasOwlClass ? 'high' : 'low' };
   }
   return { kind: 'unknown', confidence: 'low' };
 }

@@ -11,7 +11,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::auth::db::AuthDb;
-use crate::auth::models::{Dataset, GraphKind, Organisation, OwnerType};
+use crate::auth::models::{Dataset, Organisation, OwnerType};
 use crate::store::engine::TripleStore;
 
 use super::vocabulary::*;
@@ -374,10 +374,10 @@ fn emit_dataset_entry(
     }
 
     // Model conformance (links instance data to its data model).
-    // `conforms_to_ontology` is a data-model registry id; the registry serves
+    // `conforms_to_model` is a data-model registry id; the registry serves
     // model IRIs under /data-model/ (see src/data_models/registry.rs), so the
     // conformance link must dereference there, not /ontology/.
-    if let Some(ref onto_id) = ds.conforms_to_ontology {
+    if let Some(ref onto_id) = ds.conforms_to_model {
         if let Some(ref onto_ver) = ds.conforms_to_version {
             writeln!(
                 out,
@@ -560,11 +560,11 @@ fn emit_dataset_entry(
     for entry in &graph_entries {
         if !entry.graph_iri.starts_with("urn:system:") {
             if let Some(role) = entry.graph_role {
-                let role_iri = catalog_role_iri(role);
+                let role_iri = crate::auth::dataset_graph::graph_role_iri(role);
                 writeln!(out, "<{}>", entry.graph_iri).unwrap();
                 writeln!(
                     out,
-                    "    <https://opentriplestore.org/ontology/graphRole> <{role_iri}> ."
+                    "    <https://opentriplestore.org/ns#graphRole> <{role_iri}> ."
                 )
                 .unwrap();
                 writeln!(out).unwrap();
@@ -627,17 +627,6 @@ fn count_via_sparql(store: &TripleStore, sparql: &str) -> usize {
 fn count_graph_triples(store: &TripleStore, graph_iri: &str) -> usize {
     let sparql = format!("SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }}");
     count_via_sparql(store, &sparql)
-}
-
-fn catalog_role_iri(role: GraphKind) -> &'static str {
-    match role {
-        GraphKind::Instances => "https://opentriplestore.org/ontology/Instances",
-        GraphKind::Model => "https://opentriplestore.org/ontology/Model",
-        GraphKind::Vocabulary => "https://opentriplestore.org/ontology/Vocabulary",
-        GraphKind::Shapes => "https://opentriplestore.org/ontology/Shapes",
-        GraphKind::Entailment => "https://opentriplestore.org/ontology/Entailment",
-        GraphKind::System => "https://opentriplestore.org/ontology/System",
-    }
 }
 
 /// Escape string for Turtle literal (double-quote delimited).

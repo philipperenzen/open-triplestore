@@ -1702,6 +1702,13 @@ pub async fn run(
                 &seed_state.base_url,
                 auth,
             );
+            // 5b. Model/Vocabulary/Instance reframe: reclassify stored property
+            //     graphs (model→vocabulary) and rewrite legacy …/ontology/ IRIs to …/ns#.
+            crate::auth::dataset_graph::migrate_model_vocabulary_reframe(
+                store,
+                &seed_state.base_url,
+                auth,
+            );
             if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(store, auth, &base) {
                 tracing::warn!("dataset metadata audit failed: {e}");
             }
