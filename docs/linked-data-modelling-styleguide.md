@@ -28,7 +28,7 @@ All Turtle/TriG examples in this document are normative reference style: copy th
 1. [The layered model](#1-the-layered-model)
 2. [Graph roles and named graphs](#2-graph-roles-and-named-graphs)
 3. [IRIs, namespaces and naming](#3-iris-namespaces-and-naming)
-4. [Layer 1 — the Knowledge Model (ontology)](#4-layer-1--the-knowledge-model-ontology)
+4. [Layer 1 — the Model and the Vocabulary](#4-layer-1--the-model-and-the-vocabulary)
 5. [Layer 2 — the Information Model (SHACL constraints)](#5-layer-2--the-information-model-shacl-constraints)
 6. [Layer 3 — Instance Data](#6-layer-3--instance-data)
 7. [Dataset, catalogue and organisation metadata (DCAT / VoID / ADMS / ORG)](#7-dataset-catalogue-and-organisation-metadata-dcat--void--adms--org)
@@ -49,11 +49,16 @@ All Turtle/TriG examples in this document are normative reference style: copy th
 
 Every knowledge graph we build separates into layers. Confusing the layers is the single most common modelling mistake, so always know which layer you are working in.
 
-| # | Layer | Question it answers | Primary vocabularies | Description-logic term |
-|---|---|---|---|---|
-| 1 | **Knowledge Model** (ontology) | "What kinds of things exist and how can they relate?" | SKOS, SKOS-XL, RDFS, OWL | T-Box |
-| 2 | **Information Model** (constraints) | "What makes a piece of data valid?" | SHACL (ShEx) | — |
-| 3 | **Instance Data** | "Which specific things are we describing?" | the model's own terms + RDF | A-Box |
+The three top-level layers align to the Description-Logic *boxes*. We name them after **what kind of term** they hold — **classes**, **properties/concepts**, and **facts** — not after the file they happen to arrive in:
+
+| # | Layer | Question it answers | Holds | Primary vocabularies | Description-logic term |
+|---|---|---|---|---|---|
+| 1a | **Model** | "What *kinds of things* exist?" | classes and class axioms (`owl:Class`, `rdfs:subClassOf`, `owl:equivalentClass`, restrictions, disjointness) | RDFS, OWL | **T-Box** |
+| 1b | **Vocabulary** | "What *relations and terms* can describe them?" | object/datatype/annotation properties and relations (`owl:ObjectProperty`, `owl:DatatypeProperty`, `rdf:Property`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf`) **plus** SKOS concept schemes & controlled vocabularies (`skos:ConceptScheme`, `skos:Concept`) | SKOS, SKOS-XL, RDFS, OWL | **R-Box** |
+| 2 | **Information Model** (constraints) | "What makes a piece of data valid?" | SHACL node/property shapes | SHACL (ShEx) | — |
+| 3 | **Instance Data** | "Which specific things are we describing?" | concrete facts about individuals | the model's own terms + RDF | **A-Box** |
+
+> **Model vs. Vocabulary.** The **Model** is the T-Box — the *classes* of your domain and the axioms over them. The **Vocabulary** is the R-Box — the *properties/relations* that connect things, together with SKOS concept schemes. Together they form the schema (what was historically called "the ontology"); we no longer use "ontology" as the umbrella term, because the class side and the property side are first-class layers in their own right.
 
 Three cross-cutting layers wrap these:
 
@@ -63,9 +68,9 @@ Three cross-cutting layers wrap these:
 | **Provenance** | "Who made this, when, derived from what?" | PROV-O |
 | **Organisations & agents** | "Who owns/publishes/maintains this?" | ORG, FOAF, vCard |
 
-> **Mental model.** Layer 1 is the *dictionary*, Layer 2 is the *rulebook*, Layer 3 is the *story*. The catalogue is the *library index*, provenance is the *audit trail*.
+> **Mental model.** The Model and the Vocabulary together are the *dictionary* (Model = the nouns/categories, Vocabulary = the verbs/relations and the controlled term lists), Layer 2 is the *rulebook*, Layer 3 is the *story*. The catalogue is the *library index*, provenance is the *audit trail*.
 
-You **MUST NOT** mix layers in a single graph (see §2). A class definition, a SHACL shape, and an instance of that class belong in three different named graphs.
+You **MUST NOT** mix layers in a single graph (see §2). A class definition, a property definition, a SHACL shape, and an instance all belong in different named graphs.
 
 ---
 
@@ -79,18 +84,22 @@ The store recognises exactly six roles (`GraphKind` in [`src/auth/models.rs`](..
 
 | Role | Layer | Holds | Registered under |
 |---|---|---|---|
-| `model` | 1 | OWL/RDFS class & property axioms (the T-Box) | Ontology Registry |
-| `vocabulary` | 1 | SKOS concept schemes & concepts | Ontology Registry |
-| `shapes` | 2 | SHACL node/property shapes | Ontology Registry |
-| `entailment` | — | SWRL / SPIN rule sets | Ontology Registry |
+| `model` | 1a (T-Box) | OWL/RDFS **class** definitions & class axioms | Model Registry |
+| `vocabulary` | 1b (R-Box) | OWL/RDFS **property** definitions & relations, plus SKOS concept schemes & concepts | Model Registry |
+| `shapes` | 2 | SHACL node/property shapes | Model Registry |
+| `entailment` | — | SWRL / SPIN rule sets and inferred triples | Model Registry |
 | `instances` | 3 | Concrete facts (the A-Box) | Datasets |
 | `system` | — | Internal bookkeeping (`urn:system:*`) | reserved |
 
+`model`, `vocabulary` and `instances` are the **three first-class layers**, each independently registrable and versionable; `shapes` and `entailment` are **orthogonal roles** that cut across them, and `system` is internal.
+
 **Rules:**
 
-- A named graph **MUST** hold exactly one role. Do not put shapes in your model graph or instances in your vocabulary graph.
-- Instance data **MUST** be registered as a **Dataset**; models/vocabularies/shapes **MUST** be registered in the **Ontology Registry** with a version lifecycle (§8).
+- A named graph **MUST** hold exactly one role. Do not put properties in your model graph, classes in your vocabulary graph, or shapes alongside either.
+- Instance data **MUST** be registered as a **Dataset**; models/vocabularies/shapes **MUST** be registered in the **Model Registry** with a version lifecycle (§8).
 - The role of each registered graph is published in the DCAT catalogue as `ots:graphRole` on the graph IRI (§7).
+
+> **Each role's graph can be decomposed.** A single upload that carries several kinds of content is split into per-role sub-graphs by the auto-split import feature (§2.2): classes route to a `model` sub-graph, properties and concept schemes to a `vocabulary` sub-graph, and individuals to an `instances` sub-graph. All three layers are first-class targets of that split — none is subordinate to the others.
 
 ### 2.2 Automatic role detection
 
@@ -98,28 +107,30 @@ When you upload RDF, the store classifies it in a single pass over the quads ([`
 
 | Evidence counted | Pushes toward |
 |---|---|
-| `owl:Ontology`, `owl:Class`, `owl:ObjectProperty`/`DatatypeProperty`/`AnnotationProperty`, `rdf:Property`, `rdfs:Class` | `model` |
+| `owl:Class`, `rdfs:Class` (and class axioms — `rdfs:subClassOf`, `owl:equivalentClass`, restrictions, disjointness) | `model` |
+| `owl:ObjectProperty`/`DatatypeProperty`/`AnnotationProperty`, `rdf:Property`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf` | `vocabulary` |
 | `skos:ConceptScheme`, `skos:Concept`, any `skos:` predicate | `vocabulary` |
 | `sh:NodeShape`, `sh:PropertyShape`, `sh:targetClass`, any `sh:` predicate | `shapes` |
 | `swrl:Imp`, any `spin:`/`sp:` predicate | `entailment` |
 | a subject typed with a class that is **not** a schema construct | `instances` |
 
-The heuristic is **dominance-based**: a role wins when its evidence is roughly 3× the competing schema signals. A balanced mix (e.g. equal OWL classes and SKOS concepts) is reported as **ambiguous** (`primary: None`, `mixed: true`) and is left unclassified for a human to label.
+The detector classifies the **whole upload by its dominant signal**: it compares the *class* count against the combined *(property + SKOS)* count. The larger side wins; an exact **tie breaks toward Model**. So a class-heavy standard (OWL, RDFS, GeoSPARQL) reads as **Model** and a property-heavy one (DCAT, PROV, FOAF) reads as **Vocabulary**. A file that carries a substantial amount of *both* classes and properties/concepts is flagged **mixed** (`mixed: true`) so the auto-split can route each part to its own role sub-graph (§2.1), and a balanced mix with no clear winner is left unclassified (`primary: None`) for a human to label. (`owl:Ontology` is recognised as a schema marker but is not itself a layer signal — it can sit in either a Model or a Vocabulary graph.)
 
 **What this means for you:**
 
 - **Keep each graph single-purpose** so detection is unambiguous. This is the same rule as §2.1, stated operationally.
-- If you upload a mixed graph, **classify it explicitly** with the `?kind=` override (`model`/`tbox`, `vocabulary`/`vocab`, `shapes`, `entailment`, `instances`/`abox`) rather than relying on the heuristic.
+- If you upload a mixed graph, either let the auto-split route classes → `model`, properties/concepts → `vocabulary` and individuals → `instances`, or **classify it explicitly** with the `?kind=` override (`model`/`tbox`, `vocabulary`/`vocab`, `shapes`, `entailment`, `instances`/`abox`).
 - The detector is a safety net, not a substitute for clean modelling.
 
 ### 2.3 Dual-typing vs. role detection — important reconciliation
 
-The Knowledge Model pattern (§4) uses **dual typing**: a concept is declared `a skos:Concept , owl:Class` so it is both a navigable vocabulary entry *and* a formal class. This is correct and encouraged.
+The schema pattern (§4) uses **dual typing**: a concept is declared `a skos:Concept , owl:Class` so it is both a navigable vocabulary entry *and* a formal class. This is correct and encouraged.
 
-But dual typing produces **both** OWL-class and SKOS evidence in the same graph. Resolve it like this:
+But dual typing makes a concept count as **both** Model evidence (the `owl:Class` side) and Vocabulary evidence (the SKOS side). Resolve it like this:
 
-- A dual-typed **knowledge model graph** is normally detected as `vocabulary` when SKOS hierarchy predicates (`skos:broader`, `skos:inScheme`, …) dominate — which they usually do, because every concept carries several. This is the intended outcome: **register a dual-typed concept scheme as a Vocabulary.**
-- Keep **OWL-only** axioms that have no SKOS counterpart (e.g. `owl:Restriction`, `owl:disjointWith`, property characteristics) viable as a separate `model` graph if they grow large, or accept the `model` classification when OWL dominates.
+- A dual-typed **concept scheme** is normally detected as `vocabulary` when SKOS hierarchy predicates (`skos:broader`, `skos:inScheme`, …) dominate — which they usually do, because every concept carries several, and the controlled-vocabulary side belongs to the R-Box. This is the intended outcome: **register a dual-typed concept scheme as a Vocabulary.**
+- Keep **class-only** axioms that have no SKOS counterpart (e.g. `owl:Restriction`, `owl:disjointWith`, `rdfs:subClassOf` chains) viable as a separate `model` graph if they grow large, or accept the `model` classification when those class axioms dominate.
+- Keep **property definitions** (`owl:ObjectProperty`/`DatatypeProperty`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf`) in the `vocabulary` graph — they are R-Box terms, alongside the concept schemes.
 - **Always keep SHACL shapes in their own `shapes` graph.** Never co-locate shapes with the concept scheme — that muddies both detection and the lifecycle.
 - When in doubt, set `?kind=` explicitly. Do not contort your modelling to please the detector.
 
@@ -194,9 +205,9 @@ Declare every prefix you use; never rely on a reader's defaults. Use the **regis
 
 ---
 
-## 4. Layer 1 — the Knowledge Model (ontology)
+## 4. Layer 1 — the Model and the Vocabulary
 
-**Goal:** define a shared vocabulary so humans and machines agree on terminology. We combine **SKOS** (navigable concept hierarchy, labels) with **RDFS/OWL** (formal class semantics) using the **dual-typing** pattern.
+**Goal:** define a shared schema so humans and machines agree on terminology. The schema has two first-class halves: the **Model** (T-Box) declares the *classes* and class axioms, and the **Vocabulary** (R-Box) declares the *properties/relations* plus the SKOS *concept schemes*. We combine **SKOS** (navigable concept hierarchy, labels) with **RDFS/OWL** (formal class and property semantics) using the **dual-typing** pattern.
 
 ### 4.1 The concept scheme container
 
@@ -340,13 +351,13 @@ Common constraint components: `sh:minCount`/`sh:maxCount` (cardinality), `sh:dat
 
 The store validates at two distinct points (see [`data-modeling.md`](data-modeling.md)):
 
-1. **Model validation** — are the shapes/axioms themselves well-formed? Run in the Ontology Registry before publishing a version.
+1. **Model validation** — are the shapes/axioms themselves well-formed? Run in the Model Registry before publishing a version.
 2. **Instance validation** — does the A-Box satisfy the shapes? Run against a dataset: `POST /api/datasets/{id}/validate`.
 
 **Shape resolution order** for a dataset:
 
 1. dataset-specific shapes graph (`shapes_graph_iri` on the dataset), if set;
-2. otherwise the SHACL shapes from the ontology version the dataset declares via `conforms_to_ontology` + `conforms_to_version`.
+2. otherwise the SHACL shapes from the model version the dataset declares via `conforms_to_model` + `conforms_to_version`.
 
 This lets many datasets share one model's shapes without copying them. Enable `shacl_on_write` to validate every write before it commits.
 
@@ -522,7 +533,7 @@ happens to be shapes, so the same severity thresholds, reports and gating apply.
 ### 6.1 Typing and conformance
 
 - Every instance **MUST** be typed with a model class: `ex:Dracula a ex:Book`.
-- The dataset holding instances **SHOULD** declare `dct:conformsTo` the model version it targets (set via `conforms_to_ontology` + `conforms_to_version`); the catalogue emits this automatically (§7).
+- The dataset holding instances **SHOULD** declare `dct:conformsTo` the model version it targets (set via `conforms_to_model` + `conforms_to_version`); the catalogue emits this automatically (§7).
 
 ```turtle
 @prefix ex:   <https://example.org/showcase/> .
@@ -644,11 +655,11 @@ Each registered graph is annotated with its role via the project's own predicate
 
 ```turtle
 <urn:catalogue:2025>
-    <https://opentriplestore.org/ontology/graphRole>
-        <https://opentriplestore.org/ontology/Instances> .
+    <https://opentriplestore.org/ns/role#graphRole>
+        <https://opentriplestore.org/ns/role#Instances> .
 ```
 
-The `ots:` namespace `https://opentriplestore.org/ontology/` defines `graphRole` and the role individuals `Instances`, `Model`, `Vocabulary`, `Shapes`, `Entailment`, `System` — the RDF form of §2.1.
+The `ots:` role namespace `https://opentriplestore.org/ns/role#` defines `graphRole` and the role individuals `Instances`, `Model`, `Vocabulary`, `Shapes`, `Entailment`, `System` — the RDF form of §2.1.
 
 ### 7.6 Describing an organisation
 
@@ -852,7 +863,10 @@ A complete, role-separated TriG document tying every layer together. This is the
 @prefix org:   <http://www.w3.org/ns/org#> .
 @prefix foaf:  <http://xmlns.com/foaf/0.1/> .
 
-# ── Layer 1: Knowledge Model (role: vocabulary) ──────────────────────────────
+# ── Layer 1: Model + Vocabulary (role: vocabulary) ───────────────────────────
+#   Classes (Model / T-Box) and properties + concept schemes (Vocabulary / R-Box)
+#   are shown together here for readability; in production keep class-only axioms
+#   in a `model` graph and properties + concept schemes in a `vocabulary` graph.
 ex:vocabulary {
   ex:PublicationVocabulary a skos:ConceptScheme ;
       skos:prefLabel "Publication Vocabulary"@en , "Publicatievocabulaire"@nl ;
@@ -924,11 +938,12 @@ ex:provenance {
 }
 ```
 
-Three checks tell you which layer a triple belongs in:
+Four checks tell you which layer a triple belongs in:
 
-1. **"What *is* a Book?"** → Knowledge Model (`skos:Concept , owl:Class`, labels, notation, broader).
-2. **"What makes a Book *valid*?"** → Information Model (`sh:NodeShape`, cardinality, patterns, ranges).
-3. **"*Which* Book?"** → Instance Data (Dracula, 418 pages, published by the Example Organization).
+1. **"What *kind of thing* is a Book?"** → Model (`owl:Class`, `rdfs:subClassOf`, restrictions, disjointness).
+2. **"How do we *describe* a Book, and what *concept* is it?"** → Vocabulary (`owl:DatatypeProperty`/`ObjectProperty`, `rdfs:domain`/`range`; `skos:Concept`, labels, notation, broader).
+3. **"What makes a Book *valid*?"** → Information Model (`sh:NodeShape`, cardinality, patterns, ranges).
+4. **"*Which* Book?"** → Instance Data (Dracula, 418 pages, published by the Example Organization).
 
 ---
 
@@ -940,7 +955,7 @@ The exact prefixes the triplestore emits. Use these spellings.
 |---|---|---|
 | `rdf` | `http://www.w3.org/1999/02/22-rdf-syntax-ns#` | core RDF |
 | `rdfs` | `http://www.w3.org/2000/01/rdf-schema#` | classes, properties, labels |
-| `owl` | `http://www.w3.org/2002/07/owl#` | formal ontology semantics |
+| `owl` | `http://www.w3.org/2002/07/owl#` | formal class & property semantics |
 | `skos` | `http://www.w3.org/2004/02/skos/core#` | concept schemes, labels |
 | `skosxl` | `http://www.w3.org/2008/05/skos-xl#` | reified labels |
 | `sh` | `http://www.w3.org/ns/shacl#` | validation shapes |
@@ -960,18 +975,23 @@ The exact prefixes the triplestore emits. Use these spellings.
 | `unit` | `http://qudt.org/vocab/unit/` | units |
 | `om` | `http://www.ontology-of-units-of-measure.org/resource/om-2/` | units (alt) |
 | `xsd` | `http://www.w3.org/2001/XMLSchema#` | datatypes |
-| `ots` | `https://opentriplestore.org/ontology/` | graph-role annotations; validation-layer bindings (`ots:validatedBy`, §5.4) |
+| `ots:role` | `https://opentriplestore.org/ns/role#` | graph-role annotations (`graphRole` + the role individuals, §7.5) |
+| `ots` | `https://opentriplestore.org/ns/` | project terms; validation-layer bindings (`ots:validatedBy`, §5.4) |
 
 ## Appendix B — Graph-role detection cheat-sheet
 
-| If a graph is dominated by… | It is detected as | Register it as |
-|---|---|---|
-| `owl:Class` / `owl:*Property` / `rdfs:Class` | `model` | data model |
-| `skos:Concept` / `skos:ConceptScheme` / `skos:*` predicates | `vocabulary` | vocabulary |
-| `sh:NodeShape` / `sh:*` predicates / `sh:targetClass` | `shapes` | shapes (in registry) |
-| `swrl:Imp` / `spin:`/`sp:` | `entailment` | entailment |
-| subjects typed with non-schema classes | `instances` | dataset |
-| a balanced mix | *ambiguous* → set `?kind=` | (your call) |
+| If a graph is dominated by… | Layer | It is detected as | Register it as |
+|---|---|---|---|
+| `owl:Class` / `rdfs:Class` / `rdfs:subClassOf` / restrictions / disjointness | T-Box | `model` | data model |
+| `owl:ObjectProperty` / `owl:DatatypeProperty` / `owl:AnnotationProperty` / `rdf:Property` / `rdfs:domain`/`range` / `rdfs:subPropertyOf` / `owl:inverseOf` | R-Box | `vocabulary` | vocabulary |
+| `skos:Concept` / `skos:ConceptScheme` / `skos:*` predicates | R-Box | `vocabulary` | vocabulary |
+| `sh:NodeShape` / `sh:*` predicates / `sh:targetClass` | — | `shapes` | shapes (in registry) |
+| `swrl:Imp` / `spin:`/`sp:` | — | `entailment` | entailment |
+| subjects typed with non-schema classes | A-Box | `instances` | dataset |
+| a substantial mix of classes **and** properties/concepts | — | `mixed` → auto-split per role | (split into model / vocabulary / instances) |
+| a balanced mix with no clear winner | — | *ambiguous* → set `?kind=` | (your call) |
+
+The detector compares the **class** count against the combined **property + SKOS** count; the larger side wins and an exact tie breaks toward `model` (§2.2).
 
 Override values: `model`/`tbox`, `vocabulary`/`vocab`, `shapes`, `entailment`, `instances`/`abox`.
 
@@ -996,7 +1016,7 @@ How dataset registry fields render in the DCAT catalogue ([`src/dcat/catalog.rs`
 | `spatial` | `dct:spatial` (IRI) |
 | `landing_page` | `dcat:landingPage` |
 | `shapes_graph_iri` (when `shacl_on_write`) | `dct:conformsTo` |
-| `conforms_to_ontology` + `conforms_to_version` | `dct:conformsTo → …/version/{semver}` |
+| `conforms_to_model` + `conforms_to_version` | `dct:conformsTo → …/data-model/{id}/version/{semver}` |
 | registered graphs | `void:subset` + per-graph `ots:graphRole` |
 | live counts | `void:triples`, `void:distinctSubjects`, `void:distinctObjects`, `void:properties`, `void:documents` |
 
@@ -1004,7 +1024,7 @@ How dataset registry fields render in the DCAT catalogue ([`src/dcat/catalog.rs`
 
 A deliverable conforms to this styleguide when:
 
-- [ ] Each named graph holds exactly one role (model / vocabulary / shapes / instances / entailment).
+- [ ] Each named graph holds exactly one role: `model` (classes), `vocabulary` (properties + concept schemes), `shapes`, `instances` or `entailment`.
 - [ ] Concepts are dual-typed `skos:Concept , owl:Class`, in a `skos:ConceptScheme`.
 - [ ] Every concept/class/property has `skos:prefLabel`/`rdfs:label` in **NL and EN**, one per language.
 - [ ] Every concept has a `skos:notation`; properties declare `rdfs:domain`/`rdfs:range`.

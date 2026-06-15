@@ -5,7 +5,7 @@ OWL 2 QL (Query Language) is a sub-language of OWL 2 based on DL-Lite.  It is de
 of pre-computing entailed triples, OWL 2 QL rewrites each incoming SPARQL query to account for
 the TBox (schema) axioms at query time.
 
-> **Open Triplestore role names:** In the OTS UI and API, TBox content is stored with graph role **Model** (OWL/RDFS class and property definitions) and ABox content is stored with graph role **Instances**.  The standard OWL 2 terms TBox and ABox are used throughout this document as they are defined in the W3C OWL 2 specification.
+> **Open Triplestore role names:** In the OTS UI and API, class definitions and class axioms are stored with graph role **Model** (the T-Box) and ABox content with graph role **Instances**.  Property definitions and relations (`rdfs:subPropertyOf`, `owl:inverseOf`, `rdfs:domain`/`range`) are the **R-Box** and belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning purposes.  The standard OWL 2 terms TBox and ABox are used throughout this document as they are defined in the W3C OWL 2 specification, and the reasoner classifies over the TBox+RBox schema together.
 
 This makes it ideal for:
 - Read-heavy workloads where the TBox is small and relatively static.
@@ -40,6 +40,8 @@ level (not string-based rewriting):
 | `owl:equivalentProperty` | `ex:knows owl:equivalentProperty ex:acquaintedWith` |
 | `owl:inverseOf` | `ex:teaches owl:inverseOf ex:taughtBy` |
 | `rdfs:domain` | `ex:teaches rdfs:domain ex:Person` |
+
+> **Note on graph roles:** the *class* axioms above (`rdfs:subClassOf`, `owl:equivalentClass`) are T-Box terms and live in a **Model** graph; the *property* axioms (`rdfs:subPropertyOf`, `owl:equivalentProperty`, `owl:inverseOf`, `rdfs:domain`) are R-Box terms and live in a **Vocabulary** graph.  OWL groups all of them under "TBox" for reasoning, and the QL rewriter loads them together — the role split is about *where the terms are stored and registered*, not about how the reasoner uses them.
 
 ## Configuration
 

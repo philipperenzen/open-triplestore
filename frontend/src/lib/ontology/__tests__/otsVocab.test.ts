@@ -13,7 +13,9 @@ import { indexStore } from '../termDictionary';
 const FRONTEND_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const ttl = readFileSync(resolve(FRONTEND_ROOT, 'public/vocab/ots.ttl'), 'utf8');
 
-const O = 'https://opentriplestore.org/ontology/';
+// Graph-role + governance terms now live in the single …/ns# namespace (the
+// legacy …/ontology/ base was dropped), alongside the standards-registry terms.
+const O = 'https://opentriplestore.org/ns#';
 const NS = 'https://opentriplestore.org/ns#';
 const A = 'https://opentriplestore.org/ns/asset#';
 

@@ -3,7 +3,7 @@
 OWL 2 EL (Existential Language) is a tractable sub-language of OWL 2 designed for large
 biomedical ontologies such as SNOMED CT, GO, and NCI Thesaurus.
 
-> **Open Triplestore role names:** TBox content = graph role **Model**; ABox content = graph role **Instances**.
+> **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The EL reasoner classifies over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
 It supports:
 

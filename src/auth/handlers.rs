@@ -383,9 +383,10 @@ pub struct CreateDatasetRequest {
     pub owner_type: String,
     pub owner_id: String,
     pub visibility: Option<String>,
-    pub conforms_to_ontology: Option<String>,
+    #[serde(alias = "conforms_to_ontology")]
+    pub conforms_to_model: Option<String>,
     pub conforms_to_version: Option<String>,
-    /// Optional box classification: "abox" | "tbox" | "shapes" | "entailment" | "system"
+    /// Optional role classification: "instances" | "model" | "vocabulary" | "shapes" | "entailment" | "system"
     pub graph_role: Option<String>,
 }
 
@@ -394,7 +395,8 @@ pub struct UpdateDatasetRequest {
     pub name: String,
     pub description: Option<String>,
     pub visibility: String,
-    pub conforms_to_ontology: Option<String>,
+    #[serde(alias = "conforms_to_ontology")]
+    pub conforms_to_model: Option<String>,
     pub conforms_to_version: Option<String>,
     // DCAT / ADMS / VoID metadata
     pub license: Option<String>,
@@ -3545,11 +3547,11 @@ pub async fn create_dataset(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Set ontology conformance if provided
-    if req.conforms_to_ontology.is_some() || req.conforms_to_version.is_some() {
+    // Set model conformance if provided
+    if req.conforms_to_model.is_some() || req.conforms_to_version.is_some() {
         db.update_dataset_conformance(
             &id,
-            req.conforms_to_ontology.as_deref(),
+            req.conforms_to_model.as_deref(),
             req.conforms_to_version.as_deref(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -3782,10 +3784,10 @@ pub async fn update_dataset(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Update ontology conformance
+    // Update model conformance
     db.update_dataset_conformance(
         &dataset_id,
-        req.conforms_to_ontology.as_deref(),
+        req.conforms_to_model.as_deref(),
         req.conforms_to_version.as_deref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

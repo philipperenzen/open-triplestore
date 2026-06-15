@@ -61,7 +61,7 @@ pub mod storage;
 pub mod store;
 #[cfg(feature = "swrl")]
 pub mod swrl;
-#[cfg(feature = "geometry3d")]
-pub mod tiles3d;
 #[cfg(feature = "text-search")]
 pub mod text_search;
+#[cfg(feature = "geometry3d")]
+pub mod tiles3d;
