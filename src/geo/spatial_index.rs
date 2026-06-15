@@ -147,7 +147,7 @@ impl SpatialIndex {
     ) -> Vec<SpatialEntry> {
         let query_envelope = AABB::from_corners([min_x, min_y], [max_x, max_y]);
         let tree = self.tree.read().unwrap();
-        tree.locate_in_envelope_intersecting(&query_envelope)
+        tree.locate_in_envelope_intersecting(query_envelope)
             .cloned()
             .collect()
     }
@@ -155,7 +155,7 @@ impl SpatialIndex {
     /// Query the R-tree for entries within a given distance from a point.
     pub fn query_nearest(&self, x: f64, y: f64, n: usize) -> Vec<SpatialEntry> {
         let tree = self.tree.read().unwrap();
-        tree.nearest_neighbor_iter(&[x, y])
+        tree.nearest_neighbor_iter([x, y])
             .take(n)
             .cloned()
             .collect()
