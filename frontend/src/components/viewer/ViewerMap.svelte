@@ -18,6 +18,7 @@
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf } from '../../lib/viewer/detect';
   import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
+  import { ifcGuidAt, groupHasGuid, subGeometryForGuids } from '../../lib/viewer/ifc';
   import { styleFor, add3dBuildings, BUILDINGS_LAYER_ID } from '../../lib/viewer/basemaps';
 
   /** @type {import('../../lib/viewer/geometry').ViewerElement[]} */
@@ -72,6 +73,9 @@
   let lastProj = null; // latest map projection matrix (for raycasting)
   let fitted = false;
   let hoverPopup = null;
+  // Client-side model-load progress (web-ifc parse etc.) for the loading chip.
+  let modelsLoading = 0;
+  let modelsFailed = 0;
   // True between a style's 'style.load' and the next setStyle(): addSource /
   // addLayer are safe. (isStyleLoaded() is the wrong guard — it also waits for
   // tiles, so it is still false while 'style.load' fires.)
@@ -167,6 +171,10 @@
   async function attachModel(entry, el) {
     const ref = modelRefOf(el);
     if (!ref) return;
+    // Surface a "loading building model" chip: the 49 MB IFC is parsed by web-ifc
+    // client-side with no progress UI, so until it resolves the building isn't on
+    // the map and the scene reads as empty/broken.
+    modelsLoading += 1;
     try {
       const cached = await loadModel(ref.url, ref.format, { upAxis: ref.upAxis });
       if (entries.get(el.id) !== entry) return; // rebuilt meanwhile
@@ -204,7 +212,9 @@
       updateWalkSuggest(); // a building may have loaded while already zoomed in
       map?.triggerRepaint();
     } catch {
-      /* model failed to load — the vector dot remains */
+      modelsFailed += 1; // model failed to load — the vector dot remains
+    } finally {
+      modelsLoading -= 1;
     }
   }
 
@@ -216,14 +226,6 @@
       });
     }
     map?.triggerRepaint();
-  }
-
-  /** GlobalId of an IFC mesh (or its nearest ancestor that owns one). */
-  function meshGuid(obj) {
-    for (let n = obj; n; n = n.parent) {
-      if (n.userData && n.userData.ifcGuid) return n.userData.ifcGuid;
-    }
-    return null;
   }
 
   const HL_COLOR = 0xff6a00; // vivid highlight for the selected element(s)
@@ -238,8 +240,61 @@
     }
   }
 
+  // ── Eased highlight transitions ─────────────────────────────────────────────
+  // Selection/x-ray used to be an INSTANT material swap (opacity 1↔0.16, emissive
+  // 0↔0.55) with one forced repaint — the single biggest "feels unsmooth" cause.
+  // Now paintMat sets the discrete flags (transparent/depthWrite/depthTest) up
+  // front and registers the two *scalar* changes (opacity, emissiveIntensity) as
+  // a tween; a short rAF loop eases them over TWEEN_MS, repainting each frame.
+  // Re-selecting RETARGETS from the current value (no restart-snap), so rapid
+  // clicks stay fluid.
+  const TWEEN_MS = 200;
+  const tweenMats = new Set();
+  let tweenStart = 0;
+  let tweenRAF = 0;
+  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+  const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+  function runTweens() {
+    const t = Math.min(1, (nowMs() - tweenStart) / TWEEN_MS);
+    const k = easeOutCubic(t);
+    for (const m of tweenMats) {
+      const td = m.userData.tween;
+      if (!td) continue;
+      m.opacity = td.fromOpacity + (td.toOpacity - td.fromOpacity) * k;
+      if ('emissiveIntensity' in m) {
+        m.emissiveIntensity = td.fromEmis + (td.toEmis - td.fromEmis) * k;
+      }
+    }
+    map?.triggerRepaint();
+    if (t >= 1) {
+      for (const m of tweenMats) {
+        const td = m.userData.tween;
+        if (!td) continue;
+        // Settle the final discrete flags (e.g. transparent back to false on a
+        // now-solid selected material) once the scalars have arrived.
+        m.transparent = td.finalTransparent;
+        m.depthWrite = td.finalDepthWrite;
+        m.depthTest = td.finalDepthTest;
+        m.opacity = td.toOpacity;
+        if ('emissiveIntensity' in m) m.emissiveIntensity = td.toEmis;
+        m.userData.tween = null;
+      }
+      tweenMats.clear();
+      tweenRAF = 0;
+      map?.triggerRepaint();
+      return;
+    }
+    tweenRAF = requestAnimationFrame(runTweens);
+  }
+
+  function startTween() {
+    tweenStart = nowMs();
+    if (!tweenRAF) tweenRAF = requestAnimationFrame(runTweens);
+  }
+
   /**
-   * Paint a material for one of four states:
+   * Stage a material for one of four states, easing the scalar changes:
    *  - `selected`     — glow (whole non-IFC model picked); normal depth.
    *  - `selectedXray` — glow AND render ON TOP (depthTest off) so the picked IFC
    *                     sub-element is always visible through the ghosted shell.
@@ -250,45 +305,65 @@
     if (!m) return;
     stashMat(m);
     const emis = 'emissive' in m;
+    let toOpacity;
+    let toEmis;
+    let finalTransparent;
+    let finalDepthWrite;
+    let finalDepthTest;
     if (state === 'selected' || state === 'selectedXray') {
-      if (emis) {
-        m.emissive.setHex(HL_COLOR);
-        m.emissiveIntensity = 0.55;
-      }
-      // A selected element is always SOLID, even if its IFC material was glassy /
-      // semi-transparent — otherwise the highlight reads as see-through.
-      m.opacity = 1;
-      m.transparent = false;
+      if (emis) m.emissive.setHex(HL_COLOR);
+      toEmis = 0.55;
+      // A selected element ends up SOLID even if its IFC material was glassy.
+      toOpacity = 1;
+      finalTransparent = false;
+      finalDepthWrite = true;
+      finalDepthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
+      // Discrete flags that must read immediately so the pick pops on top.
       m.depthWrite = true;
-      m.depthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
+      m.depthTest = finalDepthTest;
     } else if (state === 'ghost') {
-      if (emis) {
-        m.emissive.setHex(0x000000);
-        m.emissiveIntensity = 0;
-      }
-      m.transparent = true;
-      m.opacity = Math.min(m.userData.origOpacity, 0.16);
-      m.depthWrite = false; // don't occlude the selected element behind it
-      m.depthTest = m.userData.origDepthTest;
+      toEmis = 0;
+      toOpacity = Math.min(m.userData.origOpacity, 0.16);
+      finalTransparent = true;
+      finalDepthWrite = false;
+      finalDepthTest = m.userData.origDepthTest;
+      m.depthWrite = false; // stop occluding the selected element immediately
+      m.depthTest = finalDepthTest;
     } else {
-      if (emis) {
-        m.emissive.setHex(0x000000);
-        m.emissiveIntensity = 0;
-      }
-      m.opacity = m.userData.origOpacity;
-      m.transparent = m.userData.origTransparent;
+      toEmis = 0;
+      toOpacity = m.userData.origOpacity;
+      finalTransparent = m.userData.origTransparent;
+      finalDepthWrite = m.userData.origDepthWrite;
+      finalDepthTest = m.userData.origDepthTest;
       m.depthWrite = m.userData.origDepthWrite;
       m.depthTest = m.userData.origDepthTest;
     }
-  }
-
-  /** Does this model own a mesh for any of these GlobalIds? (cheap early-out) */
-  function modelHasGuid(e, guidSet) {
-    let found = false;
-    e.modelGroup?.traverse((n) => {
-      if (!found && n.isMesh && n.userData.ifcGuid && guidSet.has(n.userData.ifcGuid)) found = true;
-    });
-    return found;
+    const curOpacity = m.opacity;
+    const curEmis = emis ? m.emissiveIntensity : 0;
+    // No scalar change and flags already settled → no tween needed.
+    if (
+      Math.abs(curOpacity - toOpacity) < 0.001 &&
+      Math.abs(curEmis - toEmis) < 0.001 &&
+      m.transparent === finalTransparent
+    ) {
+      m.transparent = finalTransparent;
+      m.opacity = toOpacity;
+      if (emis) m.emissiveIntensity = toEmis;
+      m.userData.tween = null;
+      return;
+    }
+    // Keep transparent during the ease so partial opacity actually blends.
+    m.transparent = true;
+    m.userData.tween = {
+      fromOpacity: curOpacity,
+      toOpacity,
+      fromEmis: curEmis,
+      toEmis,
+      finalTransparent,
+      finalDepthWrite,
+      finalDepthTest,
+    };
+    tweenMats.add(m);
   }
 
   // Children index (parent id → child elements) for subtree highlighting, so
@@ -325,26 +400,84 @@
   }
 
   function highlightModels() {
-    // Light the selected element's meshes by GlobalId. For a spatial container
-    // (storey/building) that owns no mesh, light its whole subtree (every wall /
-    // slab it contains). For a model with no IFC guids, light it whole by id.
-    // Inside a multi-element IFC model, also x-ray: ghost everything that isn't
-    // selected so the picked element is visible through the obstructing walls.
+    // The selected element's GlobalId set (its whole BOT subtree for a spatial
+    // container — a storey lights every wall/slab it contains).
     const selGuids = selected ? descendantGuidSet(selected) : null;
     const byGuid = selGuids && selGuids.size > 0;
     for (const [id, e] of entries) {
-      const xray = byGuid && e.isIfc && modelHasGuid(e, selGuids);
-      e.modelGroup?.traverse((n) => {
-        if (!n.isMesh || !n.material) return;
-        const on = byGuid ? selGuids.has(n.userData.ifcGuid) : id === selected;
-        const state = on ? (xray ? 'selectedXray' : 'selected') : xray ? 'ghost' : 'normal';
-        // Draw the picked element last so it sits on top of the ghosted shell.
-        n.renderOrder = state === 'selectedXray' ? 12 : 0;
-        const mats = Array.isArray(n.material) ? n.material : [n.material];
-        for (const m of mats) paintMat(m, state);
-      });
+      if (e.isIfc) {
+        // The IFC building is MERGED (a few per-material meshes), so a single
+        // element can't be lit by swapping a mesh's material. Instead: ghost the
+        // whole building, and overlay the selected element(s) as a solid, glowing
+        // copy rendered on top (the x-ray effect) — or restore it when nothing in
+        // this building is selected.
+        const xray = byGuid && groupHasGuid(e.modelGroup, selGuids);
+        e.modelGroup?.traverse((n) => {
+          if (!n.isMesh || !n.material || n.userData.isOverlay) return;
+          n.renderOrder = 0;
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          for (const m of mats) paintMat(m, xray ? 'ghost' : 'normal');
+        });
+        setIfcOverlay(e, xray ? selGuids : null);
+      } else {
+        // Non-IFC model (CityJSON/STL/glTF) — light the whole model by id.
+        const on = !byGuid && id === selected;
+        e.modelGroup?.traverse((n) => {
+          if (!n.isMesh || !n.material) return;
+          n.renderOrder = 0;
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          for (const m of mats) paintMat(m, on ? 'selected' : 'normal');
+        });
+      }
     }
-    map?.triggerRepaint();
+    // Ease the staged scalar changes (falls back to a single repaint if nothing
+    // actually needs animating).
+    if (tweenMats.size) startTween();
+    else map?.triggerRepaint();
+  }
+
+  /** Add (or remove) a solid, glowing overlay of `selGuids` on top of the ghosted
+   *  merged IFC building — the per-element x-ray highlight a merged mesh can't do
+   *  by material swap. The overlay is non-pickable and disposed on the next change. */
+  function setIfcOverlay(e, selGuids) {
+    if (e.overlay) {
+      e.overlay.parent?.remove(e.overlay);
+      disposeOverlay(e.overlay);
+      e.overlay = null;
+    }
+    if (!selGuids || !e.modelGroup) return;
+    const ov = subGeometryForGuids(e.modelGroup, selGuids);
+    if (!ov.children.length) return;
+    ov.traverse((n) => {
+      if (!n.isMesh) return;
+      const base = Array.isArray(n.material) ? n.material[0] : n.material;
+      const om = base ? base.clone() : new THREE.MeshStandardMaterial();
+      om.transparent = false;
+      om.opacity = 1;
+      om.depthTest = false; // always visible, through the ghosted shell
+      om.depthWrite = true;
+      if ('emissive' in om) {
+        om.emissive.setHex(HL_COLOR);
+        om.emissiveIntensity = 0.5;
+      }
+      n.material = om;
+      n.renderOrder = 12;
+      n.userData.isOverlay = true;
+      n.raycast = () => {}; // the merged building under it owns picking
+    });
+    // Child of the model group so it inherits the same placement transform as the
+    // merged meshes the geometry was extracted from.
+    e.modelGroup.add(ov);
+    e.overlay = ov;
+  }
+
+  function disposeOverlay(ov) {
+    ov.traverse((n) => {
+      if (!n.isMesh) return;
+      n.geometry?.dispose?.();
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of mats) m?.dispose?.();
+    });
   }
 
   /**
@@ -385,10 +518,11 @@
         RAYCASTER.ray.origin.copy(RAY.origin);
         RAYCASTER.ray.direction.copy(RAY.direction);
         const hits = RAYCASTER.intersectObject(e.modelGroup, true);
-        // Take the nearest hit that actually owns a GlobalId — IFC openings and
-        // other non-rooted meshes carry none and would otherwise swallow the pick.
+        // Take the nearest hit that actually owns a GlobalId — a merged building
+        // mesh resolves the GlobalId from the picked triangle (faceIndex); IFC
+        // openings and other non-rooted triangles carry none and are skipped.
         for (const hit of hits) {
-          const g = meshGuid(hit.object);
+          const g = ifcGuidAt(hit.object, hit.faceIndex);
           if (g) {
             guid = g;
             break;
@@ -568,6 +702,12 @@
   function rebuildData() {
     if (!map || elements === lastElements) return;
     lastElements = elements;
+    for (const e of entries.values()) {
+      if (e.overlay) {
+        e.overlay.parent?.remove(e.overlay);
+        disposeOverlay(e.overlay);
+      }
+    }
     entries = new Map();
     for (const el of elements) {
       const anchor = modelAnchor(el);
@@ -675,22 +815,18 @@
     if (fs.length) dispatch('select', { id: fs[0].properties.id });
   }
 
-  let lastHoverTs = 0;
   function onMouseMove(e) {
     if (!map) return;
     let label = null;
-    // Precise (triangle) pick on hover, throttled, so the tooltip names the exact
-    // wall/slab/door under the cursor. The cheap box test rejects off-model hovers
-    // first, so the triangle cast only runs while actually over a building.
-    const now = (typeof performance !== 'undefined' ? performance.now() : 0);
-    const precise = now - lastHoverTs > 80;
-    if (precise) lastHoverTs = now;
-    const pick = raycastModels(e.point, precise);
+    // Hover uses the CHEAP box-level pick (model name), never the per-triangle
+    // cast: the building is now a few MERGED meshes whose bounding spheres each
+    // span the whole building, so a precise hover would triangle-test the entire
+    // building every mouse-move. The exact wall/slab is still resolved on click
+    // (a one-off precise cast), where the cost is paid once.
+    const pick = raycastModels(e.point, false);
     if (pick) {
-      const el =
-        (pick.guid && elements.find((x) => x.ifc_guid === pick.guid)) ||
-        elements.find((x) => x.id === pick.id);
-      label = el?.label || (pick.guid || pick.id).split(/[/#]/).pop();
+      const el = elements.find((x) => x.id === pick.id);
+      label = el?.label || pick.id.split(/[/#]/).pop();
     } else {
       const pad = 4;
       const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
@@ -755,6 +891,13 @@
 
   onDestroy(() => {
     unsubTheme();
+    if (tweenRAF) cancelAnimationFrame(tweenRAF);
+    for (const e of entries.values()) {
+      if (e.overlay) {
+        e.overlay.parent?.remove(e.overlay);
+        disposeOverlay(e.overlay);
+      }
+    }
     hoverPopup?.remove();
     if (map) map.remove();
     map = null;
@@ -762,7 +905,12 @@
   });
 
   $: if (map && elements) rebuildData();
-  $: if (map && selected !== undefined) {
+  // Guard against redundant repaints: the parent re-sets `selected` to the same
+  // value on every panel focus/close, which used to re-run a full per-mesh
+  // traversal + repaint each time (a hitch on the 4000-element building).
+  let lastSelectedPaint = null;
+  $: if (map && selected !== undefined && selected !== lastSelectedPaint) {
+    lastSelectedPaint = selected;
     applySelectedPaint();
     highlightModels();
   }
@@ -800,6 +948,16 @@
       <span class="ml-name">{$i18nT('viewer.layerSelected')}</span>
     </div>
   </div>
+
+  {#if modelsLoading > 0 || modelsFailed > 0}
+    <div class="model-load-chip" class:err={modelsLoading === 0 && modelsFailed > 0} role="status">
+      {#if modelsLoading > 0}
+        <span class="mlc-spin"></span>{$i18nT('viewer.loadingModels')}
+      {:else}
+        {modelsFailed} {$i18nT('viewer.modelsFailed')}
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -940,5 +1098,46 @@
   }
   :global(.viewer-popup .maplibregl-popup-tip) {
     border-top-color: var(--bg-elevated, #fff);
+  }
+
+  /* "Loading building model…" chip while web-ifc parses a heavy model. */
+  .model-load-chip {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 13px;
+    border-radius: 999px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.96));
+    color: var(--ink-900, #0f172a);
+    border: 1px solid var(--line-soft, #e6eaef);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    font-size: 0.76rem;
+    backdrop-filter: blur(8px);
+  }
+  .model-load-chip.err {
+    color: var(--danger-500, #c0392b);
+  }
+  .mlc-spin {
+    width: 12px;
+    height: 12px;
+    border: 2px solid color-mix(in srgb, var(--brand-500, #2f88d8) 35%, transparent);
+    border-top-color: var(--brand-500, #2f88d8);
+    border-radius: 50%;
+    animation: mlc-spin 0.8s linear infinite;
+  }
+  @keyframes mlc-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mlc-spin {
+      animation: none;
+    }
   }
 </style>

@@ -3,18 +3,27 @@
   // (/api/datasets/:id/3dtiles/tileset.json), and on click resolves the picked
   // feature's stable per-feature IRI (the EXT_structural_metadata `iri`
   // property — the same key that is the RDF subject and the viewer lookup key)
-  // and runs a SPARQL DESCRIBE-style query for it, showing predicate/object
-  // pairs in a side panel.
+  // and runs a SPARQL query for it, showing predicate/object pairs in a panel.
   //
   // Cesium owns depth, terrain and globe occlusion natively, so this path does
   // NOT suffer the MapLibre+three.js satellite/tilt/z-fight failure modes the
-  // 2D viewer works around — switching imagery here is a plain layer swap with
-  // no custom WebGL layer to collapse.
+  // 2D viewer works around — switching imagery here is a plain layer swap.
+  //
+  // Robustness: imagery is token-free (OpenStreetMap streets + Esri World
+  // Imagery satellite — the SAME source as the 2D map), so the base layer never
+  // depends on a Cesium Ion token (the bundled demo token expires). The globe
+  // gets a neutral base colour so even a failed imagery layer reads as a surface,
+  // not black. The viewer renders on-demand (requestRenderMode) so it idles at
+  // ~0 fps over a near-static scene; every mutation requests a frame.
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import { Boxes, X, MapPin, Satellite, ExternalLink, Sparkles, Loader2 } from 'lucide-svelte';
+  import {
+    Boxes, X, MapPin, Satellite, ExternalLink, Sparkles, Loader2,
+    Home, Plus, Minus, Maximize2, MousePointerClick,
+  } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.ts';
   import { navigate } from '../../lib/router/index.js';
   import { openSparkExplain } from '../../lib/sparkHelp.js';
+  import { isDark } from '../../lib/theme.js';
 
   // Open the resource page for a predicate/object IRI (in-app navigation so it
   // shares the SPA session) — bnodes (_:…) are not dereferenceable, so callers
@@ -28,20 +37,25 @@
   export let height = '100%';
   // Embedded mode: hosted inside the dataset explorer's canvas next to the
   // element list + the rich ElementModal inspector. A pick then dispatches
-  // `select` to the parent (which opens the inspector, with the IFC/BOT
-  // decomposition + sub-element tree) instead of showing this component's own
-  // lightweight SPARQL panel — so switching to 3D Tiles sacrifices no features.
+  // `select` to the parent (which opens the inspector) instead of showing this
+  // component's own lightweight SPARQL panel — so switching to 3D Tiles
+  // sacrifices no features. A "full screen" button opens the standalone page.
   export let embedded = false;
   /** Currently-selected element id (from the parent) to highlight in the scene. */
   export let selected = '';
 
   const dispatch = createEventDispatcher();
 
-  // Cesium fetches its workers / glsl / Assets relative to CESIUM_BASE_URL. We
-  // point it at the matching CDN build so the static assets resolve without any
-  // bundler/copy-plugin configuration.
+  // Cesium fetches its workers / glsl / Assets relative to CESIUM_BASE_URL; we
+  // point it at the matching CDN build so static assets resolve with no bundler
+  // configuration.
   const CESIUM_VERSION = '1.123.0';
   const CESIUM_BASE_URL = `https://cdn.jsdelivr.net/npm/cesium@${CESIUM_VERSION}/Build/Cesium/`;
+  // Token-free Esri World Imagery — the same source the 2D map viewer uses — so
+  // the satellite base never depends on a Cesium Ion token.
+  const ESRI_IMAGERY =
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  const ESRI_CREDIT = 'Esri, Maxar, Earthstar Geographics, and the GIS User Community';
 
   let containerEl;
   let viewer = null;
@@ -51,30 +65,38 @@
 
   let loading = true;
   let error = '';
-  let baseLayer = 'satellite'; // 'satellite' | 'streets'
+  let empty = false; // tileset has no renderable geometry
+  let baseLayer = 'streets'; // 'streets' | 'satellite' — token-free either way
+  let showHint = true; // "click a building to inspect", cleared on first pick
+  let homeView = null; // captured bounding sphere for the Home button
 
-  // Side panel state for the picked feature.
+  // Side panel state for the picked feature (standalone mode only).
   let selectedIri = '';
   let selectedLabel = '';
   let rows = []; // { p, o, isIri }
   let queryLoading = false;
   let queryError = '';
 
-  // The currently-highlighted feature (so we can clear its colour on the next pick).
-  let highlighted = null;
+  // Last IRI applied as the tileset selection style — so an identical selection
+  // doesn't rebuild the style (which would force a render under requestRenderMode).
+  let lastStyledIri = null;
   const HIGHLIGHT_COLOR_CSS = '#e8590c';
+
+  let dark = false;
+  const unsubTheme = isDark.subscribe((v) => {
+    dark = v;
+  });
 
   async function init() {
     try {
-      // Set the base URL before any Cesium module touches it.
       window.CESIUM_BASE_URL = CESIUM_BASE_URL;
       Cesium = await import('cesium');
       await import('cesium/Build/Cesium/Widgets/widgets.css');
 
       viewer = new Cesium.Viewer(containerEl, {
-        // World imagery is the default base layer; terrain stays off (flat
-        // ellipsoid) so a tileset georeferenced to ground sits correctly without
-        // a terrain-provider round-trip.
+        // We add our own token-free imagery (below), so disable the default Ion
+        // world-imagery base layer entirely.
+        baseLayer: false,
         baseLayerPicker: false,
         geocoder: false,
         homeButton: false,
@@ -85,25 +107,65 @@
         fullscreenButton: false,
         infoBox: false,
         selectionIndicator: false,
+        // Render on demand: idle at ~0 fps over a near-static scene; every
+        // mutation below calls scene.requestRender(). Cesium auto-requests during
+        // camera moves and tile streaming, so interaction stays live.
+        requestRenderMode: true,
+        maximumRenderTimeChange: Infinity,
       });
-      // Hide the default Cesium credit overlay clutter; keep the logo.
-      viewer.scene.globe.depthTestAgainstTerrain = false;
-      // Soften the lighting. Cesium's default sun (intensity 2.0) blows the flat,
-      // sun-facing roofs of our short tiles out to pure white when viewed near
-      // top-down. A dimmer sun + the GLB material's small emissive floor make the
-      // tiles read as shaded grey buildings instead of white squares.
-      viewer.scene.light = new Cesium.SunLight({ intensity: 0.5 });
+      if (import.meta.env.DEV) window.__otsCesium = viewer; // dev console handle
 
+      const scene = viewer.scene;
+      scene.globe.depthTestAgainstTerrain = false;
+      // Neutral globe so a fully-failed imagery layer still reads as a surface
+      // rather than the black void the old Ion-dependent default fell back to.
+      scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a2330');
+      // Soften the lone sun so flat, sun-facing roofs read as shaded grey instead
+      // of blowing out to white near top-down.
+      scene.light = new Cesium.SunLight({ intensity: 0.55 });
+
+      applyBaseLayer();
       await loadTileset();
       attachPicking();
+      scene.requestRender();
     } catch (e) {
       error = e?.message || 'Failed to initialise the 3D viewer.';
     } finally {
       // Clear the overlay once the tileset is in the scene — the camera flight
-      // below must NOT gate the UI (zoomTo resolves only after the flight, which
-      // can stall on a degenerate bounding volume).
+      // must NOT gate the UI.
       loading = false;
     }
+  }
+
+  /** (Re)apply the current base imagery. Token-free in both modes. */
+  function applyBaseLayer() {
+    if (!viewer || !Cesium) return;
+    const layers = viewer.imageryLayers;
+    layers.removeAll();
+    try {
+      const provider =
+        baseLayer === 'satellite'
+          ? new Cesium.UrlTemplateImageryProvider({
+              url: ESRI_IMAGERY,
+              maximumLevel: 19,
+              credit: ESRI_CREDIT,
+            })
+          : new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' });
+      layers.addImageryProvider(provider);
+      // If tiles fail to load (network/provider outage), drop back to OSM streets
+      // once so the demo never silently shows a blank base.
+      if (provider.errorEvent) {
+        provider.errorEvent.addEventListener(() => {
+          if (baseLayer !== 'streets') {
+            baseLayer = 'streets';
+            applyBaseLayer();
+          }
+        });
+      }
+    } catch {
+      /* leave the neutral globe surface */
+    }
+    viewer.scene.requestRender();
   }
 
   async function loadTileset() {
@@ -114,20 +176,61 @@
     tileset = await Cesium.Cesium3DTileset.fromUrl(
       `/api/datasets/${encodeURIComponent(datasetId)}/3dtiles/tileset.json`,
     );
+    // Load the (single) tile a touch more eagerly so the block fills in quickly.
+    tileset.maximumScreenSpaceError = 16;
+    // Keep the default HIGHLIGHT (multiply) blend mode: a non-selected
+    // color('#ffffff') is the multiply identity, so every building KEEPS its
+    // per-feature COLOR_0 tone while only the matched feature tints orange. This
+    // matters in embedded mode, where the parent's `selected` is often an IFC
+    // element that ISN'T a tileset feature — under REPLACE that would dim the
+    // whole block to grey on every selection, defeating the COLOR_0 polish.
     viewer.scene.primitives.add(tileset);
-    // Fly to the tileset without blocking init: zoomTo awaits the camera flight,
-    // which can hang. Prefer the ready tileset's boundingSphere; fall back to
-    // zoomTo. Either way init() proceeds and the overlay clears.
-    try {
-      const bs = tileset.boundingSphere;
-      if (bs && Number.isFinite(bs.radius) && bs.radius > 0) {
-        viewer.camera.flyToBoundingSphere(bs, { duration: 0 });
-      } else {
-        viewer.zoomTo(tileset).catch(() => {});
-      }
-    } catch {
-      viewer.zoomTo(tileset).catch(() => {});
+    // A fresh tileset has no style; drop the idempotency cache so the current
+    // selection re-applies onto it.
+    lastStyledIri = null;
+
+    const bs = tileset.boundingSphere;
+    const hasContent = bs && Number.isFinite(bs.radius) && bs.radius > 0;
+    empty = !hasContent;
+    if (hasContent) {
+      homeView = bs.clone ? bs.clone() : bs;
+      // flyToBoundingSphere with duration 0 resolves immediately (zoomTo can hang
+      // on a degenerate volume).
+      viewer.camera.flyToBoundingSphere(bs, { duration: 0 });
+    } else {
+      flyHomeFallback();
     }
+    applyHighlight(embedded ? selected : selectedIri);
+    viewer.scene.requestRender();
+  }
+
+  /** Fixed Nijmegen pose so the camera always frames *something*, even when the
+   *  tileset is empty or its bounding volume is degenerate. */
+  function flyHomeFallback() {
+    if (!viewer || !Cesium) return;
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(5.8337, 51.8408, 1400),
+      duration: 0,
+    });
+  }
+
+  function flyHome() {
+    if (!viewer) return;
+    if (homeView) viewer.camera.flyToBoundingSphere(homeView, { duration: 0.8 });
+    else flyHomeFallback();
+    viewer.scene.requestRender();
+  }
+
+  function zoomBy(dir) {
+    if (!viewer) return;
+    const h = viewer.camera.positionCartographic.height || 1000;
+    if (dir < 0) viewer.camera.zoomIn(h * 0.35);
+    else viewer.camera.zoomOut(h * 0.35);
+    viewer.scene.requestRender();
+  }
+
+  function openFullScreen() {
+    navigate(`/datasets/${encodeURIComponent(datasetId)}/cesium`);
   }
 
   function attachPicking() {
@@ -135,64 +238,64 @@
     handler.setInputAction((movement) => {
       const picked = viewer.scene.pick(movement.position);
       // A 3D-Tiles feature exposes per-feature metadata via getProperty(); the
-      // binding key is the `iri` property written by the tiling pipeline (P5).
+      // binding key is the `iri` property written by the tiling pipeline.
       if (picked instanceof Cesium.Cesium3DTileFeature) {
         const iri = picked.getProperty('iri');
         const label =
           picked.getProperty('label') ||
           picked.getProperty('name') ||
           (iri ? shortenIRI(iri) : '');
-        highlightFeature(picked);
+        showHint = false;
         if (iri) {
-          // Embedded: hand the pick to the parent's rich inspector. Standalone:
-          // show this component's own SPARQL property panel.
+          // Embedded: hand the pick to the parent's rich inspector (it sets
+          // `selected`, which restyles the scene reactively). Standalone: show
+          // this component's own SPARQL panel; selectedIri drives the highlight.
           if (embedded) dispatch('select', { id: iri });
           else selectFeature(iri, label);
         }
         return;
       }
       // Clicking empty space clears the selection + highlight.
-      clearHighlight();
       if (!embedded) closePanel();
     }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    // Double-click empty space re-frames the block — the only recovery once you
+    // orbit away from a small tileset.
+    handler.setInputAction((m) => {
+      const picked = viewer.scene.pick(m.position);
+      if (!(picked instanceof Cesium.Cesium3DTileFeature)) flyHome();
+    }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
   }
 
-  function highlightFeature(feature) {
-    clearHighlight();
-    try {
-      highlighted = feature;
-      feature.color = Cesium.Color.fromCssColorString(HIGHLIGHT_COLOR_CSS);
-    } catch {
-      highlighted = null;
+  /**
+   * Highlight the feature whose `iri` matches by colour-styling the tileset —
+   * the SINGLE source of truth for selection (no per-feature `feature.color`,
+   * which a later tile pass would overwrite, causing the old flicker-then-revert).
+   * Passing a falsy iri clears the style back to the per-feature COLOR_0 tones.
+   */
+  function applyHighlight(iri) {
+    if (!tileset || !Cesium) return;
+    const key = iri || '';
+    if (key === lastStyledIri) return; // idempotent — don't force a re-render
+    lastStyledIri = key;
+    if (key) {
+      const esc = String(key).replace(/'/g, "\\'");
+      // HIGHLIGHT (multiply) blend mode: white is the identity, so non-matched
+      // buildings keep their COLOR_0 tone while the matched feature multiplies to
+      // a clear orange. (The COLOR_0 tones are light pastels, so orange × tone
+      // still reads unmistakably orange against the pale neighbours.)
+      tileset.style = new Cesium.Cesium3DTileStyle({
+        color: {
+          conditions: [
+            [`\${iri} === '${esc}'`, `color('${HIGHLIGHT_COLOR_CSS}')`],
+            ['true', "color('#ffffff')"],
+          ],
+        },
+      });
+    } else {
+      tileset.style = undefined;
     }
-  }
-
-  function clearHighlight() {
-    if (highlighted) {
-      try {
-        highlighted.color = Cesium.Color.WHITE;
-      } catch {
-        /* feature may be unloaded after a tile evicts */
-      }
-      highlighted = null;
-    }
-  }
-
-  // Reverse binding stub: colour every feature whose `iri` matches via a 3D
-  // Tiles Style, so an external selection (e.g. a SPARQL result row) can be
-  // reflected back into the scene.
-  // TODO(P7): drive this from the data-explorer selection store.
-  export function styleByIri(iri, cssColor = HIGHLIGHT_COLOR_CSS) {
-    if (!tileset || !Cesium || !iri) return;
-    const esc = String(iri).replace(/'/g, "\\'");
-    tileset.style = new Cesium.Cesium3DTileStyle({
-      color: {
-        conditions: [
-          [`\${iri} === '${esc}'`, `color('${cssColor}')`],
-          ['true', "color('#ffffff')"],
-        ],
-      },
-    });
+    viewer?.scene.requestRender();
   }
 
   async function selectFeature(iri, label) {
@@ -238,21 +341,21 @@
     queryError = '';
   }
 
-  // Imagery toggle: world satellite imagery vs a simple OSM raster basemap.
-  // Cesium composites raster layers natively — no custom layer to rebuild — so
-  // this is the depth-correct replacement for the old MapLibre satellite toggle.
+  // Imagery toggle: streets (OSM) vs satellite (Esri). Cesium composites raster
+  // layers natively — no custom layer to rebuild.
   function setBaseLayer(kind) {
     if (kind === baseLayer || !viewer || !Cesium) return;
     baseLayer = kind;
-    const layers = viewer.imageryLayers;
-    layers.removeAll();
-    if (kind === 'streets') {
-      layers.addImageryProvider(
-        new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' }),
-      );
-    } else {
-      // Default Cesium ion world imagery.
-      layers.addImageryProvider(Cesium.ImageryLayer.fromWorldImagery({}).imageryProvider);
+    applyBaseLayer();
+  }
+
+  function onKeydown(e) {
+    // Escape closes the standalone feature panel. (No global 'r' shortcut — it
+    // would hijack the key app-wide while the embedded viewer is mounted; the
+    // Home button + double-click-empty-space already reset the view.)
+    if (e.key === 'Escape' && !embedded && selectedIri) {
+      closePanel();
+      e.stopPropagation();
     }
   }
 
@@ -260,11 +363,12 @@
     init();
   });
 
-  // Embedded mode: reflect the parent explorer's selection into the scene by
-  // colour-styling the matching feature (reverse binding §7.3).
-  $: if (embedded && tileset && Cesium) styleByIri(selected || '');
+  // Reflect the active selection into the scene: the parent's `selected` (embedded)
+  // or the local `selectedIri` (standalone). applyHighlight is idempotent.
+  $: if (tileset && Cesium) applyHighlight(embedded ? selected || '' : selectedIri);
 
   onDestroy(() => {
+    unsubTheme();
     handler?.destroy?.();
     handler = null;
     if (viewer && !viewer.isDestroyed?.()) viewer.destroy();
@@ -273,36 +377,71 @@
   });
 </script>
 
-<div class="cesium-wrap" style:height>
+<svelte:window on:keydown={onKeydown} />
+
+<div class="cesium-wrap" class:dark style:height>
   <div bind:this={containerEl} class="cesium-canvas" role="application" aria-label="3D tiles viewer"></div>
 
-  {#if loading}
-    <div class="cesium-overlay">
-      <Loader2 size={22} class="spin" />
-      <span>Loading 3D tiles…</span>
-    </div>
-  {:else if error}
-    <div class="cesium-overlay error">
-      <span>{error}</span>
+  <div class="cesium-overlay-zone" aria-live="polite" aria-busy={loading}>
+    {#if loading}
+      <div class="cesium-overlay">
+        <Loader2 size={22} class="spin" />
+        <span>Loading 3D tiles…</span>
+      </div>
+    {:else if error}
+      <div class="cesium-overlay error">
+        <Boxes size={26} />
+        <span>{error}</span>
+      </div>
+    {:else if empty}
+      <div class="cesium-overlay empty">
+        <Boxes size={28} />
+        <p class="empty-title">No 3D-Tiles geometry yet</p>
+        <p class="empty-sub">This dataset has no streamable 3D-Tiles content — try the Map view for its other geometry.</p>
+      </div>
+    {/if}
+  </div>
+
+  {#if !loading && !error && !empty && showHint}
+    <div class="cesium-hint" role="status">
+      <MousePointerClick size={13} /> Click a building to inspect its linked data
     </div>
   {/if}
 
-  <!-- Imagery toggle (satellite vs streets). Depth/terrain are native, so this
-       swap can't collapse the scene the way the 2D viewer's custom layer could. -->
-  <div class="base-toggle" role="group" aria-label="Base imagery">
-    <button
-      class:active={baseLayer === 'satellite'}
-      title="Satellite imagery"
-      aria-label="Satellite imagery"
-      on:click={() => setBaseLayer('satellite')}
-    ><Satellite size={14} /></button>
+  <!-- Imagery toggle (streets vs satellite). Both token-free. -->
+  <div class="seg-toggle base-toggle" role="group" aria-label="Base imagery">
     <button
       class:active={baseLayer === 'streets'}
       title="Street map"
       aria-label="Street map"
       on:click={() => setBaseLayer('streets')}
     ><MapPin size={14} /></button>
+    <button
+      class:active={baseLayer === 'satellite'}
+      title="Satellite imagery"
+      aria-label="Satellite imagery"
+      on:click={() => setBaseLayer('satellite')}
+    ><Satellite size={14} /></button>
   </div>
+
+  <!-- Camera controls: home / zoom (and full-screen when embedded). There is no
+       recovery otherwise once the user orbits away from a small tileset. -->
+  {#if !loading && !error}
+    <div class="cam-controls">
+      {#if embedded}
+        <button class="cam-btn" title="Open full screen" aria-label="Open full screen" on:click={openFullScreen}>
+          <Maximize2 size={15} />
+        </button>
+      {/if}
+      <button class="cam-btn" title="Reset view" aria-label="Reset view" on:click={flyHome}>
+        <Home size={15} />
+      </button>
+      <div class="cam-zoom">
+        <button class="cam-btn" title="Zoom in" aria-label="Zoom in" on:click={() => zoomBy(-1)}><Plus size={15} /></button>
+        <button class="cam-btn" title="Zoom out" aria-label="Zoom out" on:click={() => zoomBy(1)}><Minus size={15} /></button>
+      </div>
+    </div>
+  {/if}
 
   {#if selectedIri && !embedded}
     <aside class="info-panel" aria-label="Feature properties">
@@ -326,7 +465,7 @@
       </header>
       <div class="info-body">
         {#if queryLoading}
-          <p class="info-hint"><Loader2 size={14} class="spin" /> …</p>
+          <p class="info-hint"><Loader2 size={14} class="spin" /> Loading…</p>
         {:else if queryError}
           <p class="info-hint err">{queryError}</p>
         {:else if rows.length === 0}
@@ -366,6 +505,22 @@
     border-radius: var(--radius-lg, 12px);
     overflow: hidden;
     background: var(--bg-soft, #0b1118);
+    --hud-surface: rgba(255, 255, 255, 0.96);
+    --hud-ink: var(--ink-900, #0f172a);
+    --hud-muted: var(--muted, #64748b);
+    --hud-line: var(--line-soft, #e6eaef);
+    --hud-active-bg: var(--bg-accent-soft, #e7f0fb);
+    --hud-active-ink: var(--brand-600, #2563a8);
+  }
+  /* Dark HUD so the floating controls/panel don't float bright-white over the
+     globe in dark mode. */
+  .cesium-wrap.dark {
+    --hud-surface: rgba(16, 23, 33, 0.94);
+    --hud-ink: #e2e8f0;
+    --hud-muted: #94a3b8;
+    --hud-line: rgba(255, 255, 255, 0.12);
+    --hud-active-bg: rgba(47, 136, 216, 0.22);
+    --hud-active-ink: #7ec3e8;
   }
   .cesium-canvas {
     position: absolute;
@@ -377,22 +532,45 @@
     opacity: 0.7;
   }
 
-  .cesium-overlay {
+  .cesium-overlay-zone {
     position: absolute;
     inset: 0;
     z-index: 6;
+    pointer-events: none;
+    display: flex;
+  }
+  .cesium-overlay {
+    margin: auto;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 0.5rem;
+    padding: 1.4rem 1.8rem;
     color: var(--ink-100, #e2e8f0);
-    background: rgba(11, 17, 24, 0.55);
+    background: rgba(11, 17, 24, 0.62);
+    border-radius: 14px;
     font-size: 0.85rem;
+    text-align: center;
+    max-width: min(340px, 80%);
   }
   .cesium-overlay.error {
     color: #ffd7c9;
-    background: rgba(40, 12, 8, 0.6);
+    background: rgba(40, 12, 8, 0.66);
+  }
+  .cesium-overlay.empty {
+    color: #cdd9e6;
+  }
+  .empty-title {
+    margin: 0.2rem 0 0;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+  .empty-sub {
+    margin: 0;
+    font-size: 0.78rem;
+    opacity: 0.8;
+    line-height: 1.4;
   }
   :global(.cesium-wrap .spin) {
     animation: cv-spin 1s linear infinite;
@@ -408,34 +586,112 @@
     }
   }
 
-  .base-toggle {
+  /* One-time "click a building" affordance. */
+  .cesium-hint {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 13px;
+    border-radius: 999px;
+    background: var(--hud-surface);
+    color: var(--hud-ink);
+    border: 1px solid var(--hud-line);
+    box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.18));
+    font-size: 0.76rem;
+    backdrop-filter: blur(8px);
+    animation: hintIn 0.3s ease both;
+  }
+  @keyframes hintIn {
+    from { opacity: 0; transform: translate(-50%, 6px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cesium-hint { animation: none; }
+  }
+
+  /* Shared segmented-toggle look (also used by the map basemap toggle). */
+  .seg-toggle {
     position: absolute;
     top: 10px;
     left: 10px;
     z-index: 5;
     display: flex;
-    border-radius: 8px;
+    border-radius: var(--radius-sm, 8px);
     overflow: hidden;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.22));
+    border: 1px solid var(--hud-line);
   }
-  .base-toggle button {
+  .seg-toggle button {
     border: 0;
-    padding: 7px 9px;
-    background: var(--bg-elevated, #fff);
-    color: var(--muted, #64748b);
+    padding: 7px 10px;
+    background: var(--hud-surface);
+    color: var(--hud-muted);
     cursor: pointer;
     display: flex;
     align-items: center;
   }
-  .base-toggle button + button {
-    border-left: 1px solid var(--line-soft, #e6eaef);
+  .seg-toggle button + button {
+    border-left: 1px solid var(--hud-line);
   }
-  .base-toggle button:hover {
-    color: var(--ink-900, #0f172a);
+  .seg-toggle button:hover {
+    color: var(--hud-ink);
   }
-  .base-toggle button.active {
-    background: var(--bg-accent-soft, #e7f0fb);
-    color: var(--brand-600, #2563a8);
+  .seg-toggle button.active {
+    background: var(--hud-active-bg);
+    color: var(--hud-active-ink);
+  }
+  .seg-toggle button:focus-visible,
+  .cam-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px #0c121c, 0 0 0 4px var(--brand-400, #5aa9e0);
+  }
+
+  /* Camera control cluster (bottom-right). */
+  .cam-controls {
+    position: absolute;
+    right: 10px;
+    bottom: 26px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+  }
+  .cam-zoom {
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--radius-sm, 8px);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.22));
+    border: 1px solid var(--hud-line);
+  }
+  .cam-zoom .cam-btn {
+    border-radius: 0;
+    box-shadow: none;
+    border: 0;
+  }
+  .cam-zoom .cam-btn + .cam-btn {
+    border-top: 1px solid var(--hud-line);
+  }
+  .cam-btn {
+    width: 34px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--hud-line);
+    border-radius: var(--radius-sm, 8px);
+    background: var(--hud-surface);
+    color: var(--hud-muted);
+    cursor: pointer;
+    box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.22));
+  }
+  .cam-btn:hover {
+    color: var(--hud-active-ink);
   }
 
   /* Feature-properties side panel (predicate/object table). */
@@ -448,21 +704,21 @@
     width: min(340px, 42%);
     display: flex;
     flex-direction: column;
-    border-radius: 12px;
-    background: var(--bg-elevated, rgba(255, 255, 255, 0.97));
-    border: 1px solid var(--line-soft, #e6eaef);
-    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28);
+    border-radius: var(--radius-md, 12px);
+    background: var(--hud-surface);
+    border: 1px solid var(--hud-line);
+    box-shadow: var(--shadow-md, 0 4px 18px rgba(0, 0, 0, 0.28));
     backdrop-filter: blur(8px);
     overflow: hidden;
-    color: var(--ink-900, #0f172a);
+    color: var(--hud-ink);
   }
   .info-head {
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 8px 10px;
-    border-bottom: 1px solid var(--line-soft, #e6eaef);
-    color: var(--ink-900, #0f172a);
+    border-bottom: 1px solid var(--hud-line);
+    color: var(--hud-ink);
   }
   .info-title {
     flex: 1;
@@ -479,7 +735,7 @@
     place-items: center;
     border: 0;
     background: transparent;
-    color: var(--muted, #64748b);
+    color: var(--hud-muted);
     cursor: pointer;
     padding: 2px;
     border-radius: 6px;
@@ -487,8 +743,15 @@
   }
   .info-link:hover,
   .info-close:hover {
-    color: var(--ink-900, #0f172a);
+    color: var(--hud-ink);
     background: var(--bg-hover, rgba(0, 0, 0, 0.05));
+  }
+  .info-link:focus-visible,
+  .info-close:focus-visible,
+  .pred-link:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--brand-400, #5aa9e0);
+    border-radius: 6px;
   }
   .info-body {
     flex: 1;
@@ -499,7 +762,7 @@
   .info-hint {
     margin: 0;
     padding: 10px 12px;
-    color: var(--muted, #64748b);
+    color: var(--hud-muted);
     font-size: 0.8rem;
     display: flex;
     align-items: center;
@@ -518,26 +781,26 @@
     text-align: left;
     vertical-align: top;
     padding: 5px 10px;
-    border-bottom: 1px solid var(--line-soft, #eef1f4);
+    border-bottom: 1px solid var(--hud-line);
     overflow-wrap: anywhere;
   }
   .info-table th {
     width: 42%;
     font-weight: 600;
-    color: var(--ink-700, #334155);
+    color: var(--hud-ink);
+    opacity: 0.85;
   }
   .info-table td {
-    color: var(--ink-900, #0f172a);
+    color: var(--hud-ink);
   }
   .info-table a {
-    color: var(--brand-600, #1d6fb8);
+    color: var(--hud-active-ink);
     text-decoration: none;
   }
   .info-table a:hover {
     text-decoration: underline;
   }
-  /* Predicate cell is a button that opens its term's resource page. Styled to
-     read as a quiet link, not a chrome button. */
+  /* Predicate cell is a button that opens its term's resource page. */
   .pred-link {
     border: 0;
     background: none;
@@ -545,17 +808,18 @@
     margin: 0;
     font: inherit;
     text-align: left;
-    color: var(--ink-700, #334155);
+    color: var(--hud-ink);
+    opacity: 0.85;
     cursor: pointer;
     overflow-wrap: anywhere;
   }
   .pred-link:hover {
-    color: var(--brand-600, #1d6fb8);
+    color: var(--hud-active-ink);
+    opacity: 1;
     text-decoration: underline;
   }
-  /* Blank-node object: shown for context but never linked (not dereferenceable). */
   .bnode {
-    color: var(--muted, #64748b);
+    color: var(--hud-muted);
     font-style: italic;
   }
 

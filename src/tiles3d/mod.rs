@@ -625,6 +625,80 @@ mod tests {
         assert!(blob.contains("example.org/a") && blob.contains("example.org/b"));
     }
 
+    /// End-to-end over the REAL bundled 3DBAG sample (the one the seed lifts): a
+    /// volumetric-only CityJSON conversion must mesh the whole block, and the GLB
+    /// must carry one property-table row + a colour per feature. This pins the
+    /// "empty tileset" regression — the demo's headline 3D-Tiles content — against
+    /// real data, where the prior tests only covered 2-feature toy inputs.
+    #[cfg(feature = "geometry3d")]
+    #[test]
+    fn tileset_from_bundled_3dbag_has_full_block() {
+        use crate::imports::cityjson::{convert_cityjson, CityJsonOptions};
+        let data = include_str!("../../frontend/public/samples/schependomlaan-3dbag.city.json");
+        let doc: serde_json::Value = serde_json::from_str(data).unwrap();
+        let opts = CityJsonOptions {
+            inst_base: "http://localhost/dataset/viewer-3d-demo/".to_string(),
+            source_url: None,
+            generated_at: None,
+            volumetric_only: true, // drop the 78 flat LoD0 footprints, keep the solids
+        };
+        let (nt, stats) = convert_cityjson(&doc, &opts).unwrap();
+        assert!(
+            stats.geometries >= 70,
+            "the LoD2.2 solids are converted: {} geometries",
+            stats.geometries
+        );
+
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(&nt, RdfFormat::NTriples, None).unwrap();
+        let (features, region) = collect_features(&store, &[], None);
+        assert!(
+            features.len() >= 70,
+            "the whole block meshes into the tileset, not ~4 boxes: {} features",
+            features.len()
+        );
+        assert!(region.any, "bounding region populated");
+        assert!(
+            features
+                .iter()
+                .all(|f| !f.iri.is_empty() && !f.tri_lonlath.is_empty()),
+            "every feature carries its IRI and triangles"
+        );
+
+        let glb_features: Vec<GlbFeature> = features
+            .iter()
+            .map(|f| {
+                let mut positions: Vec<f32> = Vec::new();
+                for triple in f.tri_lonlath.chunks_exact(3) {
+                    let ecef = wgs84_to_ecef(triple[0], triple[1], triple[2]);
+                    positions.push(ecef[0] as f32);
+                    positions.push(ecef[1] as f32);
+                    positions.push(ecef[2] as f32);
+                }
+                GlbFeature {
+                    iri: f.iri.clone(),
+                    positions,
+                    indices: Vec::new(),
+                }
+            })
+            .collect();
+        let glb = encode_glb(&glb_features);
+        let magic = u32::from_le_bytes([glb[0], glb[1], glb[2], glb[3]]);
+        assert_eq!(magic, 0x4654_6C67, "valid GLB container");
+        let json_len = u32::from_le_bytes([glb[12], glb[13], glb[14], glb[15]]) as usize;
+        let json_str = std::str::from_utf8(&glb[20..20 + json_len]).unwrap();
+        assert!(json_str.contains("EXT_structural_metadata"));
+        assert!(
+            json_str.contains("COLOR_0"),
+            "buildings carry per-feature colour"
+        );
+        let count = serde_json::from_str::<serde_json::Value>(json_str.trim_end()).unwrap()
+            ["extensions"]["EXT_structural_metadata"]["propertyTables"][0]["count"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(count, features.len(), "one IRI row per meshed feature");
+    }
+
     #[cfg(feature = "geometry3d")]
     #[test]
     fn broad_phase_bbox_prefilters_features() {

@@ -79,6 +79,9 @@ COPY docs/ docs/
 # Shared standard-vocabulary TTLs embedded by the backend (src/data_models/seed_vocab.rs)
 # via include_str!; needed at compile time here since the frontend tree isn't copied.
 COPY frontend/public/vocab/ frontend/public/vocab/
+# Bundled CityJSON sample neighbourhoods embedded by the demo seed
+# (src/saved_queries/seed.rs) via include_str! to lift into the 3D-Tiles pipeline.
+COPY frontend/public/samples/ frontend/public/samples/
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo build --profile ${CARGO_PROFILE} --features full
