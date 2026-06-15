@@ -7,11 +7,13 @@
   import { t as i18nT } from 'svelte-i18n';
   import { X, Maximize2, Minimize2 } from 'lucide-svelte';
   import { preview, closePreview } from '../../lib/viewer/preview';
-  import GeoPreview from '../GeoPreview.svelte';
 
-  // Model3D pulls the heavy three.js chunk — load it only when a 3D preview is
-  // actually opened (this overlay is mounted globally in App.svelte).
+  // Model3D (three.js) and GeoPreview (leaflet) both pull heavy vendor chunks —
+  // load each only when its preview is actually opened. This overlay is mounted
+  // globally in App.svelte, so a static import would drag both into the main
+  // bundle that loads on every page.
   const model3d = () => import('./Model3D.svelte');
+  const geoPreview = () => import('../GeoPreview.svelte');
 
   let full = false;
   let pos = { x: 0, y: 0 };
@@ -81,7 +83,11 @@
           />
         {/await}
       {:else}
-        <GeoPreview wkts={$preview.wkts} height="100%" />
+        {#await geoPreview()}
+          <p class="loading">…</p>
+        {:then mod}
+          <svelte:component this={mod.default} wkts={$preview.wkts} height="100%" />
+        {/await}
       {/if}
     </div>
   </div>

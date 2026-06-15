@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::Dataset;
-use crate::geo::viewer_feed::{build_viewer_feed, ViewerElement};
+use crate::geo::viewer_feed::{build_viewer_feed, dataset_geo_stats, ViewerElement};
 use crate::server::AppState;
 
 use self::wkt::{wkt_bbox, wkt_to_geojson, BBox};
@@ -91,12 +91,26 @@ fn load_accessible_dataset(
     Ok(dataset)
 }
 
-/// The geometry-bearing viewer-feed elements of a dataset (whole dataset scope).
-fn dataset_features(state: &AppState, dataset_id: &str) -> Result<Vec<ViewerElement>, ApiError> {
-    let data_graphs = state
+/// The dataset's data graphs that feed the viewer, with the verbose ifcOWL lift
+/// graph (`…/ifcowl`) excluded — exactly as the viewer-feed, geo-stats,
+/// geo-stats-batch and DCAT callers do. That graph is the full 1:1 IFC schema
+/// (millions of triples), carries none of the BOT/geo geometry the feed reads,
+/// and scanning it made every OGC feature/collection request walk the whole
+/// schema per dataset. Centralised here so the exclusion can't drift between the
+/// OGC handlers.
+fn feed_data_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, ApiError> {
+    Ok(state
         .auth_db
         .list_dataset_graphs(dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.ends_with("/ifcowl"))
+        .collect())
+}
+
+/// The geometry-bearing viewer-feed elements of a dataset (whole dataset scope).
+fn dataset_features(state: &AppState, dataset_id: &str) -> Result<Vec<ViewerElement>, ApiError> {
+    let data_graphs = feed_data_graphs(state, dataset_id)?;
     Ok(build_viewer_feed(&state.store, &data_graphs, None))
 }
 
@@ -256,9 +270,17 @@ async fn collections(
     let mut docs: Vec<Value> = Vec::with_capacity(datasets.len());
     for d in &datasets {
         // Only advertise a spatial extent when the dataset actually has features.
-        let extent = dataset_features(&state, &d.id)
-            .ok()
-            .and_then(|els| features_extent(&els));
+        // Gate the (relatively heavy) full feed build behind the cheap geo-stats
+        // ASK early-out: a geometry-free dataset — the common case on a multi-
+        // dataset list — is decided by a single ASK instead of building a whole
+        // viewer feed per dataset (the old N+1). Datasets with geometry still get
+        // their extent, so the response shape is unchanged.
+        let graphs = feed_data_graphs(&state, &d.id).unwrap_or_default();
+        let extent = if dataset_geo_stats(&state.store, &graphs).has_coordinates {
+            features_extent(&build_viewer_feed(&state.store, &graphs, None))
+        } else {
+            None
+        };
         docs.push(with_extent(collection_doc(base, d), extent));
     }
 
@@ -279,9 +301,13 @@ async fn collection(
 ) -> Result<impl IntoResponse, ApiError> {
     let dataset = load_accessible_dataset(&state, &user, &collection_id)?;
     let base = state.base_url.as_str();
-    let extent = dataset_features(&state, &dataset.id)
-        .ok()
-        .and_then(|els| features_extent(&els));
+    // Cheap geo-stats ASK gate before the full feed build (see `collections`).
+    let graphs = feed_data_graphs(&state, &dataset.id).unwrap_or_default();
+    let extent = if dataset_geo_stats(&state.store, &graphs).has_coordinates {
+        features_extent(&build_viewer_feed(&state.store, &graphs, None))
+    } else {
+        None
+    };
     Ok(Json(with_extent(collection_doc(base, &dataset), extent)))
 }
 
@@ -449,16 +475,12 @@ fn local_name(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 
-/// An RFC-3339 timestamp for `timeStamp` (best-effort; never fails).
+/// An RFC-3339 timestamp for the FeatureCollection `timeStamp`. OGC API –
+/// Features Core §7.15.4 types this property as `date-time` (RFC-3339), so a
+/// bare epoch-seconds value is non-conformant and breaks strict clients. `chrono`
+/// is already a dependency; format UTC with a `Z` offset.
 fn now_rfc3339() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // A bare epoch-seconds value is acceptable for a non-normative stamp; keep
-    // the dependency surface minimal rather than pulling in a date formatter.
-    format!("{secs}")
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
@@ -500,6 +522,22 @@ mod tests {
     fn element_without_geometry_is_skipped() {
         assert!(element_to_feature(&el("urn:x", None)).is_none());
         assert!(element_to_feature(&el("urn:x", Some("garbage"))).is_none());
+    }
+
+    #[test]
+    fn timestamp_is_rfc3339_not_epoch_seconds() {
+        // OGC API – Features Core §7.15.4 types `timeStamp` as date-time (RFC-3339).
+        // A bare epoch-seconds value is non-conformant; assert the format parses.
+        let ts = now_rfc3339();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&ts).is_ok(),
+            "timeStamp must be RFC-3339, got {ts:?}"
+        );
+        // Must NOT be a bare integer (the previous, non-conformant behaviour).
+        assert!(
+            ts.parse::<u64>().is_err(),
+            "timeStamp must not be bare epoch seconds, got {ts:?}"
+        );
     }
 
     #[test]

@@ -66,6 +66,14 @@ services:
       - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
       - LLM_API_KEY=${LLM_API_KEY:-}
+      # In-memory query accelerator cap. Above this triple count the store keeps
+      # TWO full RAM copies OFF and answers from RocksDB (correct, just slower for
+      # large joins). By default the cap auto-sizes to mem_limit below; set this
+      # explicitly only to force the accelerator on for a bigger dataset on a
+      # roomy host (each held triple costs ~2× in RAM). The server logs a warning
+      # naming this var whenever a store is over the cap, so an off accelerator is
+      # never silent.
+      - OTS_PARALLEL_QUERY_MAX_TRIPLES=${OTS_PARALLEL_QUERY_MAX_TRIPLES:-}
     # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
     # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
     # adds the same hostname on plain Linux Docker so the config stays portable.
@@ -75,11 +83,23 @@ services:
       minio:
         condition: service_healthy
     restart: unless-stopped
+    # Bound container memory so a large seed/import is a clean, observable OOM
+    # rather than host thrash, and so the in-RAM query accelerator (which sizes
+    # its cap to this budget) never tries to build copies that don't fit. Raise
+    # both for very large datasets. mem_limit/mem_reservation are honoured by
+    # `docker compose up` (non-swarm); the equivalent deploy.resources keys apply
+    # under swarm.
+    mem_limit: ${TRIPLESTORE_MEM_LIMIT:-4g}
+    mem_reservation: ${TRIPLESTORE_MEM_RESERVATION:-1g}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7878/health"]
+      # Probe /livez (pure liveness — no store/DB access), NOT /health: a long but
+      # healthy boot seed (large IFC download + lift) must not be read as a dead
+      # process and restarted. start_period covers that seed window so a slow first
+      # boot never counts toward "unhealthy"; the IFC download alone allows 600s.
+      test: ["CMD", "curl", "-f", "http://localhost:7878/livez"]
       interval: 30s
       timeout: 5s
-      start_period: 10s
+      start_period: 180s
       retries: 3
 
   minio:

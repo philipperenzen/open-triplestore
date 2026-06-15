@@ -624,9 +624,20 @@ fn count_via_sparql(store: &TripleStore, sparql: &str) -> usize {
 }
 
 /// Count triples in a specific named graph.
+///
+/// Reads the maintained O(1) per-graph count index instead of a GRAPH-wrapped
+/// `COUNT(*)` SPARQL. The SPARQL form does not match the fast-count fast path
+/// (which only recognises a bare default-graph BGP), so it routes through the
+/// store and scans the whole graph — for an IFC dataset's multi-million-triple
+/// `…/ifcowl` graph that is a full scan per dataset on every uncached catalog
+/// render. The cached count is value-identical for a single named graph (no
+/// RDF-merge dedup); fall back to a direct quad count only if the graph is not
+/// yet in the index.
 fn count_graph_triples(store: &TripleStore, graph_iri: &str) -> usize {
-    let sparql = format!("SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }}");
-    count_via_sparql(store, &sparql)
+    store
+        .graph_count_cached(Some(graph_iri))
+        .or_else(|| store.count_graph(Some(graph_iri)).ok())
+        .unwrap_or(0)
 }
 
 /// Escape string for Turtle literal (double-quote delimited).
