@@ -5,11 +5,14 @@
   import { shortenIRI, graphResultsToElements } from '../lib/rdf-utils.js';
   import { safeExternalUrl, safeImageUrl } from '../lib/safeUrl.js';
   import RdfTerm from '../components/RdfTerm.svelte';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
+  // GraphCanvas (cytoscape) loads lazily when the graph tab opens (graphCanvasMod
+  // below), so it no longer rides into the main bundle via this eagerly-imported
+  // page — cytoscape is off the initial/landing download.
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
-  import GeoPreview from '../components/GeoPreview.svelte';
+  // GeoPreview pulls in leaflet; load it lazily only when the resource actually
+  // has geometry (geoPreviewMod below) so leaflet stays out of the main bundle.
   import FileViewer from '../components/viewer/FileViewer.svelte';
   import { modelFormatFromUrl, fileResourceKind, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
 
@@ -178,6 +181,13 @@
   let showTbMenu = false;
   let copied = false;
   let activeTab = 'overview'; // overview | properties | linkedFrom | graph
+
+  // Lazily import GraphCanvas the first time the graph tab opens (memoised).
+  let graphCanvasMod;
+  $: if (activeTab === 'graph' && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
+  // GeoPreview (leaflet) only when the resource carries geometry.
+  let geoPreviewMod;
+  $: if (allWkts.length > 0 && !geoPreviewMod) geoPreviewMod = import('../components/GeoPreview.svelte');
 
   // Properties tab controls
   let propSearch = '';
@@ -777,12 +787,16 @@
           <Network size={12} /> {$i18nT('pages.resource.graphNeighbourhood')} — {$i18nT('pages.resource.graphHint')}
         </p>
         {#if graphElements.nodes.length > 0}
-          <GraphCanvas
-            nodes={graphElements.nodes}
-            edges={graphElements.edges}
-            height="460px"
-            on:nodeOpen={(e) => e.detail.fullIri && e.detail.fullIri !== iri && viewResource(e.detail.fullIri)}
-          />
+          {#await graphCanvasMod then GC}
+            {#if GC}
+              <svelte:component this={GC.default}
+                nodes={graphElements.nodes}
+                edges={graphElements.edges}
+                height="460px"
+                on:nodeOpen={(e) => e.detail.fullIri && e.detail.fullIri !== iri && viewResource(e.detail.fullIri)}
+              />
+            {/if}
+          {/await}
         {:else}
           <p class="muted empty-inline">{$i18nT('pages.resource.noGraphNeighbourhood')}</p>
         {/if}
@@ -813,7 +827,11 @@
       {#if allWkts.length > 0}
         <div class="card">
           <h3><MapPin size={14} /> {$i18nT('pages.resource.geometry')}</h3>
-          <GeoPreview wkts={allWkts} scaleMeters={modelMeters} />
+          {#await geoPreviewMod then GP}
+            {#if GP}
+              <svelte:component this={GP.default} wkts={allWkts} scaleMeters={modelMeters} />
+            {/if}
+          {/await}
         </div>
       {/if}
 

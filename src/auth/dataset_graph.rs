@@ -403,11 +403,15 @@ pub fn migrate_model_vocabulary_reframe(
     base_url: &str,
     db: &crate::auth::db::AuthDb,
 ) {
-    rewrite_legacy_ontology_iris(store);
-
+    // Gate the whole one-shot migration — including the legacy-IRI rewrite —
+    // behind the applied sentinel. The rewrite is idempotent, but each of its
+    // `store.update()`s triggers a full graph-index rebuild (a scan of every
+    // graph, including a dataset's multi-million-triple `…/ifcowl` lift), so
+    // running it on every boot was a recurring full-store scan for no effect.
     if graph_has_subject(store, MIGRATIONS_GRAPH, REFRAME_MIGRATION_IRI) {
         return;
     }
+    rewrite_legacy_ontology_iris(store);
     let reclassified = reclassify_model_graphs_to_vocabulary(store, base_url, db);
     if reclassified > 0 {
         tracing::info!(
@@ -419,7 +423,12 @@ pub fn migrate_model_vocabulary_reframe(
         "INSERT DATA {{ GRAPH <{MIGRATIONS_GRAPH}> {{ <{REFRAME_MIGRATION_IRI}> \
          <urn:system:migration#applied> true }} }}"
     );
-    let _ = store.update(&mark);
+    if let Err(e) = store.update(&mark) {
+        // Non-fatal but observable: if the sentinel write fails the migration
+        // simply re-runs next boot (it is idempotent), but a persistent failure
+        // means it never marks done — surface it instead of swallowing.
+        tracing::warn!("model/vocabulary reframe: failed to record applied marker: {e}");
+    }
 }
 
 /// Rewrite the two known legacy `…/ontology/` predicates to the `…/ns#` base in
@@ -440,7 +449,9 @@ fn rewrite_legacy_ontology_iris(store: &TripleStore) {
         ),
     ];
     for q in &updates {
-        let _ = store.update(q);
+        if let Err(e) = store.update(q) {
+            tracing::warn!("legacy-IRI rewrite update failed (non-fatal): {e}");
+        }
     }
 }
 

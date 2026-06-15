@@ -46,10 +46,27 @@ use std::sync::{Arc, Mutex, RwLock};
 use opengraph::parallel::{self, ParAnswer, ParClass, ParallelStore};
 use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolutionIter, Variable};
 use oxigraph::store::Store;
-use tracing::debug;
+use tracing::{debug, warn};
 
-/// Default ceiling on the number of triples the mirror will hold in memory.
+/// Floor for the in-memory mirror cap when no explicit override is set. The
+/// RAM-aware default ([`ram_aware_default_max_triples`]) never drops below this,
+/// preserving the historical behaviour on hosts whose memory budget can't be
+/// detected or is small.
 const DEFAULT_MAX_TRIPLES: usize = 2_000_000;
+/// Absolute ceiling on the auto-derived cap, regardless of how much RAM is
+/// available: past this, RocksDB (the reason the store is persistent) is the
+/// right tier, and building two ever-larger RAM copies stops paying off.
+const ABSOLUTE_MAX_TRIPLES: usize = 24_000_000;
+/// Fraction of the detected memory budget the mirror is allowed to use for its
+/// two copies (1/`MIRROR_BUDGET_DIVISOR`). Conservative so RocksDB's block
+/// cache, the spatial indexes, and transient import buffers still fit.
+const MIRROR_BUDGET_DIVISOR: u64 = 4;
+/// Deliberately HIGH estimate of the bytes both RAM copies (the subject-hash
+/// shards together with the unsharded full store, each carrying several index
+/// permutations) cost per triple. Over-estimating errs toward leaving the
+/// accelerator OFF (slower but safe) rather than OOM-killing the process — the
+/// failure mode that flapped the container during a large seed.
+const BYTES_PER_TRIPLE_BOTH_COPIES: u64 = 1024;
 /// Hard cap on shard count regardless of core count / configuration.
 const MAX_SHARDS: usize = 16;
 
@@ -75,6 +92,9 @@ struct Inner {
     build_lock: Mutex<()>,
     /// Triple count of the live shards (diagnostics).
     built_len: AtomicUsize,
+    /// Set once the store is first seen over `max_triples`, so the operator-facing
+    /// "accelerator OFF" warning is logged exactly once instead of on every query.
+    over_cap_warned: AtomicBool,
     shard_count: usize,
     max_triples: usize,
     enabled: bool,
@@ -98,7 +118,7 @@ impl ParallelMirror {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_MAX_TRIPLES);
+            .unwrap_or_else(ram_aware_default_max_triples);
         let shard_count = std::env::var("OTS_PARALLEL_QUERY_SHARDS")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -116,6 +136,7 @@ impl ParallelMirror {
                 dirty: AtomicBool::new(true),
                 build_lock: Mutex::new(()),
                 built_len: AtomicUsize::new(0),
+                over_cap_warned: AtomicBool::new(false),
                 shard_count: shard_count.clamp(1, MAX_SHARDS),
                 max_triples,
                 enabled,
@@ -177,10 +198,27 @@ impl ParallelMirror {
             *self.inner.full.write().ok()? = None;
             self.inner.built_len.store(0, Ordering::Release);
             self.inner.dirty.store(false, Ordering::Release);
-            debug!(
-                "parallel mirror inactive: {total} triples (cap {})",
-                self.inner.max_triples
-            );
+            // An over-cap store silently disabling the accelerator was the cause of
+            // a hard-to-spot perf regression (large joins fell back to RocksDB,
+            // ~40× slower per row). Surface it ONCE at warn! so it is never silent,
+            // naming the knob to raise it. Empty stores are not a regression — keep
+            // those at debug!.
+            if total > self.inner.max_triples
+                && !self.inner.over_cap_warned.swap(true, Ordering::AcqRel)
+            {
+                warn!(
+                    "in-memory query accelerator OFF: store has {total} triples, over the \
+                     {} cap — large joins/SELECTs fall back to RocksDB (slower). Raise \
+                     OTS_PARALLEL_QUERY_MAX_TRIPLES (and the container memory budget) to \
+                     re-enable it; each held triple costs ~2× in RAM.",
+                    self.inner.max_triples
+                );
+            } else {
+                debug!(
+                    "parallel mirror inactive: {total} triples (cap {})",
+                    self.inner.max_triples
+                );
+            }
             return None;
         }
         // Build both copies before publishing either, so a build error leaves the
@@ -191,6 +229,9 @@ impl ParallelMirror {
         *self.inner.full.write().ok()? = Some(full);
         self.inner.built_len.store(total, Ordering::Release);
         self.inner.dirty.store(false, Ordering::Release);
+        // Built successfully (under cap): re-arm the over-cap warning so a later
+        // growth back over the cap is surfaced again.
+        self.inner.over_cap_warned.store(false, Ordering::Release);
         debug!(
             "parallel mirror built: {total} triples ({} shards + 1 full copy)",
             self.inner.shard_count
@@ -231,6 +272,63 @@ fn default_shards() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, MAX_SHARDS)
+}
+
+/// Best-effort detection (Linux) of the memory budget, in bytes, this process is
+/// allowed to use: the cgroup limit if one is set (the containerized case that
+/// matters for the flap), else total system RAM. Returns `None` when neither can
+/// be read (e.g. on non-Linux hosts), where the caller falls back to the fixed
+/// floor.
+fn detect_memory_limit_bytes() -> Option<u64> {
+    // cgroup v2 (Docker default on modern hosts): a numeric byte limit, or the
+    // literal "max" when unconstrained.
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        let t = s.trim();
+        if t != "max" {
+            if let Ok(n) = t.parse::<u64>() {
+                if n > 0 && n < u64::MAX / 2 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    // cgroup v1: reports a huge sentinel (~PAGE_COUNTER_MAX) when unlimited.
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
+        if let Ok(n) = s.trim().parse::<u64>() {
+            if n > 0 && n < (1u64 << 62) {
+                return Some(n);
+            }
+        }
+    }
+    // No cgroup limit (or unconstrained) → total system RAM.
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                if let Ok(kb) = rest.trim().trim_end_matches("kB").trim().parse::<u64>() {
+                    return Some(kb.saturating_mul(1024));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Derive the mirror's default triple cap from the detected memory budget so a
+/// large persistent store never tries to build two RAM copies that would OOM the
+/// container — the historical cause of the health-check flap during a big seed —
+/// while still enabling the accelerator on a roomy host. The explicit
+/// `OTS_PARALLEL_QUERY_MAX_TRIPLES` always wins over this; the result is clamped
+/// to `[DEFAULT_MAX_TRIPLES, ABSOLUTE_MAX_TRIPLES]`, and falls back to the floor
+/// when the budget can't be detected (e.g. non-Linux).
+fn ram_aware_default_max_triples() -> usize {
+    match detect_memory_limit_bytes() {
+        Some(bytes) => {
+            let budget = bytes / MIRROR_BUDGET_DIVISOR;
+            let cap = (budget / BYTES_PER_TRIPLE_BOTH_COPIES) as usize;
+            cap.clamp(DEFAULT_MAX_TRIPLES, ABSOLUTE_MAX_TRIPLES)
+        }
+        None => DEFAULT_MAX_TRIPLES,
+    }
 }
 
 /// Build a subject-sharded `ParallelStore` mirroring every quad in `store`

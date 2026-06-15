@@ -23,8 +23,6 @@ export interface SelectResults {
   results?: { bindings?: Binding[] };
 }
 
-const GEO = 'http://www.opengis.net/ont/geosparql#';
-
 /** A GeoSPARQL WKT literal datatype (`…#wktLiteral`). */
 function isWktTerm(term: RdfTerm | undefined | null): boolean {
   return !!term && term.type === 'literal' && typeof term.datatype === 'string' && term.datatype.endsWith('wktLiteral');

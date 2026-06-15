@@ -115,7 +115,7 @@ export const sparqlLanguage = StreamLanguage.define({
     }
 
     // Variables
-    if (stream.match(/[\?$][a-zA-Z_][a-zA-Z0-9_]*/)) return 'variableName';
+    if (stream.match(/[?$][a-zA-Z_][a-zA-Z0-9_]*/)) return 'variableName';
 
     // Numbers
     if (stream.match(/[+-]?[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?/)) return 'number';
@@ -127,13 +127,13 @@ export const sparqlLanguage = StreamLanguage.define({
     if (stream.match('^^')) return 'operator';
 
     // Prefixed names and keywords
-    if (stream.match(/[a-zA-Z_][a-zA-Z0-9_\-]*/)) {
+    if (stream.match(/[a-zA-Z_][a-zA-Z0-9_-]*/)) {
       const word = stream.current().toUpperCase();
       if (KEYWORDS.has(word)) return 'keyword';
       // Check if followed by colon → it's a prefix
       if (stream.peek() === ':') {
         stream.eat(':');
-        stream.match(/[a-zA-Z0-9_\-\.]*/);
+        stream.match(/[a-zA-Z0-9_\-.]*/);
         return 'namespace';
       }
       return 'variableName';
@@ -141,12 +141,12 @@ export const sparqlLanguage = StreamLanguage.define({
 
     // Colon for bare prefix (e.g. :localName)
     if (stream.eat(':')) {
-      stream.match(/[a-zA-Z0-9_\-\.]*/);
+      stream.match(/[a-zA-Z0-9_\-.]*/);
       return 'namespace';
     }
 
     // Punctuation
-    if (stream.match(/[{}\[\]().,;*+|^]/)) return 'operator';
+    if (stream.match(/[{}[\]().,;*+|^]/)) return 'operator';
 
     stream.next();
     return null;
