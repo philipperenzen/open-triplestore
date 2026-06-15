@@ -1423,17 +1423,25 @@ async fn service_description_handler(
 
     // Default-graph triple count. Hidden (0) for anonymous/non-admin callers so the
     // unauthenticated service description never reveals default-graph size.
+    // Read the O(1) maintained count index, not count_graph() — the latter scans
+    // the whole graph, and a public IFC dataset's `…/ifcowl` graph (millions of
+    // triples) made the Turtle service description take tens of seconds per
+    // request. Value-identical: the index tracks the exact per-graph quad count.
     let default_graph_count = if is_admin {
-        state.store.count_graph(None).unwrap_or(0)
+        state.store.graph_count_cached(None).unwrap_or(0)
     } else {
         0
     };
 
-    // Pair each accessible named graph with its own triple count (void:triples).
+    // Pair each accessible named graph with its own triple count (void:triples) —
+    // O(1) cached lookups rather than a per-graph scan (see above).
     let named_graph_counts: Vec<(&str, usize)> = accessible_graph_iris
         .iter()
         .map(|iri| {
-            let count = state.store.count_graph(Some(iri.as_str())).unwrap_or(0);
+            let count = state
+                .store
+                .graph_count_cached(Some(iri.as_str()))
+                .unwrap_or(0);
             (iri.as_str(), count)
         })
         .collect();
