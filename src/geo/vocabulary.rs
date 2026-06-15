@@ -49,11 +49,9 @@ pub const OTS3D_SF_DISJOINT: &str = "https://open-triplestore.org/def/function/g
 // constructor. Exact (not AABB broad-phase). Same geo3d/ namespace.
 
 /// Convex hull of a 3D geometry as a `POLYHEDRALSURFACE Z` solid.
-pub const OTS3D_CONVEXHULL3D: &str =
-    "https://open-triplestore.org/def/function/geo3d/convexHull3d";
+pub const OTS3D_CONVEXHULL3D: &str = "https://open-triplestore.org/def/function/geo3d/convexHull3d";
 /// Exact "first solid contains the second" (every vertex of B inside A's volume).
-pub const OTS3D_SF_CONTAINS: &str =
-    "https://open-triplestore.org/def/function/geo3d/sf3dContains";
+pub const OTS3D_SF_CONTAINS: &str = "https://open-triplestore.org/def/function/geo3d/sf3dContains";
 /// Exact "first geometry is within the second solid" (inverse of contains).
 pub const OTS3D_SF_WITHIN: &str = "https://open-triplestore.org/def/function/geo3d/sf3dWithin";
 
@@ -70,12 +68,10 @@ pub const OTS3D_INTERSECTION3D: &str =
     "https://open-triplestore.org/def/function/geo3d/intersection3d";
 /// Boolean difference of two solids (certified, SFCGAL).
 #[allow(dead_code)]
-pub const OTS3D_DIFFERENCE3D: &str =
-    "https://open-triplestore.org/def/function/geo3d/difference3d";
+pub const OTS3D_DIFFERENCE3D: &str = "https://open-triplestore.org/def/function/geo3d/difference3d";
 /// Certified exact volume of a closed solid (SFCGAL, exact arithmetic).
 #[allow(dead_code)]
-pub const OTS3D_VOLUME_EXACT: &str =
-    "https://open-triplestore.org/def/function/geo3d/volumeExact";
+pub const OTS3D_VOLUME_EXACT: &str = "https://open-triplestore.org/def/function/geo3d/volumeExact";
 
 // ─── Simple Features topological function IRIs ───
 

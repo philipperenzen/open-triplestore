@@ -88,7 +88,10 @@ pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStat
              PREFIX omg: <https://w3id.org/omg#>\n\
              ASK {from} WHERE {{ {where_clause} }}"
         );
-        matches!(store.query(&q), Ok(oxigraph::sparql::QueryResults::Boolean(true)))
+        matches!(
+            store.query(&q),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
     };
 
     // Cheap early-out: every flag below requires a `geo:hasGeometry` or
@@ -100,14 +103,11 @@ pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStat
         return GeoStats::default();
     }
 
-    let has_coordinates = ask(
-        "?s geo:hasGeometry ?g . { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w }",
-    );
-    let has_models = ask(
-        "?el omg:hasGeometry ?g . ?g ?p ?f . \
+    let has_coordinates =
+        ask("?s geo:hasGeometry ?g . { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w }");
+    let has_models = ask("?el omg:hasGeometry ?g . ?g ?p ?f . \
          FILTER(STRSTARTS(STR(?p), \"https://w3id.org/fog#as\")) \
-         FILTER(REGEX(STR(?p), \"Gltf|Stl|Cityjson|Citygml|Ifc|Obj\", \"i\"))",
-    );
+         FILTER(REGEX(STR(?p), \"Gltf|Stl|Cityjson|Citygml|Ifc|Obj\", \"i\"))");
     let has_3d_geometry = ask(
         "?s geo:hasGeometry/geo:asWKT ?w . BIND(UCASE(STR(?w)) AS ?u) \
          FILTER(CONTAINS(?u, \"POLYHEDRALSURFACE\") || CONTAINS(?u, \"TIN Z\") \
