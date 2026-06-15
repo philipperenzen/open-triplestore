@@ -229,6 +229,9 @@
   }
 
   const HL_COLOR = 0xff6a00; // vivid highlight for the selected element(s)
+  // Ghost opacity for the rest of the building during an x-ray. Kept high enough
+  // that the building still reads as context (0.16 made it vanish entirely).
+  const GHOST_OPACITY = 0.34;
 
   /** Stash a material's original render flags once, so any paint is reversible. */
   function stashMat(m) {
@@ -237,6 +240,8 @@
       m.userData.origTransparent = m.transparent;
       m.userData.origDepthWrite = m.depthWrite;
       m.userData.origDepthTest = m.depthTest;
+      // Stash the base colour too, so a colour-override highlight is reversible.
+      if (m.color && m.userData.origColor === undefined) m.userData.origColor = m.color.getHex();
     }
   }
 
@@ -311,8 +316,11 @@
     let finalDepthWrite;
     let finalDepthTest;
     if (state === 'selected' || state === 'selectedXray') {
+      // Solid highlight colour + a strong glow so the pick is unmistakable, not a
+      // faint tint over the model's own colour.
+      if (m.color) m.color.setHex(HL_COLOR);
       if (emis) m.emissive.setHex(HL_COLOR);
-      toEmis = 0.55;
+      toEmis = 0.85;
       // A selected element ends up SOLID even if its IFC material was glassy.
       toOpacity = 1;
       finalTransparent = false;
@@ -323,13 +331,15 @@
       m.depthTest = finalDepthTest;
     } else if (state === 'ghost') {
       toEmis = 0;
-      toOpacity = Math.min(m.userData.origOpacity, 0.16);
+      toOpacity = Math.min(m.userData.origOpacity, GHOST_OPACITY);
       finalTransparent = true;
       finalDepthWrite = false;
       finalDepthTest = m.userData.origDepthTest;
       m.depthWrite = false; // stop occluding the selected element immediately
       m.depthTest = finalDepthTest;
     } else {
+      // Restore the stashed base colour (undo a 'selected' colour override).
+      if (m.color && m.userData.origColor !== undefined) m.color.setHex(m.userData.origColor);
       toEmis = 0;
       toOpacity = m.userData.origOpacity;
       finalTransparent = m.userData.origTransparent;
@@ -456,9 +466,17 @@
       om.opacity = 1;
       om.depthTest = false; // always visible, through the ghosted shell
       om.depthWrite = true;
+      // Render BOTH faces: a thin floor slab seen from above shows its underside,
+      // which a single-sided material would cull — the "no highlight at all" case.
+      om.side = THREE.DoubleSide;
+      // Solid bright colour (not the element's own grey) + a strong self-lit glow
+      // so it pops regardless of scene lighting or the camera angle.
+      if (om.color) om.color.setHex(HL_COLOR);
+      if ('metalness' in om) om.metalness = 0;
+      if ('roughness' in om) om.roughness = 0.5;
       if ('emissive' in om) {
         om.emissive.setHex(HL_COLOR);
-        om.emissiveIntensity = 0.5;
+        om.emissiveIntensity = 0.9;
       }
       n.material = om;
       n.renderOrder = 12;
@@ -721,6 +739,7 @@
       const selfPlaces = ref && (ref.format === 'cityjson' || ref.format === 'citygml');
       if (anchor || selfPlaces) attachModel(entry, el);
     }
+    if (import.meta.env.DEV) window.__otsViewerEntries = entries; // dev: re-point after reassign
     ensureOverlays();
     if (!fitted) {
       const features = elements.map(toMapFeature).filter(Boolean);
@@ -885,7 +904,10 @@
       hoverPopup = null;
       map.getCanvas().style.cursor = '';
     });
-    if (import.meta.env.DEV) window.__otsViewerMap = map; // dev console handle
+    if (import.meta.env.DEV) {
+      window.__otsViewerMap = map; // dev console handle
+      window.__otsViewerEntries = entries; // dev: inspect model groups + overlays
+    }
     rebuildData();
   });
 
