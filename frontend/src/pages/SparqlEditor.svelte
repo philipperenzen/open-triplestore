@@ -2,8 +2,9 @@
   import { onMount, onDestroy } from 'svelte';
   import { sparqlQuery, datasetSparqlQuery, listDatasets, listOrganisations, listServices, listDatasetGraphs, listDatasetVersions, getDataset, getOrganisation, nlToSparql, sendLlmFeedback, llmHealth } from '../lib/api.js';
   import { graphResultsToElements, resultsToCsv, downloadFile, parseNTriplesToBindings, detectGeoBindings, resultsToViewerElements } from '../lib/rdf-utils.js';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
-  import ViewerMap from '../components/viewer/ViewerMap.svelte';
+  // GraphCanvas (cytoscape) and ViewerMap (maplibre + leaflet) load lazily the
+  // first time their result tab is opened (graphCanvasMod/viewerMapMod below), so
+  // the default table/json results never pull those vendor bundles.
   import SparqlEditorCM from '../components/SparqlEditorCM.svelte';
   import Select from '../components/Select.svelte';
   import DataTable from '../components/DataTable.svelte';
@@ -64,6 +65,13 @@ LIMIT 25`;
   let loading = false;
   let elapsed = 0;
   let activeTab = 'table'; // 'table' | 'json' | 'graph'
+
+  // Lazily import the heavy graph/map components the first time their tab opens.
+  // Memoised so re-renders within the tab don't re-import and remount.
+  let graphCanvasMod;
+  let viewerMapMod;
+  $: if (activeTab === 'graph' && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
+  $: if (activeTab === 'map' && !viewerMapMod) viewerMapMod = import('../components/viewer/ViewerMap.svelte');
 
   // ── Working-state memory (sessionStorage) ──────────────────────────────────
   // Persist the editor's working state — query, scope (datasets/orgs + selected
@@ -1172,15 +1180,23 @@ LIMIT 25`;
 
       <!-- Graph tab -->
       {#if activeTab === 'graph' && canGraph}
-        <GraphCanvas nodes={graphElements.nodes} edges={graphElements.edges} height="480px"
-          on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)} />
+        {#await graphCanvasMod then GC}
+          {#if GC}
+            <svelte:component this={GC.default} nodes={graphElements.nodes} edges={graphElements.edges} height="480px"
+              on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)} />
+          {/if}
+        {/await}
       {/if}
 
       <!-- Map tab — plots rows that carry WGS84 geometry on the shared viewer map. -->
       {#if activeTab === 'map' && canMap}
         {#if mapElements.length > 0}
-          <ViewerMap elements={mapElements} height="480px"
-            on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+          {#await viewerMapMod then VM}
+            {#if VM}
+              <svelte:component this={VM.default} elements={mapElements} height="480px"
+                on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+            {/if}
+          {/await}
         {:else}
           <p class="no-results">{$i18nT('pages.sparql.noMappable')}</p>
         {/if}

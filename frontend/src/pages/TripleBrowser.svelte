@@ -5,8 +5,10 @@
   import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth, getViewerFeed, getGeoStatsBatch } from '../lib/api.js';
   import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, triplesToResults } from '../lib/rdf-utils.js';
   import DataTable from '../components/DataTable.svelte';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
-  import ViewerMap from '../components/viewer/ViewerMap.svelte';
+  // GraphCanvas (cytoscape) and ViewerMap (maplibre + leaflet) are loaded lazily
+  // the first time the graph/map view is opened — see graphCanvasMod/viewerMapMod
+  // below. The table view (default) then never pulls those vendor bundles into the
+  // /browse download.
   import ContextMenu from '../components/ContextMenu.svelte';
   import FacetRail from '../components/browse/FacetRail.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
@@ -184,6 +186,14 @@
   // ─── Graph (inline) ───────────────────────────────────────────────────────
   let graphCanvas;
   let activeLayout = 'cose-bilkent';
+
+  // Lazily import the heavy view-only components the first time their view is
+  // opened. Memoised (the `!mod` guard) so a data update inside the view never
+  // re-imports and remounts the canvas — only the initial open pays the load.
+  let graphCanvasMod;
+  let viewerMapMod;
+  $: if (viewMode === 'graph' && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
+  $: if (viewMode === 'map' && !viewerMapMod) viewerMapMod = import('../components/viewer/ViewerMap.svelte');
 
   let graphNodes = [];
   let graphEdges = [];
@@ -1832,24 +1842,28 @@
             <p class="graph-empty-sub">{$i18nT('pages.tripleBrowser.noGraphDataSub')}</p>
           </div>
         {:else}
-          <GraphCanvas
-            bind:this={graphCanvas}
-            nodes={graphNodes}
-            edges={graphEdges}
-            layout={activeLayout}
-            height="100%"
-            loading={graphLoading && graphNodes.length === 0}
-            loadingMore={graphLoadingMore}
-            highlightIds={graphHighlightIds}
-            expandedNodes={browseExpandedIris}
-            expandingNode={browseExpandingUri}
-            exhaustedNodes={browseExhaustedIris}
-            on:nodeExpand={handleBrowseNodeExpand}
-            on:nodeOpen={handleBrowseNodeOpen}
-            on:edgeClick={handleBrowseEdgeClick}
-            on:nodeContextMenu={handleBrowseNodeContextMenu}
-            on:canvasContextMenu={handleBrowseCanvasContextMenu}
-          />
+          {#await graphCanvasMod then GC}
+            {#if GC}
+              <svelte:component this={GC.default}
+                bind:this={graphCanvas}
+                nodes={graphNodes}
+                edges={graphEdges}
+                layout={activeLayout}
+                height="100%"
+                loading={graphLoading && graphNodes.length === 0}
+                loadingMore={graphLoadingMore}
+                highlightIds={graphHighlightIds}
+                expandedNodes={browseExpandedIris}
+                expandingNode={browseExpandingUri}
+                exhaustedNodes={browseExhaustedIris}
+                on:nodeExpand={handleBrowseNodeExpand}
+                on:nodeOpen={handleBrowseNodeOpen}
+                on:edgeClick={handleBrowseEdgeClick}
+                on:nodeContextMenu={handleBrowseNodeContextMenu}
+                on:canvasContextMenu={handleBrowseCanvasContextMenu}
+              />
+            {/if}
+          {/await}
         {/if}
         {#if browseGraphHint}
           <div class="graph-hint" role="status">{browseGraphHint}</div>
@@ -1866,8 +1880,12 @@
     {:else if viewMode === 'map'}
       <div class="map-area">
         {#if mapElements.length > 0}
-          <ViewerMap elements={mapElements} height="100%"
-            on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && !e.detail.id.startsWith('_:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+          {#await viewerMapMod then VM}
+            {#if VM}
+              <svelte:component this={VM.default} elements={mapElements} height="100%"
+                on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && !e.detail.id.startsWith('_:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+            {/if}
+          {/await}
         {:else if mapLoading}
           <div class="graph-empty">
             <MapIcon size={52} strokeWidth={1} />

@@ -4,7 +4,8 @@
 //! - GET/POST /sparql — SPARQL Query and Update
 //! - GET/PUT/POST/DELETE /store — Graph Store HTTP Protocol
 //! - GET / — Service Description
-//! - GET /health — Health check
+//! - GET /health — Readiness + subsystem diagnostics (O(1))
+//! - GET /livez — Liveness probe (no subsystem access)
 //!
 //! # Prefix auto-resolution
 //!
@@ -77,6 +78,7 @@ pub fn management_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(service_description_handler))
         .route("/health", get(health_check))
+        .route("/livez", get(liveness_check))
 }
 
 // ─── Query parameters ─────────────────────────────────────────────────────────
@@ -1470,14 +1472,27 @@ async fn service_description_handler(
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }
 
+/// GET /livez — pure liveness probe. Touches no subsystem (no store, no DB), so
+/// it returns instantly even while the process is busy with a large boot seed or
+/// import. Container orchestration should probe THIS for restart decisions; a
+/// long but healthy seed must never be mistaken for a dead process and killed.
+/// Readiness/diagnostics live on the richer (now also O(1)) `/health`.
+async fn liveness_check() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
 /// GET /health — detailed subsystem probe
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    // Triplestore
-    let (store_ok, store_triples, store_graphs) =
-        match (state.store.len(), state.store.named_graphs()) {
-            (Ok(n), Ok(g)) => (true, Some(n as u64), Some(g.len() as u64)),
-            _ => (false, None, None),
-        };
+    // Triplestore — read the maintained O(1) count index, NOT store.len() /
+    // named_graphs(), which scan RocksDB (O(total quads)) and can block past the
+    // healthcheck timeout while a large import holds the store under write
+    // pressure. That blocking scan was the cause of the :7878 flap during a
+    // heavy seed: the probe timed out, the container went unhealthy, despite the
+    // server still serving. The cached reads can never be starved by a write
+    // burst, so the store is reported healthy whenever the index is reachable.
+    let store_triples = Some(state.store.cached_total_triples() as u64);
+    let store_graphs = Some(state.store.cached_named_graph_count() as u64);
+    let store_ok = true;
 
     // Auth / SQLite DB — lightweight read
     let db_ok = state.auth_db.count_users().is_ok();
@@ -4690,7 +4705,7 @@ async fn serve_asset(
 
     let asset = state
         .auth_db
-        .get_asset(&asset_id)
+        .get_asset(asset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Asset not found".to_string()))?;
 

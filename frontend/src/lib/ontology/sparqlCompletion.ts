@@ -3,7 +3,7 @@
 // - Auto-inserts PREFIX declarations when a known prefix is used but not declared
 // - Looks up unknown prefixes via prefix.cc (async, cached)
 
-import { autocompletion, insertCompletionText } from '@codemirror/autocomplete';
+import { autocompletion } from '@codemirror/autocomplete';
 import { shortenIRI } from '../rdf-utils.js';
 import { NAMESPACES, VOCAB, allBuiltinTerms } from './vocabularies.js';
 import {
@@ -147,12 +147,12 @@ export function ontologyAwareAutocomplete({ prefixes = {} as Record<string, stri
       }
 
       // --- Case 3: word position — keywords, variables, prefix names
-      const word = context.matchBefore(/[\?$]?[\w-]+/);
+      const word = context.matchBefore(/[?$]?[\w-]+/);
       if (!word && !context.explicit) return null;
       const w = (word?.text || '').toLowerCase();
 
       const varNames = new Set();
-      for (const m of doc.matchAll(/[\?$]([a-zA-Z_][\w-]*)/g)) varNames.add(m[1]);
+      for (const m of doc.matchAll(/[?$]([a-zA-Z_][\w-]*)/g)) varNames.add(m[1]);
 
       const prefixNames = new Set([
         ...Object.keys(NAMESPACES),
@@ -182,7 +182,7 @@ export function ontologyAwareAutocomplete({ prefixes = {} as Record<string, stri
         options: options.filter(o =>
           !w || o.label.toLowerCase().startsWith(w) || o.label.toLowerCase().includes(w)
         ),
-        validFor: /^[\?$]?[\w-:]*$/,
+        validFor: /^[?$]?[\w-:]*$/,
       };
     }],
   });

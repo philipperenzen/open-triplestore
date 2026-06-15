@@ -121,9 +121,12 @@ EXPOSE 7878
 # Persistent storage volume
 VOLUME ["/data"]
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:7878/health || exit 1
+# Health check — probe /livez (pure liveness, no store/DB access) so a long but
+# healthy boot seed (large IFC download + lift) is never mistaken for a dead
+# process. start-period covers that first-boot seed window (the IFC download
+# alone allows 600s); /health remains the richer O(1) readiness/diagnostics route.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+    CMD curl -f http://localhost:7878/livez || exit 1
 
 # Default command
 ENTRYPOINT ["open-triplestore"]
