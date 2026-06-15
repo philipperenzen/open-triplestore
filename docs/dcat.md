@@ -16,7 +16,7 @@ The triplestore automatically generates a full [W3C DCAT 2](https://www.w3.org/T
 | `dcat:Distribution` | SPARQL endpoint distribution + Graph Store HTTP Protocol distribution |
 | VoID statistics | Per-dataset `void:triples` from actual SPARQL COUNT queries |
 | `dct:conformsTo` | Links to the dataset's SHACL shapes graph when configured |
-| `dct:conformsTo` | Links to the ontology version the dataset's instance data conforms to |
+| `dct:conformsTo` | Links to the model version the dataset's instance data conforms to |
 | Organization metadata | `foaf:Organization` + `org:FormalOrganization` for organisation-owned datasets |
 | `sd:Service` | SPARQL service description |
 
@@ -96,7 +96,7 @@ curl 'http://localhost:7878/.well-known/void?format=rdfxml'
     dct:accessRights <http://publications.europa.eu/resource/authority/access-right/PUBLIC> ;
     dct:publisher <http://localhost:7878/org/org-001> ;
     dct:conformsTo <urn:dataset:abc123:shapes> ;
-    dct:conformsTo <http://localhost:7878/ontology/publication-model/version/1.0.0> ;
+    dct:conformsTo <http://localhost:7878/data-model/publication-model/version/1.0.0> ;
     void:triples 5200 ;
     dcat:distribution [ a dcat:Distribution ; dcat:accessURL <http://localhost:7878/sparql> ] ;
     dcat:distribution [ a dcat:Distribution ; dcat:accessURL <http://localhost:7878/store> ] ;

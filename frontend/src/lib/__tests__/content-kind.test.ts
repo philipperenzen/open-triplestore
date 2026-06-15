@@ -73,6 +73,13 @@ describe('probeContentKind verdict classification', () => {
     expect((await probeContentKind(['g'])).verdict).toBe('vocabulary');
   });
 
+  it('classifies a property-only graph (R-Box) as "vocabulary"', async () => {
+    // Object/datatype/annotation properties with no class anchor are R-Box →
+    // Vocabulary, not Model (which is classes / T-Box).
+    mockCounts({ props: 6 });
+    expect((await probeContentKind(['g'])).verdict).toBe('vocabulary');
+  });
+
   it('classifies a SWRL rule graph as "entailment"', async () => {
     mockCounts({ entailments: 5 });
     expect((await probeContentKind(['g'])).verdict).toBe('entailment');

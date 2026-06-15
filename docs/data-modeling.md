@@ -12,27 +12,27 @@ The triplestore implements the semantic web's modeling layers as two primary reg
 
 | Layer | Where | Contains | Examples |
 |---|---|---|---|
-| **Ontology Registry** | `/api/ontologies` | Models, schemas, SHACL shapes, SKOS vocabularies | Publication ontology, subject vocabulary, SHACL rules for catalogue data |
+| **Model & Vocabulary Registry** | `/api/models` | Models (classes), vocabularies (properties + concept schemes), SHACL shapes | Publication model, subject vocabulary, SHACL rules for catalogue data |
 | **Datasets** | `/api/datasets` | Instance data conforming to those models | Actual catalogue records, book entries, holdings |
 
-This separation follows the classic description logic distinction between the *terminological box* (T-Box) and the *assertion box* (A-Box). In Open Triplestore these correspond to distinct **graph roles**:
+This separation follows the classic description logic distinction between the *terminological box* (T-Box), the *relational box* (R-Box) and the *assertion box* (A-Box). In Open Triplestore these correspond to distinct **graph roles**, three of which (Model, Vocabulary, Instances) are first-class layers in their own right:
 
-- **Model** (OWL/RDFS terminological schema; what description logic calls the T-Box) — class definitions, property axioms. Managed in the Ontology Registry with a full version lifecycle (Draft → Staged → Published → Deprecated).
-- **Vocabulary** (SKOS; also part of the terminological layer) — concept schemes and controlled vocabularies. Also managed in the Ontology Registry.
-- **Shapes** (SHACL) — validation constraints. Stored alongside Model graphs in the Ontology Registry.
-- **Instances** (assertion data; what description logic calls the A-Box) — individual facts. Stored in Datasets as named graphs with access control and SPARQL endpoints.
+- **Model** (the T-Box) — **class** definitions and class axioms (`owl:Class`, `rdfs:subClassOf`, `owl:equivalentClass`, restrictions, disjointness). Managed in the Model Registry with a full version lifecycle (Draft → Staged → Published → Deprecated).
+- **Vocabulary** (the R-Box) — **property** definitions and relations (`owl:ObjectProperty`/`DatatypeProperty`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf`) **plus** SKOS concept schemes and controlled vocabularies. Also managed in the Model Registry.
+- **Shapes** (SHACL) — validation constraints. An orthogonal role, stored alongside Model/Vocabulary graphs in the Model Registry.
+- **Instances** (assertion data; the A-Box) — individual facts. Stored in Datasets as named graphs with access control and SPARQL endpoints.
 
-> **Note:** The terms T-Box and A-Box come from Description Logic and the OWL 2 specification. Open Triplestore uses the more descriptive role names **Model**, **Vocabulary**, **Shapes**, and **Instances** in its UI and API, but the underlying concepts are the same.
+> **Note:** The terms T-Box, R-Box and A-Box come from Description Logic and the OWL 2 specification. Open Triplestore uses the more descriptive role names **Model** (classes), **Vocabulary** (properties + concepts), **Shapes**, and **Instances** in its UI and API, but the underlying concepts are the same. Each role's graph can be **decomposed** on import: classes route to a Model sub-graph, properties and concept schemes to a Vocabulary sub-graph, and individuals to an Instances sub-graph.
 
 ---
 
-## Linking Datasets to Ontologies
+## Linking Datasets to a Model
 
-Every dataset can declare which ontology it **conforms to** via `dct:conformsTo`. This link connects instance data to the model it was designed for:
+Every dataset can declare which model it **conforms to** via `dct:conformsTo`. This link connects instance data to the model it was designed for:
 
 ```
-dataset.conforms_to_ontology = "publication-model"
-dataset.conforms_to_version  = "2.1.0"
+dataset.conforms_to_model   = "publication-model"
+dataset.conforms_to_version = "2.1.0"
 ```
 
 In the DCAT catalog this produces:
@@ -41,7 +41,7 @@ In the DCAT catalog this produces:
 <http://example.org/dataset/library-catalogue>
     a dcat:Dataset, void:Dataset ;
     dct:title "Library Catalogue 2025" ;
-    dct:conformsTo <http://example.org/ontology/publication-model/version/2.1.0> ;
+    dct:conformsTo <http://example.org/data-model/publication-model/version/2.1.0> ;
     void:triples 84200 .
 ```
 
@@ -55,7 +55,7 @@ curl -X POST /api/datasets -d '{
   "owner_type": "organisation",
   "owner_id": "example-org",
   "visibility": "members",
-  "conforms_to_ontology": "publication-model",
+  "conforms_to_model": "publication-model",
   "conforms_to_version": "2.1.0"
 }'
 ```
@@ -66,7 +66,7 @@ curl -X POST /api/datasets -d '{
 curl -X PUT /api/datasets/{id} -d '{
   "name": "Library Catalogue 2025",
   "visibility": "members",
-  "conforms_to_ontology": "publication-model",
+  "conforms_to_model": "publication-model",
   "conforms_to_version": "2.2.0"
 }'
 ```
@@ -77,13 +77,13 @@ curl -X PUT /api/datasets/{id} -d '{
 
 SHACL validation operates at two distinct levels that correspond to the Model/Instances separation:
 
-### 1. Model Validation (Ontology Registry)
+### 1. Model Validation (Model Registry)
 
-Validates the **ontology model itself** — are the SHACL shapes well-formed? Are class definitions consistent? This is done within the Ontology Registry when reviewing ontology versions before publishing. The shapes are stored as part of the versioned ontology graph.
+Validates the **model itself** — are the SHACL shapes well-formed? Are class definitions consistent? This is done within the Model Registry when reviewing model versions before publishing. The shapes are stored as part of the versioned model graph.
 
 ### 2. Instance Data Validation (Datasets)
 
-Validates the **instance data** against the shapes defined in the model. When a dataset is linked to an ontology via `conforms_to_ontology`, the triplestore resolves the SHACL shapes from that ontology version graph.
+Validates the **instance data** against the shapes defined in the model. When a dataset is linked to a model via `conforms_to_model`, the triplestore resolves the SHACL shapes from that model version graph.
 
 ```
 POST /api/datasets/{id}/validate
@@ -92,48 +92,48 @@ POST /api/datasets/{id}/validate
 **Shape resolution order:**
 
 1. **Dataset-specific shapes** — if a shapes graph is configured directly on the dataset (`shapes_graph_iri`), it takes precedence.
-2. **Ontology version shapes** — if no dataset-specific shapes exist but `conforms_to_ontology` and `conforms_to_version` are set, the SHACL shapes from the ontology version's named graph are used.
+2. **Model version shapes** — if no dataset-specific shapes exist but `conforms_to_model` and `conforms_to_version` are set, the SHACL shapes from the model version's named graph are used.
 
 This means you can:
-- Upload a publication ontology with SHACL shapes to the Ontology Registry.
-- Create a dataset of library catalogue records and link it to that ontology.
-- Validate the catalogue data against the publication ontology's shapes — without duplicating the shapes.
+- Upload a publication model with SHACL shapes to the Model Registry.
+- Create a dataset of library catalogue records and link it to that model.
+- Validate the catalogue data against the publication model's shapes — without duplicating the shapes.
 
 ### On-Write Validation
 
-When `shacl_on_write` is enabled on a dataset, every `PUT`/`POST` to the Graph Store or LDP endpoints validates incoming data before committing. The same shape resolution order applies: dataset-specific shapes first, then linked ontology shapes.
+When `shacl_on_write` is enabled on a dataset, every `PUT`/`POST` to the Graph Store or LDP endpoints validates incoming data before committing. The same shape resolution order applies: dataset-specific shapes first, then linked model shapes.
 
 ---
 
 ## Workflow Example
 
-### Step 1: Publish the Ontology Model
+### Step 1: Publish the Model
 
 ```bash
-# Create the ontology entry
-curl -X POST /api/ontologies -d '{
+# Create the model entry
+curl -X POST /api/models -d '{
   "title": "Publication Information Model",
   "namespace": "https://example.org/publication#",
   "description": "Classes, properties and SHACL shapes for library catalogue data"
 }'
 
 # Upload a version containing OWL classes + SHACL shapes
-curl -X POST /api/ontologies/publication-model/versions \
+curl -X POST /api/models/publication-model/versions \
   -F file=@publication-model-v1.ttl \
   -F version=1.0.0
 
 # Publish it
-curl -X POST /api/ontologies/publication-model/versions/1.0.0/publish
+curl -X POST /api/models/publication-model/versions/1.0.0/publish
 ```
 
-### Step 2: Create a Dataset Linked to the Ontology
+### Step 2: Create a Dataset Linked to the Model
 
 ```bash
 curl -X POST /api/datasets -d '{
   "name": "Library Catalogue 2025",
   "owner_type": "organisation",
   "owner_id": "example-org",
-  "conforms_to_ontology": "publication-model",
+  "conforms_to_model": "publication-model",
   "conforms_to_version": "1.0.0"
 }'
 ```
@@ -179,13 +179,15 @@ The validation report shows which instances violate the model's constraints:
 
 ```
 ┌──────────────────────────────────────────────────┐
-│     Ontology Registry (Model / Vocabulary / Shapes)   │
+│   Model & Vocabulary Registry (Model / Vocabulary / Shapes) │
 │                                                  │
-│  ┌─────────────┐  ┌──────────────────────────┐   │
-│  │ OWL Classes  │  │ SHACL Shapes             │   │
-│  │ Properties   │  │ (validation constraints) │   │
-│  │ Axioms       │  │                          │   │
-│  └─────────────┘  └──────────────────────────┘   │
+│  ┌──────────────┐ ┌───────────────┐ ┌──────────┐ │
+│  │ Model (T-Box) │ │ Vocabulary    │ │ SHACL    │ │
+│  │ OWL Classes   │ │ (R-Box)       │ │ Shapes   │ │
+│  │ Class axioms  │ │ Properties    │ │ (validn. │ │
+│  │ Restrictions  │ │ Concept       │ │ constr.) │ │
+│  │               │ │ schemes       │ │          │ │
+│  └──────────────┘ └───────────────┘ └──────────┘ │
 │                                                  │
 │  Versioned: Draft → Staged → Published           │
 └──────────────┬───────────────────────────────────┘
@@ -212,10 +214,10 @@ The validation report shows which instances violate the model's constraints:
 |---|---|---|
 | Instance data | RDF | Stored in dataset named graphs |
 | Data model | Turtle, JSON-LD, N-Triples | Serialization formats for import/export |
-| Schema | RDFS | Class/property hierarchies in ontology versions |
-| Ontology | OWL 2 | Formal semantics and reasoning in ontology versions |
-| Knowledge org | SKOS | Controlled vocabularies in ontology versions |
-| Validation | SHACL, ShEx | Shapes in ontology versions or dataset-specific |
+| Schema (classes) | RDFS | Class hierarchies in model versions |
+| Formal semantics | OWL 2 | Class & property axioms and reasoning in model/vocabulary versions |
+| Knowledge org | SKOS | Controlled vocabularies in vocabulary versions |
+| Validation | SHACL, ShEx | Shapes in model versions or dataset-specific |
 | Catalog | DCAT 2, VoID | Auto-generated at `/.well-known/void` |
-| Conformance | `dct:conformsTo` | Links datasets to ontology versions |
+| Conformance | `dct:conformsTo` | Links datasets to model versions |
 | Query | SPARQL 1.1 | Uniform access to all layers |

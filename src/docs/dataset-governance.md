@@ -52,16 +52,23 @@ demonstrate validation end-to-end from **SHACL Studio → Pipelines**. The
 SHACL-of-SHACL meta-shapes (`urn:system:shapes:shacl-shacl`) validate the shape
 graphs themselves.
 
-## 4. The Open Triplestore ontology & vocabulary
+## 4. The Open Triplestore model & vocabulary
 
 The bundled **Open Triplestore** org publishes its own model and vocabulary in
-the *"Open Triplestore Ontology & Vocabulary"* dataset:
+the *"Open Triplestore Model & Vocabulary"* dataset:
 
-- **Model** (`…/ots-ontology/ots-model`, role `Model`): OWL/RDFS definitions of
-  `ots:Standard`, `ots:AuthMethod`, `ots:conformance`, the `ots:graphRole`
-  relation and the six `GraphRole` classes, and `ots:visibility`.
-- **Vocabulary** (`…/ots-ontology/ots-vocabulary`, role `Vocabulary`): a SKOS
-  concept scheme for graph roles, conformance levels and the supported standards.
+- **Model** (`…/ots-model/ots-model`, role `Model`, the T-Box): OWL/RDFS **class**
+  definitions — `ots:Standard`, `ots:AuthMethod`, and the six `GraphRole` classes.
+- **Vocabulary** (`…/ots-model/ots-vocabulary`, role `Vocabulary`, the R-Box): the
+  **property/relation** terms (`ots:conformance`, the `ots:graphRole` relation,
+  `ots:visibility`) and a SKOS concept scheme for graph roles, conformance levels
+  and the supported standards. The `ots:graphRole` property lives here, in the
+  Vocabulary layer, even though the `GraphRole` classes it points at are defined
+  in the Model.
+
+The role individuals are minted in the role namespace
+`https://opentriplestore.org/ns/role#` (e.g. `…/ns/role#Model`,
+`…/ns/role#Vocabulary`, `…/ns/role#Instances`).
 
 ## 5. Derived-data write targets
 

@@ -346,14 +346,14 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
                 "Graph roles in the model",
                 "ots-graph-roles",
                 "OWL/RDFS — the graph-role individuals the codebase classifies named graphs with.",
-                "PREFIX otso: <https://opentriplestore.org/ontology/>\n\
+                "PREFIX otso: <https://opentriplestore.org/ns#>\n\
                  PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
                  SELECT ?role ?label WHERE { ?role a otso:GraphRole ; rdfs:label ?label } ORDER BY ?label",
             ),
             svc(
-                "Ontology classes & properties",
+                "Model classes & properties",
                 "ots-model-terms",
-                "OWL — the classes and properties defined in the Open Triplestore ontology.",
+                "OWL — the classes and properties defined in the Open Triplestore model.",
                 "PREFIX owl: <http://www.w3.org/2002/07/owl#>\n\
                  PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
                  SELECT ?term ?type ?label WHERE { ?term a ?type ; rdfs:label ?label . \
@@ -603,14 +603,14 @@ const ASSETS_OTL_TTL: &str = include_str!("data/assets-otl.ttl");
 /// structure tab. The lightweight, reliable alternative to the per-element IFC.
 const BUILDINGS_BIM_TTL: &str = include_str!("data/buildings-bim.ttl");
 
-/// OWL/RDFS data model for the `ots:` terms the codebase uses. Two namespaces
-/// are in play: `…/ns#` (Standard, AuthMethod, conformance) and `…/ontology/`
-/// (graph roles + the `graphRole` relation written into dataset metadata).
+/// OWL/RDFS data model for the `ots:` terms the codebase uses. All terms live in
+/// the single `…/ns#` namespace: Standard, AuthMethod, conformance, plus the
+/// graph roles and the `graphRole` relation written into dataset metadata.
 const OTS_MODEL_TTL: &str = r#"@prefix owl:  <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 @prefix ots:  <https://opentriplestore.org/ns#> .
-@prefix otso: <https://opentriplestore.org/ontology/> .
+@prefix otso: <https://opentriplestore.org/ns#> .
 
 <https://opentriplestore.org/ns> a owl:Ontology ;
     rdfs:label "Open Triplestore ontology" ;

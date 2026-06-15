@@ -40,7 +40,7 @@ pub const DATASET_STRUCTURE_TTL: &str = r#"@prefix sh:   <http://www.w3.org/ns/s
 @prefix dct:  <http://purl.org/dc/terms/> .
 @prefix void: <http://rdfs.org/ns/void#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
-@prefix otso: <https://opentriplestore.org/ontology/> .
+@prefix otso: <https://opentriplestore.org/ns#> .
 
 # Named property shapes (the engine executes `sh:property <iri>`, not inline
 # blank-node property shapes — see src/shacl/engine.rs).
@@ -197,7 +197,7 @@ pub fn audit_dataset_metadata(
 fn mark_nonconforming(store: &TripleStore, base_url: &str, dataset_id: &str) {
     let ds_iri = format!("{base_url}/datasets/{dataset_id}");
     let q = format!(
-        "INSERT DATA {{ GRAPH <{AUDIT_GRAPH}> {{ <{ds_iri}> <https://opentriplestore.org/ontology/auditStatus> \"nonconforming\" }} }}"
+        "INSERT DATA {{ GRAPH <{AUDIT_GRAPH}> {{ <{ds_iri}> <https://opentriplestore.org/ns#auditStatus> \"nonconforming\" }} }}"
     );
     let _ = store.update(&q);
 }
@@ -216,7 +216,7 @@ mod tests {
         let good = r#"@prefix dcat: <http://www.w3.org/ns/dcat#> .
 @prefix dct: <http://purl.org/dc/terms/> .
 @prefix void: <http://rdfs.org/ns/void#> .
-@prefix otso: <https://opentriplestore.org/ontology/> .
+@prefix otso: <https://opentriplestore.org/ns#> .
 <urn:ds:1> a dcat:Dataset ; dct:title "T" ; dct:identifier "1" ; otso:visibility "public" ;
     void:subset <urn:g:1> .
 <urn:g:1> otso:graphRole otso:Instances ."#;
