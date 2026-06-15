@@ -467,14 +467,12 @@ fn reclassify_model_graphs_to_vocabulary(
         for e in &entries {
             if e.graph_role == Some(GraphKind::Model)
                 && detect_graph_role(store, &e.graph_iri) == Some(GraphKind::Vocabulary)
-            {
-                if db
+                && db
                     .set_dataset_graph_role(&ds.id, &e.graph_iri, Some(GraphKind::Vocabulary))
                     .is_ok()
-                {
-                    reclassified += 1;
-                    changed = true;
-                }
+            {
+                reclassified += 1;
+                changed = true;
             }
         }
         if changed {

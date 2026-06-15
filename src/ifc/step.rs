@@ -367,12 +367,14 @@ pub fn decode_step_string(s: &str) -> String {
     while i < b.len() {
         if b[i] == '\\' {
             // \S\c
-            if i + 2 < b.len() && (b[i + 1] == 'S' || b[i + 1] == 's') && b[i + 2] == '\\' {
-                if i + 3 < b.len() {
-                    out.push(char::from_u32(b[i + 3] as u32 + 0x80).unwrap_or(b[i + 3]));
-                    i += 4;
-                    continue;
-                }
+            if i + 2 < b.len()
+                && (b[i + 1] == 'S' || b[i + 1] == 's')
+                && b[i + 2] == '\\'
+                && i + 3 < b.len()
+            {
+                out.push(char::from_u32(b[i + 3] as u32 + 0x80).unwrap_or(b[i + 3]));
+                i += 4;
+                continue;
             }
             // \X\hh
             if i + 2 < b.len() && (b[i + 1] == 'X' || b[i + 1] == 'x') && b[i + 2] == '\\' {

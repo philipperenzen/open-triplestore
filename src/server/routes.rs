@@ -4690,7 +4690,7 @@ async fn serve_asset(
 
     let asset = state
         .auth_db
-        .get_asset(&asset_id)
+        .get_asset(asset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Asset not found".to_string()))?;
 
