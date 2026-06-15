@@ -404,6 +404,11 @@ impl<'a> Parser<'a> {
 
 // ─── Measures & derived geometry ──────────────────────────────────────────────
 
+/// Indexed triangle mesh: a deduplicated vertex list paired with triangle
+/// indices (`[u32; 3]`) into that list — the buffer layout `parry3d` and
+/// glTF/3D-Tiles exporters want.
+type IndexedMesh = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+
 impl Geometry3D {
     /// Visit every coordinate in the geometry.
     pub fn for_each_coord(&self, f: &mut impl FnMut(Coord3)) {
@@ -520,7 +525,7 @@ impl Geometry3D {
     /// currently a self-contained Möller test, so this is wired in only once the
     /// parry 0.17 `TriMesh::new` signature is pinned (see functions3d TODO).
     #[allow(dead_code)]
-    pub fn trimesh(&self) -> Option<(Vec<[f64; 3]>, Vec<[u32; 3]>)> {
+    pub fn trimesh(&self) -> Option<IndexedMesh> {
         use std::collections::HashMap;
         let tris = self.triangles();
         if tris.is_empty() {

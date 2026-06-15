@@ -411,7 +411,7 @@ fn ray_tri_cross(orig: Coord3, dir: [f64; 3], tri: &[Coord3; 3]) -> RayHit {
     let inv_det = 1.0 / det;
     let tvec = sub(orig, tri[0]);
     let u = dot(tvec, pvec) * inv_det;
-    if u < -EPS || u > 1.0 + EPS {
+    if !(-EPS..=1.0 + EPS).contains(&u) {
         return RayHit::Miss;
     }
     let qvec = cross(tvec, e1);

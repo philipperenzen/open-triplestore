@@ -47,7 +47,7 @@ fn pad4(len: usize) -> usize {
 fn push_padded(buf: &mut Vec<u8>, bytes: &[u8], pad: u8) -> usize {
     let offset = buf.len();
     buf.extend_from_slice(bytes);
-    while buf.len() % 4 != 0 {
+    while !buf.len().is_multiple_of(4) {
         buf.push(pad);
     }
     offset
@@ -141,7 +141,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         bin.extend_from_slice(&v.to_le_bytes());
     }
     let pos_len = bin.len() - pos_offset;
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -151,7 +151,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         bin.extend_from_slice(&v.to_le_bytes());
     }
     let idx_len = bin.len() - idx_offset;
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -167,7 +167,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         }
     }
     let fid_len = bin.len() - fid_offset;
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -189,7 +189,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         bin.extend_from_slice(&v.to_le_bytes());
     }
     let iri_off_len = bin.len() - iri_off_offset;
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -200,7 +200,7 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         bin.extend_from_slice(&v.to_le_bytes());
     }
     let nrm_len = bin.len() - nrm_offset;
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
 
@@ -340,17 +340,18 @@ fn assemble_glb(gltf: &Value, bin: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&(json_padded_len as u32).to_le_bytes());
     out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
     out.extend_from_slice(&json_bytes);
-    for _ in json_bytes.len()..json_padded_len {
-        out.push(b' ');
-    }
+    // Space-pad the JSON chunk to a 4-byte boundary (glTF 2.0 spec).
+    out.extend(std::iter::repeat_n(
+        b' ',
+        json_padded_len - json_bytes.len(),
+    ));
 
     // ── BIN chunk ── (type 0x004E4942 "BIN\0", zero-padded)
     out.extend_from_slice(&(bin_padded_len as u32).to_le_bytes());
     out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
     out.extend_from_slice(bin);
-    for _ in bin.len()..bin_padded_len {
-        out.push(0);
-    }
+    // Zero-pad the BIN chunk to a 4-byte boundary (glTF 2.0 spec).
+    out.extend(std::iter::repeat_n(0u8, bin_padded_len - bin.len()));
 
     out
 }

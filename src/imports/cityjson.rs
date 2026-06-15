@@ -418,7 +418,7 @@ fn transform_of(doc: &Value) -> ([f64; 3], [f64; 3]) {
 /// or an OGC CRS URL) into the canonical OGC EPSG URI used in WKT prefixes.
 fn normalise_crs_uri(s: &str) -> String {
     let code = s
-        .rsplit(|c| c == ':' || c == '/')
+        .rsplit([':', '/'])
         .find(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
     match code {
         Some(c) => format!("http://www.opengis.net/def/crs/EPSG/0/{c}"),

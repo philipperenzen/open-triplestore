@@ -216,8 +216,12 @@ fn parse_rings(s: &str) -> Option<Vec<Vec<(f64, f64)>>> {
         .collect::<Option<Vec<_>>>()
 }
 
+/// A MULTIPOLYGON's coordinates: a list of polygons, each a list of rings, each
+/// ring a list of `(x, y)` coordinates.
+type MultiPolygonCoords = Vec<Vec<Vec<(f64, f64)>>>;
+
 /// Parse the inner of a MULTIPOLYGON: a list of polygons, each a list of rings.
-fn parse_multi_polygon(s: &str) -> Option<Vec<Vec<Vec<(f64, f64)>>>> {
+fn parse_multi_polygon(s: &str) -> Option<MultiPolygonCoords> {
     split_top_level(s)
         .into_iter()
         .map(|part| parse_rings(strip_parens(part)?))
