@@ -40,8 +40,9 @@
 //! all) on their normal path. A read-heavy workload within the cap pays the one-time
 //! build after a write, then reuses warm copies.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use opengraph::parallel::{self, ParAnswer, ParClass, ParallelStore};
 use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolutionIter, Variable};
@@ -69,6 +70,17 @@ const MIRROR_BUDGET_DIVISOR: u64 = 4;
 const BYTES_PER_TRIPLE_BOTH_COPIES: u64 = 1024;
 /// Hard cap on shard count regardless of core count / configuration.
 const MAX_SHARDS: usize = 16;
+/// Default quiet period (ms) a write burst must clear before the mirror is
+/// (re)built. After any write the two RAM copies are stale; rebuilding them over a
+/// multi-million-triple store costs seconds, so doing it on the very next query —
+/// then again after the next write — turns a write-heavy phase (the boot seed's
+/// vocabulary/metadata writes interleaved with its registry existence checks, or a
+/// bulk import) into dozens of back-to-back full-store rebuilds that peg a core for
+/// minutes with no client traffic. Holding off until writes go quiet collapses that
+/// to a single rebuild; queries in the meantime fall back to the persistent store
+/// (correct, just unaccelerated). `0` disables the debounce (rebuild eagerly).
+/// Tunable via `OTS_PARALLEL_QUERY_REBUILD_QUIET_MS`.
+const DEFAULT_REBUILD_QUIET_MS: u64 = 500;
 
 /// Subject-sharded in-memory accelerator, shared (`Arc`) inside `TripleStore`.
 #[derive(Clone)]
@@ -98,6 +110,39 @@ struct Inner {
     shard_count: usize,
     max_triples: usize,
     enabled: bool,
+    /// Monotonic base for the millisecond clock behind the rebuild debounce.
+    base: Instant,
+    /// Milliseconds since `base` of the most recent write (recorded by `mark_dirty`),
+    /// or `0` if there has been none since construction. Read on the query path so a
+    /// rebuild is deferred while writes are still churning.
+    last_write_ms: AtomicU64,
+    /// Quiet period (ms) writes must clear before a (re)build; `0` rebuilds eagerly.
+    rebuild_quiet_ms: AtomicU64,
+    /// Count of full (re)builds performed — diagnostics + regression guard.
+    build_count: AtomicUsize,
+}
+
+impl Inner {
+    /// Milliseconds elapsed since `base` (monotonic; never goes backwards).
+    fn now_ms(&self) -> u64 {
+        self.base.elapsed().as_millis() as u64
+    }
+
+    /// Whether a write landed within the rebuild quiet period — i.e. the store is
+    /// still being actively written and a full mirror rebuild would likely be
+    /// invalidated by the next write. `false` before the first write (so the initial
+    /// build is never delayed) and when the debounce is disabled (`quiet == 0`).
+    fn recently_written(&self) -> bool {
+        let quiet = self.rebuild_quiet_ms.load(Ordering::Relaxed);
+        if quiet == 0 {
+            return false;
+        }
+        let last = self.last_write_ms.load(Ordering::Acquire);
+        if last == 0 {
+            return false;
+        }
+        self.now_ms().saturating_sub(last) < quiet
+    }
 }
 
 impl ParallelMirror {
@@ -140,13 +185,37 @@ impl ParallelMirror {
                 shard_count: shard_count.clamp(1, MAX_SHARDS),
                 max_triples,
                 enabled,
+                base: Instant::now(),
+                last_write_ms: AtomicU64::new(0),
+                rebuild_quiet_ms: AtomicU64::new(env_rebuild_quiet_ms()),
+                build_count: AtomicUsize::new(0),
             }),
         }
     }
 
     /// Mark the mirror stale after any write to the persistent store.
     pub fn mark_dirty(&self) {
+        // Record the write time first, then flip the dirty flag: a query that
+        // observes `dirty == true` is then guaranteed to read a write timestamp at
+        // least this fresh, so the debounce in `get_or_build` never rebuilds against
+        // a stale "last write" during an active burst.
+        self.inner
+            .last_write_ms
+            .store(self.inner.now_ms().max(1), Ordering::Release);
         self.inner.dirty.store(true, Ordering::Release);
+    }
+
+    /// Number of full (re)builds performed since construction. Diagnostics, and the
+    /// hook the regression test uses to prove a write burst does not thrash rebuilds.
+    pub fn build_count(&self) -> usize {
+        self.inner.build_count.load(Ordering::Relaxed)
+    }
+
+    /// Override the rebuild quiet period (ms) — used by tests to drive the debounce
+    /// deterministically without touching the process-wide environment variable.
+    #[cfg(test)]
+    fn set_rebuild_quiet_ms(&self, ms: u64) {
+        self.inner.rebuild_quiet_ms.store(ms, Ordering::Relaxed);
     }
 
     /// Try to answer `sparql` in parallel across the shards, returning `None` to
@@ -183,6 +252,15 @@ impl ParallelMirror {
             if let Some(ps) = self.inner.shards.read().ok()?.clone() {
                 return Some(ps);
             }
+        }
+        // Debounce: while writes are still churning, decline (the persistent store
+        // answers this query — correct, just unaccelerated) instead of paying for a
+        // full-store rebuild that the next write would immediately invalidate. This
+        // is what keeps a write-heavy boot seed (or bulk import) from rebuilding two
+        // multi-million-triple RAM copies dozens of times back-to-back; the mirror
+        // builds once, on the first query after writes go quiet.
+        if self.inner.recently_written() {
+            return None;
         }
         // (Re)build under the build lock so concurrent queries build at most once.
         let _guard = self.inner.build_lock.lock().ok()?;
@@ -229,6 +307,7 @@ impl ParallelMirror {
         *self.inner.full.write().ok()? = Some(full);
         self.inner.built_len.store(total, Ordering::Release);
         self.inner.dirty.store(false, Ordering::Release);
+        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
         // Built successfully (under cap): re-arm the over-cap warning so a later
         // growth back over the cap is surfaced again.
         self.inner.over_cap_warned.store(false, Ordering::Release);
@@ -272,6 +351,15 @@ fn default_shards() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, MAX_SHARDS)
+}
+
+/// Resolve the rebuild quiet period (ms) from the environment, falling back to
+/// [`DEFAULT_REBUILD_QUIET_MS`]. `0` disables the debounce (eager rebuild).
+fn env_rebuild_quiet_ms() -> u64 {
+    std::env::var("OTS_PARALLEL_QUERY_REBUILD_QUIET_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REBUILD_QUIET_MS)
 }
 
 /// Best-effort detection (Linux) of the memory budget, in bytes, this process is
@@ -358,5 +446,108 @@ fn par_answer_to_results(ans: ParAnswer) -> QueryResults {
             let vars: Arc<[Variable]> = Arc::from(variables);
             QueryResults::Solutions(QuerySolutionIter::new(vars, rows.into_iter().map(Ok)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxigraph::model::{GraphName, NamedNode, Quad};
+    use std::time::Duration;
+
+    /// A small in-memory store — enough to exercise a real mirror build without the
+    /// cost mattering; the regression guard asserts the *number* of builds, not time.
+    fn store_with_quads(n: usize) -> Store {
+        let store = Store::new().unwrap();
+        let p = NamedNode::new("http://example.org/p").unwrap();
+        for i in 0..n {
+            let s = NamedNode::new(format!("http://example.org/s{i}")).unwrap();
+            let o = NamedNode::new(format!("http://example.org/o{i}")).unwrap();
+            store
+                .insert(&Quad::new(s, p.clone(), o, GraphName::DefaultGraph))
+                .unwrap();
+        }
+        store
+    }
+
+    /// The regression guard for the post-seed CPU peg: a write-heavy burst (the boot
+    /// seed interleaves registry/metadata writes with existence-check queries) must
+    /// NOT rebuild the full-store mirror on every query. Before the debounce this
+    /// loop rebuilt two full RAM copies 50 times; now it builds zero times until
+    /// writes go quiet, then exactly once, then reuses the warm copy.
+    #[test]
+    fn write_burst_does_not_thrash_rebuilds() {
+        let mirror = ParallelMirror::new(true, 2, 10_000_000);
+        mirror.set_rebuild_quiet_ms(120);
+        let store = store_with_quads(200);
+        let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+
+        // Interleaved writes + queries with no quiet gap → every query declines and
+        // falls back to the persistent store; the mirror is never (re)built.
+        for _ in 0..50 {
+            mirror.mark_dirty();
+            assert!(
+                mirror
+                    .try_full_query(&store, q, QueryOptions::default)
+                    .is_none(),
+                "a query during an active write burst must decline (fall back), not rebuild",
+            );
+        }
+        assert_eq!(
+            mirror.build_count(),
+            0,
+            "writes still churning → no full-store rebuild (was 50 before the debounce)",
+        );
+
+        // Writes go quiet → the next query builds the mirror exactly once.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(mirror
+            .try_full_query(&store, q, QueryOptions::default)
+            .is_some());
+        assert_eq!(mirror.build_count(), 1, "one build after writes quiesce");
+
+        // Steady read-only traffic reuses the warm copy — no further rebuilds.
+        for _ in 0..50 {
+            assert!(mirror
+                .try_full_query(&store, q, QueryOptions::default)
+                .is_some());
+        }
+        assert_eq!(
+            mirror.build_count(),
+            1,
+            "clean mirror reused on every read, not rebuilt",
+        );
+    }
+
+    /// The env escape hatch (`OTS_PARALLEL_QUERY_REBUILD_QUIET_MS=0`) restores the
+    /// eager behaviour: the first query after a write rebuilds immediately.
+    #[test]
+    fn quiet_zero_rebuilds_eagerly() {
+        let mirror = ParallelMirror::new(true, 2, 10_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        let store = store_with_quads(50);
+        let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+
+        mirror.mark_dirty();
+        assert!(mirror
+            .try_full_query(&store, q, QueryOptions::default)
+            .is_some());
+        assert_eq!(mirror.build_count(), 1);
+    }
+
+    /// With no write since construction the initial build is never debounced, so a
+    /// cold first query (e.g. the first viewer-feed after boot settles) builds at
+    /// once rather than waiting out a quiet period.
+    #[test]
+    fn first_build_is_not_debounced() {
+        let mirror = ParallelMirror::new(true, 2, 10_000_000);
+        mirror.set_rebuild_quiet_ms(60_000); // huge window; must not delay first build
+        let store = store_with_quads(50);
+        let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+
+        assert!(mirror
+            .try_full_query(&store, q, QueryOptions::default)
+            .is_some());
+        assert_eq!(mirror.build_count(), 1);
     }
 }
