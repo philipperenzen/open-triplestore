@@ -432,7 +432,12 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     }
     for b in IFC_BUILDINGS.iter() {
         let bot_graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, b.graph_suffix);
-        if state.store.graph_count_cached(Some(&bot_graph)).unwrap_or(0) > 0 {
+        if state
+            .store
+            .graph_count_cached(Some(&bot_graph))
+            .unwrap_or(0)
+            > 0
+        {
             continue; // already seeded
         }
         // SEED_IFC_URL overrides only the Schependomlaan source (the headline
@@ -441,19 +446,31 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             Some(u) if b.label == "Schependomlaan" && !u.trim().is_empty() => u.to_string(),
             _ => b.url.to_string(),
         };
-        tracing::info!("seed: downloading {} IFC ({url}) — first boot only", b.label);
+        tracing::info!(
+            "seed: downloading {} IFC ({url}) — first boot only",
+            b.label
+        );
         let downloaded = block_on_anywhere(async {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(600))
                 .build()?;
-            let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+            let bytes = client
+                .get(&url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
             anyhow::Ok(bytes.to_vec())
         })
         .and_then(|r| r);
         let bytes = match downloaded {
             Ok(b2) => b2,
             Err(e) => {
-                tracing::warn!("{} IFC seed skipped (download failed, retries next boot): {e}", b.label);
+                tracing::warn!(
+                    "{} IFC seed skipped (download failed, retries next boot): {e}",
+                    b.label
+                );
                 continue;
             }
         };
@@ -473,7 +490,12 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
         match imported {
             Ok(o) => tracing::info!(
                 "seeded {}: {} elements / {} storeys / {} spaces; BOT {} + ifcOWL {} triples",
-                b.label, o.stats.elements, o.stats.storeys, o.stats.spaces, o.stats.bot_triples, o.stats.ifcowl_triples
+                b.label,
+                o.stats.elements,
+                o.stats.storeys,
+                o.stats.spaces,
+                o.stats.bot_triples,
+                o.stats.ifcowl_triples
             ),
             Err(e) => tracing::warn!("{} IFC seed failed: {e}", b.label),
         }
