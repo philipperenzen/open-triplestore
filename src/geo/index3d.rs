@@ -82,7 +82,7 @@ impl Index3D {
     pub fn candidates(&self, query: &Aabb3) -> Vec<String> {
         let env = AABB::from_corners(query.min, query.max);
         self.tree
-            .locate_in_envelope_intersecting(&env)
+            .locate_in_envelope_intersecting(env)
             .map(|e| e.iri.clone())
             .collect()
     }
