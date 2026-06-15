@@ -963,7 +963,7 @@ function makeCurie(prefixes: Record<string, string>): (iri: string) => string {
     for (const [p, ns] of entries) {
       if (ns && iri.startsWith(ns)) {
         const local = iri.slice(ns.length);
-        if (/^[A-Za-z_][A-Za-z0-9_.\-]*$/.test(local)) return `${p}:${local}`;
+        if (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(local)) return `${p}:${local}`;
       }
     }
     return `<${iri}>`;

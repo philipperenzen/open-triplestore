@@ -7,9 +7,12 @@
 # lint/test/build, the cargo-deny supply-chain audit (advisories, bans, sources,
 # licenses), an npm production-dependency audit, a gitleaks secret scan, the
 # performance-regression gate, and a tag-driven release. Commands and versions
-# are kept identical to the GitHub jobs (the sole intentional difference is that
-# the GitLab perf jobs install python3, which the rust image lacks but the
-# GitHub ubuntu-latest runner already ships — see the perf job below).
+# track the GitHub jobs, with two intentional differences: (1) the GitLab perf
+# jobs install python3, which the rust image lacks but the GitHub ubuntu-latest
+# runner already ships (see the perf job below); and (2) the rust job here keeps
+# `--all-features`, so — since ci.yml switched to an explicit feature list — this
+# is the only CI that actually compiles the `sfcgal3d` feature (hence the extra
+# libsfcgal-dev native dep in before_script).
 
 stages:
   - check
@@ -38,9 +41,12 @@ rust:
       - .cargo/git/
       - target/
   before_script:
-    # GEOS for GeoSPARQL; the rest match the GitHub backend job (SAML/xmlsec, TLS).
+    # GEOS for GeoSPARQL; SFCGAL for the `sfcgal3d` feature (pulled in by
+    # `--all-features` below — sfcgal-sys is a `-sys` crate that needs the native
+    # SFCGAL headers at build time); the rest match the GitHub backend job
+    # (SAML/xmlsec, TLS). Without libsfcgal-dev the `--all-features` build fails.
     - apt-get update -qq
-    - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+    - apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
     - rustup component add rustfmt clippy
   script:
     - cargo fmt --all --check

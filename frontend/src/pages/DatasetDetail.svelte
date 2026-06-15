@@ -58,7 +58,9 @@
   import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
   import { copyToClipboard } from '../lib/clipboard.js';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
+  // GraphCanvas (cytoscape) loads lazily once there are graph nodes to show
+  // (graphCanvasMod below), keeping cytoscape out of the main bundle that this
+  // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
   import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History } from 'lucide-svelte';
@@ -545,6 +547,9 @@
 
   // Linked data preview
   let graphNodes = [];
+  // Lazily import GraphCanvas once there are nodes to render (memoised).
+  let graphCanvasMod;
+  $: if (graphNodes.length > 0 && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
   let graphEdges = [];
   let sampleTriples = [];
   let loadingPreview = false;
@@ -1548,17 +1553,21 @@
     {:else if previewError || versionError}
       <p class="error">{previewError || versionError}</p>
     {:else}
-      <GraphCanvas
-        nodes={graphNodes}
-        edges={graphEdges}
-        height="400px"
-        expandedNodes={previewExpandedIris}
-        expandingNode={previewExpandingUri}
-        exhaustedNodes={previewExhaustedIris}
-        on:nodeExpand={handlePreviewNodeExpand}
-        on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)}
-        on:nodeContextMenu={handlePreviewNodeContextMenu}
-      />
+      {#await graphCanvasMod then GC}
+        {#if GC}
+          <svelte:component this={GC.default}
+            nodes={graphNodes}
+            edges={graphEdges}
+            height="400px"
+            expandedNodes={previewExpandedIris}
+            expandingNode={previewExpandingUri}
+            exhaustedNodes={previewExhaustedIris}
+            on:nodeExpand={handlePreviewNodeExpand}
+            on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)}
+            on:nodeContextMenu={handlePreviewNodeContextMenu}
+          />
+        {/if}
+      {/await}
       <ContextMenu
         visible={previewCtxVisible}
         x={previewCtxX}

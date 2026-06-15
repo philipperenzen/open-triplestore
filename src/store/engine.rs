@@ -604,7 +604,20 @@ impl TripleStore {
         self.store.bulk_loader().load_quads(quads)?;
 
         info!("Data loaded successfully");
-        self.graph_index.rebuild(&self.store);
+        // When all data was forced into a single target graph (the Graph Store
+        // PUT/POST path, and every per-graph seed/audit/shape re-PUT at boot),
+        // ONLY that graph changed — recount just it instead of rebuilding the
+        // whole index. A full rebuild walks and counts every named graph,
+        // including a dataset's multi-million-triple `…/ifcowl` lift, so doing it
+        // per re-PUT turned each idempotent boot PUT into a full-store scan. With
+        // no target graph the input may name several graphs (NQuads/TriG), so the
+        // full rebuild stays.
+        match to_graph {
+            Some(g) => self
+                .graph_index
+                .recount_specific_graphs(&self.store, &[Some(g.to_string())]),
+            None => self.graph_index.rebuild(&self.store),
+        }
         self.spatial_index.mark_dirty();
         #[cfg(feature = "geometry3d")]
         self.spatial_index_3d.mark_dirty();
@@ -851,6 +864,29 @@ impl TripleStore {
             }
         }
         Ok(graphs)
+    }
+
+    /// O(1) approximate total triple count read from the maintained per-graph
+    /// count index (lock-free `DashMap`), summing every graph including the
+    /// default graph. Unlike [`Self::len`] this never scans RocksDB, so it is
+    /// safe to call from the `/health` probe even while a large import holds the
+    /// store under write pressure — the historical cause of the health-check
+    /// timing out and flapping the container during a heavy seed. The count may
+    /// lag a single-quad write that bypassed index maintenance, which is
+    /// acceptable for a health signal.
+    pub fn cached_total_triples(&self) -> usize {
+        self.graph_index.all_entries().iter().map(|(_, n)| *n).sum()
+    }
+
+    /// O(1) count of *named* graphs from the maintained index — the `None`
+    /// default-graph entry is excluded so this matches [`Self::named_graphs`]
+    /// length semantics without an index scan.
+    pub fn cached_named_graph_count(&self) -> usize {
+        self.graph_index
+            .all_entries()
+            .iter()
+            .filter(|(g, _)| g.is_some())
+            .count()
     }
 
     /// Insert a single quad into the store.
