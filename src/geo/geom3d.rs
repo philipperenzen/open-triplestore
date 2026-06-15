@@ -121,7 +121,10 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(s: &'a str) -> Self {
-        Parser { s: s.as_bytes(), i: 0 }
+        Parser {
+            s: s.as_bytes(),
+            i: 0,
+        }
     }
     fn ws(&mut self) {
         while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
@@ -185,7 +188,10 @@ impl<'a> Parser<'a> {
             }
             "POLYGON" => {
                 if self.skip_dim_tag() {
-                    return Some(Geometry3D::Polygon(Polygon3 { exterior: vec![], interiors: vec![] }));
+                    return Some(Geometry3D::Polygon(Polygon3 {
+                        exterior: vec![],
+                        interiors: vec![],
+                    }));
                 }
                 Some(Geometry3D::Polygon(self.polygon_body()?))
             }
@@ -403,7 +409,9 @@ impl Geometry3D {
     pub fn for_each_coord(&self, f: &mut impl FnMut(Coord3)) {
         match self {
             Geometry3D::Point(c) => f(*c),
-            Geometry3D::LineString(cs) | Geometry3D::MultiPoint(cs) => cs.iter().for_each(|c| f(*c)),
+            Geometry3D::LineString(cs) | Geometry3D::MultiPoint(cs) => {
+                cs.iter().for_each(|c| f(*c))
+            }
             Geometry3D::Triangle(t) => t.iter().for_each(|c| f(*c)),
             Geometry3D::MultiLineString(ls) => ls.iter().flatten().for_each(|c| f(*c)),
             Geometry3D::Polygon(p) => poly_coords(p, f),
@@ -461,7 +469,11 @@ impl Geometry3D {
                 area_sum += area;
             }
             if area_sum > 0.0 {
-                return Some(Coord3::new(acc.x / area_sum, acc.y / area_sum, acc.z / area_sum));
+                return Some(Coord3::new(
+                    acc.x / area_sum,
+                    acc.y / area_sum,
+                    acc.z / area_sum,
+                ));
             }
         }
         // No faces (point / line): mean of vertices.
@@ -488,9 +500,7 @@ impl Geometry3D {
             Geometry3D::MultiPolygon(ps) | Geometry3D::PolyhedralSurface(ps) => {
                 ps.iter().for_each(|p| fan(&p.exterior, &mut out))
             }
-            Geometry3D::GeometryCollection(gs) => {
-                gs.iter().for_each(|g| out.extend(g.triangles()))
-            }
+            Geometry3D::GeometryCollection(gs) => gs.iter().for_each(|g| out.extend(g.triangles())),
             _ => {}
         }
         out
@@ -750,14 +760,23 @@ pub fn extrude(ring: &[Coord3], height: f64) -> Option<Geometry3D> {
     // bottom (reverse for downward normal) and top
     let mut bottom_ring = base.clone();
     bottom_ring.reverse();
-    faces.push(Polygon3 { exterior: close(bottom_ring), interiors: vec![] });
-    faces.push(Polygon3 { exterior: close(top.clone()), interiors: vec![] });
+    faces.push(Polygon3 {
+        exterior: close(bottom_ring),
+        interiors: vec![],
+    });
+    faces.push(Polygon3 {
+        exterior: close(top.clone()),
+        interiors: vec![],
+    });
     // side walls
     let n = base.len();
     for i in 0..n {
         let j = (i + 1) % n;
         let wall = vec![base[i], base[j], top[j], top[i], base[i]];
-        faces.push(Polygon3 { exterior: wall, interiors: vec![] });
+        faces.push(Polygon3 {
+            exterior: wall,
+            interiors: vec![],
+        });
     }
     Some(Geometry3D::PolyhedralSurface(faces))
 }
@@ -790,7 +809,14 @@ pub fn to_wkt3d(g: &Geometry3D) -> String {
         Geometry3D::LineString(cs) => format!("LINESTRING Z {}", fmt_ring(cs)),
         Geometry3D::Polygon(p) => format!("POLYGON Z {}", fmt_poly(p)),
         Geometry3D::Triangle(t) => {
-            format!("TRIANGLE Z (({}))", t.iter().map(fmt_coord).chain(std::iter::once(fmt_coord(&t[0]))).collect::<Vec<_>>().join(","))
+            format!(
+                "TRIANGLE Z (({}))",
+                t.iter()
+                    .map(fmt_coord)
+                    .chain(std::iter::once(fmt_coord(&t[0])))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         }
         Geometry3D::MultiPoint(cs) => {
             let inner: Vec<String> = cs.iter().map(|c| format!("({})", fmt_coord(c))).collect();
@@ -814,7 +840,11 @@ pub fn to_wkt3d(g: &Geometry3D) -> String {
                 .map(|t| {
                     format!(
                         "(({}))",
-                        t.iter().map(fmt_coord).chain(std::iter::once(fmt_coord(&t[0]))).collect::<Vec<_>>().join(",")
+                        t.iter()
+                            .map(fmt_coord)
+                            .chain(std::iter::once(fmt_coord(&t[0])))
+                            .collect::<Vec<_>>()
+                            .join(",")
                     )
                 })
                 .collect();
@@ -834,12 +864,66 @@ pub fn aabb_to_wkt(b: &Aabb3) -> String {
     let c = |x: f64, y: f64, z: f64| Coord3::new(x, y, z);
     let faces = vec![
         // bottom z0, top z1, and four walls — outward-oriented
-        Polygon3 { exterior: vec![c(x0, y0, z0), c(x0, y1, z0), c(x1, y1, z0), c(x1, y0, z0), c(x0, y0, z0)], interiors: vec![] },
-        Polygon3 { exterior: vec![c(x0, y0, z1), c(x1, y0, z1), c(x1, y1, z1), c(x0, y1, z1), c(x0, y0, z1)], interiors: vec![] },
-        Polygon3 { exterior: vec![c(x0, y0, z0), c(x0, y0, z1), c(x0, y1, z1), c(x0, y1, z0), c(x0, y0, z0)], interiors: vec![] },
-        Polygon3 { exterior: vec![c(x1, y0, z0), c(x1, y1, z0), c(x1, y1, z1), c(x1, y0, z1), c(x1, y0, z0)], interiors: vec![] },
-        Polygon3 { exterior: vec![c(x0, y0, z0), c(x1, y0, z0), c(x1, y0, z1), c(x0, y0, z1), c(x0, y0, z0)], interiors: vec![] },
-        Polygon3 { exterior: vec![c(x0, y1, z0), c(x0, y1, z1), c(x1, y1, z1), c(x1, y1, z0), c(x0, y1, z0)], interiors: vec![] },
+        Polygon3 {
+            exterior: vec![
+                c(x0, y0, z0),
+                c(x0, y1, z0),
+                c(x1, y1, z0),
+                c(x1, y0, z0),
+                c(x0, y0, z0),
+            ],
+            interiors: vec![],
+        },
+        Polygon3 {
+            exterior: vec![
+                c(x0, y0, z1),
+                c(x1, y0, z1),
+                c(x1, y1, z1),
+                c(x0, y1, z1),
+                c(x0, y0, z1),
+            ],
+            interiors: vec![],
+        },
+        Polygon3 {
+            exterior: vec![
+                c(x0, y0, z0),
+                c(x0, y0, z1),
+                c(x0, y1, z1),
+                c(x0, y1, z0),
+                c(x0, y0, z0),
+            ],
+            interiors: vec![],
+        },
+        Polygon3 {
+            exterior: vec![
+                c(x1, y0, z0),
+                c(x1, y1, z0),
+                c(x1, y1, z1),
+                c(x1, y0, z1),
+                c(x1, y0, z0),
+            ],
+            interiors: vec![],
+        },
+        Polygon3 {
+            exterior: vec![
+                c(x0, y0, z0),
+                c(x1, y0, z0),
+                c(x1, y0, z1),
+                c(x0, y0, z1),
+                c(x0, y0, z0),
+            ],
+            interiors: vec![],
+        },
+        Polygon3 {
+            exterior: vec![
+                c(x0, y1, z0),
+                c(x0, y1, z1),
+                c(x1, y1, z1),
+                c(x1, y1, z0),
+                c(x0, y1, z0),
+            ],
+            interiors: vec![],
+        },
     ];
     to_wkt3d(&Geometry3D::PolyhedralSurface(faces))
 }
@@ -860,7 +944,9 @@ mod tests {
     #[test]
     fn detects_3d() {
         assert!(wkt_is_3d("POINT Z (1 2 3)"));
-        assert!(wkt_is_3d("POLYHEDRALSURFACE Z (((0 0 0,1 0 0,1 1 0,0 0 0)))"));
+        assert!(wkt_is_3d(
+            "POLYHEDRALSURFACE Z (((0 0 0,1 0 0,1 1 0,0 0 0)))"
+        ));
         assert!(wkt_is_3d("TIN Z (((0 0 0,1 0 0,0 1 0,0 0 0)))"));
         assert!(!wkt_is_3d("POINT(1 2)"));
         assert!(!wkt_is_3d("POLYGON((0 0,1 0,1 1,0 0))"));
@@ -882,12 +968,18 @@ mod tests {
         assert_eq!(b.min, [0.0, 0.0, 0.0]);
         assert_eq!(b.max, [1.0, 1.0, 1.0]);
         assert!((cube.area3d() - 6.0).abs() < 1e-9, "area {}", cube.area3d());
-        assert!((cube.volume() - 1.0).abs() < 1e-9, "volume {}", cube.volume());
+        assert!(
+            (cube.volume() - 1.0).abs() < 1e-9,
+            "volume {}",
+            cube.volume()
+        );
         assert!((cube.height().unwrap() - 1.0).abs() < 1e-9);
         assert_eq!(cube.z_min(), Some(0.0));
         assert_eq!(cube.z_max(), Some(1.0));
         let cen = cube.centroid().unwrap();
-        assert!((cen.x - 0.5).abs() < 1e-9 && (cen.y - 0.5).abs() < 1e-9 && (cen.z - 0.5).abs() < 1e-9);
+        assert!(
+            (cen.x - 0.5).abs() < 1e-9 && (cen.y - 0.5).abs() < 1e-9 && (cen.z - 0.5).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -899,7 +991,11 @@ mod tests {
             Coord3::new(0.0, 1.0, 0.0),
         ];
         let solid = extrude(&square, 1.0).unwrap();
-        assert!((solid.volume() - 1.0).abs() < 1e-9, "vol {}", solid.volume());
+        assert!(
+            (solid.volume() - 1.0).abs() < 1e-9,
+            "vol {}",
+            solid.volume()
+        );
         assert!((solid.height().unwrap() - 1.0).abs() < 1e-9);
     }
 
@@ -952,7 +1048,8 @@ mod tests {
     #[test]
     fn tin_area() {
         // two unit right-triangles in the z=0 plane → area 1.0
-        let tin = parse_wkt3d("TIN Z (((0 0 0,1 0 0,0 1 0,0 0 0)),((1 0 0,1 1 0,0 1 0,1 0 0)))").unwrap();
+        let tin =
+            parse_wkt3d("TIN Z (((0 0 0,1 0 0,0 1 0,0 0 0)),((1 0 0,1 1 0,0 1 0,1 0 0)))").unwrap();
         assert!((tin.area3d() - 1.0).abs() < 1e-9, "area {}", tin.area3d());
     }
 }

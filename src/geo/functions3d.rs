@@ -490,11 +490,7 @@ fn tri_tri_intersect(t1: &[Coord3; 3], t2: &[Coord3; 3]) -> bool {
 /// given each vertex's signed distance `dv`. Returns the two parameter values
 /// where the two straddling edges pierce the plane. `None` if the triangle lies
 /// entirely on one side (already excluded by the caller) or is degenerate.
-fn tri_line_interval(
-    tri: &[Coord3; 3],
-    dv: &[f64; 3],
-    line_dir: Coord3,
-) -> Option<(f64, f64)> {
+fn tri_line_interval(tri: &[Coord3; 3], dv: &[f64; 3], line_dir: Coord3) -> Option<(f64, f64)> {
     let proj = |c: Coord3| dot(c, line_dir);
     let p = [proj(tri[0]), proj(tri[1]), proj(tri[2])];
     // Find the vertex on its own side of the plane; the other two straddle.
@@ -705,7 +701,10 @@ mod tests {
 
     #[test]
     fn distance_between_two_points() {
-        let d = as_f64(fn_distance3d(&[wkt("POINT Z (0 0 0)"), wkt("POINT Z (1 2 2)")]));
+        let d = as_f64(fn_distance3d(&[
+            wkt("POINT Z (0 0 0)"),
+            wkt("POINT Z (1 2 2)"),
+        ]));
         assert!((d - 3.0).abs() < 1e-9);
     }
 
@@ -747,7 +746,9 @@ mod tests {
         assert!(iris.contains(&vocab::OTS3D_CONVEXHULL3D));
         assert!(iris.contains(&vocab::OTS3D_SF_CONTAINS));
         assert!(iris.contains(&vocab::OTS3D_SF_WITHIN));
-        assert!(iris.iter().all(|i| i.starts_with("https://open-triplestore.org/def/function/geo3d/")));
+        assert!(iris
+            .iter()
+            .all(|i| i.starts_with("https://open-triplestore.org/def/function/geo3d/")));
     }
 
     #[test]
@@ -758,7 +759,10 @@ mod tests {
             Term::Literal(l) => l.value().to_string(),
             other => panic!("expected wkt literal, got {other:?}"),
         };
-        assert!(hull_wkt.starts_with("POLYHEDRALSURFACE Z"), "wkt {hull_wkt}");
+        assert!(
+            hull_wkt.starts_with("POLYHEDRALSURFACE Z"),
+            "wkt {hull_wkt}"
+        );
         // The hull is a closed solid of unit volume (parry triangulates 6→12 faces).
         let v = as_f64(fn_volume(&[hull]));
         assert!((v - 1.0).abs() < 1e-6, "hull volume {v}");
@@ -778,15 +782,27 @@ mod tests {
         assert!(as_bool(fn_sf3d_contains(&[wkt(CUBE), inside])));
         assert!(!as_bool(fn_sf3d_contains(&[wkt(CUBE), outside])));
         // within is the inverse argument order.
-        assert!(as_bool(fn_sf3d_within(&[wkt("POINT Z (0.5 0.5 0.5)"), wkt(CUBE)])));
-        assert!(!as_bool(fn_sf3d_within(&[wkt("POINT Z (1.5 0.5 0.5)"), wkt(CUBE)])));
+        assert!(as_bool(fn_sf3d_within(&[
+            wkt("POINT Z (0.5 0.5 0.5)"),
+            wkt(CUBE)
+        ])));
+        assert!(!as_bool(fn_sf3d_within(&[
+            wkt("POINT Z (1.5 0.5 0.5)"),
+            wkt(CUBE)
+        ])));
     }
 
     #[test]
     fn contains_a_corner_and_a_face_point() {
         // Boundary points (a corner and a face centre) count as contained.
-        assert!(as_bool(fn_sf3d_contains(&[wkt(CUBE), wkt("POINT Z (0 0 0)")])));
-        assert!(as_bool(fn_sf3d_contains(&[wkt(CUBE), wkt("POINT Z (0 0.5 0.5)")])));
+        assert!(as_bool(fn_sf3d_contains(&[
+            wkt(CUBE),
+            wkt("POINT Z (0 0 0)")
+        ])));
+        assert!(as_bool(fn_sf3d_contains(&[
+            wkt(CUBE),
+            wkt("POINT Z (0 0.5 0.5)")
+        ])));
     }
 
     #[test]

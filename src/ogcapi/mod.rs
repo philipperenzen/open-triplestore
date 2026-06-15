@@ -478,7 +478,15 @@ mod tests {
     fn parse_bbox_orders_corners() {
         // Reversed corners are normalised to min/max.
         let bb = parse_bbox("4,52,3,51").unwrap();
-        assert_eq!(bb, BBox { min_x: 3.0, min_y: 51.0, max_x: 4.0, max_y: 52.0 });
+        assert_eq!(
+            bb,
+            BBox {
+                min_x: 3.0,
+                min_y: 51.0,
+                max_x: 4.0,
+                max_y: 52.0
+            }
+        );
     }
 
     #[test]
@@ -510,11 +518,16 @@ mod tests {
     #[test]
     fn bbox_filter_includes_and_excludes() {
         let els = vec![
-            el("a", Some("POINT(5 51)")),   // inside
-            el("b", Some("POINT(50 50)")),  // outside
-            el("c", None),                  // no geometry
+            el("a", Some("POINT(5 51)")),  // inside
+            el("b", Some("POINT(50 50)")), // outside
+            el("c", None),                 // no geometry
         ];
-        let filter = BBox { min_x: 4.0, min_y: 50.0, max_x: 6.0, max_y: 52.0 };
+        let filter = BBox {
+            min_x: 4.0,
+            min_y: 50.0,
+            max_x: 6.0,
+            max_y: 52.0,
+        };
         let kept: Vec<&str> = els
             .iter()
             .filter(|e| {
@@ -548,7 +561,13 @@ mod tests {
 
     #[test]
     fn ogc_url_joins_cleanly() {
-        assert_eq!(ogc_url("http://h", "/collections"), "http://h/api/ogc/collections");
-        assert_eq!(ogc_url("http://h/", "/collections"), "http://h/api/ogc/collections");
+        assert_eq!(
+            ogc_url("http://h", "/collections"),
+            "http://h/api/ogc/collections"
+        );
+        assert_eq!(
+            ogc_url("http://h/", "/collections"),
+            "http://h/api/ogc/collections"
+        );
     }
 }

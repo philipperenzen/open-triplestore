@@ -316,11 +316,12 @@ pub async fn bulk_import(
     // CityJSON (3D BAG) files are geometry-bearing: converted to RDF (BOT + WKT-Z
     // + ots:cityjsonGeometryLiteral) rather than parsed as RDF. `.city.json`/
     // `.cityjson` only — a plain `.json` stays on the RDF (JSON-LD) path.
-    let (cityjson_files, raw_files): (Vec<_>, Vec<_>) = raw_files
-        .into_iter()
-        .partition(|(filename, content_type, _)| {
-            super::cityjson::is_cityjson_file(filename, content_type)
-        });
+    let (cityjson_files, raw_files): (Vec<_>, Vec<_>) =
+        raw_files
+            .into_iter()
+            .partition(|(filename, content_type, _)| {
+                super::cityjson::is_cityjson_file(filename, content_type)
+            });
 
     let inputs: Vec<InputFile> = raw_files
         .into_iter()

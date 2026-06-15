@@ -70,7 +70,10 @@ pub struct CityJsonImportOutcome {
 /// Convert a parsed CityJSON document into N-Triples plus stats. Pure and
 /// deterministic (no I/O), so it is unit-tested directly and reused by both the
 /// streaming importer and the `?preview=` dry-run.
-pub fn convert_cityjson(doc: &Value, opts: &CityJsonOptions) -> Result<(String, CityJsonStats), String> {
+pub fn convert_cityjson(
+    doc: &Value,
+    opts: &CityJsonOptions,
+) -> Result<(String, CityJsonStats), String> {
     if doc.get("type").and_then(Value::as_str) != Some("CityJSON") {
         return Err("not a CityJSON document".to_string());
     }
@@ -84,7 +87,11 @@ pub fn convert_cityjson(doc: &Value, opts: &CityJsonOptions) -> Result<(String, 
             vs.iter()
                 .map(|v| {
                     let a = v.as_array();
-                    let g = |i: usize| a.and_then(|x| x.get(i)).and_then(Value::as_f64).unwrap_or(0.0);
+                    let g = |i: usize| {
+                        a.and_then(|x| x.get(i))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0)
+                    };
                     [
                         g(0) * scale[0] + translate[0],
                         g(1) * scale[1] + translate[1],
@@ -108,19 +115,51 @@ pub fn convert_cityjson(doc: &Value, opts: &CityJsonOptions) -> Result<(String, 
 
     let inst = opts.inst_base.trim_end_matches('/');
     let mut out = String::new();
-    let mut stats = CityJsonStats { crs: crs_uri.clone(), ..Default::default() };
+    let mut stats = CityJsonStats {
+        crs: crs_uri.clone(),
+        ..Default::default()
+    };
 
     for (id, obj) in objects {
         stats.objects += 1;
         let feature = format!("{inst}/bag/{}", iri_safe(id));
 
         // Type → bag:{Type} + geo:Feature + bot:Element.
-        let otype = obj.get("type").and_then(Value::as_str).unwrap_or("CityObject");
-        triple_iri(&mut out, &feature, RDF_TYPE, &format!("{BAG_NS}{}", iri_safe(otype)), &mut stats);
-        triple_iri(&mut out, &feature, RDF_TYPE, &format!("{GEO_NS}Feature"), &mut stats);
-        triple_iri(&mut out, &feature, RDF_TYPE, &format!("{BOT_NS}Element"), &mut stats);
+        let otype = obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("CityObject");
+        triple_iri(
+            &mut out,
+            &feature,
+            RDF_TYPE,
+            &format!("{BAG_NS}{}", iri_safe(otype)),
+            &mut stats,
+        );
+        triple_iri(
+            &mut out,
+            &feature,
+            RDF_TYPE,
+            &format!("{GEO_NS}Feature"),
+            &mut stats,
+        );
+        triple_iri(
+            &mut out,
+            &feature,
+            RDF_TYPE,
+            &format!("{BOT_NS}Element"),
+            &mut stats,
+        );
         triple_lit(&mut out, &feature, RDFS_LABEL, id, None, None, &mut stats);
-        triple_lit(&mut out, &feature, &format!("{BAG_NS}identificatie"), id, None, None, &mut stats);
+        triple_lit(
+            &mut out,
+            &feature,
+            &format!("{BAG_NS}identificatie"),
+            id,
+            None,
+            None,
+            &mut stats,
+        );
 
         // Attributes → bag:{key} typed literals.
         if let Some(attrs) = obj.get("attributes").and_then(Value::as_object) {
@@ -130,25 +169,56 @@ pub fn convert_cityjson(doc: &Value, opts: &CityJsonOptions) -> Result<(String, 
         }
 
         // Topology: parents (dct:isPartOf) and children (bot:containsElement).
-        for parent in obj.get("parents").and_then(Value::as_array).into_iter().flatten() {
+        for parent in obj
+            .get("parents")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if let Some(p) = parent.as_str() {
-                triple_iri(&mut out, &feature, &format!("{DCT_NS}isPartOf"), &format!("{inst}/bag/{}", iri_safe(p)), &mut stats);
+                triple_iri(
+                    &mut out,
+                    &feature,
+                    &format!("{DCT_NS}isPartOf"),
+                    &format!("{inst}/bag/{}", iri_safe(p)),
+                    &mut stats,
+                );
             }
         }
-        for child in obj.get("children").and_then(Value::as_array).into_iter().flatten() {
+        for child in obj
+            .get("children")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if let Some(c) = child.as_str() {
-                triple_iri(&mut out, &feature, &format!("{BOT_NS}containsElement"), &format!("{inst}/bag/{}", iri_safe(c)), &mut stats);
+                triple_iri(
+                    &mut out,
+                    &feature,
+                    &format!("{BOT_NS}containsElement"),
+                    &format!("{inst}/bag/{}", iri_safe(c)),
+                    &mut stats,
+                );
             }
         }
 
         // Geometry, one node per LoD.
-        let geoms = obj.get("geometry").and_then(Value::as_array).cloned().unwrap_or_default();
-        let mut seen_lods: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let geoms = obj
+            .get("geometry")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut seen_lods: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         for geom in &geoms {
             let lod_raw = geom.get("lod").map(value_to_lod_string).unwrap_or_default();
             let lod_key = sanitise_lod(&lod_raw);
             let n = seen_lods.entry(lod_key.clone()).or_insert(0);
-            let suffix = if *n == 0 { lod_key.clone() } else { format!("{lod_key}-{n}") };
+            let suffix = if *n == 0 {
+                lod_key.clone()
+            } else {
+                format!("{lod_key}-{n}")
+            };
             *n += 1;
             let gnode = format!("{feature}/geom/lod{suffix}");
 
@@ -158,28 +228,78 @@ pub fn convert_cityjson(doc: &Value, opts: &CityJsonOptions) -> Result<(String, 
                 continue; // non-surface geometry; skip silently
             }
 
-            triple_iri(&mut out, &feature, &format!("{GEO_NS}hasGeometry"), &gnode, &mut stats);
-            triple_iri(&mut out, &gnode, RDF_TYPE, &format!("{GEO_NS}Geometry"), &mut stats);
+            triple_iri(
+                &mut out,
+                &feature,
+                &format!("{GEO_NS}hasGeometry"),
+                &gnode,
+                &mut stats,
+            );
+            triple_iri(
+                &mut out,
+                &gnode,
+                RDF_TYPE,
+                &format!("{GEO_NS}Geometry"),
+                &mut stats,
+            );
             if !lod_raw.is_empty() {
-                triple_lit(&mut out, &gnode, &format!("{BAG_NS}lod"), &lod_raw, None, None, &mut stats);
+                triple_lit(
+                    &mut out,
+                    &gnode,
+                    &format!("{BAG_NS}lod"),
+                    &lod_raw,
+                    None,
+                    None,
+                    &mut stats,
+                );
             }
             if let Some(wkt) = wkt {
                 let lexical = match &crs_uri {
                     Some(c) => format!("<{c}> {wkt}"),
                     None => wkt,
                 };
-                triple_lit(&mut out, &gnode, &format!("{GEO_NS}asWKT"), &lexical, Some(WKT_LITERAL), None, &mut stats);
+                triple_lit(
+                    &mut out,
+                    &gnode,
+                    &format!("{GEO_NS}asWKT"),
+                    &lexical,
+                    Some(WKT_LITERAL),
+                    None,
+                    &mut stats,
+                );
             }
             // Loss-free CityJSON geometry literal (boundaries + semantics + LoD).
             let cj = serde_json::to_string(geom).unwrap_or_default();
-            triple_lit(&mut out, &gnode, &format!("{OTS_NS}asCityJSON"), &cj, Some(CITYJSON_LITERAL), None, &mut stats);
+            triple_lit(
+                &mut out,
+                &gnode,
+                &format!("{OTS_NS}asCityJSON"),
+                &cj,
+                Some(CITYJSON_LITERAL),
+                None,
+                &mut stats,
+            );
 
             // PROV-O lineage.
             if let Some(src) = &opts.source_url {
-                triple_iri(&mut out, &gnode, &format!("{PROV_NS}wasDerivedFrom"), src, &mut stats);
+                triple_iri(
+                    &mut out,
+                    &gnode,
+                    &format!("{PROV_NS}wasDerivedFrom"),
+                    src,
+                    &mut stats,
+                );
             }
             if let Some(ts) = &opts.generated_at {
-                triple_lit(&mut out, &gnode, &format!("{PROV_NS}generatedAtTime"), ts, Some(&format!("{XSD}dateTime")), None, &mut stats);
+                triple_lit(
+                    &mut out,
+                    &gnode,
+                    &format!("{PROV_NS}generatedAtTime"),
+                    ts,
+                    Some(&format!("{XSD}dateTime")),
+                    None,
+                    &mut stats,
+                );
             }
             stats.geometries += 1;
         }
@@ -212,7 +332,9 @@ fn collect_surfaces(boundaries: &Value) -> Vec<Face> {
                 .iter()
                 .filter_map(|ring| {
                     ring.as_array().map(|r| {
-                        r.iter().filter_map(|i| i.as_u64().map(|n| n as usize)).collect()
+                        r.iter()
+                            .filter_map(|i| i.as_u64().map(|n| n as usize))
+                            .collect()
                     })
                 })
                 .collect();
@@ -286,7 +408,10 @@ fn transform_of(doc: &Value) -> ([f64; 3], [f64; 3]) {
             })
             .unwrap_or(dflt)
     };
-    (arr3("scale", [1.0, 1.0, 1.0]), arr3("translate", [0.0, 0.0, 0.0]))
+    (
+        arr3("scale", [1.0, 1.0, 1.0]),
+        arr3("translate", [0.0, 0.0, 0.0]),
+    )
 }
 
 /// Normalise a CityJSON `referenceSystem` (`EPSG:7415`, `urn:ogc:def:crs:EPSG::7415`,
@@ -333,11 +458,25 @@ fn iri_safe(s: &str) -> String {
         .collect()
 }
 
-fn emit_attribute(out: &mut String, subject: &str, key: &str, v: &Value, stats: &mut CityJsonStats) {
+fn emit_attribute(
+    out: &mut String,
+    subject: &str,
+    key: &str,
+    v: &Value,
+    stats: &mut CityJsonStats,
+) {
     let pred = format!("{BAG_NS}{}", iri_safe(key));
     match v {
         Value::String(s) => triple_lit(out, subject, &pred, s, None, None, stats),
-        Value::Bool(b) => triple_lit(out, subject, &pred, &b.to_string(), Some(&format!("{XSD}boolean")), None, stats),
+        Value::Bool(b) => triple_lit(
+            out,
+            subject,
+            &pred,
+            &b.to_string(),
+            Some(&format!("{XSD}boolean")),
+            None,
+            stats,
+        ),
         Value::Number(n) => {
             let dt = if n.is_i64() || n.is_u64() {
                 format!("{XSD}integer")
@@ -450,9 +589,20 @@ pub async fn import_cityjson_bytes(
             .map_err(|e| format!("asset upload failed: {e}"))?;
         let asset = state
             .auth_db
-            .create_asset(&asset_id, dataset_id, &file_name_clean, declared, &s3_key, size, user_id, public_asset)
+            .create_asset(
+                &asset_id,
+                dataset_id,
+                &file_name_clean,
+                declared,
+                &s3_key,
+                size,
+                user_id,
+                public_asset,
+            )
             .map_err(|e| format!("asset record failed: {e}"))?;
-        if let Err(e) = crate::server::routes::insert_asset_triples(state, &asset, dataset_id, kind, &meta) {
+        if let Err(e) =
+            crate::server::routes::insert_asset_triples(state, &asset, dataset_id, kind, &meta)
+        {
             tracing::warn!("cityjson import: asset metadata insert failed: {e}");
         }
         let assets_graph = crate::server::routes::assets_graph_iri(&state.base_url, dataset_id);
@@ -469,11 +619,16 @@ pub async fn import_cityjson_bytes(
 
     // 2. Parse + convert + load on the blocking pool.
     let inst_base = format!("{base}/dataset/{dataset_id}/");
-    let opts = CityJsonOptions { inst_base, source_url: asset_url.clone(), generated_at };
+    let opts = CityJsonOptions {
+        inst_base,
+        source_url: asset_url.clone(),
+        generated_at,
+    };
     let store = state.store.clone();
     let graph_c = graph.clone();
     let stats = tokio::task::spawn_blocking(move || -> Result<CityJsonStats, String> {
-        let doc: Value = serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON: {e}"))?;
+        let doc: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("invalid JSON: {e}"))?;
         let (ntriples, stats) = convert_cityjson(&doc, &opts)?;
         use oxigraph::io::RdfFormat;
         store
@@ -491,7 +646,12 @@ pub async fn import_cityjson_bytes(
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
 
-    Ok(CityJsonImportOutcome { asset_id, asset_url, graph, stats })
+    Ok(CityJsonImportOutcome {
+        asset_id,
+        asset_url,
+        graph,
+        stats,
+    })
 }
 
 // ─── HTTP handler ─────────────────────────────────────────────────────────────
@@ -577,15 +737,23 @@ pub async fn ingest_cityjson(
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| AppError::BadRequest("Missing 'file' field".to_string()))?;
+    let bytes =
+        file_bytes.ok_or_else(|| AppError::BadRequest("Missing 'file' field".to_string()))?;
 
     // Per-graph write boundary: a non-admin may only target a graph already
     // registered to this dataset or under its canonical IRI namespace (mirrors
     // the bulk-import / Graph Store Protocol gate).
     if !user.is_admin() {
         if let Some(t) = target_graph.as_deref() {
-            let namespace = format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), dataset_id);
-            let registered = state.auth_db.list_dataset_graphs(&dataset_id).unwrap_or_default();
+            let namespace = format!(
+                "{}/dataset/{}",
+                state.base_url.trim_end_matches('/'),
+                dataset_id
+            );
+            let registered = state
+                .auth_db
+                .list_dataset_graphs(&dataset_id)
+                .unwrap_or_default();
             let owned_by_other = state
                 .auth_db
                 .graph_has_other_dataset_refs(t, &dataset_id)
@@ -691,7 +859,10 @@ mod tests {
         let (nt, stats) = convert_cityjson(&cube_doc(), &opts()).unwrap();
         assert_eq!(stats.objects, 1);
         assert_eq!(stats.geometries, 1);
-        assert_eq!(stats.crs.as_deref(), Some("http://www.opengis.net/def/crs/EPSG/0/7415"));
+        assert_eq!(
+            stats.crs.as_deref(),
+            Some("http://www.opengis.net/def/crs/EPSG/0/7415")
+        );
         // Feature IRI minted under {inst_base}bag/{id}.
         assert!(nt.contains("<https://ex.org/dataset/d1/bag/NL.IMBAG.Pand.001>"));
         // Typed as bag:Building + geo:Feature.
@@ -706,10 +877,11 @@ mod tests {
         assert!(nt.contains("POLYHEDRALSURFACE Z"));
         assert!(nt.contains("<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z"));
         assert!(nt.contains("84000 447000 0")); // translate applied
-        // Loss-free CityJSON literal.
+                                                // Loss-free CityJSON literal.
         assert!(nt.contains("^^<https://open-triplestore.org/def/cityjsonGeometryLiteral>"));
         // PROV lineage.
-        assert!(nt.contains("<http://www.w3.org/ns/prov#wasDerivedFrom> <https://ex.org/src.city.json>"));
+        assert!(nt
+            .contains("<http://www.w3.org/ns/prov#wasDerivedFrom> <https://ex.org/src.city.json>"));
         // bag:lod retained.
         assert!(nt.contains("<https://data.3dbag.nl/def/lod> \"2.2\""));
     }

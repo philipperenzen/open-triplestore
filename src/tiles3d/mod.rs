@@ -212,14 +212,19 @@ fn collect_features(
             oxigraph::model::Term::BlankNode(b) => format!("_:{}", b.as_str()),
             other => other.to_string(),
         };
-        let Some(wkt_term) = sol.get("wkt") else { continue };
+        let Some(wkt_term) = sol.get("wkt") else {
+            continue;
+        };
         let wkt_literal = match wkt_term {
             oxigraph::model::Term::Literal(l) => l.value().to_string(),
             _ => continue,
         };
         if let Some(tri) = triangulate_feature(&wkt_literal, &mut region) {
             if !tri.is_empty() {
-                features.push(GeoFeature { iri, tri_lonlath: tri });
+                features.push(GeoFeature {
+                    iri,
+                    tri_lonlath: tri,
+                });
             }
         }
     }
@@ -256,10 +261,7 @@ fn broad_phase_filter(
     let candidates = index.query_intersecting(bbox);
     // Bind the candidate geometry nodes; an empty set yields `VALUES ?g {}` which
     // correctly selects nothing (the box overlaps no indexed 3D geometry).
-    let values: String = candidates
-        .iter()
-        .map(|iri| format!("<{iri}> "))
-        .collect();
+    let values: String = candidates.iter().map(|iri| format!("<{iri}> ")).collect();
     format!("VALUES ?g {{ {values}}}")
 }
 
@@ -320,13 +322,7 @@ fn wkt_triangles(body: &str) -> Vec<[(f64, f64, f64); 3]> {
             if !tris.is_empty() {
                 return tris
                     .into_iter()
-                    .map(|[a, b, c]| {
-                        [
-                            (a.x, a.y, a.z),
-                            (b.x, b.y, b.z),
-                            (c.x, c.y, c.z),
-                        ]
-                    })
+                    .map(|[a, b, c]| [(a.x, a.y, a.z), (b.x, b.y, b.z), (c.x, c.y, c.z)])
                     .collect();
             }
         }
@@ -580,7 +576,10 @@ mod tests {
         let store = TripleStore::in_memory().unwrap();
         store.load_str(data, RdfFormat::Turtle, None).unwrap();
         let (features, _region) = collect_features(&store, &[], None);
-        assert!(features.is_empty(), "UTM metres must not be meshed: {features:?}");
+        assert!(
+            features.is_empty(),
+            "UTM metres must not be meshed: {features:?}"
+        );
     }
 
     #[test]
@@ -606,7 +605,11 @@ mod tests {
                     positions.push(ecef[1] as f32);
                     positions.push(ecef[2] as f32);
                 }
-                GlbFeature { iri: f.iri.clone(), positions, indices: Vec::new() }
+                GlbFeature {
+                    iri: f.iri.clone(),
+                    positions,
+                    indices: Vec::new(),
+                }
             })
             .collect();
         let glb = encode_glb(&glb_features);
@@ -646,13 +649,19 @@ mod tests {
         assert_eq!(all.len(), 2, "full scan: {all:?}");
 
         // A box around building `a` only → the broad phase returns just `a`.
-        let around_a = Aabb3 { min: [-0.5, -0.5, -1.0], max: [0.5, 0.5, 6.0] };
+        let around_a = Aabb3 {
+            min: [-0.5, -0.5, -1.0],
+            max: [0.5, 0.5, 6.0],
+        };
         let (just_a, _r) = collect_features(&store, &[], Some(&around_a));
         assert_eq!(just_a.len(), 1, "broad phase narrowed to one: {just_a:?}");
         assert_eq!(just_a[0].iri, "http://example.org/a");
 
         // A box over empty space → the broad phase returns nothing.
-        let empty_region = Aabb3 { min: [100.0, 100.0, 0.0], max: [101.0, 101.0, 1.0] };
+        let empty_region = Aabb3 {
+            min: [100.0, 100.0, 0.0],
+            max: [101.0, 101.0, 1.0],
+        };
         let (none, _r) = collect_features(&store, &[], Some(&empty_region));
         assert!(none.is_empty(), "no candidates over empty space: {none:?}");
     }

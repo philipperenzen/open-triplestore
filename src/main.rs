@@ -40,10 +40,10 @@ mod store;
 mod svc_registry;
 #[cfg(feature = "swrl")]
 mod swrl;
-#[cfg(feature = "geometry3d")]
-mod tiles3d;
 #[cfg(feature = "text-search")]
 mod text_search;
+#[cfg(feature = "geometry3d")]
+mod tiles3d;
 
 #[derive(Parser, Debug)]
 #[command(name = "open-triplestore")]

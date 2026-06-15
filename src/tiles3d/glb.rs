@@ -98,7 +98,11 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
     // large flat-faced solids, so f32 face normals are accurate enough to shade.
     let mut normals = vec![0.0f32; positions.len()];
     for tri in indices.chunks_exact(3) {
-        let (i0, i1, i2) = (tri[0] as usize * 3, tri[1] as usize * 3, tri[2] as usize * 3);
+        let (i0, i1, i2) = (
+            tri[0] as usize * 3,
+            tri[1] as usize * 3,
+            tri[2] as usize * 3,
+        );
         let ux = positions[i1] - positions[i0];
         let uy = positions[i1 + 1] - positions[i0 + 1];
         let uz = positions[i1 + 2] - positions[i0 + 2];
@@ -399,7 +403,10 @@ mod tests {
             json_str.contains("EXT_structural_metadata"),
             "structural metadata extension present"
         );
-        assert!(json_str.contains("EXT_mesh_features"), "mesh features extension present");
+        assert!(
+            json_str.contains("EXT_mesh_features"),
+            "mesh features extension present"
+        );
         assert!(json_str.contains("\"iri\""), "iri property present");
 
         // extensionsUsed lists both binding extensions.
@@ -435,8 +442,12 @@ mod tests {
 
         // ── BIN chunk: declared length consistent, type 'BIN\0' ──
         let bin_chunk_start = json_end;
-        let bin_len =
-            u32::from_le_bytes([glb[bin_chunk_start], glb[bin_chunk_start + 1], glb[bin_chunk_start + 2], glb[bin_chunk_start + 3]]) as usize;
+        let bin_len = u32::from_le_bytes([
+            glb[bin_chunk_start],
+            glb[bin_chunk_start + 1],
+            glb[bin_chunk_start + 2],
+            glb[bin_chunk_start + 3],
+        ]) as usize;
         let bin_type = u32::from_le_bytes([
             glb[bin_chunk_start + 4],
             glb[bin_chunk_start + 5],
@@ -453,7 +464,10 @@ mod tests {
 
         // ── The buffer's declared byteLength matches the actual BIN payload ──
         let declared_buffer_len = parsed["buffers"][0]["byteLength"].as_u64().unwrap() as usize;
-        assert_eq!(declared_buffer_len, bin_len, "buffer byteLength == BIN chunk len");
+        assert_eq!(
+            declared_buffer_len, bin_len,
+            "buffer byteLength == BIN chunk len"
+        );
     }
 
     #[test]
