@@ -128,8 +128,14 @@ jsonwebtoken = "9"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-# TOTP two-factor codes (RFC 6238: HMAC-SHA1)
+# Kept in lockstep with `hkdf` (below): both ride the RustCrypto `digest` 0.11
+# trait family, so `Hkdf::<Sha256>` type-checks. The digest 0.11 `Output` is a
+# `hybrid_array::Array`, which (unlike the old `GenericArray`) does not impl
+# `LowerHex` — hex-encode digests via the `hex` crate instead of `{:x}`.
+sha2 = "0.11"
+hex = "0.4"
+# TOTP two-factor codes (RFC 6238: HMAC-SHA1). Left on the digest 0.10 family;
+# self-consistent with each other and independent of the sha2/hkdf path above.
 hmac = "0.12"
 sha1 = "0.10"
 # WebAuthn / FIDO2 passkey login. In-progress challenge state stays in memory
@@ -204,7 +210,7 @@ oauth2 = "5"
 
 # Credential encryption (AES-256-GCM for stored OAuth client secrets)
 aes-gcm = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 
 # In-memory concurrent cache (OAuth PKCE sessions)
 dashmap = "6"
