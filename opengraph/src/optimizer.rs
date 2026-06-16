@@ -39,17 +39,14 @@ fn selectivity(tp: &TriplePattern, bound: &std::collections::HashSet<String>) ->
     let s_bound = match &tp.subject {
         TermPattern::NamedNode(_) | TermPattern::BlankNode(_) | TermPattern::Literal(_) => true,
         TermPattern::Variable(v) => bound.contains(v.as_str()),
-        // spargebra 0.4 gates the rdf-star `TermPattern::Triple` variant behind its
-        // `sparql-12` feature, which we don't enable — so it can't occur here.
+        TermPattern::Triple(_) => false,
     };
     let p_bound = match &tp.predicate {
         NamedNodePattern::NamedNode(_) => true,
         NamedNodePattern::Variable(v) => bound.contains(v.as_str()),
     };
     let o_bound = match &tp.object {
-        // (rdf-star `TermPattern::Triple` would also be ground, but spargebra's
-        // `sparql-12` feature is off, so the variant is absent; `_` covers Literal.)
-        TermPattern::NamedNode(_) | TermPattern::BlankNode(_) => true,
+        TermPattern::NamedNode(_) | TermPattern::BlankNode(_) | TermPattern::Triple(_) => true,
         TermPattern::Variable(v) => bound.contains(v.as_str()),
         _ => false,
     };
