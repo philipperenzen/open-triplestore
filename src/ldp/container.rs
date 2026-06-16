@@ -129,7 +129,9 @@ pub fn get_membership_info(
 /// Compute a short ETag from the serialized content.
 pub fn compute_etag(content: &[u8]) -> String {
     let hash = Sha256::digest(content);
-    format!("\"{:.16x}\"", hash)
+    // First 8 bytes → 16 lowercase hex chars (the digest 0.11 `Array` output no
+    // longer impls `LowerHex`, so the old `{:.16x}` truncation is done by hand).
+    format!("\"{}\"", hex::encode(&hash[..8]))
 }
 
 // ─── Container creation ────────────────────────────────────────────────────────

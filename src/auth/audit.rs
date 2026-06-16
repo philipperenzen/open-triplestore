@@ -436,7 +436,7 @@ impl AuditLogger {
             let hashed = actor_id.as_deref().map(|a| {
                 let mut h = Sha256::new();
                 h.update(a.as_bytes());
-                format!("sha256:{:x}", h.finalize())
+                format!("sha256:{}", hex::encode(h.finalize()))
             });
             tx.execute(
                 "UPDATE audit_events
