@@ -79,31 +79,52 @@ pub enum BlankNodeMode {
 struct GraphIndex {
     /// `None` key = default graph, `Some(iri)` = named graph.
     counts: Arc<DashMap<Option<String>, usize>>,
+    /// Observability/test hook: total number of per-graph triple-count scans
+    /// performed (one `quads_for_pattern(..).count()` per graph counted, in either
+    /// a full [`Self::rebuild`] or a targeted [`Self::recount_specific_graphs`]).
+    /// A targeted write must touch only its own graph; this counter lets a
+    /// regression test prove an unrelated multi-million-triple graph (e.g. a
+    /// dataset's `…/ifcowl` lift) is *not* rescanned on every `store.update()`.
+    scans: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl GraphIndex {
     fn new() -> Self {
         Self {
             counts: Arc::new(DashMap::new()),
+            scans: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Count the quads in one graph, recording the scan for observability.
+    fn scan_graph(&self, store: &Store, graph: GraphNameRef<'_>) -> usize {
+        self.scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        store
+            .quads_for_pattern(None, None, None, Some(graph))
+            .count()
+    }
+
+    /// Total per-graph count scans performed since construction (shared across
+    /// store clones). Test-only: lets a regression test assert that a targeted
+    /// write recounts just its own graph instead of rescanning every graph.
+    #[cfg(test)]
+    fn scan_count(&self) -> u64 {
+        self.scans.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Rebuild the entire index from the store.
     fn rebuild(&self, store: &Store) {
         // Compute new values first, then swap atomically per-key.
         // Default graph count
-        let default_count = store
-            .quads_for_pattern(None, None, None, Some(GraphNameRef::DefaultGraph))
-            .count();
+        let default_count = self.scan_graph(store, GraphNameRef::DefaultGraph);
 
         let mut fresh: Vec<(Option<String>, usize)> = Vec::new();
         fresh.push((None, default_count));
 
         for g in store.named_graphs() {
             if let Ok(NamedOrBlankNode::NamedNode(nn)) = g {
-                let count = store
-                    .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(nn.as_ref())))
-                    .count();
+                let count = self.scan_graph(store, GraphNameRef::NamedNode(nn.as_ref()));
                 fresh.push((Some(nn.as_str().to_string()), count));
             }
         }
@@ -144,26 +165,36 @@ impl GraphIndex {
 
     /// M-5: Re-count only the specified graphs instead of doing a full rebuild.
     /// Pass `None` in the slice to re-count the default graph.
+    ///
+    /// Stays faithful to [`Self::rebuild`]: a named graph that recounts to 0 and
+    /// is no longer present in the store's named-graph set is *removed* from the
+    /// index (a full rebuild only enumerates graphs in `named_graphs()`, so an
+    /// emptied implicit graph drops out). Otherwise the per-graph counts and
+    /// `cached_named_graph_count` would drift after a `DELETE` empties a graph.
     fn recount_specific_graphs(&self, store: &Store, graph_iris: &[Option<String>]) {
         for graph_iri in graph_iris {
             match graph_iri {
                 None => {
-                    let count = store
-                        .quads_for_pattern(None, None, None, Some(GraphNameRef::DefaultGraph))
-                        .count();
+                    // The default graph always conceptually exists (rebuild always
+                    // records it), so keep its entry even at 0.
+                    let count = self.scan_graph(store, GraphNameRef::DefaultGraph);
                     self.counts.insert(None, count);
                 }
                 Some(iri) => {
                     if let Ok(nn) = NamedNode::new(iri.as_str()) {
-                        let count = store
-                            .quads_for_pattern(
-                                None,
-                                None,
-                                None,
-                                Some(GraphNameRef::NamedNode(nn.as_ref())),
-                            )
-                            .count();
-                        self.counts.insert(Some(iri.clone()), count);
+                        let count = self.scan_graph(store, GraphNameRef::NamedNode(nn.as_ref()));
+                        // Mirror rebuild: a named graph appears in the index iff it
+                        // is in `named_graphs()`. An emptied implicit graph is gone
+                        // from that set, so drop its entry rather than leaving a
+                        // ghost 0-count. An explicitly-created empty graph stays
+                        // (`contains_named_graph` is true), matching rebuild.
+                        let keep =
+                            count > 0 || store.contains_named_graph(nn.as_ref()).unwrap_or(true);
+                        if keep {
+                            self.counts.insert(Some(iri.clone()), count);
+                        } else {
+                            self.counts.remove(&Some(iri.clone()));
+                        }
                     }
                 }
             }
@@ -469,11 +500,90 @@ impl TripleStore {
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
         debug!("Executing update: {}", &sparql[..prefix_end]);
+        // Statically determine which graphs this UPDATE writes to *before*
+        // mutating the store, so the per-graph count index can be surgically
+        // recounted instead of fully rebuilt. A full rebuild rescans every named
+        // graph — including a dataset's multi-million-triple `…/ifcowl` lift — so
+        // doing it after each write turned the ~100 single-graph registry/audit/
+        // migration `update()`s on the post-seed boot path into ~100 full-store
+        // scans. `None` ⇒ targets can't be bounded (variable graph, CLEAR/DROP/
+        // CREATE/LOAD, or a parse miss) ⇒ conservative full rebuild.
+        let targets = Self::static_update_targets(sparql);
         let update = Update::parse(sparql, None)?;
         self.store.update_opt(update, self.query_options())?;
-        self.graph_index.rebuild(&self.store);
+        match targets {
+            Some(targets) => self
+                .graph_index
+                .recount_specific_graphs(&self.store, &targets),
+            None => self.graph_index.rebuild(&self.store),
+        }
         self.note_write();
         Ok(())
+    }
+
+    /// Statically determine the set of graphs a SPARQL UPDATE writes to, so the
+    /// per-graph count index can be surgically recounted instead of fully rebuilt.
+    ///
+    /// Returns `Some(targets)` only when *every* operation writes to graphs whose
+    /// IRIs are known at parse time: the ground `GRAPH <iri>` blocks of
+    /// `INSERT DATA` / `DELETE DATA`, and the literal `GRAPH <iri>` templates of
+    /// `DELETE/INSERT … WHERE`. Each target is `Option<String>` (`None` = default
+    /// graph); a write's count delta is confined to the graphs named in its
+    /// delete/insert *templates* — the `WHERE`/`USING` clauses only match, they
+    /// never write — so recounting exactly those keeps every count correct.
+    ///
+    /// Returns `None` — "do a full rebuild" — whenever the effect can't be bounded
+    /// to statically-known graphs: a variable graph target (`GRAPH ?g`), any
+    /// `LOAD`/`CLEAR`/`CREATE`/`DROP` (which add or remove whole graph entries),
+    /// or a parse failure. Conservative by construction: when in doubt, rebuild.
+    fn static_update_targets(sparql: &str) -> Option<Vec<Option<String>>> {
+        use opengraph::spargebra::term::{GraphName, GraphNamePattern};
+        use opengraph::spargebra::{GraphUpdateOperation, Update as SpargebraUpdate};
+
+        let parsed = SpargebraUpdate::parse(sparql, None).ok()?;
+        // Ground `GraphName` (DATA blocks): NamedNode or DefaultGraph, never a var.
+        let ground = |g: &GraphName| match g {
+            GraphName::NamedNode(nn) => Some(nn.as_str().to_string()),
+            GraphName::DefaultGraph => None,
+        };
+        let mut targets: Vec<Option<String>> = Vec::new();
+        for op in &parsed.operations {
+            match op {
+                GraphUpdateOperation::InsertData { data } => {
+                    targets.extend(data.iter().map(|q| ground(&q.graph_name)));
+                }
+                GraphUpdateOperation::DeleteData { data } => {
+                    targets.extend(data.iter().map(|q| ground(&q.graph_name)));
+                }
+                GraphUpdateOperation::DeleteInsert { delete, insert, .. } => {
+                    // Both delete and insert templates can write; a variable graph
+                    // target can resolve to graphs we can't enumerate → full rebuild.
+                    for g in delete
+                        .iter()
+                        .map(|q| &q.graph_name)
+                        .chain(insert.iter().map(|q| &q.graph_name))
+                    {
+                        match g {
+                            GraphNamePattern::NamedNode(nn) => {
+                                targets.push(Some(nn.as_str().to_string()))
+                            }
+                            GraphNamePattern::DefaultGraph => targets.push(None),
+                            GraphNamePattern::Variable(_) => return None,
+                        }
+                    }
+                }
+                // LOAD / CLEAR / CREATE / DROP add or remove whole graph entries
+                // (and LOAD's source is opaque); their effect isn't bounded to a
+                // known count delta, so fall back to a full rebuild.
+                _ => return None,
+            }
+        }
+        // Many quads usually share one target graph (e.g. a registry INSERT DATA of
+        // a dozen triples all in REGISTRY_GRAPH); dedup so that graph is recounted
+        // once, not once per quad.
+        targets.sort();
+        targets.dedup();
+        Some(targets)
     }
 
     /// M-5: Execute a SPARQL UPDATE using a surgical graph index update.
@@ -1392,5 +1502,171 @@ mod tests {
             detect_format_from_mime("application/n-triples"),
             Ok(RdfFormat::NTriples)
         ));
+    }
+
+    // ── Surgical graph-index maintenance on store.update() ──────────────────
+
+    /// Regression guard for the post-seed boot CPU peg: a single-graph
+    /// `store.update()` must recount only the graph it writes to, never rescan
+    /// every named graph (which on the viewer-3d-demo includes a 2.64M-triple
+    /// `…/ifcowl` lift). Asserted via the index's per-graph scan counter.
+    #[test]
+    fn update_recounts_only_written_graph_not_unrelated_ones() {
+        let store = TripleStore::in_memory().unwrap();
+
+        // A "big" graph standing in for a dataset's multi-million-triple ifcOWL
+        // lift — a full rebuild would rescan it on every write.
+        let big = "http://example.org/big";
+        let mut ttl = String::new();
+        for i in 0..200 {
+            ttl.push_str(&format!(
+                "<http://example.org/s{i}> <http://example.org/p> \"{i}\" .\n"
+            ));
+        }
+        store
+            .load_str(&ttl, RdfFormat::NTriples, Some(big))
+            .unwrap();
+        // Two more unrelated named graphs, so a full rebuild scans several graphs.
+        store
+            .load_str(
+                "<http://e/a> <http://e/p> \"1\" .",
+                RdfFormat::NTriples,
+                Some("http://example.org/other1"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                "<http://e/b> <http://e/p> \"2\" .",
+                RdfFormat::NTriples,
+                Some("http://example.org/other2"),
+            )
+            .unwrap();
+
+        assert_eq!(store.graph_count_cached(Some(big)), Some(200));
+        assert!(store.named_graphs().unwrap().len() >= 3);
+
+        // Snapshot the scan counter, then run an UNRELATED targeted write into a
+        // brand-new small graph.
+        let before = store.graph_index.scan_count();
+        store
+            .update(
+                "INSERT DATA { GRAPH <http://example.org/small> { <http://e/x> <http://e/p> \"v\" } }",
+            )
+            .unwrap();
+        let targeted_scans = store.graph_index.scan_count() - before;
+
+        // Exactly one graph (the small target) was recounted — NOT a full rebuild
+        // that would have rescanned the big graph and the two others.
+        assert_eq!(
+            targeted_scans, 1,
+            "a single-graph update must recount only its own graph"
+        );
+
+        // Counts stay correct: big graph untouched, small graph registered.
+        assert_eq!(store.graph_count_cached(Some(big)), Some(200));
+        assert_eq!(
+            store.graph_count_cached(Some("http://example.org/small")),
+            Some(1)
+        );
+
+        // Demonstrate the win explicitly: a full rebuild scans every graph.
+        let before_rebuild = store.graph_index.scan_count();
+        store.rebuild_graph_index();
+        let rebuild_scans = store.graph_index.scan_count() - before_rebuild;
+        assert!(
+            rebuild_scans >= 4 && rebuild_scans > targeted_scans,
+            "full rebuild ({rebuild_scans}) scans far more graphs than the targeted recount ({targeted_scans})"
+        );
+    }
+
+    /// The targeted recount must leave the graph-count index byte-for-byte
+    /// identical to an authoritative full rebuild, across the full mix of update
+    /// shapes the fast path handles (named/default INSERT & DELETE DATA,
+    /// DELETE/INSERT…WHERE, and a DELETE that empties a graph).
+    #[test]
+    fn targeted_update_index_matches_full_rebuild() {
+        let store = TripleStore::in_memory().unwrap();
+        let stmts = [
+            "INSERT DATA { GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> \"1\" } }",
+            "INSERT DATA { GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> \"2\" } }",
+            "INSERT DATA { GRAPH <http://ex/b> { <http://ex/s> <http://ex/p> \"1\" } }",
+            "INSERT DATA { <http://ex/s> <http://ex/p> \"default\" }",
+            // Empties graph b (the graph stays registered in oxigraph at count 0).
+            "DELETE DATA { GRAPH <http://ex/b> { <http://ex/s> <http://ex/p> \"1\" } }",
+            // DELETE/INSERT…WHERE rewriting one triple in graph a.
+            "DELETE { GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> \"1\" } } \
+             INSERT { GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> \"3\" } } \
+             WHERE  { GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> \"1\" } }",
+            // DELETE DATA on a graph that never existed → must NOT add a ghost entry.
+            "DELETE DATA { GRAPH <http://ex/never> { <http://ex/s> <http://ex/p> \"x\" } }",
+        ];
+        for s in stmts {
+            store.update(s).unwrap();
+        }
+
+        let mut targeted = store.graph_counts();
+        targeted.sort();
+
+        store.rebuild_graph_index();
+        let mut rebuilt = store.graph_counts();
+        rebuilt.sort();
+
+        assert_eq!(
+            targeted, rebuilt,
+            "targeted recount must match a full rebuild exactly"
+        );
+        // Sanity: the never-existed graph is absent in both.
+        assert_eq!(store.graph_count_cached(Some("http://ex/never")), None);
+    }
+
+    /// Static target analysis: only statically-known write graphs yield a
+    /// targeted recount; anything unbounded falls back to a full rebuild (`None`).
+    #[test]
+    fn static_update_targets_bounds_known_graphs() {
+        let t = TripleStore::static_update_targets;
+
+        // INSERT/DELETE DATA into a named graph ⇒ just that graph.
+        assert_eq!(
+            t("INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }"),
+            Some(vec![Some("http://ex/g".to_string())])
+        );
+        // INSERT DATA into the default graph ⇒ the default-graph target (None).
+        assert_eq!(
+            t("INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }"),
+            Some(vec![None])
+        );
+        // Several distinct graphs ⇒ all of them, deduped (many quads, one graph each).
+        let many = t("INSERT DATA { \
+                GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> <http://ex/o> } \
+                GRAPH <http://ex/b> { <http://ex/s> <http://ex/p> <http://ex/o> } \
+                GRAPH <http://ex/a> { <http://ex/s> <http://ex/p> <http://ex/o2> } }")
+        .unwrap();
+        assert_eq!(many.len(), 2);
+        assert!(many.contains(&Some("http://ex/a".to_string())));
+        assert!(many.contains(&Some("http://ex/b".to_string())));
+        // DELETE/INSERT…WHERE with literal graph templates ⇒ those graphs.
+        assert_eq!(
+            t(
+                "DELETE { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> ?o } } \
+               INSERT { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> \"x\" } } \
+               WHERE  { GRAPH <http://ex/g> { OPTIONAL { <http://ex/s> <http://ex/p> ?o } } }"
+            ),
+            Some(vec![Some("http://ex/g".to_string())])
+        );
+
+        // Unbounded / whole-graph effects ⇒ full rebuild (None).
+        assert_eq!(
+            t("DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }"),
+            None,
+            "variable graph target can't be bounded"
+        );
+        assert_eq!(t("DROP GRAPH <http://ex/g>"), None);
+        assert_eq!(t("CLEAR ALL"), None);
+        assert_eq!(t("CREATE GRAPH <http://ex/g>"), None);
+        assert_eq!(
+            t("this is not a valid update"),
+            None,
+            "parse miss → rebuild"
+        );
     }
 }
