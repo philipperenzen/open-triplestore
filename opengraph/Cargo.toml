@@ -13,9 +13,9 @@ publish = false
 
 [dependencies]
 # Oxigraph engine — opengraph wraps and extends these (re-exported from lib.rs).
-oxigraph  = "0.4"
-oxrdf     = "0.2"
-spargebra = "0.3"
+oxigraph  = "0.5"
+oxrdf     = "0.3"
+spargebra = "0.4"
 
 # Durable blank-node identity: SHA-256 canonical hashing + hex encoding.
 # 0.11 to match the workspace root (RustCrypto `digest` 0.11 family).
