@@ -42,6 +42,42 @@ fn pad4(len: usize) -> usize {
     (len + 3) & !3
 }
 
+/// A stable, muted "architectural" RGB colour for feature index `fid`.
+///
+/// Without per-feature colour the whole merged mesh is one grey lump, so a block
+/// of 150+ buildings reads as a single undifferentiated mass. A golden-ratio hue
+/// rotation gives every adjacent building a distinct-but-related tone (warm
+/// stones, slates, taupes) at low saturation + mid lightness so it reads as a
+/// real cityscape rather than a rainbow. Deterministic in `fid` (no RNG), so the
+/// GLB is byte-stable for a given feature order.
+fn feature_color(fid: usize) -> [f32; 3] {
+    // 137.508° — the golden angle — spreads successive hues maximally.
+    let hue = (fid as f32 * 137.508) % 360.0;
+    // A touch of per-index variation in lightness keeps neighbours from reading
+    // as flat-identical even where two hues land close together. wrapping_mul on
+    // a u64 so the Knuth hash never overflow-panics under dev/test overflow-checks.
+    let h = (fid as u64).wrapping_mul(2_654_435_761);
+    let light = 0.60 + 0.06 * (((h >> 8 & 0xff) as f32) / 255.0 - 0.5);
+    hsl_to_rgb(hue, 0.26, light)
+}
+
+/// HSL (h in degrees, s/l in 0..1) → linear-ish sRGB triple in 0..1.
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [r + m, g + m, b + m]
+}
+
 /// Append `bytes` to `buf`, then pad with `pad` bytes to a 4-byte boundary.
 /// Returns the byte offset at which `bytes` began.
 fn push_padded(buf: &mut Vec<u8>, bytes: &[u8], pad: u8) -> usize {
@@ -66,13 +102,18 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
     // Feature id per vertex. u16 covers up to 65 535 features; we pick the
     // component type after counting.
     let mut feature_ids: Vec<u32> = Vec::new();
+    // Per-vertex COLOR_0 (VEC3 f32): a stable muted tone per feature so a block
+    // of many buildings reads as distinct masses, not one grey lump.
+    let mut colors: Vec<f32> = Vec::new();
 
     for (fid, f) in features.iter().enumerate() {
         let base = (positions.len() / 3) as u32;
         let vcount = f.positions.len() / 3;
         positions.extend_from_slice(&f.positions);
+        let col = feature_color(fid);
         for _ in 0..vcount {
             feature_ids.push(fid as u32);
+            colors.extend_from_slice(&col);
         }
         if f.indices.is_empty() {
             // Non-indexed: synthesise sequential indices for the appended verts.
@@ -204,19 +245,31 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
         bin.push(0);
     }
 
+    // COLOR_0 (VEC3 f32) — appended after NORMAL so bufferView indices 0-5 (which
+    // the property table references by index) stay untouched; this is view 6.
+    let col_offset = bin.len();
+    for v in &colors {
+        bin.extend_from_slice(&v.to_le_bytes());
+    }
+    let col_len = bin.len() - col_offset;
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+
     let total_buffer_len = bin.len();
 
     // ── 3. Assemble the glTF JSON referencing the bufferViews above ────────────
     // bufferView indices (declaration order):
     //   0 POSITION, 1 indices, 2 _FEATURE_ID_0,
-    //   3 iri values, 4 iri string-offsets, 5 NORMAL
+    //   3 iri values, 4 iri string-offsets, 5 NORMAL, 6 COLOR_0
     let buffer_views = json!([
         { "buffer": 0, "byteOffset": pos_offset, "byteLength": pos_len, "target": 34962 },
         { "buffer": 0, "byteOffset": idx_offset, "byteLength": idx_len, "target": 34963 },
         { "buffer": 0, "byteOffset": fid_offset, "byteLength": fid_len },
         { "buffer": 0, "byteOffset": iri_val_offset, "byteLength": iri_val_len },
         { "buffer": 0, "byteOffset": iri_off_offset, "byteLength": iri_off_len },
-        { "buffer": 0, "byteOffset": nrm_offset, "byteLength": nrm_len, "target": 34962 }
+        { "buffer": 0, "byteOffset": nrm_offset, "byteLength": nrm_len, "target": 34962 },
+        { "buffer": 0, "byteOffset": col_offset, "byteLength": col_len, "target": 34962 }
     ]);
 
     // POSITION accessor needs min/max for the bounding box (cgltf/Cesium require it).
@@ -239,13 +292,14 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
           "type": "VEC3", "min": min, "max": max },
         { "bufferView": 1, "componentType": 5125, "count": index_count, "type": "SCALAR" },
         { "bufferView": 2, "componentType": fid_component_type, "count": vertex_count, "type": "SCALAR" },
-        { "bufferView": 5, "componentType": 5126, "count": vertex_count, "type": "VEC3" }
+        { "bufferView": 5, "componentType": 5126, "count": vertex_count, "type": "VEC3" },
+        { "bufferView": 6, "componentType": 5126, "count": vertex_count, "type": "VEC3" }
     ]);
 
     // EXT_mesh_features: one feature-id set sourced from the _FEATURE_ID_0 attribute,
     // and bound to property-table 0 so a picked feature resolves to metadata.
     let primitive = json!({
-        "attributes": { "POSITION": 0, "NORMAL": 3, "_FEATURE_ID_0": 2 },
+        "attributes": { "POSITION": 0, "NORMAL": 3, "_FEATURE_ID_0": 2, "COLOR_0": 4 },
         "indices": 1,
         "mode": 4,
         "material": 0,
@@ -300,14 +354,17 @@ pub fn encode_glb(features: &[GlbFeature]) -> Vec<u8> {
             {
                 "name": "ots_building",
                 "pbrMetallicRoughness": {
-                    "baseColorFactor": [0.58, 0.60, 0.64, 1.0],
+                    // White base so the per-vertex COLOR_0 tone shows through
+                    // unmodified (glTF multiplies baseColorFactor by COLOR_0).
+                    "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
                     "metallicFactor": 0.0,
                     "roughnessFactor": 0.9
                 },
                 // Small ambient lift so faces turned away from Cesium's lone sun
                 // don't fall to near-black (the viewer sets up no IBL/ambient).
-                // Kept modest so flat sun-facing roofs read grey, not white.
-                "emissiveFactor": [0.10, 0.105, 0.115],
+                // Lower than the old flat-grey material since the vertex colour now
+                // carries the building tone — too much emissive would wash it grey.
+                "emissiveFactor": [0.04, 0.045, 0.05],
                 "doubleSided": true
             }
         ],
@@ -427,6 +484,27 @@ mod tests {
             parsed["meshes"][0]["primitives"][0]["attributes"]["NORMAL"],
             json!(3),
             "primitive carries a NORMAL attribute (accessor 3)"
+        );
+        // Per-feature COLOR_0 so a block of buildings reads as distinct masses.
+        assert_eq!(
+            parsed["meshes"][0]["primitives"][0]["attributes"]["COLOR_0"],
+            json!(4),
+            "primitive carries a COLOR_0 attribute (accessor 4)"
+        );
+        let color_accessor = &parsed["accessors"][4];
+        assert_eq!(color_accessor["type"], json!("VEC3"), "COLOR_0 is VEC3");
+        assert_eq!(
+            color_accessor["count"].as_u64().unwrap(),
+            6,
+            "COLOR_0 has one colour per vertex (2 tris × 3 verts)"
+        );
+        // Adjacent feature indices must produce visibly different tones.
+        let c0 = feature_color(0);
+        let c1 = feature_color(1);
+        let dist = (c0[0] - c1[0]).abs() + (c0[1] - c1[1]).abs() + (c0[2] - c1[2]).abs();
+        assert!(
+            dist > 0.05,
+            "neighbouring features get distinct colours: {c0:?} vs {c1:?}"
         );
         assert_eq!(
             parsed["meshes"][0]["primitives"][0]["material"],

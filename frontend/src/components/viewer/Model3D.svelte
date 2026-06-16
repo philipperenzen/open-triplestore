@@ -9,6 +9,7 @@
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
   import { isDark } from '../../lib/theme.js';
   import { loadModel, defaultMaterial } from '../../lib/viewer/models';
+  import { ifcGuidAt } from '../../lib/viewer/ifc';
 
   /** Models to show: [{ id, label, url, format, slot?: [x, z] }]. */
   export let refs = [];
@@ -25,6 +26,7 @@
   let loadedCount = 0;
   let failedCount = 0;
   let dark = false;
+  let needsRender = true; // render-on-demand flag (see the animate loop)
   const unsubTheme = isDark.subscribe((v) => {
     dark = v;
     applyTheme();
@@ -44,24 +46,80 @@
       });
     }
     highlight();
+    needsRender = true;
   }
+
+  // Frames remaining to ease emissive intensity toward its per-material target
+  // (set by highlight()). Bounds the per-frame traversal so an idle viewer does
+  // no extra work once the glow has settled.
+  let emisFrames = 0;
 
   function highlight() {
     for (const [id, group] of groupsById) {
       const isSel = id === selected && groupsById.size > 1;
       group.traverse((node) => {
         if (node.isMesh && node.material && 'emissive' in node.material) {
-          node.material.emissive = isSel ? SELECT_COLOR : new THREE.Color(0x000000);
-          node.material.emissiveIntensity = isSel ? 0.55 : 0;
+          // Set the highlight colour once; the intensity eases in the render loop
+          // (no per-mesh Color allocation per call, no instant snap).
+          if (isSel) node.material.emissive.copy(SELECT_COLOR);
+          node.material.userData.emisTarget = isSel ? 0.55 : 0;
         }
       });
     }
+    emisFrames = 24; // ~0.4s of easing at the 0.18 lerp factor below
+  }
+
+  /** Frame the loaded model set: centre the orbit target and pull the camera back
+   *  so the whole bounding box fits — multi-model slot layouts used to spill off
+   *  screen against the old fixed camera pose. Runs on each refs change only, so a
+   *  user's mid-session orbit is never yanked. */
+  function fitView() {
+    if (!camera || !controls || groupsById.size === 0) return;
+    const box = new THREE.Box3();
+    let any = false;
+    for (const g of groupsById.values()) {
+      const b = new THREE.Box3().setFromObject(g);
+      if (b.isEmpty()) continue;
+      box.union(b);
+      any = true;
+    }
+    if (!any) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const radius = Math.max(size.x, size.y, size.z, 0.001) * 0.5;
+    const fov = (camera.fov * Math.PI) / 180;
+    const dist = (radius / Math.sin(fov / 2)) * 1.3;
+    controls.target.copy(center);
+    camera.position.copy(center).add(new THREE.Vector3(0.7, 0.55, 1).normalize().multiplyScalar(dist));
+    camera.near = Math.max(0.01, dist / 200);
+    camera.far = dist * 200;
+    camera.updateProjectionMatrix();
+    controls.update();
+    needsRender = true;
+  }
+
+  /** Dispose the per-instance materials of a group (the geometry is shared with
+   *  the loadModel cache, so it must NOT be disposed — only owned materials are). */
+  function disposeGroup(group) {
+    group.traverse((n) => {
+      if (!n.isMesh) return;
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of mats) {
+        if (!m) continue;
+        m.map?.dispose?.();
+        m.dispose?.();
+      }
+    });
   }
 
   async function loadAll() {
     // Clear any previous set: the modal/preview overlay reuse one live
-    // instance across `refs` changes, so stale groups must not linger.
-    for (const group of groupsById.values()) scene.remove(group);
+    // instance across `refs` changes, so stale groups must not linger. Dispose the
+    // evicted groups' cloned materials so a long session doesn't leak them.
+    for (const group of groupsById.values()) {
+      scene.remove(group);
+      disposeGroup(group);
+    }
     groupsById = new Map();
     loadedCount = 0;
     failedCount = 0;
@@ -108,6 +166,7 @@
     await Promise.allSettled(tasks);
     if (refs !== wanted) return;
     highlight();
+    fitView(); // frame the loaded set (multi-model layouts used to spill off-screen)
   }
 
   function onClick(event) {
@@ -121,9 +180,9 @@
     const hits = raycaster.intersectObjects([...groupsById.values()], true);
     if (!hits.length) return;
     const hit = hits[0].object;
-    // IFC meshes carry their element's GlobalId — picking one selects that
-    // *atom* (a beam, a slab), not just the whole model.
-    const guid = hit.userData?.ifcGuid || null;
+    // IFC geometry carries its element's GlobalId — picking one selects that
+    // *atom* (a beam, a slab). A merged mesh resolves it from the picked triangle.
+    const guid = ifcGuidAt(hit, hits[0].faceIndex);
     let node = hit;
     while (node && !node.userData.elementId) node = node.parent;
     const id = node?.userData.elementId || null;
@@ -136,7 +195,10 @@
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
     camera.position.set(2.6, 2.0, 3.4);
-    renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true });
+    renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true, powerPreference: 'high-performance' });
+    // Cap the device-pixel-ratio: a retina DPR of 2-3 renders 4-9× the fragments
+    // for no visible gain on these shaded models — the single biggest fill-rate win.
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     raycaster = new THREE.Raycaster();
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.9));
@@ -158,15 +220,38 @@
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      needsRender = true;
     };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(canvasEl);
 
+    // Render on demand: a static orbit viewer rendering at 60fps forever burns GPU
+    // (and battery) for nothing. controls.update() returns true while the camera is
+    // moving/damping; otherwise we only draw when something actually changed
+    // (selection ease, theme, (re)load, resize). rAF auto-pauses on a hidden tab.
     const animate = () => {
       frameId = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+      const moving = controls.update();
+      // Ease emissive intensity toward each material's target for a few frames
+      // after a selection change (set by highlight()) — no instant snap.
+      if (emisFrames > 0) {
+        emisFrames -= 1;
+        needsRender = true;
+        for (const group of groupsById.values()) {
+          group.traverse((node) => {
+            if (!node.isMesh || !node.material || !('emissiveIntensity' in node.material)) return;
+            const target = node.material.userData?.emisTarget;
+            if (target === undefined) return; // never highlighted → leave as-is
+            const cur = node.material.emissiveIntensity;
+            node.material.emissiveIntensity = cur + (target - cur) * 0.18;
+          });
+        }
+      }
+      if (moving || needsRender) {
+        renderer.render(scene, camera);
+        needsRender = false;
+      }
     };
     animate();
 
@@ -176,6 +261,15 @@
   onDestroy(() => {
     unsubTheme();
     if (frameId) cancelAnimationFrame(frameId);
+    // Free the cloned materials + grid; the shared cached geometry is left for the
+    // model cache to own. Without this a session that opens many panels leaks GPU
+    // resources until the browser drops the WebGL context (models turn black).
+    for (const group of groupsById.values()) disposeGroup(group);
+    groupsById = new Map();
+    if (grid) {
+      grid.geometry?.dispose?.();
+      grid.material?.dispose?.();
+    }
     if (renderer) renderer.dispose();
     renderer = null;
   });

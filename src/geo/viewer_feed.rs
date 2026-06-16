@@ -56,6 +56,17 @@ pub struct ViewerElement {
 
 const FOG_AS: &str = "https://w3id.org/fog#as";
 
+/// A `tiles3d-*` graph holds CityJSON lifted to volumetric WKT-Z **solely** to
+/// feed the 3D-Tiles pipeline (`/3dtiles`, which reads every registered graph).
+/// The 2D map, the OGC API – Features endpoint and the DCAT capability probe all
+/// render the same blocks from their client-side CityJSON file-links instead, so
+/// every feed-style reader skips these graphs (the same way they skip `/ifcowl`)
+/// to avoid doubling the geometry and swamping the element list. The 3D-Tiles
+/// route deliberately does NOT apply this filter.
+pub(crate) fn is_tiles3d_graph(graph: &str) -> bool {
+    graph.contains("/tiles3d-")
+}
+
 /// Lightweight geo capability summary for a dataset/scope — drives the UI gating
 /// (show a 2D map when there are coordinates; show the 3D viewer only when there
 /// is 3D data). Computed with cheap `ASK`/`COUNT` queries rather than building
@@ -149,15 +160,31 @@ pub fn build_viewer_feed(
     data_graphs: &[String],
     root: Option<&str>,
 ) -> Vec<ViewerElement> {
+    build_viewer_feed_opts(store, data_graphs, root, false)
+}
+
+/// As [`build_viewer_feed`], but with `located_only` to fetch just the elements
+/// that carry actual coordinates (`geo:asWKT`/`geo:asGML`) plus their model
+/// references — the subset the 2D map renders. On a big BIM dataset the IFC
+/// sub-elements (walls/beams/…) inherit their location and number in the
+/// thousands; they matter only to the structure tree, not the map. Skipping the
+/// BOT containment closure for the map turns a multi-second whole-building scan
+/// into a sub-second query, so the map paints immediately while the full feed
+/// (for the tree) streams in behind it.
+pub fn build_viewer_feed_opts(
+    store: &TripleStore,
+    data_graphs: &[String],
+    root: Option<&str>,
+    located_only: bool,
+) -> Vec<ViewerElement> {
     let from: String = data_graphs
         .iter()
         .map(|g| format!("FROM <{g}> "))
         .collect::<Vec<_>>()
         .join("");
-    let root_filter = match root {
-        Some(r) => format!("FILTER(?el = <{r}> || ?parent = <{r}>)"),
-        None => String::new(),
-    };
+    // Selection of candidate ?el (+ optional ?parent). Located mode anchors on a
+    // real coordinate; full mode walks the BOT hierarchy.
+    //
     // Containment follows the BOT hierarchy — bot:containsElement / hasSubElement
     // (used by the IFC importer) plus bot:hasStorey / hasSpace / hasElement (the
     // Site→Building→Storey→Space→Element decomposition). Roots (containment
@@ -165,23 +192,38 @@ pub fn build_viewer_feed(
     // children come from the closure. The third arm admits plain geo/omg subjects
     // outside any BOT topology, also as parentless roots — a dataset needs no BOT
     // topology to feed the viewer.
-    let query = format!(
-        r#"
-        PREFIX bot:  <https://w3id.org/bot#>
-        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-        PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
-        PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid ?up ?msize
-        {from}
-        WHERE {{
-            {{ ?parent (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el . }}
+    let selection = if located_only {
+        // Only coordinate-bearing features; ?parent stays unbound (the map's
+        // located elements are roots/anchors — the tree resolves parents).
+        "?el geo:hasGeometry ?gg . { ?gg geo:asWKT ?w0 } UNION { ?gg geo:asGML ?g0 }".to_string()
+    } else {
+        let root_filter = match root {
+            Some(r) => format!("FILTER(?el = <{r}> || ?parent = <{r}>)"),
+            None => String::new(),
+        };
+        format!(
+            r#"{{ ?parent (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el . }}
             UNION
             {{ ?el (bot:containsElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?child .
                FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el }} }}
             UNION
             {{ ?el (geo:hasGeometry|omg:hasGeometry) ?anyg .
                FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el }} }}
-            {root_filter}
+            {root_filter}"#
+        )
+    };
+    // ifcGuid lives on a known predicate (props#ifcGuid); binding it directly
+    // avoids the unbounded `?el ?p ?o` predicate scan a STRENDS filter forces.
+    let query = format!(
+        r#"
+        PREFIX bot:  <https://w3id.org/bot#>
+        PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+        PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
+        PREFIX omg:  <https://w3id.org/omg#>
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guid ?up ?msize
+        {from}
+        WHERE {{
+            {selection}
             OPTIONAL {{ ?el rdfs:label ?label }}
             OPTIONAL {{ ?el a ?type }}
             OPTIONAL {{ ?el geo:hasGeometry ?g .
@@ -191,7 +233,7 @@ pub fn build_viewer_feed(
                         FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
                         OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }}
                         OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelSizeMeters> ?msize }} }}
-            OPTIONAL {{ ?el ?guidp ?guid . FILTER(STRENDS(STR(?guidp), "ifcGuid")) }}
+            OPTIONAL {{ ?el <https://w3id.org/props#ifcGuid> ?guid }}
         }}
         "#
     );
@@ -467,5 +509,48 @@ mod tests {
             .filter_map(|t| t.parse().ok())
             .collect();
         assert_eq!(nums, [4.0, 52.0], "unprefixed WKT stays WGS84: {wkt}");
+    }
+
+    #[test]
+    fn located_only_drops_uncoordinated_subelements() {
+        // A multi-level BIM tree: one located Site → Building → Storey → many
+        // walls, none of which carry coordinates of their own (they inherit the
+        // Site's location). This is the shape that makes the full feed slow.
+        let mut data = String::from(
+            "@prefix bot:  <https://w3id.org/bot#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix geo:  <http://www.opengis.net/ont/geosparql#> .\n\
+             @prefix ex:   <http://example.org/> .\n\
+             ex:Site geo:hasGeometry [ geo:asWKT \"POINT(4 52)\"^^geo:wktLiteral ] ;\n\
+                 bot:containsElement ex:Building .\n\
+             ex:Building bot:hasStorey ex:Storey .\n\
+             ex:Storey a bot:Storey ;\n",
+        );
+        for i in 0..50 {
+            data.push_str(&format!("    bot:hasElement ex:Wall{i} ;\n"));
+        }
+        data.push_str("    rdfs:label \"Storey\" .\n");
+        for i in 0..50 {
+            data.push_str(&format!("ex:Wall{i} rdfs:label \"Wall {i}\" .\n"));
+        }
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(&data, RdfFormat::Turtle, None).unwrap();
+
+        // Full feed walks the whole BOT closure → Site + Building + Storey + 50 walls.
+        let full = build_viewer_feed(&store, &[], None);
+        assert_eq!(
+            full.len(),
+            53,
+            "full feed includes every sub-element: {}",
+            full.len()
+        );
+
+        // Located feed (the map's fast path) returns ONLY the coordinate-bearing
+        // Site — its size does not grow with the tree, however deep it gets. This
+        // is the contract that keeps the map paint fast on big buildings.
+        let located = build_viewer_feed_opts(&store, &[], None, true);
+        assert_eq!(located.len(), 1, "located feed stays tiny: {located:?}");
+        assert_eq!(located[0].id, "http://example.org/Site");
+        assert!(located[0].wkt4326.is_some(), "Site keeps its coordinate");
     }
 }

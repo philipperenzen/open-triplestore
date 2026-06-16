@@ -582,8 +582,16 @@ export const browseStats = () => request('GET', '/api/browse/stats');
 // Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
 // references (glTF/IFC/...), resolved from BOT/OMG/FOG/GeoSPARQL. Feeds the
 // dataset 3D & map viewer; optional root IRI scopes to one object + children.
-export const getViewerFeed = (datasetId, root = null) => {
-  const qs = root ? `?root=${encodeURIComponent(root)}` : '';
+// `located: true` fetches only coordinate-bearing elements (+ model refs) — the
+// fast subset the 2D map renders, so the map can paint before the full feed (the
+// structure tree, which on a big BIM dataset includes thousands of sub-elements)
+// finishes loading.
+export const getViewerFeed = (datasetId, root = null, opts: { located?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (root) params.set('root', root);
+  // 'true' (not '1') — the backend parses this as a bool; '1' is a 400.
+  if (opts.located) params.set('located', 'true');
+  const qs = params.toString() ? `?${params.toString()}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
 };
 

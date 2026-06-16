@@ -92,19 +92,20 @@ fn load_accessible_dataset(
 }
 
 /// The dataset's data graphs that feed the viewer, with the verbose ifcOWL lift
-/// graph (`…/ifcowl`) excluded — exactly as the viewer-feed, geo-stats,
-/// geo-stats-batch and DCAT callers do. That graph is the full 1:1 IFC schema
-/// (millions of triples), carries none of the BOT/geo geometry the feed reads,
-/// and scanning it made every OGC feature/collection request walk the whole
-/// schema per dataset. Centralised here so the exclusion can't drift between the
-/// OGC handlers.
+/// graph (`…/ifcowl`) and the 3D-Tiles-only `tiles3d-*` lift graphs excluded —
+/// exactly as the viewer-feed, geo-stats, geo-stats-batch and DCAT callers do.
+/// The ifcOWL graph is the full 1:1 IFC schema (millions of triples) and carries
+/// none of the BOT/geo geometry the feed reads; the `tiles3d-*` graphs hold
+/// CityJSON lifted to WKT-Z purely for the 3D-Tiles pipeline, so surfacing them
+/// here would make the Features API disagree with the 2D map. Centralised so the
+/// exclusion can't drift between the OGC handlers.
 fn feed_data_graphs(state: &AppState, dataset_id: &str) -> Result<Vec<String>, ApiError> {
     Ok(state
         .auth_db
         .list_dataset_graphs(dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
-        .filter(|g| !g.ends_with("/ifcowl"))
+        .filter(|g| !g.ends_with("/ifcowl") && !crate::geo::viewer_feed::is_tiles3d_graph(g))
         .collect())
 }
 

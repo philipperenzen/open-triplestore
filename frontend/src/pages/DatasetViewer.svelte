@@ -150,21 +150,39 @@
     return rows;
   })();
 
+  // Two-phase load so the map paints fast on big BIM datasets: phase 1 fetches
+  // only the located elements (the map's render set — seconds, not the whole
+  // multi-thousand-element building); phase 2 fetches the full feed (the
+  // structure tree + every sub-element) in the background and swaps it in.
+  let fullLoaded = false;
   async function load() {
     loading = true;
     error = '';
+    // Phase 1 — fast located subset → the map renders almost immediately.
     try {
-      const data = await getViewerFeed(id);
-      elements = data?.elements || [];
-    } catch (e) {
-      error = e?.message || 'failed';
-    } finally {
-      loading = false;
-    }
-    try {
-      graphs = (await listDatasetGraphs(id)) || [];
+      const fast = await getViewerFeed(id, null, { located: true });
+      elements = fast?.elements || [];
     } catch {
-      graphs = []; // downloads simply hide when the graph list is unavailable
+      /* fall through — the full feed below is the source of truth */
+    }
+    loading = false; // shell + map are interactive now
+
+    // Graph list (download menu) — cheap, fetch alongside without blocking.
+    listDatasetGraphs(id)
+      .then((g) => (graphs = g || []))
+      .catch(() => (graphs = [])); // downloads simply hide when unavailable
+
+    // Phase 2 — the full feed (tree + sub-elements) in the background.
+    try {
+      const full = await getViewerFeed(id);
+      if (full?.elements) {
+        treeInit = false; // re-seed the auto-expansion over the full hierarchy
+        elements = full.elements;
+      }
+    } catch (e) {
+      if (!elements.length) error = e?.message || 'failed';
+    } finally {
+      fullLoaded = true;
     }
   }
 
@@ -318,13 +336,12 @@
     {/if}
   </div>
 
-  {#if loading}
-    <p class="hint">…</p>
-  {:else if error}
+  {#if error}
     <p class="hint error">{error}</p>
-  {:else if elements.length === 0}
-    <p class="hint">{$i18nT('pages.datasetViewer.empty')}</p>
   {:else}
+    <!-- The shell + map render immediately; the side list shows a loading state
+         while the feed streams in, so the map is interactive in ~1s instead of
+         blocking on the whole-building feed. -->
     <div class="explorer">
       <aside class="side card-flat">
         <label class="search">
@@ -344,7 +361,13 @@
           </div>
         {/if}
         <div class="list-scroll">
-          {#if query}
+          {#if loading && elements.length === 0}
+            <div class="side-loading" role="status">
+              <span class="ls-spin"></span>{$i18nT('viewer.loadingElements')}
+            </div>
+          {:else if !loading && elements.length === 0}
+            <p class="empty-row">{$i18nT('pages.datasetViewer.empty')}</p>
+          {:else if query}
             <!-- Search: flat result list across the whole dataset. -->
             <ul>
               {#each filtered as el (el.id)}
@@ -416,6 +439,11 @@
             {/if}
           {/if}
         </div>
+        {#if !fullLoaded}
+          <div class="loading-structure" role="status">
+            <span class="ls-spin"></span>{$i18nT('viewer.loadingStructure')}
+          </div>
+        {/if}
         <p class="side-hint">{$i18nT('viewer.zoomHint')}</p>
       </aside>
 
@@ -424,7 +452,9 @@
           <!-- 3D Tiles globe. Embedded: a pick dispatches `select`, opening the
                same ElementModal inspector the map view uses (no lost features). -->
           <CesiumViewer datasetId={id} {selected} embedded on:select={onMapSelect} height="100%" />
-        {:else if hasGeo}
+        {:else if hasGeo || loading}
+          <!-- Mount the map immediately (even before the feed resolves) so the
+               basemap is interactive in ~1s; features stream in when the feed lands. -->
           <ViewerMap
             bind:this={mapComponent}
             {elements}
@@ -557,15 +587,20 @@
     font-size: 0.84rem;
     font-weight: 600;
     cursor: pointer;
-    box-shadow: 0 4px 18px rgba(37, 99, 168, 0.45);
-    animation: walkPulse 2.6s ease-in-out infinite;
+    box-shadow: 0 6px 22px rgba(37, 99, 168, 0.5);
+    /* One-shot entrance instead of an endless box-shadow pulse, which read as
+       distracting and ignored motion preferences. */
+    animation: rowIn var(--dur-base, 220ms) var(--ease-out, ease) both;
   }
   .walk-suggest:hover {
     background: #e8590c;
   }
-  @keyframes walkPulse {
-    0%, 100% { box-shadow: 0 4px 18px rgba(37, 99, 168, 0.45); }
-    50% { box-shadow: 0 6px 24px rgba(232, 89, 12, 0.55); }
+  @media (prefers-reduced-motion: reduce) {
+    .walk-suggest,
+    .panel-dock,
+    .dl-menu {
+      animation: none;
+    }
   }
   .search {
     display: flex;
@@ -735,6 +770,44 @@
     font-size: 0.72rem;
     color: var(--muted, #64748b);
   }
+  /* Side-list loading state while the first (located) feed is in flight. */
+  .side-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 12px;
+    font-size: 0.8rem;
+    color: var(--muted, #64748b);
+  }
+  /* Background full-feed (structure tree) loading cue — the map is already live. */
+  .loading-structure {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    border-top: 1px solid var(--line-soft, #eef1f4);
+    font-size: 0.72rem;
+    color: var(--muted, #64748b);
+  }
+  .ls-spin {
+    width: 11px;
+    height: 11px;
+    flex: none;
+    border: 2px solid color-mix(in srgb, var(--brand-500, #2f88d8) 35%, transparent);
+    border-top-color: var(--brand-500, #2f88d8);
+    border-radius: 50%;
+    animation: ls-spin 0.8s linear infinite;
+  }
+  @keyframes ls-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ls-spin {
+      animation: none;
+    }
+  }
   .hint {
     color: var(--muted, #64748b);
   }
@@ -768,6 +841,19 @@
     background: var(--bg-accent-soft, #e7f0fb);
     color: var(--brand-600, #2563a8);
     font-weight: 600;
+  }
+  /* Visible keyboard focus on the bespoke viewer controls. */
+  .canvas-mode button:focus-visible,
+  .dock-focus:focus-visible,
+  .dock-close:focus-visible,
+  .dock-closeall:focus-visible,
+  .twist:focus-visible,
+  .link-btn:focus-visible,
+  .walk-suggest:focus-visible,
+  .row:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--brand-400, #5aa9e0);
+    border-radius: var(--radius-sm, 7px);
   }
 
   /* Download menu (IFC + linked-data formats) */
