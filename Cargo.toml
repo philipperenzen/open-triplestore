@@ -21,8 +21,9 @@ keywords = ["rdf", "sparql", "triplestore", "geosparql", "linked-data"]
 categories = ["database-implementations", "web-programming::http-server"]
 
 [features]
-## RDF 1.2 / SPARQL 1.2 triple term support (oxrdf rdf-star variant)
-rdf-12          = ["oxrdf/rdf-star"]
+## RDF 1.2 / SPARQL 1.2 triple term support (oxrdf 0.3 renamed this feature
+## from `rdf-star` to `rdf-12`).
+rdf-12          = ["oxrdf/rdf-12"]
 ## RDFS forward-chaining entailment
 rdfs-entailment = []
 ## OWL 2 EL profile (existential/intersection reasoning)
@@ -73,10 +74,12 @@ full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-s
 
 [dependencies]
 libc = "0.2"
-# Core triple store engine
-oxigraph = "0.4"
-oxrdf = "0.2"
-spargebra = "0.3"
+# Core triple store engine. oxrdf/spargebra are pinned to the exact majors
+# oxigraph 0.5 re-exports so the model/algebra types unify to a single version
+# (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
+oxigraph = "0.5"
+oxrdf = "0.3"
+spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable
 # blank-node identity (canonical labels + opt-in Skolemization) applied on import.
