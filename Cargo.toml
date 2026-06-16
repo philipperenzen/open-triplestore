@@ -21,9 +21,13 @@ keywords = ["rdf", "sparql", "triplestore", "geosparql", "linked-data"]
 categories = ["database-implementations", "web-programming::http-server"]
 
 [features]
-## RDF 1.2 / SPARQL 1.2 triple term support (oxrdf 0.3 renamed this feature
-## from `rdf-star` to `rdf-12`).
-rdf-12          = ["oxrdf/rdf-12"]
+## RDF 1.2 / SPARQL 1.2 triple term support. oxrdf 0.3 renamed its `rdf-star`
+## feature to `rdf-12`. In the oxigraph 0.5 family the `oxrdf::Term::Triple`
+## variant is gated per-crate, so enabling it anywhere forces enabling it
+## everywhere (else their `Term` matches go non-exhaustive): `oxigraph/rdf-12`
+## cascades to the parser/serializer/eval crates, `spargebra/sparql-12` covers
+## the algebra crate, and `opengraph/sparql-12` covers our engine layer.
+rdf-12          = ["oxigraph/rdf-12", "spargebra/sparql-12", "opengraph/sparql-12"]
 ## RDFS forward-chaining entailment
 rdfs-entailment = []
 ## OWL 2 EL profile (existential/intersection reasoning)
