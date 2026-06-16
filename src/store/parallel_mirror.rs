@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use opengraph::parallel::{self, ParAnswer, ParClass, ParallelStore};
-use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolutionIter, Variable};
+use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator, Variable};
 use oxigraph::store::Store;
 use tracing::{debug, warn};
 
@@ -225,9 +225,14 @@ impl ParallelMirror {
     ///
     /// `options` is a factory (called at most once) so the relatively expensive
     /// `QueryOptions` build is skipped entirely for non-accelerable queries.
-    pub fn try_query<F>(&self, store: &Store, sparql: &str, options: F) -> Option<QueryResults>
+    pub fn try_query<F>(
+        &self,
+        store: &Store,
+        sparql: &str,
+        options: F,
+    ) -> Option<QueryResults<'static>>
     where
-        F: FnOnce() -> QueryOptions,
+        F: FnOnce() -> SparqlEvaluator,
     {
         if !self.inner.enabled {
             return None;
@@ -324,9 +329,14 @@ impl ParallelMirror {
     /// store evaluated by the same engine, so results are identical; it is just in
     /// RAM, avoiding RocksDB's per-row join lookups. Returns `None` (→ persistent
     /// store) for a disabled mirror, an over-cap store, or any evaluation error.
-    pub fn try_full_query<F>(&self, store: &Store, sparql: &str, options: F) -> Option<QueryResults>
+    pub fn try_full_query<F>(
+        &self,
+        store: &Store,
+        sparql: &str,
+        options: F,
+    ) -> Option<QueryResults<'static>>
     where
-        F: FnOnce() -> QueryOptions,
+        F: FnOnce() -> SparqlEvaluator,
     {
         if !self.inner.enabled {
             return None;
@@ -431,20 +441,29 @@ fn build_from_store(store: &Store, shards: usize) -> Option<ParallelStore> {
 /// preserved, so `FROM`/default-graph scoping evaluates identically).
 fn build_full_store(store: &Store) -> Option<Store> {
     let full = Store::new().ok()?;
-    full.bulk_loader()
+    // oxigraph 0.5: the bulk loader stages batches and persists them only on commit().
+    let mut loader = full.bulk_loader();
+    loader
         .load_quads(store.iter().filter_map(Result::ok))
         .ok()?;
+    loader.commit().ok()?;
     Some(full)
 }
 
 /// Convert a merged parallel answer back into Oxigraph `QueryResults`, so the
 /// caller cannot tell the answer was produced across shards.
-fn par_answer_to_results(ans: ParAnswer) -> QueryResults {
+fn par_answer_to_results(ans: ParAnswer) -> QueryResults<'static> {
     match ans {
         ParAnswer::Boolean(b) => QueryResults::Boolean(b),
         ParAnswer::Solutions { variables, rows } => {
             let vars: Arc<[Variable]> = Arc::from(variables);
-            QueryResults::Solutions(QuerySolutionIter::new(vars, rows.into_iter().map(Ok)))
+            // oxigraph 0.5: `QuerySolutionIter` yields `QuerySolution`s built from the
+            // (variables, values) pair; the iterator owns its data, so it is `'static`.
+            let row_vars = vars.clone();
+            let iter = rows
+                .into_iter()
+                .map(move |row| Ok(QuerySolution::from((row_vars.clone(), row))));
+            QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
         }
     }
 }
@@ -488,7 +507,7 @@ mod tests {
             mirror.mark_dirty();
             assert!(
                 mirror
-                    .try_full_query(&store, q, QueryOptions::default)
+                    .try_full_query(&store, q, SparqlEvaluator::new)
                     .is_none(),
                 "a query during an active write burst must decline (fall back), not rebuild",
             );
@@ -502,14 +521,14 @@ mod tests {
         // Writes go quiet → the next query builds the mirror exactly once.
         std::thread::sleep(Duration::from_millis(200));
         assert!(mirror
-            .try_full_query(&store, q, QueryOptions::default)
+            .try_full_query(&store, q, SparqlEvaluator::new)
             .is_some());
         assert_eq!(mirror.build_count(), 1, "one build after writes quiesce");
 
         // Steady read-only traffic reuses the warm copy — no further rebuilds.
         for _ in 0..50 {
             assert!(mirror
-                .try_full_query(&store, q, QueryOptions::default)
+                .try_full_query(&store, q, SparqlEvaluator::new)
                 .is_some());
         }
         assert_eq!(
@@ -530,7 +549,7 @@ mod tests {
 
         mirror.mark_dirty();
         assert!(mirror
-            .try_full_query(&store, q, QueryOptions::default)
+            .try_full_query(&store, q, SparqlEvaluator::new)
             .is_some());
         assert_eq!(mirror.build_count(), 1);
     }
@@ -546,7 +565,7 @@ mod tests {
         let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
 
         assert!(mirror
-            .try_full_query(&store, q, QueryOptions::default)
+            .try_full_query(&store, q, SparqlEvaluator::new)
             .is_some());
         assert_eq!(mirror.build_count(), 1);
     }

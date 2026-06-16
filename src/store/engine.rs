@@ -4,7 +4,7 @@ use opengraph::spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use opengraph::spargebra::Query as SpargebraQuery;
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::*;
-use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolutionIter, Update};
+use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator, Update};
 use oxigraph::store::Store;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -29,6 +29,8 @@ pub enum StoreError {
     Loader(#[from] oxigraph::store::LoaderError),
     #[error("SPARQL evaluation error: {0}")]
     Evaluation(#[from] oxigraph::sparql::EvaluationError),
+    #[error("SPARQL update error: {0}")]
+    Update(#[from] oxigraph::sparql::UpdateEvaluationError),
     #[error("SPARQL syntax error: {0}")]
     SparqlSyntax(#[from] oxigraph::sparql::SparqlSyntaxError),
     #[error("IO error: {0}")]
@@ -347,12 +349,13 @@ impl TripleStore {
     }
 
     /// Build query options with all registered custom functions (GeoSPARQL, RDF 1.2, etc.).
-    pub(crate) fn query_options(&self) -> QueryOptions {
-        // Disable SPARQL federation (`SERVICE`) explicitly. Today oxigraph is built
-        // without an HTTP client so `SERVICE`/`LOAD` already error rather than
-        // fetch, but pinning it here keeps SERVICE-based SSRF/exfiltration off even
-        // if an oxigraph HTTP feature is ever enabled transitively. (SSRF-1)
-        let mut opts = QueryOptions::default().without_service_handler();
+    pub(crate) fn query_options(&self) -> SparqlEvaluator {
+        // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
+        // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`
+        // error rather than fetch — SERVICE-based SSRF/exfiltration stays off. (SSRF-1)
+        // (oxigraph 0.5 moved the explicit `without_service_handler` toggle behind the
+        // `http-client` feature, so there is nothing to call when it is disabled.)
+        let mut opts = SparqlEvaluator::new();
 
         // Register all GeoSPARQL functions
         for (iri, handler) in geo_fns::all_functions() {
@@ -389,7 +392,7 @@ impl TripleStore {
     }
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
-    pub fn query(&self, sparql: &str) -> Result<QueryResults, StoreError> {
+    pub fn query(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
         // Result cache: a repeated, *deterministic* query is answered from a small
         // LRU keyed by the (already ACL-scoped) query string and invalidated on
         // every write — so a hit is the exact result the engine would compute.
@@ -401,7 +404,7 @@ impl TripleStore {
     }
 
     /// The evaluation pipeline behind [`Self::query`], without the result cache.
-    fn query_uncached(&self, sparql: &str) -> Result<QueryResults, StoreError> {
+    fn query_uncached(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -449,7 +452,7 @@ impl TripleStore {
     /// results never change — this only short-circuits one exact, provably-safe
     /// shape (a single full-scan triple pattern over one graph; the count of a
     /// graph equals its triple count, no RDF-merge dedup involved).
-    fn try_fast_count(&self, sparql: &str) -> Option<QueryResults> {
+    fn try_fast_count(&self, sparql: &str) -> Option<QueryResults<'static>> {
         // Cheap reject: must mention COUNT(*) (whitespace-insensitive) before parsing.
         if !sparql
             .chars()
@@ -488,8 +491,8 @@ impl TripleStore {
             NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
         );
         let vars: Arc<[oxigraph::sparql::Variable]> = Arc::from(vec![var]);
-        let iter =
-            QuerySolutionIter::new(vars, std::iter::once(Ok(vec![Some(Term::Literal(lit))])));
+        let sol = QuerySolution::from((vars.clone(), vec![Some(Term::Literal(lit))]));
+        let iter = QuerySolutionIter::new(vars, std::iter::once(Ok(sol)));
         Some(QueryResults::Solutions(iter))
     }
 
@@ -678,9 +681,11 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         // Fast path: nothing to rewrite and no forced graph → stream directly.
         if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
-            self.store
-                .bulk_loader()
-                .load_from_reader(Self::parser_for(format, base_iri)?, reader)?;
+            // oxigraph 0.5: the bulk loader stages batches and only persists them on
+            // an explicit `commit()` — dropping it without committing loses the data.
+            let mut loader = self.store.bulk_loader();
+            loader.load_from_reader(Self::parser_for(format, base_iri)?, reader)?;
+            loader.commit()?;
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
@@ -711,7 +716,9 @@ impl TripleStore {
 
         // Apply the durable blank-node policy, then bulk-load.
         let quads = self.apply_blank_node_mode(quads);
-        self.store.bulk_loader().load_quads(quads)?;
+        let mut loader = self.store.bulk_loader();
+        loader.load_quads(quads)?;
+        loader.commit()?; // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
 
         info!("Data loaded successfully");
         // When all data was forced into a single target graph (the Graph Store
@@ -941,7 +948,9 @@ impl TripleStore {
         affected_graphs: &[String],
     ) -> Result<(), StoreError> {
         if !quads.is_empty() {
-            self.store.bulk_loader().load_quads(quads)?;
+            let mut loader = self.store.bulk_loader();
+            loader.load_quads(quads)?;
+            loader.commit()?; // oxigraph 0.5: stage-then-commit.
             self.spatial_index.mark_dirty();
             #[cfg(feature = "geometry3d")]
             self.spatial_index_3d.mark_dirty();

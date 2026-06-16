@@ -60,10 +60,9 @@ fn bench_query(c: &mut Criterion, label: &str, sparql: &str, n_persons: usize) {
     let quads = persons(n_persons);
 
     let single = Store::new().unwrap();
-    single
-        .bulk_loader()
-        .load_quads(quads.iter().cloned())
-        .unwrap();
+    let mut loader = single.bulk_loader();
+    loader.load_quads(quads.iter().cloned()).unwrap();
+    loader.commit().unwrap();
 
     let mut group = c.benchmark_group(label);
     group.sample_size(20);

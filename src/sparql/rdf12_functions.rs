@@ -69,10 +69,11 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         NamedNode::new(RDF_SUBJECT).expect("RDF_SUBJECT is a valid IRI"),
         Arc::new(|args: &[Term]| {
             if let Some(Term::Triple(tt)) = args.first() {
+                // RDF 1.2 / oxrdf 0.3: a triple term's subject is a NamedNode or
+                // BlankNode only (quoted-triple subjects were dropped vs rdf-star).
                 Some(match tt.subject.clone() {
                     oxrdf::Subject::NamedNode(nn) => Term::NamedNode(nn),
                     oxrdf::Subject::BlankNode(bn) => Term::BlankNode(bn),
-                    oxrdf::Subject::Triple(inner) => Term::Triple(inner),
                 })
             } else {
                 None
@@ -308,10 +309,10 @@ pub fn triple_term_to_json(tt: &oxrdf::Triple) -> serde_json::Value {
         }
     }
 
+    // RDF 1.2 / oxrdf 0.3: a triple term's subject is a NamedNode or BlankNode only.
     let subj: Term = match tt.subject.clone() {
         oxrdf::Subject::NamedNode(nn) => Term::NamedNode(nn),
         oxrdf::Subject::BlankNode(bn) => Term::BlankNode(bn),
-        oxrdf::Subject::Triple(inner) => Term::Triple(inner),
     };
 
     serde_json::json!({
