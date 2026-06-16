@@ -12,6 +12,7 @@
   import { X, Footprints, MousePointerClick } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { loadModel, realWorldMeters, NORMALISED_DIM } from '../../lib/viewer/models';
+  import { ifcGuidAt } from '../../lib/viewer/ifc';
   import { shortenIRI } from '../../lib/rdf-utils.js';
 
   /** Whole-building model to walk through. */
@@ -25,15 +26,17 @@
   const dispatch = createEventDispatcher();
 
   let wrapEl, canvasEl, vrSlot;
-  let renderer, scene, camera, controls, raycaster, model = null;
+  let renderer, scene, camera, controls, raycaster, model = null, grid = null;
   let loading = true;
   let error = '';
   let locked = false;
   let hoverLabel = '';
   let picked = null; // { label, type, guid, id }
+  let wtNeedsRender = true; // draw a frame while paused (render-on-demand)
 
   const move = { f: false, b: false, l: false, r: false, up: false, down: false, fast: false };
   let prevT = 0;
+  let lastPickT = 0; // throttle the crosshair raycast against the merged building
   const CENTER = new THREE.Vector2(0, 0);
 
   // mesh GlobalId → feed element (for the crosshair label + click-to-inspect).
@@ -47,18 +50,14 @@
     return (types || []).map((t) => shortenIRI(t)).find((s) => /Ifc|Element|Space|Storey|Wall|Slab/i.test(s)) || (types?.[0] ? shortenIRI(types[0]) : '');
   }
 
-  function meshGuid(obj) {
-    for (let n = obj; n; n = n.parent) if (n.userData?.ifcGuid) return n.userData.ifcGuid;
-    return null;
-  }
-
-  /** Raycast straight ahead (crosshair) → the element under the reticle. */
+  /** Raycast straight ahead (crosshair) → the element under the reticle. The
+   *  merged building resolves the GlobalId from the picked triangle (faceIndex). */
   function pickAhead() {
     if (!model || !raycaster) return null;
     raycaster.setFromCamera(CENTER, camera);
     const hits = raycaster.intersectObject(model, true);
     for (const h of hits) {
-      const g = meshGuid(h.object);
+      const g = ifcGuidAt(h.object, h.faceIndex);
       if (g) return { guid: g, el: guidToEl.get(g) || null };
     }
     return null;
@@ -100,7 +99,9 @@
       scene.background = new THREE.Color(0x0c121c);
       scene.fog = new THREE.Fog(0x0c121c, 60, 240);
       camera = new THREE.PerspectiveCamera(75, 1, 0.03, 3000);
-      renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true });
+      renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true, powerPreference: 'high-performance' });
+      // Cap DPR — a retina building walkthrough is heavily fill-rate bound.
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
       renderer.xr.enabled = true;
       raycaster = new THREE.Raycaster();
 
@@ -108,7 +109,7 @@
       const sun = new THREE.DirectionalLight(0xffffff, 2.1);
       sun.position.set(18, 40, 12);
       scene.add(sun);
-      const grid = new THREE.GridHelper(500, 100, 0x2c3e54, 0x1a2533);
+      grid = new THREE.GridHelper(500, 100, 0x2c3e54, 0x1a2533);
       grid.material.transparent = true;
       grid.material.opacity = 0.5;
       scene.add(grid);
@@ -116,7 +117,10 @@
       controls = new PointerLockControls(camera, renderer.domElement);
       scene.add(camera);
       controls.addEventListener('lock', () => (locked = true));
-      controls.addEventListener('unlock', () => (locked = false));
+      controls.addEventListener('unlock', () => {
+        locked = false;
+        wtNeedsRender = true; // draw the final paused frame once
+      });
 
       try {
         const cached = await loadModel(url, format, { upAxis });
@@ -154,6 +158,7 @@
         renderer.setSize(w, h, false);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
+        wtNeedsRender = true;
       };
       resize();
       ro = new ResizeObserver(resize);
@@ -170,11 +175,13 @@
       window.addEventListener('keyup', ku);
 
       prevT = performance.now();
+      wtNeedsRender = true;
       renderer.setAnimationLoop(() => {
         const t = performance.now();
         const dt = Math.min(0.1, (t - prevT) / 1000);
         prevT = t;
-        if (locked || renderer.xr.isPresenting) {
+        const active = locked || renderer.xr.isPresenting;
+        if (active) {
           const v = (move.fast ? 9 : 3.4) * dt;
           if (move.f) controls.moveForward(v);
           if (move.b) controls.moveForward(-v);
@@ -182,10 +189,22 @@
           if (move.l) controls.moveRight(-v);
           if (move.up) camera.position.y += v;
           if (move.down) camera.position.y -= v;
-          const p = pickAhead();
-          hoverLabel = p ? (p.el?.label || shortenIRI(p.guid)) : '';
+          // Throttle the crosshair pick: it raycasts the MERGED building (whose
+          // few meshes each span the whole model), so casting it every frame would
+          // triangle-test the entire building 60×/s. ~8/s keeps the reticle label
+          // responsive without the per-frame cost.
+          if (t - lastPickT > 120) {
+            lastPickT = t;
+            const p = pickAhead();
+            hoverLabel = p ? p.el?.label || shortenIRI(p.guid) : '';
+          }
         }
-        renderer.render(scene, camera);
+        // Render every frame while walking/VR; when paused (pointer unlocked) the
+        // scene is static, so draw just once instead of burning the GPU at 60fps.
+        if (active || wtNeedsRender) {
+          renderer.render(scene, camera);
+          wtNeedsRender = false;
+        }
       });
     })();
 
@@ -199,6 +218,18 @@
   onDestroy(() => {
     renderer?.setAnimationLoop(null);
     try { controls?.unlock(); } catch { /* noop */ }
+    // Free the cloned (per-instance, double-sided) materials + grid; the model's
+    // BufferGeometry is shared with the loadModel cache, so it is left intact.
+    model?.traverse((n) => {
+      if (!n.isMesh) return;
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of mats) {
+        m?.map?.dispose?.();
+        m?.dispose?.();
+      }
+    });
+    grid?.geometry?.dispose?.();
+    grid?.material?.dispose?.();
     renderer?.dispose();
   });
 
@@ -459,5 +490,20 @@
   }
   .wt-details:hover {
     background: #e8590c;
+  }
+  /* Visible keyboard focus over the dark immersive scene (dual ring). */
+  .wt-close:focus-visible,
+  .wt-enter:focus-visible,
+  .wt-details:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px #0c121c, 0 0 0 4px #ff8a2a;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spin {
+      animation: none;
+    }
+    .reticle {
+      transition: none;
+    }
   }
 </style>

@@ -310,6 +310,13 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     // source URL — the linked data + decomposition are present either way.
     seed_ifc_buildings(state, owner.as_ref().map(|o| o.id.as_str()).unwrap_or(""));
 
+    // Lift the bundled CityJSON sample neighbourhoods (the real 3DBAG block + the
+    // authored LoD2 zones) into the store as volumetric WKT-Z, so the 3D-Tiles
+    // pipeline (`/3dtiles`) and the 3D R*-tree index have a real cityscape to
+    // stream instead of only the handful of authored worked-example solids. Runs
+    // after the IFC buildings so its graphs register on the same boot.
+    seed_cityjson_volumes(state);
+
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
 
@@ -499,6 +506,107 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             ),
             Err(e) => tracing::warn!("{} IFC seed failed: {e}", b.label),
         }
+    }
+}
+
+/// One bundled CityJSON neighbourhood lifted to volumetric WKT-Z at seed time.
+///
+/// The same `.city.json` files the map viewer fetches client-side (`/samples/…`,
+/// referenced via OMG/FOG file-links) are also embedded in the binary and parsed
+/// to GeoSPARQL `POLYHEDRALSURFACE Z` here, so the 3D-Tiles tileset (which is
+/// built purely from store `geo:asWKT`) has the full block to stream. They land
+/// in their own `tiles3d-*` graphs, which the viewer-feed/geo-stats routes skip
+/// (like `/ifcowl`), so the 2D map keeps rendering its client-side CityJSON and
+/// is not doubled up with flattened footprints.
+struct CityJsonZoneSeed {
+    /// Embedded CityJSON document (one of the bundled samples).
+    data: &'static str,
+    /// Distinct, feed-excluded graph suffix.
+    graph_suffix: &'static str,
+    /// PROV `wasDerivedFrom` / attribution for the lifted geometry.
+    source: &'static str,
+    /// Short label for logs.
+    label: &'static str,
+}
+
+/// CityJSON neighbourhoods to lift. The real 3DBAG LoD2.2 block is the headline
+/// (≈79 building solids); the authored zones add the foreground LoD2 buildings.
+const CITYJSON_ZONES: &[CityJsonZoneSeed] = &[
+    CityJsonZoneSeed {
+        data: include_str!("../../frontend/public/samples/schependomlaan-3dbag.city.json"),
+        graph_suffix: "tiles3d-3dbag",
+        source: "https://docs.3dbag.nl/en/copyright/",
+        label: "3DBAG LoD2.2 block",
+    },
+    CityJsonZoneSeed {
+        data: include_str!("../../frontend/public/samples/neighbourhood.city.json"),
+        graph_suffix: "tiles3d-neighbourhood",
+        source: "https://creativecommons.org/publicdomain/zero/1.0/",
+        label: "authored LoD2 neighbourhood",
+    },
+    CityJsonZoneSeed {
+        data: include_str!("../../frontend/public/samples/schependomlaan-zone2.city.json"),
+        graph_suffix: "tiles3d-zone2",
+        source: "https://creativecommons.org/publicdomain/zero/1.0/",
+        label: "authored LoD2 zone 2",
+    },
+];
+
+/// Lift the bundled CityJSON neighbourhoods into the demo dataset's store as
+/// volumetric WKT-Z (`volumetric_only` — flat LoD0 footprints are dropped), one
+/// dedicated `tiles3d-*` graph per sample. Idempotent: each graph is skipped once
+/// it holds data, exactly like [`seed_ifc_buildings`]. Best-effort.
+fn seed_cityjson_volumes(state: &AppState) {
+    use crate::imports::cityjson::{convert_cityjson, CityJsonOptions};
+    const DS: &str = "viewer-3d-demo";
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    let base = state.base_url.trim_end_matches('/').to_string();
+    for z in CITYJSON_ZONES {
+        let graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, z.graph_suffix);
+        if state.store.graph_count_cached(Some(&graph)).unwrap_or(0) > 0 {
+            continue; // already seeded
+        }
+        let opts = CityJsonOptions {
+            inst_base: format!("{base}/dataset/{DS}/"),
+            source_url: Some(z.source.to_string()),
+            generated_at: None,
+            // 3D massing only — flat footprints would mesh as redundant ground
+            // polygons that z-fight the solids in the tileset.
+            volumetric_only: true,
+        };
+        let doc: serde_json::Value = match serde_json::from_str(z.data) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("cityjson volume seed: {} parse failed: {e}", z.label);
+                continue;
+            }
+        };
+        let (ntriples, stats) = match convert_cityjson(&doc, &opts) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!("cityjson volume seed: {} convert failed: {e}", z.label);
+                continue;
+            }
+        };
+        if let Err(e) = state.store.graph_store_put(
+            Some(graph.as_str()),
+            &ntriples,
+            oxigraph::io::RdfFormat::NTriples,
+        ) {
+            tracing::warn!("cityjson volume seed: <{graph}> load failed: {e}");
+            continue;
+        }
+        let _ = state.auth_db.add_dataset_graph(DS, &graph);
+        let _ = crate::imports::handlers::detect_and_store_graph_role(state, DS, &graph);
+        state.auth_db.invalidate_accessible_graphs_cache();
+        tracing::info!(
+            "seeded CityJSON volumes ({}): {} objects / {} solids → <{graph}>",
+            z.label,
+            stats.objects,
+            stats.geometries
+        );
     }
 }
 

@@ -45,6 +45,12 @@ pub struct CityJsonOptions {
     pub source_url: Option<String>,
     /// ISO-8601 conversion timestamp for `prov:generatedAtTime` (optional).
     pub generated_at: Option<String>,
+    /// Skip flat (zero vertical extent) geometry, e.g. 3DBAG LoD0 footprints, so
+    /// only the volumetric massing (LoD2.2 Solids) is emitted. Used when lifting
+    /// CityJSON purely to feed the 3D engine / 3D-Tiles pipeline, where flat
+    /// footprints would otherwise mesh as redundant ground-level polygons that
+    /// z-fight the solids. Default `false` — the importer keeps every LoD.
+    pub volumetric_only: bool,
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -223,6 +229,11 @@ pub fn convert_cityjson(
             let gnode = format!("{feature}/geom/lod{suffix}");
 
             let faces = collect_surfaces(geom.get("boundaries").unwrap_or(&Value::Null));
+            // In volumetric-only mode, drop flat geometry (LoD0 footprints) so only
+            // the 3D massing reaches the store — keeps the 3D-Tiles pipeline clean.
+            if opts.volumetric_only && z_extent(&faces, &vertices) < 0.05 {
+                continue;
+            }
             let wkt = polyhedral_wkt(&faces, &vertices);
             if wkt.is_none() && geom.get("type").and_then(Value::as_str) == Some("MultiPoint") {
                 continue; // non-surface geometry; skip silently
@@ -382,6 +393,28 @@ fn polyhedral_wkt(faces: &[Face], vertices: &[[f64; 3]]) -> Option<String> {
         return None;
     }
     Some(format!("POLYHEDRALSURFACE Z ({})", face_strs.join(",")))
+}
+
+/// Vertical (Z) extent in source units of a face set — `max(z) - min(z)` over the
+/// referenced vertices. Used to spot flat footprints (≈ 0) versus 3D solids.
+fn z_extent(faces: &[Face], vertices: &[[f64; 3]]) -> f64 {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for face in faces {
+        for ring in face {
+            for &i in ring {
+                if let Some(v) = vertices.get(i) {
+                    lo = lo.min(v[2]);
+                    hi = hi.max(v[2]);
+                }
+            }
+        }
+    }
+    if hi >= lo {
+        hi - lo
+    } else {
+        0.0
+    }
 }
 
 /// Compact metric formatting: up to mm precision, trailing zeros trimmed.
@@ -570,6 +603,7 @@ pub async fn import_cityjson_bytes(
     target_graph: Option<String>,
     public_asset: bool,
     generated_at: Option<String>,
+    volumetric_only: bool,
 ) -> Result<CityJsonImportOutcome, String> {
     let base = state.base_url.trim_end_matches('/').to_string();
 
@@ -623,6 +657,7 @@ pub async fn import_cityjson_bytes(
         inst_base,
         source_url: asset_url.clone(),
         generated_at,
+        volumetric_only,
     };
     let store = state.store.clone();
     let graph_c = graph.clone();
@@ -773,6 +808,7 @@ pub async fn ingest_cityjson(
             inst_base: format!("{base}/dataset/{dataset_id}/"),
             source_url: None,
             generated_at: None,
+            volumetric_only: false,
         };
         let doc: Value = serde_json::from_slice(&bytes)
             .map_err(|e| AppError::BadRequest(format!("invalid JSON: {e}")))?;
@@ -798,6 +834,7 @@ pub async fn ingest_cityjson(
         target_graph,
         public_asset,
         generated_at,
+        false, // HTTP imports keep every LoD; volumetric-only is a seed-time concern
     )
     .await
     .map_err(AppError::BadRequest)?;
@@ -821,6 +858,7 @@ mod tests {
             inst_base: "https://ex.org/dataset/d1/".to_string(),
             source_url: Some("https://ex.org/src.city.json".to_string()),
             generated_at: None,
+            volumetric_only: false,
         }
     }
 
@@ -906,6 +944,47 @@ mod tests {
     fn rejects_non_cityjson() {
         let v = serde_json::json!({ "type": "FeatureCollection" });
         assert!(convert_cityjson(&v, &opts()).is_err());
+    }
+
+    #[test]
+    fn volumetric_only_skips_flat_footprints() {
+        // A 3DBAG-shaped object: a flat LoD0 footprint (z all 0) + a LoD2.2 Solid.
+        // volumetric_only must drop the footprint and keep the solid.
+        let doc = serde_json::json!({
+            "type": "CityJSON",
+            "version": "2.0",
+            "transform": { "scale": [1,1,1], "translate": [0,0,0] },
+            "CityObjects": {
+                "pand": { "type": "Building", "geometry": [
+                    { "type": "MultiSurface", "lod": "0", "boundaries": [[[0,1,2,3]]] }
+                ]},
+                "pand-0": { "type": "BuildingPart", "geometry": [{
+                    "type": "Solid", "lod": "2.2",
+                    "boundaries": [[
+                        [[0,1,2,3]], [[4,7,6,5]],
+                        [[0,4,5,1]], [[1,5,6,2]], [[2,6,7,3]], [[3,7,4,0]]
+                    ]]
+                }]}
+            },
+            "vertices": [
+                [0,0,0],[1,0,0],[1,1,0],[0,1,0],
+                [0,0,1],[1,0,1],[1,1,1],[0,1,1]
+            ]
+        });
+        let mut o = opts();
+        o.volumetric_only = true;
+        let (nt, stats) = convert_cityjson(&doc, &o).unwrap();
+        assert_eq!(stats.geometries, 1, "only the solid is meshed: {nt}");
+        assert!(nt.contains("POLYHEDRALSURFACE Z"), "the solid survives");
+        // The flat footprint's geometry node (lod0) is gone.
+        assert!(
+            !nt.contains("/geom/lod0>"),
+            "flat LoD0 footprint dropped: {nt}"
+        );
+
+        // Without the flag both geometries are kept (default behaviour intact).
+        let (_nt2, stats2) = convert_cityjson(&doc, &opts()).unwrap();
+        assert_eq!(stats2.geometries, 2, "default keeps every LoD");
     }
 
     #[test]

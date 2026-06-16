@@ -3656,6 +3656,7 @@
     "model3dBim": "3D model (BIM)",
     "bimFiles": "BIM / geometry files",
     "noChildren": "No sub-elements.",
+    "structHint": "Click ▸ to expand here · click a name to open it",
     "parent": "Part of",
     "orbitHint": "Drag to rotate · scroll to zoom · right-drag to pan",
     "zoomHint": "Zoom in to see 3D models to scale; right-drag (or Ctrl-drag) tilts and rotates the map.",
@@ -3689,7 +3690,11 @@
     "modelFormat": "Model format",
     "download": "Download",
     "downloadIfc": "IFC model (.ifc)",
-    "downloadLd": "Linked data (per graph)"
+    "downloadLd": "Linked data (per graph)",
+    "loadingModels": "Loading building model…",
+    "modelsFailed": "model(s) failed to load",
+    "loadingStructure": "Loading full structure…",
+    "loadingElements": "Loading elements…"
   },
   "fileViewer": {
     "kind3d": "3D model",

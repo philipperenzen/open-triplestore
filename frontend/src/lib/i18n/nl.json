@@ -3656,6 +3656,7 @@
     "model3dBim": "3D-model (BIM)",
     "bimFiles": "BIM- / geometriebestanden",
     "noChildren": "Geen sub-onderdelen.",
+    "structHint": "Klik ▸ om hier uit te klappen · klik een naam om te openen",
     "parent": "Onderdeel van",
     "orbitHint": "Sleep om te draaien · scroll om te zoomen · rechts-slepen om te verschuiven",
     "zoomHint": "Zoom in om 3D-modellen op schaal te zien; sleep met rechts (of Ctrl) om de kaart te kantelen en draaien.",
@@ -3689,7 +3690,11 @@
     "modelFormat": "Modelformaat",
     "download": "Downloaden",
     "downloadIfc": "IFC-model (.ifc)",
-    "downloadLd": "Linked data (per graaf)"
+    "downloadLd": "Linked data (per graaf)",
+    "loadingModels": "Gebouwmodel laden…",
+    "modelsFailed": "model(len) niet geladen",
+    "loadingStructure": "Volledige structuur laden…",
+    "loadingElements": "Elementen laden…"
   },
   "fileViewer": {
     "kind3d": "3D-model",

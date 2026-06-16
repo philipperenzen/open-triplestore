@@ -609,6 +609,7 @@ pub async fn bulk_import(
             target,
             false,
             None,
+            false, // bulk imports keep every LoD (volumetric-only is seed-time only)
         )
         .await
         {

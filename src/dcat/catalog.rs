@@ -476,6 +476,9 @@ fn emit_dataset_entry(
         .iter()
         .filter(|e| !e.graph_iri.starts_with("urn:system:"))
         .filter(|e| !e.graph_iri.ends_with("/ifcowl"))
+        // `tiles3d-*` graphs feed only the 3D-Tiles pipeline; skip them here too so
+        // the probe doesn't scan the extra lifted geometry on every catalog render.
+        .filter(|e| !crate::geo::viewer_feed::is_tiles3d_graph(&e.graph_iri))
         .map(|e| e.graph_iri.clone())
         .collect();
     let geo = crate::geo::viewer_feed::dataset_geo_stats(store, &data_graphs);

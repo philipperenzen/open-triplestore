@@ -6969,7 +6969,15 @@ pub struct ViewerFeedQuery {
     /// Optional root object IRI: restrict the feed to this object and its
     /// directly contained elements.
     pub root: Option<String>,
+    /// `located=true` returns only coordinate-bearing elements (+ their model
+    /// refs) — the subset the 2D map renders. Lets the client paint the map fast
+    /// while the full feed (the structure tree) loads behind it. Taken as a
+    /// string (not a bool) so a stray value never 400s the whole feed request.
+    #[serde(default)]
+    pub located: Option<String>,
 }
+
+use crate::geo::viewer_feed::is_tiles3d_graph;
 
 /// GET /api/datasets/:dataset_id/viewer-feed — per-element geometry (reprojected
 /// to EPSG:4326/3857) plus FOG 3D-file references (glTF/IFC/…), resolved from the
@@ -7002,15 +7010,28 @@ pub async fn viewer_feed(
     // schema (millions of triples) and carries none of the BOT/OMG/FOG/GeoSPARQL
     // the feed resolves, but its unbounded predicate scan dominates the query
     // time. The BOT topology + geometry live in the sibling building graph.
+    // Also exclude `tiles3d-*` graphs: those hold CityJSON lifted to volumetric
+    // WKT-Z purely to feed the 3D-Tiles pipeline — the 2D map already renders the
+    // same blocks from their client-side CityJSON file-links, so surfacing the
+    // lifted footprints here would double them up and swamp the element list.
     let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
-        .filter(|g| !g.ends_with("/ifcowl"))
+        .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
         .collect();
-    let elements =
-        crate::geo::viewer_feed::build_viewer_feed(&state.store, &data_graphs, q.root.as_deref());
+    // Tolerant truthy parse so a stray ?located value can't 400 the feed.
+    let located = matches!(
+        q.located.as_deref().map(str::trim),
+        Some("true" | "1" | "yes" | "on")
+    );
+    let elements = crate::geo::viewer_feed::build_viewer_feed_opts(
+        &state.store,
+        &data_graphs,
+        q.root.as_deref(),
+        located,
+    );
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
         "count": elements.len(),
@@ -7041,13 +7062,14 @@ pub async fn geo_stats(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
     // Skip the verbose ifcOWL lift graph (see viewer_feed) — it has no geometry
-    // and only slows the capability probe.
+    // and only slows the capability probe — and the `tiles3d-*` lift graphs, whose
+    // geometry the map view does not render (see viewer_feed).
     let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
-        .filter(|g| !g.ends_with("/ifcowl"))
+        .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
         .collect();
     let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
     Ok(Json(stats))
@@ -7115,7 +7137,7 @@ pub async fn geo_stats_batch(
             .list_dataset_graphs(id)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
             .into_iter()
-            .filter(|g| !g.ends_with("/ifcowl"))
+            .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
         {
             data_graphs.push(g);
         }
