@@ -35,6 +35,28 @@ export interface ModelRef {
 const FORMAT_ORDER: ModelFormat[] = ['gltf', 'cityjson', 'citygml', 'stl'];
 
 /**
+ * Every loadable 3D-model reference of a viewer-feed element — the explicit
+ * glTF URL plus the FOG file list (by FOG format key or URL extension), one per
+ * format, ordered by preference (glTF > CityJSON > CityGML > STL). The inspector
+ * offers these as switchable representations of the same element.
+ */
+export function modelRefsOf(el: {
+  gltf_url?: string | null;
+  files?: [string, string][];
+}): ModelRef[] {
+  const found = new Map<ModelFormat, string>();
+  if (el.gltf_url) found.set('gltf', el.gltf_url);
+  for (const [key, url] of el.files || []) {
+    const format = formatFromFogKey(key) ?? modelFormatFromUrl(url);
+    if (format && !found.has(format)) found.set(format, url);
+  }
+  return FORMAT_ORDER.flatMap((format) => {
+    const url = found.get(format);
+    return url ? [{ url, format }] : [];
+  });
+}
+
+/**
  * The best loadable 3D-model reference of a viewer-feed element: the explicit
  * glTF URL first, then the FOG file list — by FOG format key or URL extension —
  * preferring glTF > CityJSON > CityGML > STL.
@@ -43,17 +65,7 @@ export function modelRefOf(el: {
   gltf_url?: string | null;
   files?: [string, string][];
 }): ModelRef | null {
-  if (el.gltf_url) return { url: el.gltf_url, format: 'gltf' };
-  const found = new Map<ModelFormat, string>();
-  for (const [key, url] of el.files || []) {
-    const format = formatFromFogKey(key) ?? modelFormatFromUrl(url);
-    if (format && !found.has(format)) found.set(format, url);
-  }
-  for (const format of FORMAT_ORDER) {
-    const url = found.get(format);
-    if (url) return { url, format };
-  }
-  return null;
+  return modelRefsOf(el)[0] ?? null;
 }
 
 /** Human-readable display name per model format (file chips, BIM lists). */

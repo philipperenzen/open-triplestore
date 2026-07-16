@@ -1069,6 +1069,13 @@
       "couldNotLoadVersion": "Kon versie {version} niet laden (HTTP {status})",
       "failedToLoadVersion": "Laden van versie mislukt"
     },
+    "datasetViewer": {
+      "title": "3D- & kaartviewer",
+      "back": "Dataset",
+      "elements": "Onderdelen",
+      "openResource": "Open resource",
+      "empty": "Geen onderdelen met geometrie of 3D-modellen in deze dataset."
+    },
     "validation": {
       "title": "SHACL-validatie",
       "detail": "Voer rapporten uit en inspecteer conformiteitsproblemen.",
@@ -2529,6 +2536,31 @@
   "language": {
     "en": "English",
     "nl": "Nederlands"
+  },
+  "viewer": {
+    "resize": "Formaat wijzigen",
+    "close": "Sluiten",
+    "search": "Zoek onderdelen…",
+    "located": "Op de kaart",
+    "noLocation": "Geen locatie",
+    "properties": "Eigenschappen",
+    "structure": "Structuur",
+    "model3d": "3D-model",
+    "model3dBim": "3D-model (BIM)",
+    "modelFormat": "3D-formaat",
+    "bimFiles": "BIM- / geometriebestanden",
+    "noChildren": "Geen sub-onderdelen.",
+    "parent": "Onderdeel van",
+    "orbitHint": "Sleep om te draaien · scroll om te zoomen · rechts-slepen om te verschuiven",
+    "zoomHint": "Zoom in om 3D-modellen op schaal te zien; sleep met rechts (of Ctrl) om de kaart te kantelen en draaien.",
+    "basemap": "Ondergrond",
+    "basemapStreets": "Kaart",
+    "basemapSatellite": "Satelliet",
+    "toScale": "op schaal",
+    "geometry": "Geometrie",
+    "showOnMap": "Toon op kaart",
+    "show3d": "Bekijk 3D-model",
+    "noModels": "Geen 3D-modellen in deze dataset."
   },
   "components": {
     "dataTable": {

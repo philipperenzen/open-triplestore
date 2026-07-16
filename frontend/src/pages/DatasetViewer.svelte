@@ -146,8 +146,10 @@
   element={modalElement}
   {elements}
   datasetId={id}
+  hasMap={hasGeo}
   on:close={() => (modalElement = null)}
   on:navigate={(e) => open(e.detail.id)}
+  on:showonmap={(e) => mapComponent?.focusElement(e.detail.id)}
 />
 
 <style>
