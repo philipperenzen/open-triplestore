@@ -1069,6 +1069,13 @@
       "couldNotLoadVersion": "Could not load version {version} (HTTP {status})",
       "failedToLoadVersion": "Failed to load version"
     },
+    "datasetViewer": {
+      "title": "3D & map viewer",
+      "back": "Dataset",
+      "elements": "Elements",
+      "openResource": "Open resource",
+      "empty": "No elements with geometry or 3D models in this dataset."
+    },
     "validation": {
       "title": "SHACL Validation",
       "detail": "Run reports and inspect conformance issues.",
@@ -2529,6 +2536,31 @@
   "language": {
     "en": "English",
     "nl": "Nederlands"
+  },
+  "viewer": {
+    "resize": "Resize",
+    "close": "Close",
+    "search": "Search elements…",
+    "located": "On the map",
+    "noLocation": "No location",
+    "properties": "Properties",
+    "structure": "Structure",
+    "model3d": "3D model",
+    "model3dBim": "3D model (BIM)",
+    "modelFormat": "3D format",
+    "bimFiles": "BIM / geometry files",
+    "noChildren": "No sub-elements.",
+    "parent": "Part of",
+    "orbitHint": "Drag to rotate · scroll to zoom · right-drag to pan",
+    "zoomHint": "Zoom in to see 3D models to scale; right-drag (or Ctrl-drag) tilts and rotates the map.",
+    "basemap": "Basemap",
+    "basemapStreets": "Map",
+    "basemapSatellite": "Satellite",
+    "toScale": "to scale",
+    "geometry": "Geometry",
+    "showOnMap": "Show on map",
+    "show3d": "View 3D model",
+    "noModels": "No 3D models in this dataset."
   },
   "components": {
     "dataTable": {
