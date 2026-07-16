@@ -150,6 +150,14 @@ struct Cli {
     #[arg(long, env = "SPARQL_QUERY_TIMEOUT_SECS", default_value_t = 30)]
     query_timeout_secs: u64,
 
+    /// Write-path execution timeout in seconds for Graph Store PUT/POST/DELETE and
+    /// data-model/dataset DELETE/PATCH. Separate from (and larger than) the query
+    /// timeout so a stuck write fails fast without starving reads, while ordinary
+    /// writes have generous headroom. Bulk import (`/api/import/bulk`) is
+    /// intentionally uncapped — large IFC/CityJSON loads legitimately run for minutes.
+    #[arg(long, env = "WRITE_TIMEOUT_SECS", default_value_t = 120)]
+    write_timeout_secs: u64,
+
     /// Issue auth cookies with the `Secure` attribute (HTTPS-only transport).
     /// Enable in production behind TLS; leave off for plain-HTTP local development.
     #[arg(long, env = "SECURE_COOKIES", default_value_t = false)]
@@ -502,6 +510,7 @@ async fn main() -> anyhow::Result<()> {
         &cli.cors_origins,
         trusted_cidrs,
         cli.query_timeout_secs,
+        cli.write_timeout_secs,
         cli.secure_cookies,
         cli.serve_frontend,
         #[cfg(feature = "text-search")]
