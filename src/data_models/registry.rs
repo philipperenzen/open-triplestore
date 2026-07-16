@@ -420,21 +420,55 @@ pub fn delete_data_model(
     data_model_id: &str,
 ) -> Result<(), crate::store::engine::StoreError> {
     let ont_iri = format!("{}/data-model/{}", base_url, data_model_id);
-    // Delete all version metadata records first
-    let q1 = format!(
+
+    // Collect the version-record subjects for this model, then delete their triples
+    // in bounded batches. A single `DELETE WHERE { ?v ver:dataModel <ont> . ?v ?vp ?vo }`
+    // is unbounded: a model with thousands of versions produces one giant transaction
+    // that can pin RocksDB under write pressure and stall unrelated writes. Batching by
+    // a fixed number of subjects caps each transaction's size.
+    let select_versions = format!(
         r#"
         PREFIX ver: <{VER}>
-        DELETE WHERE {{
-          GRAPH <{REGISTRY_GRAPH}> {{
-            ?v ver:dataModel <{ont_iri}> .
-            ?v ?vp ?vo .
-          }}
+        SELECT ?v WHERE {{
+          GRAPH <{REGISTRY_GRAPH}> {{ ?v ver:dataModel <{ont_iri}> }}
         }}
         "#
     );
-    store.update(&q1)?;
-    // Delete ontology record itself
-    let q2 = format!(
+    let mut version_iris: Vec<String> = Vec::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&select_versions) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            if let Some(iri) = var_str(&vals, 0) {
+                version_iris.push(iri);
+            }
+        }
+    }
+
+    // Subjects per delete transaction. Each version record is a handful of triples, so
+    // this bounds a batch to a few thousand quads while keeping the query small.
+    const DELETE_BATCH_SUBJECTS: usize = 256;
+    for chunk in version_iris.chunks(DELETE_BATCH_SUBJECTS) {
+        let values = chunk
+            .iter()
+            .map(|v| format!("<{v}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let q = format!(
+            r#"
+            DELETE {{
+              GRAPH <{REGISTRY_GRAPH}> {{ ?v ?vp ?vo }}
+            }}
+            WHERE {{
+              VALUES ?v {{ {values} }}
+              GRAPH <{REGISTRY_GRAPH}> {{ ?v ?vp ?vo }}
+            }}
+            "#
+        );
+        store.update(&q)?;
+    }
+
+    // Delete the model record itself — a single subject, inherently bounded.
+    let q_record = format!(
         r#"
         DELETE WHERE {{
           GRAPH <{REGISTRY_GRAPH}> {{
@@ -443,7 +477,7 @@ pub fn delete_data_model(
         }}
         "#
     );
-    store.update(&q2)
+    store.update(&q_record)
 }
 
 // ─── Version CRUD ─────────────────────────────────────────────────────────────
