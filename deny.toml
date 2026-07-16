@@ -22,6 +22,13 @@ ignore = [
     "RUSTSEC-2026-0098",  # rustls-webpki — name constraints (URI) (transitive TLS)
     "RUSTSEC-2026-0099",  # rustls-webpki — name constraints (wildcard) (transitive TLS)
     "RUSTSEC-2026-0104",  # rustls-webpki — reachable panic in CRL parsing (transitive TLS)
+    # quick-xml 0.37.5 DoS advisories. The fix is in quick-xml >= 0.41, but the vulnerable
+    # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults, via
+    # oxigraph 0.4.11) — bumping our own direct `quick-xml` dep would leave Oxigraph's copy
+    # in the tree, so the advisory can't clear until Oxigraph upgrades. Tracked; revisit on
+    # the next Oxigraph bump.
+    "RUSTSEC-2026-0194",  # quick-xml — quadratic duplicate-attribute check (via oxigraph)
+    "RUSTSEC-2026-0195",  # quick-xml — NsReader namespace-decl memory-exhaustion (via oxigraph)
 ]
 
 [bans]
