@@ -62,6 +62,7 @@ pub mod shex;
 pub mod sparql;
 pub mod storage;
 pub mod store;
+pub mod svc_registry;
 #[cfg(feature = "swrl")]
 pub mod swrl;
 #[cfg(feature = "text-search")]
