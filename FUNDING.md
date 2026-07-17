@@ -11,8 +11,6 @@ support its upkeep through any of these:
 | Platform | Link | Notes |
 |---|---|---|
 | **GitHub Sponsors** | https://github.com/sponsors/philipperenzen | One-off or recurring |
-| **Liberapay** | https://liberapay.com/opentriplestore | Recurring; run by a non-profit |
-| **Ko-fi** | https://ko-fi.com/opentriplestore | One-off "tip" |
 
 ## What a contribution is — and what it isn't
 
