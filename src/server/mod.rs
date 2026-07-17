@@ -253,6 +253,9 @@ pub struct AppState {
     pub auth_ext: Arc<crate::auth::oidc_rs::AuthExt>,
     /// M-1/W4-21: SPARQL query and update timeout in seconds.
     pub query_timeout_secs: u64,
+    /// Write-path timeout in seconds for GSP PUT/POST/DELETE and data-model/dataset
+    /// DELETE/PATCH. Larger than `query_timeout_secs`; bulk import is exempt.
+    pub write_timeout_secs: u64,
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
@@ -296,6 +299,7 @@ impl AppState {
             passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
+            write_timeout_secs: 120,
             secure_cookies: false,
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -1511,6 +1515,7 @@ pub async fn run(
     cors_origins: &str,
     trusted_cidrs: Vec<IpNet>,
     query_timeout_secs: u64,
+    write_timeout_secs: u64,
     secure_cookies: bool,
     serve_frontend: bool,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
@@ -1616,6 +1621,7 @@ pub async fn run(
         passkey_sessions: crate::auth::passkey::new_session_store(),
         auth_ext,
         query_timeout_secs,
+        write_timeout_secs,
         secure_cookies,
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
