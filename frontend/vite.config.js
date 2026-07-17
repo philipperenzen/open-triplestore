@@ -35,6 +35,11 @@ export default defineConfig(async () => {
   // The triplestore backend ("triplestore" in the registry); defaults to the local dev port.
   const TS = reg.triplestore || (process.env.OTS_BACKEND_URL ?? 'http://localhost:7878');
   return {
+    // Serve/build under a sub-path (e.g. a static host like GitLab Pages that
+    // publishes this app at https://host/some-project/). Defaults to root, so
+    // every existing deployment is unaffected. Set OTS_BASE_PATH="/my-path/"
+    // (leading AND trailing slash) at build time to change it.
+    base: process.env.OTS_BASE_PATH || '/',
     // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
     // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
     define: { __LD_DISCOVERY__: JSON.stringify(DISCOVERY) },
