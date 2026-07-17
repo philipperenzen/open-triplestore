@@ -52,8 +52,9 @@ shex            = []
 swrl            = []
 ## Additive 3D / volumetric geometry: the ots-geof: 3D function surface, WKT-Z
 ## parsing and the 3D R-tree (spec §3). The exact narrow-phase / hull kernel is
-## backed by `parry3d-f64` (pure Rust, no native dep — it re-exports nalgebra,
-## which we reach as `parry3d_f64::na` to avoid a separate, skew-prone dep).
+## backed by `parry3d-f64` (pure Rust, no native dep — it wraps its own
+## glam-backed math types, reached as `parry3d_f64::math::Vector3` to avoid a
+## separate, skew-prone glam/nalgebra dep).
 geometry3d      = ["dep:parry3d-f64"]
 ## Certified constructive solid geometry (boolean union/intersection/difference
 ## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
@@ -189,9 +190,9 @@ rayon = "1"
 rstar = "0.13"
 
 # Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
-# parry3d-f64 re-exports nalgebra as `parry3d_f64::na`; we use that re-export
-# rather than adding a separate `nalgebra` dependency, to avoid version skew.
-parry3d-f64 = { version = "0.17", optional = true }
+# parry3d-f64 wraps its own glam-backed math types (`parry3d_f64::math::Vector3`);
+# we use that rather than adding a separate `glam`/`nalgebra` dependency, to avoid version skew.
+parry3d-f64 = { version = "0.29", optional = true }
 # Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
 # libSFCGAL C library, so it is excluded from `full` and the default CI build.
 sfcgal = { version = "0.8", optional = true }
@@ -223,7 +224,7 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "fla
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
 
 # Full-text search (text-search feature)
-tantivy = { version = "0.22", optional = true }
+tantivy = { version = "0.26", optional = true }
 
 # SAML 2.0 SSO (saml feature)
 samael = { version = "0.0.22", optional = true }
