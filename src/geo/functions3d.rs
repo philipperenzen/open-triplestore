@@ -180,13 +180,13 @@ fn fn_convex_hull3d(args: &[Term]) -> Option<Term> {
 /// Convex hull of a 3D geometry as a closed `PolyhedralSurface` solid, via
 /// `parry3d_f64::transformation::convex_hull` (returns hull vertices + a triangle
 /// index buffer). Returns `None` for fewer than four non-coplanar points (no 3D
-/// hull). `parry3d_f64::na` is parry's re-exported nalgebra — we do not depend on
-/// nalgebra directly, to avoid version skew.
+/// hull). `parry3d_f64::math::Vector3` is parry's own (glam-backed) vector type —
+/// we do not depend on glam or nalgebra directly, to avoid version skew.
 fn convex_hull3d(g: &Geometry3D) -> Option<Geometry3D> {
-    use parry3d_f64::na::Point3;
+    use parry3d_f64::math::Vector3;
 
-    let mut pts: Vec<Point3<f64>> = Vec::new();
-    g.for_each_coord(&mut |c| pts.push(Point3::new(c.x, c.y, c.z)));
+    let mut pts: Vec<Vector3> = Vec::new();
+    g.for_each_coord(&mut |c| pts.push(Vector3::new(c.x, c.y, c.z)));
     if pts.len() < 4 {
         return None;
     }
