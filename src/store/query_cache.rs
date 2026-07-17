@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
 use oxigraph::model::Term;
-use oxigraph::sparql::{EvaluationError, QueryResults, QuerySolutionIter, Variable};
+use oxigraph::sparql::{EvaluationError, QueryResults, QuerySolution, QuerySolutionIter, Variable};
 
 const DEFAULT_MAX_ENTRIES: usize = 1024;
 const DEFAULT_MAX_ROWS: usize = 10_000;
@@ -49,13 +49,19 @@ enum Cached {
 }
 
 impl Cached {
-    fn to_results(&self) -> QueryResults {
+    fn to_results(&self) -> QueryResults<'static> {
         match self {
             Cached::Boolean(b) => QueryResults::Boolean(*b),
             Cached::Solutions { vars, rows } => {
+                // oxigraph 0.5: `QuerySolutionIter` yields `QuerySolution` (not raw
+                // `Vec<Option<Term>>`), built from the (variables, values) pair. The
+                // iterator owns its cloned data, so the result is `'static`.
+                let vars = vars.clone();
                 let rows = rows.clone();
-                let iter = (0..rows.len()).map(move |i| Ok(rows[i].clone()));
-                QueryResults::Solutions(QuerySolutionIter::new(vars.clone(), iter))
+                let row_vars = vars.clone();
+                let iter = (0..rows.len())
+                    .map(move |i| Ok(QuerySolution::from((row_vars.clone(), rows[i].clone()))));
+                QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
             }
         }
     }
@@ -121,7 +127,7 @@ impl QueryCache {
     }
 
     /// Return a *fresh* (current-generation) cached result, or `None`.
-    pub fn get(&self, sparql: &str) -> Option<QueryResults> {
+    pub fn get(&self, sparql: &str) -> Option<QueryResults<'static>> {
         if !self.inner.enabled {
             return None;
         }
@@ -136,7 +142,7 @@ impl QueryCache {
     /// Materialise `results`, caching it if it is cacheable and small enough, and
     /// return the (reconstructed) full results either way — so the caller streams
     /// the same data whether or not it was cached.
-    pub fn put(&self, sparql: &str, results: QueryResults) -> QueryResults {
+    pub fn put(&self, sparql: &str, results: QueryResults<'static>) -> QueryResults<'static> {
         if !self.inner.enabled || !is_cacheable(sparql) {
             return results;
         }
@@ -185,16 +191,20 @@ impl QueryCache {
                             rows: rows.clone(),
                         },
                     );
-                    let iter = (0..rows.len()).map(move |i| Ok(rows[i].clone()));
+                    let row_vars = vars.clone();
+                    let iter = (0..rows.len())
+                        .map(move |i| Ok(QuerySolution::from((row_vars.clone(), rows[i].clone()))));
                     QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
                 } else {
-                    // Over the cap or errored → don't cache; stream the buffered
-                    // prefix chained with the rest of the live iterator.
-                    let tail_vars = vars.clone();
-                    let tail = sols.map(move |r| {
-                        r.map(|sol| tail_vars.iter().map(|v| sol.get(v).cloned()).collect())
-                    });
-                    let iter = buf.into_iter().chain(tail);
+                    // Over the cap or errored → don't cache; stream the buffered prefix
+                    // chained with the rest of the live iterator. oxigraph 0.5's live
+                    // `sols` already yield `QuerySolution`s, so only the buffered raw
+                    // value rows need rebuilding into solutions.
+                    let head_vars = vars.clone();
+                    let head = buf
+                        .into_iter()
+                        .map(move |r| r.map(|row| QuerySolution::from((head_vars.clone(), row))));
+                    let iter = head.chain(sols);
                     QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
                 }
             }
