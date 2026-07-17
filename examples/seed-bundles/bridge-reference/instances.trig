@@ -1,0 +1,12 @@
+@prefix ex: <https://example.org/seed-bundles/bridge#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+GRAPH <https://example.org/seed-bundles/bridge/instances> {
+    ex:RiverExample a ex:River ;
+        <http://www.w3.org/2000/01/rdf-schema#label> "Example River" .
+
+    ex:Bridge42 a ex:Bridge ;
+        <http://www.w3.org/2000/01/rdf-schema#label> "Bridge 42" ;
+        ex:crossesRiver ex:RiverExample ;
+        ex:length "120.5"^^xsd:decimal .
+}

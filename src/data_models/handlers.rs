@@ -11,6 +11,7 @@ use serde_json::json;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::SystemRole;
 use crate::server::error::AppError;
+use crate::server::routes::run_store_write;
 use crate::server::AppState;
 use crate::store::{escape_sparql_iri, escape_sparql_literal, TripleStore};
 
@@ -145,23 +146,27 @@ pub async fn delete_data_model(
         ));
     }
 
-    // Delete all version data graphs in one batched transaction.
-    let versions = registry::list_versions(&state.store, &state.base_url, &id);
-    let mut all_iris: Vec<String> = Vec::new();
-    for ver in &versions {
-        if ver.sub_graphs.is_empty() {
-            all_iris.push(ver.graph_iri.clone());
-        } else {
-            all_iris.extend(ver.sub_graphs.iter().cloned());
+    // Enumerate + delete all version data graphs, then the registry records, in one
+    // blocking task under the write timeout. Held off the async runtime so this
+    // (potentially large) delete can't pin a Tokio worker or block reads/liveness.
+    let store = state.store.clone();
+    let base = state.base_url.to_string();
+    let model_id = id.clone();
+    run_store_write(&state, "data model delete", move || {
+        let versions = registry::list_versions(&store, &base, &model_id);
+        let mut all_iris: Vec<String> = Vec::new();
+        for ver in &versions {
+            if ver.sub_graphs.is_empty() {
+                all_iris.push(ver.graph_iri.clone());
+            } else {
+                all_iris.extend(ver.sub_graphs.iter().cloned());
+            }
         }
-    }
-    let iri_refs: Vec<&str> = all_iris.iter().map(|s| s.as_str()).collect();
-    state
-        .store
-        .bulk_delete_graphs(&iri_refs)
-        .map_err(AppError::from)?;
-
-    registry::delete_data_model(&state.store, &state.base_url, &id).map_err(AppError::from)?;
+        let iri_refs: Vec<&str> = all_iris.iter().map(|s| s.as_str()).collect();
+        store.bulk_delete_graphs(&iri_refs)?;
+        registry::delete_data_model(&store, &base, &model_id)
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -199,18 +204,23 @@ pub async fn update_data_model(
             "Only an administrator may change ontology ownership".to_string(),
         ));
     }
-    registry::update_data_model(
-        &state.store,
-        &state.base_url,
-        &id,
-        body.title.as_deref(),
-        body.namespace.as_deref(),
-        body.description.as_deref(),
-        body.is_public,
-        body.owner_type.as_deref(),
-        body.owner_id.as_deref(),
-    )
-    .map_err(AppError::from)?;
+    let store = state.store.clone();
+    let base = state.base_url.to_string();
+    let model_id = id.clone();
+    run_store_write(&state, "data model update", move || {
+        registry::update_data_model(
+            &store,
+            &base,
+            &model_id,
+            body.title.as_deref(),
+            body.namespace.as_deref(),
+            body.description.as_deref(),
+            body.is_public,
+            body.owner_type.as_deref(),
+            body.owner_id.as_deref(),
+        )
+    })
+    .await?;
     let record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::Internal("Failed to retrieve updated ontology".to_string()))?;
     Ok(Json(record))
