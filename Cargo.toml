@@ -177,7 +177,7 @@ futures = "0.3"
 # disabled at runtime; only the JSON spec is served.) swagger-ui 7 carries its
 # own utoipa 4 transitively, which coexists fine with our utoipa 5.
 utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "7", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # SHACL Compact Syntax parser
 nom = "7"
