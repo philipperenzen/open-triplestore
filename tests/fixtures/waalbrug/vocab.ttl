@@ -1,0 +1,44 @@
+# Waalbrug reference example — §2 Vocabulary layer (TBox), IMBOR-style with NEN 2660-2.
+# Object types are modelled as rdfs:Class (and, in the shapes files, sh:NodeShape);
+# value lists are SKOS concept schemes. All wb:/da:/ex:/nen2660: IRIs are illustrative.
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix nen2660: <https://w3id.org/nen2660/def#> .
+@prefix da:      <https://data.example.nl/def/> .
+
+#################################################################
+## Class hierarchy (object types). BOT is building-oriented, so
+## civil structures get their own branch that reuses BOT.
+#################################################################
+da:Kunstwerk a owl:Class, sh:NodeShape ;
+    rdfs:subClassOf nen2660:PhysicalObject ;
+    rdfs:label "Kunstwerk"@nl .
+
+da:Brug         rdfs:subClassOf da:Kunstwerk, bot:Zone ; rdfs:label "Brug"@nl .
+da:Vaarwegbrug  rdfs:subClassOf da:Brug ;                rdfs:label "Vaarwegbrug"@nl .
+
+da:Brugonderdeel rdfs:subClassOf nen2660:PhysicalObject, bot:Element ;
+                  rdfs:label "Brugonderdeel"@nl .
+da:Rijdek    rdfs:subClassOf da:Brugonderdeel ; rdfs:label "Rijdek"@nl .
+da:Boog      rdfs:subClassOf da:Brugonderdeel ; rdfs:label "Boog"@nl .
+da:Hanger    rdfs:subClassOf da:Brugonderdeel ; rdfs:label "Hanger"@nl .
+da:Landhoofd rdfs:subClassOf da:Brugonderdeel ; rdfs:label "Landhoofd"@nl .
+
+#################################################################
+## Value lists as SKOS (NEN 2767 condition score and material)
+#################################################################
+da:Conditiescores a skos:ConceptScheme ; rdfs:label "NEN 2767 conditiescore"@nl .
+da:cs1 a skos:Concept ; skos:inScheme da:Conditiescores ; skos:notation "1" ; skos:prefLabel "Uitstekend"@nl .
+da:cs2 a skos:Concept ; skos:inScheme da:Conditiescores ; skos:notation "2" ; skos:prefLabel "Goed"@nl .
+da:cs3 a skos:Concept ; skos:inScheme da:Conditiescores ; skos:notation "3" ; skos:prefLabel "Redelijk"@nl .
+da:cs4 a skos:Concept ; skos:inScheme da:Conditiescores ; skos:notation "4" ; skos:prefLabel "Matig"@nl .
+da:cs5 a skos:Concept ; skos:inScheme da:Conditiescores ; skos:notation "5" ; skos:prefLabel "Slecht"@nl .
+da:cs6 a skos:Concept ; skos:inScheme da:Conditiescores ; skos:notation "6" ; skos:prefLabel "Zeer slecht"@nl .
+
+da:Materialen a skos:ConceptScheme ; rdfs:label "Materiaal"@nl .
+da:staal a skos:Concept ; skos:inScheme da:Materialen ; skos:prefLabel "Staal"@nl .
+da:beton a skos:Concept ; skos:inScheme da:Materialen ; skos:prefLabel "Beton"@nl .

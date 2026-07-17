@@ -10,10 +10,10 @@
 //!
 //! Everything is gated by env config and disabled by default, so existing
 //! password/PAT auth is unaffected until an IdP is wired up:
-//!   * `OIDC_ISSUER`         — issuer URL, e.g. `https://idp/realms/example` (enables this)
-//!   * `OIDC_AUDIENCE`       — expected `aud` (optional; audience check skipped if unset)
-//!   * `OIDC_DEFAULT_ROLE`   — role for newly provisioned users (default `user`)
-//!   * `ACCEPT_LEGACY_TOKENS`— keep accepting password-session JWTs + `ots_` PATs (default true)
+//! - `OIDC_ISSUER` — issuer URL, e.g. `https://idp/realms/example` (enables this)
+//! - `OIDC_AUDIENCE` — expected `aud` (REQUIRED once `OIDC_ISSUER` is set; tokens are rejected until it is configured)
+//! - `OIDC_DEFAULT_ROLE` — role for newly provisioned users (default `user`)
+//! - `ACCEPT_LEGACY_TOKENS` — keep accepting password-session JWTs + `ots_` PATs (default true)
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -107,7 +107,28 @@ impl AuthExt {
             .ok()
             .filter(|s| !s.trim().is_empty());
 
-        let oidc = issuer.map(|iss| OidcVerifier::new(iss, audience));
+        if issuer.is_some() && audience.is_none() {
+            tracing::warn!(
+                "OIDC_ISSUER is set but OIDC_AUDIENCE is not — OIDC bearer-token \
+                 verification will reject all tokens until OIDC_AUDIENCE is configured \
+                 (audience validation is mandatory)."
+            );
+        }
+        // Refuse to enable OIDC over a cleartext issuer: discovery/JWKS would be
+        // fetched over `http`, letting a MITM serve forged keys (→ token forgery).
+        // Fail closed (disable OIDC) rather than silently trusting the network.
+        let oidc = match issuer {
+            Some(iss) if !is_secure_idp_url(&iss) => {
+                tracing::error!(
+                    "OIDC_ISSUER='{iss}' is not https (and not a loopback dev URL) — refusing \
+                     to enable OIDC resource-server verification, since IdP key material would \
+                     be fetched over cleartext (MITM → token forgery). Configure an https issuer."
+                );
+                None
+            }
+            Some(iss) => Some(OidcVerifier::new(iss, audience)),
+            None => None,
+        };
         Self {
             oidc,
             accept_legacy_tokens,
@@ -127,6 +148,34 @@ fn default_role_claims() -> Vec<String> {
         "realm_access.roles".to_string(),
         "groups".to_string(),
     ]
+}
+
+/// Whether `raw` is safe to fetch IdP key material / discovery metadata from.
+///
+/// OIDC discovery and JWKS documents are trust anchors: a token's signature is
+/// only as trustworthy as the keys we fetched. Fetching them over cleartext
+/// `http` lets a network attacker (MITM) serve their own JWKS and forge tokens
+/// we would accept. We therefore require `https`, with a loopback-only `http`
+/// exception so local development against a dev IdP still works.
+pub(crate) fn is_secure_idp_url(raw: &str) -> bool {
+    match url::Url::parse(raw) {
+        Ok(u) => match u.scheme() {
+            "https" => true,
+            "http" => u.host_str().map(is_loopback_host).unwrap_or(false),
+            _ => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Loopback host check for the dev `http` exception: `localhost` or any
+/// loopback IP literal (`127.0.0.0/8`, `::1`, optionally bracketed).
+fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim_start_matches('[').trim_end_matches(']');
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 /// Claims we read off a verified access token. Registered claims (`exp`, `iss`,
@@ -258,6 +307,16 @@ impl OidcVerifier {
                 }
             }
         }
+        // Defense in depth (the issuer is also validated at startup in `from_env`):
+        // never fetch discovery/JWKS over cleartext, even if an insecure issuer
+        // slipped through (e.g. a directly-constructed verifier).
+        if !is_secure_idp_url(&self.issuer) {
+            anyhow::bail!(
+                "refusing to fetch OIDC discovery/JWKS for insecure issuer '{}': \
+                 the issuer must use https (loopback http is allowed for local dev)",
+                self.issuer
+            );
+        }
         let disco_url = format!(
             "{}/.well-known/openid-configuration",
             self.issuer.trim_end_matches('/')
@@ -270,6 +329,15 @@ impl OidcVerifier {
             .error_for_status()?
             .json()
             .await?;
+        // The discovery document chooses `jwks_uri`; require https there too so a
+        // (hypothetically) tampered or misconfigured document can't redirect the
+        // key fetch to cleartext.
+        if !is_secure_idp_url(&disco.jwks_uri) {
+            anyhow::bail!(
+                "refusing to fetch JWKS over insecure jwks_uri '{}': it must use https",
+                disco.jwks_uri
+            );
+        }
         let jwks: JwkSet = self
             .http
             .get(&disco.jwks_uri)
@@ -315,10 +383,20 @@ impl OidcVerifier {
         let key = DecodingKey::from_jwk(&jwk)?;
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[self.issuer.as_str()]);
-        match &self.audience {
-            Some(aud) => validation.set_audience(&[aud.as_str()]),
-            None => validation.validate_aud = false,
-        }
+        // Audience validation is MANDATORY. With no configured `aud` we would
+        // accept any token the IdP minted for *any* client of the same issuer
+        // (audience-confusion / token-redirection). Fail closed instead of
+        // disabling the check.
+        let aud = self.audience.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OIDC_AUDIENCE is not configured; refusing to verify IdP-issued token \
+                 (set OIDC_AUDIENCE to this service's expected `aud`)"
+            )
+        })?;
+        validation.set_audience(&[aud]);
+        // jsonwebtoken validates `exp` by default but not `nbf`; reject
+        // not-yet-valid tokens too.
+        validation.validate_nbf = true;
         let data = decode::<ExternalClaims>(token, &key, &validation)?;
         Ok(data.claims)
     }
@@ -599,5 +677,45 @@ mod tests {
         let p2 = ensure_env_provider(&db, "https://idp.example/realms/example", "user").unwrap();
         assert_eq!(p1.id, p2.id);
         assert_eq!(p1.slug, ENV_OIDC_PROVIDER_SLUG);
+    }
+
+    // ─── LOW: IdP metadata must not be fetched over cleartext ─────────────────
+    // OIDC discovery + JWKS are trust anchors; fetching them over http lets a
+    // MITM serve forged keys and mint tokens we'd accept. https is required,
+    // with a loopback-only http exception for local development.
+
+    #[test]
+    fn is_secure_idp_url_security() {
+        // https to any host is accepted.
+        assert!(is_secure_idp_url("https://idp.example/realms/x"));
+        assert!(is_secure_idp_url("https://idp.example:8443/realms/x"));
+        // Plain http to a routable host is rejected (cleartext key material).
+        assert!(!is_secure_idp_url("http://idp.example/realms/x"));
+        assert!(!is_secure_idp_url("http://10.0.0.5:8080/realms/x"));
+        // Loopback http is allowed (dev IdP on localhost).
+        assert!(is_secure_idp_url("http://localhost:8080/realms/x"));
+        assert!(is_secure_idp_url("http://127.0.0.1:9000/realms/x"));
+        assert!(is_secure_idp_url("http://[::1]:9000/realms/x"));
+        // Non-http(s) schemes and garbage are rejected.
+        assert!(!is_secure_idp_url("ftp://idp.example"));
+        assert!(!is_secure_idp_url("file:///etc/passwd"));
+        assert!(!is_secure_idp_url("not-a-url"));
+    }
+
+    #[tokio::test]
+    async fn oidc_verifier_refuses_insecure_issuer_security() {
+        // A verifier with an http (non-loopback) issuer must refuse to fetch
+        // discovery/JWKS — failing closed *before* any network I/O, so a cleartext
+        // issuer can never serve forged keys. `force=true` skips the cache.
+        let verifier = OidcVerifier::new("http://idp.example".to_string(), Some("aud".to_string()));
+        let err = verifier
+            .jwks(true)
+            .await
+            .expect_err("an http issuer must be refused before fetching keys");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https") || msg.contains("insecure"),
+            "the error must explain the https requirement, got: {msg}"
+        );
     }
 }

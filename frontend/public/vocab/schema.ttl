@@ -1,0 +1,450 @@
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dcmitype: <http://purl.org/dc/dcmitype/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <https://schema.org/> .
+@prefix void: <http://rdfs.org/ns/void#> .
+
+<http://schema.org/Article> a rdfs:Class ;
+    rdfs:label "Article" ;
+    rdfs:comment "An article, such as a news article or piece of investigative report. Newspapers and magazines have articles of many different types and this is intended to cover them all.\\n\\nSee also [blog post](https://blog.schema.org/2014/09/02/schema-org-support-for-bibliographic-relationships-and-periodicals/)." ;
+    rdfs:subClassOf schema:CreativeWork ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+<http://schema.org/BlogPosting> a rdfs:Class ;
+    rdfs:label "BlogPosting" ;
+    rdfs:comment "A blog post." ;
+    rdfs:subClassOf schema:SocialMediaPosting .
+
+<http://schema.org/CreativeWork> a rdfs:Class ;
+    rdfs:label "CreativeWork" ;
+    rdfs:comment "The most generic kind of creative work, including books, movies, photographs, software programs, etc." ;
+    rdfs:subClassOf schema:Thing ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+<http://schema.org/Dataset> a rdfs:Class ;
+    rdfs:label "Dataset" ;
+    rdfs:comment "A body of structured information describing some topic(s) of interest." ;
+    rdfs:subClassOf schema:CreativeWork ;
+    owl:equivalentClass dcmitype:Dataset,
+        void:Dataset,
+        dcat:Dataset ;
+    schema:contributor <https://schema.org/docs/collab/DatasetClass> .
+
+<http://schema.org/Event> a rdfs:Class ;
+    rdfs:label "Event" ;
+    rdfs:comment "An event happening at a certain time and location, such as a concert, lecture, or festival. Ticketing information may be added via the [[offers]] property. Repeated events may be structured as separate Event objects." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass dcmitype:Event,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/DatesAndTimes/Occurrences/Occurrence> .
+
+<http://schema.org/Offer> a rdfs:Class ;
+    rdfs:label "Offer" ;
+    rdfs:comment "An offer to transfer some rights to an item or to provide a service — for example, an offer to sell tickets to an event, to rent the DVD of a movie, to stream a TV show over the internet, to repair a motorcycle, or to loan a book.\\n\\nNote: As the [[businessFunction]] property, which identifies the form of offer (e.g. sell, lease, repair, dispose), defaults to http://purl.org/goodrelations/v1#Sell; an Offer without a defined businessFunction value can be assumed to be an offer to sell.\\n\\nFor [GTIN](http://www.gs1.org/barcodes/technical/idkeys/gtin)-related fields, see [Check Digit calculator](http://www.gs1.org/barcodes/support/check_digit_calculator) and [validation guide](http://www.gs1us.org/resources/standards/gtin-validation-guide) from [GS1](http://www.gs1.org/)." ;
+    rdfs:subClassOf schema:Intangible ;
+    owl:equivalentClass <http://unece.org/vocab#Offer>,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/ProductsAndServices/Offer> ;
+    schema:contributor <https://schema.org/docs/collab/GoodRelationsTerms> .
+
+<http://schema.org/Organization> a rdfs:Class ;
+    rdfs:label "Organization" ;
+    rdfs:comment "An organization such as a school, NGO, corporation, club, etc." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass <https://ref.gs1.org/voc/Organization>,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/Organizations/Organizations/Organization> .
+
+<http://schema.org/Person> a rdfs:Class ;
+    rdfs:label "Person" ;
+    rdfs:comment "A person (alive, dead, undead, or fictional)." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass foaf:Person ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+<http://schema.org/Place> a rdfs:Class ;
+    rdfs:label "Place" ;
+    rdfs:comment "Entities that have a somewhat fixed, physical extension." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass <https://www.omg.org/spec/Commons/Locations/Location> .
+
+<http://schema.org/Product> a rdfs:Class ;
+    rdfs:label "Product" ;
+    rdfs:comment "Any offered product or service. For example: a pair of shoes; a concert ticket; the rental of a car; a haircut; or an episode of a TV show streamed online." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass <http://unece.org/vocab#TradeProduct>,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/ProductsAndServices/Product> ;
+    schema:contributor <https://schema.org/docs/collab/GoodRelationsTerms> .
+
+<http://schema.org/Review> a rdfs:Class ;
+    rdfs:label "Review" ;
+    rdfs:comment "A review of an item - for example, of a restaurant, movie, or store." ;
+    rdfs:subClassOf schema:CreativeWork .
+
+<http://schema.org/Thing> a rdfs:Class ;
+    rdfs:label "Thing" ;
+    rdfs:comment "The most generic type of item." .
+
+schema:Article a rdfs:Class ;
+    rdfs:label "Article" ;
+    rdfs:comment "An article, such as a news article or piece of investigative report. Newspapers and magazines have articles of many different types and this is intended to cover them all.\\n\\nSee also [blog post](https://blog.schema.org/2014/09/02/schema-org-support-for-bibliographic-relationships-and-periodicals/)." ;
+    rdfs:subClassOf schema:CreativeWork ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+schema:BlogPosting a rdfs:Class ;
+    rdfs:label "BlogPosting" ;
+    rdfs:comment "A blog post." ;
+    rdfs:subClassOf schema:SocialMediaPosting .
+
+schema:CreativeWork a rdfs:Class ;
+    rdfs:label "CreativeWork" ;
+    rdfs:comment "The most generic kind of creative work, including books, movies, photographs, software programs, etc." ;
+    rdfs:subClassOf schema:Thing ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+schema:Dataset a rdfs:Class ;
+    rdfs:label "Dataset" ;
+    rdfs:comment "A body of structured information describing some topic(s) of interest." ;
+    rdfs:subClassOf schema:CreativeWork ;
+    owl:equivalentClass dcmitype:Dataset,
+        void:Dataset,
+        dcat:Dataset ;
+    schema:contributor <https://schema.org/docs/collab/DatasetClass> .
+
+schema:Event a rdfs:Class ;
+    rdfs:label "Event" ;
+    rdfs:comment "An event happening at a certain time and location, such as a concert, lecture, or festival. Ticketing information may be added via the [[offers]] property. Repeated events may be structured as separate Event objects." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass dcmitype:Event,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/DatesAndTimes/Occurrences/Occurrence> .
+
+schema:Offer a rdfs:Class ;
+    rdfs:label "Offer" ;
+    rdfs:comment "An offer to transfer some rights to an item or to provide a service — for example, an offer to sell tickets to an event, to rent the DVD of a movie, to stream a TV show over the internet, to repair a motorcycle, or to loan a book.\\n\\nNote: As the [[businessFunction]] property, which identifies the form of offer (e.g. sell, lease, repair, dispose), defaults to http://purl.org/goodrelations/v1#Sell; an Offer without a defined businessFunction value can be assumed to be an offer to sell.\\n\\nFor [GTIN](http://www.gs1.org/barcodes/technical/idkeys/gtin)-related fields, see [Check Digit calculator](http://www.gs1.org/barcodes/support/check_digit_calculator) and [validation guide](http://www.gs1us.org/resources/standards/gtin-validation-guide) from [GS1](http://www.gs1.org/)." ;
+    rdfs:subClassOf schema:Intangible ;
+    owl:equivalentClass <http://unece.org/vocab#Offer>,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/ProductsAndServices/Offer> ;
+    schema:contributor <https://schema.org/docs/collab/GoodRelationsTerms> .
+
+schema:Organization a rdfs:Class ;
+    rdfs:label "Organization" ;
+    rdfs:comment "An organization such as a school, NGO, corporation, club, etc." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass <https://ref.gs1.org/voc/Organization>,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/Organizations/Organizations/Organization> .
+
+schema:Person a rdfs:Class ;
+    rdfs:label "Person" ;
+    rdfs:comment "A person (alive, dead, undead, or fictional)." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass foaf:Person ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+schema:Place a rdfs:Class ;
+    rdfs:label "Place" ;
+    rdfs:comment "Entities that have a somewhat fixed, physical extension." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass <https://www.omg.org/spec/Commons/Locations/Location> .
+
+schema:Product a rdfs:Class ;
+    rdfs:label "Product" ;
+    rdfs:comment "Any offered product or service. For example: a pair of shoes; a concert ticket; the rental of a car; a haircut; or an episode of a TV show streamed online." ;
+    rdfs:subClassOf schema:Thing ;
+    owl:equivalentClass <http://unece.org/vocab#TradeProduct>,
+        <https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/ProductsAndServices/Product> ;
+    schema:contributor <https://schema.org/docs/collab/GoodRelationsTerms> .
+
+schema:Review a rdfs:Class ;
+    rdfs:label "Review" ;
+    rdfs:comment "A review of an item - for example, of a restaurant, movie, or store." ;
+    rdfs:subClassOf schema:CreativeWork .
+
+schema:Thing a rdfs:Class ;
+    rdfs:label "Thing" ;
+    rdfs:comment "The most generic type of item." .
+
+<http://schema.org/address> a rdf:Property ;
+    rdfs:label "address" ;
+    rdfs:comment "Physical address of the item." ;
+    owl:equivalentProperty <https://ref.gs1.org/voc/address> ;
+    schema:domainIncludes schema:GeoCoordinates,
+        schema:GeoShape,
+        schema:Organization,
+        schema:Person,
+        schema:Place ;
+    schema:rangeIncludes schema:PostalAddress,
+        schema:Text .
+
+<http://schema.org/author> a rdf:Property ;
+    rdfs:label "author" ;
+    rdfs:comment "The author of this content or rating. Please note that author is special in that HTML 5 provides a special mechanism for indicating authorship via the rel tag. That is equivalent to this and may be used interchangeably." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:Rating ;
+    schema:rangeIncludes schema:Organization,
+        schema:Person .
+
+<http://schema.org/dateCreated> a rdf:Property ;
+    rdfs:label "dateCreated" ;
+    rdfs:comment "The date on which the CreativeWork was created or the item was added to a DataFeed." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:DataFeedItem ;
+    schema:rangeIncludes schema:Date,
+        schema:DateTime .
+
+<http://schema.org/dateModified> a rdf:Property ;
+    rdfs:label "dateModified" ;
+    rdfs:comment "The date on which the CreativeWork was most recently modified or when the item's entry was modified within a DataFeed." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:DataFeedItem ;
+    schema:rangeIncludes schema:Date,
+        schema:DateTime .
+
+<http://schema.org/datePublished> a rdf:Property ;
+    rdfs:label "datePublished" ;
+    rdfs:comment "Date of first publication or broadcast. For example the date a [[CreativeWork]] was broadcast or a [[Certification]] was issued." ;
+    schema:domainIncludes schema:Certification,
+        schema:CreativeWork ;
+    schema:rangeIncludes schema:Date,
+        schema:DateTime .
+
+<http://schema.org/description> a rdf:Property ;
+    rdfs:label "description" ;
+    rdfs:comment "A description of the item." ;
+    owl:equivalentProperty <http://ogp.me/ns#description>,
+        dcterms:description,
+        <https://ref.gs1.org/voc/description> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:Text,
+        schema:TextObject .
+
+<http://schema.org/email> a rdf:Property ;
+    rdfs:label "email" ;
+    rdfs:comment "Email address." ;
+    owl:equivalentProperty <https://ref.gs1.org/voc/email> ;
+    schema:domainIncludes schema:ContactPoint,
+        schema:Organization,
+        schema:Person ;
+    schema:rangeIncludes schema:Text .
+
+<http://schema.org/identifier> a rdf:Property ;
+    rdfs:label "identifier" ;
+    rdfs:comment """The identifier property represents any kind of identifier for any kind of [[Thing]], such as ISBNs, GTIN codes, UUIDs etc. Schema.org provides dedicated properties for representing many of these, either as textual strings or as URL (URI) links. See [background notes](/docs/datamodel.html#identifierBg) for more details.
+        """ ;
+    owl:equivalentProperty dcterms:identifier,
+        <https://www.omg.org/spec/Commons/Identifiers/identifiedBy> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:PropertyValue,
+        schema:Text,
+        schema:URL .
+
+<http://schema.org/image> a rdf:Property ;
+    rdfs:label "image" ;
+    rdfs:comment "An image of the item. This can be a [[URL]] or a fully described [[ImageObject]]." ;
+    owl:equivalentProperty <http://ogp.me/ns#image> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:ImageObject,
+        schema:URL .
+
+<http://schema.org/inLanguage> a rdf:Property ;
+    rdfs:label "inLanguage" ;
+    rdfs:comment "The language of the content or performance or used in an action. Please use one of the language codes from the [IETF BCP 47 standard](http://tools.ietf.org/html/bcp47). See also [[availableLanguage]]." ;
+    owl:equivalentProperty dcterms:language ;
+    schema:domainIncludes schema:BroadcastService,
+        schema:CommunicateAction,
+        schema:CreativeWork,
+        schema:Event,
+        schema:LinkRole,
+        schema:PronounceableText,
+        schema:WriteAction ;
+    schema:rangeIncludes schema:Language,
+        schema:Text ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/2382> .
+
+<http://schema.org/keywords> a rdf:Property ;
+    rdfs:label "keywords" ;
+    rdfs:comment "Keywords or tags used to describe some item. Multiple textual entries in a keywords list are typically delimited by commas, or by repeating the property." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:Event,
+        schema:Organization,
+        schema:Place,
+        schema:Product ;
+    schema:rangeIncludes schema:DefinedTerm,
+        schema:Text,
+        schema:URL .
+
+<http://schema.org/name> a rdf:Property ;
+    rdfs:label "name" ;
+    rdfs:comment "The name of the item." ;
+    rdfs:subPropertyOf rdfs:label ;
+    owl:equivalentProperty <http://ogp.me/ns#title>,
+        dcterms:title,
+        <https://www.omg.org/spec/Commons/Text/hasName> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:Text .
+
+<http://schema.org/sameAs> a rdf:Property ;
+    rdfs:label "sameAs" ;
+    rdfs:comment "URL of a reference Web page that unambiguously indicates the item's identity. E.g. the URL of the item's Wikipedia page, Wikidata entry, or official website." ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:URL .
+
+<http://schema.org/telephone> a rdf:Property ;
+    rdfs:label "telephone" ;
+    rdfs:comment "The telephone number." ;
+    owl:equivalentProperty <https://ref.gs1.org/voc/telephone> ;
+    schema:domainIncludes schema:ContactPoint,
+        schema:Organization,
+        schema:Person,
+        schema:Place ;
+    schema:rangeIncludes schema:Text .
+
+<http://schema.org/url> a rdf:Property ;
+    rdfs:label "url" ;
+    rdfs:comment "URL of the item." ;
+    owl:equivalentProperty <http://ogp.me/ns#url> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:URL .
+
+schema:address a rdf:Property ;
+    rdfs:label "address" ;
+    rdfs:comment "Physical address of the item." ;
+    owl:equivalentProperty <https://ref.gs1.org/voc/address> ;
+    schema:domainIncludes schema:GeoCoordinates,
+        schema:GeoShape,
+        schema:Organization,
+        schema:Person,
+        schema:Place ;
+    schema:rangeIncludes schema:PostalAddress,
+        schema:Text .
+
+schema:author a rdf:Property ;
+    rdfs:label "author" ;
+    rdfs:comment "The author of this content or rating. Please note that author is special in that HTML 5 provides a special mechanism for indicating authorship via the rel tag. That is equivalent to this and may be used interchangeably." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:Rating ;
+    schema:rangeIncludes schema:Organization,
+        schema:Person .
+
+schema:dateCreated a rdf:Property ;
+    rdfs:label "dateCreated" ;
+    rdfs:comment "The date on which the CreativeWork was created or the item was added to a DataFeed." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:DataFeedItem ;
+    schema:rangeIncludes schema:Date,
+        schema:DateTime .
+
+schema:dateModified a rdf:Property ;
+    rdfs:label "dateModified" ;
+    rdfs:comment "The date on which the CreativeWork was most recently modified or when the item's entry was modified within a DataFeed." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:DataFeedItem ;
+    schema:rangeIncludes schema:Date,
+        schema:DateTime .
+
+schema:datePublished a rdf:Property ;
+    rdfs:label "datePublished" ;
+    rdfs:comment "Date of first publication or broadcast. For example the date a [[CreativeWork]] was broadcast or a [[Certification]] was issued." ;
+    schema:domainIncludes schema:Certification,
+        schema:CreativeWork ;
+    schema:rangeIncludes schema:Date,
+        schema:DateTime .
+
+schema:description a rdf:Property ;
+    rdfs:label "description" ;
+    rdfs:comment "A description of the item." ;
+    owl:equivalentProperty <http://ogp.me/ns#description>,
+        dcterms:description,
+        <https://ref.gs1.org/voc/description> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:Text,
+        schema:TextObject .
+
+schema:email a rdf:Property ;
+    rdfs:label "email" ;
+    rdfs:comment "Email address." ;
+    owl:equivalentProperty <https://ref.gs1.org/voc/email> ;
+    schema:domainIncludes schema:ContactPoint,
+        schema:Organization,
+        schema:Person ;
+    schema:rangeIncludes schema:Text .
+
+schema:identifier a rdf:Property ;
+    rdfs:label "identifier" ;
+    rdfs:comment """The identifier property represents any kind of identifier for any kind of [[Thing]], such as ISBNs, GTIN codes, UUIDs etc. Schema.org provides dedicated properties for representing many of these, either as textual strings or as URL (URI) links. See [background notes](/docs/datamodel.html#identifierBg) for more details.
+        """ ;
+    owl:equivalentProperty dcterms:identifier,
+        <https://www.omg.org/spec/Commons/Identifiers/identifiedBy> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:PropertyValue,
+        schema:Text,
+        schema:URL .
+
+schema:image a rdf:Property ;
+    rdfs:label "image" ;
+    rdfs:comment "An image of the item. This can be a [[URL]] or a fully described [[ImageObject]]." ;
+    owl:equivalentProperty <http://ogp.me/ns#image> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:ImageObject,
+        schema:URL .
+
+schema:inLanguage a rdf:Property ;
+    rdfs:label "inLanguage" ;
+    rdfs:comment "The language of the content or performance or used in an action. Please use one of the language codes from the [IETF BCP 47 standard](http://tools.ietf.org/html/bcp47). See also [[availableLanguage]]." ;
+    owl:equivalentProperty dcterms:language ;
+    schema:domainIncludes schema:BroadcastService,
+        schema:CommunicateAction,
+        schema:CreativeWork,
+        schema:Event,
+        schema:LinkRole,
+        schema:PronounceableText,
+        schema:WriteAction ;
+    schema:rangeIncludes schema:Language,
+        schema:Text ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/2382> .
+
+schema:keywords a rdf:Property ;
+    rdfs:label "keywords" ;
+    rdfs:comment "Keywords or tags used to describe some item. Multiple textual entries in a keywords list are typically delimited by commas, or by repeating the property." ;
+    schema:domainIncludes schema:CreativeWork,
+        schema:Event,
+        schema:Organization,
+        schema:Place,
+        schema:Product ;
+    schema:rangeIncludes schema:DefinedTerm,
+        schema:Text,
+        schema:URL .
+
+schema:name a rdf:Property ;
+    rdfs:label "name" ;
+    rdfs:comment "The name of the item." ;
+    rdfs:subPropertyOf rdfs:label ;
+    owl:equivalentProperty <http://ogp.me/ns#title>,
+        dcterms:title,
+        <https://www.omg.org/spec/Commons/Text/hasName> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:Text .
+
+schema:sameAs a rdf:Property ;
+    rdfs:label "sameAs" ;
+    rdfs:comment "URL of a reference Web page that unambiguously indicates the item's identity. E.g. the URL of the item's Wikipedia page, Wikidata entry, or official website." ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:URL .
+
+schema:telephone a rdf:Property ;
+    rdfs:label "telephone" ;
+    rdfs:comment "The telephone number." ;
+    owl:equivalentProperty <https://ref.gs1.org/voc/telephone> ;
+    schema:domainIncludes schema:ContactPoint,
+        schema:Organization,
+        schema:Person,
+        schema:Place ;
+    schema:rangeIncludes schema:Text .
+
+schema:url a rdf:Property ;
+    rdfs:label "url" ;
+    rdfs:comment "URL of the item." ;
+    owl:equivalentProperty <http://ogp.me/ns#url> ;
+    schema:domainIncludes schema:Thing ;
+    schema:rangeIncludes schema:URL .
+

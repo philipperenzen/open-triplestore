@@ -250,6 +250,10 @@ pub struct UpdateGroupRequest {
 pub struct DatasetView {
     #[serde(flatten)]
     pub dataset: crate::auth::models::Dataset,
+    /// Canonical dataset IRI (`{base_url}/dataset/{id}`). Clients mint graph IRIs
+    /// for this dataset under `{dataset_iri}/...`; the bulk-import write boundary
+    /// only admits targets registered to the dataset or under this namespace.
+    pub dataset_iri: String,
     pub can_write: bool,
     /// Whether the caller can manage this dataset's settings and access grants.
     pub can_manage: bool,
@@ -381,10 +385,16 @@ fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
     headers
 }
 
+/// Mint an access+refresh token pair and persist the refresh token's hash under
+/// `family_id` (the session/rotation chain it belongs to). A fresh login passes a
+/// brand-new family id; a rotation passes the family of the token being rotated,
+/// so every token from one login shares a family and reuse-detection can be scoped
+/// to that single session.
 fn issue_tokens(
     jwt_config: &JwtConfig,
     auth_db: &AuthDb,
     user: &User,
+    family_id: &str,
 ) -> Result<(String, String, u64), (StatusCode, String)> {
     let access_token =
         jwt::issue_access_token(jwt_config, &user.id, &user.username, user.role.as_str())
@@ -405,11 +415,27 @@ fn issue_tokens(
             &user.id,
             &refresh_hash,
             &expires_at.to_rfc3339(),
+            family_id,
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let expires_in = jwt_config.access_expiry_minutes * 60;
     Ok((access_token, refresh_token, expires_in))
+}
+
+/// Window during which a just-rotated refresh token may still be replayed by a
+/// legitimate client (a second tab / the browser session-restore herd that hasn't
+/// observed the new cookie yet) without being treated as token theft.
+const REFRESH_ROTATION_GRACE_SECS: i64 = 30;
+
+/// True if `created_at` (RFC 3339) is within the rotation grace window of now.
+fn within_rotation_grace(created_at: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds()
+                <= REFRESH_ROTATION_GRACE_SECS
+        })
+        .unwrap_or(false)
 }
 
 // ─── Linked-data graph helpers ────────────────────────────────────────────────
@@ -459,10 +485,10 @@ pub async fn register(
             "Username must be 3-50 characters".to_string(),
         ));
     }
-    if req.password.len() < 8 {
+    if req.password.len() < 8 || req.password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
+            "Password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -524,7 +550,10 @@ pub async fn register(
         });
     }
 
-    let (access_token, refresh_token, expires_in) = issue_tokens(&jwt_config, &db, &user)?;
+    // Registration auto-logs the new user in — a fresh session family.
+    let family_id = uuid::Uuid::new_v4().to_string();
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
 
     let cookie_headers = auth_cookie_headers(
         &access_token,
@@ -628,7 +657,11 @@ pub async fn login(
     // Successful authentication — reset the failure counter.
     let _ = db.clear_login_attempts(&req.username);
 
-    let (access_token, refresh_token, expires_in) = issue_tokens(&jwt_config, &db, &user)?;
+    // A fresh login starts a new session family — independent from any other
+    // browser/device the user is already signed in on.
+    let family_id = uuid::Uuid::new_v4().to_string();
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
 
     {
         let mut b = AuditEventBuilder::new(AuditEventType::LoginSuccess, AuditOutcome::Success)
@@ -711,9 +744,9 @@ pub async fn refresh(
         ));
     }
 
-    // Check refresh token hash exists in DB and is not revoked
+    // Check refresh token hash exists in DB
     let token_hash = hash_token(&refresh_token_str);
-    let stored = db
+    let mut stored = db
         .get_refresh_token_by_hash(&token_hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| {
@@ -724,20 +757,54 @@ pub async fn refresh(
         })?;
 
     if stored.revoked {
-        // Refresh-token REUSE: a token that was already rotated (or explicitly
-        // revoked) is being replayed. Per RFC 6819 / refresh-token-rotation
-        // guidance this signals theft of the token chain, so we revoke EVERY
-        // refresh token for the user, forcing full re-authentication of both the
-        // legitimate user and the attacker.
-        tracing::warn!(
-            user_id = %claims.sub,
-            "refresh-token reuse detected; revoking all refresh tokens for user"
-        );
-        let _ = db.revoke_all_user_refresh_tokens(&claims.sub);
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "Refresh token has been revoked".to_string(),
-        ));
+        // The presented token was already rotated away. This is EITHER a benign
+        // concurrent-refresh race (a second tab / the browser session-restore herd
+        // replaying the just-rotated cookie before it saw the new one) OR genuine
+        // token-chain theft (RFC 6819 §5.2.2.3). We tell them apart by the family:
+        //
+        // - If this token's session family still has a live, recently-issued head,
+        //   the session is plainly still in use, so we rotate from that head and let
+        //   the caller through — no false logout for honest multi-tab clients.
+        // - Otherwise the whole chain is already dead (or aged out of the grace
+        //   window): treat it as reuse and revoke ONLY this session family. Crucially
+        //   we do NOT revoke every token for the user — that was the old behaviour and
+        //   it logged people out of all their other browsers/devices the moment one
+        //   session glitched.
+        let live_head = stored
+            .family_id
+            .as_deref()
+            .and_then(|fid| db.get_active_family_head(fid).ok().flatten())
+            .filter(|head| within_rotation_grace(&head.created_at));
+
+        match live_head {
+            Some(head) => {
+                stored = head; // rotate from the session's current head instead
+            }
+            None => {
+                match stored.family_id.as_deref() {
+                    Some(fid) => {
+                        tracing::warn!(
+                            user_id = %claims.sub,
+                            "refresh-token reuse detected; revoking session family"
+                        );
+                        let _ = db.revoke_refresh_token_family(fid);
+                    }
+                    None => {
+                        // Legacy token with no family (pre-migration): fall back to the
+                        // conservative blast radius so theft is still contained.
+                        tracing::warn!(
+                            user_id = %claims.sub,
+                            "refresh-token reuse detected on familyless token; revoking all user tokens"
+                        );
+                        let _ = db.revoke_all_user_refresh_tokens(&claims.sub);
+                    }
+                }
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
+        }
     }
 
     // Revoke the old refresh token (rotation)
@@ -757,8 +824,14 @@ pub async fn refresh(
         ));
     }
 
-    // Issue new token pair
-    let (access_token, refresh_token, expires_in) = issue_tokens(&jwt_config, &db, &user)?;
+    // Issue new token pair within the SAME session family so the whole chain stays
+    // revocable as one unit. (Legacy familyless rows adopt a fresh family here.)
+    let family_id = stored
+        .family_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let (access_token, refresh_token, expires_in) =
+        issue_tokens(&jwt_config, &db, &user, &family_id)?;
 
     let cookie_headers = auth_cookie_headers(
         &access_token,
@@ -953,10 +1026,10 @@ pub async fn change_password(
         ));
     }
 
-    if req.new_password.len() < 8 {
+    if req.new_password.len() < 8 || req.new_password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "New password must be at least 8 characters".to_string(),
+            "New password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -1162,10 +1235,10 @@ pub async fn admin_create_user(
             "Username must be 3-50 characters".to_string(),
         ));
     }
-    if req.password.len() < 8 {
+    if req.password.len() < 8 || req.password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
+            "Password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -1462,10 +1535,10 @@ pub async fn admin_reset_password(
         ));
     }
 
-    if req.new_password.len() < 8 {
+    if req.new_password.len() < 8 || req.new_password.len() > 1024 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
+            "Password must be between 8 and 1024 characters".to_string(),
         ));
     }
 
@@ -1829,6 +1902,38 @@ pub async fn get_organisation(
     Ok(Json(org))
 }
 
+/// Schemes permitted in stored DCAT / vCard URL metadata. Mirrors the frontend
+/// `safeExternalUrl` allowlist (frontend/src/lib/safeUrl.ts): `mailto:` is kept
+/// for contact URLs, everything dangerous (`javascript:`, `data:`, `file:`, …)
+/// is rejected.
+const SAFE_METADATA_URL_SCHEMES: &[&str] = &["http", "https", "mailto"];
+
+/// Reject DCAT / vCard URL metadata that does not use a safe web scheme.
+///
+/// These fields are later rendered as `<a href>` on public (and anonymously
+/// viewable) pages, so a `javascript:`/`data:` value would be stored XSS in
+/// waiting. The frontend gates the href as defence-in-depth; this is the
+/// root-cause fix that keeps such values out of storage entirely. An empty /
+/// `None` value clears the field and is always allowed.
+fn validate_metadata_url(field: &str, value: Option<&str>) -> Result<(), (StatusCode, String)> {
+    if let Some(raw) = value {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let scheme_ok = url::Url::parse(trimmed)
+            .map(|u| SAFE_METADATA_URL_SCHEMES.contains(&u.scheme()))
+            .unwrap_or(false);
+        if !scheme_ok {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("{field} must be an http(s) or mailto URL"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// PUT /api/organisations/:org_id
 pub async fn update_organisation(
     user_opt: Option<Extension<AuthenticatedUser>>,
@@ -1847,6 +1952,11 @@ pub async fn update_organisation(
             _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
         }
     }
+
+    // Reject unsafe URL schemes before they reach storage (these surface as
+    // <a href> on the org's public page).
+    validate_metadata_url("homepage", req.homepage.as_deref())?;
+    validate_metadata_url("contact_url", req.contact_url.as_deref())?;
 
     // Resolve and validate the requested parent (empty string clears it).
     let existing = db
@@ -2149,7 +2259,7 @@ pub async fn update_org_member_role(
 
     let role = req["role"]
         .as_str()
-        .and_then(|r| Role::from_str(r))
+        .and_then(Role::from_str)
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
@@ -2399,7 +2509,7 @@ pub async fn create_dataset(
     State(state): State<AppState>,
     Json(req): Json<CreateDatasetRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let _current_user = require_user(user_opt)?;
+    let current_user = require_user(user_opt)?;
     let owner_type = OwnerType::from_str(&req.owner_type)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid owner_type".to_string()))?;
 
@@ -2409,6 +2519,30 @@ pub async fn create_dataset(
         .map(Visibility::from_str)
         .unwrap_or(Some(Visibility::Private))
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid visibility".to_string()))?;
+
+    // Authorization: a non-admin may only create datasets owned by themselves or
+    // by an organisation/group they belong to — otherwise `owner_id` could be
+    // forged to impersonate another principal or attribute data to a foreign
+    // catalogue. Publishing (visibility=public) additionally requires publisher
+    // rights, mirroring the visibility gate in `update_dataset`.
+    if !current_user.is_admin() {
+        if !db
+            .can_act_as_owner(&current_user.user_id, owner_type, &req.owner_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "You may only create datasets owned by yourself or an organisation/group you belong to"
+                    .to_string(),
+            ));
+        }
+        if visibility == Visibility::Public && !current_user.is_publisher() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Publisher access is required to create a public dataset".to_string(),
+            ));
+        }
+    }
 
     // Human-readable, unique slug id → IRI `{base}/dataset/{id}` reads semantically
     // (e.g. `…/dataset/bridge-inventory`) instead of exposing a raw UUID.
@@ -2464,13 +2598,26 @@ pub async fn create_dataset(
         ));
     }
 
-    Ok((StatusCode::CREATED, Json(dataset)))
+    // Surface the canonical dataset IRI alongside the raw fields so clients can
+    // immediately mint graph IRIs under `{dataset_iri}/...` (which the bulk-import
+    // write boundary admits) — important for the import wizard's lazy
+    // create-then-import flow, where the new id isn't known until now.
+    let mut body = serde_json::to_value(&dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "dataset_iri".to_string(),
+            serde_json::Value::String(dataset_graph::dataset_iri(&state.base_url, &dataset.id)),
+        );
+    }
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 /// GET /api/datasets
 pub async fn list_datasets(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(base_url): State<crate::server::BaseUrl>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id = user.as_ref().map(|u| u.user_id.as_str());
     let datasets = db
@@ -2492,8 +2639,10 @@ pub async fn list_datasets(
                     roles.push(r);
                 }
             }
+            let dataset_iri = dataset_graph::dataset_iri(&base_url.0, &ds.id);
             DatasetView {
                 dataset: ds,
+                dataset_iri,
                 can_write,
                 can_manage,
                 effective_role,
@@ -2509,6 +2658,7 @@ pub async fn list_datasets(
 pub async fn get_dataset(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
+    State(base_url): State<crate::server::BaseUrl>,
     Path(dataset_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let dataset = db
@@ -2544,8 +2694,10 @@ pub async fn get_dataset(
             roles.push(r);
         }
     }
+    let dataset_iri = dataset_graph::dataset_iri(&base_url.0, &dataset.id);
     Ok(Json(DatasetView {
         dataset,
+        dataset_iri,
         can_write,
         can_manage,
         effective_role,
@@ -2629,6 +2781,13 @@ pub async fn update_dataset(
             "Manage access required to change visibility".to_string(),
         ));
     }
+
+    // Reject unsafe URL schemes before they reach storage (these surface as
+    // <a href> on the dataset's public DCAT metadata page).
+    validate_metadata_url("license", req.license.as_deref())?;
+    validate_metadata_url("spatial", req.spatial.as_deref())?;
+    validate_metadata_url("landing_page", req.landing_page.as_deref())?;
+    validate_metadata_url("contact_url", req.contact_url.as_deref())?;
 
     db.update_dataset(
         &dataset_id,
@@ -2837,6 +2996,32 @@ pub async fn add_dataset_graph(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+
+    // Per-graph registration boundary. `can_write_dataset` only proves the caller
+    // may write *into this dataset*; it does not constrain which graph IRI they
+    // attach to it. Without this gate a writer could register another tenant's
+    // private graph IRI to their own dataset and then read it, since
+    // `get_accessible_graph_iris` makes any graph registered to an accessible
+    // dataset readable (cross-tenant read — the IDOR the bulk-import path already
+    // defends against). Admins are unrestricted.
+    if !current_user.is_admin() {
+        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
+            &db,
+            &state.base_url,
+            &dataset_id,
+            &req.graph_iri,
+        ) {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_graph",
+                &dataset_id,
+                "register_graph",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
+        }
     }
 
     db.add_dataset_graph(&dataset_id, &req.graph_iri)
@@ -3349,77 +3534,26 @@ pub async fn update_dataset_role(
     db.update_dataset_graphs_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Auto-register the dataset in the model / vocabulary registry so it shows
-    // up in those listings. Idempotent: skip if a record with this id already exists.
+    // Promote the dataset into the model / vocabulary registry so it shows up in
+    // those listings *with its data* — a published 1.0.0 version whose graphs hold
+    // a copy of the dataset's graphs, not just an empty metadata tag. Idempotent;
+    // best-effort (logged, never fails the role update).
     if let Some(role) = graph_role {
         let role_str = role.as_str();
         if role_str == "model" || role_str == "vocabulary" {
             let registry_id = slugify(&dataset.name);
             if !registry_id.is_empty() {
-                let now = chrono::Utc::now().to_rfc3339();
-                let owner_type = match dataset.owner_type {
-                    OwnerType::User => "user",
-                    OwnerType::Organisation => "organisation",
-                    OwnerType::Group => "group",
-                };
-                let owner_id = dataset.owner_id.as_str();
-                let creator = format!("{}/users/{}", state.base_url, current_user.user_id);
-                let title = if dataset.name.is_empty() {
-                    dataset_id.as_str()
-                } else {
-                    dataset.name.as_str()
-                };
-                let description = dataset.description.as_deref();
-
-                if role_str == "model" {
-                    if !crate::data_models::registry::data_model_exists(
-                        &state.store,
-                        &state.base_url,
-                        &registry_id,
-                    ) {
-                        if let Err(e) = crate::data_models::registry::insert_data_model(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            title,
-                            "", // namespace unknown — user can edit later
-                            description,
-                            false, // is_public — keep private until user opts in
-                            Some(owner_type),
-                            Some(owner_id),
-                            Some(&creator),
-                            &now,
-                        ) {
-                            tracing::warn!(
-                                "failed to auto-register data model for dataset {dataset_id}: {e}"
-                            );
-                        }
-                    }
-                } else {
-                    // role_str == "vocabulary"
-                    if !crate::vocabularies::registry::vocabulary_exists(
-                        &state.store,
-                        &state.base_url,
-                        &registry_id,
-                    ) {
-                        if let Err(e) = crate::vocabularies::registry::insert_vocabulary(
-                            &state.store,
-                            &state.base_url,
-                            &registry_id,
-                            title,
-                            "",
-                            description,
-                            false,
-                            Some(owner_type),
-                            Some(owner_id),
-                            Some(&creator),
-                            &now,
-                        ) {
-                            tracing::warn!(
-                                "failed to auto-register vocabulary for dataset {dataset_id}: {e}"
-                            );
-                        }
-                    }
+                if let Err(e) = promote_dataset_to_registry(
+                    &state,
+                    &dataset,
+                    &dataset_id,
+                    &registry_id,
+                    role_str,
+                    &current_user.user_id,
+                ) {
+                    tracing::warn!(
+                        "failed to promote dataset {dataset_id} into the {role_str} registry: {e}"
+                    );
                 }
             }
         }
@@ -3431,9 +3565,121 @@ pub async fn update_dataset_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Promote a dataset whose graph role was set to `model`/`vocabulary` into the
+/// model registry: ensure a registry entry exists and a published `1.0.0` version
+/// holds a COPY of the dataset's graphs. Idempotent — only creates what's missing,
+/// and never clobbers an existing version's data.
+fn promote_dataset_to_registry(
+    state: &AppState,
+    dataset: &crate::auth::models::Dataset,
+    dataset_id: &str,
+    registry_id: &str,
+    role_str: &str,
+    user_id: &str,
+) -> anyhow::Result<()> {
+    use crate::data_models::models::{DataModelVersion, VersionStatus};
+    use crate::data_models::{registry, upload};
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let owner_type = match dataset.owner_type {
+        OwnerType::User => "user",
+        OwnerType::Organisation => "organisation",
+        OwnerType::Group => "group",
+    };
+    let creator = format!("{}/users/{}", state.base_url, user_id);
+    let title = if dataset.name.is_empty() {
+        dataset_id
+    } else {
+        dataset.name.as_str()
+    };
+    let kind = if role_str == "vocabulary" {
+        crate::kind_detector::RegistryKind::Vocabulary
+    } else {
+        crate::kind_detector::RegistryKind::DataModel
+    };
+
+    // 1. Ensure the registry entry exists (kept private until the user opts in).
+    //    The registry id is derived from the dataset's free-form, non-unique name,
+    //    so a same-slug entry may already belong to another account. If one exists,
+    //    the caller must be allowed to WRITE it — the same `can_write_ontology` gate
+    //    every other registry write path enforces. Without this check a user with
+    //    write access to *their own* dataset could inject a published version into
+    //    a different owner's same-named model.
+    match registry::get_data_model(&state.store, &state.base_url, registry_id) {
+        Some(existing) => {
+            if !state.auth_db.can_write_ontology(
+                user_id,
+                existing.owner_type.as_deref(),
+                existing.owner_id.as_deref(),
+            )? {
+                anyhow::bail!(
+                    "registry entry '{registry_id}' already exists and is owned by \
+                     another account; refusing to promote dataset {dataset_id} into it"
+                );
+            }
+        }
+        None => {
+            registry::insert_data_model(
+                &state.store,
+                &state.base_url,
+                registry_id,
+                title,
+                "", // namespace unknown — user can edit later
+                dataset.description.as_deref(),
+                false,
+                Some(owner_type),
+                Some(dataset.owner_id.as_str()),
+                Some(&creator),
+                &now,
+            )?;
+            registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+        }
+    }
+
+    // 2. Ensure a published 1.0.0 version with the dataset's data exists — the
+    //    actual "move" the role assignment was missing.
+    if !registry::version_exists(&state.store, &state.base_url, registry_id, "1.0.0") {
+        let src_graphs: Vec<String> = state
+            .auth_db
+            .list_dataset_graph_entries(dataset_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.graph_iri)
+            .collect();
+        let sub_graphs = upload::copy_graphs_into_version(
+            &state.store,
+            &state.base_url,
+            registry_id,
+            "1.0.0",
+            &src_graphs,
+        )?;
+        let graph_iri = format!(
+            "{}/data-model/{}/version/1.0.0",
+            state.base_url, registry_id
+        );
+        let record = DataModelVersion {
+            data_model_id: registry_id.to_string(),
+            version: "1.0.0".to_string(),
+            status: VersionStatus::Published,
+            graph_iri,
+            sub_graphs,
+            created_at: now,
+            created_by: Some(creator),
+            derived_from: None,
+            notes: Some(format!("Imported from dataset {dataset_id}")),
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        registry::insert_version(&state.store, &state.base_url, &record)?;
+        registry::set_data_model_kind(&state.store, &state.base_url, registry_id, kind)?;
+        registry::update_latest_published(&state.store, &state.base_url, registry_id, "1.0.0")?;
+    }
+    Ok(())
+}
+
 /// URL-safe slug derived from a free-form title — same shape that
-/// `create_data_model` / `create_vocabulary` mint when the user creates one
-/// from scratch, so the auto-registered id collides with an existing one
+/// `create_data_model` mints when the user creates an entry from scratch, so
+/// the auto-registered id collides with an existing one
 /// rather than producing a duplicate when the user already created it manually.
 fn slugify(s: &str) -> String {
     s.to_lowercase()
@@ -3490,11 +3736,14 @@ pub async fn grant_access(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Managing who may access a dataset is an owner/admin capability, not an
+    // editor one — a mere editor (write grant) must not be able to grant access
+    // to arbitrary users. Mirrors the role-based grant endpoints below.
     if !db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     let user_id = req["user_id"]
@@ -3518,11 +3767,12 @@ pub async fn revoke_access(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Revoking access is an owner/admin (manage) capability, not an editor one.
     if !db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     db.revoke_dataset_access(&dataset_id, &user_id)
@@ -3542,11 +3792,13 @@ pub async fn list_access(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
 
+    // Enumerating who has access is an owner/admin (manage) capability — an
+    // editor must not be able to read the access list.
     if !db
-        .can_write_dataset(&current_user.user_id, &dataset)
+        .can_manage_dataset(&current_user.user_id, &dataset)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     {
-        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+        return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
     let users = db
@@ -4109,4 +4361,196 @@ pub async fn get_dataset_banner(
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Banner not found".to_string()))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, content_type)], data).into_response())
+}
+
+/// Request body for the banner-preset endpoints: a preset id to apply, or
+/// null/empty to clear the banner.
+#[derive(Deserialize)]
+pub struct BannerPresetBody {
+    #[serde(default)]
+    pub preset: Option<String>,
+}
+
+/// Banner preset ids are short url-safe slugs (`[a-z0-9-]`). The frontend
+/// `banners.ts` registry is the source of truth for which ids actually render;
+/// here we only guard the shape so the stored `preset:<id>` sentinel can never
+/// carry arbitrary text.
+fn is_valid_banner_preset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 40
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Resolve a request body into the `banner_key` to store: `Some("preset:<id>")`
+/// for a valid id, or `None` to clear. Rejects malformed ids.
+fn resolve_banner_preset_key(
+    body: &BannerPresetBody,
+) -> Result<Option<String>, (StatusCode, String)> {
+    match body
+        .preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(id) => {
+            if !is_valid_banner_preset_id(id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid banner preset id".to_string(),
+                ));
+            }
+            Ok(Some(format!("preset:{id}")))
+        }
+        None => Ok(None),
+    }
+}
+
+/// PUT /api/datasets/:dataset_id/banner-preset — select a built-in animated
+/// banner preset (stored as `banner_key = "preset:<id>"`) or clear it. Mirrors
+/// the write-access check of `upload_dataset_banner`.
+pub async fn set_dataset_banner_preset(
+    user_opt: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Json(body): Json<BannerPresetBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = require_user(user_opt)?;
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    if !state
+        .auth_db
+        .can_write_dataset(&current_user.user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+    let new_key = resolve_banner_preset_key(&body)?;
+    state
+        .auth_db
+        .update_dataset_banner(&dataset_id, new_key.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "banner_key": new_key })))
+}
+
+/// PUT /api/organisations/:org_id/banner-preset — same as above for an
+/// organisation. Mirrors the admin/org-admin check of `upload_org_banner`.
+pub async fn set_org_banner_preset(
+    user_opt: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(org_id): Path<String>,
+    Json(body): Json<BannerPresetBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = require_user(user_opt)?;
+    if !current_user.is_admin() {
+        match state
+            .auth_db
+            .get_org_membership(&current_user.user_id, &org_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            Some(Role::Admin) => {}
+            _ => return Err((StatusCode::FORBIDDEN, "Admin access required".to_string())),
+        }
+    }
+    let new_key = resolve_banner_preset_key(&body)?;
+    state
+        .auth_db
+        .update_org_banner(&org_id, new_key.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "banner_key": new_key })))
+}
+
+#[cfg(test)]
+mod banner_preset_tests {
+    use super::{is_valid_banner_preset_id, resolve_banner_preset_key, BannerPresetBody};
+
+    #[test]
+    fn accepts_slug_ids_and_rejects_junk() {
+        for ok in ["aurora-teal", "gradient-dusk", "a", "x0123456789"] {
+            assert!(is_valid_banner_preset_id(ok), "{ok} should be valid");
+        }
+        let too_long = "z".repeat(41);
+        for bad in [
+            "",
+            "Aurora",
+            "has space",
+            "semi;colon",
+            "preset:teal",
+            "../x",
+            too_long.as_str(),
+        ] {
+            assert!(!is_valid_banner_preset_id(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn resolve_maps_to_sentinel_or_clears() {
+        let apply = BannerPresetBody {
+            preset: Some("aurora-rose".into()),
+        };
+        assert_eq!(
+            resolve_banner_preset_key(&apply).unwrap(),
+            Some("preset:aurora-rose".to_string())
+        );
+        // trims whitespace
+        let padded = BannerPresetBody {
+            preset: Some("  aurora-teal  ".into()),
+        };
+        assert_eq!(
+            resolve_banner_preset_key(&padded).unwrap(),
+            Some("preset:aurora-teal".to_string())
+        );
+        // null / empty clears
+        for clear in [None, Some(String::new()), Some("   ".into())] {
+            let body = BannerPresetBody { preset: clear };
+            assert_eq!(resolve_banner_preset_key(&body).unwrap(), None);
+        }
+        // malformed → 400
+        let bad = BannerPresetBody {
+            preset: Some("Bad Id".into()),
+        };
+        assert!(resolve_banner_preset_key(&bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod metadata_url_security_tests {
+    use super::{validate_metadata_url, StatusCode};
+
+    #[test]
+    fn allows_safe_or_empty_urls() {
+        for v in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("https://example.org/landing"),
+            Some("http://example.org"),
+            Some("mailto:admin@example.org"),
+        ] {
+            assert!(
+                validate_metadata_url("field", v).is_ok(),
+                "should allow {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dangerous_schemes_stored_xss() {
+        // Each of these would otherwise round-trip into an <a href> on a public page.
+        for v in [
+            "javascript:alert(document.cookie)",
+            "JavaScript:alert(1)", // scheme is case-insensitive
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "vbscript:msgbox(1)",
+        ] {
+            let err = validate_metadata_url("homepage", Some(v))
+                .expect_err(&format!("should reject {v}"));
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        }
+    }
 }

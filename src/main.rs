@@ -39,7 +39,6 @@ mod svc_registry;
 mod swrl;
 #[cfg(feature = "text-search")]
 mod text_search;
-mod vocabularies;
 
 #[derive(Parser, Debug)]
 #[command(name = "open-triplestore")]
@@ -115,7 +114,13 @@ struct Cli {
     #[arg(long, env = "BASE_URL", default_value = "http://localhost:7878")]
     base_url: String,
 
-    /// service-registry base URL for self-registration (discovery). Fail-soft:
+    /// Enable cross-app service discovery (opt-in). When set, self-register with the registry at
+    /// LD_REGISTRY_URL so siblings can resolve this store, and let the web UI resolve siblings too.
+    /// Off by default — a missing registry is fail-soft either way; this just makes it explicit.
+    #[arg(long, env = "LD_DISCOVERY", default_value = "false", value_parser = parse_lenient_bool)]
+    discovery: bool,
+
+    /// service-registry base URL, used only when --discovery/LD_DISCOVERY is set. Fail-soft:
     /// if it's unreachable the triplestore runs exactly as before.
     #[arg(long, env = "LD_REGISTRY_URL", default_value = "http://localhost:8500")]
     registry_url: String,
@@ -138,6 +143,12 @@ struct Cli {
     /// Enable in production behind TLS; leave off for plain-HTTP local development.
     #[arg(long, env = "SECURE_COOKIES", default_value_t = false)]
     secure_cookies: bool,
+
+    /// Serve the bundled web UI (frontend SPA) at `/`. On by default; set to
+    /// `false` (or pass `--serve-frontend false`) for a headless, API-only server
+    /// — SPARQL, Graph Store and the REST API are unaffected either way.
+    #[arg(long, env = "SERVE_FRONTEND", default_value_t = true, action = clap::ArgAction::Set)]
+    serve_frontend: bool,
 
     /// Directory for the Tantivy full-text index (default: {data_dir}/tantivy)
     #[cfg(feature = "text-search")]
@@ -225,6 +236,18 @@ fn print_banner() {
     println!();
 }
 
+/// Parse a lenient boolean for opt-in flags: accepts 1/true/yes/on and 0/false/no/off
+/// (case-insensitive), so both `LD_DISCOVERY=1` and `LD_DISCOVERY=true` work.
+fn parse_lenient_bool(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "expected a boolean (true/false/1/0/yes/no/on/off), got {other:?}"
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -262,8 +285,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Auth database at {:?}", db_path);
 
-    // Initialize the store
-    let store = store::TripleStore::open(&cli.data_dir)?;
+    // Initialize the store, auto-recovering from RocksDB corruption (e.g. an
+    // unclean shutdown that left "SST file is ahead of WALs") so the service comes
+    // back instead of crash-looping. See store::recovery.
+    let backup_dir = std::env::var("BACKUP_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| cli.data_dir.join("backups"));
+    let store = store::recovery::open_store_with_recovery(&cli.data_dir, &backup_dir)?;
     info!("Store opened at {:?}", cli.data_dir);
 
     // Load initial data if specified
@@ -418,13 +446,19 @@ async fn main() -> anyhow::Result<()> {
     info!("API at http://{}/api", addr);
     info!("Service description at http://{}/", addr);
 
-    // Best-effort self-registration with the service registry (fail-soft): advertise
-    // the linked-data base_url as "triplestore" so siblings resolve it via discovery.
-    svc_registry::spawn_registrar(
-        cli.base_url.clone(),
-        cli.registry_url.clone(),
-        cli.registry_token.clone(),
-    );
+    // Cross-app service discovery is opt-in (LD_DISCOVERY). When enabled, self-register the
+    // linked-data base_url as "triplestore" so siblings resolve it via the registry (fail-soft).
+    if cli.discovery {
+        svc_registry::spawn_registrar(
+            cli.base_url.clone(),
+            cli.registry_url.clone(),
+            cli.registry_token.clone(),
+        );
+    } else {
+        info!(
+            "service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)"
+        );
+    }
 
     server::run(
         store,
@@ -438,6 +472,7 @@ async fn main() -> anyhow::Result<()> {
         trusted_cidrs,
         cli.query_timeout_secs,
         cli.secure_cookies,
+        cli.serve_frontend,
         #[cfg(feature = "text-search")]
         text_index,
     )

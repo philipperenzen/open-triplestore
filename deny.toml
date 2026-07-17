@@ -18,11 +18,17 @@ ignore = [
     # (`saml` via samael, `alerting` via lettre, and their TLS/crypto stack). Tracked
     # for upgrade; the rsa "Marvin" advisory currently has no fixed upstream release.
     "RUSTSEC-2023-0071",  # rsa — Marvin timing side-channel (no upstream fix; via `saml`)
-    "RUSTSEC-2026-0141",  # TLS hostname verification (Boring TLS backend; via `alerting`)
     "RUSTSEC-2026-0049",  # rustls-webpki — certificate/CRL validation (transitive TLS)
     "RUSTSEC-2026-0098",  # rustls-webpki — name constraints (URI) (transitive TLS)
     "RUSTSEC-2026-0099",  # rustls-webpki — name constraints (wildcard) (transitive TLS)
     "RUSTSEC-2026-0104",  # rustls-webpki — reachable panic in CRL parsing (transitive TLS)
+    # quick-xml 0.37.5 DoS advisories. The fix is in quick-xml >= 0.41, but the vulnerable
+    # 0.37.5 is pinned transitively by the Oxigraph stack (oxrdfxml / sparesults, via
+    # oxigraph 0.4.11) — bumping our own direct `quick-xml` dep would leave Oxigraph's copy
+    # in the tree, so the advisory can't clear until Oxigraph upgrades. Tracked; revisit on
+    # the next Oxigraph bump.
+    "RUSTSEC-2026-0194",  # quick-xml — quadratic duplicate-attribute check (via oxigraph)
+    "RUSTSEC-2026-0195",  # quick-xml — NsReader namespace-decl memory-exhaustion (via oxigraph)
 ]
 
 [bans]
@@ -53,6 +59,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # quoted_printable (transitive via lettre, the optional `alerting` email stack)
+    # is 0BSD — OSI-approved, public-domain-equivalent, more permissive than MIT.
+    "0BSD",
     "ISC",
     "Zlib",
     "MPL-2.0",

@@ -1,3 +1,4 @@
+
 const API_BASE = '';
 
 // In-memory token storage (M-2: avoids localStorage XSS exposure).
@@ -491,12 +492,26 @@ export const browseTriples = (params) => {
   const qs = new URLSearchParams(params).toString();
   return request('GET', `/api/browse/triples?${qs}`);
 };
-export const browseResource = (iri, graph) => {
+// `opts` may be a bare graph IRI (back-compat) or an object carrying the same
+// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
+// Scope lets the graph view expand a resource within the active browse scope
+// (dataset/org + version pins) instead of the broad accessible set.
+export const browseResource = (iri, opts = {}) => {
   const qs = new URLSearchParams({ iri });
-  if (graph) qs.set('graph', graph);
+  const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
+  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
+    if (o[k]) qs.set(k, o[k]);
+  }
   return request('GET', `/api/browse/resource?${qs.toString()}`);
 };
 export const browseStats = () => request('GET', '/api/browse/stats');
+// Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
+// references (glTF/IFC/...), resolved from BOT/OMG/FOG/GeoSPARQL. Feeds the
+// dataset 3D & map viewer; optional root IRI scopes to one object + children.
+export const getViewerFeed = (datasetId, root = null) => {
+  const qs = root ? `?root=${encodeURIComponent(root)}` : '';
+  return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
+};
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.
@@ -558,14 +573,18 @@ export const datasetSparqlQuery = (datasetId, serviceSlug, query, version = null
 // Natural-language → SPARQL via any OpenAI-compatible LLM endpoint.
 // Generation only: the returned query is run through the normal scoped SPARQL endpoint,
 // so it passes the same authorization boundary as any user-typed query.
-export async function nlToSparql(question, schemaHint) {
+export async function nlToSparql(question, schemaHint, currentQuery = null) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${API_BASE}/api/llm/sparql`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ question, schema_hint: schemaHint || null }),
+    body: JSON.stringify({
+      question,
+      schema_hint: schemaHint || null,
+      current_query: (currentQuery && currentQuery.trim()) ? currentQuery : null,
+    }),
   });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
@@ -628,6 +647,43 @@ export async function llmChat(messages, model = null) {
     throw err;
   }
   return res.json();
+}
+
+// Streaming variant of llmChat. Calls `onEvent` for every server-sent event —
+// status / delta / round_reset / query / query_result — and resolves with the
+// terminal `done` payload (the same shape llmChat returns). Throws on transport
+// errors, on a terminal `error` event, and when the server doesn't actually
+// stream (older server, buffering proxy) — callers fall back to llmChat then.
+// Abort via `signal` to stop generation (closing the stream stops the server-side
+// turn as well).
+export async function llmChatStream(messages, { model = null, signal, onEvent } = {}) {
+  const token = getAccessToken();
+  const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}/api/llm/chat/stream`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({ messages, model }),
+    signal,
+  });
+  if (!res.ok) {
+    const msg = await extractErrorMessage(res);
+    const err = new ApiError(msg);
+    err.status = res.status;
+    throw err;
+  }
+  const contentType = res.headers.get('content-type') || '';
+  if (!res.body || !contentType.includes('text/event-stream')) {
+    throw new ApiError('streaming unavailable');
+  }
+  const { sseJsonEvents } = await import('./sse.js');
+  for await (const ev of sseJsonEvents(res.body)) {
+    if (ev?.type === 'done') return ev.response;
+    if (ev?.type === 'error') throw new ApiError(ev.message || 'chat failed');
+    onEvent?.(ev);
+  }
+  throw new ApiError('stream ended unexpectedly');
 }
 
 // SHACL
@@ -864,6 +920,10 @@ export async function uploadToGraph(graphIri, body, contentType, replace = false
  *   - `file`: the File/Blob (filename and content-type are read from it)
  *   - `targetGraph`: target graph IRI for triple-format files; for quad
  *      formats this only takes effect when `merge` is true.
+ *   - `graphRemap`: for quad formats (merge off), `{ embeddedIri: newTargetIri }`
+ *      re-homing each embedded graph to a different write target — used to move
+ *      embedded graphs under the dataset namespace so the server's per-graph
+ *      write boundary admits them (applied at write time, not a post-import MOVE).
  * `opts`:
  *   - `datasetId`: if set, every touched graph is registered with this dataset.
  *   - `replace`: drop touched graphs before insertion.
@@ -873,7 +933,7 @@ export async function uploadToGraph(graphIri, body, contentType, replace = false
  * Returns the server's BulkResponse (per-file status + aggregate counts).
  */
 export async function bulkImport(
-  entries: { file: File | Blob; filename?: string; targetGraph?: string; autoSplit?: boolean; replace?: boolean; graphRole?: string }[],
+  entries: { file: File | Blob; filename?: string; targetGraph?: string; autoSplit?: boolean; replace?: boolean; graphRole?: string; graphRemap?: Record<string, string> }[],
   opts: { datasetId?: string; replace?: boolean; merge?: boolean; defaultTargetGraph?: string; versionBump?: string } = {},
 ) {
   const fd = new FormData();
@@ -881,6 +941,7 @@ export async function bulkImport(
   const autoSplitFiles: string[] = [];
   const replaceFiles: string[] = [];
   const graphRoles: Record<string, string> = {};
+  const graphRemap: Record<string, Record<string, string>> = {};
   for (const e of entries) {
     const fname = e.filename || (e.file as File).name || 'upload.bin';
     fd.append('file', e.file, fname);
@@ -888,6 +949,7 @@ export async function bulkImport(
     if (e.autoSplit) autoSplitFiles.push(fname);
     if (e.replace) replaceFiles.push(fname);
     if (e.graphRole) graphRoles[fname] = e.graphRole;
+    if (e.graphRemap && Object.keys(e.graphRemap).length) graphRemap[fname] = e.graphRemap;
   }
   fd.append('meta', JSON.stringify({
     dataset_id: opts.datasetId,
@@ -898,6 +960,7 @@ export async function bulkImport(
     auto_split_files: autoSplitFiles,
     replace_files: replaceFiles,
     graph_roles: graphRoles,
+    graph_remap: graphRemap,
     version_bump: opts.versionBump,
   }));
 
@@ -1002,6 +1065,17 @@ export const getOrgBannerUrl = (orgId) => `${API_BASE}/api/organisations/${orgId
 export const uploadDatasetBanner = (datasetId, file) => uploadImage(`/api/datasets/${datasetId}/banner`, file);
 export const getDatasetBannerUrl = (datasetId) => `${API_BASE}/api/datasets/${datasetId}/banner`;
 
+// Banner presets — select a built-in animated/gradient banner instead of
+// uploading. Stored server-side as `banner_key = "preset:<id>"`; passing a
+// null/empty preset clears the banner.
+export const setOrgBannerPreset = (orgId, preset) =>
+  request('PUT', `/api/organisations/${orgId}/banner-preset`, { preset: preset ?? null });
+export const clearOrgBanner = (orgId) => setOrgBannerPreset(orgId, null);
+
+export const setDatasetBannerPreset = (datasetId, preset) =>
+  request('PUT', `/api/datasets/${datasetId}/banner-preset`, { preset: preset ?? null });
+export const clearDatasetBanner = (datasetId) => setDatasetBannerPreset(datasetId, null);
+
 // Assets
 export const listAssets = (datasetId) =>
   request('GET', `/api/datasets/${datasetId}/assets`);
@@ -1059,36 +1133,102 @@ export function isLoggedIn() {
   return !!getAccessToken();
 }
 
-// ── Data Model Registry ───────────────────────────────────────────────────────
+// ── Model Registry (OWL/RDFS ontologies and SKOS vocabularies) ─────────────────
+// Each entry carries a `kind` ("data-model" | "vocabulary"), auto-detected on upload.
 
-export const listDataModels = () => request('GET', '/api/data-models');
-export const createDataModel = (data) => request('POST', '/api/data-models', data);
-export const getDataModel = (id) => request('GET', `/api/data-models/${id}`);
-export const deleteDataModel = (id) => request('DELETE', `/api/data-models/${id}`);
-export const updateDataModel = (id, data) => request('PATCH', `/api/data-models/${id}`, data);
+export const listDataModels = () => request('GET', '/api/models');
 
-export const listDataModelVersions = (id) => request('GET', `/api/data-models/${id}/versions`);
-export const getDataModelVersion = (id, ver) => request('GET', `/api/data-models/${id}/versions/${ver}`);
-export const deleteDataModelVersion = (id, ver) => request('DELETE', `/api/data-models/${id}/versions/${ver}`);
-export const updateDataModelVersionNotes = (id, ver, notes) => request('PATCH', `/api/data-models/${id}/versions/${ver}`, { notes });
-export const stageDataModelVersion = (id, ver) => request('POST', `/api/data-models/${id}/versions/${ver}/stage`);
-export const publishDataModelVersion = (id, ver) => request('POST', `/api/data-models/${id}/versions/${ver}/publish`);
+// A prefix candidate derived from an on-platform registered model/vocabulary.
+// Shape lines up with PrefixCandidate in prefixService so the search panel can
+// merge these straight into its result list.
+export type PlatformPrefix = {
+  prefix: string;
+  namespace: string;
+  title?: string;
+  description?: string;
+  source: 'platform';
+  kind?: 'data-model' | 'vocabulary';
+};
+
+// Turn a model title (or id) into a short, valid prefix label: lowercase,
+// alnum/underscore, must start with a letter. Falls back to "ns" if nothing usable.
+function slugifyPrefix(raw: string): string {
+  const base = (raw || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const trimmed = base.replace(/^[^a-z]+/, '');
+  return (trimmed || base || 'ns').slice(0, 24);
+}
+
+/**
+ * On-platform prefixes derived from the model registry. For every registered
+ * model/vocabulary that declares a `namespace`, yields a prefix candidate whose
+ * label is slugified from the model title (falling back to its id). Best-effort:
+ * returns [] if the registry can't be loaded (e.g. anonymous user). De-duplicates
+ * by namespace and disambiguates colliding prefix labels with a numeric suffix.
+ */
+export async function listPlatformPrefixes(): Promise<PlatformPrefix[]> {
+  let models: any[];
+  try {
+    models = await listDataModels();
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(models)) return [];
+
+  const out: PlatformPrefix[] = [];
+  const seenNs = new Set<string>();
+  const usedPrefixes = new Set<string>();
+  for (const m of models) {
+    const namespace = (m?.namespace || '').trim();
+    if (!namespace || seenNs.has(namespace)) continue;
+    seenNs.add(namespace);
+
+    let prefix = slugifyPrefix(m?.title || m?.id || '');
+    if (usedPrefixes.has(prefix)) {
+      let i = 2;
+      while (usedPrefixes.has(`${prefix}${i}`)) i++;
+      prefix = `${prefix}${i}`;
+    }
+    usedPrefixes.add(prefix);
+
+    out.push({
+      prefix,
+      namespace,
+      title: m?.title || undefined,
+      description: m?.description || undefined,
+      source: 'platform',
+      kind: m?.kind === 'vocabulary' ? 'vocabulary' : 'data-model',
+    });
+  }
+  return out;
+}
+
+export const createDataModel = (data) => request('POST', '/api/models', data);
+export const getDataModel = (id) => request('GET', `/api/models/${id}`);
+export const deleteDataModel = (id) => request('DELETE', `/api/models/${id}`);
+export const updateDataModel = (id, data) => request('PATCH', `/api/models/${id}`, data);
+
+export const listDataModelVersions = (id) => request('GET', `/api/models/${id}/versions`);
+export const getDataModelVersion = (id, ver) => request('GET', `/api/models/${id}/versions/${ver}`);
+export const deleteDataModelVersion = (id, ver) => request('DELETE', `/api/models/${id}/versions/${ver}`);
+export const updateDataModelVersionNotes = (id, ver, notes) => request('PATCH', `/api/models/${id}/versions/${ver}`, { notes });
+export const stageDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/stage`);
+export const publishDataModelVersion = (id, ver) => request('POST', `/api/models/${id}/versions/${ver}/publish`);
 export const createDataModelDraft = (id, fromVer, targetVer) =>
-  request('POST', `/api/data-models/${id}/versions/${fromVer}/draft`, { target_version: targetVer });
+  request('POST', `/api/models/${id}/versions/${fromVer}/draft`, { target_version: targetVer });
 export const getDataModelDiff = (id, from, to) =>
-  request('GET', `/api/data-models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-export const getDataModelCollaborators = (id) => request('GET', `/api/data-models/${id}/collaborators`);
-export const getDataModelBranches = (id) => request('GET', `/api/data-models/${id}/branches`);
+  request('GET', `/api/models/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+export const getDataModelCollaborators = (id) => request('GET', `/api/models/${id}/collaborators`);
+export const getDataModelBranches = (id) => request('GET', `/api/models/${id}/branches`);
 export const getDataModelCommits = (id, branch) =>
-  request('GET', `/api/data-models/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
+  request('GET', `/api/models/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
 export const createDataModelBranch = (id, branch, fromVersion, targetVersion) =>
-  request('POST', `/api/data-models/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
+  request('POST', `/api/models/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
 export const previewDataModelMerge = (id, from, into) =>
-  request('GET', `/api/data-models/${id}/merge/preview?from=${encodeURIComponent(from)}&into=${encodeURIComponent(into)}`);
-export const mergeDataModel = (id, body) => request('POST', `/api/data-models/${id}/merge`, body);
+  request('GET', `/api/models/${id}/merge/preview?from=${encodeURIComponent(from)}&into=${encodeURIComponent(into)}`);
+export const mergeDataModel = (id, body) => request('POST', `/api/models/${id}/merge`, body);
 /** Phase 6 — stage/publish/deprecate a single subgraph of a version. */
 export const subgraphActionDataModel = (id, ver, action: 'stage' | 'publish' | 'deprecate', graph) =>
-  request('POST', `/api/data-models/${id}/versions/${ver}/subgraph/${action}`, { graph });
+  request('POST', `/api/models/${id}/versions/${ver}/subgraph/${action}`, { graph });
 
 export function uploadDataModelVersion(id, file, versionOverride, notes, merge, isPublic) {
   const token = getAccessToken();
@@ -1100,7 +1240,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
   if (notes) form.append('notes', notes);
   if (merge) form.append('merge', 'true');
   form.append('is_public', isPublic ? 'true' : 'false');
-  return fetch(`/api/data-models/${id}/versions`, { method: 'POST', headers, body: form })
+  return fetch(`/api/models/${id}/versions`, { method: 'POST', headers, body: form })
     .then(async (res) => {
       if (!res.ok) {
         const msg = await res.text().then(t => {
@@ -1115,68 +1255,7 @@ export function uploadDataModelVersion(id, file, versionOverride, notes, merge, 
 }
 
 export function getDataModelVersionDataUrl(id, ver, format, graph) {
-  let url = `/api/data-models/${id}/versions/${ver}/data?format=${format || 'trig'}`;
-  if (graph) url += `&graph=${encodeURIComponent(graph)}`;
-  return url;
-}
-
-// ── Vocabulary Registry ───────────────────────────────────────────────────────
-
-export const listVocabularies = () => request('GET', '/api/vocabularies');
-export const createVocabulary = (data) => request('POST', '/api/vocabularies', data);
-export const getVocabulary = (id) => request('GET', `/api/vocabularies/${id}`);
-export const deleteVocabulary = (id) => request('DELETE', `/api/vocabularies/${id}`);
-export const updateVocabulary = (id, data) => request('PATCH', `/api/vocabularies/${id}`, data);
-
-export const listVocabularyVersions = (id) => request('GET', `/api/vocabularies/${id}/versions`);
-export const getVocabularyVersion = (id, ver) => request('GET', `/api/vocabularies/${id}/versions/${ver}`);
-export const deleteVocabularyVersion = (id, ver) => request('DELETE', `/api/vocabularies/${id}/versions/${ver}`);
-export const updateVocabularyVersionNotes = (id, ver, notes) => request('PATCH', `/api/vocabularies/${id}/versions/${ver}`, { notes });
-export const stageVocabularyVersion = (id, ver) => request('POST', `/api/vocabularies/${id}/versions/${ver}/stage`);
-export const publishVocabularyVersion = (id, ver) => request('POST', `/api/vocabularies/${id}/versions/${ver}/publish`);
-export const createVocabularyDraft = (id, fromVer, targetVer) =>
-  request('POST', `/api/vocabularies/${id}/versions/${fromVer}/draft`, { target_version: targetVer });
-export const getVocabularyDiff = (id, from, to) =>
-  request('GET', `/api/vocabularies/${id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-export const getVocabularyCollaborators = (id) => request('GET', `/api/vocabularies/${id}/collaborators`);
-export const getVocabularyBranches = (id) => request('GET', `/api/vocabularies/${id}/branches`);
-export const getVocabularyCommits = (id, branch) =>
-  request('GET', `/api/vocabularies/${id}/commits${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`);
-export const createVocabularyBranch = (id, branch, fromVersion, targetVersion) =>
-  request('POST', `/api/vocabularies/${id}/branches`, { branch, from_version: fromVersion, target_version: targetVersion || undefined });
-export const previewVocabularyMerge = (id, from, into) =>
-  request('GET', `/api/vocabularies/${id}/merge/preview?from=${encodeURIComponent(from)}&into=${encodeURIComponent(into)}`);
-export const mergeVocabulary = (id, body) => request('POST', `/api/vocabularies/${id}/merge`, body);
-/** Phase 6 — stage/publish/deprecate a single subgraph of a version. */
-export const subgraphActionVocabulary = (id, ver, action: 'stage' | 'publish' | 'deprecate', graph) =>
-  request('POST', `/api/vocabularies/${id}/versions/${ver}/subgraph/${action}`, { graph });
-
-export function uploadVocabularyVersion(id, file, versionOverride, notes, merge, isPublic) {
-  const token = getAccessToken();
-  const headers = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const form = new FormData();
-  form.append('file', file);
-  if (versionOverride) form.append('version', versionOverride);
-  if (notes) form.append('notes', notes);
-  if (merge) form.append('merge', 'true');
-  form.append('is_public', isPublic ? 'true' : 'false');
-  return fetch(`/api/vocabularies/${id}/versions`, { method: 'POST', headers, body: form })
-    .then(async (res) => {
-      if (!res.ok) {
-        const msg = await res.text().then(t => {
-          try { return JSON.parse(t).message || t; } catch { return t; }
-        });
-        const err = new ApiError(msg);
-        err.status = res.status;
-        throw err;
-      }
-      return res.json();
-    });
-}
-
-export function getVocabularyVersionDataUrl(id, ver, format, graph) {
-  let url = `/api/vocabularies/${id}/versions/${ver}/data?format=${format || 'trig'}`;
+  let url = `/api/models/${id}/versions/${ver}/data?format=${format || 'trig'}`;
   if (graph) url += `&graph=${encodeURIComponent(graph)}`;
   return url;
 }

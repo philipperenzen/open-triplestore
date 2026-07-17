@@ -1,5 +1,11 @@
 //! REST handlers for managing endpoint ACL rules, graph ACL rules, and
 //! triple security labels.  All routes require admin privileges.
+//!
+//! Every mutating action here changes access policy, so each success is written
+//! to the append-only audit trail (`AclGranted` / `AclRevoked` /
+//! `EndpointAclChanged` / `TripleLabelChanged`) — granting another principal
+//! access to a private graph, or locking a user out with a deny rule, must be
+//! reconstructable after the fact.
 
 use axum::{
     extract::{Path, Query, State},
@@ -10,6 +16,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
 use super::middleware::AuthenticatedUser;
 use crate::server::AppState;
 
@@ -67,7 +74,22 @@ pub async fn create_endpoint_acl_rule(
         priority,
         &user.user_id,
     ) {
-        Ok(rule) => (StatusCode::CREATED, Json(rule)).into_response(),
+        Ok(rule) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::EndpointAclChanged, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("endpoint_acl", id.clone())
+                    .action("create")
+                    .details(serde_json::json!({
+                        "principal_type": body.principal_type.clone(),
+                        "principal_id": body.principal_id.clone(),
+                        "path_pattern": body.path_pattern.clone(),
+                        "http_methods": methods,
+                        "effect": body.effect.clone(),
+                    })),
+            );
+            (StatusCode::CREATED, Json(rule)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),
@@ -79,7 +101,7 @@ pub async fn create_endpoint_acl_rule(
 /// PUT /api/admin/acl/endpoints/:id
 pub async fn update_endpoint_acl_rule(
     State(state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
     Json(body): Json<UpdateEndpointAclRule>,
 ) -> impl IntoResponse {
@@ -92,7 +114,20 @@ pub async fn update_endpoint_acl_rule(
         &body.effect,
         priority,
     ) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::EndpointAclChanged, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("endpoint_acl", id.clone())
+                    .action("update")
+                    .details(serde_json::json!({
+                        "path_pattern": body.path_pattern.clone(),
+                        "http_methods": methods,
+                        "effect": body.effect.clone(),
+                    })),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),
@@ -104,11 +139,19 @@ pub async fn update_endpoint_acl_rule(
 /// DELETE /api/admin/acl/endpoints/:id
 pub async fn delete_endpoint_acl_rule(
     State(state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.auth_db.delete_endpoint_acl_rule(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::EndpointAclChanged, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("endpoint_acl", id.clone())
+                    .action("delete"),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),
@@ -166,7 +209,21 @@ pub async fn grant_graph_permission(
         &body.permission,
         &user.user_id,
     ) {
-        Ok(rule) => (StatusCode::CREATED, Json(rule)).into_response(),
+        Ok(rule) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::AclGranted, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("graph_acl", id.clone())
+                    .action("grant")
+                    .details(serde_json::json!({
+                        "graph_iri": body.graph_iri.clone(),
+                        "principal_type": body.principal_type.clone(),
+                        "principal_id": body.principal_id.clone(),
+                        "permission": body.permission.clone(),
+                    })),
+            );
+            (StatusCode::CREATED, Json(rule)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),
@@ -178,11 +235,19 @@ pub async fn grant_graph_permission(
 /// DELETE /api/admin/acl/graphs/:id
 pub async fn revoke_graph_permission(
     State(state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.auth_db.revoke_graph_permission(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::AclRevoked, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("graph_acl", id.clone())
+                    .action("revoke"),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),
@@ -229,7 +294,7 @@ pub async fn list_triple_security_labels(
 /// POST /api/admin/acl/triples
 pub async fn create_triple_security_label(
     State(state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<CreateTripleLabel>,
 ) -> impl IntoResponse {
     let id = Uuid::new_v4().to_string();
@@ -241,7 +306,21 @@ pub async fn create_triple_security_label(
         &body.graph_iri,
         &body.label_graph_iri,
     ) {
-        Ok(label) => (StatusCode::CREATED, Json(label)).into_response(),
+        Ok(label) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::TripleLabelChanged, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("triple_label", id.clone())
+                    .action("create")
+                    .details(serde_json::json!({
+                        "graph_iri": body.graph_iri.clone(),
+                        "subject_iri": body.subject_iri.clone(),
+                        "predicate_iri": body.predicate_iri.clone(),
+                        "label_graph_iri": body.label_graph_iri.clone(),
+                    })),
+            );
+            (StatusCode::CREATED, Json(label)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),
@@ -253,11 +332,19 @@ pub async fn create_triple_security_label(
 /// DELETE /api/admin/acl/triples/:id
 pub async fn delete_triple_security_label(
     State(state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.auth_db.delete_triple_security_label(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            state.audit.log(
+                AuditEventBuilder::new(AuditEventType::TripleLabelChanged, AuditOutcome::Success)
+                    .actor_id(user.user_id.clone())
+                    .resource("triple_label", id.clone())
+                    .action("delete"),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("{{\"error\":\"{e}\"}}"),

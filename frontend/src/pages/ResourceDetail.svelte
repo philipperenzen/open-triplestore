@@ -3,10 +3,86 @@
   import { navigate } from '../lib/router/index.js';
   import { location } from '../lib/locationStore.js';
   import { shortenIRI, graphResultsToElements } from '../lib/rdf-utils.js';
+  import { safeExternalUrl, safeImageUrl } from '../lib/safeUrl.js';
   import RdfTerm from '../components/RdfTerm.svelte';
   import GraphCanvas from '../components/GraphCanvas.svelte';
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
+  import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
+  import { lookupTerm } from '../lib/ontology/termDictionary.js';
   import GeoPreview from '../components/GeoPreview.svelte';
+  import { modelFormatFromUrl, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
+
+  // Model3D pulls the heavy three.js chunk; this page is in the main bundle,
+  // so load the viewer only when the resource actually has a 3D model.
+  const model3d = () => import('../components/viewer/Model3D.svelte');
+
+  // GeoSPARQL/OMG geometry often hangs off a *named* node
+  // (wb:Boog geo:hasGeometry wb:geom-boog; wb:geom-boog geo:asWKT "...").
+  // browseResource only inlines blank nodes, so follow hasGeometry objects one
+  // hop and harvest their WKT + model-file values too.
+  let hopWkts = [];
+  let hopModels = [];
+  async function followGeometryHops(rows) {
+    // Snapshot the IRI: the router reuses this component across navigations,
+    // so a slow response for the previous resource must not overwrite state.
+    const forIri = iri;
+    hopWkts = [];
+    hopModels = [];
+    const targets = rows
+      .filter((r) => isGeometryPredicate(r.p?.value))
+      .map((r) => r.o)
+      .filter((o) => o?.type === 'uri' || o?.type === 'iri')
+      .map((o) => o.value)
+      .slice(0, 4);
+    if (!targets.length) return;
+    const results = await Promise.all(
+      targets.map((t) => browseResource(t, graphScope || undefined).catch(() => null))
+    );
+    if (forIri !== iri) return; // navigated away while loading
+    const wkts = [];
+    const models = [];
+    const scanRow = (r) => {
+      if (isWktLiteral(r.o)) wkts.push(r.o.value);
+      const v = r.o?.value;
+      if (typeof v === 'string') {
+        const format = modelFormatFromUrl(v);
+        if (format) models.push({ id: v, label: shortenIRI(r.p?.value || ''), url: v, format });
+      }
+    };
+    for (const res of results) {
+      if (!res) continue;
+      for (const r of res.outgoing || []) scanRow(r);
+      for (const rows2 of Object.values(res.bnodes || {})) for (const r of rows2 || []) scanRow(r);
+    }
+    hopWkts = wkts;
+    hopModels = models;
+  }
+  $: followGeometryHops(outgoing);
+
+  $: allWkts = [...featuredWkts, ...hopWkts.filter((w) => !featuredWkts.includes(w))];
+  $: allModels = [
+    ...featuredModels,
+    ...hopModels.filter((m) => !featuredModels.some((f) => f.url === m.url)),
+  ];
+
+  // Real-world footprint for the map's "to scale" toggle, measured from the
+  // resource's own 3D model (0 hides the toggle - no fabricated sizes).
+  let modelMeters = 0;
+  async function measureModel(models) {
+    const forIri = iri; // see followGeometryHops: guard against stale loads
+    modelMeters = 0;
+    if (!models.length) return;
+    try {
+      const { loadModel, realWorldMeters } = await import('../lib/viewer/models');
+      const group = await loadModel(models[0].url, models[0].format);
+      if (forIri !== iri) return;
+      modelMeters = Math.round(realWorldMeters(group, 0));
+    } catch {
+      if (forIri !== iri) return;
+      modelMeters = 0;
+    }
+  }
+  $: measureModel(allModels);
   import Select from '../components/Select.svelte';
   import { t as i18nT } from 'svelte-i18n';
   import {
@@ -18,6 +94,7 @@
   import { tick } from 'svelte';
   import { detectValueKind, datatypeLabel } from '../lib/ontology/valueType.js';
   import { prefixForNamespace, lookupNamespacePrefix } from '../lib/ontology/prefixService.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   const isIri = (term) => term && (term.type === 'uri' || term.type === 'iri');
   const langOf = (term) => term && (term['xml:lang'] || term.language || term.lang || '');
@@ -74,6 +151,18 @@
 
   let iri = '';
   let graphScope = '';
+
+  // Bundled vocabulary definition for this IRI (DCAT/OWL/SKOS/…/OTS) — shown as a
+  // prominent card when the resource is a known linked-data term, even if the
+  // user's own data does not carry the vocabulary triples. Null otherwise.
+  let vocabMeta = null;
+  async function loadVocabMeta(i) {
+    vocabMeta = null;
+    if (!i || i.startsWith('_:')) return;
+    const m = await lookupTerm(i);
+    if (i === iri) vocabMeta = m;
+  }
+  $: loadVocabMeta(iri);
   let data = null;
   let error = '';
   let loading = false;
@@ -217,11 +306,10 @@
   }
 
   async function copyIri() {
-    try {
-      await navigator.clipboard.writeText(iri);
+    if (await copyToClipboard(iri)) {
       copied = true;
       setTimeout(() => (copied = false), 1500);
-    } catch {}
+    }
   }
 
   // Svelte action: invoke callback on a click outside the node.
@@ -330,6 +418,33 @@
   // A WKT literal, identified by datatype or by its leading geometry keyword.
   const isWktLiteral = (t) =>
     t?.type === 'literal' && (t.datatype === GEO_WKT_DATATYPE || WKT_RE.test(t.value || ''));
+
+  // 3D model / BIM references on this resource (or its blank-node closure):
+  // any object value that is a loadable model URL (glb/gltf/stl — the FOG
+  // pattern omg:hasGeometry/fog:asGltf…), plus an IFC GlobalId if present.
+  $: featuredModels = (() => {
+    const seen = new Set();
+    const out = [];
+    const scan = (r) => {
+      const v = r.o?.value;
+      if (typeof v !== 'string' || seen.has(v)) return;
+      const format = modelFormatFromUrl(v);
+      if (format) {
+        seen.add(v);
+        out.push({ id: v, label: shortenIRI(r.p?.value || ''), url: v, format });
+      }
+    };
+    for (const r of outgoing) scan(r);
+    for (const rows of Object.values(bnodes)) for (const r of (rows || [])) scan(r);
+    return out;
+  })();
+
+  $: featuredIfcGuid = (() => {
+    const isGuidPred = (r) => isIfcGuidPredicate(r.p?.value);
+    for (const r of outgoing) if (isGuidPred(r)) return r.o?.value;
+    for (const rows of Object.values(bnodes)) for (const r of (rows || [])) if (isGuidPred(r)) return r.o?.value;
+    return null;
+  })();
 
   $: featuredWkts = (() => {
     const seen = new Set();
@@ -600,6 +715,12 @@
   {#if loading}
     <div class="card"><p class="loading-text">{$i18nT('pages.resource.loadingResource')}</p></div>
   {:else if data}
+    {#if vocabMeta}
+      <div class="card vocab-def-card">
+        <h3 class="vocab-def-title">{$i18nT('pages.resource.vocabularyDefinition')}</h3>
+        <TermDefinitionCard {iri} meta={vocabMeta} variant="rich" />
+      </div>
+    {/if}
     <!-- Tabs -->
     <div class="tabs">
       <button class="tab" class:tab-active={activeTab === 'overview'} on:click={() => (activeTab = 'overview')}>
@@ -655,10 +776,29 @@
       {/if}
 
       <!-- Featured visuals (geo / images / links) -->
-      {#if featuredWkts.length > 0}
+      {#if allWkts.length > 0}
         <div class="card">
           <h3><MapPin size={14} /> {$i18nT('pages.resource.geometry')}</h3>
-          <GeoPreview wkts={featuredWkts} />
+          <GeoPreview wkts={allWkts} scaleMeters={modelMeters} />
+        </div>
+      {/if}
+
+      {#if allModels.length > 0}
+        <div class="card">
+          <h3><Boxes size={14} /> {$i18nT('viewer.model3dBim')}</h3>
+          {#await model3d() then mod}
+            <svelte:component this={mod.default} refs={[allModels[0]]} height="260px" />
+          {/await}
+          <div class="bim-facts">
+            {#if featuredIfcGuid}
+              <span class="bim-fact" title="IFC GlobalId">IFC GlobalId <code>{featuredIfcGuid}</code></span>
+            {/if}
+            {#each allModels as m}
+              <a class="bim-fact" href={m.url} target="_blank" rel="noopener" title={m.url}>
+                {FORMAT_LABELS[m.format]} ↗
+              </a>
+            {/each}
+          </div>
         </div>
       {/if}
 
@@ -667,8 +807,9 @@
           <h3><ImageIcon size={14} /> {$i18nT('pages.resource.images')}</h3>
           <div class="img-strip">
             {#each featuredImages as src}
-              <a href={src} target="_blank" rel="noopener" title={src}>
-                <img src={src} alt="" loading="lazy" on:error={(e) => { /** @type {HTMLElement} */ (e.currentTarget).style.display = 'none'; }} />
+              {@const safeSrc = safeImageUrl(src)}
+              <a href={safeSrc} target="_blank" rel="noopener" title={src}>
+                <img src={safeSrc} alt="" loading="lazy" on:error={(e) => { /** @type {HTMLElement} */ (e.currentTarget).style.display = 'none'; }} />
               </a>
             {/each}
           </div>
@@ -680,7 +821,7 @@
           <h3><Link2 size={14} /> {$i18nT('pages.resource.links')}</h3>
           <div class="link-chips">
             {#each featuredLinks as href}
-              <a class="link-chip" href={href} target="_blank" rel="noopener" title={href}>
+              <a class="link-chip" href={safeExternalUrl(href)} target="_blank" rel="noopener" title={href}>
                 {shortenIRI(href)}
               </a>
             {/each}
@@ -1055,6 +1196,8 @@
 
   /* Header card */
   .resource-header { background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%); }
+  .vocab-def-card { border-left: 3px solid #6366f1; }
+  .vocab-def-title { margin: 0 0 0.5rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #6366f1; }
   .header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .min-w-0 { min-width: 0; }
   .short-iri { font-size: 0.8rem; color: #6a5acd; margin-bottom: 0.25rem; font-weight: 500; }
@@ -1160,6 +1303,25 @@
   .empty-state { display: flex; gap: 0.75rem; align-items: flex-start; padding: 1rem; background: #fffbe6; border: 1px solid #ffe58f; color: #614700; }
   .empty-state strong { display: block; margin-bottom: 0.25rem; }
   .empty-state .muted { margin: 0 0 0.5rem; }
+
+  .bim-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    align-items: center;
+  }
+  .bim-fact {
+    font-size: 0.74rem;
+    padding: 2px 10px;
+    border-radius: 99px;
+    border: 1px solid var(--line-soft, #e5e9ee);
+    background: var(--bg-subtle, #f8fafc);
+    color: var(--muted, #64748b);
+    text-decoration: none;
+  }
+  .bim-fact code { font-size: 0.72rem; color: var(--ink-900, #0f172a); }
+  a.bim-fact:hover { border-color: var(--brand-500, #2f88d8); color: var(--brand-600, #1d6fb8); }
 
   .img-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .img-strip a { display: inline-block; }

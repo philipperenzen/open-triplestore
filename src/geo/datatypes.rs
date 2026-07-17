@@ -3,11 +3,48 @@
 //! Supports the `geo:wktLiteral` datatype as defined in GeoSPARQL 1.1,
 //! including optional CRS URI prefix: `<http://...crs...> POINT(0 0)`
 
+use dashmap::DashMap;
 use geos::{Geom, Geometry as GeosGeometry};
 use oxrdf::{Literal, NamedNode, Term};
+use std::sync::OnceLock;
 use tracing::trace;
 
 use super::vocabulary;
+
+// Process-wide WKT → WKB cache. Profiling (callgrind) shows GeoSPARQL relation
+// queries are dominated by **WKT parsing** (`strtod` per coordinate +
+// `geos::io::StringTokenizer`), not the geometric computation — and a relation
+// query with a constant geometry re-parses that same literal on every candidate
+// binding. We memoise the parse as **WKB bytes**, not a `geos::Geometry`: a
+// `Vec<u8>` carries no GEOS context, so (unlike caching the geometry) it drops
+// safely on any thread at teardown and can be shared process-wide. Decoding WKB
+// skips the `strtod`/tokeniser hot path; misses pay one `to_wkb`, amortised across
+// repeated bindings and queries over the same geometry.
+fn wkb_cache() -> &'static DashMap<String, Vec<u8>> {
+    static CACHE: OnceLock<DashMap<String, Vec<u8>>> = OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
+}
+/// Cap the cache; once full, new geometries simply aren't memoised (still parsed).
+const WKB_CACHE_CAP: usize = 200_000;
+
+/// Parse a WKT string into a geometry, memoised process-wide as WKB.
+fn parse_wkt_cached(wkt_str: &str) -> Option<GeosGeometry> {
+    let cache = wkb_cache();
+    // Clone the bytes out of the map so the shard lock isn't held during decode.
+    if let Some(wkb) = cache.get(wkt_str).map(|r| r.value().clone()) {
+        if let Ok(g) = GeosGeometry::new_from_wkb(&wkb) {
+            return Some(g);
+        }
+        // Decode failure: fall through and re-parse from WKT.
+    }
+    let g = GeosGeometry::new_from_wkt(wkt_str).ok()?;
+    if cache.len() < WKB_CACHE_CAP {
+        if let Ok(wkb) = g.to_wkb() {
+            cache.insert(wkt_str.to_string(), wkb);
+        }
+    }
+    Some(g)
+}
 
 /// Parse a `geo:wktLiteral` from an oxrdf Term into a GEOS Geometry.
 ///
@@ -24,19 +61,28 @@ pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
     // Check the datatype
     let datatype = literal.datatype();
     let is_wkt = datatype.as_str() == vocabulary::WKT_LITERAL;
+    let is_gml = datatype.as_str() == vocabulary::GML_LITERAL;
     let is_string = datatype.as_str() == "http://www.w3.org/2001/XMLSchema#string";
 
-    // Accept geo:wktLiteral or plain string (for convenience)
-    if !is_wkt && !is_string {
+    // Accept geo:wktLiteral, geo:gmlLiteral, or a plain string (for convenience).
+    if !is_wkt && !is_gml && !is_string {
         return None;
     }
 
     let value = literal.value();
+
+    // GML literals are translated to WKT first, then parsed by the same GEOS path.
+    if is_gml {
+        let wkt = super::gml::gml_to_wkt(value)?;
+        trace!("Parsing GML→WKT: {}", wkt);
+        return parse_wkt_cached(&wkt);
+    }
+
     let wkt_str = extract_wkt(value);
 
     trace!("Parsing WKT: {}", wkt_str);
 
-    GeosGeometry::new_from_wkt(wkt_str).ok()
+    parse_wkt_cached(wkt_str)
 }
 
 /// Extract the WKT portion from a geo:wktLiteral value,
@@ -44,7 +90,7 @@ pub fn parse_wkt_literal(term: &Term) -> Option<GeosGeometry> {
 ///
 /// Input: `<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(1 2)`
 /// Output: `POINT(1 2)`
-fn extract_wkt(value: &str) -> &str {
+pub fn extract_wkt(value: &str) -> &str {
     let trimmed = value.trim();
     if trimmed.starts_with('<') {
         // Find the closing '>' and skip past it

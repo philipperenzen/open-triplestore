@@ -24,10 +24,16 @@ hex       = "0.4"
 # Utilities
 tracing   = "0.1"
 anyhow    = "1"
+# Data-parallel execution for the partitioned (sharded) query layer.
+rayon     = "1"
 
 [dev-dependencies]
 criterion  = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "hash_join"
+harness = false
+
+[[bench]]
+name = "parallel"
 harness = false

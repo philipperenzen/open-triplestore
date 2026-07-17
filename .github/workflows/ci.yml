@@ -1,13 +1,33 @@
 name: CI
 
 on:
+  # `develop` is intentionally NOT in this push list: every change reaches it via a
+  # PR that already runs CI, and the develop→main release PR runs it again — keeping
+  # `develop` here would fire a second, identical run on every push while that PR is
+  # open. PRs (below) cover all branches.
   push:
-    branches: [main, master]
+    branches: [main, master, 'release/**']
   pull_request:
+
+# Collapse superseded runs: a new push/PR-update on the same ref cancels the
+# in-flight one. push (refs/heads/*) and PR (refs/pull/*/merge) have distinct refs,
+# so a push never cancels a PR's required check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The `--all-features` debug build of every test binary fills the runner's small
+  # disk ("No space left on device"; the "ld terminated with signal 7 [Bus error]"
+  # crash is the same thing — a bus error from mmap on a full disk). Shrink target/:
+  # line-tables-only debuginfo (keeps file:line in backtraces) and no incremental
+  # artifacts. The heavy jobs additionally reclaim ~25 GB of preinstalled runner
+  # tooling in a "Free up disk space" step.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   backend:
@@ -15,6 +35,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Reclaim ~25 GB of preinstalled tooling the Rust build doesn't need, so the
+      # `--all-features` build of all test binaries doesn't run the disk out.
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
 
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
@@ -43,15 +74,41 @@ jobs:
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
-      # obvious in the CI summary.
+      # obvious in the CI summary. The `security` filter yields a "0 passed; N
+      # filtered out" line for every binary that has no security tests (the
+      # conformance suites, etc.) — that is expected. What is NOT acceptable is the
+      # filter matching *nothing at all* (e.g. after a rename), which `cargo test`
+      # would still exit 0 on. The guard below fails the job if too few security
+      # tests actually ran, so the suite can never be silently skipped.
       - name: Security regression tests
-        run: cargo test --all-features --locked security
+        shell: bash
+        run: |
+          set -o pipefail
+          out=$(cargo test --all-features --locked security 2>&1)
+          echo "$out"
+          passed=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
+          echo "==> security-named tests passed across all binaries: $passed"
+          if [ "$passed" -lt 40 ]; then
+            echo "::error::Expected at least 40 security tests to run, but only $passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
+            exit 1
+          fi
 
   conformance:
     name: Conformance suites
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Reclaim ~25 GB of preinstalled tooling so the `--all-features` conformance
+      # test binaries don't run the disk out (see the backend job).
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
 
       - name: Install system dependencies
         run: |

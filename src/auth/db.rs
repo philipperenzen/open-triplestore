@@ -258,6 +258,7 @@ pub struct AuthDb {
     /// Short-lived cache for `get_accessible_graph_iris`, keyed by user_id
     /// (`None` = anonymous). /browse hits this path many times per second; the
     /// uncached path does two SELECTs + a HashSet join each call.
+    #[allow(clippy::type_complexity)] // a cache tuple; a type alias would obscure it
     accessible_graphs_cache: Mutex<HashMap<Option<String>, (Instant, Arc<AccessibleGraphs>)>>,
 }
 
@@ -892,6 +893,11 @@ impl AuthDb {
             "ALTER TABLE validation_pipelines ADD COLUMN inferred_target_graph TEXT",
             "ALTER TABLE validation_pipelines ADD COLUMN results_target_kind TEXT NOT NULL DEFAULT 'none'",
             "ALTER TABLE validation_pipelines ADD COLUMN results_target_graph TEXT",
+            // Refresh-token rotation families: every token minted from one login shares
+            // a family id, so reuse-detection can revoke just that session instead of
+            // every session the user has (which logged people out of their other
+            // browsers/tabs). NULL on rows created before this column existed.
+            "ALTER TABLE refresh_tokens ADD COLUMN family_id TEXT",
         ];
         for sql in &upgrades {
             let _ = conn.execute_batch(sql); // ignore "duplicate column" / already-run errors
@@ -1054,6 +1060,7 @@ impl AuthDb {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // flat profile fields; a struct adds churn
     pub fn update_user_profile(
         &self,
         id: &str,
@@ -1347,12 +1354,13 @@ impl AuthDb {
         user_id: &str,
         token_hash: &str,
         expires_at: &str,
+        family_id: &str,
     ) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?1,?2,?3,?4,?5)",
-            params![id, user_id, token_hash, expires_at, now],
+            "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at, family_id) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, user_id, token_hash, expires_at, now, family_id],
         )?;
         Ok(())
     }
@@ -1363,21 +1371,42 @@ impl AuthDb {
     ) -> anyhow::Result<Option<RefreshToken>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, user_id, token_hash, expires_at, created_at, revoked FROM refresh_tokens WHERE token_hash = ?1",
+            "SELECT id, user_id, token_hash, expires_at, created_at, revoked, family_id FROM refresh_tokens WHERE token_hash = ?1",
             params![token_hash],
-            |row| {
-                Ok(RefreshToken {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    token_hash: row.get(2)?,
-                    expires_at: row.get(3)?,
-                    created_at: row.get(4)?,
-                    revoked: row.get::<_, i32>(5)? != 0,
-                })
-            },
+            Self::map_refresh_token_row,
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// The newest still-valid token in a rotation family, if any. Used by the
+    /// refresh handler to absorb benign concurrent-refresh races (multiple
+    /// tabs/the session-restore thundering herd replaying the just-rotated cookie):
+    /// as long as the session still has a live head, the replay rotates from it
+    /// instead of being flagged as token theft.
+    pub fn get_active_family_head(&self, family_id: &str) -> anyhow::Result<Option<RefreshToken>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT id, user_id, token_hash, expires_at, created_at, revoked, family_id \
+             FROM refresh_tokens WHERE family_id = ?1 AND revoked = 0 \
+             ORDER BY created_at DESC LIMIT 1",
+            params![family_id],
+            Self::map_refresh_token_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn map_refresh_token_row(row: &rusqlite::Row) -> rusqlite::Result<RefreshToken> {
+        Ok(RefreshToken {
+            id: row.get(0)?,
+            user_id: row.get(1)?,
+            token_hash: row.get(2)?,
+            expires_at: row.get(3)?,
+            created_at: row.get(4)?,
+            revoked: row.get::<_, i32>(5)? != 0,
+            family_id: row.get(6)?,
+        })
     }
 
     pub fn revoke_refresh_token(&self, id: &str) -> anyhow::Result<()> {
@@ -1385,6 +1414,18 @@ impl AuthDb {
         conn.execute(
             "UPDATE refresh_tokens SET revoked = 1 WHERE id = ?1",
             params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke every token in one rotation family (i.e. one session). This is the
+    /// blast radius for refresh-token reuse: a stolen/replayed chain kills only
+    /// that session, leaving the user's other browsers/devices logged in.
+    pub fn revoke_refresh_token_family(&self, family_id: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?1",
+            params![family_id],
         )?;
         Ok(())
     }
@@ -2027,6 +2068,7 @@ impl AuthDb {
 
     // ─── Dataset CRUD ─────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)] // flat dataset columns; a struct adds churn
     pub fn create_dataset(
         &self,
         id: &str,
@@ -2691,6 +2733,34 @@ impl AuthDb {
                     best = stronger(best, scope_membership_role(org_role, dataset.visibility));
                 }
                 Ok(best)
+            }
+        }
+    }
+
+    /// Whether `user_id` may create/own a resource under the owner
+    /// (`owner_type`, `owner_id`): the user themselves, or an organisation/group
+    /// they belong to (directly, or via the group's parent org). Platform admins
+    /// bypass this at the call site. Prevents forging `owner_id` to impersonate
+    /// another user or attribute a resource to a foreign org/group.
+    pub fn can_act_as_owner(
+        &self,
+        user_id: &str,
+        owner_type: OwnerType,
+        owner_id: &str,
+    ) -> anyhow::Result<bool> {
+        match owner_type {
+            OwnerType::User => Ok(owner_id == user_id),
+            OwnerType::Organisation => Ok(self.get_org_membership(user_id, owner_id)?.is_some()),
+            OwnerType::Group => {
+                if self.get_group_membership(user_id, owner_id)?.is_some() {
+                    return Ok(true);
+                }
+                if let Some(group) = self.get_group(owner_id)? {
+                    if self.get_org_membership(user_id, &group.org_id)?.is_some() {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
             }
         }
     }
@@ -4932,15 +5002,61 @@ mod tests {
         db.create_user("u1", "alice", "alice@example.com", "hash", SystemRole::User)
             .unwrap();
 
-        db.create_refresh_token("rt1", "u1", "hash_rt1", "2099-01-01T00:00:00Z")
+        db.create_refresh_token("rt1", "u1", "hash_rt1", "2099-01-01T00:00:00Z", "fam1")
             .unwrap();
 
         let found = db.get_refresh_token_by_hash("hash_rt1").unwrap().unwrap();
         assert_eq!(found.user_id, "u1");
+        assert_eq!(found.family_id.as_deref(), Some("fam1"));
         assert!(!found.revoked);
 
         db.revoke_refresh_token("rt1").unwrap();
         let revoked = db.get_refresh_token_by_hash("hash_rt1").unwrap().unwrap();
         assert!(revoked.revoked);
+    }
+
+    #[test]
+    fn refresh_token_family_revocation_is_session_scoped() {
+        // Two logins for the same user create two families (sessions). Revoking one
+        // family must NOT revoke the other — that is the whole point of the fix:
+        // a rotation race in one browser can't log the user out everywhere.
+        let db = AuthDb::in_memory().unwrap();
+        db.create_user("u1", "alice", "alice@example.com", "hash", SystemRole::User)
+            .unwrap();
+        // Session A: two rotations in family "famA".
+        db.create_refresh_token("a1", "u1", "h_a1", "2099-01-01T00:00:00Z", "famA")
+            .unwrap();
+        db.create_refresh_token("a2", "u1", "h_a2", "2099-01-01T00:00:00Z", "famA")
+            .unwrap();
+        // Session B: one token in family "famB".
+        db.create_refresh_token("b1", "u1", "h_b1", "2099-01-01T00:00:00Z", "famB")
+            .unwrap();
+
+        // The live head of family A is its newest token.
+        assert_eq!(db.get_active_family_head("famA").unwrap().unwrap().id, "a2");
+
+        // Revoke family A only.
+        db.revoke_refresh_token_family("famA").unwrap();
+        assert!(
+            db.get_refresh_token_by_hash("h_a1")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        assert!(
+            db.get_refresh_token_by_hash("h_a2")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        // Session B survives.
+        assert!(
+            !db.get_refresh_token_by_hash("h_b1")
+                .unwrap()
+                .unwrap()
+                .revoked
+        );
+        assert!(db.get_active_family_head("famA").unwrap().is_none());
+        assert_eq!(db.get_active_family_head("famB").unwrap().unwrap().id, "b1");
     }
 }

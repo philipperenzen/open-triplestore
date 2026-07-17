@@ -3,7 +3,7 @@
   import { t } from 'svelte-i18n';
   import { GitCommit, Loader2, User } from 'lucide-svelte';
   import {
-    getDataModelCommits, getVocabularyCommits, getDatasetCommits, getShapeGraphCommits,
+    getDataModelCommits, getDatasetCommits, getShapeGraphCommits,
   } from '../lib/api.js';
   import Avatar from './Avatar.svelte';
   import Select from './Select.svelte';
@@ -23,9 +23,9 @@
   const branchless = kind === 'dataset' || kind === 'shape-graph';
 
   function loadFn(branch) {
-    if (kind === 'vocabulary') return getVocabularyCommits(id, branch);
     if (kind === 'dataset') return getDatasetCommits(id);
     if (kind === 'shape-graph') return getShapeGraphCommits(id);
+    // 'data-model' and (legacy) 'vocabulary' share the unified model endpoint.
     return getDataModelCommits(id, branch);
   }
 

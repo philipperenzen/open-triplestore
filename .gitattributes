@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-platform line endings (Windows / macOS / Linux).
+#
+# Without this file, working-tree line endings depend on each contributor's local
+# `core.autocrlf`. A stray CRLF then breaks tools that require LF — `/bin/bash^M:
+# bad interpreter` for a shell script, `make` choking on a recipe's trailing CR,
+# or a `.env` value silently carrying a `\r`. The rules below pin the correct
+# ending per file type so a Windows checkout stays usable under WSL, Git Bash, and
+# Docker Desktop, and so the bytes committed are identical on every platform.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Normalize all text to LF in the repository, regardless of local core.autocrlf.
+# Working-tree endings stay platform-native unless explicitly pinned below.
+* text=auto
+
+# ── Must be LF even in a Windows working tree (consumed by bash / make / Docker
+#    / Compose). A CR here is a real bug, not a cosmetic one. ──
+*.sh            text eol=lf
+*.bash          text eol=lf
+Makefile        text eol=lf
+makefile        text eol=lf
+*.mk            text eol=lf
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+.dockerignore   text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.env            text eol=lf
+.env.example    text eol=lf
+*.env           text eol=lf
+*.py            text eol=lf
+# Extensionless shell scripts (git hooks) — must be LF so bash can run them.
+scripts/hooks/* text eol=lf
+
+# ── RDF fixtures: loaded by the server and byte-compared in conformance tests,
+#    so keep them LF on every platform. ──
+*.ttl           text eol=lf
+*.nt            text eol=lf
+*.nq            text eol=lf
+*.trig          text eol=lf
+*.rq            text eol=lf
+*.srj           text eol=lf
+*.srx           text eol=lf
+
+# ── Windows-native scripts REQUIRE CRLF. ──
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# ── Binary assets — never run EOL conversion on them. ──
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.webp          binary
+*.woff          binary
+*.woff2         binary
+*.ttf           binary
+*.eot           binary
+*.pdf           binary
+*.gz            binary
+*.zip           binary

@@ -5,7 +5,7 @@
   import { Link } from '../lib/router/index.js';
   import { isAuthenticated, user, isAdmin } from '../lib/stores.js';
   import {
-    listDatasets, listDatasetGraphs, addDatasetGraph, listOrganisations,
+    listDatasets, listDatasetGraphs, listOrganisations,
     createDataset, validateDataset, sparqlUpdate, sparqlQuery,
     getDataset, adminListUsers,
     listServices, addServiceGraph, detectShapes, updateDatasetShacl,
@@ -202,6 +202,10 @@ INTO GRAPH <http://example.org/import/loaded>`,
   let selectedOrgId = '';
   let datasetMode = 'existing';
   let selectedDatasetId = '';
+  // Canonical IRI ({base}/dataset/{id}) of the selected/created dataset. Default
+  // target graphs are minted under `{selectedDatasetIri}/...` so they pass the
+  // server's per-graph write boundary; empty when no dataset is chosen yet.
+  let selectedDatasetIri = '';
   let newDatasetName = '';
   let newDatasetDesc = '';
   let newDatasetVis = 'private';
@@ -214,6 +218,10 @@ INTO GRAPH <http://example.org/import/loaded>`,
 
   // ── Step 3: review & import ────────────────────────────────────────────────
   let loadingDatasetGraphs = false;
+  // Graph IRIs already registered to the selected dataset (fetched in goToStep3).
+  // The bulk-import boundary admits these even when they fall outside the dataset
+  // namespace, so the quad pre-flight consults them to avoid false positives.
+  let registeredGraphIris = new Set();
   let selectedDatasetShapesIri = null; // null=loading, ''=no shapes, string=has shapes
   let doValidate = false;
   let validationDatasetId = '';
@@ -229,6 +237,45 @@ INTO GRAPH <http://example.org/import/loaded>`,
   // True when at least one file replaces a graph in an existing dataset, so the
   // upload may cut a new version (and the bump selector is relevant).
   $: anyReplaceExisting = !useSprarqlUpdate && datasetMode !== 'new' && files.some(f => f.replace);
+
+  // Quad embedded-graph targets that the server's per-graph write boundary would
+  // still reject (effective target not under the dataset namespace and not already
+  // registered to it). Best-effort: the server's cross-dataset-ownership check
+  // can't be mirrored client-side, so per-file import errors remain the backstop.
+  $: foreignQuadTargets = (() => {
+    if (!selectedDatasetIri) return [];
+    const ns = `${selectedDatasetIri}/`;
+    const out = [];
+    for (const f of files) {
+      if (!isQuadFile(f.file?.name)) continue;
+      for (const orig of (f.detectedGraphIris || [])) {
+        const cur = f.graphIriRenameMap?.[orig] ?? orig;
+        const eff = (cur !== orig && isValidIri(cur)) ? cur : orig;
+        if (!registeredGraphIris.has(eff) && !eff.startsWith(ns)) {
+          out.push({ file: f.file?.name, orig, target: eff });
+        }
+      }
+    }
+    return out;
+  })();
+
+  // Distinct embedded graphs that would collapse into the SAME write target
+  // (silent multi-graph merge). Surfaced as a separate, non-auto-fixable warning.
+  $: mergedQuadTargets = (() => {
+    const byTarget = new Map();
+    for (const f of files) {
+      if (!isQuadFile(f.file?.name)) continue;
+      for (const orig of (f.detectedGraphIris || [])) {
+        const cur = f.graphIriRenameMap?.[orig] ?? orig;
+        const eff = (cur !== orig && isValidIri(cur)) ? cur : orig;
+        if (!byTarget.has(eff)) byTarget.set(eff, new Set());
+        byTarget.get(eff).add(orig);
+      }
+    }
+    return [...byTarget.entries()]
+      .filter(([, origs]) => origs.size > 1)
+      .map(([target, origs]) => ({ target, count: origs.size }));
+  })();
 
   // Service graph registration (shown after successful import)
   let availableServices = [];
@@ -362,9 +409,133 @@ INTO GRAPH <http://example.org/import/loaded>`,
     return [...iris];
   }
 
+  // Best-effort: does a quad file carry DEFAULT-graph triples (no graph label)?
+  // These have no addressable IRI, so on a dataset-scoped import the server routes
+  // them into the dataset's own default graph. Used only to show an info note.
+  function quadFileHasDefaultGraphTriples(filename, content) {
+    const lower = filename.toLowerCase();
+    if (lower.endsWith('.nq') || lower.endsWith('.nquads')) {
+      for (const line of content.split('\n').slice(0, 200)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        // A 4-term quad ends with `<graph> .`; a 3-term default-graph triple does not.
+        const endsWithGraph = /\s<[^>]+>\s*\.\s*$/.test(trimmed);
+        const isStatement = /\.\s*$/.test(trimmed);
+        if (isStatement && !endsWithGraph) return true;
+      }
+      return false;
+    }
+    if (lower.endsWith('.trig')) {
+      // Strip whole `{ … }` graph blocks, then any remaining top-level triple is a
+      // default-graph statement. Misses the rarer unlabelled `{ … }` block form.
+      const topLevel = content.replace(/\{[^}]*\}/g, '');
+      for (const line of topLevel.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('@')) continue;
+        if (/^(?:PREFIX|BASE)\b/i.test(trimmed)) continue;
+        if (/\.\s*$/.test(trimmed)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  function graphSlug(filename) {
+    return filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').toLowerCase();
+  }
+
+  // Slugify the trailing segment of an IRI (after the last '/' or '#') for use as
+  // a dataset-namespaced graph suffix. Falls back to a generic 'graph' when the
+  // IRI has no usable tail.
+  function slugFromIri(iri) {
+    const tail = String(iri || '').split(/[#/]/).filter(Boolean).pop() || '';
+    const slug = tail.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '').toLowerCase();
+    return slug || 'graph';
+  }
+
+  function isQuadFile(name) {
+    const lower = (name || '').toLowerCase();
+    return lower.endsWith('.nq') || lower.endsWith('.trig');
+  }
+
   function generateDefaultGraphIri(filename) {
-    const slug = filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').toLowerCase();
-    return `https://opentriplestore.org/graphs/${slug}`;
+    return `https://opentriplestore.org/graphs/${graphSlug(filename)}`;
+  }
+
+  // Re-home auto-generated default target graphs under the selected dataset's IRI
+  // namespace ({datasetIri}/{slug}). The server's bulk-import write boundary only
+  // admits graphs registered to the dataset or under this namespace, so an
+  // unqualified default like https://opentriplestore.org/graphs/x would be rejected.
+  //   - Triple files: re-home the auto-default `graphIri` (untouched ⇔
+  //     graphIriAutoDefault). User-edited and content-detected targets are kept.
+  //   - Quad files: re-home each embedded graph's rename target to
+  //     {datasetIri}/{slugFromIri(embedded)}, but only while it is still
+  //     "untouched" (identity or empty) and not already under the namespace.
+  //     User-edited and already-namespaced targets are kept. Idempotent.
+  function namespaceTargets(fileList, datasetIri) {
+    if (!datasetIri) return fileList;
+    const ns = `${datasetIri}/`;
+    return fileList.map((f) => {
+      if (isQuadFile(f.file?.name)) {
+        if (!f.detectedGraphIris?.length) return f;
+        const map = { ...f.graphIriRenameMap };
+        const used = new Set(Object.values(map).filter(Boolean));
+        let changed = false;
+        for (const orig of f.detectedGraphIris) {
+          const cur = map[orig] ?? orig;
+          const untouched = cur === orig || cur === '';
+          const alreadyNamespaced = typeof cur === 'string' && cur.startsWith(ns);
+          if (untouched && !alreadyNamespaced) {
+            let target = `${ns}${slugFromIri(orig)}`;
+            // Disambiguate within-file slug collisions so two distinct embedded
+            // graphs don't silently merge into one target.
+            if (used.has(target)) {
+              let n = 2;
+              while (used.has(`${target}-${n}`)) n++;
+              target = `${target}-${n}`;
+            }
+            map[orig] = target;
+            used.add(target);
+            changed = true;
+          }
+        }
+        return changed ? { ...f, graphIriRenameMap: map } : f;
+      }
+      if (!f.graphIriAutoDefault) return f;
+      return { ...f, graphIri: `${datasetIri}/${graphSlug(f.file?.name || '')}` };
+    });
+  }
+
+  // Pre-flight one-click fix: force-re-home every quad embedded graph whose
+  // effective write target is still outside the selected dataset (exactly the
+  // entries the banner lists), overriding a user-typed foreign IRI. Uses the same
+  // collision disambiguation as namespaceTargets.
+  function namespaceForeignQuadTargets() {
+    const datasetIri = selectedDatasetIri;
+    if (!datasetIri) return;
+    const ns = `${datasetIri}/`;
+    files = files.map((f) => {
+      if (!isQuadFile(f.file?.name) || !f.detectedGraphIris?.length) return f;
+      const map = { ...f.graphIriRenameMap };
+      const used = new Set(Object.values(map).filter(Boolean));
+      let changed = false;
+      for (const orig of f.detectedGraphIris) {
+        const cur = map[orig] ?? orig;
+        const eff = (cur !== orig && isValidIri(cur)) ? cur : orig;
+        if (!registeredGraphIris.has(eff) && !eff.startsWith(ns)) {
+          let target = `${ns}${slugFromIri(orig)}`;
+          if (used.has(target)) {
+            let n = 2;
+            while (used.has(`${target}-${n}`)) n++;
+            target = `${target}-${n}`;
+          }
+          map[orig] = target;
+          used.add(target);
+          changed = true;
+        }
+      }
+      return changed ? { ...f, graphIriRenameMap: map } : f;
+    });
   }
 
   function addFile(f) {
@@ -380,6 +551,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
       const graphIriRenameMap = {};
       for (const iri of detected) graphIriRenameMap[iri] = iri;
       const graphIri = isQuad ? '' : (detected.length > 0 ? detected[0] : generateDefaultGraphIri(f.name));
+      // True only when graphIri is our generic auto-default (not detected from
+      // content, not a quad file) — i.e. safe to re-home under a dataset namespace.
+      const graphIriAutoDefault = !isQuad && detected.length === 0;
       let parsedPreview = null;
       if (isNt) {
         const partial = content.split('\n').slice(0, 500).join('\n');
@@ -389,9 +563,10 @@ INTO GRAPH <http://example.org/import/loaded>`,
       // For quad formats, classify each embedded graph on its own so we can show
       // per-graph role badges instead of a single "Mixed" verdict for the file.
       const graphRoles = isQuad ? detectGraphRolesFromContent(f.name, content) : {};
+      const hasDefaultGraphTriples = isQuad && quadFileHasDefaultGraphTriples(f.name, content);
       files = [...files, {
-        file: f, content, format, detectedGraphIris: detected,
-        graphIri, graphIriRenameMap, showPreview: false, parsedPreview,
+        file: f, content, format, detectedGraphIris: detected, hasDefaultGraphTriples,
+        graphIri, graphIriAutoDefault, graphIriRenameMap, showPreview: false, parsedPreview,
         previewSearch: '',
         importDest: 'named-graph',
         detectedKind: kindResult.kind,
@@ -462,7 +637,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
   }
 
   function setFileGraphIri(idx, value) {
-    files = files.map((f, i) => i === idx ? { ...f, graphIri: value } : f);
+    // A manual edit pins the target: clear the auto-default flag so dataset
+    // selection no longer re-homes it under the dataset namespace.
+    files = files.map((f, i) => i === idx ? { ...f, graphIri: value, graphIriAutoDefault: false } : f);
   }
 
   function setQuadRename(idx, origIri, newValue) {
@@ -586,10 +763,12 @@ INTO GRAPH <http://example.org/import/loaded>`,
     const graphIriRenameMap = {};
     for (const iri of detected) graphIriRenameMap[iri] = iri;
     const graphRoles = isQuad ? detectGraphRolesFromContent(name, content) : {};
+    const hasDefaultGraphTriples = isQuad ? quadFileHasDefaultGraphTriples(name, content) : false;
     files = [...files, {
       file: { name, size: content.length },
       content, format, fromUrl,
-      detectedGraphIris: detected, graphIri: isQuad ? '' : graphIri,
+      detectedGraphIris: detected, hasDefaultGraphTriples, graphIri: isQuad ? '' : graphIri,
+      graphIriAutoDefault: !isQuad,
       graphIriRenameMap, showPreview: false,
       parsedPreview: (isNt && rows) ? rows.slice(0, 20) : null,
       previewSearch: '',
@@ -613,6 +792,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     ownerType = 'personal';
     selectedOrgId = '';
     selectedDatasetId = '';
+    selectedDatasetIri = '';
     datasetMode = 'existing';
   }
 
@@ -621,6 +801,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     ownerType = 'org';
     selectedOrgId = orgId;
     selectedDatasetId = '';
+    selectedDatasetIri = '';
     datasetMode = 'existing';
   }
 
@@ -644,18 +825,29 @@ INTO GRAPH <http://example.org/import/loaded>`,
     preValidationResult = null;
 
     const dsId = datasetMode === 'new' ? null : selectedDatasetId;
-    if (!dsId) { selectedDatasetShapesIri = ''; return; }
+    // A brand-new dataset's IRI isn't known until it's created at import time;
+    // namespacing for that case happens in runImport once the id exists.
+    if (!dsId) { selectedDatasetShapesIri = ''; selectedDatasetIri = ''; registeredGraphIris = new Set(); return; }
 
     loadingDatasetGraphs = true;
+    // Reset up front so a previously-selected dataset's graphs don't leak into the
+    // pre-flight when this fetch fails.
+    registeredGraphIris = new Set();
     try {
-      await listDatasetGraphs(dsId);
+      const graphs = await listDatasetGraphs(dsId);
+      registeredGraphIris = new Set((graphs || []).map(g => g.graph_iri).filter(Boolean));
     } catch { /* graphs unavailable, continue */ }
     try {
       const dsDetail = await getDataset(dsId);
       selectedDatasetShapesIri = dsDetail?.shapes_graph_iri || '';
+      // Re-home untouched default target graphs under the dataset's namespace so
+      // the review (and the import) show the IRIs the server will actually accept.
+      selectedDatasetIri = dsDetail?.dataset_iri || '';
+      if (selectedDatasetIri) files = namespaceTargets(files, selectedDatasetIri);
     } catch {
       // 403 on private dataset or network error — hide validation section
       selectedDatasetShapesIri = '';
+      selectedDatasetIri = '';
     } finally {
       loadingDatasetGraphs = false;
     }
@@ -738,6 +930,9 @@ INTO GRAPH <http://example.org/import/loaded>`,
       if (selectedDatasetId || !pendingNewDataset) return selectedDatasetId;
       const ds = await createDataset(pendingNewDataset);
       selectedDatasetId = ds.id;
+      // The create response carries the canonical IRI so we can namespace targets
+      // for this just-created dataset (its slug-derived id wasn't known until now).
+      selectedDatasetIri = ds.dataset_iri || '';
       // Keep the local list in sync so the new dataset shows up as "existing"
       // without needing a full page reload.
       if (!datasets.some(d => d.id === ds.id)) datasets = [...datasets, ds];
@@ -752,40 +947,40 @@ INTO GRAPH <http://example.org/import/loaded>`,
         // Single multipart POST: parsed in parallel server-side, one bulk-insert.
         importProgress = { current: 0, total: files.length, currentFile: $i18nT('pages.import.filesCount', { values: { count: files.length } }) };
         await ensureDataset();
+        // Final safety net: re-home untouched default targets under the dataset
+        // namespace. Idempotent for existing datasets (already done in goToStep3)
+        // and essential for a just-created one. Without a dataset, leave targets
+        // as-is (admin-only unmanaged import).
+        if (selectedDatasetIri) files = namespaceTargets(files, selectedDatasetIri);
 
-        const entries = files.map((f) => ({
-          file: f.file,
-          filename: f.file.name,
-          targetGraph: f.graphIri || undefined,
-          autoSplit: f.autoSplit || false,
-          replace: f.replace || false,
-          // Explicit role override for the file's target graph. Only applies to
-          // non-auto-split files (auto-split derives roles per sub-graph).
-          graphRole: (!f.autoSplit && f.graphRole) ? f.graphRole : undefined,
-        }));
+        const entries = files.map((f) => {
+          // Quad files: re-home embedded graphs to their (namespaced) rename
+          // targets at write time so the server's per-graph boundary admits them.
+          // Only non-identity, valid-IRI renames are sent; the rest keep their
+          // embedded names. Replaces the old, boundary-incompatible post-import MOVE.
+          let graphRemap;
+          if (isQuadFile(f.file.name)) {
+            graphRemap = {};
+            for (const [orig, tgt] of Object.entries(f.graphIriRenameMap || {})) {
+              if (tgt && tgt !== orig && isValidIri(tgt)) graphRemap[orig] = tgt;
+            }
+          }
+          return {
+            file: f.file,
+            filename: f.file.name,
+            targetGraph: f.graphIri || undefined,
+            autoSplit: f.autoSplit || false,
+            replace: f.replace || false,
+            // Explicit role override for the file's target graph. Only applies to
+            // non-auto-split files (auto-split derives roles per sub-graph).
+            graphRole: (!f.autoSplit && f.graphRole) ? f.graphRole : undefined,
+            graphRemap: (graphRemap && Object.keys(graphRemap).length) ? graphRemap : undefined,
+          };
+        });
         const bulkRes = await bulkImport(entries, {
           datasetId: selectedDatasetId || undefined,
           versionBump: anyReplaceExisting ? versionBump : undefined,
         });
-
-        // Apply any quad-file graph renames (oldIri → newIri) in parallel.
-        const moveOps = [];
-        for (const f of files) {
-          for (const [oldIri, newIri] of Object.entries(f.graphIriRenameMap || {})) {
-            if (newIri && newIri !== oldIri && isValidIri(newIri)) {
-              moveOps.push(
-                sparqlUpdate(`MOVE GRAPH <${oldIri}> TO <${newIri}>`)
-                  .then(() => {
-                    if (selectedDatasetId) {
-                      addDatasetGraph(selectedDatasetId, { graph_iri: newIri }).catch(() => {});
-                    }
-                  })
-                  .catch(() => {}),
-              );
-            }
-          }
-        }
-        if (moveOps.length > 0) await Promise.all(moveOps);
 
         // Map server's per-file results back to the wizard's shape.
         const byName = new Map(
@@ -796,8 +991,12 @@ INTO GRAPH <http://example.org/import/loaded>`,
           if (!r || r.status !== 'ok') {
             return { name: f.file.name, status: 'error', error: r?.error || 'unknown error' };
           }
-          const renamed = Object.values(f.graphIriRenameMap || {}).filter(Boolean);
-          const graphIri = renamed[0] || f.graphIri || (r.graph_iris || [])[0] || '';
+          // Prefer the authoritative final graph the server wrote and registered;
+          // fall back to a valid rename target, then the file's own target.
+          const graphIri = (r.graph_iris || [])[0]
+            || Object.values(f.graphIriRenameMap || {}).find(v => v && isValidIri(v))
+            || f.graphIri
+            || '';
           return { name: f.file.name, status: 'ok', graphIri };
         });
 
@@ -853,6 +1052,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     urlPreviewData = null;
     urlPreviewPage = 0;
     selectedDatasetId = '';
+    selectedDatasetIri = '';
     datasetMode = 'existing';
     selectedDatasetShapesIri = null;
     doValidate = false;
@@ -1386,6 +1586,12 @@ INTO GRAPH <http://example.org/import/loaded>`,
                             </div>
                           {/each}
                         {/if}
+                        {#if f.hasDefaultGraphTriples && selectedDatasetId}
+                          <div class="flex items-start gap-1.5 text-xs text-[var(--ink-500)]">
+                            <Info size={12} class="text-[var(--brand-500)] shrink-0 mt-0.5" />
+                            <span>{$i18nT('pages.import.defaultGraphRoutedNote')}</span>
+                          </div>
+                        {/if}
                       {:else}
                         <div class="flex items-center gap-2">
                           <Target size={13} class="text-[var(--brand-500)] shrink-0" />
@@ -1567,7 +1773,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
                   <div class="flex gap-1.5 shrink-0">
                     <button
                       class="btn btn-sm {dominantKind === 'vocabulary' ? 'bg-purple-600 hover:bg-purple-700 text-white border-0' : 'bg-amber-600 hover:bg-amber-700 text-white border-0'}"
-                      on:click={() => navigate(dominantKind === 'vocabulary' ? '/vocabularies' : '/models')}
+                      on:click={() => navigate(dominantKind === 'vocabulary' ? '/models?kind=vocabulary' : '/models')}
                     >
                       {dominantKind === 'vocabulary' ? $i18nT('pages.import.goToVocabularyRegistry') : $i18nT('pages.import.goToModelRegistry')}
                     </button>
@@ -1886,6 +2092,35 @@ INTO GRAPH <http://example.org/import/loaded>`,
                 </div>
               </div>
             </div>
+
+            <!-- Pre-flight: quad embedded graphs whose write target falls outside
+                 this dataset (the server's per-graph boundary would 403 them).
+                 One click re-homes them under the dataset namespace. -->
+            {#if !importResult && !importing && selectedDatasetIri && foreignQuadTargets.length > 0}
+              <div class="p-3 rounded-xl bg-amber-50 border border-amber-200">
+                <div class="flex items-start gap-2">
+                  <AlertTriangle size={15} class="text-amber-700 shrink-0 mt-0.5" />
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-semibold text-[var(--ink-700)]">{$i18nT('pages.import.preflightForeignTitle')}</p>
+                    <p class="text-xs text-[var(--ink-500)] mt-0.5">{$i18nT('pages.import.preflightForeignBody', { values: { count: foreignQuadTargets.length } })}</p>
+                  </div>
+                  <button class="btn btn-sm shrink-0 whitespace-nowrap" on:click={namespaceForeignQuadTargets}>
+                    {$i18nT('pages.import.preflightNamespaceBtn')}
+                  </button>
+                </div>
+              </div>
+            {/if}
+
+            <!-- Pre-flight: distinct embedded graphs that would collapse into one
+                 target (silent merge / data loss). Not auto-fixable — rename them. -->
+            {#if !importResult && !importing && mergedQuadTargets.length > 0}
+              <div class="p-3 rounded-xl bg-red-50 border border-red-200">
+                <p class="text-xs text-red-700 flex items-start gap-2">
+                  <AlertTriangle size={14} class="shrink-0 mt-0.5" />
+                  <span>{$i18nT('pages.import.preflightMergeWarning', { values: { count: mergedQuadTargets.reduce((a, m) => a + m.count, 0) } })}</span>
+                </p>
+              </div>
+            {/if}
 
             {#if importError && !importResult}
               <div class="error">{importError}</div>

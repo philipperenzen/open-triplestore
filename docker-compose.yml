@@ -1,6 +1,9 @@
 services:
   triplestore:
     build: .
+    # Prefer a pre-built release over a local build: comment out `build: .` above
+    # and uncomment the line below to pull the published image from GHCR instead.
+    # image: ghcr.io/philipperenzen/open-triplestore:latest  # pull the published image instead of building
     container_name: open-triplestore
     ports:
       # Bind to loopback only: the triplestore must sit behind a TLS-terminating reverse proxy in
@@ -11,6 +14,9 @@ services:
       - triplestore_data:/data
     environment:
       - RUST_LOG=info
+      # Serve the bundled web UI at /. Set SERVE_FRONTEND=false in .env for an
+      # API-only container (SPARQL / Graph Store / REST are unaffected).
+      - SERVE_FRONTEND=${SERVE_FRONTEND:-true}
       # No default: a public default secret makes every session token forgeable. Set it in .env
       # (see .env.example); `openssl rand -hex 32`. The server also refuses weak secrets under TLS.
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
@@ -39,13 +45,32 @@ services:
       - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-}
       - OIDC_ORG_GROUP_PREFIX=${OIDC_ORG_GROUP_PREFIX:-}
       # CORS allowlist for trusted frontend origin(s), comma-separated (dev + prod).
+      # "*" reflects any origin with credentials (mirror mode) — lets a browser client
+      # on an arbitrary host (e.g. the OTL viewer) connect. Prefer an explicit list in prod.
       - CORS_ORIGINS=${CORS_ORIGINS:-}
       # External validation platform base URL, used by /api/datasets/validate-and-commit.
       - VALIDATION_API_URL=${VALIDATION_API_URL:-}
-      # service registry (discovery): self-register as "triplestore" so siblings/the browser
-      # resolve this store instead of hardcoding :7878. Points at the host-run registry; fail-soft if absent.
+      # Cross-app service discovery (opt-in, off by default). Set LD_DISCOVERY=true to self-register
+      # as "triplestore" so siblings/the browser resolve this store instead of hardcoding :7878.
+      # A missing registry is fail-soft either way; this just makes discovery an explicit choice.
+      - LD_DISCOVERY=${LD_DISCOVERY:-false}
+      # Registry location + token, used only when LD_DISCOVERY=true. Points at the host-run
+      # registry; fail-soft if absent.
       - LD_REGISTRY_URL=${LD_REGISTRY_URL:-http://host.docker.internal:8500}
       - LD_REGISTRY_TOKEN=${LD_REGISTRY_TOKEN:-}
+      # LLM / AI features (NL→SPARQL, SHACL assist, knowledge-graph chat). Defaults
+      # to the bundled `ollama` service below — start it with `--profile llm` (and
+      # the GPU override on an NVIDIA host: see docker-compose.gpu.yml). Prefer an
+      # external OpenAI-compatible API? Set LLM_GATEWAY_URL + LLM_API_KEY in .env and
+      # don't enable the `llm` profile. Unreachable endpoint = AI features just hide.
+      - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+    # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
+    # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
+    # adds the same hostname on plain Linux Docker so the config stays portable.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       minio:
         condition: service_healthy
@@ -82,8 +107,79 @@ services:
       start_period: 5s
       retries: 5
 
+  # One-shot helper: once the triplestore is healthy, print where each service is
+  # reachable so the URLs show up in the logs (and inline when you run
+  # `docker compose up` without -d). It echoes and exits — re-show the banner
+  # anytime with `docker compose logs info`.
+  info:
+    image: busybox:1.37
+    depends_on:
+      triplestore:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        echo
+        echo "=================================================="
+        echo "  Open Triplestore is up - reachable at:"
+        echo "    Web UI & API : http://localhost:7878"
+        echo "    Health check : http://localhost:7878/health"
+        echo "    API docs     : http://localhost:7878/api-docs/"
+        echo "    MinIO console: http://localhost:9001"
+        echo "    MinIO S3 API : http://localhost:9000"
+        echo "=================================================="
+        echo
+    restart: "no"
+
+  # ── LLM (optional, profile: llm) ──────────────────────────────────────────
+  # A local OpenAI-compatible model server for the platform's AI features. Enable
+  # with `--profile llm`; on an NVIDIA host add `-f docker-compose.gpu.yml` to use
+  # the GPU. Prefer a hosted model? Skip this profile and point the triplestore's
+  # LLM_GATEWAY_URL / LLM_API_KEY at your endpoint instead.
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: triplestore-ollama
+    profiles: ["llm"]
+    ports:
+      # Defaults to loopback. Follows the triplestore's bind (TRIPLESTORE_BIND) unless
+      # OLLAMA_BIND is set explicitly, so exposing the store on all interfaces also
+      # publishes the LLM on its default port 11434. Override OLLAMA_BIND to decouple.
+      - "${OLLAMA_BIND:-${TRIPLESTORE_BIND:-127.0.0.1}}:11434:11434"
+    environment:
+      # Listen on all interfaces inside the container (also the official image default).
+      - OLLAMA_HOST=0.0.0.0:11434
+      # Browser CORS allowlist for direct ollama calls. Follows the triplestore's
+      # CORS_ORIGINS unless OLLAMA_ORIGINS is set explicitly; "*" reflects any origin.
+      - OLLAMA_ORIGINS=${OLLAMA_ORIGINS:-${CORS_ORIGINS:-}}
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+  # One-shot: pull the default model into the ollama volume on first `up`, then
+  # exit. Cheap to re-run (already-present layers are skipped).
+  ollama-pull:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    container_name: triplestore-ollama-pull
+    profiles: ["llm"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    command: ["pull", "${LLM_MODEL:-qwen2.5:7b}"]
+    restart: "no"
+
 volumes:
   triplestore_data:
     driver: local
   minio_data:
+    driver: local
+  ollama_models:
     driver: local

@@ -98,6 +98,15 @@ pub async fn begin_oidc_flow(
         .discovery_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Provider '{}' has no discovery_url", provider.slug))?;
+    // Never fetch IdP metadata over cleartext (MITM → forged identity/tokens):
+    // require https, with a loopback http exception for local dev.
+    if !super::oidc_rs::is_secure_idp_url(discovery_url) {
+        anyhow::bail!(
+            "OIDC provider '{}' discovery_url must use https (refusing to fetch IdP \
+             metadata over cleartext): {discovery_url}",
+            provider.slug
+        );
+    }
 
     let client_id = provider
         .client_id
@@ -204,6 +213,15 @@ pub async fn complete_oidc_flow(
         .discovery_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Provider has no discovery_url"))?;
+    // Never fetch IdP metadata / exchange the code against an issuer reached over
+    // cleartext (MITM → forged identity/tokens): require https (loopback http ok for dev).
+    if !super::oidc_rs::is_secure_idp_url(discovery_url) {
+        anyhow::bail!(
+            "OIDC provider '{}' discovery_url must use https (refusing to fetch IdP \
+             metadata over cleartext): {discovery_url}",
+            provider.slug
+        );
+    }
 
     let issuer = IssuerUrl::new(
         discovery_url
@@ -278,11 +296,18 @@ pub async fn complete_oidc_flow(
     let refresh_id = Uuid::new_v4().to_string();
     let refresh = issue_refresh_token(jwt_config, &user.id, &user.username, user.role.as_str())?;
 
-    // Store refresh token hash
+    // Store refresh token hash — a fresh SSO login starts its own session family.
     let refresh_hash = super::jwt::hash_token(&refresh);
+    let family_id = Uuid::new_v4().to_string();
     let expires =
         chrono::Utc::now() + chrono::Duration::days(jwt_config.refresh_expiry_days as i64);
-    auth_db.create_refresh_token(&refresh_id, &user.id, &refresh_hash, &expires.to_rfc3339())?;
+    auth_db.create_refresh_token(
+        &refresh_id,
+        &user.id,
+        &refresh_hash,
+        &expires.to_rfc3339(),
+        &family_id,
+    )?;
 
     Ok((access, refresh))
 }

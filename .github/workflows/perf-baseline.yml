@@ -1,0 +1,78 @@
+# Refreshes the AUTHORITATIVE performance baseline (benches/perf_baseline.json).
+#
+# The baseline is refreshed ONLY here — never from PR/push perf runs (perf.yml) —
+# so the reference point can't drift from in-flight changes. Runs the FULL
+# Criterion suite (not the subset the gate uses) for a complete, low-noise
+# measurement, then opens a PR to `develop` with the regenerated baseline so the
+# update is reviewed before it lands.
+#
+# Triggers: manual (workflow_dispatch) for an on-demand refresh, and on each
+# released `v*` tag so every release re-anchors the baseline.
+name: Performance baseline
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  perf-baseline:
+    name: Refresh performance baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # FULL suite (no name filter): measures every benchmark for a complete
+      # baseline. Sample sizes are hard-coded in benches/performance.rs.
+      - name: Run full benchmark suite
+        run: cargo bench --bench performance --features full
+
+      # --keep-tolerances preserves the per-benchmark tolerances already in the
+      # committed baseline; only the measured numbers are refreshed.
+      - name: Regenerate baseline
+        run: python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --runner "github-actions/${{ runner.os }}" --keep-tolerances
+
+      - name: Upload baseline artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: perf-baseline
+          path: benches/perf_baseline.json
+          retention-days: 90
+
+      - name: Open baseline-refresh PR
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          branch: chore/perf-baseline-refresh
+          base: develop
+          add-paths: benches/perf_baseline.json
+          commit-message: "chore(perf): refresh performance baseline"
+          title: "chore(perf): refresh performance baseline"
+          body: |
+            Regenerated `benches/perf_baseline.json` from the full Criterion suite.
+
+            - Runner: `github-actions/${{ runner.os }}`
+            - Trigger: `${{ github.event_name }}`${{ github.ref_type == 'tag' && format(' (tag {0})', github.ref_name) || '' }}
+            - Per-benchmark tolerances were preserved (`--keep-tolerances`); only
+              the measured numbers changed.
+
+            Review the diff before merging — this becomes the reference the perf
+            gate (`perf.yml`) checks every PR against.

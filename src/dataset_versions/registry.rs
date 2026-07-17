@@ -166,7 +166,7 @@ fn get_snapshot_graphs(store: &TripleStore, ver_iri: &str) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(QueryResults::Solutions(sols)) = store.query(&q) {
         for row in sols.flatten() {
-            if let Some(g) = var_str(&row.values().to_vec(), 0) {
+            if let Some(g) = var_str(row.values(), 0) {
                 out.push(g);
             }
         }

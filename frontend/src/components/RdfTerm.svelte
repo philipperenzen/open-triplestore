@@ -3,7 +3,11 @@
   import { shortenIRI } from '../lib/rdf-utils.js';
   import { navigate } from '../lib/router/index.js';
   import { isDark } from '../lib/theme.js';
-  import { Check, Copy } from 'lucide-svelte';
+  import { langToFlag } from '../lib/i18n/langFlag.js';
+  import { Check, Copy, MapPin, Boxes } from 'lucide-svelte';
+  import { copyToClipboard } from '../lib/clipboard.js';
+  import { modelFormatFromUrl, isWktDatatype } from '../lib/viewer/detect';
+  import { openPreview } from '../lib/viewer/preview';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -27,37 +31,6 @@
   // Theme-aware term colours. The light defaults are kept close to the originals;
   // the dark variants are brightened so URIs/literals/bnodes stay legible on a
   // dark surface (the old #4a90d9 / #2e8b57 / #888 were too dim).
-  // Map a 2-letter ISO country code to its flag emoji (regional-indicator pair).
-  function flagEmoji(cc) {
-    if (!cc || !/^[a-zA-Z]{2}$/.test(cc)) return '';
-    const up = cc.toUpperCase();
-    return String.fromCodePoint(up.charCodeAt(0) + 0x1f1a5, up.charCodeAt(1) + 0x1f1a5);
-  }
-
-  // Default country for a primary language subtag, used when the BCP-47 tag has
-  // no explicit region (e.g. "nl" → NL flag). A region subtag in the tag itself
-  // (e.g. "en-GB", "nl-BE") always wins over this fallback.
-  const LANG_TO_COUNTRY = {
-    en: 'GB', nl: 'NL', de: 'DE', fr: 'FR', es: 'ES', it: 'IT', pt: 'PT',
-    ru: 'RU', zh: 'CN', ja: 'JP', ko: 'KR', ar: 'SA', hi: 'IN', pl: 'PL',
-    sv: 'SE', no: 'NO', nb: 'NO', nn: 'NO', da: 'DK', fi: 'FI', cs: 'CZ',
-    sk: 'SK', hu: 'HU', ro: 'RO', el: 'GR', tr: 'TR', uk: 'UA', he: 'IL',
-    th: 'TH', vi: 'VN', id: 'ID', ms: 'MY', ga: 'IE', cy: 'GB', ca: 'ES',
-    eu: 'ES', gl: 'ES', hr: 'HR', sr: 'RS', sl: 'SI', bg: 'BG', et: 'EE',
-    lv: 'LV', lt: 'LT', is: 'IS', fa: 'IR', ur: 'PK', bn: 'BD', ta: 'IN',
-    af: 'ZA', sw: 'KE', fy: 'NL',
-  };
-
-  function langToFlag(lang) {
-    if (!lang) return '';
-    const parts = lang.split('-');
-    // An explicit 2-letter region subtag (anything past the primary) wins.
-    for (let i = parts.length - 1; i >= 1; i--) {
-      if (/^[a-zA-Z]{2}$/.test(parts[i])) return flagEmoji(parts[i]);
-    }
-    return flagEmoji(LANG_TO_COUNTRY[parts[0].toLowerCase()] || '');
-  }
-
   function colorFor(t, dark) {
     if (!t) return dark ? '#94a3b8' : '#9ca3af';
     switch (t.type) {
@@ -160,13 +133,13 @@
     }
   }
 
-  function copyValue(e) {
+  async function copyValue(e) {
     e.stopPropagation();
     const val = typeof term?.value === 'string' ? term.value : (display || '');
-    navigator.clipboard.writeText(val).then(() => {
+    if (await copyToClipboard(val)) {
       copied = true;
       setTimeout(() => (copied = false), 1500);
-    }).catch(() => {});
+    }
   }
 
   $: display = (() => {
@@ -189,6 +162,27 @@
     }
     return null;
   })();
+
+  // Inline viz affordances: a WKT geometry literal gets a map chip, a 3D-model
+  // file URL (glb/gltf/stl) gets a 3D chip — every table/graph/panel that
+  // renders terms through this component gains the previews for free.
+  $: geoWkt =
+    term?.type === 'literal' && isWktDatatype(term.datatype) && typeof term.value === 'string'
+      ? term.value
+      : null;
+  $: modelFormat =
+    typeof term?.value === 'string' && (term.type === 'uri' || term.type === 'iri' || term.type === 'literal')
+      ? modelFormatFromUrl(term.value)
+      : null;
+
+  function showGeo(e) {
+    e.stopPropagation();
+    openPreview({ kind: 'geo', wkts: [geoWkt], title: $i18nT('viewer.geometry') });
+  }
+  function showModel(e) {
+    e.stopPropagation();
+    openPreview({ kind: 'model', url: term.value, format: modelFormat, title: shortenIRI(term.value) });
+  }
 
   $: color = colorFor(term, $isDark);
   $: isClickable = navigable && (term?.type === 'uri' || term?.type === 'iri' || term?.type === 'bnode');
@@ -241,6 +235,16 @@
         title={literalMeta.title}
       >{#if literalMeta.flag}<span class="lit-flag">{literalMeta.flag}</span>{/if}{literalMeta.label}</span>
     {/if}
+    {#if !nested && geoWkt}
+      <button class="viz-chip" title={$i18nT('viewer.showOnMap')} on:click={showGeo} tabindex="-1">
+        <MapPin size={11} />
+      </button>
+    {/if}
+    {#if !nested && modelFormat}
+      <button class="viz-chip model" title={$i18nT('viewer.show3d')} on:click={showModel} tabindex="-1">
+        <Boxes size={11} />
+      </button>
+    {/if}
     {#if !nested}
       <button
         class="copy-btn"
@@ -265,6 +269,25 @@
 
   .term-wrap:not(:hover) .copy-btn { opacity: 0; pointer-events: none; }
   .term-wrap:hover .copy-btn { opacity: 1; }
+
+  /* Always-visible viz affordances (unlike the hover-only copy button): they
+     advertise that a geometry/model can be previewed in place. */
+  .viz-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line-soft, #dfe5ea);
+    background: var(--bg-subtle, #f8fafc);
+    color: var(--brand-600, #1d6fb8);
+    border-radius: 99px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .viz-chip.model { color: #e8590c; }
+  .viz-chip:hover { background: var(--bg-hover, rgba(0, 0, 0, 0.05)); }
 
   .rdf-term {
     font-size: 0.875rem;

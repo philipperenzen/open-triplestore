@@ -114,9 +114,21 @@ async fn sparql_query_get(
     Query(params): Query<SparqlQueryParams>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let query = params
-        .query
-        .ok_or_else(|| AppError::BadRequest("Missing 'query' parameter".to_string()))?;
+    let query = match params.query {
+        Some(q) => q,
+        None => {
+            // A browser hard-refresh / deep link to the `/sparql` client route
+            // arrives here with no `query` param. Serve the SPA shell so the
+            // workspace renders instead of a JSON error; genuine API clients
+            // (no `Accept: text/html`) still get the 400 below.
+            if let Some(resp) = spa_shell_response(&headers) {
+                return Ok(resp);
+            }
+            return Err(AppError::BadRequest(
+                "Missing 'query' parameter".to_string(),
+            ));
+        }
+    };
 
     let accept = headers
         .get(ACCEPT)
@@ -465,8 +477,7 @@ async fn execute_query(
             Mode::Graph(f) => serialize_graph_to(results, f, &mut writer),
         };
         if let Err(msg) = result {
-            let _ =
-                chunk_tx.blocking_send(Err(std::io::Error::new(std::io::ErrorKind::Other, msg)));
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(msg)));
         }
     });
 
@@ -984,10 +995,7 @@ async fn graph_store_get(
         // can surface an error as a real 5xx if the dump cannot be initiated.
         let _ = start_tx.send(Ok(()));
         if let Err(e) = store.dump_to_writer(&mut writer, rdf_format, graph_iri.as_deref()) {
-            let _ = chunk_tx.blocking_send(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )));
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
 
@@ -1300,10 +1308,58 @@ async fn graph_store_delete(
 // ─── Management endpoints ─────────────────────────────────────────────────────
 
 /// GET / — Service Description (Turtle), filtered to caller-accessible graphs
+/// True when the client prefers HTML (a browser) over RDF — used so the root route
+/// serves the web UI to browsers while RDF/SPARQL clients still get the service
+/// description.
+fn prefers_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|a| a.contains("text/html"))
+        .unwrap_or(false)
+}
+
+/// Mirrors the server's frontend gate (`SERVE_FRONTEND`, default on) so the root
+/// route only serves the SPA shell when the web UI is actually being served.
+fn serve_frontend_enabled() -> bool {
+    !matches!(
+        std::env::var("SERVE_FRONTEND").ok().as_deref(),
+        Some("false") | Some("0") | Some("no")
+    )
+}
+
+/// Returns the SPA shell (`index.html`) as a 200 response when the web UI is
+/// being served and the caller is a browser (`Accept: text/html`).
+///
+/// A few API routes share their path with a client-side route in the
+/// History-mode SPA (`/` → Home, `/sparql` → the SPARQL workspace). Those API
+/// routes are registered explicitly, so they shadow the `index.html` fallback
+/// configured in `mod.rs`: a hard refresh or deep link to e.g. `/sparql` reaches
+/// the API handler, which would otherwise answer a browser with a JSON error
+/// ("Missing 'query' parameter") instead of the page. Handlers call this first
+/// so a browser navigation renders the UI, while genuine API/RDF clients (which
+/// do not send `Accept: text/html`) fall through to the API behaviour.
+fn spa_shell_response(headers: &HeaderMap) -> Option<Response> {
+    if serve_frontend_enabled() && prefers_html(headers) {
+        if let Ok(html) = std::fs::read_to_string("frontend/dist/index.html") {
+            return Some(axum::response::Html(html).into_response());
+        }
+    }
+    None
+}
+
 async fn service_description_handler(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    // Content negotiation: a browser (Accept: text/html) gets the web UI; RDF/SPARQL
+    // clients get the service description. The explicit `/` route shadows the SPA
+    // fallback, so without this a browser at the root only ever sees Turtle.
+    if let Some(resp) = spa_shell_response(&headers) {
+        return Ok(resp);
+    }
+
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
     let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
 
@@ -1324,15 +1380,53 @@ async fn service_description_handler(
         cached_graphs.0.iter().cloned().collect()
     };
 
-    // Triple count limited to the default graph (not revealing private named graph sizes).
-    let count = if is_admin {
-        state.store.len().unwrap_or(0)
+    // Default-graph triple count. Hidden (0) for anonymous/non-admin callers so the
+    // unauthenticated service description never reveals default-graph size.
+    let default_graph_count = if is_admin {
+        state.store.count_graph(None).unwrap_or(0)
     } else {
         0
     };
 
-    let graph_name_refs: Vec<&str> = accessible_graph_iris.iter().map(String::as_str).collect();
-    let desc = service_description::generate(count, &graph_name_refs);
+    // Pair each accessible named graph with its own triple count (void:triples).
+    let named_graph_counts: Vec<(&str, usize)> = accessible_graph_iris
+        .iter()
+        .map(|iri| {
+            let count = state.store.count_graph(Some(iri.as_str())).unwrap_or(0);
+            (iri.as_str(), count)
+        })
+        .collect();
+    // Registry datasets the caller can access, each with its accessible graphs.
+    // Private graphs are filtered out for non-admins so the description can't leak
+    // them (datasets themselves are already scoped by list_accessible_datasets).
+    let accessible_set: std::collections::HashSet<&str> =
+        accessible_graph_iris.iter().map(|s| s.as_str()).collect();
+    let base = state.base_url.trim_end_matches('/');
+    let dataset_descs: Vec<service_description::DatasetDesc> = state
+        .auth_db
+        .list_accessible_datasets(user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| {
+            let graphs = state
+                .auth_db
+                .list_dataset_graphs(&d.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|g| is_admin || accessible_set.contains(g.as_str()))
+                .collect();
+            service_description::DatasetDesc {
+                iri: format!("{base}/dataset/{}", d.id),
+                name: d.name,
+                description: d.description,
+                public: matches!(d.visibility, crate::auth::models::Visibility::Public),
+                graphs,
+            }
+        })
+        .collect();
+
+    let desc =
+        service_description::generate(default_graph_count, &named_graph_counts, &dataset_descs);
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }
@@ -1494,6 +1588,11 @@ struct BrowseFilterChip {
     /// `regex` (case-insensitive SPARQL REGEX over the term's string form).
     #[serde(default)]
     mode: Option<String>,
+    /// When true the chip is negated: rows that MATCH the clause are excluded
+    /// (`FILTER(!(…))`). Negated chips AND together — each is an independent
+    /// exclusion — unlike positive chips on the same field, which OR together.
+    #[serde(default)]
+    neg: Option<bool>,
 }
 
 /// Validate a regex pattern before embedding it in a SPARQL string literal.
@@ -1896,6 +1995,18 @@ pub struct BrowseTripleParams {
 pub struct BrowseResourceParams {
     pub iri: String,
     pub graph: Option<String>,
+    /// Scope to all named graphs belonging to this dataset ID. Mirrors
+    /// `BrowseTripleParams` so the graph view can expand a resource within the
+    /// same scope as the initial browse load. `graph` takes precedence.
+    pub dataset_id: Option<String>,
+    /// Comma-separated dataset IDs; union of their named graphs. Takes
+    /// precedence over `dataset_id`.
+    pub dataset_ids: Option<String>,
+    /// Scope to all datasets owned by this organisation ID.
+    pub org_id: Option<String>,
+    /// Per-dataset version pins (comma-separated `datasetId:version`). A pinned
+    /// dataset is read from its version snapshot graphs instead of live graphs.
+    pub versions: Option<String>,
 }
 
 /// GET /api/browse/graphs — list named graphs accessible to the caller
@@ -2177,29 +2288,48 @@ pub async fn browse_triples(
     let mut obj_clauses: Vec<String> = Vec::new();
     let mut graph_clauses: Vec<String> = Vec::new();
     let mut vocab_clauses: Vec<String> = Vec::new();
+    // Negated chips (`neg: true`): rows matching the clause are excluded. Each
+    // exclusion ANDs independently (drop the row if it matches ANY of them), so
+    // they share one list and emit one FILTER each — unlike the OR-ed positive
+    // buckets above.
+    let mut neg_clauses: Vec<String> = Vec::new();
     for chip in &chips {
         if chip.value.is_empty() {
             continue;
         }
         let mode = chip.mode.as_deref().unwrap_or("contains");
-        match chip.field.as_str() {
-            "subject" => subj_clauses.push(chip_clause("s", &chip.value, mode, false)?),
-            "predicate" => pred_clauses.push(chip_clause("p", &chip.value, mode, false)?),
-            "object" => obj_clauses.push(chip_clause("o", &chip.value, mode, true)?),
-            "graph" => graph_clauses.push(chip_clause("g", &chip.value, mode, false)?),
-            "vocabulary" => vocab_clauses.push(vocab_clause(&chip.value, mode)?),
+        let clause = match chip.field.as_str() {
+            "subject" => chip_clause("s", &chip.value, mode, false)?,
+            "predicate" => chip_clause("p", &chip.value, mode, false)?,
+            "object" => chip_clause("o", &chip.value, mode, true)?,
+            "graph" => chip_clause("g", &chip.value, mode, false)?,
+            "vocabulary" => vocab_clause(&chip.value, mode)?,
             _ => {
                 return Err(AppError::BadRequest(
                     "filter field must be subject, predicate, object, graph, or vocabulary"
                         .to_string(),
                 ))
             }
+        };
+        if chip.neg.unwrap_or(false) {
+            neg_clauses.push(format!("!({clause})"));
+            continue;
+        }
+        match chip.field.as_str() {
+            "subject" => subj_clauses.push(clause),
+            "predicate" => pred_clauses.push(clause),
+            "object" => obj_clauses.push(clause),
+            "graph" => graph_clauses.push(clause),
+            "vocabulary" => vocab_clauses.push(clause),
+            _ => unreachable!("field validated above"),
         }
     }
     // Graph chips scan/bind ?g, which the single-graph fast path doesn't expose,
-    // so any graph chip forces a ?g-binding branch (ACL still enforced by the
-    // candidate ?g set in every branch).
-    let has_graph_chips = !graph_clauses.is_empty();
+    // so any graph chip — positive or negated — forces a ?g-binding branch (ACL
+    // still enforced by the candidate ?g set in every branch).
+    let has_graph_chips = chips
+        .iter()
+        .any(|c| c.field == "graph" && !c.value.is_empty());
 
     // In exact mode the graph filter is bound directly via `GRAPH <iri>` and is
     // ACL-checked here. In contains mode the same access check is enforced by
@@ -2296,6 +2426,10 @@ pub async fn browse_triples(
     }
     if !vocab_clauses.is_empty() {
         filters.push(format!("FILTER({})", vocab_clauses.join(" || ")));
+    }
+    // Negated chips: each is excluded independently (AND), so one FILTER apiece.
+    for nc in &neg_clauses {
+        filters.push(format!("FILTER({nc})"));
     }
 
     let filter_clause = filters.join("\n");
@@ -2601,6 +2735,48 @@ pub async fn browse_resource(
             }
         }
         vec![graph.clone()]
+    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
+    {
+        // Honour the browse scope (dataset/org + version pins), mirroring
+        // browse_triples → resolve_scope_graphs, so expanding a resource in the
+        // graph view reads the same (possibly version-snapshot) graphs as the
+        // initial scoped load — not the broad accessible set. Access control is
+        // enforced inside scope_dataset_graphs.
+        let versions_map = params
+            .versions
+            .as_deref()
+            .map(parse_versions_map)
+            .unwrap_or_default();
+        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
+            ids_csv
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        } else if let Some(ref org_id) = params.org_id {
+            state
+                .auth_db
+                .list_datasets_by_org(org_id)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter()
+                .map(|ds| ds.id.to_string())
+                .collect()
+        } else {
+            vec![params.dataset_id.clone().unwrap()]
+        };
+        let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
+        if scoped.is_empty() {
+            return Ok(Json(serde_json::json!({
+                "iri": iri,
+                "label": null,
+                "outgoing": [],
+                "incoming": [],
+                "bnodes": {},
+                "reason": "no_accessible_graphs",
+            })));
+        }
+        scoped
     } else {
         let cached_graphs = state
             .auth_db
@@ -3155,6 +3331,33 @@ async fn execute_dataset_query(
         }
     };
 
+    // Drop graphs flagged `private` for callers who cannot write the dataset, so a
+    // viewer (or anonymous user on a public dataset) cannot read a graph the owner
+    // marked private — matching the global /sparql path (get_accessible_graph_iris).
+    let can_write = match user {
+        Some(u) => state
+            .auth_db
+            .can_write_dataset(&u.user_id, &dataset)
+            .unwrap_or(false),
+        None => false,
+    };
+    let graphs: Vec<String> = if can_write {
+        graphs
+    } else {
+        let private: std::collections::HashSet<String> = state
+            .auth_db
+            .list_dataset_graph_entries(dataset_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.private)
+            .map(|e| e.graph_iri)
+            .collect();
+        graphs
+            .into_iter()
+            .filter(|g| !private.contains(g))
+            .collect()
+    };
+
     // Fast path: detect "list all non-empty named graphs" queries and answer from the
     // in-memory graph index.  The pattern `GRAPH ?g { ?s ?p ?o }` forces Oxigraph to
     // enumerate every triple in every accessible graph (O(total_triples)), whereas the
@@ -3271,8 +3474,7 @@ pub(crate) async fn run_scoped_sparql(
             Mode::Graph(f) => serialize_graph_to(results, f, &mut writer),
         };
         if let Err(msg) = result {
-            let _ =
-                chunk_tx.blocking_send(Err(std::io::Error::new(std::io::ErrorKind::Other, msg)));
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(msg)));
         }
     });
 
@@ -3985,7 +4187,7 @@ INSERT DATA {{
     // rebuild and re-count just that graph.
     state
         .store
-        .update_targeted(&update, &[graph.clone()], false)
+        .update_targeted(&update, std::slice::from_ref(&graph), false)
         .map_err(|e| e.to_string())
 }
 
@@ -4966,6 +5168,31 @@ pub async fn validate_dataset(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Compliance-as-data: also persist the report as standard sh:ValidationReport
+    // RDF in a per-dataset system graph, replaced on every official run, so
+    // dashboards can query failures via SPARQL (history stays in run rows).
+    // Best-effort: an RDF-persistence failure must not fail the validation call.
+    {
+        let report_graph = format!("urn:system:reports:dataset:{dataset_id}");
+        let report_iri = format!("{report_graph}#run-{}", summary.id);
+        let ttl = crate::shacl_studio::report_rdf::report_to_turtle(&report, &report_iri);
+        match state.store.graph_store_put(
+            Some(&report_graph),
+            &ttl,
+            oxigraph::io::RdfFormat::Turtle,
+        ) {
+            Ok(_) => {
+                let _ = state.auth_db.add_dataset_graph(&dataset_id, &report_graph);
+                let _ = state.auth_db.set_dataset_graph_role(
+                    &dataset_id,
+                    &report_graph,
+                    Some(crate::auth::models::GraphKind::System),
+                );
+            }
+            Err(e) => debug!("report-RDF persistence skipped: {e}"),
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "report": report,
         "run_id": summary.id,
@@ -5462,6 +5689,31 @@ pub async fn execute_rml_mapping(
         .cloned()
         .unwrap_or_else(|| format!("urn:dataset:{}:rml-output", dataset_id));
 
+    // Cross-tenant write boundary (fail fast, before any work). `can_write_dataset`
+    // only authorizes writing *into this dataset*, not which graph the RML output
+    // targets. A non-admin may therefore only write the dataset's own namespaced
+    // graphs: gate the `?graph=` target here, and every `rml:graphMap` override at
+    // execution. Without this a writer of any dataset could inject triples into
+    // another tenant's graph. Admins are unrestricted.
+    if !current_user.is_admin() {
+        if let Err(msg) = crate::auth::dataset_graph::authorize_dataset_graph_target(
+            &state.auth_db,
+            &state.base_url,
+            &dataset_id,
+            &target_graph,
+        ) {
+            state.audit.log_denied(
+                Some(current_user.user_id.clone()),
+                None,
+                "dataset_graph",
+                &dataset_id,
+                "rml_execute",
+                None,
+            );
+            return Err((StatusCode::FORBIDDEN, msg));
+        }
+    }
+
     // Parse multipart: collect mapping override and source files
     let mut mapping_turtle_override: Option<String> = None;
     let mut source_data: std::collections::HashMap<String, String> =
@@ -5534,9 +5786,32 @@ pub async fn execute_rml_mapping(
         .into_response());
     }
 
-    // Execute into the real store
-    let count = crate::rml::execute(&mapping, &source_data, &state.store, Some(&target_graph))
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Execute into the real store, enforcing the same boundary on every effective
+    // (graphMap-overridden) destination graph — a mapping's `rml:graphMap` can name
+    // a target other than `?graph=`, so the gate must cover the resolved set too.
+    let is_admin = current_user.is_admin();
+    let authz_base = state.base_url.clone();
+    let authz_db = state.auth_db.clone();
+    let authz_ds = dataset_id.clone();
+    let count = crate::rml::execute_authorized(
+        &mapping,
+        &source_data,
+        &state.store,
+        Some(&target_graph),
+        move |g: &str| {
+            if is_admin {
+                Ok(())
+            } else {
+                crate::auth::dataset_graph::authorize_dataset_graph_target(
+                    &authz_db,
+                    &authz_base,
+                    &authz_ds,
+                    g,
+                )
+            }
+        },
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Register target graph in dataset
     let _ = state.auth_db.add_dataset_graph(&dataset_id, &target_graph);
@@ -6318,4 +6593,53 @@ pub async fn list_accessible_shape_graphs(
         .collect();
 
     Ok(Json(serde_json::json!({ "shape_graphs": shape_graphs })))
+}
+
+// ─── Viewer feed (geometry + 3D-file references per element) ────────────────────
+
+#[derive(Deserialize)]
+pub struct ViewerFeedQuery {
+    /// Optional root object IRI: restrict the feed to this object and its
+    /// directly contained elements.
+    pub root: Option<String>,
+}
+
+/// GET /api/datasets/:dataset_id/viewer-feed — per-element geometry (reprojected
+/// to EPSG:4326/3857) plus FOG 3D-file references (glTF/IFC/…), resolved from the
+/// BOT/OMG/FOG/GeoSPARQL layering. Feeds the map and 3D viewers; element detail
+/// is fetched separately on selection. Anonymous access works for public datasets.
+pub async fn viewer_feed(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Query(q): Query<ViewerFeedQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+    if !state
+        .auth_db
+        .can_access_dataset(user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+    if let Some(root) = q.root.as_deref() {
+        validate_iri(root)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid root IRI".to_string()))?;
+    }
+    let data_graphs = state
+        .auth_db
+        .list_dataset_graphs(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let elements =
+        crate::geo::viewer_feed::build_viewer_feed(&state.store, &data_graphs, q.root.as_deref());
+    Ok(Json(serde_json::json!({
+        "dataset_id": dataset_id,
+        "count": elements.len(),
+        "elements": elements,
+    })))
 }

@@ -30,7 +30,6 @@ use crate::prefixes::PrefixRegistry;
 use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_routes};
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
-use crate::vocabularies::routes::{vocabulary_auth_routes, vocabulary_public_routes};
 use axum::extract::{ConnectInfo, DefaultBodyLimit};
 use axum::http::{HeaderName, HeaderValue, Method, Request};
 use axum::middleware;
@@ -43,7 +42,7 @@ use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::KeyExtractor;
 use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -114,7 +113,29 @@ impl KeyExtractor for SmartIpExtractor {
 }
 
 /// Build a CORS layer from a comma-separated list of allowed origins.
-/// If the list is empty, no cross-origin requests are allowed (same-origin only).
+///
+/// Three modes, selected by the `CORS_ORIGINS` value:
+/// * empty — same-origin only (no `Access-Control-Allow-Origin` is emitted).
+/// * an explicit comma-separated list — only those origins are reflected, with
+///   credentials. The tightest option; prefer it in production.
+/// * `*` — reflect ANY origin (and the requested headers) with credentials, by mirroring
+///   the request's `Origin` rather than the literal `*`, which the Fetch spec forbids
+///   alongside credentials. This lets a browser client served from any origin — e.g. the
+///   OTL viewer on `http://localhost:5190` — connect to this store.
+///
+/// Why mirroring any origin *with credentials* is safe here — and what it depends on:
+/// this server authenticates a request from EITHER an `Authorization: Bearer <token>`
+/// header OR an `access_token` cookie (`auth::middleware::extract_token`), so the cookie
+/// **is** a real ambient credential. What keeps mirror mode safe is that both session
+/// cookies (`access_token`, `refresh_token`) are `SameSite=Strict`, so the browser
+/// withholds them on every cross-site request — even a credentialed `fetch` to a
+/// mirrored origin. (The lone `SameSite=Lax` cookie, `oauth_state`, is a short-lived
+/// CSRF nonce that is never sent on `fetch`/XHR and confers no access; there is no HTTP
+/// Basic auth.) A hostile origin therefore cannot make the browser attach a usable
+/// credential, and cannot forge the bearer header — so it gains nothing it could not
+/// already reach unauthenticated. **Load-bearing invariant:** if any auth cookie is ever
+/// downgraded to `SameSite=Lax`/`None`, mirror mode becomes a credentialed-CORS / CSRF
+/// hole. The `auth_session_cookies_are_samesite_strict` regression test pins this.
 fn build_cors_layer(cors_origins: &str) -> CorsLayer {
     let origins: Vec<&str> = cors_origins
         .split(',')
@@ -141,16 +162,25 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
         // concurrency (If-Match) on draft edits across origins.
         .expose_headers([axum::http::header::ETAG]);
 
-    // A bare "*" cannot be combined with credentialed requests (Fetch spec), and
-    // tower-http panics if `*` appears in an explicit origin list. Refuse it loudly
-    // and fall back to same-origin only rather than crashing at the first request.
-    if origins.iter().any(|o| *o == "*") {
-        tracing::error!(
-            "CORS_ORIGINS contains '*', which cannot be combined with credentialed API \
-             requests. Ignoring it and allowing SAME-ORIGIN only. List explicit origins \
-             (scheme + host) instead."
+    // `*` ⇒ permissive mirror mode. The literal `*` cannot be paired with
+    // `Access-Control-Allow-Credentials: true` (the Fetch spec rejects it), so mirror
+    // the caller's `Origin` instead — a concrete value that *is* legal with credentials.
+    // Also mirror the requested headers: in "any origin" mode we don't control the client,
+    // so a fixed allow-list would silently break a preflight the moment a client sends a
+    // header it doesn't enumerate. tower-http adds `Vary: Origin` automatically. See the
+    // safety rationale on this fn's doc comment.
+    if origins.contains(&"*") {
+        tracing::warn!(
+            "CORS_ORIGINS contains '*': reflecting ANY request origin with credentials \
+             (mirror mode). Safe only while both session cookies stay SameSite=Strict (the \
+             browser then withholds them cross-site, leaving the unforgeable Authorization \
+             bearer token as the only cross-origin credential). For a tighter posture in \
+             production, list explicit origins instead."
         );
-        return layer;
+        return layer
+            .allow_credentials(true)
+            .allow_origin(AllowOrigin::mirror_request())
+            .allow_headers(AllowHeaders::mirror_request());
     }
 
     if origins.is_empty() {
@@ -315,6 +345,19 @@ impl axum::extract::FromRef<AppState> for Arc<AuthDb> {
     }
 }
 
+/// Extractor newtype for the linked-data base URL, so handlers that only take
+/// `State<Arc<AuthDb>>` can also obtain `base_url` (e.g. to surface a dataset's
+/// canonical IRI) without pulling in the whole `AppState`. A newtype is required
+/// because the orphan rule forbids `impl FromRef<AppState> for Arc<String>`.
+#[derive(Clone)]
+pub struct BaseUrl(pub Arc<String>);
+
+impl axum::extract::FromRef<AppState> for BaseUrl {
+    fn from_ref(state: &AppState) -> Self {
+        BaseUrl(state.base_url.clone())
+    }
+}
+
 impl axum::extract::FromRef<AppState> for Arc<crate::auth::audit::AuditLogger> {
     fn from_ref(state: &AppState) -> Self {
         state.audit.clone()
@@ -337,6 +380,41 @@ impl axum::extract::FromRef<AppState> for Arc<crate::auth::oidc_rs::AuthExt> {
     fn from_ref(state: &AppState) -> Self {
         state.auth_ext.clone()
     }
+}
+
+/// Surface the LDP capability headers (`Accept-Post`, `Accept-Patch`, `Allow`) on
+/// `OPTIONS /ldp/*` responses even when the global CORS layer answers the preflight
+/// before the LDP handler runs.
+///
+/// tower-http's `CorsLayer` short-circuits CORS *preflight* requests (an `OPTIONS`
+/// carrying `Access-Control-Request-Method`) and replies directly, so the LDP
+/// `OPTIONS` handler never executes and its capability headers are lost. This
+/// middleware is layered just outside CORS, so it observes that short-circuited
+/// response and fills the headers in when they are missing. A plain (non-preflight)
+/// `OPTIONS` still reaches the handler, which sets them — `accept-post` is then
+/// already present and this is a no-op. The values match `ldp::handler::ldp_options`.
+async fn ldp_options_capabilities(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_ldp_options = req.method() == Method::OPTIONS && req.uri().path().starts_with("/ldp/");
+    let mut resp = next.run(req).await;
+    if is_ldp_options && !resp.headers().contains_key("accept-post") {
+        let headers = resp.headers_mut();
+        headers.insert(
+            axum::http::header::ALLOW,
+            HeaderValue::from_static("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"),
+        );
+        headers.insert(
+            HeaderName::from_static("accept-post"),
+            HeaderValue::from_static("text/turtle, application/ld+json"),
+        );
+        headers.insert(
+            HeaderName::from_static("accept-patch"),
+            HeaderValue::from_static("application/sparql-update"),
+        );
+    }
+    resp
 }
 
 /// Build the application router.
@@ -684,6 +762,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/organisations/:org_id/banner",
             put(handlers::upload_org_banner).get(handlers::get_org_banner),
         )
+        .route(
+            "/api/organisations/:org_id/banner-preset",
+            put(handlers::set_org_banner_preset),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -696,6 +778,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/:dataset_id/banner",
             put(handlers::upload_dataset_banner).get(handlers::get_dataset_banner),
+        )
+        .route(
+            "/api/datasets/:dataset_id/banner-preset",
+            put(handlers::set_dataset_banner_preset),
+        )
+        // Viewer feed: per-element geometry + 3D-file references (map/3D viewers).
+        // Optional auth so public datasets are viewable anonymously.
+        .route(
+            "/api/datasets/:dataset_id/viewer-feed",
+            get(routes::viewer_feed),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
@@ -898,19 +990,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // Vocabulary registry — public read routes
-    let vocabulary_read = Router::new()
-        .merge(vocabulary_public_routes())
-        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
-        .with_state(state.clone());
-
-    // Vocabulary registry — write routes
-    let vocabulary_write = Router::new()
-        .merge(vocabulary_auth_routes())
-        .route_layer(middleware::from_fn(require_publisher))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state.clone());
-
     // Dataset versioning — public read routes (visibility scoped via optional_auth)
     let dataset_version_read = Router::new()
         .merge(dataset_version_public_routes())
@@ -1069,8 +1148,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(reasoning_api_routes)
         .merge(data_model_read)
         .merge(data_model_write)
-        .merge(vocabulary_read)
-        .merge(vocabulary_write)
         .merge(dataset_version_read)
         .merge(dataset_version_write)
         .merge(saved_query_read)
@@ -1121,13 +1198,28 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     router = router.merge(openapi_doc_route);
 
     let mut router = router
+        // Innermost global layer (added first ⇒ closest to the route handlers): turn a
+        // panic in any handler into a clean `500` instead of letting it unwind the
+        // per-connection task. Without this a single malformed request that trips a
+        // panic (a failed `unwrap`, an out-of-bounds slice, a debug-build arithmetic
+        // overflow, or a panic raised deep inside a parsing library on adversarial
+        // input) drops the connection with no status code. Placing it *inside* the
+        // timeout / compression / CORS / security-header / trace / request-id layers
+        // means the synthesised 500 still receives all of those (security headers,
+        // gzip, an `x-request-id`, a trace span), exactly like a normal error response.
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            handle_request_panic,
+        ))
         // Generous global request timeout as a DoS backstop for stuck/slow handlers.
         // It bounds the time to PRODUCE a response, not body streaming: SPARQL
         // results stream after a fast first-byte response, so large exports are not
         // truncated. The per-query 30s timeout and the expensive-op semaphore are the
         // primary guards; this catches anything that slips past them. (Slow-header
         // Slowloris is handled at the reverse proxy.)
-        .layer(tower_http::timeout::TimeoutLayer::new(
+        // `with_status_code` replaces the deprecated `TimeoutLayer::new`; passing
+        // REQUEST_TIMEOUT (408) keeps the exact response status `new` defaulted to.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(300),
         ))
         // M-6: Default body limit for all other endpoints (JSON API, image uploads, etc.).
@@ -1137,6 +1229,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // This can reduce SPARQL JSON payloads by 70–90 % (e.g. 50 MB → 5 MB).
         .layer(CompressionLayer::new())
         .layer(build_cors_layer(cors_origins))
+        // Re-attach the LDP capability headers that the CORS preflight short-circuit
+        // would otherwise drop. Must sit just outside the CORS layer so it runs on the
+        // preflight response CORS produced (see `ldp_options_capabilities`).
+        .layer(middleware::from_fn(ldp_options_capabilities))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
             csp_value,
@@ -1211,6 +1307,42 @@ async fn request_id_middleware(
     resp
 }
 
+/// Panic handler for the [`tower_http::catch_panic::CatchPanicLayer`] wrapped around
+/// every route (see [`build_router`]).
+///
+/// A panic in a handler — a failed `unwrap`/`expect`, an out-of-bounds index, a
+/// debug-build arithmetic overflow, or a panic raised deep inside a parsing library
+/// on adversarial input — would otherwise unwind the per-connection task, leaving the
+/// client with an abrupt connection reset (no status code) and the failure visible
+/// only as a stack trace in the logs. Catching it turns every such panic into a
+/// normal `500 Internal Server Error`, so one malformed request can no longer drop
+/// its connection. The response is deliberately generic: the panic payload is logged
+/// server-side but never sent to the client, matching [`error::AppError::Internal`].
+fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::response::Response {
+    // The panic payload is the value passed to `panic!` — almost always a `&str`
+    // (string literals) or a `String` (formatted messages, e.g. from `unwrap`).
+    let detail = if let Some(s) = err.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+    // This layer runs inside TraceLayer + request_id_middleware, so the error line is
+    // emitted within the per-request span and is correlated with its `x-request-id`.
+    tracing::error!("caught panic in request handler: {detail}");
+
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+        .header(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )
+        .body(axum::body::Body::from("Internal server error"))
+        // Infallible: a static status + header + body can never be a builder error.
+        .expect("static 500 response is always valid")
+}
+
 /// Start the HTTP server.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -1225,6 +1357,7 @@ pub async fn run(
     trusted_cidrs: Vec<IpNet>,
     query_timeout_secs: u64,
     secure_cookies: bool,
+    serve_frontend: bool,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
 ) -> anyhow::Result<()> {
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
@@ -1409,7 +1542,10 @@ pub async fn run(
     {
         let seed_state = state.clone();
         tokio::task::spawn_blocking(move || {
-            let _ = crate::saved_queries::seed::seed_open_triplestore(&seed_state);
+            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
+            // Seed the standard RDF vocabularies (OWL/RDF/RDFS/SKOS/DCAT/PROV/…)
+            // into the model registry as public reference entries (idempotent).
+            crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
             // Migrate any pre-existing datasets onto the canonical singular dataset
             // IRI so their metadata node renders complete when browsed/clicked.
             crate::auth::dataset_graph::reconcile_all_dataset_metadata(
@@ -1423,14 +1559,23 @@ pub async fn run(
     // Build router — auth endpoint rate limiting is applied inside build_router.
     let app = build_router(state, cors_origins, trusted_cidrs);
 
-    // Serve frontend SPA from frontend/dist (fallback to index.html for SPA routing)
+    // Serve frontend SPA from frontend/dist. Gated by --serve-frontend /
+    // SERVE_FRONTEND (default on); disable for an API-only server. SPARQL, Graph
+    // Store and REST endpoints are unaffected.
+    //
+    // Use `.fallback` (NOT `.not_found_service`) for the index.html catch-all:
+    // svelte-routing uses history mode, so a deep link or hard refresh to a client
+    // route such as /browse must return index.html with a 200. `.not_found_service`
+    // serves the body but forces a 404 status, which breaks deep links and caching.
     let frontend_dir = std::path::Path::new("frontend/dist");
     let mut app = Router::new().merge(app);
-    if frontend_dir.exists() {
+    if serve_frontend && frontend_dir.exists() {
         app = app.fallback_service(
-            ServeDir::new("frontend/dist")
-                .not_found_service(ServeFile::new("frontend/dist/index.html")),
+            ServeDir::new("frontend/dist").fallback(ServeFile::new("frontend/dist/index.html")),
         );
+        info!("Web UI served at http://{}/", addr);
+    } else if !serve_frontend {
+        info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
     }
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
@@ -1503,5 +1648,53 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod panic_safety_net_tests {
+    //! Regression test for the panic safety net wired into [`build_router`]: a
+    //! panic inside a handler must surface as a clean `500` produced by
+    //! [`handle_request_panic`], never as an unwound (reset) connection.
+    //!
+    //! NB: the default panic hook still prints a "thread '…' panicked" line to
+    //! stderr when the panic is caught — that output is expected here and is not
+    //! a test failure.
+    use super::handle_request_panic;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _; // for `oneshot`
+
+    async fn always_panics() -> axum::response::Response {
+        panic!("simulated handler panic");
+    }
+
+    #[tokio::test]
+    async fn handler_panic_becomes_clean_500() {
+        let app = Router::new().route("/boom", get(always_panics)).layer(
+            tower_http::catch_panic::CatchPanicLayer::custom(handle_request_panic),
+        );
+
+        let resp = app
+            .oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap())
+            .await
+            // The panic must be caught: the service resolves to a response rather
+            // than propagating the unwind to the caller (the connection task).
+            .expect("service resolved to a response");
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        // Generic message only — the panic payload is never leaked to the client.
+        assert_eq!(body.as_ref(), b"Internal server error");
     }
 }

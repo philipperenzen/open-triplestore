@@ -51,6 +51,13 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
+# The binary embeds the user-facing docs at compile time — src/docs/mod.rs uses
+# include_str!("../../docs/*.md") — so the docs/ tree must be present for the build.
+# (.dockerignore's `*.md` only excludes root-level markdown, not docs/.)
+COPY docs/ docs/
+# Shared standard-vocabulary TTLs embedded by the backend (src/data_models/seed_vocab.rs)
+# via include_str!; needed at compile time here since the frontend tree isn't copied.
+COPY frontend/public/vocab/ frontend/public/vocab/
 RUN cargo build --release --features full
 
 # ─── Stage 3: Runtime ───

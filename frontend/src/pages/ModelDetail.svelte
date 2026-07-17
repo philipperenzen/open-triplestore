@@ -15,6 +15,7 @@
     subgraphActionDataModel,
   } from '../lib/api.js';
   import { isAdmin, user } from '../lib/stores.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import UploadVersionDialog from '../components/UploadVersionDialog.svelte';
   import PublishConfirmDialog from '../components/PublishConfirmDialog.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -47,11 +48,11 @@
 
   // Copy-to-clipboard
   let copiedApi = null;
-  function copyApiUrl(key, url) {
-    navigator.clipboard.writeText(url).then(() => {
+  async function copyApiUrl(key, url) {
+    if (await copyToClipboard(url)) {
       copiedApi = key;
       setTimeout(() => { copiedApi = null; }, 2000);
-    }).catch(() => {});
+    }
   }
 
   let currentUser = null;
@@ -335,18 +336,18 @@
       <span class="api-bar-label">API</span>
       <div class="api-row">
         <span class="api-method">GET</span>
-        <code class="api-url">/api/data-models/{id}/versions</code>
+        <code class="api-url">/api/models/{id}/versions</code>
         <button class="btn btn-xs btn-ghost copy-btn" title={$t('system.copy')}
-          on:click={() => copyApiUrl('versions', `${window.location.origin}/api/data-models/${id}/versions`)}>
+          on:click={() => copyApiUrl('versions', `${window.location.origin}/api/models/${id}/versions`)}>
           {#if copiedApi === 'versions'}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
         </button>
         <span class="api-note">{$t('pages.modelDetail.listAllVersions')}</span>
       </div>
       <div class="api-row">
         <span class="api-method">GET</span>
-        <code class="api-url">/api/data-models/{id}/latest/data</code>
+        <code class="api-url">/api/models/{id}/latest/data</code>
         <button class="btn btn-xs btn-ghost copy-btn" title={$t('system.copy')}
-          on:click={() => copyApiUrl('latest', `${window.location.origin}/api/data-models/${id}/latest/data`)}>
+          on:click={() => copyApiUrl('latest', `${window.location.origin}/api/models/${id}/latest/data`)}>
           {#if copiedApi === 'latest'}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
         </button>
         <span class="api-note">{$t('pages.modelDetail.latestPublishedData')} (<code>Accept</code>)</span>
@@ -418,7 +419,7 @@
 
     <!-- Branches -->
     {#if model}
-      <BranchPanel kind="data-model" {id} {versions} canWrite={isPublisher} on:created={load} />
+      <BranchPanel {id} {versions} canWrite={isPublisher} on:created={load} />
     {/if}
 
     <!-- Commit history -->
@@ -487,7 +488,7 @@
                   <button
                     class="ver-btn"
                     title={$t('pages.modelDetail.copyEndpointUrl')}
-                    on:click={() => copyApiUrl(`ver-${ver.version}`, `${window.location.origin}/api/data-models/${id}/versions/${ver.version}/data`)}
+                    on:click={() => copyApiUrl(`ver-${ver.version}`, `${window.location.origin}/api/models/${id}/versions/${ver.version}/data`)}
                   >
                     {#if copiedApi === `ver-${ver.version}`}
                       <CheckCheck size={13} class="text-green-600" /> {$t('system.copied')}

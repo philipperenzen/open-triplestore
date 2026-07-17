@@ -11,7 +11,7 @@
 
   import {
     Home as HomeIcon, Search as SearchIcon,
-    Upload, Database, Building2, BookOpen, Library, HelpCircle,
+    Upload, Database, Building2, BookOpen, HelpCircle,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon
@@ -29,12 +29,14 @@
   import OrgDetail from './pages/OrgDetail.svelte';
   import GraphList from './pages/GraphList.svelte';
   import ResourceDetail from './pages/ResourceDetail.svelte';
+  import PreviewOverlay from './components/viewer/PreviewOverlay.svelte';
   import Validation from './pages/Validation.svelte';
 
   // W4-20: Heavy pages use dynamic imports so their vendor chunks (CodeMirror,
   // Cytoscape, etc.) are only fetched when the route is first visited.
   import LazyPage from './components/LazyPage.svelte';
   const lazySparqlEditor     = () => import('./pages/SparqlEditor.svelte');
+  const lazyDatasetViewer    = () => import('./pages/DatasetViewer.svelte');
   const lazyApiServices      = () => import('./pages/ApiServices.svelte');
   // /graph-viz is deprecated: the unified browse page (/browse?view=graph) now
   // owns the graph viz. Keep a thin redirect so deep-links don't 404.
@@ -53,10 +55,6 @@
   const lazyModelDetail         = () => import('./pages/ModelDetail.svelte');
   const lazyModelViewer         = () => import('./pages/ModelViewer.svelte');
   const lazyModelDiff           = () => import('./pages/ModelDiff.svelte');
-  const lazyVocabularyRegistry  = () => import('./pages/VocabularyRegistry.svelte');
-  const lazyVocabularyDetail    = () => import('./pages/VocabularyDetail.svelte');
-  const lazyVocabularyViewer    = () => import('./pages/VocabularyViewer.svelte');
-  const lazyVocabularyDiff      = () => import('./pages/VocabularyDiff.svelte');
   const lazyTripleBrowser       = () => import('./pages/TripleBrowser.svelte');
   const lazyLlmChat             = () => import('./pages/LlmChat.svelte');
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
@@ -93,7 +91,6 @@
         { to: '/datasets', labelKey: 'nav.datasets', icon: Database, match: (p) => p.startsWith('/datasets') },
         { to: '/organisations', labelKey: 'nav.organisations', icon: Building2, match: (p) => p.startsWith('/organisations') },
         { to: '/models', labelKey: 'nav.models', icon: BookOpen, match: (p) => p.startsWith('/models') },
-        { to: '/vocabularies', labelKey: 'nav.vocabularies', icon: Library, match: (p) => p.startsWith('/vocabularies') },
       ],
     },
     {
@@ -113,7 +110,7 @@
   ];
 
   // Pages where ⌘K search is meaningful. Auth/settings/admin pages don't need it.
-  const SEARCH_ENABLED_PREFIXES = ['/', '/browse', '/resource', '/sparql', '/graph-viz', '/graphs', '/datasets', '/organisations', '/models', '/vocabularies', '/import', '/validation', '/shacl'];
+  const SEARCH_ENABLED_PREFIXES = ['/', '/browse', '/resource', '/sparql', '/graph-viz', '/graphs', '/datasets', '/organisations', '/models', '/import', '/validation', '/shacl'];
   function searchEnabledFor(path) {
     if (path === '/') return true;
     return SEARCH_ENABLED_PREFIXES.some((p) => p !== '/' && path.startsWith(p));
@@ -227,7 +224,6 @@
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
-      ['/vocabularies', 'pages.vocabularyRegistry.title', 'pages.vocabularyRegistry.detail'],
       ['/docs', 'pages.documentation.title', 'pages.documentation.detail'],
       ['/api-docs', 'pages.apiDocs.title', 'pages.apiDocs.detail'],
     ];
@@ -607,6 +603,9 @@
         </Route>
         <Route path="/validation" component={Validation} />
         <Route path="/datasets" component={Datasets} />
+        <Route path="/datasets/:id/viewer" let:params>
+          <LazyPage loader={lazyDatasetViewer} id={params.id} />
+        </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />
         </Route>
@@ -638,21 +637,6 @@
         </Route>
         <Route path="/models/:id" let:params>
           <LazyPage loader={lazyModelDetail} id={params.id} />
-        </Route>
-        <Route path="/vocabularies">
-          <LazyPage loader={lazyVocabularyRegistry} />
-        </Route>
-        <Route path="/vocabularies/:id/viewer/:versionId" let:params>
-          <LazyPage loader={lazyVocabularyViewer} id={params.id} versionId={params.versionId} />
-        </Route>
-        <Route path="/vocabularies/:id/viewer" let:params>
-          <LazyPage loader={lazyVocabularyViewer} id={params.id} />
-        </Route>
-        <Route path="/vocabularies/:id/diff" let:params>
-          <LazyPage loader={lazyVocabularyDiff} id={params.id} />
-        </Route>
-        <Route path="/vocabularies/:id" let:params>
-          <LazyPage loader={lazyVocabularyDetail} id={params.id} />
         </Route>
         <Route path="/docs">
           <LazyPage loader={lazyDocumentation} />
@@ -728,6 +712,10 @@
 
   <Toasts />
 </Router>
+
+<!-- Global 3D-model / geometry preview, requested by RDF terms anywhere
+     (triple table, graph explorer, resource panels). -->
+<PreviewOverlay />
 {/if}
 
 <style>

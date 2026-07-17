@@ -66,6 +66,9 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::DISTANCE, fn_distance),
         make_fn(vocab::AREA, fn_area),
         make_fn(vocab::GET_SRID, fn_get_srid),
+        make_fn(vocab::RELATE, fn_relate),
+        // ─── CRS transform ───
+        make_fn(vocab::TRANSFORM, fn_transform),
     ]
 }
 
@@ -157,6 +160,23 @@ fn relates_pattern(g1: &GeosGeometry, g2: &GeosGeometry, pattern: &str) -> Optio
     g1.relate_pattern(g2, pattern).ok()
 }
 
+/// geof:relate(g1, g2, pattern) — true iff the DE-9IM intersection matrix of g1
+/// and g2 matches the 9-character `pattern` (chars from the set T/F/*/0/1/2).
+/// OGC GeoSPARQL Requirement 44 (Geometry Extension).
+fn fn_relate(args: &[Term]) -> Option<Term> {
+    if args.len() < 3 {
+        return None;
+    }
+    let g1 = parse_wkt_literal(&args[0])?;
+    let g2 = parse_wkt_literal(&args[1])?;
+    let pattern = match &args[2] {
+        Term::Literal(l) => l.value().to_string(),
+        _ => return None,
+    };
+    let result = g1.relate_pattern(&g2, &pattern).ok()?;
+    Some(boolean_literal(result))
+}
+
 fn eh_contains(args: &[Term]) -> Option<Term> {
     let (g1, g2) = parse_two_geoms(args)?;
     // Egenhofer contains: T*TFF*FF*
@@ -240,20 +260,28 @@ fn rcc8_po(args: &[Term]) -> Option<Term> {
 }
 
 fn rcc8_tppi(args: &[Term]) -> Option<Term> {
-    // Tangential proper part inverse = covers ∧ ¬equals
+    // Tangential proper part inverse = (covers ∧ ¬equals) ∧ ¬(non-tangential inverse).
+    // Without the ¬ntppi guard, TPPi would also match the non-tangential case (NTPPi),
+    // violating RCC8's requirement that its eight base relations be mutually exclusive.
     let (g1, g2) = parse_two_geoms(args)?;
     let covers = relates_pattern(&g1, &g2, "T*TFT*FF*")?;
     let equals = relates_pattern(&g1, &g2, "TFFFTFFFT")?;
-    Some(boolean_literal(covers && !equals))
+    // NTPPi uses the Egenhofer "contains" mask.
+    let ntppi = relates_pattern(&g1, &g2, "T*TFF*FF*")?;
+    Some(boolean_literal(covers && !equals && !ntppi))
 }
 
 fn rcc8_tpp(args: &[Term]) -> Option<Term> {
-    // Tangential proper part = coveredBy ∧ ¬equals
-    // Use native GEOS operations to correctly handle boundary-sharing geometries.
+    // Tangential proper part = (coveredBy ∧ ¬equals) ∧ ¬(non-tangential proper part).
+    // Without the ¬ntpp guard, TPP would also match the non-tangential case (NTPP),
+    // violating RCC8's requirement that its eight base relations be mutually exclusive.
+    // Native GEOS covered_by/equals handle boundary-sharing and mixed types correctly.
     let (g1, g2) = parse_two_geoms(args)?;
     let covered_by = g1.covered_by(&g2).ok()?;
     let equals = g1.equals(&g2).ok()?;
-    Some(boolean_literal(covered_by && !equals))
+    // NTPP uses the Egenhofer "inside" mask.
+    let ntpp = relates_pattern(&g1, &g2, "TFF*FFT**")?;
+    Some(boolean_literal(covered_by && !equals && !ntpp))
 }
 
 fn rcc8_ntpp(args: &[Term]) -> Option<Term> {
@@ -342,11 +370,78 @@ fn fn_union(args: &[Term]) -> Option<Term> {
 fn fn_distance(args: &[Term]) -> Option<Term> {
     let (g1, g2) = parse_two_geoms(args)?;
 
-    // Third arg (optional): units IRI
-    let _unit_scale = args.get(2).and_then(parse_uom).unwrap_or(1.0);
+    // Planar distance in the CRS of the first geometry. The optional third argument
+    // is a units-of-measure IRI; for a metre-based CRS (e.g. EPSG:28992) the planar
+    // value is already in metres, so we convert by dividing by the unit's metre size
+    // (metre → ÷1, kilometre → ÷1000, …). For a geographic CRS the planar value is in
+    // degrees and no linear conversion is applied — geodesic metres would need
+    // geof:metricDistance (a separate, still-tracked gap).
+    let metres_per_unit = args.get(2).and_then(uom_metres_per_unit).unwrap_or(1.0);
 
-    let dist = g1.distance(&g2).ok()?;
+    let dist = g1.distance(&g2).ok()? / metres_per_unit;
     Some(double_literal(dist))
+}
+
+/// Size of a linear units-of-measure IRI in metres, for converting a metre-based
+/// planar distance into the requested unit. Returns `None` for non-linear/unknown
+/// units so the caller falls back to the raw (unscaled) planar value.
+fn uom_metres_per_unit(term: &Term) -> Option<f64> {
+    match term {
+        Term::NamedNode(nn) => match nn.as_str() {
+            s if s == vocab::METRE => Some(1.0),
+            s if s == vocab::KILOMETRE => Some(1000.0),
+            s if s == vocab::CENTIMETRE => Some(0.01),
+            s if s == vocab::MILLIMETRE => Some(0.001),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `geof:transform(geom, targetCrsIri)` — reproject a geometry literal to the target
+/// CRS (OGC GeoSPARQL Geometry Extension). The source CRS is taken from the literal's
+/// `<crs>` prefix (defaulting to CRS84); supported CRS are EPSG:28992 / 4326 / 3857
+/// (see [`super::crs`]). Returns a `geo:wktLiteral` prefixed with the target CRS, or
+/// `None` if either CRS is unsupported or the geometry does not parse.
+fn fn_transform(args: &[Term]) -> Option<Term> {
+    use super::crs::Crs;
+    use geo::MapCoords;
+    use wkt::{ToWkt, TryFromWkt};
+
+    let lit = match args.first()? {
+        Term::Literal(l) => l,
+        _ => return None,
+    };
+    let value = lit.value();
+    let source = extract_crs(value)
+        .and_then(Crs::from_uri)
+        .unwrap_or(Crs::Wgs84);
+
+    let target_iri = match args.get(1)? {
+        Term::NamedNode(nn) => nn.as_str(),
+        _ => return None,
+    };
+    let target = Crs::from_uri(target_iri)?;
+
+    // Strip the optional CRS prefix to get the bare WKT, then parse via geo-types.
+    let trimmed = value.trim();
+    let wkt_body = if trimmed.starts_with('<') {
+        trimmed.split_once('>').map(|(_, rest)| rest.trim())?
+    } else {
+        trimmed
+    };
+    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(wkt_body).ok()?;
+
+    let out = geom.map_coords(|c| {
+        let (x, y) = super::crs::transform_xy(source, target, c.x, c.y).unwrap_or((c.x, c.y));
+        geo::Coord { x, y }
+    });
+
+    let lexical = format!("<{}> {}", target.to_uri(), out.wkt_string());
+    Some(Term::Literal(oxrdf::Literal::new_typed_literal(
+        lexical,
+        NamedNode::new_unchecked(vocab::WKT_LITERAL),
+    )))
 }
 
 fn fn_area(args: &[Term]) -> Option<Term> {

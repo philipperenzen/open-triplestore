@@ -178,7 +178,9 @@ fn zip_metadata(bytes: &[u8], meta: &mut AssetMetadata) {
 
 /// Zip-bomb heuristic: an uncompressed total is suspicious when it exceeds both an
 /// absolute floor (100 MB) and 1000× the compressed input. Pure so it is unit-testable
-/// without synthesizing a real bomb. (Always compiled; used by `zip_metadata`.)
+/// without synthesizing a real bomb. Compiled with `asset-archive` (its only caller,
+/// `zip_metadata`) or under `test`; otherwise it would be dead code (e.g. the e2e build).
+#[cfg(any(feature = "asset-archive", test))]
 pub(crate) fn zip_ratio_is_suspicious(uncompressed: u64, compressed: u64) -> bool {
     const RATIO_LIMIT: u64 = 1000;
     const ABS_FLOOR: u64 = 100_000_000;
@@ -243,7 +245,10 @@ pub fn make_thumbnail(bytes: &[u8], max_dim: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The outcome of an anti-virus / content scan on an uploaded asset.
+/// The outcome of an anti-virus / content scan on an uploaded asset. Compiled with
+/// `asset-clamav` (its only producer/consumer) or under `test`; otherwise dead code
+/// (e.g. the e2e build, which omits the asset features).
+#[cfg(any(feature = "asset-clamav", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanVerdict {
     /// Scanning is disabled (no scanner configured) — upload proceeds unscanned.
@@ -256,6 +261,7 @@ pub enum ScanVerdict {
     Error(String),
 }
 
+#[cfg(any(feature = "asset-clamav", test))]
 impl ScanVerdict {
     /// Whether an upload carrying this verdict may be stored. Only an explicit
     /// `Infected` blocks; Skipped/Clean/Error are allowed (fail-open on scanner
@@ -569,6 +575,48 @@ fn symphonia_metadata(bytes: &[u8], filename: &str, meta: &mut AssetMetadata) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the PDF page-count path (`lopdf::Document::load_mem` + `get_pages`), which
+    // is otherwise untested. lopdf was bumped 0.34 -> 0.44 for RUSTSEC-2026-0187, so a
+    // silent behaviour change here would go unnoticed.
+    #[cfg(feature = "asset-pdf")]
+    #[test]
+    fn pdf_page_count() {
+        use lopdf::{dictionary, Document, Object};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page_ids: Vec<Object> = (0..2)
+            .map(|_| {
+                doc.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                })
+                .into()
+            })
+            .collect();
+        let count = page_ids.len() as i64;
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids,
+                "Count" => count,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("save pdf");
+
+        let m = extract_for(AssetKind::Document, &bytes, "application/pdf", "a.pdf");
+        assert_eq!(m.pages, Some(2));
+    }
 
     const PNG_1X1: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,

@@ -1,7 +1,10 @@
 use dashmap::DashMap;
+use opengraph::spargebra::algebra::{AggregateExpression, Expression, GraphPattern};
+use opengraph::spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use opengraph::spargebra::Query as SpargebraQuery;
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::*;
-use oxigraph::sparql::{QueryOptions, QueryResults, Update};
+use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolutionIter, Update};
 use oxigraph::store::Store;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -11,6 +14,8 @@ use tracing::{debug, info};
 
 use crate::geo::functions as geo_fns;
 use crate::geo::spatial_index::SpatialIndex;
+use crate::store::parallel_mirror::ParallelMirror;
+use crate::store::query_cache::QueryCache;
 
 #[derive(Error, Debug)]
 pub enum StoreError {
@@ -170,11 +175,26 @@ pub struct TripleStore {
     store: Arc<Store>,
     graph_index: GraphIndex,
     spatial_index: SpatialIndex,
+    /// In-memory subject-sharded read accelerator: a decomposable aggregate/ASK is
+    /// answered across cores instead of on one. Derived from `store`, rebuilt
+    /// lazily after writes, and bounded by a triple-count cap (see
+    /// [`ParallelMirror`]).
+    parallel_mirror: ParallelMirror,
+    /// Memoises small query results (invalidated on every write); a repeated query
+    /// is answered without re-evaluation. See [`QueryCache`].
+    query_cache: QueryCache,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
     blank_node_mode: BlankNodeMode,
+    /// Process-unique identity for cache keying (shared by clones, distinct per
+    /// underlying store). Prevents the per-thread SHACL path cache from serving
+    /// one store's results to another (same focus IRI + path, different data).
+    cache_id: u64,
 }
+
+/// Monotonic source for [`TripleStore::cache_id`].
+static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl TripleStore {
     /// Open or create a persistent store at the given path.
@@ -189,7 +209,10 @@ impl TripleStore {
             store: Arc::new(store),
             graph_index,
             spatial_index,
+            parallel_mirror: ParallelMirror::from_env(),
+            query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
+            cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -202,7 +225,10 @@ impl TripleStore {
             store: Arc::new(store),
             graph_index,
             spatial_index,
+            parallel_mirror: ParallelMirror::from_env(),
+            query_cache: QueryCache::from_env(),
             blank_node_mode: BlankNodeMode::default(),
+            cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -210,6 +236,29 @@ impl TripleStore {
     pub fn with_blank_node_mode(mut self, mode: BlankNodeMode) -> Self {
         self.blank_node_mode = mode;
         self
+    }
+
+    /// Override the parallel-query mirror configuration (builder style) instead of
+    /// reading it from the environment. `enabled` toggles the accelerator,
+    /// `shards` is the subject-hash shard count (clamped to 1..=16), and
+    /// `max_triples` is the memory cap above which it stays disabled.
+    pub fn with_parallel_query(mut self, enabled: bool, shards: usize, max_triples: usize) -> Self {
+        self.parallel_mirror = ParallelMirror::new(enabled, shards, max_triples);
+        self
+    }
+
+    /// Override the query-result cache configuration (builder style; tests).
+    pub fn with_query_cache(mut self, enabled: bool, max_entries: usize, max_rows: usize) -> Self {
+        self.query_cache = QueryCache::new(enabled, max_entries, max_rows);
+        self
+    }
+
+    /// Record a write: invalidate the in-memory mirror (mark for rebuild) and the
+    /// result cache (bump its generation). Called by every mutating path so reads
+    /// never see stale derived state.
+    fn note_write(&self) {
+        self.parallel_mirror.mark_dirty();
+        self.query_cache.invalidate();
     }
 
     /// The blank-node durability policy currently in effect.
@@ -234,6 +283,11 @@ impl TripleStore {
     /// Access the underlying Oxigraph store for direct index queries.
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Process-unique store identity for cache keying (stable across clones).
+    pub fn cache_id(&self) -> u64 {
+        self.cache_id
     }
 
     /// Build query options with all registered custom functions (GeoSPARQL, RDF 1.2, etc.).
@@ -261,19 +315,119 @@ impl TripleStore {
             opts = opts.with_custom_function(iri, move |args| handler(args));
         }
 
+        // Register SHACL-AF user-defined functions (sh:SPARQLFunction) discovered in the
+        // store. Discovery uses the raw quad index (never store.query), so this does not
+        // re-enter query_options; each function evaluates against a fresh in-memory store.
+        for (iri, handler) in crate::shacl::sparql_functions::all_functions(self) {
+            opts = opts.with_custom_function(iri, move |args| handler(args));
+        }
+
         opts
     }
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
     pub fn query(&self, sparql: &str) -> Result<QueryResults, StoreError> {
+        // Result cache: a repeated, *deterministic* query is answered from a small
+        // LRU keyed by the (already ACL-scoped) query string and invalidated on
+        // every write — so a hit is the exact result the engine would compute.
+        if let Some(cached) = self.query_cache.get(sparql) {
+            return Ok(cached);
+        }
+        let results = self.query_uncached(sparql)?;
+        Ok(self.query_cache.put(sparql, results))
+    }
+
+    /// The evaluation pipeline behind [`Self::query`], without the result cache.
+    fn query_uncached(&self, sparql: &str) -> Result<QueryResults, StoreError> {
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
         debug!("Executing query: {}", &sparql[..prefix_end]);
+        // Fast path: a global `COUNT(*)` over a full triple scan is answered from
+        // the maintained per-graph count index instead of materialising and then
+        // discarding every solution tuple. Callgrind shows ~30% of COUNT(*) cost is
+        // tuple build/copy (`InternalTuple::set`, `EncodedTerm::clone`, memcpy) —
+        // pure waste when the projection is only a count.
+        if let Some(fast) = self.try_fast_count(sparql) {
+            return Ok(fast);
+        }
+        // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
+        // subject-hash shards (the in-memory mirror) and merged, using every core
+        // instead of one. Returns `None` — falling through to the single-store
+        // evaluator below — for anything not provably safe, an over-cap store, or a
+        // shard error, so results are identical to single-store evaluation.
+        if let Some(parallel) = self
+            .parallel_mirror
+            .try_query(&self.store, sparql, || self.query_options())
+        {
+            return Ok(parallel);
+        }
+        // In-memory full mirror: everything the shards can't decompose (joins,
+        // grouped non-COUNT aggregates, large SELECTs) is served from an unsharded
+        // RAM copy within the cap. RocksDB answers a multi-pattern join with one
+        // point lookup per row — ~40x slower than the same join in memory — so this
+        // is the biggest win for non-aggregate reads. Identical engine + data, so
+        // results match; `None` (over cap / error) falls through to RocksDB.
+        if let Some(full) = self
+            .parallel_mirror
+            .try_full_query(&self.store, sparql, || self.query_options())
+        {
+            return Ok(full);
+        }
         let opts = self.query_options();
         let results = self.store.query_opt(sparql, opts)?;
         Ok(results)
+    }
+
+    /// Recognise `SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally with a
+    /// single default-graph `FROM <g>`) and answer it from the O(1) per-graph count
+    /// index. Returns `None` for anything else, so the normal evaluator runs and
+    /// results never change — this only short-circuits one exact, provably-safe
+    /// shape (a single full-scan triple pattern over one graph; the count of a
+    /// graph equals its triple count, no RDF-merge dedup involved).
+    fn try_fast_count(&self, sparql: &str) -> Option<QueryResults> {
+        // Cheap reject: must mention COUNT(*) (whitespace-insensitive) before parsing.
+        if !sparql
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<String>()
+            .contains("count(*)")
+        {
+            return None;
+        }
+        let parsed = SpargebraQuery::parse(sparql, None).ok()?;
+        let (pattern, dataset) = match &parsed {
+            SpargebraQuery::Select {
+                pattern, dataset, ..
+            } => (pattern, dataset),
+            _ => return None,
+        };
+        let var_name = count_star_var(pattern)?;
+        // The single graph the count applies to (the query's default graph).
+        let graph: Option<String> = match dataset {
+            None => None,
+            Some(ds) => match ds.default.as_slice() {
+                // `FROM NAMED` with no `FROM` empties the default graph → not us.
+                [] if ds.named.is_some() => return None,
+                [] => None,
+                [g] => Some(g.as_str().to_string()),
+                _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
+            },
+        };
+        let count = self
+            .graph_count_cached(graph.as_deref())
+            .or_else(|| self.count_graph(graph.as_deref()).ok())?;
+        let var = oxigraph::sparql::Variable::new(var_name).ok()?;
+        let lit = Literal::new_typed_literal(
+            count.to_string(),
+            NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+        );
+        let vars: Arc<[oxigraph::sparql::Variable]> = Arc::from(vec![var]);
+        let iter =
+            QuerySolutionIter::new(vars, std::iter::once(Ok(vec![Some(Term::Literal(lit))])));
+        Some(QueryResults::Solutions(iter))
     }
 
     /// Execute a SPARQL UPDATE operation.
@@ -286,6 +440,7 @@ impl TripleStore {
         let update = Update::parse(sparql, None)?;
         self.store.update_opt(update, self.query_options())?;
         self.graph_index.rebuild(&self.store);
+        self.note_write();
         Ok(())
     }
 
@@ -315,6 +470,7 @@ impl TripleStore {
             self.graph_index
                 .recount_specific_graphs(&self.store, &graphs);
         }
+        self.note_write();
         Ok(())
     }
 
@@ -349,6 +505,7 @@ impl TripleStore {
 
         // Rebuild graph index once for the entire batch
         self.graph_index.rebuild(&self.store);
+        self.note_write();
         Ok(results)
     }
 
@@ -364,20 +521,34 @@ impl TripleStore {
         format: RdfFormat,
         to_graph: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.load_reader_with_base(reader, format, None, to_graph)
+    }
+
+    /// Like [`Self::load_reader`], but resolves relative IRIs in the input against
+    /// `base_iri`. Used by the LDP layer so an idiomatic `<>`-rooted request body
+    /// attaches to the target resource IRI instead of being rejected as schemeless.
+    pub fn load_reader_with_base(
+        &self,
+        reader: impl BufRead,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+        to_graph: Option<&str>,
+    ) -> Result<(), StoreError> {
         // Fast path: nothing to rewrite and no forced graph → stream directly.
         if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
             self.store
                 .bulk_loader()
-                .load_from_reader(RdfParser::from_format(format), reader)?;
+                .load_from_reader(Self::parser_for(format, base_iri)?, reader)?;
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
+            self.note_write();
             return Ok(());
         }
 
         // Materialise quads (embedded graph names from NQuads/TriG are preserved;
         // triple formats land in the default graph). Parse errors are propagated.
-        let mut quads: Vec<Quad> = RdfParser::from_format(format)
+        let mut quads: Vec<Quad> = Self::parser_for(format, base_iri)?
             .for_reader(reader)
             .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
@@ -401,6 +572,7 @@ impl TripleStore {
         info!("Data loaded successfully");
         self.graph_index.rebuild(&self.store);
         self.spatial_index.mark_dirty();
+        self.note_write();
         Ok(())
     }
 
@@ -421,6 +593,30 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let reader = BufReader::new(data.as_bytes());
         self.load_reader(reader, format, to_graph)
+    }
+
+    /// Load RDF data from a string, resolving relative IRIs against `base_iri`.
+    pub fn load_str_with_base(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        base_iri: &str,
+        to_graph: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let reader = BufReader::new(data.as_bytes());
+        self.load_reader_with_base(reader, format, Some(base_iri), to_graph)
+    }
+
+    /// Build an [`RdfParser`] for `format`, optionally resolving relative IRIs
+    /// against `base_iri`.
+    fn parser_for(format: RdfFormat, base_iri: Option<&str>) -> Result<RdfParser, StoreError> {
+        let parser = RdfParser::from_format(format);
+        match base_iri {
+            Some(base) => parser
+                .with_base_iri(base)
+                .map_err(|e| StoreError::Parse(format!("Invalid base IRI '{base}': {e}"))),
+            None => Ok(parser),
+        }
     }
 
     /// Stream all triples from a graph in the specified format into `writer`.
@@ -537,6 +733,7 @@ impl TripleStore {
             self.store.remove_named_graph(&nn)?;
         }
         self.graph_index.remove(graph_iri);
+        self.note_write();
         Ok(())
     }
 
@@ -570,6 +767,7 @@ impl TripleStore {
         for iri in graph_iris {
             self.graph_index.remove(Some(iri));
         }
+        self.note_write();
         Ok(())
     }
 
@@ -591,6 +789,7 @@ impl TripleStore {
         // Register (or recount) only the affected graphs in the index.
         let iris: Vec<Option<String>> = affected_graphs.iter().map(|s| Some(s.clone())).collect();
         self.graph_index.recount_specific_graphs(&self.store, &iris);
+        self.note_write();
         Ok(())
     }
 
@@ -619,6 +818,7 @@ impl TripleStore {
     /// Insert a single quad into the store.
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
         self.store.insert(&quad)?;
+        self.note_write();
         Ok(())
     }
 
@@ -668,6 +868,7 @@ impl TripleStore {
     /// Rebuild the graph index (e.g. after external writes).
     pub fn rebuild_graph_index(&self) {
         self.graph_index.rebuild(&self.store);
+        self.note_write();
     }
 
     /// Access the spatial R-tree index for GeoSPARQL pre-filtering.
@@ -785,10 +986,119 @@ pub fn detect_format_from_path(path: &Path) -> Result<RdfFormat, StoreError> {
     }
 }
 
+// ── Fast-COUNT(*) shape recognition (see TripleStore::try_fast_count) ─────────────
+
+/// If `pattern` is `SELECT (COUNT(*) AS ?v)` over a single full-scan triple
+/// pattern, return the projected variable name `v`; otherwise `None`.
+fn count_star_var(pattern: &GraphPattern) -> Option<String> {
+    if let GraphPattern::Project { inner, variables } = pattern {
+        if variables.len() == 1 && is_count_star_full_scan(inner) {
+            return Some(variables[0].as_str().to_string());
+        }
+    }
+    None
+}
+
+/// `Extend(Group([], [COUNT(*)]), full-scan BGP)` — the algebra a global
+/// `(COUNT(*) AS ?v)` parses to (the Extend aliases the aggregate result).
+fn is_count_star_full_scan(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Extend {
+            inner, expression, ..
+        } => matches!(expression, Expression::Variable(_)) && is_count_star_full_scan(inner),
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
+            variables.is_empty()
+                && aggregates.len() == 1
+                && matches!(
+                    &aggregates[0].1,
+                    AggregateExpression::CountSolutions { distinct: false }
+                )
+                && is_full_scan_bgp(inner)
+        }
+        _ => false,
+    }
+}
+
+/// A single triple pattern whose subject, predicate and object are three
+/// *distinct* variables (`{ ?s ?p ?o }`) — a true full scan.
+fn is_full_scan_bgp(p: &GraphPattern) -> bool {
+    matches!(p, GraphPattern::Bgp { patterns } if patterns.len() == 1 && all_distinct_vars(&patterns[0]))
+}
+
+fn all_distinct_vars(tp: &TriplePattern) -> bool {
+    let s = match &tp.subject {
+        TermPattern::Variable(v) => v.as_str(),
+        _ => return false,
+    };
+    let p = match &tp.predicate {
+        NamedNodePattern::Variable(v) => v.as_str(),
+        _ => return false,
+    };
+    let o = match &tp.object {
+        TermPattern::Variable(v) => v.as_str(),
+        _ => return false,
+    };
+    s != p && p != o && s != o
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn fast_count_matches_normal_eval() {
+        let store = TripleStore::in_memory().unwrap();
+        // default graph: 3 triples
+        store
+            .load_str(
+                "<http://e/a> <http://e/p> \"1\" . <http://e/b> <http://e/p> \"2\" . <http://e/c> <http://e/p> \"3\" .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        // named graph <http://g>: 2 triples
+        store
+            .load_str(
+                "<http://e/x> <http://e/p> \"1\" . <http://e/y> <http://e/p> \"2\" .",
+                RdfFormat::Turtle,
+                Some("http://g"),
+            )
+            .unwrap();
+
+        let count = |q: &str| -> String {
+            match store.query(q).unwrap() {
+                QueryResults::Solutions(s) => {
+                    let sol = s.into_iter().next().unwrap().unwrap();
+                    sol.get("c").map(|t| t.to_string()).unwrap_or_default()
+                }
+                _ => panic!("expected solutions"),
+            }
+        };
+
+        // Fast path: default-graph count = 3.
+        assert!(count("SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }").contains("\"3\""));
+        // Fast path: FROM <g> counts only that graph = 2.
+        assert!(
+            count("SELECT (COUNT(*) AS ?c) FROM <http://g> WHERE { ?s ?p ?o }").contains("\"2\"")
+        );
+        // A COUNT with a FILTER must NOT be short-circuited — it must reflect the
+        // filter (one default-graph triple has object "1"), proving the fast path
+        // is skipped for anything but a bare full scan.
+        assert!(
+            count("SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o FILTER(STR(?o) = \"1\") }")
+                .contains("\"1\"")
+        );
+        // A two-pattern BGP COUNT is also not the bare-scan shape → normal eval.
+        assert!(count(
+            "SELECT (COUNT(*) AS ?c) WHERE { ?s <http://e/p> ?o . ?s <http://e/p> ?o2 }"
+        )
+        .contains("\"3\""));
+    }
 
     fn detect_format_from_mime(mime: &str) -> Result<RdfFormat, StoreError> {
         let mime = mime.split(';').next().unwrap_or(mime).trim();

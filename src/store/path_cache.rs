@@ -26,7 +26,7 @@ const MAX_ENTRIES: usize = 10_000;
 /// Uses an LRU eviction policy to bound memory while keeping hot entries.
 /// Protected by a `Mutex` (writes are rare; LRU requires mutable access on reads).
 pub struct PathCache {
-    cache: Mutex<LruCache<(String, String), Vec<String>>>,
+    cache: Mutex<LruCache<(u64, String, String), Vec<String>>>,
 }
 
 impl PathCache {
@@ -38,18 +38,24 @@ impl PathCache {
         }
     }
 
-    /// Look up cached path results.
-    pub fn get(&self, start_node: &str, path_expr: &str) -> Option<Vec<String>> {
+    /// Look up cached path results for a specific store (`store_id`).
+    pub fn get(&self, store_id: u64, start_node: &str, path_expr: &str) -> Option<Vec<String>> {
         let mut map = self.cache.lock().unwrap();
-        map.get(&(start_node.to_string(), path_expr.to_string()))
+        map.get(&(store_id, start_node.to_string(), path_expr.to_string()))
             .cloned()
     }
 
-    /// Insert path results into the cache.
+    /// Insert path results into the cache for a specific store (`store_id`).
     /// LRU eviction happens automatically when capacity is exceeded.
-    pub fn insert(&self, start_node: String, path_expr: String, results: Vec<String>) {
+    pub fn insert(
+        &self,
+        store_id: u64,
+        start_node: String,
+        path_expr: String,
+        results: Vec<String>,
+    ) {
         let mut map = self.cache.lock().unwrap();
-        map.put((start_node, path_expr), results);
+        map.put((store_id, start_node, path_expr), results);
     }
 
     /// Clear the entire cache.
@@ -58,6 +64,9 @@ impl PathCache {
     }
 
     /// Number of cached entries.
+    // is_empty is only needed by tests; keep it test-gated rather than ship an
+    // unused method, and waive the companion lint here.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.cache.lock().unwrap().len()
     }
@@ -88,13 +97,18 @@ thread_local! {
 }
 
 /// Look up cached path results for the current thread.
-pub fn tl_get(start_node: &str, path_expr: &str) -> Option<Vec<String>> {
-    TL_CACHE.with(|c| c.borrow().get(start_node, path_expr))
+///
+/// Keys include the store's process-unique `cache_id`: rayon worker threads
+/// retain their caches across validation passes (only the calling thread is
+/// cleared), so without the id a worker could serve one store's results to
+/// another store that uses the same focus IRI and path.
+pub fn tl_get(store_id: u64, start_node: &str, path_expr: &str) -> Option<Vec<String>> {
+    TL_CACHE.with(|c| c.borrow().get(store_id, start_node, path_expr))
 }
 
-/// Insert path results into the current thread's cache.
-pub fn tl_insert(start_node: String, path_expr: String, results: Vec<String>) {
-    TL_CACHE.with(|c| c.borrow().insert(start_node, path_expr, results));
+/// Insert path results into the current thread's cache (keyed by store id).
+pub fn tl_insert(store_id: u64, start_node: String, path_expr: String, results: Vec<String>) {
+    TL_CACHE.with(|c| c.borrow().insert(store_id, start_node, path_expr, results));
 }
 
 /// Clear the current thread's path cache.  Call this at the start of each
@@ -116,12 +130,13 @@ mod tests {
     fn test_cache_insert_and_get() {
         let cache = PathCache::new();
         cache.insert(
+            1,
             "http://ex/a".to_string(),
             "http://ex/next+".to_string(),
             vec!["http://ex/b".to_string(), "http://ex/c".to_string()],
         );
 
-        let result = cache.get("http://ex/a", "http://ex/next+");
+        let result = cache.get(1, "http://ex/a", "http://ex/next+");
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 2);
     }
@@ -129,13 +144,14 @@ mod tests {
     #[test]
     fn test_cache_miss() {
         let cache = PathCache::new();
-        assert!(cache.get("http://ex/a", "http://ex/next+").is_none());
+        assert!(cache.get(1, "http://ex/a", "http://ex/next+").is_none());
     }
 
     #[test]
     fn test_cache_clear() {
         let cache = PathCache::new();
         cache.insert(
+            1,
             "http://ex/a".to_string(),
             "http://ex/next+".to_string(),
             vec!["http://ex/b".to_string()],

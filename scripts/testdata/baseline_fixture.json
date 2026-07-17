@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "default_tolerance_ratio": 1.25,
+  "tolerances": {
+    "concurrent/": 1.5
+  },
+  "generator": {
+    "commit": "fixture",
+    "note": "Self-test fixture (pass case). Medians match criterion_fixture/, so every compared benchmark is ok. Omits path/inverse/100 (→ 'new, not in baseline' WARN) and adds query/aggregate/1000 (→ 'not measured this run' WARN) to exercise both soft-warn paths without failing."
+  },
+  "benchmarks": {
+    "query/simple_lookup/1000": 275000.0,
+    "query/join/1000": 1200000.0,
+    "geosparql/sf_contains/50": 74000.0,
+    "concurrent/throughput/8": 5000000.0,
+    "query/aggregate/1000": 50000.0
+  }
+}

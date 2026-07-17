@@ -21,6 +21,8 @@
     uploadOrgImage,
     getOrgImageUrl,
     uploadOrgBanner,
+    setOrgBannerPreset,
+    clearOrgBanner,
     getOrgBannerUrl,
     listDatasetGrants,
     setDatasetGrant,
@@ -31,10 +33,13 @@
   import { navigate } from '../lib/router/index.js';
   import { isAdmin, user as userStore } from '../lib/stores.js';
   import { VISIBILITIES } from '../lib/permissions.js';
+  import { safeExternalUrl } from '../lib/safeUrl.js';
+  import { copyToClipboard } from '../lib/clipboard.js';
   import { Plus, Trash2, X, UserPlus, Terminal, Database, Network, Rows3, Activity, Edit2, ShieldCheck, Loader2, Upload, Copy, CheckCheck, Users, Building2, Globe, Mail, Link as LinkIcon, ChevronRight, Info, Hash, Bookmark } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import OrganisationMetadataDialog from '../components/OrganisationMetadataDialog.svelte';
   import Avatar from '../components/Avatar.svelte';
+  import BannerBackdrop from '../components/BannerBackdrop.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
 
@@ -182,12 +187,12 @@
 
   // Copy SPARQL endpoint URL
   let copiedSparql = false;
-  function copyOrgSparqlUrl() {
+  async function copyOrgSparqlUrl() {
     const url = `${window.location.origin}/api/organisations/${id}/sparql`;
-    navigator.clipboard.writeText(url).then(() => {
+    if (await copyToClipboard(url)) {
       copiedSparql = true;
       setTimeout(() => { copiedSparql = false; }, 2000);
-    }).catch(() => {});
+    }
   }
 
   onMount(async () => {
@@ -236,8 +241,36 @@
     if (!file) return;
     uploadingBanner = true;
     try {
-      await uploadOrgBanner(id, file);
-      bannerKey = true;
+      const res = await uploadOrgBanner(id, file);
+      bannerKey = res?.banner_key || true;
+      bannerVersion++;
+    } catch (e) {
+      metadataError = e.message;
+    } finally {
+      uploadingBanner = false;
+    }
+  }
+
+  async function doSetBannerPreset(preset) {
+    uploadingBanner = true;
+    metadataError = '';
+    try {
+      await setOrgBannerPreset(id, preset);
+      bannerKey = `preset:${preset}`;
+      bannerVersion++;
+    } catch (e) {
+      metadataError = e.message;
+    } finally {
+      uploadingBanner = false;
+    }
+  }
+
+  async function doClearBanner() {
+    uploadingBanner = true;
+    metadataError = '';
+    try {
+      await clearOrgBanner(id);
+      bannerKey = null;
       bannerVersion++;
     } catch (e) {
       metadataError = e.message;
@@ -454,33 +487,17 @@
 
 <div class="card">
   {#if org}
-    {#if bannerKey}
-      <img
-        src="{getOrgBannerUrl(id)}?v={bannerVersion}"
-        alt={$t('pages.orgDetail.bannerAlt', { values: { name: org?.name } })}
-        class="page-banner"
-        on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-      />
-    {/if}
-    <div class="org-header">
-      <div class="org-left">
-        {#if imageKey}
-          <img
-            src="{getOrgImageUrl(id)}?v={imageVersion}"
-            alt={$t('pages.orgDetail.logoAlt', { values: { name: org?.name } })}
-            class="org-image"
-            on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display='none'; }}
-          />
-        {/if}
+    <div class="org-cover">
+      <BannerBackdrop bannerKey={bannerKey} imageUrl="{getOrgBannerUrl(id)}?v={bannerVersion}" seed={id} />
+      <div class="org-header glass">
         <div class="org-info">
           <h2 class="org-title">{org.name}</h2>
           {#if org.description}<p class="meta org-desc">{org.description}</p>{/if}
         </div>
-      </div>
-      <div class="org-actions">
+        <div class="org-actions">
         {#if canManageOrg}
           <button class="btn btn-sm btn-ghost" on:click={() => { metadataError = ''; metadataDialogOpen = true; }}>
-            <Edit2 size={13} /> {$t('pages.orgDetail.pageSettings')}
+            <Edit2 size={13} /> {$t('pages.orgDetail.editPage')}
           </button>
         {/if}
         <Link to="/organisations/{id}/sparql" class="btn btn-sm">
@@ -490,6 +507,7 @@
           {#if copiedSparql}<CheckCheck size={13} /> {$t('system.copied')}{:else}<Copy size={13} /> {$t('pages.orgDetail.copyUrl')}{/if}
         </button>
       </div>
+    </div>
     </div>
   {:else if error}
     <p class="error">{error}</p>
@@ -504,11 +522,6 @@
   <div class="explore-head">
     <Info size={15} />
     <h3>{$t('pages.orgDetail.about')}</h3>
-    {#if canManageOrg}
-      <button class="btn btn-sm btn-ghost" style="margin-left:auto" on:click={() => { metadataError = ''; metadataDialogOpen = true; }}>
-        <Edit2 size={13} /> {$t('pages.orgDetail.editMetadata')}
-      </button>
-    {/if}
   </div>
 
   <dl class="meta-grid">
@@ -527,7 +540,7 @@
     {#if org.homepage}
       <div class="meta-item">
         <dt>{$t('pages.orgDetail.fieldHomepage')}</dt>
-        <dd><a href={org.homepage} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {org.homepage}</a></dd>
+        <dd><a href={safeExternalUrl(org.homepage)} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {org.homepage}</a></dd>
       </div>
     {/if}
 
@@ -537,7 +550,7 @@
         <dd class="contact-dd">
           {#if org.contact_name}<span class="contact-name">{org.contact_name}</span>{/if}
           {#if org.contact_email}<a href="mailto:{org.contact_email}" class="md-link"><Mail size={11} /> {org.contact_email}</a>{/if}
-          {#if org.contact_url}<a href={org.contact_url} target="_blank" rel="noopener" class="md-link"><LinkIcon size={11} /> {org.contact_url}</a>{/if}
+          {#if org.contact_url}<a href={safeExternalUrl(org.contact_url)} target="_blank" rel="noopener" class="md-link"><LinkIcon size={11} /> {org.contact_url}</a>{/if}
         </dd>
       </div>
     {/if}
@@ -551,7 +564,7 @@
   </dl>
 
   {#if !hasAboutMeta && canManageOrg}
-    <p class="about-empty">{$t('pages.orgDetail.aboutEmptyBefore')} <strong>{$t('pages.orgDetail.editMetadata')}</strong> {$t('pages.orgDetail.aboutEmptyAfter')}</p>
+    <p class="about-empty">{$t('pages.orgDetail.aboutEmptyBefore')} <strong>{$t('pages.orgDetail.editPage')}</strong> {$t('pages.orgDetail.aboutEmptyAfter')}</p>
   {/if}
 </div>
 
@@ -1032,13 +1045,15 @@
   hasImage={!!imageKey}
   imageUrl={`${getOrgImageUrl(id)}?v=${imageVersion}`}
   uploadingImage={uploadingImage}
-  hasBanner={!!bannerKey}
+  bannerKey={bannerKey}
   bannerUrl={`${getOrgBannerUrl(id)}?v=${bannerVersion}`}
   uploadingBanner={uploadingBanner}
   deleting={deletingOrg}
   on:save={handleMetadataSave}
   on:uploadImage={(e) => doUploadImage(e.detail.file)}
   on:uploadBanner={(e) => doUploadBanner(e.detail.file)}
+  on:selectBannerPreset={(e) => doSetBannerPreset(e.detail.preset)}
+  on:clearBanner={() => doClearBanner()}
   on:delete={doDeleteOrg}
   on:close={() => { if (!savingMetadata && !deletingOrg) metadataDialogOpen = false; }}
 />
@@ -1048,6 +1063,11 @@
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+    /* Cap the page on very wide screens so cards (About grid, members,
+       datasets) don't stretch edge-to-edge and spread content thinly.
+       Left-aligned to line up with the full-width topbar. */
+    width: 100%;
+    max-width: 1500px;
   }
 
   .breadcrumb {
@@ -1058,13 +1078,15 @@
     font-size: 1.6rem;
     font-weight: 700;
     margin: 0 0 0.35rem 0;
-    color: var(--ink-900);
+    color: #fff;
     line-height: 1.2;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   }
   .org-desc {
     font-size: 0.93rem;
-    color: var(--ink-600);
+    color: rgba(255, 255, 255, 0.88);
     margin: 0;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   }
 
   /* About / metadata */
@@ -1124,38 +1146,45 @@
   .meta { color: #666; }
   .header { display: flex; justify-content: space-between; align-items: center; }
 
-  .org-header {
+  /* Org cover: banner image (or a fallback gradient) behind an animated
+     linked-data layer, with a liquid-glass header panel floating on top. */
+  .org-cover {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border-radius: 14px;
+    min-height: 188px;
+    padding: 14px;
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 1rem;
-  }
-  .org-left {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.85rem;
-    flex: 1;
-    min-width: 0;
-  }
-  .org-image {
-    width: 56px;
-    height: 56px;
-    object-fit: cover;
-    border-radius: 12px;
+    align-items: flex-end;
     border: 1px solid var(--line-soft);
-    flex-shrink: 0;
-  }
-  .org-info { flex: 1; min-width: 0; }
-  .org-actions { display: flex; gap: 0.4rem; flex-shrink: 0; align-items: flex-start; }
-  .page-banner {
-    display: block;
-    width: 100%;
-    height: 160px;
-    object-fit: cover;
-    border-radius: 12px;
-    border: 1px solid var(--line-soft);
+    background: linear-gradient(135deg, #0f2a33 0%, #1e5663 55%, #2f7a8c 100%);
     margin-bottom: 1rem;
   }
+  .org-header {
+    position: relative;
+    z-index: 1;
+    width: min(640px, 100%);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 1rem;
+    flex-wrap: wrap;
+    background: rgba(10, 24, 30, 0.46);
+    backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(125%);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    padding: 0.85rem 1.05rem;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 8px 24px rgba(0, 0, 0, 0.22);
+  }
+  .org-info { flex: 1; min-width: 0; }
+  .org-actions { display: flex; gap: 0.4rem; flex-shrink: 0; align-items: flex-end; flex-wrap: wrap; }
+  /* Buttons sit on the dark glass — lift their contrast. */
+  .org-header :global(.btn-ghost) { color: rgba(255, 255, 255, 0.92); }
+  .org-header :global(.btn-ghost:hover) { background: rgba(255, 255, 255, 0.14); }
 
   :global(.org-actions a.btn), :global(.org-actions .btn) {
     display: inline-flex;

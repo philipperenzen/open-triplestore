@@ -1,0 +1,124 @@
+# Auto-tag a release when a `develop → main` PR is merged.
+#
+# The PR **title** declares the bump level — it must contain one of the words
+# `major`, `minor`, or `patch` (case-insensitive). On merge into `main`, this
+# workflow:
+#   1. derives the next version from the latest `vX.Y.Z` tag + that bump level,
+#   2. checks it matches the `[package] version` already committed in Cargo.toml
+#      (the release PR bumps Cargo.toml + CHANGELOG, per docs/release-process.md),
+#   3. creates an annotated `vX.Y.Z` tag whose message is the matching CHANGELOG
+#      section, and pushes it — which fires `release.yml` (GitHub Release + GHCR).
+#
+# IMPORTANT — the tag is pushed with `secrets.RELEASE_PAT`, not GITHUB_TOKEN: a
+# tag pushed by the default token does NOT trigger other workflows (GitHub's
+# recursion guard), so `release.yml` would never run. Create a fine-grained PAT
+# with `contents: write` on this repo and save it as the `RELEASE_PAT` secret.
+# Without it, the job still creates the tag but warns that release.yml won't fire.
+#
+# If the title has no major/minor/patch keyword the job is a no-op (it just logs
+# a notice), so non-release merges into main are ignored.
+name: Auto-tag release
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag merged release
+    runs-on: ubuntu-latest
+    # Only when a `develop → main` PR is actually MERGED (not just closed). Scoped
+    # to head==develop so other merges into main can't accidentally trigger a tag.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'develop'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Need the full history + tags to find the latest version and push one.
+          fetch-depth: 0
+          # PAT so the pushed tag triggers release.yml; falls back to the default
+          # token (tag created, but release.yml won't auto-run — see header).
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Compute version, validate, and tag
+        env:
+          # Pass the (untrusted) PR title via env, never inline into the script,
+          # to avoid shell injection from a crafted title.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          HAVE_PAT: ${{ secrets.RELEASE_PAT != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1. Bump level from the PR title (major > minor > patch).
+          shopt -s nocasematch
+          if   [[ "$PR_TITLE" =~ (^|[^[:alpha:]])major([^[:alpha:]]|$) ]]; then bump=major
+          elif [[ "$PR_TITLE" =~ (^|[^[:alpha:]])minor([^[:alpha:]]|$) ]]; then bump=minor
+          elif [[ "$PR_TITLE" =~ (^|[^[:alpha:]])patch([^[:alpha:]]|$) ]]; then bump=patch
+          else
+            echo "::notice::PR title has no major/minor/patch keyword — not a release merge, skipping auto-tag."
+            exit 0
+          fi
+          shopt -u nocasematch
+          echo "Bump level from title: $bump"
+
+          # 2. Next version from the latest vX.Y.Z tag (ignores pre-release tags).
+          last="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+          last="${last:-v0.0.0}"
+          IFS=. read -r M m p <<< "${last#v}"
+          case "$bump" in
+            major) M=$((M + 1)); m=0; p=0 ;;
+            minor) m=$((m + 1)); p=0 ;;
+            patch) p=$((p + 1)) ;;
+          esac
+          next="${M}.${m}.${p}"
+          echo "Latest tag: $last → next: v$next"
+
+          # 3. The committed Cargo.toml version must match (single source of truth
+          #    for the binary's reported version).
+          cargo_ver="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$cargo_ver" != "$next" ]; then
+            echo "::error::Title declares a '$bump' bump → expected v$next, but Cargo.toml is $cargo_ver. Bump Cargo.toml (and CHANGELOG) to $next before merging the release PR."
+            exit 1
+          fi
+
+          # 4. Idempotency — never re-tag.
+          if git rev-parse "v$next" >/dev/null 2>&1; then
+            echo "::notice::Tag v$next already exists; nothing to do."
+            exit 0
+          fi
+
+          # 5. Tag message = the CHANGELOG section for this version (same extraction
+          #    release.yml uses). Fixed-string match, not regex.
+          hdr="## [$next]"
+          awk -v hdr="$hdr" '
+            index($0, hdr) == 1               { capture = 1; next }
+            capture && index($0, "## [") == 1 { exit }
+            capture                           { print }
+          ' CHANGELOG.md > tag_message.txt
+          if [ ! -s tag_message.txt ]; then
+            echo "::error::No CHANGELOG section '## [$next]' found. Add it before merging the release PR."
+            exit 1
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$next" -F tag_message.txt
+          git push origin "v$next"
+          echo "Pushed tag v$next"
+
+          if [ "$HAVE_PAT" != "true" ]; then
+            echo "::warning::RELEASE_PAT is not set — the tag was pushed with GITHUB_TOKEN, so release.yml will NOT auto-run. Re-push the tag with a PAT, or run the Release workflow manually, to publish the GitHub Release + GHCR image."
+          fi
+
+          echo "### Tagged \`v$next\` ($bump bump from \"$PR_TITLE\")" >> "$GITHUB_STEP_SUMMARY"

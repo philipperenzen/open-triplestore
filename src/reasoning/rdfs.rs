@@ -26,7 +26,7 @@
 use std::time::Instant;
 use tracing::{debug, info};
 
-use super::common::{count_graph, ReasoningError, ReasoningReport, RDFS_ENTAILMENT_GRAPH};
+use super::common::{count_graph, ReasoningError, ReasoningReport};
 use crate::store::TripleStore;
 
 // ─── Namespace constants ──────────────────────────────────────────────────────
@@ -60,13 +60,8 @@ pub struct RdfsMaterializer<'a> {
 }
 
 impl<'a> RdfsMaterializer<'a> {
-    /// Create a materializer targeting the standard RDFS entailment graph
-    /// (`urn:entailment:rdfs`).
-    pub fn new(store: &'a TripleStore) -> Self {
-        Self::with_target(store, RDFS_ENTAILMENT_GRAPH)
-    }
-
-    /// Create a materializer targeting a custom named graph.
+    /// Create a materializer targeting a named graph (pass [`RDFS_ENTAILMENT_GRAPH`]
+    /// for the standard `urn:entailment:rdfs`).
     pub fn with_target(store: &'a TripleStore, target_graph: impl Into<String>) -> Self {
         Self {
             store,
@@ -347,6 +342,7 @@ impl<'a> RdfsMaterializer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reasoning::common::RDFS_ENTAILMENT_GRAPH;
     use crate::store::TripleStore;
     use oxigraph::io::RdfFormat;
 
@@ -372,7 +368,9 @@ mod tests {
              ex:Student rdfs:subClassOf ex:Person .
              ex:alice   rdf:type        ex:Student .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -390,7 +388,9 @@ mod tests {
              ex:PhD     rdfs:subClassOf ex:Student .
              ex:Student rdfs:subClassOf ex:Person .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -409,7 +409,9 @@ mod tests {
              ex:teaches rdfs:domain ex:Professor .
              ex:bob     ex:teaches  ex:cs101 .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -428,7 +430,9 @@ mod tests {
              ex:teaches rdfs:range ex:Course .
              ex:bob     ex:teaches ex:cs101 .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -446,7 +450,9 @@ mod tests {
              ex:fatherOf rdfs:subPropertyOf ex:parentOf .
              ex:bob      ex:fatherOf        ex:alice .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -463,7 +469,9 @@ mod tests {
              @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
              ex:bob ex:age \"42\"^^xsd:integer .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         // The datatype xsd:integer should be inferred as subClassOf rdfs:Literal
         assert!(ask(
             &s,
@@ -480,7 +488,9 @@ mod tests {
             "@prefix ex: <http://example.org/> .
              ex:bob ex:knows ex:alice .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -496,7 +506,9 @@ mod tests {
             "@prefix ex: <http://example.org/> .
              ex:bob ex:knows ex:alice .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -513,7 +525,9 @@ mod tests {
              @prefix ex:   <http://example.org/> .
              ex:knows rdf:type rdf:Property .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -531,7 +545,9 @@ mod tests {
              ex:Person rdfs:subClassOf ex:Agent .
              ex:Person a rdfs:Class .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -548,7 +564,9 @@ mod tests {
              @prefix ex:   <http://example.org/> .
              ex:Person a rdfs:Class .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -565,7 +583,9 @@ mod tests {
              @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
              rdf:_1 a rdfs:ContainerMembershipProperty .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \
@@ -582,7 +602,9 @@ mod tests {
              @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
              xsd:integer a rdfs:Datatype .",
         );
-        RdfsMaterializer::new(&s).materialize().unwrap();
+        RdfsMaterializer::with_target(&s, RDFS_ENTAILMENT_GRAPH)
+            .materialize()
+            .unwrap();
         assert!(ask(
             &s,
             "ASK { GRAPH <urn:entailment:rdfs> \

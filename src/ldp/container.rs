@@ -232,15 +232,14 @@ pub fn list_members(
          ORDER BY ?member OFFSET {offset} LIMIT {limit}"
     );
     let mut members = Vec::new();
-    match store.query(&q).map_err(|e| e.to_string())? {
-        oxigraph::sparql::QueryResults::Solutions(sols) => {
-            for sol in sols.flatten() {
-                if let Some(oxigraph::model::Term::NamedNode(nn)) = sol.get("member") {
-                    members.push(nn.as_str().to_string());
-                }
+    if let oxigraph::sparql::QueryResults::Solutions(sols) =
+        store.query(&q).map_err(|e| e.to_string())?
+    {
+        for sol in sols.flatten() {
+            if let Some(oxigraph::model::Term::NamedNode(nn)) = sol.get("member") {
+                members.push(nn.as_str().to_string());
             }
         }
-        _ => {}
     }
     Ok(members)
 }
@@ -250,17 +249,16 @@ pub fn count_members(store: &TripleStore, container_iri: &str) -> Result<usize, 
     let q = format!(
         "SELECT (COUNT(?member) AS ?n) WHERE {{ <{container_iri}> <{LDP_CONTAINS}> ?member }}"
     );
-    match store.query(&q).map_err(|e| e.to_string())? {
-        oxigraph::sparql::QueryResults::Solutions(sols) => {
-            for sol in sols.flatten() {
-                if let Some(oxigraph::model::Term::Literal(lit)) = sol.get("n") {
-                    if let Ok(n) = lit.value().parse::<usize>() {
-                        return Ok(n);
-                    }
+    if let oxigraph::sparql::QueryResults::Solutions(sols) =
+        store.query(&q).map_err(|e| e.to_string())?
+    {
+        for sol in sols.flatten() {
+            if let Some(oxigraph::model::Term::Literal(lit)) = sol.get("n") {
+                if let Ok(n) = lit.value().parse::<usize>() {
+                    return Ok(n);
                 }
             }
         }
-        _ => {}
     }
     Ok(0)
 }
@@ -309,15 +307,14 @@ pub fn list_membership_triples(
 
     let q = format!("SELECT ?obj WHERE {{ <{mr}> <{hmr}> ?obj }}");
     let mut triples = Vec::new();
-    match store.query(&q).map_err(|e| e.to_string())? {
-        oxigraph::sparql::QueryResults::Solutions(sols) => {
-            for sol in sols.flatten() {
-                if let Some(oxigraph::model::Term::NamedNode(nn)) = sol.get("obj") {
-                    triples.push((mr.clone(), hmr.clone(), nn.as_str().to_string()));
-                }
+    if let oxigraph::sparql::QueryResults::Solutions(sols) =
+        store.query(&q).map_err(|e| e.to_string())?
+    {
+        for sol in sols.flatten() {
+            if let Some(oxigraph::model::Term::NamedNode(nn)) = sol.get("obj") {
+                triples.push((mr.clone(), hmr.clone(), nn.as_str().to_string()));
             }
         }
-        _ => {}
     }
     Ok(triples)
 }
@@ -422,20 +419,26 @@ pub fn describe_resource(store: &TripleStore, iri: &str) -> Result<Vec<u8>, Stri
 }
 
 /// Load Turtle data about a resource into the default graph.
-pub fn load_resource_turtle(store: &TripleStore, _iri: &str, turtle: &str) -> Result<(), String> {
+///
+/// Relative IRIs resolve against `iri` so an idiomatic `<>` subject (LDP's way of
+/// referring to the resource being written) attaches to the resource itself.
+pub fn load_resource_turtle(store: &TripleStore, iri: &str, turtle: &str) -> Result<(), String> {
     store
-        .load_str(turtle, oxigraph::io::RdfFormat::Turtle, None)
+        .load_str_with_base(turtle, oxigraph::io::RdfFormat::Turtle, iri, None)
         .map_err(|e| e.to_string())
 }
 
 /// Load JSON-LD data about a resource into the default graph.
-pub fn load_resource_jsonld(store: &TripleStore, _iri: &str, jsonld: &str) -> Result<(), String> {
+///
+/// Relative IRIs resolve against `iri` (see [`load_resource_turtle`]).
+pub fn load_resource_jsonld(store: &TripleStore, iri: &str, jsonld: &str) -> Result<(), String> {
     store
-        .load_str(
+        .load_str_with_base(
             jsonld,
             oxigraph::io::RdfFormat::JsonLd {
                 profile: Default::default(),
             },
+            iri,
             None,
         )
         .map_err(|e| e.to_string())

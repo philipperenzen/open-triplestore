@@ -8,6 +8,101 @@ pub fn dataset_metadata_graph_iri(dataset_id: &str) -> String {
     format!("urn:system:metadata:dataset:{}", dataset_id)
 }
 
+/// Canonical dataset IRI per the styleguide (§3.3): `{base}/dataset/{id}`
+/// (singular). This is the single source of truth for the dataset's own IRI and
+/// the prefix of its owned graph namespace (`{base}/dataset/{id}/...`). It MUST
+/// match the catalogue, version registry and API-service registry; the bulk
+/// import write boundary also keys off this prefix, so any divergence would let
+/// a caller's "namespaced" target graph fall outside the gate.
+pub fn dataset_iri(base_url: &str, dataset_id: &str) -> String {
+    format!("{}/dataset/{}", base_url.trim_end_matches('/'), dataset_id)
+}
+
+/// Named graph IRI for a dataset's "default graph": where DEFAULT-graph (and
+/// blank-node-graph) triples from a dataset-scoped quad import are routed so they
+/// fall under the per-graph write boundary instead of the shared global default
+/// graph. Lives under the dataset's owned namespace, so the bulk-import authorize
+/// gate admits it (`g.starts_with("{base}/dataset/{id}/")`). `default` is neither
+/// an auto-split role suffix nor a `urn:system:` graph, so it cannot collide.
+pub fn dataset_default_graph_iri(base_url: &str, dataset_id: &str) -> String {
+    format!("{}/default", dataset_iri(base_url, dataset_id))
+}
+
+/// True iff `graph_iri` lies inside `dataset_id`'s own reserved graph namespace —
+/// either the canonical HTTP prefix `{base}/dataset/{id}/` or the
+/// `urn:dataset:{id}:` URN prefix (shapes, RML mappings/output, the namespaced
+/// default graph). Both prefixes carry a trailing delimiter so one dataset id can
+/// never prefix-match another (`d1` vs `d12`).
+pub fn dataset_owns_graph(base_url: &str, dataset_id: &str, graph_iri: &str) -> bool {
+    let http_ns = format!("{}/", dataset_iri(base_url, dataset_id));
+    let urn_ns = format!("urn:dataset:{dataset_id}:");
+    graph_iri.starts_with(&http_ns) || graph_iri.starts_with(&urn_ns)
+}
+
+/// True iff `graph_iri` is in a *reserved* namespace owned by another dataset or
+/// the system — `urn:system:*`, `urn:dataset:{other}:*`, or
+/// `{base}/dataset/{other}/*`. A non-admin may never register or write such a
+/// graph for `dataset_id`.
+fn graph_in_foreign_reserved_namespace(base_url: &str, dataset_id: &str, graph_iri: &str) -> bool {
+    if graph_iri.starts_with("urn:system:") {
+        return true;
+    }
+    if let Some(rest) = graph_iri.strip_prefix("urn:dataset:") {
+        return match rest.split_once(':') {
+            Some((other, _)) => other != dataset_id,
+            None => true, // malformed `urn:dataset:` with no id segment → reserved
+        };
+    }
+    let datasets_root = format!("{}/dataset/", base_url.trim_end_matches('/'));
+    if let Some(rest) = graph_iri.strip_prefix(&datasets_root) {
+        let other = rest.split('/').next().unwrap_or("");
+        return other != dataset_id;
+    }
+    false
+}
+
+/// Authorize a non-admin caller naming `graph_iri` as a write/registration target
+/// for `dataset_id`.
+///
+/// Closes the cross-tenant graph-claim vector: registration (`POST /datasets/:id/
+/// graphs`) and RML output both feed `dataset_graphs`, and `get_accessible_graph_iris`
+/// then treats any graph registered to an accessible dataset as readable — so a
+/// writer who attached *another tenant's* graph IRI to their own dataset could read
+/// (or, via RML, write) it. The rule, mirroring the bulk-import write boundary: the
+/// graph must be the dataset's own namespaced graph, or a non-reserved external IRI
+/// that no other dataset has claimed. Admins bypass (the caller checks `is_admin`).
+/// Returns `Err(message)` on rejection (map to HTTP 403); fails closed on a
+/// registry lookup error.
+pub fn authorize_dataset_graph_target(
+    db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> Result<(), String> {
+    // The dataset's own reserved namespace is always allowed.
+    if dataset_owns_graph(base_url, dataset_id, graph_iri) {
+        return Ok(());
+    }
+    // Reserved namespaces of other datasets / the system are never claimable.
+    if graph_in_foreign_reserved_namespace(base_url, dataset_id, graph_iri) {
+        return Err(graph_boundary_error(dataset_id, graph_iri));
+    }
+    // A non-reserved external graph is allowed only if no OTHER dataset claims it
+    // (a lookup error fails closed — treat as foreign).
+    match db.graph_has_other_dataset_refs(graph_iri, dataset_id) {
+        Ok(false) => Ok(()),
+        _ => Err(graph_boundary_error(dataset_id, graph_iri)),
+    }
+}
+
+fn graph_boundary_error(dataset_id: &str, graph_iri: &str) -> String {
+    format!(
+        "Target graph <{graph_iri}> is outside dataset '{dataset_id}'. A dataset may only use its \
+         own namespaced graphs or an unclaimed external graph — not a graph owned by another \
+         dataset or the system."
+    )
+}
+
 /// Write (or overwrite) the DCAT/ADMS/VoID/VCARD metadata named graph for a dataset.
 /// Silently ignores errors so that metadata graph failures never abort the main operation.
 ///
@@ -56,7 +151,7 @@ pub fn build_dataset_metadata_ttl(
     // (singular). This MUST match the catalogue (`dcat/catalog.rs`), the version
     // registry and the API-service registry, otherwise a dataset's descriptive
     // metadata splits across two IRIs and its node renders incomplete when browsed.
-    let dataset_iri = format!("{}/dataset/{}", base_url.trim_end_matches('/'), dataset.id);
+    let dataset_iri = dataset_iri(base_url, &dataset.id);
     let mut ttl = String::new();
 
     ttl.push_str("@prefix dcat: <http://www.w3.org/ns/dcat#> .\n");

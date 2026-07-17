@@ -124,9 +124,11 @@ fn parse_subject_map(
     graph: Option<&str>,
 ) -> Result<SubjectMap, String> {
     // Try rr:subjectMap first (a blank/named node), then rr:subject (shortcut constant)
-    let sm_nodes = get_objects(store, tm_iri, &format!("{RR}subjectMap"), graph);
-    let term_map = if let Some(sm_node) = sm_nodes.into_iter().next() {
-        parse_term_map(store, &sm_node, graph, TermType::IRI)?
+    let sm_node = get_objects(store, tm_iri, &format!("{RR}subjectMap"), graph)
+        .into_iter()
+        .next();
+    let term_map = if let Some(ref sm) = sm_node {
+        parse_term_map(store, sm, graph, TermType::IRI)?
     } else {
         // rr:subject shortcut
         let subjects = get_objects(store, tm_iri, &format!("{RR}subject"), graph);
@@ -142,8 +144,15 @@ fn parse_subject_map(
         }
     };
 
-    // rr:class assertions
-    let classes = get_objects(store, tm_iri, &format!("{RR}class"), graph);
+    // rr:class assertions. R2RML places rr:class on the subjectMap; also accept it on
+    // the TriplesMap as a convenience.
+    let mut classes = Vec::new();
+    if let Some(ref sm) = sm_node {
+        classes.extend(get_objects(store, sm, &format!("{RR}class"), graph));
+    }
+    classes.extend(get_objects(store, tm_iri, &format!("{RR}class"), graph));
+    classes.sort();
+    classes.dedup();
 
     Ok(SubjectMap { term_map, classes })
 }
@@ -222,7 +231,8 @@ fn parse_term_map(
 
     // Determine TermType (default depends on context)
     let term_type_iris = get(&format!("{RR}termType"));
-    let term_type = term_type_iris
+    let explicit_term_type = !term_type_iris.is_empty();
+    let mut term_type = term_type_iris
         .into_iter()
         .next()
         .map(|iri| match iri.as_str() {
@@ -231,7 +241,16 @@ fn parse_term_map(
             i if i.ends_with("Literal") => TermType::Literal,
             _ => default_type.clone(),
         })
-        .unwrap_or(default_type);
+        .unwrap_or_else(|| default_type.clone());
+    // R2RML: a constant's term type follows the constant's RDF term — an absolute-IRI
+    // constant is an IRI even in object position (where the default is Literal).
+    if !explicit_term_type {
+        if let TermMapKind::Constant(ref v) = kind {
+            if v.contains("://") || v.starts_with("urn:") {
+                term_type = TermType::IRI;
+            }
+        }
+    }
 
     let datatype = get(&format!("{RR}datatype")).into_iter().next();
     let language = get(&format!("{RR}language")).into_iter().next();
@@ -258,27 +277,32 @@ fn parse_optional_term_map(
 }
 
 /// Get all object values for (subject, predicate) in the given graph context.
+///
+/// Resolves through the raw quad index (`objects_for_subject_in_graph`) rather
+/// than a SPARQL query, because `subject` may be a *stored* blank node — inline
+/// term maps written with the standard idiom (`rr:subjectMap [ … ]`,
+/// `rr:predicateObjectMap [ … ]`, `rr:objectMap [ … ]`). SPARQL surface syntax
+/// cannot name a specific stored blank node (`_:x` in a query is a fresh
+/// existential), so the old query form matched EVERY blank node carrying the
+/// predicate and cross-contaminated inline mappings. This mirrors the fix the
+/// SHACL shape loader already applies.
 fn get_objects(
     store: &TripleStore,
     subject: &str,
     predicate: &str,
     graph: Option<&str>,
 ) -> Vec<String> {
-    let (subj_pattern, graph_clause, graph_close) = if subject.starts_with("_:") {
-        // blank node subject — use a different format
-        let gc = graph.map(|g| format!("GRAPH <{g}> {{")).unwrap_or_default();
-        let gclose = if graph.is_some() { "}" } else { "" };
-        (subject.to_string(), gc, gclose.to_string())
-    } else {
-        let gc = graph.map(|g| format!("GRAPH <{g}> {{")).unwrap_or_default();
-        let gclose = if graph.is_some() { "}" } else { "" };
-        (format!("<{subject}>"), gc, gclose.to_string())
-    };
-
-    let q = format!(
-        "SELECT ?o WHERE {{ {graph_clause} {subj_pattern} <{predicate}> ?o {graph_close} }}"
-    );
-    query_col(store, &q, "o")
+    use oxigraph::model::Term;
+    store
+        .objects_for_subject_in_graph(subject, predicate, graph)
+        .into_iter()
+        .filter_map(|t| match t {
+            Term::NamedNode(n) => Some(n.as_str().to_string()),
+            Term::BlankNode(b) => Some(format!("_:{}", b.as_str())),
+            Term::Literal(l) => Some(l.value().to_string()),
+            Term::Triple(_) => None,
+        })
+        .collect()
 }
 
 /// Run a SELECT query and return a named column's values as strings.

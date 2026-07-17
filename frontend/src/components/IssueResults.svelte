@@ -4,6 +4,7 @@
   import { toastSuccess, toastError } from '../lib/toast.ts';
   import { t } from 'svelte-i18n';
   import Select from './Select.svelte';
+  import { copyToClipboard } from '../lib/clipboard.js';
 
   export let results = [];
   export let datasetName = '';
@@ -105,13 +106,13 @@
       downloadFile([header, ...csv].join('\n'), `${base}-report.csv`, 'text/csv');
     }
   }
-  function copySparql(scope) {
+  async function copySparql(scope) {
     const rows = rowsFor(scope);
     const nodes = [...new Set(rows.map(r => r.focus_node))].filter(Boolean).slice(0, 50);
     if (nodes.length === 0) { toastError($t('components.issueResults.noFocusNodes')); return; }
     const values = nodes.map(n => `<${n}>`).join(' ');
     const q = `SELECT ?s ?p ?o WHERE {\n  VALUES ?s { ${values} }\n  ?s ?p ?o\n}`;
-    navigator.clipboard.writeText(q).then(() => toastSuccess($t('components.issueResults.sparqlCopied'))).catch(() => {});
+    if (await copyToClipboard(q)) toastSuccess($t('components.issueResults.sparqlCopied'));
   }
 
   let exportScope = 'all';

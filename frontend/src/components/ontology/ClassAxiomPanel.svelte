@@ -4,6 +4,7 @@
   import { shortenIRI } from '../../lib/rdf-utils';
   import { ChevronRight, ChevronDown, Layers } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
+  import TermDefinitionCard from './TermDefinitionCard.svelte';
 
   export let classes: ClassEntry[] = [];
   export let onOpen: (_iri: string) => void = () => {};
@@ -132,6 +133,7 @@
           <div class="meta-line">{$t('components.classAxiomPanel.shaclTarget')}: <strong>{selected.hasShape ? $t('components.classAxiomPanel.yes') : $t('components.classAxiomPanel.no')}</strong></div>
         </section>
       </div>
+      <TermDefinitionCard iri={selected.iri} variant="rich" hideEmpty {onOpen} />
     {/if}
   </div>
 </div>

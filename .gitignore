@@ -16,11 +16,17 @@ node_modules/
 **/playwright-report/
 **/test-results/
 
+# ─── Generated benchmark reports (machine-specific; see docs/performance.md for
+#     the curated numbers) ─────────────────────────────────────────────────────
+/benchmark-report.md
+/q_*.rq
+
 # ─── Editor / OS / tooling noise ────────────────────────────────────────────
 *.swp
 *.swo
 .DS_Store
 .claude/
+__pycache__/
 
 # ─── Secrets — never commit (.env.example is the template) ───────────────────
 .env

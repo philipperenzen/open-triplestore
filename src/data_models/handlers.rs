@@ -26,7 +26,7 @@ use super::upload;
 
 // ─── Data Model CRUD ──────────────────────────────────────────────────────────
 
-/// GET /api/data-models
+/// GET /api/models
 pub async fn list_data_models(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -50,7 +50,7 @@ pub async fn list_data_models(
     Ok(Json(filtered))
 }
 
-/// POST /api/data-models
+/// POST /api/models
 pub async fn create_data_model(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -109,7 +109,7 @@ pub async fn create_data_model(
     Ok((StatusCode::CREATED, Json(record)))
 }
 
-/// GET /api/data-models/:id
+/// GET /api/models/:id
 pub async fn get_data_model(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -133,7 +133,7 @@ pub async fn get_data_model(
     Ok(Json(record))
 }
 
-/// DELETE /api/data-models/:id
+/// DELETE /api/models/:id
 pub async fn delete_data_model(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -165,7 +165,7 @@ pub async fn delete_data_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// PATCH /api/data-models/:id
+/// PATCH /api/models/:id
 pub async fn update_data_model(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -218,7 +218,7 @@ pub async fn update_data_model(
 
 // ─── Version listing and metadata ─────────────────────────────────────────────
 
-/// GET /api/data-models/:id/versions
+/// GET /api/models/:id/versions
 pub async fn list_versions(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -243,7 +243,7 @@ pub async fn list_versions(
     Ok(Json(versions))
 }
 
-/// GET /api/data-models/:id/versions/:ver
+/// GET /api/models/:id/versions/:ver
 pub async fn get_version(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -269,7 +269,7 @@ pub async fn get_version(
     Ok(Json(record))
 }
 
-/// GET /api/data-models/:id/collaborators
+/// GET /api/models/:id/collaborators
 ///
 /// Lists who can see/edit this model: the owner (user) or org members, plus any
 /// users who authored a version (draft holders). Deduplicated, owner/org first.
@@ -306,7 +306,7 @@ pub async fn list_collaborators(
     Ok(Json(list))
 }
 
-/// GET /api/data-models/:id/commits — provenance trail for this model.
+/// GET /api/models/:id/commits — provenance trail for this model.
 pub async fn list_commits(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -335,7 +335,7 @@ pub async fn list_commits(
     Ok(Json(commits))
 }
 
-/// PATCH /api/data-models/:id/versions/:ver
+/// PATCH /api/models/:id/versions/:ver
 pub async fn update_version_notes(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -375,7 +375,7 @@ pub async fn update_version_notes(
 
 // ─── Version data download ────────────────────────────────────────────────────
 
-/// GET /api/data-models/:id/versions/:ver/data
+/// GET /api/models/:id/versions/:ver/data
 pub async fn get_version_data(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -498,7 +498,7 @@ pub async fn get_version_data(
 
 // ─── Latest published data shortcut ───────────────────────────────────────────
 
-/// GET /api/data-models/:id/latest/data
+/// GET /api/models/:id/latest/data
 pub async fn get_latest_data(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -528,7 +528,7 @@ pub async fn get_latest_data(
 
 // ─── Upload a new version ─────────────────────────────────────────────────────
 
-/// POST /api/data-models/:id/versions  (multipart)
+/// POST /api/models/:id/versions  (multipart)
 pub async fn upload_version(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -649,22 +649,21 @@ pub async fn upload_version(
     let store_clone = state.store.clone();
     let base_url_clone = state.base_url.clone();
     let id_clone = id.clone();
-    let (result, detected) = tokio::task::spawn_blocking(move || {
+    let (result, detected, effective_kind) = tokio::task::spawn_blocking(move || {
         // Parse RDF first
         let quads = upload::parse_rdf(&bytes, &content_type_field, &filename_field)?;
 
         // Auto-detect kind from RDF content
         let detected = crate::kind_detector::detect(&quads);
 
-        // Validate kind if override provided
-        if let Some(ref kind_str) = kind_override {
-            crate::kind_detector::parse_kind_override(kind_str).ok_or_else(|| {
-                format!(
-                    "Invalid kind override: '{}'. Expected: data-model, vocabulary",
-                    kind_str
-                )
-            })?;
-        }
+        // Resolve the effective kind: an explicit override wins (validated here),
+        // otherwise fall back to the auto-detected primary kind.
+        let effective_kind = match kind_override.as_deref() {
+            Some(k) => Some(crate::kind_detector::parse_kind_override(k).ok_or_else(|| {
+                format!("Invalid kind override: '{k}'. Expected: data-model, vocabulary")
+            })?),
+            None => detected.primary,
+        };
 
         // Proceed with loading
         let result = upload::parse_and_load(
@@ -678,7 +677,7 @@ pub async fn upload_version(
             merge,
         )?;
 
-        Ok::<_, String>((result, detected))
+        Ok::<_, String>((result, detected, effective_kind))
     })
     .await
     .map_err(|e| AppError::Internal(format!("Upload task failed: {e}")))?
@@ -717,8 +716,24 @@ pub async fn upload_version(
     };
 
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+
+    // Persist the detected/declared kind on the entry so the registry can badge
+    // and filter ontologies vs SKOS vocabularies.
+    if let Some(kind) = effective_kind {
+        registry::set_data_model_kind(&state.store, &state.base_url, &id, kind)
+            .map_err(AppError::from)?;
+    }
+
     if is_public {
         registry::update_latest_published(&state.store, &state.base_url, &id, &result.version)
+            .map_err(AppError::from)?;
+    } else {
+        // A freshly uploaded draft becomes the model's current main-line draft, so
+        // keep the ver:latestDraft pointer in sync — mirroring how `create_draft`
+        // (the derived-draft flow) and the `is_public` branch above maintain their
+        // pointers. Without this, a raw draft upload left `latest_draft` null even
+        // though the version is a draft and shows up in the versions list.
+        registry::update_latest_draft(&state.store, &state.base_url, &id, &result.version)
             .map_err(AppError::from)?;
     }
 
@@ -771,7 +786,7 @@ fn infer_mime(filename: &str) -> String {
 
 // ─── Patch (edit draft) ───────────────────────────────────────────────────────
 
-/// PATCH /api/data-models/:id/versions/:ver/data
+/// PATCH /api/models/:id/versions/:ver/data
 pub async fn patch_version_data(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1134,7 +1149,7 @@ fn rdf_value_to_sparql(v: &serde_json::Value) -> String {
 
 // ─── Draft creation ───────────────────────────────────────────────────────────
 
-/// POST /api/data-models/:id/versions/:ver/draft
+/// POST /api/models/:id/versions/:ver/draft
 pub async fn create_draft(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1233,7 +1248,7 @@ pub async fn create_draft(
     Ok((StatusCode::CREATED, Json(record)))
 }
 
-/// POST /api/data-models/:id/branches — create a named branch as a new draft
+/// POST /api/models/:id/branches — create a named branch as a new draft
 /// forked from `from_version`. Unlike a plain draft this carries a `branch`
 /// label and does not move the model's `latestDraft` pointer.
 pub async fn create_branch(
@@ -1344,7 +1359,7 @@ pub async fn create_branch(
     Ok((StatusCode::CREATED, Json(record)))
 }
 
-/// GET /api/data-models/:id/branches — list branch tips (one per branch name).
+/// GET /api/models/:id/branches — list branch tips (one per branch name).
 pub async fn list_branches(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -1402,7 +1417,7 @@ fn ancestor_chain(store: &TripleStore, base_url: &str, id: &str, version: &str) 
     chain
 }
 
-/// GET /api/data-models/:id/merge/preview?from=X&into=Y
+/// GET /api/models/:id/merge/preview?from=X&into=Y
 pub async fn merge_preview(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -1434,7 +1449,7 @@ pub async fn merge_preview(
     Ok(Json(preview))
 }
 
-/// POST /api/data-models/:id/merge — apply resolutions, write a new draft.
+/// POST /api/models/:id/merge — apply resolutions, write a new draft.
 pub async fn merge_apply(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1595,7 +1610,7 @@ pub fn write_merged_graph(
 
 // ─── Rebase ───────────────────────────────────────────────────────────────────
 
-/// POST /api/data-models/:id/versions/:ver/rebase
+/// POST /api/models/:id/versions/:ver/rebase
 ///
 /// Rebase a branch version onto a newer base (default: latest published).
 /// Performs a three-way merge: (LCA, branch_tip, onto) and creates a new
@@ -1745,7 +1760,7 @@ pub async fn rebase_version(
 
 // ─── Stage ────────────────────────────────────────────────────────────────────
 
-/// POST /api/data-models/:id/versions/:ver/stage
+/// POST /api/models/:id/versions/:ver/stage
 pub async fn stage_version(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1795,7 +1810,7 @@ pub async fn stage_version(
 
 // ─── Publish ──────────────────────────────────────────────────────────────────
 
-/// POST /api/data-models/:id/versions/:ver/publish
+/// POST /api/models/:id/versions/:ver/publish
 pub async fn publish_version(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1849,14 +1864,28 @@ pub async fn publish_version(
     .map_err(AppError::from)?;
     registry::update_latest_published(&state.store, &state.base_url, &id, &ver)
         .map_err(AppError::from)?;
+    // Publishing a version that was the main-line draft retires the draft pointer.
+    // Staging already clears it, but a Draft can be published directly (see the
+    // status guard above), so without this `latest_draft` would keep pointing at a
+    // now-published version. Guard on equality so an unrelated pending draft pointer
+    // is left untouched.
+    if record.branch.is_none() && data_model.latest_draft.as_deref() == Some(ver.as_str()) {
+        registry::clear_latest_draft(&state.store, &state.base_url, &id).map_err(AppError::from)?;
+    }
 
-    // Mint owl:versionIRI into the published version's named graph.
-    let version_iri = super::version_iri::mint(
+    // Stamp version metadata into the published version's named graph: OWL
+    // `owl:versionIRI`/`owl:priorVersion` for ontologies, DCAT/PAV/SKOS for
+    // vocabularies, both for mixed packages, and by entry kind when the graph
+    // declares neither an ontology nor a concept scheme.
+    let now = Utc::now().to_rfc3339();
+    let version_iri = super::version_iri::stamp_version(
         &state.store,
         &record.graph_iri,
         &data_model.namespace,
         &ver,
+        &now,
         prior_version_iri.as_deref(),
+        data_model.kind,
     )
     .map_err(AppError::from)?;
 
@@ -1869,7 +1898,7 @@ pub async fn publish_version(
 
 // ─── Deprecate ────────────────────────────────────────────────────────────────
 
-/// POST /api/data-models/:id/versions/:ver/deprecate
+/// POST /api/models/:id/versions/:ver/deprecate
 pub async fn deprecate_version(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1968,7 +1997,7 @@ async fn transition_sub_graph(
     })))
 }
 
-/// POST /api/data-models/:id/versions/:ver/subgraph/stage
+/// POST /api/models/:id/versions/:ver/subgraph/stage
 pub async fn stage_sub_graph(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1987,7 +2016,7 @@ pub async fn stage_sub_graph(
     .await
 }
 
-/// POST /api/data-models/:id/versions/:ver/subgraph/publish
+/// POST /api/models/:id/versions/:ver/subgraph/publish
 pub async fn publish_sub_graph(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2006,7 +2035,7 @@ pub async fn publish_sub_graph(
     .await
 }
 
-/// POST /api/data-models/:id/versions/:ver/subgraph/deprecate
+/// POST /api/models/:id/versions/:ver/subgraph/deprecate
 pub async fn deprecate_sub_graph(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2027,7 +2056,7 @@ pub async fn deprecate_sub_graph(
 
 // ─── Diff ─────────────────────────────────────────────────────────────────────
 
-/// GET /api/data-models/:id/diff?from=X&to=Y&graph=suffix
+/// GET /api/models/:id/diff?from=X&to=Y&graph=suffix
 pub async fn diff_versions(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
