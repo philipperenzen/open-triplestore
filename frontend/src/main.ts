@@ -6,6 +6,7 @@ import './theme.css';
 import './app.css';
 import { initTheme } from './lib/theme.js';
 import { initServiceRegistry } from './lib/serviceRegistry.js';
+import { loadRuntimeConfig } from './lib/runtimeConfig.js';
 import { logBanner } from './lib/banner.js';
 
 // Greet the console with the brand mark + wordmark.
@@ -20,6 +21,12 @@ initTheme();
 // app reaches its own backend same-origin (Vite proxy), so the client mainly powers cross-links +
 // the change event. Fail-soft: localhost defaults stand.
 initServiceRegistry();
+
+// Runtime config (/config.json) — an operator's zero-rebuild way to point this
+// deployment at different backends and apply branding. Unconditional (not
+// gated by LD_DISCOVERY): fetched once, applied as soon as it resolves, and a
+// complete no-op when no config.json is present. See runtimeConfig.ts.
+loadRuntimeConfig();
 
 let app: ReturnType<typeof mount>;
 
