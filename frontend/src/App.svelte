@@ -17,6 +17,7 @@
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
+  import { runtimeBranding } from './lib/runtimeConfig.js';
 
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
@@ -65,7 +66,8 @@
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
   const lazyApiDocs          = () => import('./pages/ApiDocs.svelte');
 
-  const BRAND = 'Open Triplestore';
+  // Overridable at runtime (no rebuild) via /config.json's "branding.title" — see runtimeConfig.ts.
+  $: BRAND = $runtimeBranding.title;
 
   const NAV_SECTIONS = [
     {
@@ -312,19 +314,23 @@
       </button>
       <Link to="/" class="brand-link-mobile" aria-label={BRAND}>
         <span class="brand-word brand-word-sm">
-          <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-            <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
-            <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
-              <line x1="32" y1="51" x2="48.45" y2="22.5"/>
-              <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
-              <line x1="15.55" y1="22.5" x2="32" y2="51"/>
-            </g>
-            <g stroke="#eafdfb" stroke-width="2.1">
-              <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
-              <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
-              <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
-            </g>
-          </svg><span class="brand-rest">pen Triplestore</span>
+          {#if $runtimeBranding.logoUrl}
+            <img class="brand-o" src={$runtimeBranding.logoUrl} alt="" aria-hidden="true" /><span class="brand-rest">{BRAND}</span>
+          {:else}
+            <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+              <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
+              <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
+                <line x1="32" y1="51" x2="48.45" y2="22.5"/>
+                <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
+                <line x1="15.55" y1="22.5" x2="32" y2="51"/>
+              </g>
+              <g stroke="#eafdfb" stroke-width="2.1">
+                <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
+                <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
+                <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
+              </g>
+            </svg><span class="brand-rest">pen Triplestore</span>
+          {/if}
         </span>
       </Link>
       {#if searchEnabled}
@@ -345,19 +351,23 @@
       <div class="brand-block">
         <Link to="/" class="brand-link" on:click={navClick} aria-label={BRAND}>
           <span class="brand-word">
-            <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-              <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
-              <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
-                <line x1="32" y1="51" x2="48.45" y2="22.5"/>
-                <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
-                <line x1="15.55" y1="22.5" x2="32" y2="51"/>
-              </g>
-              <g stroke="#eafdfb" stroke-width="2.1">
-                <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
-                <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
-                <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
-              </g>
-            </svg><span class="brand-rest">pen Triplestore</span>
+            {#if $runtimeBranding.logoUrl}
+              <img class="brand-o" src={$runtimeBranding.logoUrl} alt="" aria-hidden="true" /><span class="brand-rest">{BRAND}</span>
+            {:else}
+              <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
+                <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
+                  <line x1="32" y1="51" x2="48.45" y2="22.5"/>
+                  <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
+                  <line x1="15.55" y1="22.5" x2="32" y2="51"/>
+                </g>
+                <g stroke="#eafdfb" stroke-width="2.1">
+                  <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
+                  <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
+                  <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
+                </g>
+              </svg><span class="brand-rest">pen Triplestore</span>
+            {/if}
           </span>
           <small class="brand-sub">{$t('nav.brandSub')}</small>
         </Link>
@@ -802,6 +812,7 @@
     width: 1.65em; height: 1.65em; flex: 0 0 auto;
     margin: -0.3em 0.06em -0.3em 0;
     filter: drop-shadow(0 1px 3px rgba(13, 42, 50, 0.5));
+    object-fit: contain; /* only applies when this class is on an <img> (operator-supplied logo) */
   }
   .brand-rest { display: inline-block; transform: translateY(0.08em); }
   .brand-sub {

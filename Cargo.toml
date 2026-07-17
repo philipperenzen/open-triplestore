@@ -1,5 +1,9 @@
 [workspace]
-members = [".", "opengraph"]
+# `plugins/*` is a glob: dropping in a new `plugins/<name>/Cargo.toml` (e.g. by
+# copying `plugins/hello`) makes it a workspace member automatically — no edit
+# needed here. It still needs an optional dependency entry + feature flag
+# below, and a registration in `src/plugins.rs`, to actually be built in.
+members = [".", "opengraph", "plugins/*"]
 resolver = "2"
 
 [package]
@@ -59,6 +63,9 @@ sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
+## Template/example compile-time plugin (plugins/hello), mounted at /ext/hello.
+## Off by default — the pattern every real plugin follows, see docs/plugins.md.
+plugin-hello    = ["dep:ots-plugin-hello"]
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
 ## Optional SMTP alerting (lettre itself is a core dependency — the auth
@@ -192,6 +199,15 @@ sfcgal = { version = "0.7", optional = true }
 # RML mapping sources
 csv = "1"
 quick-xml = "0.37"
+
+# Seed bundle manifests (src/seed_bundles/manifest.rs)
+toml = "0.8"
+
+# Compile-time plugin architecture (src/plugins.rs). The API crate is always
+# present (the registry/mount code needs its types); individual plugin crates
+# are optional, enabled by their own `plugin-<name>` feature.
+ots-plugin-api = { path = "plugins/api" }
+ots-plugin-hello = { path = "plugins/hello", optional = true }
 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.

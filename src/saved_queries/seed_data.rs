@@ -7,45 +7,22 @@
 //! LDP, DCAT/VoID, SHACL-C, JWT, OAuth/OIDC) are exercised by the e2e suite and
 //! advertised in the `capabilities` dataset rather than via a SPARQL query.
 
-use oxigraph::io::{JsonLdProfileSet, RdfFormat};
 use serde_json::json;
 
 use crate::auth::models::GraphKind;
 
 use super::models::{CreateSavedQueryRequest, ParamSpec, ParamType};
 
+/// Serialization a graph's bundled data is written in. Defined by the generic
+/// seed-bundle engine ([`crate::seed_bundles`]) that this demo now runs through;
+/// re-exported here so the demo data tables read naturally.
+pub use crate::seed_bundles::Fmt;
+
 /// Base IRI for every demo graph: `{DEMO_BASE}/{dataset_slug}/{graph_suffix}`.
 pub const DEMO_BASE: &str = "https://opentriplestore.org/demo";
 
 pub const ORG_NAME: &str = "Open Triplestore";
 pub const ORG_SLUG: &str = "open-triplestore";
-
-/// Serialization a graph's bundled data is written in.
-#[derive(Clone, Copy)]
-pub enum Fmt {
-    Turtle,
-    NTriples,
-    RdfXml,
-    JsonLd,
-    /// Turtle-star body wrapped in a SPARQL-star `INSERT DATA` — used for the
-    /// RDF-star graph so it loads through the (rdf-12) update path rather than
-    /// the file parser.
-    SparqlStarUpdate,
-}
-
-impl Fmt {
-    pub fn rdf_format(self) -> Option<RdfFormat> {
-        match self {
-            Fmt::Turtle => Some(RdfFormat::Turtle),
-            Fmt::NTriples => Some(RdfFormat::NTriples),
-            Fmt::RdfXml => Some(RdfFormat::RdfXml),
-            Fmt::JsonLd => Some(RdfFormat::JsonLd {
-                profile: JsonLdProfileSet::empty(),
-            }),
-            Fmt::SparqlStarUpdate => None,
-        }
-    }
-}
 
 pub struct GraphSpec {
     pub suffix: &'static str,

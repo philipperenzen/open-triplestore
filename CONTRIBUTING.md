@@ -124,6 +124,17 @@ npm run e2e      # Playwright end-to-end (boots backend + frontend)
 The "Open in graph viewer" deep-links are **off by default**. Set
 `VITE_GRAPH_VIEWER_URL` at build time to point at a compatible viewer to enable them.
 
+## Extending Open Triplestore (plugins)
+
+Customizing a deployment — seed data, backend URLs/branding, or a new HTTP
+endpoint — doesn't require patching upstream source. See
+[`docs/plugins.md`](docs/plugins.md) for the three extension tiers (seed
+bundles, runtime config, compile-time plugins) and, if you've built a
+compile-time plugin worth sharing, that doc's **"Plugin promotion"** section
+covers the acceptance criteria for landing it under `plugins/` as an
+off-by-default feature — a normal PR against `develop`, same as any other
+change.
+
 ## Pull-request checklist
 
 Before opening a PR, please make sure:

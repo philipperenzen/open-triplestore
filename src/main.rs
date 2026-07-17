@@ -23,11 +23,14 @@ mod imports;
 mod kind_detector;
 #[cfg(feature = "ldp")]
 mod ldp;
+mod netutil;
 mod ogcapi;
+mod plugins;
 mod prefixes;
 mod reasoning;
 mod rml;
 mod saved_queries;
+mod seed_bundles;
 mod server;
 mod shacl;
 mod shacl_studio;
@@ -173,6 +176,23 @@ struct Cli {
     #[cfg(feature = "text-search")]
     #[arg(long, env = "TEXT_SEARCH_DIR")]
     text_search_dir: Option<PathBuf>,
+
+    /// Directory of seed bundles to load at boot (each a subdirectory with a
+    /// `manifest.toml` + RDF payload files — see docs/plugins.md). Idempotent,
+    /// fail-soft, and per-bundle opt-out-able; unset by default (no extra
+    /// bundles loaded). This is how a downstream operator adds org-owned
+    /// datasets without patching source: mount a directory here (e.g. a Docker
+    /// volume) instead of forking.
+    #[arg(long, env = "SEED_DIR")]
+    seed_dir: Option<PathBuf>,
+
+    /// Opt-in fallback to the next free port when `--port`/`-p` is already in
+    /// use, instead of refusing to start. The advertised base URL and service-
+    /// registry self-registration are rewritten to the port actually bound.
+    /// Off by default — existing deployments that rely on "refuse to start on
+    /// a busy port" see no behavior change.
+    #[arg(long, env = "PORT_FALLBACK", default_value_t = false, value_parser = parse_lenient_bool)]
+    port_fallback: bool,
 }
 
 /// Best-effort terminal width (columns); 80 when stdout is not a tty.
@@ -485,15 +505,11 @@ async fn main() -> anyhow::Result<()> {
     info!("API at http://{}/api", addr);
     info!("Service description at http://{}/", addr);
 
-    // Cross-app service discovery is opt-in (LD_DISCOVERY). When enabled, self-register the
-    // linked-data base_url as "triplestore" so siblings resolve it via the registry (fail-soft).
-    if cli.discovery {
-        svc_registry::spawn_registrar(
-            cli.base_url.clone(),
-            cli.registry_url.clone(),
-            cli.registry_token.clone(),
-        );
-    } else {
+    // Cross-app service discovery is opt-in (LD_DISCOVERY); self-registration is
+    // handled inside `server::run`, AFTER the listener is bound, so that when
+    // `--port-fallback` moves the bind off the requested port the registry sees
+    // the base URL rewritten to the port actually in use, not the stale one.
+    if !cli.discovery {
         info!(
             "service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)"
         );
@@ -513,6 +529,11 @@ async fn main() -> anyhow::Result<()> {
         cli.write_timeout_secs,
         cli.secure_cookies,
         cli.serve_frontend,
+        cli.seed_dir,
+        cli.port_fallback,
+        cli.discovery,
+        cli.registry_url,
+        cli.registry_token,
         #[cfg(feature = "text-search")]
         text_index,
     )

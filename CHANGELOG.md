@@ -14,6 +14,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Extension/plugin architecture**, so a downstream operator can customize an
+  instance without patching upstream source — see [`docs/plugins.md`](docs/plugins.md):
+  - **Seed bundles** (`src/seed_bundles/`, `--seed-dir` / `SEED_DIR`): boot-time
+    org/dataset/graph/saved-query loading from a directory of `manifest.toml` +
+    RDF payload files. Idempotent, fail-soft, per-bundle opt-out env var. The
+    bundled standards demo (`src/saved_queries/seed.rs`) now runs through this
+    same engine as the reference bundle, and a documented example ships in
+    `examples/seed-bundles/`.
+  - **Compile-time plugins** (`plugins/api`, `plugins/hello`): a `Plugin` trait
+    (routes mounted under `/ext/<name>`, `on_boot`, background-task spawn) plus
+    a registry in `src/plugins.rs`. Each plugin is its own crate, enabled by a
+    `plugin-<name>` Cargo feature — following the existing `[features]`
+    pattern (`rdfs-entailment`, `owl2-*`, …) rather than dynamic library
+    loading. `GET /api/plugins` lists what's compiled in. `plugins/hello` is
+    both a working example and the copy-this-crate template.
+  - **Frontend runtime config**: `serviceRegistry.ts` now resolves each
+    backend URL with precedence `VITE_<SERVICE>_URL` (build-time) >
+    `/config.json` (runtime, no rebuild) > `/registry` discovery > localhost
+    defaults. `/config.json` also carries branding (title, logo, accent color),
+    applied at boot with no rebuild — see `runtimeConfig.ts`. `vite.config.js`
+    gained an `OTS_BASE_PATH` build-time option for static sub-path deploys.
+  - **Opt-in port fallback** (`--port-fallback` / `PORT_FALLBACK`, default
+    off): when the requested port is busy, bind any free port instead of
+    refusing to start (`src/netutil.rs`), rewriting the advertised base URL
+    used for service-registry self-registration to match. Upstream's default
+    "refuse to start on a busy port" behavior is unchanged unless this is set.
 - **IFC → linked data**: bulk import accepts `.ifc` files — stored as a downloadable
   dataset asset and transformed into a BOT topology graph (storeys/elements,
   property sets, FOG file references) plus a full ifcOWL-style instance lift
