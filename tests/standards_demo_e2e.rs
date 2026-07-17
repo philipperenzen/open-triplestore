@@ -55,10 +55,15 @@ fn test_state() -> AppState {
         backup: None,
         jwt_config: Arc::new(JwtConfig::new(JWT_SECRET.to_string(), 30, 30)),
         object_store: Arc::new(ObjectStore::noop()),
+        mailer: Arc::new(open_triplestore::email::Mailer::log_only(
+            "http://localhost:7878",
+        )),
         base_url: Arc::new("http://localhost:7878".to_string()),
         oauth_sessions: new_session_store(),
+        passkey_sessions: open_triplestore::auth::passkey::new_session_store(),
         auth_ext: Arc::new(open_triplestore::auth::oidc_rs::AuthExt::disabled()),
         query_timeout_secs: 30,
+        write_timeout_secs: 120,
         secure_cookies: false,
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -90,6 +95,10 @@ fn seeded() -> (AppState, String, String) {
     )
     .unwrap();
 
+    // Tests must never reach the network: an empty SEED_IFC_URL makes the
+    // seeder skip the Schependomlaan IFC download (same pattern as the
+    // role-visibility tests).
+    std::env::set_var("SEED_IFC_URL", "");
     seed_open_triplestore(&state);
 
     let org = state
@@ -98,6 +107,46 @@ fn seeded() -> (AppState, String, String) {
         .unwrap()
         .expect("demo organisation must be seeded");
     (state, token, org.id)
+}
+
+/// Production runs two seeders on a fresh install — the boot task and the
+/// first-admin registration handler — and they can overlap (the browser-e2e
+/// harness registers its admin while the boot task is still on the SHACL
+/// seeds). They must serialise, with the loser re-running idempotently — not
+/// race their INSERTs into UNIQUE constraints and leave a half-seeded demo.
+#[tokio::test]
+async fn concurrent_seeders_serialise_into_one_clean_seed() {
+    let state = test_state();
+    state
+        .auth_db
+        .create_user(
+            "adm",
+            "admin",
+            "admin@test.com",
+            "hash",
+            SystemRole::SuperAdmin,
+        )
+        .unwrap();
+    std::env::set_var("SEED_IFC_URL", "");
+    let (a, b) = (state.clone(), state.clone());
+    let race = tokio::join!(
+        tokio::task::spawn_blocking(move || seed_open_triplestore(&a)),
+        tokio::task::spawn_blocking(move || seed_open_triplestore(&b)),
+    );
+    race.0.unwrap();
+    race.1.unwrap();
+
+    let org = state
+        .auth_db
+        .get_organisation_by_slug(ORG_SLUG)
+        .unwrap()
+        .expect("demo organisation must be seeded");
+    let datasets = org_datasets(&state, &org.id);
+    assert_eq!(
+        datasets.len(),
+        demo_datasets().len(),
+        "racing seeders must leave exactly the full demo dataset set"
+    );
 }
 
 fn app(state: &AppState) -> Router {

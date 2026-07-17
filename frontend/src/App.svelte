@@ -14,13 +14,17 @@
     Upload, Database, Building2, BookOpen, HelpCircle,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield,
-    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon
+    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
+  import { runtimeBranding } from './lib/runtimeConfig.js';
 
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
   import Register from './pages/Register.svelte';
+  import ForgotPassword from './pages/ForgotPassword.svelte';
+  import ResetPassword from './pages/ResetPassword.svelte';
+  import VerifyEmail from './pages/VerifyEmail.svelte';
   import OAuthCallback from './pages/OAuthCallback.svelte';
   import Settings from './pages/Settings.svelte';
   import Datasets from './pages/Datasets.svelte';
@@ -37,6 +41,7 @@
   import LazyPage from './components/LazyPage.svelte';
   const lazySparqlEditor     = () => import('./pages/SparqlEditor.svelte');
   const lazyDatasetViewer    = () => import('./pages/DatasetViewer.svelte');
+  const lazyCesiumView       = () => import('./pages/CesiumView.svelte');
   const lazyApiServices      = () => import('./pages/ApiServices.svelte');
   // /graph-viz is deprecated: the unified browse page (/browse?view=graph) now
   // owns the graph viz. Keep a thin redirect so deep-links don't 404.
@@ -50,6 +55,7 @@
   const lazyShaclResults        = () => import('./pages/ShaclResults.svelte');
   const lazyAdminUsers          = () => import('./pages/AdminUsers.svelte');
   const lazyAdminSecurity       = () => import('./pages/AdminSecurity.svelte');
+  const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
   const lazyModelRegistry       = () => import('./pages/ModelRegistry.svelte');
   const lazyModelDetail         = () => import('./pages/ModelDetail.svelte');
@@ -60,7 +66,8 @@
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
   const lazyApiDocs          = () => import('./pages/ApiDocs.svelte');
 
-  const BRAND = 'Open Triplestore';
+  // Overridable at runtime (no rebuild) via /config.json's "branding.title" — see runtimeConfig.ts.
+  $: BRAND = $runtimeBranding.title;
 
   const NAV_SECTIONS = [
     {
@@ -222,6 +229,7 @@
       ['/login', 'pages.login.title', 'pages.login.detail'],
       ['/register', 'pages.register.title', 'pages.register.detail'],
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
+      ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
       ['/docs', 'pages.documentation.title', 'pages.documentation.detail'],
@@ -306,19 +314,23 @@
       </button>
       <Link to="/" class="brand-link-mobile" aria-label={BRAND}>
         <span class="brand-word brand-word-sm">
-          <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-            <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
-            <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
-              <line x1="32" y1="51" x2="48.45" y2="22.5"/>
-              <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
-              <line x1="15.55" y1="22.5" x2="32" y2="51"/>
-            </g>
-            <g stroke="#eafdfb" stroke-width="2.1">
-              <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
-              <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
-              <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
-            </g>
-          </svg><span class="brand-rest">pen Triplestore</span>
+          {#if $runtimeBranding.logoUrl}
+            <img class="brand-o" src={$runtimeBranding.logoUrl} alt="" aria-hidden="true" /><span class="brand-rest">{BRAND}</span>
+          {:else}
+            <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+              <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
+              <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
+                <line x1="32" y1="51" x2="48.45" y2="22.5"/>
+                <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
+                <line x1="15.55" y1="22.5" x2="32" y2="51"/>
+              </g>
+              <g stroke="#eafdfb" stroke-width="2.1">
+                <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
+                <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
+                <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
+              </g>
+            </svg><span class="brand-rest">pen Triplestore</span>
+          {/if}
         </span>
       </Link>
       {#if searchEnabled}
@@ -339,19 +351,23 @@
       <div class="brand-block">
         <Link to="/" class="brand-link" on:click={navClick} aria-label={BRAND}>
           <span class="brand-word">
-            <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-              <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
-              <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
-                <line x1="32" y1="51" x2="48.45" y2="22.5"/>
-                <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
-                <line x1="15.55" y1="22.5" x2="32" y2="51"/>
-              </g>
-              <g stroke="#eafdfb" stroke-width="2.1">
-                <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
-                <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
-                <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
-              </g>
-            </svg><span class="brand-rest">pen Triplestore</span>
+            {#if $runtimeBranding.logoUrl}
+              <img class="brand-o" src={$runtimeBranding.logoUrl} alt="" aria-hidden="true" /><span class="brand-rest">{BRAND}</span>
+            {:else}
+              <svg class="brand-o" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                <circle cx="32" cy="32" r="19" stroke="url(#otRing)" stroke-width="4.6"/>
+                <g stroke="#dbf7f3" stroke-width="1.9" stroke-opacity="0.5" stroke-linecap="round">
+                  <line x1="32" y1="51" x2="48.45" y2="22.5"/>
+                  <line x1="48.45" y1="22.5" x2="15.55" y2="22.5"/>
+                  <line x1="15.55" y1="22.5" x2="32" y2="51"/>
+                </g>
+                <g stroke="#eafdfb" stroke-width="2.1">
+                  <circle cx="32" cy="51" r="6.4" fill="url(#otNode)"/>
+                  <circle cx="48.45" cy="22.5" r="6.4" fill="url(#otNode)"/>
+                  <circle cx="15.55" cy="22.5" r="6.4" fill="url(#otNode)"/>
+                </g>
+              </svg><span class="brand-rest">pen Triplestore</span>
+            {/if}
           </span>
           <small class="brand-sub">{$t('nav.brandSub')}</small>
         </Link>
@@ -393,6 +409,10 @@
               <Link to="/admin/security" class={`nav-item ${currentPath.startsWith('/admin/security') ? 'selected' : ''}`} on:click={navClick}>
                 <Shield size={16} />
                 <span class="nav-item-label">{$t('nav.securityAcl')}</span>
+              </Link>
+              <Link to="/admin/llm" class={`nav-item ${currentPath.startsWith('/admin/llm') ? 'selected' : ''}`} on:click={navClick}>
+                <Activity size={16} />
+                <span class="nav-item-label">{$t('nav.adminLlm')}</span>
               </Link>
               <Link to="/admin/docs" class={`nav-item ${currentPath.startsWith('/admin/docs') ? 'selected' : ''}`} on:click={navClick}>
                 <SettingsIcon size={16} />
@@ -546,9 +566,14 @@
       {/if}
 
       <section class="page-shell">
+        {#key $location?.pathname}
+        <div class="route-view">
         <Route path="/" component={Home} />
         <Route path="/login" component={Login} />
         <Route path="/register" component={Register} />
+        <Route path="/forgot-password" component={ForgotPassword} />
+        <Route path="/reset-password" component={ResetPassword} />
+        <Route path="/verify-email" component={VerifyEmail} />
         <Route path="/oauth/callback" component={OAuthCallback} />
         <Route path="/browse">
           <LazyPage loader={lazyTripleBrowser} />
@@ -606,6 +631,9 @@
         <Route path="/datasets/:id/viewer" let:params>
           <LazyPage loader={lazyDatasetViewer} id={params.id} />
         </Route>
+        <Route path="/datasets/:id/cesium" let:params>
+          <LazyPage loader={lazyCesiumView} id={params.id} />
+        </Route>
         <Route path="/datasets/:id" let:params>
           <DatasetDetail id={params.id} />
         </Route>
@@ -619,6 +647,9 @@
         </Route>
         <Route path="/admin/security">
           <LazyPage loader={lazyAdminSecurity} />
+        </Route>
+        <Route path="/admin/llm">
+          <LazyPage loader={lazyAdminLlm} />
         </Route>
         <Route path="/admin/docs">
           <LazyPage loader={lazyDocEditor} />
@@ -650,6 +681,8 @@
         <Route path="/graph-viz">
           <LazyPage loader={lazyGraphVisualizer} />
         </Route>
+        </div>
+        {/key}
       </section>
     </main>
 
@@ -779,6 +812,7 @@
     width: 1.65em; height: 1.65em; flex: 0 0 auto;
     margin: -0.3em 0.06em -0.3em 0;
     filter: drop-shadow(0 1px 3px rgba(13, 42, 50, 0.5));
+    object-fit: contain; /* only applies when this class is on an <img> (operator-supplied logo) */
   }
   .brand-rest { display: inline-block; transform: translateY(0.08em); }
   .brand-sub {

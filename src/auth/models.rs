@@ -233,6 +233,13 @@ pub struct User {
     pub id: String,
     pub username: String,
     pub email: String,
+    /// Whether ownership of `email` was proven (confirmation link, or asserted
+    /// by a trusted IdP / admin). Accounts predating verification are
+    /// grandfathered as verified by the one-time migration.
+    pub email_verified: bool,
+    /// Whether TOTP two-factor login is active. The encrypted shared secret
+    /// itself never leaves the DB layer (see `AuthDb::get_totp_secret`).
+    pub totp_enabled: bool,
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub role: SystemRole,
@@ -261,6 +268,54 @@ impl User {
     pub fn is_publisher(&self) -> bool {
         self.role.is_admin() || self.can_publish
     }
+}
+
+// ─── Email action tokens ─────────────────────────────────────────────────────
+
+/// A single-use, expiring token mailed to a user to prove mailbox control:
+/// email verification, password reset, or an email-address change.
+/// Only the SHA-256 hash of the token is stored.
+#[derive(Debug, Clone)]
+pub struct EmailToken {
+    pub id: String,
+    pub user_id: String,
+    /// `verify_email` | `reset_password` | `change_email`
+    pub kind: String,
+    pub token_hash: String,
+    /// For `change_email`: the new address taking effect on confirmation.
+    pub new_email: Option<String>,
+    pub expires_at: String,
+    pub created_at: String,
+    pub used_at: Option<String>,
+}
+
+impl EmailToken {
+    pub fn is_expired(&self) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map(|t| t.with_timezone(&chrono::Utc) < chrono::Utc::now())
+            .unwrap_or(true)
+    }
+}
+
+// ─── WebAuthn passkeys ───────────────────────────────────────────────────────
+
+/// A registered WebAuthn/FIDO2 passkey credential.
+/// `public_key` is the serialized `webauthn_rs::prelude::Passkey` JSON.
+#[derive(Debug, Clone)]
+pub struct WebauthnCredential {
+    pub id: String,
+    pub user_id: String,
+    /// Credential ID, base64url (no padding) — unique across all users.
+    pub credential_id: String,
+    pub public_key: String,
+    /// Authenticator signature counter at last use (clone detection).
+    pub counter: i64,
+    /// JSON array of authenticator transports reported at registration.
+    pub transports: Option<String>,
+    /// User-chosen label ("MacBook Touch ID", "YubiKey 5"…).
+    pub name: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
 }
 
 // ─── API Token ───────────────────────────────────────────────────────────────
@@ -514,9 +569,18 @@ impl OwnerType {
 /// unrelated to [`SystemRole`], [`ResourceRole`], or [`AccessLevel`]. The
 /// owning field and DB column remain named `graph_role` for backward compat.
 ///
-/// * `Instances` — instance data / assertions (default for user-created datasets).
-/// * `Model`     — OWL/RDFS terminological schema (classes and properties).
-/// * `Vocabulary` — SKOS concept schemes and controlled vocabularies.
+/// The three logical layers map to the Description-Logic boxes:
+///
+/// * `Model`      — **T-Box**: class definitions and class axioms (`owl:Class`,
+///   `rdfs:subClassOf`, restrictions).
+/// * `Vocabulary` — **R-Box**: object/datatype/annotation properties and
+///   relations, plus SKOS concept schemes / controlled vocabularies — the terms
+///   that describe how things relate.
+/// * `Instances`  — **A-Box**: instance data / assertions (default for
+///   user-created datasets).
+///
+/// plus two orthogonal roles:
+///
 /// * `Shapes`    — SHACL shape graphs used to validate instance data.
 /// * `Entailment` — materialised inference results (written by the reasoner).
 /// * `System`    — internal system graphs (registry metadata, etc.).
@@ -546,9 +610,9 @@ impl GraphKind {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "instances" | "abox" => Some(GraphKind::Instances),
-            "model" | "tbox" => Some(GraphKind::Model),
-            "vocabulary" => Some(GraphKind::Vocabulary),
+            "instances" | "instance" | "abox" => Some(GraphKind::Instances),
+            "model" | "data-model" | "tbox" => Some(GraphKind::Model),
+            "vocabulary" | "vocab" | "rbox" => Some(GraphKind::Vocabulary),
             "shapes" => Some(GraphKind::Shapes),
             "entailment" => Some(GraphKind::Entailment),
             "system" => Some(GraphKind::System),
@@ -579,7 +643,7 @@ pub struct Dataset {
     pub shacl_on_write: bool,
     pub shapes_graph_iri: Option<String>,
     /// Model registry ID this dataset's instance data conforms to.
-    pub conforms_to_ontology: Option<String>,
+    pub conforms_to_model: Option<String>,
     /// Specific model version (semver) the dataset conforms to.
     pub conforms_to_version: Option<String>,
     pub image_key: Option<String>,

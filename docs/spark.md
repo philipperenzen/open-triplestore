@@ -57,14 +57,36 @@ A JSON spec with a `type` of `bar`, `line` or `pie`, an optional `title` / `xLab
 ```
 ````
 
-### `map` — WKT feature map
+### `map` — WKT feature map (with optional 3D models)
 
-A JSON `features` array rendered as an interactive map. Each feature carries a `wkt` geometry — WGS84, longitude before latitude — plus an optional `label` and `iri` linking the marker back to the resource.
+A JSON `features` array rendered as an interactive map. Each feature carries a `wkt` geometry — WGS84, longitude before latitude — plus an optional `label` and `iri` linking the marker back to the resource. An optional `models` array places real 3D geometry on the basemap: each entry anchors a model file (glTF, STL, IFC, CityJSON) at a WKT `POINT`, rendered with the same georeferenced 3D engine as the dataset explorer.
 
 ````markdown
 ```map
 {"features": [{"label": "Waalbrug", "wkt": "POINT(5.8645 51.8519)",
-               "iri": "http://example.org/id/waalbrug"}]}
+               "iri": "http://example.org/id/waalbrug"}],
+ "models": [{"label": "Schependomlaan", "wkt": "POINT(5.8354 51.8473)",
+             "url": "/api/datasets/viewer-3d-demo/assets/…/download"}]}
+```
+````
+
+### `model3d` — interactive 3D viewer
+
+An orbitable 3D viewer (drag to rotate, scroll to zoom) for model files the assistant retrieved from the graphs — typically `omg:hasGeometry`/`fog:as…` file references or asset download URLs. Supports glTF (`.glb`/`.gltf`), STL, IFC and CityJSON.
+
+````markdown
+```model3d
+{"models": [{"label": "Boiler house", "url": "https://…/boiler.glb"}]}
+```
+````
+
+### `file` — file card with preview
+
+A compact card for a downloadable file: images, audio and video preview inline; everything else gets typed download/open actions. URLs are scheme-checked the same way as every other link in answers.
+
+````markdown
+```file
+{"label": "Inspection report", "url": "/api/datasets/bridges/assets/…/download", "filename": "report.pdf"}
 ```
 ````
 
@@ -94,6 +116,30 @@ Roads,74210
 
 Other fenced languages (` ```turtle `, ` ```json `, ` ```xml `, …) render as syntax-highlighted code rather than widgets, and small markdown tables render natively. Widget parsing is hard-capped (chart points, map features, CSV rows), so a confused answer cannot freeze the browser tab.
 
+## Chat history & memory
+
+Signed-in users keep their conversations: the sidebar lists past chats (newest first), **New chat** starts fresh, and each chat can be renamed or deleted. A restored chat brings its full retrieval trail and widgets back, not just the text. History is strictly per-account — nobody else, including admins, can open your conversations. Guests get no history; their chat lives in the page and is gone on navigation.
+
+**Memory** (the notebook icon) holds standing preferences Spark applies to every chat — *"answer in Dutch"*, *"I mostly work with the bridge datasets"*. It is injected into the system prompt, can be toggled off without deleting it, and is screened for prompt-injection phrasing at save time so a stored instruction can never override Spark's grounding rules.
+
+## Safety guard
+
+Every LLM-backed request passes a guard before any completion is spent:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LLM_RATE_LIMIT_PER_MIN` | `20` | Per-user (per-IP for guests) request budget per minute, separate from the global rate limiter. `0` disables. |
+| `LLM_GUARD_MAX_MESSAGE_CHARS` | `8000` | Per-message size cap. |
+| `LLM_GUARD_MAX_MESSAGES` / `LLM_GUARD_MAX_TOTAL_CHARS` | `40` / `64000` | Whole-conversation caps — start a new chat past them. |
+| `LLM_GUARD_INJECTION_ACTION` | `block` | What a prompt-injection heuristic hit does: `block`, `flag` (allow but log), or `off`. |
+| `LLM_GUARD_BLOCKLIST` | *(empty)* | Comma-separated phrases that always block. |
+
+Final answers are additionally screened for verbatim system-prompt leaks (redacted and flagged), and the system prompt instructs the model to treat retrieved data and memory as data, never as instructions.
+
+## Admin telemetry
+
+Admins see every LLM request under **Admin → AI Requests** (`/admin/llm`): timestamp, user, endpoint, model, outcome (`ok` / `error` / `blocked` with the guard rule that fired), latency, time-to-first-token, prompt/answer sizes and query rounds. Message *contents* are not logged — only a short question preview (disable even that with `LLM_LOG_PREVIEW_DISABLED=1`). Rows are pruned after `LLM_LOG_RETENTION_DAYS` (default 90).
+
 ## Configuration
 
 Spark uses the same bring-your-own-LLM gateway as the platform's other AI features (see [API Services & AI Queries](/docs/api-services)):
@@ -104,12 +150,21 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 | `LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
 | `LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
 
-Availability is probed at `GET /api/llm/health`; the chat itself is served by `POST /api/llm/chat`. When the gateway is unreachable, the chat page shows an offline banner and the platform's other AI assistants stay hidden.
+Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE) so the first tokens appear while the turn is still running; `POST /api/llm/chat` is the buffered fallback.
+
+## Performance & serving
+
+Replies stream token-by-token, so perceived latency is dominated by the gateway's **time-to-first-token**. Two bundled serving options:
+
+- **Ollama** (`--profile llm`, default) — easiest start, CPU or GPU. The compose file keeps the model resident between chats (`OLLAMA_KEEP_ALIVE=1h`, overridable) so warm questions skip the model-load entirely, and serves a couple of requests in parallel (`OLLAMA_NUM_PARALLEL`).
+- **vLLM** (`--profile llm-vllm`, NVIDIA GPU) — higher throughput with **automatic prefix caching**: Spark's large shared system prompt is computed once and reused across turns and users, which makes time-to-first-token nearly independent of the prompt size. Set `LLM_GATEWAY_URL=http://vllm:8000` and `LLM_MODEL` to the served model (default `Qwen/Qwen2.5-7B-Instruct-AWQ`).
+
+The server keeps a pooled connection to the gateway and builds the prompt deterministically (sorted graph lists, cached vocabulary samples) precisely so gateway-side prompt caches hit.
 
 ## Privacy & scope
 
 - **The model never touches the store.** It sees only the per-user platform context and the capped result rows of queries the server executed under your own read scope. Chat-issued queries are read-only and re-scoped server-side exactly like a hand-typed query.
-- **Conversations go to your gateway.** The chat messages, the platform context (dataset names, descriptions, topics, API-service names, graph IRIs) and query result rows are sent to the endpoint configured in `LLM_GATEWAY_URL`. Point it at a provider you trust — or keep everything on-premises with a local server such as Ollama.
+- **Conversations go to your gateway.** The chat messages, the platform context (dataset names, descriptions, topics, API-service names, graph IRIs) and query result rows are sent to the endpoint configured in `LLM_GATEWAY_URL`. Point it at a provider you trust — or keep everything on-premises with a local server such as Ollama or vLLM.
 - **Chat content can only trigger reads.** The only thing runnable from an answer is a **same-origin `GET /api/…`** call, executed by your own browser session under your own permissions. Other methods and other hosts are never runnable, so an answer cannot mutate data or call out elsewhere.
 - **Feedback is per-message and explicit.** The **Helpful?** buttons send that turn (question, answer, last query) to the gateway's training track — the same feedback loop as the SPARQL editor.
-- **Nothing is stored server-side.** The conversation lives in the page; **Clear chat** or navigating away discards it.
+- **Saved chats belong to your account.** Only the metadata in the admin request log (timing, status, a short question preview) is visible to administrators — never whole conversations. Guests' chats are never stored.

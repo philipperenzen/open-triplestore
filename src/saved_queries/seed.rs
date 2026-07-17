@@ -18,17 +18,15 @@
 //! or creating one service is logged and skipped without aborting the rest. Opt
 //! out with `SEED_STANDARDS_DEMO=false`.
 
-use bytes::Bytes;
-use uuid::Uuid;
+use std::borrow::Cow;
 
-use crate::auth::models::{OwnerType, Role, SystemRole, Visibility};
-use crate::auth::{dataset_graph, org_graph};
+use bytes::Bytes;
+
+use crate::auth::models::Visibility;
+use crate::seed_bundles::{self, Bundle, BundleDataset, BundleGraph, OrgSpec};
 use crate::server::AppState;
 
-use super::metadata;
-use super::models::QueryScope;
-use super::seed_data::{self, Fmt, GraphSpec, DEMO_BASE, ORG_NAME, ORG_SLUG};
-use super::store::SavedQueryStore;
+use super::seed_data::{self, DEMO_BASE, ORG_NAME, ORG_SLUG};
 
 const ORG_DESCRIPTION: &str =
     "Public reference deployment showcasing every standard Open Triplestore implements: \
@@ -110,161 +108,392 @@ pub fn seed_open_triplestore(state: &AppState) {
     if disabled {
         return;
     }
+    // Two seeders can run concurrently on a fresh install: the boot task only
+    // reaches the demo seed after the SHACL/standards seeding (seconds), and the
+    // first-admin registration handler kicks one off the moment that admin
+    // exists — the browser-e2e harness registers its admin exactly in that
+    // window. The seed is idempotent but not concurrent with itself: both
+    // passes see "missing", then race their INSERTs into UNIQUE constraints
+    // (and both would download the demo IFC). Serialise process-wide; the
+    // second pass then no-ops via the existence checks.
+    static SEED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SEED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if let Err(e) = try_seed(state) {
         tracing::warn!("open-triplestore demo seed skipped: {e}");
     }
 }
 
+/// Build the bundled standards demo as a [`Bundle`] so it runs through the same
+/// generic engine ([`seed_bundles::apply_bundle`]) as an on-disk `--seed-dir`
+/// bundle — this is the "reference bundle": the one every CI run that exercises
+/// the demo seed also exercises the shared seed-bundle code path.
+fn build_bundle() -> Bundle {
+    let datasets = seed_data::datasets()
+        .iter()
+        .map(|ds| {
+            let graphs = ds
+                .graphs
+                .iter()
+                .map(|g| BundleGraph {
+                    iri: format!("{DEMO_BASE}/{}/{}", ds.slug, g.suffix),
+                    role: Some(g.role),
+                    data: Some((Cow::Borrowed(g.data), g.fmt)),
+                })
+                .collect();
+            BundleDataset {
+                slug: ds.slug.to_string(),
+                name: ds.name.to_string(),
+                description: Some(ds.description.to_string()),
+                visibility: Visibility::Public,
+                graphs,
+                quads: Vec::new(),
+                saved_queries: seed_data::services_for(ds.slug),
+            }
+        })
+        .collect();
+
+    Bundle {
+        id: "open-triplestore-standards-demo".to_string(),
+        // Gating already happens in `seed_open_triplestore` before this bundle
+        // is even built; recorded here too so the bundle is self-describing.
+        opt_out_env: Some("SEED_STANDARDS_DEMO".to_string()),
+        org: OrgSpec {
+            slug: ORG_SLUG.to_string(),
+            name: ORG_NAME.to_string(),
+            description: Some(ORG_DESCRIPTION.to_string()),
+        },
+        datasets,
+    }
+}
+
 fn try_seed(state: &AppState) -> anyhow::Result<()> {
-    // Idempotent: if the demo organisation already exists we don't reseed it,
-    // but we do back-fill branding when an earlier (pre-branding) seed left it
-    // without a logo or banner — without ever clobbering artwork an admin has
-    // since uploaded.
-    if let Some(existing) = state.auth_db.get_organisation_by_slug(ORG_SLUG)? {
-        seed_org_branding(
+    // Snapshot the org's existing branding BEFORE the generic engine runs, so we
+    // know whether to seed fresh artwork or only back-fill what's missing on an
+    // install seeded before branding shipped.
+    let existing_org = state.auth_db.get_organisation_by_slug(ORG_SLUG)?;
+
+    let bundle = build_bundle();
+    let report = seed_bundles::apply_bundle(state, &bundle)?;
+
+    match existing_org {
+        Some(existing) => seed_org_branding(
             state,
-            &existing.id,
+            &report.org_id,
             existing.image_key.is_none(),
             existing.banner_key.is_none(),
-        );
-        // Back-fill dataset branding too, for installs seeded before it shipped —
-        // only filling what's unset so an admin's own artwork is never clobbered.
-        for brand in DATASET_BRANDS {
-            if let Ok(Some(ds)) = state.auth_db.get_dataset(brand.slug) {
-                seed_dataset_branding(
-                    state,
-                    &ds.id,
-                    brand.slug,
-                    ds.image_key.is_none(),
-                    ds.banner_key.is_none(),
-                );
-            }
-        }
-        return Ok(());
+        ),
+        None => seed_org_branding(state, &report.org_id, true, true),
     }
 
-    // Owner = a super_admin (preferred) or any admin. On a brand-new install
-    // before any admin exists, skip quietly — it will seed on the next start.
-    let users = state.auth_db.list_users()?;
-    let owner = users
-        .iter()
-        .find(|u| matches!(u.role, SystemRole::SuperAdmin) && u.is_active)
-        .or_else(|| users.iter().find(|u| u.role.is_admin() && u.is_active));
-    let owner = match owner {
-        Some(u) => u,
-        None => {
-            tracing::info!("open-triplestore seed: no admin user yet; will retry on next start");
-            return Ok(());
-        }
-    };
-
-    // Create the public organisation and attach the seeding admin to it.
-    let org_id = Uuid::new_v4().to_string();
-    let org = state.auth_db.create_organisation(
-        &org_id,
-        ORG_NAME,
-        ORG_SLUG,
-        Some(ORG_DESCRIPTION),
-        None,
-    )?;
-    let _ = state
-        .auth_db
-        .add_org_member(&owner.id, &org_id, Role::Admin);
-    org_graph::write_org_metadata_graph(&state.store, &state.base_url, &org, &[]);
-
-    // Give the public org page a branded logo + banner out of the box.
-    seed_org_branding(state, &org_id, true, true);
-
-    let sq = SavedQueryStore::new(state.auth_db.pool());
-    let mut graph_count = 0usize;
-    let mut service_count = 0usize;
-
-    for ds in seed_data::datasets() {
-        // Use the curated, URL-safe slug as the dataset id so the minted IRI
-        // (`{base}/dataset/{id}`) is human-readable — e.g. `…/dataset/spatial`
-        // rather than `…/dataset/<uuid>`. Slugs are unique across the demo set.
-        let ds_id = ds.slug.to_string();
-        if let Err(e) = state.auth_db.create_dataset(
-            &ds_id,
-            ds.name,
-            Some(ds.description),
-            OwnerType::Organisation,
-            &org_id,
-            Visibility::Public,
-            None,
-        ) {
-            tracing::warn!("open-triplestore seed: dataset '{}' failed: {e}", ds.slug);
-            continue;
-        }
-
-        // Themed icon + animated banner preset so the public page isn't blank.
-        seed_dataset_branding(state, &ds_id, ds.slug, true, true);
-
-        for g in ds.graphs {
-            let graph_iri = format!("{DEMO_BASE}/{}/{}", ds.slug, g.suffix);
-            if let Err(e) = load_graph(state, &graph_iri, g) {
-                tracing::warn!("open-triplestore seed: graph <{graph_iri}> load failed: {e}");
-                continue;
-            }
-            let _ = state.auth_db.add_dataset_graph(&ds_id, &graph_iri);
-            let _ = state
-                .auth_db
-                .set_dataset_graph_role(&ds_id, &graph_iri, Some(g.role));
-            graph_count += 1;
-        }
-
-        // Project the dataset's DCAT/VoID metadata graph so it is discoverable
-        // as linked data (mirrors what the bulk-import path does).
-        if let Ok(Some(dsrec)) = state.auth_db.get_dataset(&ds_id) {
-            let entries = state
-                .auth_db
-                .list_dataset_graph_entries(&ds_id)
-                .unwrap_or_default();
-            dataset_graph::write_dataset_metadata_graph(
-                &state.store,
-                &state.base_url,
-                &dsrec,
-                &entries,
-            );
-        }
-
-        for req in seed_data::services_for(ds.slug) {
-            match sq.create(QueryScope::Dataset, &ds_id, &req, &owner.id) {
-                Ok(svc) => {
-                    metadata::record_service(&state.store, &state.base_url, &svc);
-                    metadata::record_revision(
-                        &state.store,
-                        &state.base_url,
-                        &svc.id,
-                        svc.current_revision,
-                        req.version_name.as_deref(),
-                        req.note.as_deref(),
-                        svc.sparql.as_deref().unwrap_or(&req.sparql),
-                        "manual",
-                        &svc.created_by,
-                        &svc.created_at,
-                    );
-                    service_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!("open-triplestore seed: service '{}' failed: {e}", req.name)
-                }
-            }
-        }
+    // Themed icon + animated banner preset for each dataset THIS run created
+    // (never for a pre-existing dataset, so an admin's chosen artwork stands).
+    for slug in &report.datasets_created {
+        seed_dataset_branding(state, slug, slug, true, true);
     }
 
+    // The Schependomlaan IFC (layered Dutch BIM demo: BOT topology + full ifcOWL
+    // lift, every storey/wall/beam individually addressable) loads on first boot
+    // so the public demo shows the IFC decomposition immediately. With an admin
+    // owner it is also stored as a downloadable asset; without one (brand-new
+    // install) the asset is skipped and the FOG file reference points at the
+    // source URL — the linked data + decomposition are present either way.
+    seed_ifc_buildings(state, report.owner_id.as_deref().unwrap_or(""));
+
+    // Lift the bundled CityJSON sample neighbourhoods (the real 3DBAG block + the
+    // authored LoD2 zones) into the store as volumetric WKT-Z, so the 3D-Tiles
+    // pipeline (`/3dtiles`) and the 3D R*-tree index have a real cityscape to
+    // stream instead of only the handful of authored worked-example solids. Runs
+    // after the IFC buildings so its graphs register on the same boot.
+    seed_cityjson_volumes(state);
+
+    // Unconditional (unlike `apply_bundle`'s internal marking, which only fires
+    // for its own graphs): `seed_cityjson_volumes` loads store data directly
+    // without going through a handler that marks the index dirty itself.
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
 
     tracing::info!(
-        "Seeded '{}' organisation ({}) with {} datasets, {} graphs, {} saved queries",
+        "Seeded/verified '{}' organisation ({}): {} datasets, {} graphs ({} back-filled), {} new services",
         ORG_NAME,
-        org_id,
+        report.org_id,
         seed_data::datasets().len(),
-        graph_count,
-        service_count
+        report.graphs_registered,
+        report.graphs_backfilled,
+        report.services_created
     );
+    if report.owner_id.is_none() {
+        tracing::info!(
+            "open-triplestore seed: org + public data created on first load; saved-query \
+             services, the IFC demo and org membership are deferred until the first admin registers"
+        );
+    }
     Ok(())
+}
+
+/// Drive `fut` to completion from any calling context. The seed normally runs
+/// on a `spawn_blocking` thread, where `Handle::current().block_on` would be
+/// fine — but tests call it straight from async workers, where that panics
+/// ("Cannot start a runtime from within a runtime"). A throwaway
+/// single-thread runtime on a scoped OS thread works from both.
+fn block_on_anywhere<T: Send>(
+    fut: impl std::future::Future<Output = T> + Send,
+) -> anyhow::Result<T> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                Ok(rt.block_on(fut))
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// Default source of the Schependomlaan design-model IFC — the canonical open
+/// Dutch BIM dataset (Nijmegen; CC BY 4.0, openBIMstandards/TU Eindhoven),
+/// mirrored on GitHub. Override with `SEED_IFC_URL`; disable the whole demo
+/// seed with `SEED_STANDARDS_DEMO=false`.
+const SCHEPENDOMLAAN_IFC_URL: &str = "https://raw.githubusercontent.com/jakob-beetz/DataSetSchependomlaan/master/Design%20model%20IFC/IFC%20Schependomlaan.ifc";
+
+/// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
+/// once (first boot), stored as a public asset, and lifted to BOT + ifcOWL in its
+/// OWN graph; the WKT anchor overrides the file's IfcSite (exporters leave default
+/// locations) so the buildings cluster as a little BIM neighbourhood near the
+/// Schependomlaan site in Nijmegen. URLs are CORS-enabled (raw.githubusercontent)
+/// so the web-ifc viewer can fetch them client-side too.
+struct IfcBuildingSeed {
+    /// Stored asset filename.
+    name: &'static str,
+    /// Open IFC download URL.
+    url: &'static str,
+    /// `POINT(lon lat)` map anchor (overrides the file's own IfcSite georef).
+    anchor: &'static str,
+    /// Distinct BOT graph suffix per building so they don't collide.
+    graph_suffix: &'static str,
+    /// Short label for logs.
+    label: &'static str,
+}
+
+/// The demo IFC buildings. The small KIT FZK-Haus + buildingSMART Duplex
+/// (~2.5 MB each) come FIRST so a couple of rich IFC buildings appear within
+/// seconds of first boot; the 49 MB Schependomlaan (which honours `SEED_IFC_URL`)
+/// imports last so it doesn't hold the others up. All carry full BOT topology,
+/// property sets and an ifcOWL lift.
+const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
+    IfcBuildingSeed {
+        name: "FZK-Haus.ifc",
+        url: "https://raw.githubusercontent.com/tum-gis/ifc-to-citygml3/master/input/AC20-FZK-Haus.ifc",
+        anchor: "POINT(5.83602 51.84182)",
+        graph_suffix: "building-fzk",
+        label: "FZK-Haus",
+    },
+    IfcBuildingSeed {
+        name: "Duplex.ifc",
+        url: "https://raw.githubusercontent.com/MadsHolten/BOT-Duplex-house/master/Model%20files/IFC/Duplex.ifc",
+        anchor: "POINT(5.83180 51.84050)",
+        graph_suffix: "building-duplex",
+        label: "Duplex Apartment",
+    },
+    IfcBuildingSeed {
+        name: "Schependomlaan.ifc",
+        url: SCHEPENDOMLAAN_IFC_URL,
+        anchor: "POINT(5.83373 51.84114)",
+        graph_suffix: "building",
+        label: "Schependomlaan",
+    },
+];
+
+/// Download each demo IFC building (first boot only) and run it through the same
+/// IFC import pipeline users get: stored as a public dataset asset, converted to
+/// a BOT topology graph + a full ifcOWL lift, every storey, wall and beam
+/// individually addressable. Each building skips instantly when its graph already
+/// has data; a failed download just retries on the next boot.
+fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
+    const DS: &str = "viewer-3d-demo";
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
+    // tests, which must never reach out to the network). A custom value overrides
+    // only the first (Schependomlaan) building.
+    let env_url = std::env::var("SEED_IFC_URL").ok();
+    if env_url.as_deref().map(str::trim) == Some("") {
+        tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
+        return;
+    }
+    for b in IFC_BUILDINGS.iter() {
+        let bot_graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, b.graph_suffix);
+        if state
+            .store
+            .graph_count_cached(Some(&bot_graph))
+            .unwrap_or(0)
+            > 0
+        {
+            continue; // already seeded
+        }
+        // SEED_IFC_URL overrides only the Schependomlaan source (the headline
+        // building), regardless of its position in the list.
+        let url = match env_url.as_deref() {
+            Some(u) if b.label == "Schependomlaan" && !u.trim().is_empty() => u.to_string(),
+            _ => b.url.to_string(),
+        };
+        tracing::info!(
+            "seed: downloading {} IFC ({url}) — first boot only",
+            b.label
+        );
+        let downloaded = block_on_anywhere(async {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(600))
+                .build()?;
+            let bytes = client
+                .get(&url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            anyhow::Ok(bytes.to_vec())
+        })
+        .and_then(|r| r);
+        let bytes = match downloaded {
+            Ok(b2) => b2,
+            Err(e) => {
+                tracing::warn!(
+                    "{} IFC seed skipped (download failed, retries next boot): {e}",
+                    b.label
+                );
+                continue;
+            }
+        };
+        let imported = block_on_anywhere(crate::imports::ifc::import_ifc_bytes(
+            state,
+            DS,
+            owner_id,
+            b.name,
+            bytes,
+            Some(bot_graph),
+            true,
+            true,
+            Some(url),
+            Some(b.anchor.to_string()),
+        ))
+        .and_then(|r| r.map_err(anyhow::Error::msg));
+        match imported {
+            Ok(o) => tracing::info!(
+                "seeded {}: {} elements / {} storeys / {} spaces; BOT {} + ifcOWL {} triples",
+                b.label,
+                o.stats.elements,
+                o.stats.storeys,
+                o.stats.spaces,
+                o.stats.bot_triples,
+                o.stats.ifcowl_triples
+            ),
+            Err(e) => tracing::warn!("{} IFC seed failed: {e}", b.label),
+        }
+    }
+}
+
+/// One bundled CityJSON neighbourhood lifted to volumetric WKT-Z at seed time.
+///
+/// The same `.city.json` files the map viewer fetches client-side (`/samples/…`,
+/// referenced via OMG/FOG file-links) are also embedded in the binary and parsed
+/// to GeoSPARQL `POLYHEDRALSURFACE Z` here, so the 3D-Tiles tileset (which is
+/// built purely from store `geo:asWKT`) has the full block to stream. They land
+/// in their own `tiles3d-*` graphs, which the viewer-feed/geo-stats routes skip
+/// (like `/ifcowl`), so the 2D map keeps rendering its client-side CityJSON and
+/// is not doubled up with flattened footprints.
+struct CityJsonZoneSeed {
+    /// Embedded CityJSON document (one of the bundled samples).
+    data: &'static str,
+    /// Distinct, feed-excluded graph suffix.
+    graph_suffix: &'static str,
+    /// PROV `wasDerivedFrom` / attribution for the lifted geometry.
+    source: &'static str,
+    /// Short label for logs.
+    label: &'static str,
+}
+
+/// CityJSON neighbourhoods to lift. The real 3DBAG LoD2.2 block is the headline
+/// (≈79 building solids); the authored zones add the foreground LoD2 buildings.
+const CITYJSON_ZONES: &[CityJsonZoneSeed] = &[
+    CityJsonZoneSeed {
+        data: include_str!("../../frontend/public/samples/schependomlaan-3dbag.city.json"),
+        graph_suffix: "tiles3d-3dbag",
+        source: "https://docs.3dbag.nl/en/copyright/",
+        label: "3DBAG LoD2.2 block",
+    },
+    CityJsonZoneSeed {
+        data: include_str!("../../frontend/public/samples/neighbourhood.city.json"),
+        graph_suffix: "tiles3d-neighbourhood",
+        source: "https://creativecommons.org/publicdomain/zero/1.0/",
+        label: "authored LoD2 neighbourhood",
+    },
+    CityJsonZoneSeed {
+        data: include_str!("../../frontend/public/samples/schependomlaan-zone2.city.json"),
+        graph_suffix: "tiles3d-zone2",
+        source: "https://creativecommons.org/publicdomain/zero/1.0/",
+        label: "authored LoD2 zone 2",
+    },
+];
+
+/// Lift the bundled CityJSON neighbourhoods into the demo dataset's store as
+/// volumetric WKT-Z (`volumetric_only` — flat LoD0 footprints are dropped), one
+/// dedicated `tiles3d-*` graph per sample. Idempotent: each graph is skipped once
+/// it holds data, exactly like [`seed_ifc_buildings`]. Best-effort.
+fn seed_cityjson_volumes(state: &AppState) {
+    use crate::imports::cityjson::{convert_cityjson, CityJsonOptions};
+    const DS: &str = "viewer-3d-demo";
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    let base = state.base_url.trim_end_matches('/').to_string();
+    for z in CITYJSON_ZONES {
+        let graph = format!("{}/{}/{}", seed_data::DEMO_BASE, DS, z.graph_suffix);
+        if state.store.graph_count_cached(Some(&graph)).unwrap_or(0) > 0 {
+            continue; // already seeded
+        }
+        let opts = CityJsonOptions {
+            inst_base: format!("{base}/dataset/{DS}/"),
+            source_url: Some(z.source.to_string()),
+            generated_at: None,
+            // 3D massing only — flat footprints would mesh as redundant ground
+            // polygons that z-fight the solids in the tileset.
+            volumetric_only: true,
+        };
+        let doc: serde_json::Value = match serde_json::from_str(z.data) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("cityjson volume seed: {} parse failed: {e}", z.label);
+                continue;
+            }
+        };
+        let (ntriples, stats) = match convert_cityjson(&doc, &opts) {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!("cityjson volume seed: {} convert failed: {e}", z.label);
+                continue;
+            }
+        };
+        if let Err(e) = state.store.graph_store_put(
+            Some(graph.as_str()),
+            &ntriples,
+            oxigraph::io::RdfFormat::NTriples,
+        ) {
+            tracing::warn!("cityjson volume seed: <{graph}> load failed: {e}");
+            continue;
+        }
+        let _ = state.auth_db.add_dataset_graph(DS, &graph);
+        let _ = crate::imports::handlers::detect_and_store_graph_role(state, DS, &graph);
+        state.auth_db.invalidate_accessible_graphs_cache();
+        tracing::info!(
+            "seeded CityJSON volumes ({}): {} objects / {} solids → <{graph}>",
+            z.label,
+            stats.objects,
+            stats.geometries
+        );
+    }
 }
 
 /// Upload the bundled logo/banner for the demo organisation and record their
@@ -277,9 +506,6 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
     if !state.object_store.is_configured() || (!do_logo && !do_banner) {
         return;
     }
-    // The seed runs on a blocking thread (spawn_blocking), so drive the async
-    // object-store uploads to completion on the current runtime handle.
-    let rt = tokio::runtime::Handle::current();
     let assets: [(bool, &str, &'static [u8]); 2] = [
         (do_logo, "org-images", ORG_LOGO_PNG),
         (do_banner, "org-banners", ORG_BANNER_PNG),
@@ -289,11 +515,13 @@ fn seed_org_branding(state: &AppState, org_id: &str, do_logo: bool, do_banner: b
             continue;
         }
         let key = format!("{prefix}/{org_id}.png");
-        if let Err(e) = rt.block_on(state.object_store.upload(
+        let uploaded = block_on_anywhere(state.object_store.upload(
             &key,
             Bytes::from_static(bytes),
             "image/png",
-        )) {
+        ))
+        .and_then(|r| r);
+        if let Err(e) = uploaded {
             tracing::warn!("open-triplestore seed: branding upload to '{key}' failed: {e}");
             continue;
         }
@@ -352,29 +580,119 @@ fn seed_dataset_branding(
     }
 }
 
-/// Load one graph's bundled data into its named graph. Quoted-triple data is
-/// loaded through a SPARQL-star `INSERT DATA`; everything else goes through the
-/// Graph Store PUT path in its declared serialization.
-fn load_graph(state: &AppState, graph_iri: &str, g: &GraphSpec) -> anyhow::Result<()> {
-    match g.fmt {
-        Fmt::SparqlStarUpdate => {
-            state
-                .store
-                .update(&format!(
-                    "INSERT DATA {{ GRAPH <{graph_iri}> {{ {} }} }}",
-                    g.data
-                ))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::models::{Role, SystemRole};
+    use crate::saved_queries::models::QueryScope;
+    use crate::saved_queries::store::SavedQueryStore;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+
+    /// Run the demo seed the way production does — on the blocking pool, so the
+    /// branding helpers' `Handle::current().block_on` has a runtime to use and the
+    /// seeder's internal `block_on`s don't panic on an async worker. An empty
+    /// `SEED_IFC_URL` keeps the seeder off the network (no IFC download).
+    async fn run_seed(state: &AppState) {
+        std::env::set_var("SEED_IFC_URL", "");
+        let s = state.clone();
+        tokio::task::spawn_blocking(move || seed_open_triplestore(&s))
+            .await
+            .unwrap();
+    }
+
+    /// The org and all its PUBLIC data are created on first boot, before anyone
+    /// has registered — the headline fix. Owner-attributed content (membership +
+    /// saved-query services) is deferred until an admin exists.
+    #[tokio::test]
+    async fn creates_org_and_public_data_on_first_load_without_any_user() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        assert_eq!(state.auth_db.count_users().unwrap(), 0, "fresh install");
+
+        run_seed(&state).await;
+
+        let org = state
+            .auth_db
+            .get_organisation_by_slug(ORG_SLUG)
+            .unwrap()
+            .expect("org is created on first load, not first login");
+        assert_eq!(org.name, ORG_NAME);
+
+        // Every public demo dataset exists already.
+        for ds in seed_data::datasets() {
+            assert!(
+                matches!(state.auth_db.get_dataset(ds.slug), Ok(Some(_))),
+                "dataset '{}' created on first load",
+                ds.slug
+            );
         }
-        other => {
-            let format = other
-                .rdf_format()
-                .expect("non-update formats always map to an RdfFormat");
-            state
-                .store
-                .graph_store_put(Some(graph_iri), g.data, format)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // Owner-attributed content is deferred: no members, no services yet.
+        assert!(
+            state.auth_db.list_org_members(&org.id).unwrap().is_empty(),
+            "org has no members until the first admin registers"
+        );
+        let sq = SavedQueryStore::new(state.auth_db.pool());
+        for ds in seed_data::datasets() {
+            assert!(
+                sq.list(QueryScope::Dataset, ds.slug)
+                    .unwrap_or_default()
+                    .is_empty(),
+                "saved-query services deferred for '{}'",
+                ds.slug
+            );
         }
     }
-    Ok(())
+
+    /// Once the first admin exists, the (idempotent) reseed back-fills the
+    /// owner-attributed content the first-load seed deferred.
+    #[tokio::test]
+    async fn backfills_membership_and_services_once_an_admin_exists() {
+        let state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+
+        // First boot, no users: org + public data, services deferred.
+        run_seed(&state).await;
+        let demo_ds = seed_data::datasets()[0].slug;
+        let sq = SavedQueryStore::new(state.auth_db.pool());
+        assert!(
+            sq.list(QueryScope::Dataset, demo_ds)
+                .unwrap_or_default()
+                .is_empty(),
+            "no services before an admin exists"
+        );
+
+        // The first admin appears (promoted to super_admin in the real flow).
+        let admin = state
+            .auth_db
+            .create_user(
+                "admin-1",
+                "admin",
+                "admin@x.test",
+                "hash",
+                SystemRole::SuperAdmin,
+            )
+            .unwrap();
+
+        // Reseed, exactly as the registration handler does on first admin.
+        run_seed(&state).await;
+
+        let org = state
+            .auth_db
+            .get_organisation_by_slug(ORG_SLUG)
+            .unwrap()
+            .unwrap();
+        let members = state.auth_db.list_org_members(&org.id).unwrap();
+        assert!(
+            members
+                .iter()
+                .any(|(u, r)| u.id == admin.id && matches!(r, Role::Admin)),
+            "first admin back-filled as an Admin member of the org"
+        );
+        assert!(
+            !sq.list(QueryScope::Dataset, demo_ds)
+                .unwrap_or_default()
+                .is_empty(),
+            "saved-query services back-filled once an owner exists"
+        );
+    }
 }

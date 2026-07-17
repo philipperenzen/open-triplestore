@@ -80,4 +80,59 @@ Full access including user management. **Requires an admin or super_admin accoun
 
 **Publish permission** is an add-on that can be granted to any user (the role stays `user`) by an admin or super-admin. It allows uploading model and vocabulary versions and publishing them. Admins and super-admins always have it implicitly.
 
-Manage your own account from [Settings](/settings): change your password, create and revoke API tokens, and deactivate or permanently purge your account. Identity providers for SSO are configured by admins under [Security & Access Control](/docs/security).
+Manage your own account from [Settings](/settings): change your password or email address, enable two-factor authentication, create and revoke API tokens, and deactivate or permanently purge your account. Identity providers for SSO are configured by admins under [Security & Access Control](/docs/security).
+
+## Account lifecycle & recovery
+
+Registration validates the email address, username (3–50 chars, letters/digits/`._-`) and password (8+ chars) server-side, and emails a verification link (valid 24 h). Existing accounts created before email verification existed are grandfathered as verified.
+
+Self-service flows (all enumeration-safe — responses never reveal whether an account exists):
+
+- **Forgot password** — `/forgot-password` emails a single-use reset link (valid 1 h). Completing a reset revokes every existing session and counts as proof of mailbox control.
+- **Forgot username** — the same page emails the username tied to an address.
+- **Change email** — from Settings, requires the current password; the new address only takes effect after its mailbox confirms the emailed link. Without SMTP configured the change applies immediately but is flagged unverified.
+- **Two-factor authentication (TOTP)** — enroll from Settings with any authenticator app (QR or manual key). Login then requires a 6-digit code; ten single-use recovery codes are issued at enrollment (shown exactly once). Disabling 2FA requires the password *and* a live code.
+
+### Email delivery configuration
+
+Account email (verification, resets, reminders) is sent through SMTP when configured; otherwise every message — including its action link — is written to the server log so development setups can complete the flows.
+
+| Variable | Meaning |
+|---|---|
+| `SMTP_HOST` | SMTP relay host (unset → log-only mode) |
+| `SMTP_PORT` | Relay port (default 587) |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | Optional credentials |
+| `SMTP_STARTTLS` | Force STARTTLS on/off (default: implicit TLS on 465, STARTTLS otherwise) |
+| `SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
+| `PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
+| `OTS_REQUIRE_VERIFIED_EMAIL` | `1` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
+
+## SSO provider setup (OIDC / SAML)
+
+Providers are configured by admins under **Security & Access Control → Identity providers**. Any standards-compliant OIDC or SAML 2.0 IdP works; the callback/redirect URL to register at the IdP is always:
+
+```
+https://<your-host>/api/auth/oauth/<slug>/callback     (OIDC)
+https://<your-host>/api/auth/saml/<slug>/acs           (SAML)
+```
+
+### Google
+
+1. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials) create an **OAuth client ID** (type *Web application*) and add the callback URL above as an authorized redirect URI.
+2. Add a provider with type **OIDC**, discovery URL `https://accounts.google.com/.well-known/openid-configuration`, the client ID/secret from step 1, and scopes `openid email profile`.
+
+Google asserts `email_verified`, so verified Google emails can auto-link to existing local accounts of the same address.
+
+### Microsoft Entra ID (Azure AD)
+
+1. In the [Entra admin center](https://entra.microsoft.com) register an application (*App registrations → New*), add the callback URL as a **Web** redirect URI, and create a client secret.
+2. Add a provider with type **OIDC/Azure**, discovery URL `https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration`, the application (client) ID and secret, and scopes `openid email profile`.
+3. To map directory roles/groups, emit them in the token (App roles or the `groups` claim) and configure the provider's *role claim map*, e.g. `{"ots-admins": "admin"}`.
+
+### Apple
+
+Sign in with Apple is **not yet supported** by the generic OIDC integration: Apple requires the client secret to be a short-lived ES256-signed JWT minted from a developer key (`.p8`), rather than a static secret, and returns the authorization response via `form_post`. Until dedicated support lands, front Apple sign-in through a federating IdP (Keycloak, Auth0, Entra External ID) and connect that IdP here as a regular OIDC provider.
+
+### Other IdPs (Keycloak, Auth0, Okta, …)
+
+Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (upload the IdP certificate, set the SSO URL, and exchange SP metadata from `/api/auth/saml/<slug>/metadata`).

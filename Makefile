@@ -1,4 +1,4 @@
-.PHONY: up down restart dev build release logs bench bench-baseline perf-check perf-check-selftest install-hooks
+.PHONY: up down restart dev watch watch-check check dev-release build release nextest logs bench bench-baseline perf-check perf-check-selftest install-hooks
 
 PORT ?= 7878
 
@@ -40,9 +40,39 @@ dev:
 	@lsof -ti :$(PORT) | xargs -r kill -9 2>/dev/null || true
 	cargo run --features "$(FEATURES)"
 
+## Hot reload: rebuild + restart the server on every source change.
+## Needs cargo-watch (`cargo install cargo-watch`). Frees PORT first.
+watch:
+	@command -v cargo-watch >/dev/null 2>&1 || { echo "cargo-watch not found — run: cargo install cargo-watch"; exit 1; }
+	@lsof -ti :$(PORT) | xargs -r kill -9 2>/dev/null || true
+	cargo watch -x 'run --features $(FEATURES)'
+
+## Fastest inner loop: type-check (no codegen) on every source change.
+## Needs cargo-watch. Use this while editing; it reports errors in ~seconds.
+watch-check:
+	@command -v cargo-watch >/dev/null 2>&1 || { echo "cargo-watch not found — run: cargo install cargo-watch"; exit 1; }
+	cargo watch -x 'check --features $(FEATURES)'
+
+## One-shot fast compile check (no binary produced)
+check:
+	cargo check --features "$(FEATURES)"
+
+## Run with the fast thin-LTO release profile (optimised, ~Nx quicker to link
+## than --release). Realistic performance without the fat-LTO wait.
+dev-release:
+	@lsof -ti :$(PORT) | xargs -r kill -9 2>/dev/null || true
+	cargo run --profile release-dev --features "$(FEATURES)"
+
 ## Build the optimised release binary with all standards enabled
 release:
 	cargo build --release --features "$(FEATURES)"
+
+## Run the test suite with cargo-nextest — faster, better parallelism + output.
+## Needs cargo-nextest (`cargo install cargo-nextest`). Note: nextest does not run
+## doctests; run those with `cargo test --doc --features full` when needed.
+nextest:
+	@command -v cargo-nextest >/dev/null 2>&1 || { echo "cargo-nextest not found — run: cargo install cargo-nextest"; exit 1; }
+	cargo nextest run --features "$(FEATURES)"
 
 ## Run the full Criterion benchmark suite
 # Needs a native build — fails on Windows (missing GEOS/pkg-config); build via

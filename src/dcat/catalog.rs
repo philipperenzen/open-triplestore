@@ -11,7 +11,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::auth::db::AuthDb;
-use crate::auth::models::{Dataset, GraphKind, Organisation, OwnerType};
+use crate::auth::models::{Dataset, Organisation, OwnerType};
 use crate::store::engine::TripleStore;
 
 use super::vocabulary::*;
@@ -374,10 +374,10 @@ fn emit_dataset_entry(
     }
 
     // Model conformance (links instance data to its data model).
-    // `conforms_to_ontology` is a data-model registry id; the registry serves
+    // `conforms_to_model` is a data-model registry id; the registry serves
     // model IRIs under /data-model/ (see src/data_models/registry.rs), so the
     // conformance link must dereference there, not /ontology/.
-    if let Some(ref onto_id) = ds.conforms_to_ontology {
+    if let Some(ref onto_id) = ds.conforms_to_model {
         if let Some(ref onto_ver) = ds.conforms_to_version {
             writeln!(
                 out,
@@ -464,6 +464,93 @@ fn emit_dataset_entry(
         writeln!(out, "    ] ;").unwrap();
     }
 
+    // Geospatial distributions — only when the dataset actually carries geometry.
+    // DCAT 2 §4.3/§5.3: advertise the OGC API – Features, 3D Tiles, and viewer
+    // services as `dcat:Distribution`/`dcat:accessService` nodes so harvesters can
+    // discover the spatial access paths alongside the SPARQL/GSP ones above.
+    // Exclude the verbose ifcOWL lift graph (`…/ifcowl`) just like the viewer-feed
+    // and geo-stats handlers do (routes.rs): it is the full 1:1 IFC schema (millions
+    // of triples), carries none of the geometry the probe looks for, and its
+    // unbounded scan would dominate the per-dataset capability check run here.
+    let data_graphs: Vec<String> = graph_entries
+        .iter()
+        .filter(|e| !e.graph_iri.starts_with("urn:system:"))
+        .filter(|e| !e.graph_iri.ends_with("/ifcowl"))
+        // `tiles3d-*` graphs feed only the 3D-Tiles pipeline; skip them here too so
+        // the probe doesn't scan the extra lifted geometry on every catalog render.
+        .filter(|e| !crate::geo::viewer_feed::is_tiles3d_graph(&e.graph_iri))
+        .map(|e| e.graph_iri.clone())
+        .collect();
+    let geo = crate::geo::viewer_feed::dataset_geo_stats(store, &data_graphs);
+    if geo.has_coordinates || geo.has_3d {
+        // OGC API – Features landing for this dataset (GeoJSON FeatureCollection).
+        writeln!(out, "    dcat:distribution [").unwrap();
+        writeln!(out, "        a dcat:Distribution ;").unwrap();
+        writeln!(out, "        dct:title \"OGC API – Features (GeoJSON)\" ;").unwrap();
+        writeln!(
+            out,
+            "        dcat:accessURL <{base_url}/api/ogc/collections/{id}/items> ;",
+            id = ds.id
+        )
+        .unwrap();
+        writeln!(out, "        dcat:mediaType <https://www.iana.org/assignments/media-types/application/geo+json> ;").unwrap();
+        writeln!(
+            out,
+            "        dct:conformsTo <http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core> ;"
+        )
+        .unwrap();
+        // General OGC API – Features service endpoint backing this distribution.
+        writeln!(out, "        dcat:accessService [").unwrap();
+        writeln!(out, "            a dcat:DataService ;").unwrap();
+        writeln!(out, "            dct:title \"OGC API – Features\" ;").unwrap();
+        writeln!(out, "            dcat:endpointURL <{base_url}/api/ogc> ;").unwrap();
+        writeln!(
+            out,
+            "            dct:conformsTo <http://www.opengis.net/spec/ogcapi-features-1/1.0/conf/core>"
+        )
+        .unwrap();
+        writeln!(out, "        ]").unwrap();
+        writeln!(out, "    ] ;").unwrap();
+
+        // 3D Tiles tileset — only when the dataset has volumetric/model 3D data.
+        if geo.has_3d {
+            writeln!(out, "    dcat:distribution [").unwrap();
+            writeln!(out, "        a dcat:Distribution ;").unwrap();
+            writeln!(out, "        dct:title \"OGC 3D Tiles 1.1\" ;").unwrap();
+            writeln!(
+                out,
+                "        dcat:accessURL <{base_url}/api/datasets/{id}/3dtiles/tileset.json> ;",
+                id = ds.id
+            )
+            .unwrap();
+            writeln!(out, "        dcat:mediaType \"application/json\" ;").unwrap();
+            writeln!(
+                out,
+                "        dct:conformsTo <https://docs.ogc.org/cs/22-025r4/22-025r4.html>"
+            )
+            .unwrap();
+            writeln!(out, "    ] ;").unwrap();
+        }
+
+        // Viewer-feed JSON (per-element geometry + 3D-file references).
+        writeln!(out, "    dcat:distribution [").unwrap();
+        writeln!(out, "        a dcat:Distribution ;").unwrap();
+        writeln!(out, "        dct:title \"Viewer Feed (JSON)\" ;").unwrap();
+        writeln!(
+            out,
+            "        dcat:accessURL <{base_url}/api/datasets/{id}/viewer-feed> ;",
+            id = ds.id
+        )
+        .unwrap();
+        writeln!(out, "        dcat:mediaType \"application/json\"").unwrap();
+        writeln!(out, "    ] ;").unwrap();
+
+        // TODO(dcat §6.4.3): when this dataset has registered versions, advertise
+        // the version-scoped geometry endpoints via `dct:hasVersion` on each
+        // distribution. Dataset version records are not readily available in this
+        // generation pass, so the per-version geometry links are deferred.
+    }
+
     let landing = ds
         .landing_page
         .as_deref()
@@ -476,11 +563,11 @@ fn emit_dataset_entry(
     for entry in &graph_entries {
         if !entry.graph_iri.starts_with("urn:system:") {
             if let Some(role) = entry.graph_role {
-                let role_iri = catalog_role_iri(role);
+                let role_iri = crate::auth::dataset_graph::graph_role_iri(role);
                 writeln!(out, "<{}>", entry.graph_iri).unwrap();
                 writeln!(
                     out,
-                    "    <https://opentriplestore.org/ontology/graphRole> <{role_iri}> ."
+                    "    <https://opentriplestore.org/ns#graphRole> <{role_iri}> ."
                 )
                 .unwrap();
                 writeln!(out).unwrap();
@@ -540,20 +627,21 @@ fn count_via_sparql(store: &TripleStore, sparql: &str) -> usize {
 }
 
 /// Count triples in a specific named graph.
+///
+/// Reads the maintained per-graph count from the in-memory graph index
+/// ([`TripleStore::graph_count_cached`]) — an O(1) lookup — rather than issuing
+/// `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <iri> { ?s ?p ?o } }`. The explicit
+/// `GRAPH` wrapper keeps that query off the default-graph fast-count path in the
+/// engine (`try_fast_count` only recognises a bare `?s ?p ?o` default-graph
+/// scan), so it degrades to a full scan of the named graph. On a verbose lift
+/// graph — e.g. the `…/ifcowl` 1:1 IFC schema, which can run to millions of
+/// triples — that scan dominated every DCAT catalog request. The index tracks
+/// exactly the named-graph quad count (one entry per `?s ?p ?o` solution under
+/// the graph), so the emitted `void:triples` value is identical to the old
+/// SPARQL count. A graph with no triples is absent from the index; treat that
+/// missing entry as 0.
 fn count_graph_triples(store: &TripleStore, graph_iri: &str) -> usize {
-    let sparql = format!("SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }}");
-    count_via_sparql(store, &sparql)
-}
-
-fn catalog_role_iri(role: GraphKind) -> &'static str {
-    match role {
-        GraphKind::Instances => "https://opentriplestore.org/ontology/Instances",
-        GraphKind::Model => "https://opentriplestore.org/ontology/Model",
-        GraphKind::Vocabulary => "https://opentriplestore.org/ontology/Vocabulary",
-        GraphKind::Shapes => "https://opentriplestore.org/ontology/Shapes",
-        GraphKind::Entailment => "https://opentriplestore.org/ontology/Entailment",
-        GraphKind::System => "https://opentriplestore.org/ontology/System",
-    }
+    store.graph_count_cached(Some(graph_iri)).unwrap_or(0)
 }
 
 /// Escape string for Turtle literal (double-quote delimited).
@@ -627,5 +715,84 @@ mod tests {
             !out.contains("/ontology/library-catalogue-model"),
             "must not emit legacy /ontology/ conformance path, got:\n{out}"
         );
+    }
+
+    /// `void:triples` must sum every registered graph — including the verbose
+    /// `…/ifcowl` lift graph — and the value must be exact. The count is read
+    /// from the maintained O(1) graph index ([`TripleStore::graph_count_cached`])
+    /// rather than a `GRAPH`-wrapped `COUNT(*)` SPARQL scan, so a multi-million
+    /// triple ifcOWL graph no longer forces a full scan on every catalog
+    /// request. Guards the regression where the per-graph count loop scanned
+    /// each named graph via SPARQL.
+    #[test]
+    fn void_triples_counts_all_graphs_including_ifcowl_via_index() {
+        let db = Arc::new(AuthDb::in_memory().unwrap());
+        let store = TripleStore::in_memory().unwrap();
+
+        db.create_dataset(
+            "ds-graphs",
+            "Graphs Dataset",
+            None,
+            OwnerType::User,
+            "u1",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+
+        let data_graph = "http://example.org/g/data";
+        let ifcowl_graph = "http://example.org/g/data/ifcowl";
+
+        // 2 triples in the data graph, 3 in the ifcOWL lift graph.
+        store
+            .update(
+                "INSERT DATA { GRAPH <http://example.org/g/data> { \
+                 <http://example.org/s1> <http://example.org/p> <http://example.org/o1> . \
+                 <http://example.org/s2> <http://example.org/p> <http://example.org/o2> . } }",
+            )
+            .unwrap();
+        store
+            .update(
+                "INSERT DATA { GRAPH <http://example.org/g/data/ifcowl> { \
+                 <http://example.org/i1> <http://example.org/p> <http://example.org/o1> . \
+                 <http://example.org/i2> <http://example.org/p> <http://example.org/o2> . \
+                 <http://example.org/i3> <http://example.org/p> <http://example.org/o3> . } }",
+            )
+            .unwrap();
+
+        db.add_dataset_graph("ds-graphs", data_graph).unwrap();
+        db.add_dataset_graph("ds-graphs", ifcowl_graph).unwrap();
+
+        // The index lookup must agree with a direct named-graph quad count.
+        assert_eq!(count_graph_triples(&store, data_graph), 2);
+        assert_eq!(count_graph_triples(&store, ifcowl_graph), 3);
+        assert_eq!(
+            count_graph_triples(&store, ifcowl_graph),
+            store.count_graph(Some(ifcowl_graph)).unwrap(),
+            "cached count must equal a direct quads_for_pattern count"
+        );
+
+        let ds = db.get_dataset("ds-graphs").unwrap().unwrap();
+        let mut out = String::new();
+        emit_dataset_entry(&mut out, "http://example.org", &store, &db, &ds);
+
+        // ifcOWL is still included in the aggregate count (2 + 3 = 5) …
+        assert!(
+            out.contains("void:triples 5 ;"),
+            "void:triples must sum every registered graph including …/ifcowl, got:\n{out}"
+        );
+        // … and still advertised as a void:subset.
+        assert!(
+            out.contains(&format!("void:subset <{ifcowl_graph}>")),
+            "ifcOWL graph should still be linked as a void:subset, got:\n{out}"
+        );
+    }
+
+    /// A registered graph holding no triples is absent from the graph index;
+    /// the count must read as 0 (missing entry), not panic or omit the line.
+    #[test]
+    fn count_graph_triples_missing_graph_is_zero() {
+        let store = TripleStore::in_memory().unwrap();
+        assert_eq!(count_graph_triples(&store, "http://example.org/empty"), 0);
     }
 }

@@ -31,14 +31,40 @@ export function defaultMaterial(dark: boolean): THREE.Material {
 
 const modelCache = new Map<string, Promise<THREE.Group>>();
 
+/** Order-independent digest of a guid set for cache keys (length + a 32-bit
+ *  hash of the sorted ids) — keeps a 900-element storey from making a 20 KB key. */
+function digestGuids(guids: string[]): string {
+  let h = 5381;
+  for (const g of [...guids].sort()) {
+    for (let i = 0; i < g.length; i++) h = ((h * 33) ^ g.charCodeAt(i)) >>> 0;
+    h = (h ^ 0x2d) >>> 0; // separator so [ab,c] != [a,bc]
+  }
+  return h.toString(36);
+}
+
 /**
  * Load a model into a normalised group (unit-ish bounding box, sitting on the
  * ground plane, centred on x/z) with [ModelGeoData] in `userData`. Cached per
- * URL; callers must `.clone()` before adding to a scene so cached geometry is
- * never mutated per-consumer.
+ * URL (+ orientation); callers must `.clone()` before adding to a scene so
+ * cached geometry is never mutated per-consumer.
+ *
+ * `upAxis: 'Z'` rotates a Z-up model into the scene's Y-up convention. There is
+ * no reliable way to detect a file's up-axis (3D-print STLs are usually Z-up,
+ * but plenty are exported Y-up — a tower and a bridge can't both win under one
+ * default), so orientation is *data*: the linked-data geometry node may carry
+ * `ots:modelUpAxis "Z"`, which the viewer feed forwards per element.
  */
-export function loadModel(url: string, format: ModelFormat): Promise<THREE.Group> {
-  const key = `${format}:${url}`;
+export function loadModel(
+  url: string,
+  format: ModelFormat,
+  opts: { upAxis?: string | null; guids?: string[] } = {},
+): Promise<THREE.Group> {
+  const upAxis = (opts.upAxis || '').toUpperCase() === 'Z' ? 'Z' : null;
+  // A subtree (an IFC container's descendant leaf guids) must not collide in the
+  // cache with the whole model or with another subtree of the same file: fold a
+  // compact, order-independent digest of the guid set into the key.
+  const guidKey = opts.guids?.length ? `${opts.guids.length}~${digestGuids(opts.guids)}` : '-';
+  const key = `${format}:${upAxis ?? '-'}:${guidKey}:${url}`;
   let p = modelCache.get(key);
   if (!p) {
     p = (async () => {
@@ -51,12 +77,25 @@ export function loadModel(url: string, format: ModelFormat): Promise<THREE.Group
         const geom = await new STLLoader().loadAsync(url);
         geom.computeVertexNormals();
         group.add(new THREE.Mesh(geom, defaultMaterial(false)));
+      } else if (format === 'ifc') {
+        // web-ifc (WASM) loads on demand; a `#GlobalId` fragment isolates one
+        // element. Meshes carry `userData.ifcGuid` for per-element picking.
+        const { loadIfcGroup } = await import('./ifc');
+        group.add(await loadIfcGroup(url, { guids: opts.guids }));
       } else {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
         const city = format === 'cityjson' ? parseCityJSON(await res.json()) : parseCityGML(await res.text());
         group.add(city.group);
         anchorLonLat = city.anchorLonLat;
+      }
+      // Annotated Z-up content rotates into the Y-up scene BEFORE measuring, so
+      // realSize.y is the real-world height. IFC manages its own axes.
+      if (upAxis === 'Z' && format !== 'ifc') {
+        for (const child of group.children) {
+          child.rotation.x = -Math.PI / 2;
+        }
+        group.updateMatrixWorld(true);
       }
       const box = new THREE.Box3().setFromObject(group);
       const size = box.getSize(new THREE.Vector3());

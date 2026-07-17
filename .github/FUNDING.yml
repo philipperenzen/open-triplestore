@@ -3,14 +3,11 @@
 #
 # The `github` entry requires an active GitHub Sponsors profile for the account.
 # Uncomment / replace any of the others with your own handles as you set them up.
-# Contributions are appreciation, not payment for a service — see FUNDING.md.
 
 github: [philipperenzen]
-# ko_fi: your-handle
-# liberapay: your-handle
-
-# Other platforms — uncomment and set your handle as you create accounts:
+# ko-fi: your-handle
 # open_collective: open-triplestore
 # buy_me_a_coffee: your-handle
+# liberapay: your-handle
 # patreon: your-handle
 # custom: ["https://your-donation-page.example"]

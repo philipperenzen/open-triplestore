@@ -265,6 +265,69 @@ const ENTRIES: &[StdEntry] = &[
 "#,
     },
     StdEntry {
+        key: "geometry",
+        name: "Geometry conformance (GeoSPARQL)",
+        demo_path: "viewer-3d-demo/geo-features",
+        run_inference: false,
+        ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+# Every geo:Geometry SHOULD carry a serialized geometry literal (geo:asWKT),
+# otherwise it cannot be parsed, indexed or rendered.
+geo:GeometryShape a sh:NodeShape ;
+   sh:targetClass geo:Geometry ;
+   sh:property [ sh:path geo:asWKT ; sh:minCount 1 ; sh:maxCount 1 ;
+                 sh:datatype geo:wktLiteral ;
+                 sh:message "A geo:Geometry should have exactly one geo:asWKT wktLiteral serialization." ] .
+"#,
+    },
+    StdEntry {
+        key: "geometry3d",
+        name: "3D solid closure (POLYHEDRALSURFACE Z)",
+        demo_path: "viewer-3d-demo/volumes-3d",
+        run_inference: false,
+        ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+# Pragmatic closure check for volumetric solids: a POLYHEDRALSURFACE Z that bounds
+# a watertight volume needs several faces. Each face opens with "((", so we flag a
+# Z polyhedral surface whose WKT carries fewer than four "((" face openers — a
+# degenerate, almost-certainly-unclosed shell. Counts via STRLEN over the WKT with
+# the "((" sequences removed (each removed pair is 2 chars).
+geo:SolidClosureShape a sh:NodeShape ;
+   sh:targetSubjectsOf geo:asWKT ;
+   sh:sparql [
+       a sh:SPARQLConstraint ;
+       sh:message "A POLYHEDRALSURFACE Z should have at least four faces to bound a closed solid." ;
+       sh:select """
+         SELECT $this ?value WHERE {
+           $this <http://www.opengis.net/ont/geosparql#asWKT> ?value .
+           FILTER(CONTAINS(UCASE(STR(?value)), \"POLYHEDRALSURFACE Z\"))
+           BIND((STRLEN(STR(?value)) - STRLEN(REPLACE(STR(?value), \"\\\\(\\\\(\", \"\"))) / 2 AS ?faces)
+           FILTER(?faces < 4)
+         }
+       """ ;
+   ] .
+"#,
+    },
+    StdEntry {
+        key: "bot",
+        name: "BOT topology hygiene",
+        demo_path: "viewer-3d-demo/volumes-3d",
+        run_inference: false,
+        ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix bot: <https://w3id.org/bot#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+# A bot:Element should be human-labelled and, if it has sub-elements, those links
+# must point at IRI resources (no anonymous topology). Keeps the building-topology
+# graph navigable.
+bot:ElementShape a sh:NodeShape ;
+   sh:targetClass bot:Element ;
+   sh:property [ sh:path rdfs:label ; sh:minCount 1 ;
+                 sh:message "Every bot:Element should have an rdfs:label." ] ;
+   sh:property [ sh:path bot:hasSubElement ; sh:nodeKind sh:IRI ;
+                 sh:message "bot:hasSubElement must reference a named (IRI) element." ] .
+"#,
+    },
+    StdEntry {
         key: "shaclcore",
         name: "SHACL Core",
         demo_path: "validation/shacl-data",
@@ -379,7 +442,7 @@ ots:StandardShape a sh:NodeShape ;
         run_inference: false,
         ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix otso: <https://opentriplestore.org/ontology/> .
+@prefix otso: <https://opentriplestore.org/ns#> .
 # Every graph-role individual must be labelled (model hygiene for the ots terms).
 [] a sh:NodeShape ;
    sh:targetClass otso:GraphRole ;

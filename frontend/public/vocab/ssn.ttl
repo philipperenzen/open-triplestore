@@ -1,0 +1,110 @@
+# SSN (Semantic Sensor Network ontology) — the W3C/OGC ontology layered above the
+# SOSA core, adding the system-level concepts (systems, subsystems, deployments)
+# used to describe sensor and actuator networks and their installation in the
+# field. Hand-authored term subset bundled so SSN terms in the demo data render
+# with full definitions.
+# Source: http://www.w3.org/TR/vocab-ssn/  (ns http://www.w3.org/ns/ssn/)
+@prefix ssn:  <http://www.w3.org/ns/ssn/> .
+@prefix sosa: <http://www.w3.org/ns/sosa/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<http://www.w3.org/ns/ssn/> a owl:Ontology ;
+  rdfs:label "Semantic Sensor Network ontology (SSN)"@en ;
+  rdfs:comment "The W3C/OGC ontology layered above the SOSA core that adds system-level concepts — systems, subsystems and deployments — for describing sensor and actuator networks."@en ;
+  owl:versionInfo "2017-10-19" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+ssn:System a owl:Class ;
+  rdfs:label "System"@en ;
+  rdfs:comment "A unit of abstraction for pieces of infrastructure that implement procedures. A system may have components, its subsystems, which are themselves systems."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:Deployment a owl:Class ;
+  rdfs:label "Deployment"@en ;
+  rdfs:comment "Describes the deployment of one or more systems for a particular purpose, for example a deployment of sensors to monitor a building over a period of time."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:Input a owl:Class ;
+  rdfs:label "Input"@en ;
+  rdfs:comment "Any information that is provided to a procedure for its use."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:Output a owl:Class ;
+  rdfs:label "Output"@en ;
+  rdfs:comment "Any information that is reported from a procedure."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:Property a owl:Class ;
+  rdfs:label "Property"@en ;
+  rdfs:comment "A quality of an entity. An aspect of an entity that is intrinsic to and cannot exist without the entity."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:Stimulus a owl:Class ;
+  rdfs:label "Stimulus"@en ;
+  rdfs:comment "An event in the real world that triggers the sensor. The properties associated with the stimulus may be different from the observed property."@en ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+ssn:hasSubSystem a owl:ObjectProperty ;
+  rdfs:label "has subsystem"@en ;
+  rdfs:comment "Relates a system to a component part of it, which is itself a system."@en ;
+  rdfs:domain ssn:System ;
+  rdfs:range ssn:System ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:deployedSystem a owl:ObjectProperty ;
+  rdfs:label "deployed system"@en ;
+  rdfs:comment "Relates a deployment to a system that is deployed as part of it."@en ;
+  rdfs:domain ssn:Deployment ;
+  rdfs:range ssn:System ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:hasDeployment a owl:ObjectProperty ;
+  rdfs:label "has deployment"@en ;
+  rdfs:comment "Relates a system to a deployment in which the system is used."@en ;
+  rdfs:domain ssn:System ;
+  rdfs:range ssn:Deployment ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:deployedOnPlatform a owl:ObjectProperty ;
+  rdfs:label "deployed on platform"@en ;
+  rdfs:comment "Relates a deployment to the platform on which the systems are deployed."@en ;
+  rdfs:domain ssn:Deployment ;
+  rdfs:range sosa:Platform ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:implements a owl:ObjectProperty ;
+  rdfs:label "implements"@en ;
+  rdfs:comment "Relates a system, sensor, actuator or sampler to a procedure (such as a sensing or sampling method) that it implements."@en ;
+  rdfs:domain ssn:System ;
+  rdfs:range sosa:Procedure ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:hasInput a owl:ObjectProperty ;
+  rdfs:label "has input"@en ;
+  rdfs:comment "Relates a procedure to an input it requires."@en ;
+  rdfs:range ssn:Input ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:hasOutput a owl:ObjectProperty ;
+  rdfs:label "has output"@en ;
+  rdfs:comment "Relates a procedure to an output it produces."@en ;
+  rdfs:range ssn:Output ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:detects a owl:ObjectProperty ;
+  rdfs:label "detects"@en ;
+  rdfs:comment "Relates a sensor to a stimulus that the sensor can detect, where the stimulus serves as a proxy for an observable property."@en ;
+  rdfs:domain sosa:Sensor ;
+  rdfs:range ssn:Stimulus ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .
+
+ssn:forProperty a owl:ObjectProperty ;
+  rdfs:label "for property"@en ;
+  rdfs:comment "Relates a system, sensor or condition to a property that is relevant to its capability or operation."@en ;
+  rdfs:range ssn:Property ;
+  rdfs:isDefinedBy <http://www.w3.org/ns/ssn/> .

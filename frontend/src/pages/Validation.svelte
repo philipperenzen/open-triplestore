@@ -16,6 +16,7 @@
   import ShapesEditor from '../components/ShapesEditor.svelte';
   import IssueResults from '../components/IssueResults.svelte';
   import { toastError } from '../lib/toast.ts';
+  import { unwrapValidationRun } from '../lib/validationReport.js';
 
   let organisations = [];
   let accessibleShapeGraphs = [];
@@ -110,8 +111,10 @@
     datasetStatus = datasetStatus;
     try {
       const res = await validateDataset(dsId, {});
-      const report = res.report;
-      datasetStatus[dsId] = { loading: false, result: report, summary: summarize(report), error: null, ranAt: res.ran_at };
+      const run = unwrapValidationRun(res);
+      if (!run.report) throw new Error($t('pages.validation.validationError'));
+      const report = run.report;
+      datasetStatus[dsId] = { loading: false, result: report, summary: summarize(report), error: null, ranAt: run.ranAt };
       selectedDataset = dsId;
       viewingRunId = null;
       if (activeTab === 'history') loadHistory(dsId);
@@ -124,7 +127,7 @@
   async function validateAll() {
     batchRunning = true;
     try {
-      for (const d of datasets.filter(d => d.shapes_graph_iri)) {
+      for (const d of datasets.filter(d => !noShapesIds.has(d.id))) {
         await runValidation(d.id);
       }
     } finally {
@@ -192,11 +195,17 @@
   $: activeResult = selectedDataset ? datasetStatus[selectedDataset]?.result : null;
   $: activeStatus = selectedDataset ? datasetStatus[selectedDataset] : null;
 
+  // dataset-shape-graphs now also lists datasets whose shapes come from Studio
+  // bindings or shapes-role graphs (shapes_graph_iri may be null for those), so
+  // "has shapes" is: legacy shapes_graph_iri OR membership in that response.
+  $: shapeSourceDatasetIds = new Set((accessibleShapeGraphs || []).map(sg => String(sg.dataset_id)).filter(s => s && s !== 'undefined'));
+  $: noShapesIds = new Set(datasets.filter(d => !d.shapes_graph_iri && !shapeSourceDatasetIds.has(String(d.id))).map(d => d.id));
+
   // Global summary across datasets (uses persisted summaries + freshly run reports).
   $: summary = (() => {
     const s = { conforms: 0, violations: 0, warnings: 0, infos: 0, validated: 0, total: datasets.length, noShapes: 0 };
     for (const d of datasets) {
-      if (!d.shapes_graph_iri) s.noShapes += 1;
+      if (noShapesIds.has(d.id)) s.noShapes += 1;
       const st = datasetStatus[d.id];
       const src = st?.summary;
       if (!src) continue;
@@ -257,7 +266,7 @@
       <div><div class="metric-value">{summary.infos}</div><div class="metric-label">{$t('pages.validation.metricInfo')}</div></div>
     </div>
     <div class="summary-actions">
-      <button class="btn" on:click={validateAll} disabled={batchRunning || datasets.every(d => !d.shapes_graph_iri)}>
+      <button class="btn" on:click={validateAll} disabled={batchRunning || datasets.every(d => noShapesIds.has(d.id))}>
         {#if batchRunning}<Loader2 size={14} class="spin" />{:else}<PlayCircle size={14} />{/if}
         {$t('pages.validation.validateAll')}
       </button>
@@ -304,15 +313,15 @@
                   {/if}
                 {:else if status.error}
                   <span class="pill pill-error"><AlertTriangle size={11} /> {$t('system.error')}</span>
-                {:else if !ds.shapes_graph_iri}
+                {:else if noShapesIds.has(ds.id)}
                   <span class="pill pill-muted">{$t('pages.validation.noShapes')}</span>
-                  {#if accessibleShapeGraphs.length > 0}
+                  {#if accessibleShapeGraphs.some((sg) => sg.shapes_graph_iri)}
                     <div class="inline-shapes-picker" on:click|stopPropagation role="presentation">
                       <Select
                         size="sm"
                         value=""
                         placeholder={$t('pages.validation.linkShapesPlaceholder')}
-                        options={accessibleShapeGraphs.map((sg) => ({ value: sg.shapes_graph_iri, label: sg.dataset_name }))}
+                        options={accessibleShapeGraphs.filter((sg) => sg.shapes_graph_iri).map((sg) => ({ value: sg.shapes_graph_iri, label: sg.dataset_name || sg.shapes_graph_iri }))}
                         on:change={(e) => { if (e.detail) linkShapes(ds, e.detail); }}
                       />
                     </div>
@@ -327,8 +336,8 @@
             </div>
             <div class="row-actions">
               <button class="btn btn-sm btn-ghost" on:click|stopPropagation={() => runValidation(ds.id)}
-                disabled={status.loading || !ds.shapes_graph_iri}
-                title={!ds.shapes_graph_iri ? $t('pages.validation.configureShapesFirst') : $t('pages.validation.runValidation')}>
+                disabled={status.loading || noShapesIds.has(ds.id)}
+                title={noShapesIds.has(ds.id) ? $t('pages.validation.configureShapesFirst') : $t('pages.validation.runValidation')}>
                 {#if status.loading}<Loader2 size={12} class="spin" />{:else}<Play size={12} />{/if}
               </button>
               <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -358,7 +367,7 @@
             <button class="tab" class:active={activeTab === 'shapes'} on:click={() => setTab('shapes')}><FileCode size={14} /> {$t('pages.validation.tabShapes')}</button>
             <button class="tab" class:active={activeTab === 'history'} on:click={() => setTab('history')}><History size={14} /> {$t('pages.validation.tabHistory')}</button>
           </div>
-          <button class="btn btn-sm" on:click={() => runValidation(selectedDataset)} disabled={activeStatus?.loading || !selectedDs.shapes_graph_iri}>
+          <button class="btn btn-sm" on:click={() => runValidation(selectedDataset)} disabled={activeStatus?.loading || noShapesIds.has(selectedDs.id)}>
             {#if activeStatus?.loading}<Loader2 size={13} class="spin" />{:else}<Play size={13} />{/if} {$t('pages.validation.runValidation')}
           </button>
         </div>
@@ -391,7 +400,7 @@
             <div class="placeholder">
               <ShieldCheck size={40} strokeWidth={1.1} />
               <h3>{$t('pages.validation.notValidatedYet')}</h3>
-              {#if selectedDs.shapes_graph_iri}
+              {#if !noShapesIds.has(selectedDs.id)}
                 <p>{$t('pages.validation.notValidatedDesc', { values: { name: selectedDs.name } })}</p>
                 <button class="btn" on:click={() => runValidation(selectedDataset)}><Play size={14} /> {$t('pages.validation.runValidation')}</button>
               {:else}

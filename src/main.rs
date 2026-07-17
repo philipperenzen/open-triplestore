@@ -16,15 +16,21 @@ mod data_models;
 mod dataset_versions;
 mod dcat;
 mod docs;
+mod email;
 mod geo;
+mod ifc;
 mod imports;
 mod kind_detector;
 #[cfg(feature = "ldp")]
 mod ldp;
+mod netutil;
+mod ogcapi;
+mod plugins;
 mod prefixes;
 mod reasoning;
 mod rml;
 mod saved_queries;
+mod seed_bundles;
 mod server;
 mod shacl;
 mod shacl_studio;
@@ -39,6 +45,8 @@ mod svc_registry;
 mod swrl;
 #[cfg(feature = "text-search")]
 mod text_search;
+#[cfg(feature = "geometry3d")]
+mod tiles3d;
 
 #[derive(Parser, Debug)]
 #[command(name = "open-triplestore")]
@@ -105,6 +113,12 @@ struct Cli {
     #[arg(long)]
     promote_super_admin: Option<String>,
 
+    /// Restore the store + identity DB from a backup id (in BACKUP_DIR, default
+    /// {data-dir}/backups), REPLACING current data, then exit. Encrypted backups
+    /// must be decrypted manually first.
+    #[arg(long, value_name = "BACKUP_ID")]
+    restore: Option<String>,
+
     /// Allowed CORS origins, comma-separated (e.g. "https://app.example.com,https://admin.example.com").
     /// If empty, same-origin only.
     #[arg(long, env = "CORS_ORIGINS", default_value = "")]
@@ -139,6 +153,14 @@ struct Cli {
     #[arg(long, env = "SPARQL_QUERY_TIMEOUT_SECS", default_value_t = 30)]
     query_timeout_secs: u64,
 
+    /// Write-path execution timeout in seconds for Graph Store PUT/POST/DELETE and
+    /// data-model/dataset DELETE/PATCH. Separate from (and larger than) the query
+    /// timeout so a stuck write fails fast without starving reads, while ordinary
+    /// writes have generous headroom. Bulk import (`/api/import/bulk`) is
+    /// intentionally uncapped — large IFC/CityJSON loads legitimately run for minutes.
+    #[arg(long, env = "WRITE_TIMEOUT_SECS", default_value_t = 120)]
+    write_timeout_secs: u64,
+
     /// Issue auth cookies with the `Secure` attribute (HTTPS-only transport).
     /// Enable in production behind TLS; leave off for plain-HTTP local development.
     #[arg(long, env = "SECURE_COOKIES", default_value_t = false)]
@@ -154,6 +176,23 @@ struct Cli {
     #[cfg(feature = "text-search")]
     #[arg(long, env = "TEXT_SEARCH_DIR")]
     text_search_dir: Option<PathBuf>,
+
+    /// Directory of seed bundles to load at boot (each a subdirectory with a
+    /// `manifest.toml` + RDF payload files — see docs/plugins.md). Idempotent,
+    /// fail-soft, and per-bundle opt-out-able; unset by default (no extra
+    /// bundles loaded). This is how a downstream operator adds org-owned
+    /// datasets without patching source: mount a directory here (e.g. a Docker
+    /// volume) instead of forking.
+    #[arg(long, env = "SEED_DIR")]
+    seed_dir: Option<PathBuf>,
+
+    /// Opt-in fallback to the next free port when `--port`/`-p` is already in
+    /// use, instead of refusing to start. The advertised base URL and service-
+    /// registry self-registration are rewritten to the port actually bound.
+    /// Off by default — existing deployments that rely on "refuse to start on
+    /// a busy port" see no behavior change.
+    #[arg(long, env = "PORT_FALLBACK", default_value_t = false, value_parser = parse_lenient_bool)]
+    port_fallback: bool,
 }
 
 /// Best-effort terminal width (columns); 80 when stdout is not a tty.
@@ -266,6 +305,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Create data directory if it doesn't exist
     std::fs::create_dir_all(&cli.data_dir)?;
+
+    // Handle --restore: rebuild the store + identity DB from a backup, then exit.
+    // Runs before the identity DB is opened so its SQLite file can be replaced.
+    if let Some(ref id) = cli.restore {
+        let backup_dir = std::env::var("BACKUP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| cli.data_dir.join("backups"));
+        let target_sqlite = cli
+            .db_path
+            .clone()
+            .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        info!("Restoring backup {id} from {}…", backup_dir.display());
+        let store = store::TripleStore::open(&cli.data_dir)?;
+        let manifest = backup::restore_backup(&backup_dir, id, &store, &target_sqlite)?;
+        info!(
+            "Restored backup {} ({} quads). Restart without --restore to run the server.",
+            manifest.id, manifest.rdf_quad_count
+        );
+        return Ok(());
+    }
 
     // Initialize the auth database (SQLite) — needed by --promote-super-admin and the server.
     // Opened before the RocksDB store so admin operations can run while the server is live.
@@ -446,15 +505,11 @@ async fn main() -> anyhow::Result<()> {
     info!("API at http://{}/api", addr);
     info!("Service description at http://{}/", addr);
 
-    // Cross-app service discovery is opt-in (LD_DISCOVERY). When enabled, self-register the
-    // linked-data base_url as "triplestore" so siblings resolve it via the registry (fail-soft).
-    if cli.discovery {
-        svc_registry::spawn_registrar(
-            cli.base_url.clone(),
-            cli.registry_url.clone(),
-            cli.registry_token.clone(),
-        );
-    } else {
+    // Cross-app service discovery is opt-in (LD_DISCOVERY); self-registration is
+    // handled inside `server::run`, AFTER the listener is bound, so that when
+    // `--port-fallback` moves the bind off the requested port the registry sees
+    // the base URL rewritten to the port actually in use, not the stale one.
+    if !cli.discovery {
         info!(
             "service discovery disabled (set LD_DISCOVERY=true to self-register with the registry)"
         );
@@ -471,8 +526,14 @@ async fn main() -> anyhow::Result<()> {
         &cli.cors_origins,
         trusted_cidrs,
         cli.query_timeout_secs,
+        cli.write_timeout_secs,
         cli.secure_cookies,
         cli.serve_frontend,
+        cli.seed_dir,
+        cli.port_fallback,
+        cli.discovery,
+        cli.registry_url,
+        cli.registry_token,
         #[cfg(feature = "text-search")]
         text_index,
     )

@@ -72,7 +72,7 @@
         visibility: newVisibility,
         owner_type: newOwnerType,
         owner_id: newOwnerType === 'organisation' ? newOwnerOrgId : currentUser?.id,
-        conforms_to_ontology: null,
+        conforms_to_model: null,
         conforms_to_version: null,
         graph_role: newGraphRole || null,
       });

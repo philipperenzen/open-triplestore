@@ -98,6 +98,36 @@ pub fn issue_refresh_token(
     Ok(token)
 }
 
+/// Lifetime of the intermediate 2FA challenge token minted after a correct
+/// password for an account with TOTP enabled.
+pub const MFA_TOKEN_EXPIRY_MINUTES: u64 = 5;
+
+/// Issue a short-lived two-factor challenge token (`token_type: "mfa"`).
+/// It can ONLY be redeemed at POST /api/auth/2fa/verify together with a valid
+/// code — the auth middleware never accepts it as an access token.
+pub fn issue_mfa_token(
+    config: &JwtConfig,
+    user_id: &str,
+    username: &str,
+    role: &str,
+) -> anyhow::Result<String> {
+    let now = chrono::Utc::now().timestamp() as u64;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        username: username.to_string(),
+        role: role.to_string(),
+        token_type: "mfa".to_string(),
+        iat: now,
+        exp: now + MFA_TOKEN_EXPIRY_MINUTES * 60,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
+    };
+    Ok(encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(config.secret.as_bytes()),
+    )?)
+}
+
 /// Verify and decode a JWT token.
 pub fn verify_token(config: &JwtConfig, token: &str) -> anyhow::Result<Claims> {
     let token_data = decode::<Claims>(
@@ -123,7 +153,7 @@ pub fn generate_api_token() -> String {
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// True for well-known default/placeholder JWT secrets (and the empty string) that must never

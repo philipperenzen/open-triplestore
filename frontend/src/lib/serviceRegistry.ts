@@ -9,7 +9,14 @@
 // same-origin via the Vite proxy; the client mainly powers cross-links + the change event.
 //
 // Fail-soft: every name has a localhost DEFAULT, so first paint is correct and a missing
-// registry never breaks the app. Precedence at each call site: explicit VITE_* > registry > DEFAULT.
+// registry never breaks the app. Precedence at each call site, highest first:
+//   1. VITE_<SERVICE>_URL   — build-time env var (e.g. VITE_TRIPLESTORE_URL), baked into the
+//                             bundle. For static deploys (GitLab Pages, no registry proxy)
+//                             that point at an external backend.
+//   2. runtime config       — /config.json's "services" map, applied WITHOUT a rebuild (see
+//                             runtimeConfig.ts); set via setRuntimeServiceOverrides.
+//   3. /registry discovery  — live, opt-in (LD_DISCOVERY) cross-app SSE resolution.
+//   4. DEFAULTS             — localhost dev ports.
 
 export type ServiceName =
   | 'triplestore' | 'form-service' | 'form-app' | 'validation-api' | 'validation-app'
@@ -37,14 +44,55 @@ export const SERVICE_CHANGE_EVENT = 'ldapps-service-change'
 const MAP: Record<string, string> = { ...DEFAULTS }
 let started = false
 
-/** Resolve a logical service name to its current base URL (registry value, else localhost default). */
-export function getService(name: ServiceName): string {
-  return MAP[name] || DEFAULTS[name]
+/** `my-service` -> `VITE_MY_SERVICE_URL`, matched against `import.meta.env` at build time. */
+function viteEnvVarName(name: string): string {
+  return `VITE_${name.toUpperCase().replace(/-/g, '_')}_URL`
 }
 
-/** A copy of the whole current map (debugging / bulk reads). */
+/**
+ * Highest-precedence overrides: `VITE_<SERVICE>_URL` build-time env vars.
+ * Resolved once at module load (Vite bakes `import.meta.env` in at build
+ * time, so this can never change at runtime).
+ */
+const VITE_OVERRIDES: Partial<Record<ServiceName, string>> = (() => {
+  const out: Partial<Record<ServiceName, string>> = {}
+  const env = import.meta.env as unknown as Record<string, string | undefined>
+  for (const name of Object.keys(DEFAULTS) as ServiceName[]) {
+    const v = env[viteEnvVarName(name)]
+    if (typeof v === 'string' && v.trim()) out[name] = v.trim().replace(/\/+$/, '')
+  }
+  return out
+})()
+
+/** Second-highest precedence: the runtime `/config.json` "services" map (see runtimeConfig.ts). */
+let RUNTIME_OVERRIDES: Partial<Record<ServiceName, string>> = {}
+
+/**
+ * Apply the runtime-config service map (called by `runtimeConfig.ts` once
+ * `/config.json` resolves). Values here are outranked by `VITE_*_URL` but
+ * outrank `/registry` discovery and the localhost DEFAULTS.
+ */
+export function setRuntimeServiceOverrides(services: Record<string, string>): void {
+  let changed = false
+  for (const [name, url] of Object.entries(services)) {
+    if (typeof url === 'string' && url && RUNTIME_OVERRIDES[name as ServiceName] !== url) {
+      RUNTIME_OVERRIDES = { ...RUNTIME_OVERRIDES, [name]: url }
+      changed = true
+    }
+  }
+  if (changed) broadcast()
+}
+
+/** Resolve a logical service name to its current base URL, per the precedence above. */
+export function getService(name: ServiceName): string {
+  return VITE_OVERRIDES[name] || RUNTIME_OVERRIDES[name] || MAP[name] || DEFAULTS[name]
+}
+
+/** A copy of the whole current, precedence-resolved map (debugging / bulk reads). */
 export function getServiceMap(): Record<string, string> {
-  return { ...MAP }
+  const out: Record<string, string> = {}
+  for (const name of Object.keys(DEFAULTS) as ServiceName[]) out[name] = getService(name)
+  return out
 }
 
 function applyServices(services: Record<string, { url?: string }> | undefined): boolean {
@@ -62,7 +110,10 @@ function applyServices(services: Record<string, { url?: string }> | undefined): 
 
 function broadcast(): void {
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent(SERVICE_CHANGE_EVENT, { detail: { map: { ...MAP } } }))
+    // The full precedence-resolved map (VITE_*_URL / runtime config / registry
+    // / defaults) — not just the registry-tier MAP — so a listener sees the
+    // same values getService() would return.
+    window.dispatchEvent(new CustomEvent(SERVICE_CHANGE_EVENT, { detail: { map: getServiceMap() } }))
   }
 }
 

@@ -4,7 +4,7 @@
 // testable in jsdom.
 
 import { parseWktGeometry, type WktGeometry } from '../ontology/valueType';
-import { modelRefOf, type ModelFormat } from './detect';
+import { modelRefOf, type ModelFormat, type ModelRef as DetectedRef } from './detect';
 
 export interface ViewerElement {
   id: string;
@@ -17,6 +17,11 @@ export interface ViewerElement {
   files?: [string, string][];
   source_crs?: string | null;
   wkt4326?: string | null;
+  /** Source up-axis of the element's 3D model(s), from `ots:modelUpAxis`. */
+  up_axis?: string | null;
+  /** Real-world largest extent (m) from `ots:modelSizeMeters` — scales unit-less
+   *  STL landmarks to true size on the map instead of guessing. */
+  size_meters?: number | null;
 }
 
 export type LatLng = [number, number];
@@ -104,6 +109,8 @@ export interface ModelRef {
   label: string;
   url: string;
   format: ModelFormat;
+  /** Source up-axis from ots:modelUpAxis ('Z' rotates into the Y-up scene). */
+  upAxis?: string | null;
   /** Grid slot position in the 3D scene, [x, z]. */
   slot: [number, number];
 }
@@ -119,13 +126,14 @@ export function modelRefs(elements: ViewerElement[], spacing = 3): ModelRef[] {
       const ref = modelRefOf(el);
       return ref ? { el, ...ref } : null;
     })
-    .filter((x): x is { el: ViewerElement; url: string; format: ModelFormat } => x !== null);
+    .filter((x): x is { el: ViewerElement } & DetectedRef => x !== null);
   const cols = Math.max(1, Math.ceil(Math.sqrt(withModels.length)));
-  return withModels.map(({ el, url, format }, i) => ({
+  return withModels.map(({ el, url, format, upAxis }, i) => ({
     id: el.id,
     label: el.label || el.id.split(/[/#]/).pop() || el.id,
     url,
     format,
+    upAxis,
     slot: [(i % cols) * spacing, Math.floor(i / cols) * spacing],
   }));
 }

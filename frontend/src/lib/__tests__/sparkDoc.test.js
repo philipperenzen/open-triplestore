@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { renderMarkdown } from '../markdown.js';
 
 // Renders the real docs/spark.md through the production renderer and checks the
@@ -18,7 +19,11 @@ const SEEDED_SLUGS = new Set([
   'dataset-governance',
 ]);
 
-const md = readFileSync(resolve(process.cwd(), '../docs/spark.md'), 'utf8');
+// ../../.. → frontend/, then ../docs → repo-root docs/. Resolving against this
+// file (not process.cwd()) keeps the test launch-directory independent. (new URL(
+// ..., import.meta.url) can't be used: vite rewrites it into a dev-server asset URL.)
+const FRONTEND_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+const md = readFileSync(resolve(FRONTEND_ROOT, '../docs/spark.md'), 'utf8');
 const { html, headings } = renderMarkdown(md);
 
 describe('docs/spark.md', () => {

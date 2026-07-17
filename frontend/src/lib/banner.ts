@@ -48,6 +48,8 @@ export function logBanner(): void {
   const tagline = wide
     ? '  A modern RDF triple store · SPARQL 1.1/1.2 · GeoSPARQL\n'
     : '  SPARQL 1.1/1.2 · GeoSPARQL\n';
+  // Intentional: this is the styled startup banner printed to the dev console.
+  // eslint-disable-next-line no-console
   console.log(
     `%c${mark}\n%c${tagline}`,
     // line-height:1 so the half-blocks tile seamlessly into solid shapes.

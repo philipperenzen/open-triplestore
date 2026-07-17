@@ -14,17 +14,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Spark chat is now an interactive linked-data canvas.** Assistant answers render
-  runnable widgets: `GET /api/.../run` mentions (fenced or inline) become one-click
-  API calls whose results show in place exactly like the API-services page (SPARQL
-  result table with linked RDF terms, CSV, RDF, JSON — with parameters, dataset
-  version and download); fenced ```sparql blocks get Run / copy / open-in-workspace
-  actions and execute under the caller's normal read scope; and the model can emit
-  ```chart (bar/line/pie), ```map (WGS84 WKT on Leaflet), ```card (entity info card)
-  and ```csv preview blocks. Spark itself may now run up to three scoped SPARQL
-  rounds per turn (with error feedback for self-repair), the full retrieval trail is
-  shown per answer with syntax-highlighted queries, and WKT result cells survive
-  long enough to be mapped.
+- None.
 
 ### Changed
 - None.
@@ -32,11 +22,122 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 - None.
 
+### Removed
+- None.
+
 ### Fixed
 - None.
 
 ### Security
 - None.
+
+## [0.4.0] — 2026-07-17
+
+### Added
+- **Extension/plugin architecture**, so a downstream operator can customize an
+  instance without patching upstream source — see [`docs/plugins.md`](docs/plugins.md):
+  - **Seed bundles** (`src/seed_bundles/`, `--seed-dir` / `SEED_DIR`): boot-time
+    org/dataset/graph/saved-query loading from a directory of `manifest.toml` +
+    RDF payload files. Idempotent, fail-soft, per-bundle opt-out env var. The
+    bundled standards demo (`src/saved_queries/seed.rs`) now runs through this
+    same engine as the reference bundle, and a documented example ships in
+    `examples/seed-bundles/`.
+  - **Compile-time plugins** (`plugins/api`, `plugins/hello`): a `Plugin` trait
+    (routes mounted under `/ext/<name>`, `on_boot`, background-task spawn) plus
+    a registry in `src/plugins.rs`. Each plugin is its own crate, enabled by a
+    `plugin-<name>` Cargo feature — following the existing `[features]`
+    pattern (`rdfs-entailment`, `owl2-*`, …) rather than dynamic library
+    loading. `GET /api/plugins` lists what's compiled in. `plugins/hello` is
+    both a working example and the copy-this-crate template.
+  - **Frontend runtime config**: `serviceRegistry.ts` now resolves each
+    backend URL with precedence `VITE_<SERVICE>_URL` (build-time) >
+    `/config.json` (runtime, no rebuild) > `/registry` discovery > localhost
+    defaults. `/config.json` also carries branding (title, logo, accent color),
+    applied at boot with no rebuild — see `runtimeConfig.ts`. `vite.config.js`
+    gained an `OTS_BASE_PATH` build-time option for static sub-path deploys.
+  - **Opt-in port fallback** (`--port-fallback` / `PORT_FALLBACK`, default
+    off): when the requested port is busy, bind any free port instead of
+    refusing to start (`src/netutil.rs`), rewriting the advertised base URL
+    used for service-registry self-registration to match. Upstream's default
+    "refuse to start on a busy port" behavior is unchanged unless this is set.
+- **IFC → linked data**: bulk import accepts `.ifc` files — stored as a downloadable
+  dataset asset and transformed into a BOT topology graph (storeys/elements,
+  property sets, FOG file references) plus a full ifcOWL-style instance lift
+  (`src/ifc/`). Graph Store reads gain `?format=` (turtle/jsonld/rdfxml/ntriples/
+  trig/nquads) with download disposition, and assets gain an anonymous-capable
+  `…/download` route gated by dataset visibility.
+- **Schependomlaan demo** replaces the Waalbrug example: the canonical open Dutch
+  BIM dataset (Nijmegen, CC BY 4.0) is fetched on first boot (`SEED_IFC_URL`),
+  with the real 3DBAG LoD2.2 city block (CC BY 4.0) bundled for the map.
+- **Viewer**: in-browser IFC rendering (web-ifc) with per-element picking —
+  clicking a beam opens that element's linked-data panel; multiple movable
+  element panels with a dock; map layer toggles + legend; "Show on map";
+  a model-format picker; ontology viewer standards header + full-page viewer.
+- **Spark chat v2**: signed-in users keep their conversations — a history
+  sidebar (new / open / rename / delete), restored with their full retrieval
+  trail and widgets — plus editable "memory" (standing preferences injected
+  into the system prompt, screened for injection at save time). New answer
+  widgets: `model3d` (orbit viewer), `file` (preview/download card), and
+  `map` with georeferenced 3D `models`. An "About Spark" panel surfaces the
+  live model/gateway and grounding/privacy notes.
+- **Admin → AI Requests** (`/admin/llm`): a request log for every LLM-backed
+  call (chat, NL→SPARQL, SHACL) — outcome, latency, time-to-first-token,
+  sizes and the guard rule that fired — with 24h/7-day aggregates. Message
+  contents are never stored, only a short question preview (`LLM_LOG_*`).
+- **vLLM serving profile** (`docker compose --profile llm-vllm`, NVIDIA GPU):
+  automatic prefix caching reuses Spark's shared system prompt across turns
+  for near-instant time-to-first-token; the bundled Ollama profile now keeps
+  the model resident (`OLLAMA_KEEP_ALIVE`) and serves requests in parallel.
+
+### Changed
+- App-wide motion polish: route transitions, staggered table rows, delayed
+  loading indicators (no sub-500 ms skeleton flash), reduced-motion guard.
+- SPARQL/read rate limit raised to an interactive burst (40 @ 60/min) and 429s
+  now carry a standard `Retry-After`; the web client retries them transparently.
+- **Developer build speed**: a hot-reload loop (`make watch` / `watch-check` via
+  cargo-watch), `make nextest` for parallel tests, dependency-only debuginfo
+  stripping for faster debug/test links, a `CARGO_PROFILE` Docker build-arg for
+  fast `release-dev` local images, BuildKit cargo/npm cache mounts plus `npm ci`,
+  and a separate rust-analyzer target dir to avoid build-lock contention. New
+  guide: [`docs/development.md`](docs/development.md).
+- Spark chat streams over SSE for fast first tokens; the server keeps a pooled
+  gateway connection and builds the prompt deterministically so gateway-side
+  prompt caches hit.
+
+### Deprecated
+- None.
+
+### Fixed
+- STL models rendered lying flat (Z-up vs Y-up) and basemap building extrusions
+  overlapping real 3D models on the map.
+- Boot seeding serialized + self-healing (a half-seeded instance left public
+  demo graphs registered but empty, so logged-out visitors saw no data and a
+  zero landing count); SQLite `busy_timeout` now precedes WAL setup.
+- Ontology viewer rendered empty for model-registry versions (preloaded store
+  now supersedes an empty SPARQL load).
+- **Spark**: a guard-rejected question (prompt-injection / rate limit) is no
+  longer replayed as context on later turns — one blocked message used to
+  re-block every following turn and freeze the chat; rejected questions stay
+  visible but dimmed and are excluded from the conversation and from history.
+- `docker-compose.yml` no longer hardcodes container names — every service's
+  name (and its containers/networks/volumes) now derives from the compose
+  project, so a second concurrent `docker compose up` (e.g. a second git
+  worktree) no longer fails with "container name already in use".
+- Published host ports (`7878`, `9000`/`9001`, `11434`, `8000`) are now
+  overridable via `TRIPLESTORE_PORT` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` /
+  `OLLAMA_PORT` / `VLLM_PORT` (`.env`), so two concurrent `docker compose up`
+  checkouts no longer fight over the same host port; the `info` banner service
+  reports the actual configured ports.
+
+### Security
+- Authorization matrix tests (role × visibility × endpoint) pinning anonymous
+  access to public data across browse/SPARQL/GSP/datasets/service description.
+- **LLM guard rails** on every Spark endpoint: a per-principal request rate
+  limit (separate from the global governor), size caps, a configurable phrase
+  blocklist and prompt-injection heuristics on user input
+  (`LLM_GUARD_INJECTION_ACTION` block/flag/off), plus an output screen that
+  redacts verbatim system-prompt leaks. Stored chat memory is screened the same
+  way at save time. All verdicts land in the admin request log.
 
 ## [0.3.0] — 2026-06-10
 
@@ -314,7 +415,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3

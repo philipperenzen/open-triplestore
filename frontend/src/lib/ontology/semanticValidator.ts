@@ -34,6 +34,12 @@ export function validateSemantics(store: Store): SemanticIssue[] {
   issues.push(...checkShaclTargetClassUnknown(store, types));
   issues.push(...checkShaclMinMaxCount(store));
   issues.push(...checkShaclDatatypeVsClassConflict(store));
+  issues.push(...checkShaclPathOnNodeShape(store));
+  issues.push(...checkShaclTargetOnPropertyShape(store));
+  issues.push(...checkShaclQualifiedMinMaxCount(store));
+  issues.push(...checkShaclLogicListValues(store));
+  issues.push(...checkShaclPathExpressions(store));
+  issues.push(...checkShaclPropertyShapeWithoutPath(store));
   issues.push(...checkMissingLabels(store, types));
   issues.push(...checkBareNamespaceIri(store));
   issues.push(...checkOrphanClass(store, types));
@@ -202,6 +208,184 @@ function checkShaclDatatypeVsClassConflict(store: Store): SemanticIssue[] {
       out.push({
         code: 'shacl-datatype-and-class', severity: 'error', focus: val,
         message: `Property shape declares both sh:datatype and sh:class; they are mutually exclusive.`,
+      });
+    }
+  }
+  return out;
+}
+
+function checkShaclPathOnNodeShape(store: Store): SemanticIssue[] {
+  const out = [];
+  for (const q of store.getQuads(null, namedNode(RDF + 'type'), namedNode(SH + 'NodeShape'), null)) {
+    if (store.getQuads(q.subject, namedNode(SH + 'path'), null, null).length > 0) {
+      out.push({
+        code: 'shacl-path-on-nodeshape', severity: 'error', focus: q.subject.value,
+        predicate: SH + 'path',
+        message: `Node shape declares sh:path; paths belong on property shapes (use sh:property).`,
+      });
+    }
+  }
+  return out;
+}
+
+/** Subjects that count as property shapes: typed so, or attached via sh:property. */
+function propertyShapeTerms(store: Store): Map<string, any> {
+  const subjects = new Map<string, any>();
+  for (const q of store.getQuads(null, namedNode(RDF + 'type'), namedNode(SH + 'PropertyShape'), null)) {
+    subjects.set(q.subject.value, q.subject);
+  }
+  for (const q of store.getQuads(null, namedNode(SH + 'property'), null, null)) {
+    if (q.object.termType === 'NamedNode' || q.object.termType === 'BlankNode') {
+      subjects.set(q.object.value, q.object);
+    }
+  }
+  // A subject also typed sh:NodeShape is judged by the node-shape rules.
+  for (const q of store.getQuads(null, namedNode(RDF + 'type'), namedNode(SH + 'NodeShape'), null)) {
+    subjects.delete(q.subject.value);
+  }
+  return subjects;
+}
+
+function checkShaclTargetOnPropertyShape(store: Store): SemanticIssue[] {
+  const out = [];
+  for (const [val, term] of propertyShapeTerms(store)) {
+    if (store.getQuads(term, namedNode(SH + 'targetClass'), null, null).length > 0) {
+      out.push({
+        code: 'shacl-target-on-propertyshape', severity: 'warning', focus: val,
+        predicate: SH + 'targetClass',
+        message: `Property shape declares sh:targetClass; targets are usually declared on the node shape.`,
+      });
+    }
+  }
+  return out;
+}
+
+function checkShaclQualifiedMinMaxCount(store: Store): SemanticIssue[] {
+  const out = [];
+  // Like checkShaclMinMaxCount: subjects are usually blank nodes, reuse terms.
+  const subjects = new Map<string, any>();
+  for (const q of store.getQuads(null, namedNode(SH + 'qualifiedMinCount'), null, null)) {
+    subjects.set(q.subject.value, q.subject);
+  }
+  for (const [val, term] of subjects) {
+    const min = num(store.getObjects(term, namedNode(SH + 'qualifiedMinCount'), null)[0]);
+    const max = num(store.getObjects(term, namedNode(SH + 'qualifiedMaxCount'), null)[0]);
+    if (min != null && max != null && min > max) {
+      out.push({
+        code: 'shacl-qualified-min-gt-max', severity: 'error', focus: val,
+        message: `sh:qualifiedMinCount (${min}) is greater than sh:qualifiedMaxCount (${max}).`,
+      });
+    }
+  }
+  return out;
+}
+
+/** Walks an RDF list; returns null when well-formed, else a problem string. */
+function listProblem(store: Store, head: { termType: string; value: string }): string | null {
+  let node = head;
+  const seen = new Set<string>();
+  for (;;) {
+    if (node.termType === 'NamedNode') {
+      return node.value === RDF + 'nil' ? null : 'does not end in rdf:nil';
+    }
+    if (node.termType !== 'BlankNode') return 'is not an RDF list';
+    if (seen.has(node.value)) return 'is a cyclic list';
+    seen.add(node.value);
+    const first = store.getObjects(node as any, namedNode(RDF + 'first'), null);
+    const rest = store.getObjects(node as any, namedNode(RDF + 'rest'), null);
+    if (first.length !== 1 || rest.length !== 1) return 'is a malformed list (rdf:first/rdf:rest)';
+    node = rest[0];
+  }
+}
+
+function checkShaclLogicListValues(store: Store): SemanticIssue[] {
+  const out = [];
+  for (const local of ['and', 'or', 'xone']) {
+    for (const q of store.getQuads(null, namedNode(SH + local), null, null)) {
+      const problem = listProblem(store, q.object);
+      if (problem) {
+        out.push({
+          code: 'shacl-logic-not-list', severity: 'error', focus: q.subject.value,
+          predicate: SH + local,
+          message: `sh:${local} must be an RDF list of shapes; its value ${problem}.`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/** Returns null when the path term is a valid SHACL path, else a problem string. */
+function pathProblem(store: Store, term: { termType: string; value: string }, seen: Set<string>): string | null {
+  if (term.termType === 'Literal') return null; // flagged by literal-where-iri-expected
+  if (term.termType === 'NamedNode') {
+    return term.value === RDF + 'nil' ? 'is an empty sequence list' : null;
+  }
+  if (seen.has(term.value)) return 'is cyclic';
+  seen.add(term.value);
+  const preds = store.getQuads(term as any, null, null, null);
+  const first = preds.filter(q => q.predicate.value === RDF + 'first');
+  if (first.length > 0) {
+    // sequence path: a list with at least two members
+    const lp = listProblem(store, term);
+    if (lp) return `has a sequence that ${lp}`;
+    const items = [];
+    let node: any = term;
+    while (node.termType === 'BlankNode') {
+      items.push(store.getObjects(node, namedNode(RDF + 'first'), null)[0]);
+      node = store.getObjects(node, namedNode(RDF + 'rest'), null)[0];
+    }
+    if (items.length < 2) return 'has a sequence list with fewer than two members';
+    for (const it of items) {
+      const p = pathProblem(store, it, seen);
+      if (p) return p;
+    }
+    return null;
+  }
+  const ops = [SH + 'inversePath', SH + 'alternativePath', SH + 'zeroOrMorePath', SH + 'oneOrMorePath', SH + 'zeroOrOnePath'];
+  const opQuads = preds.filter(q => ops.includes(q.predicate.value));
+  if (opQuads.length !== 1 || preds.length !== 1) return 'is not a recognised path expression';
+  const [opQuad] = opQuads;
+  if (opQuad.predicate.value === SH + 'alternativePath') {
+    const lp = listProblem(store, opQuad.object);
+    if (lp) return `has an sh:alternativePath that ${lp}`;
+    let node: any = opQuad.object;
+    let count = 0;
+    while (node.termType === 'BlankNode') {
+      const item = store.getObjects(node, namedNode(RDF + 'first'), null)[0];
+      count++;
+      const p = pathProblem(store, item, seen);
+      if (p) return p;
+      node = store.getObjects(node, namedNode(RDF + 'rest'), null)[0];
+    }
+    if (count < 2) return 'has an sh:alternativePath with fewer than two members';
+    return null;
+  }
+  return pathProblem(store, opQuad.object, seen);
+}
+
+function checkShaclPathExpressions(store: Store): SemanticIssue[] {
+  const out = [];
+  for (const q of store.getQuads(null, namedNode(SH + 'path'), null, null)) {
+    const problem = pathProblem(store, q.object, new Set());
+    if (problem) {
+      out.push({
+        code: 'shacl-path-invalid', severity: 'error', focus: q.subject.value,
+        predicate: SH + 'path',
+        message: `sh:path ${problem}.`,
+      });
+    }
+  }
+  return out;
+}
+
+function checkShaclPropertyShapeWithoutPath(store: Store): SemanticIssue[] {
+  const out = [];
+  for (const [val, term] of propertyShapeTerms(store)) {
+    if (store.getQuads(term, namedNode(SH + 'path'), null, null).length === 0) {
+      out.push({
+        code: 'shacl-propertyshape-no-path', severity: 'error', focus: val,
+        message: `Property shape has no sh:path; its constraints cannot apply to anything.`,
       });
     }
   }

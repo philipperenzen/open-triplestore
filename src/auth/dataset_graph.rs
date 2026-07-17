@@ -160,7 +160,7 @@ pub fn build_dataset_metadata_ttl(
     ttl.push_str("@prefix adms: <http://www.w3.org/ns/adms#> .\n");
     ttl.push_str("@prefix vcard: <http://www.w3.org/2006/vcard/ns#> .\n");
     ttl.push_str("@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .\n");
-    ttl.push_str("@prefix ots:  <https://opentriplestore.org/ontology/> .\n\n");
+    ttl.push_str("@prefix ots:  <https://opentriplestore.org/ns#> .\n\n");
 
     ttl.push_str(&format!(
         "<{}> a dcat:Dataset, void:Dataset ;\n",
@@ -373,6 +373,144 @@ pub fn reconcile_all_dataset_metadata(
     }
 }
 
+// ─── Model / Vocabulary / Instance reframe migration ────────────────────────────
+
+/// System graph recording which one-shot content migrations have run.
+const MIGRATIONS_GRAPH: &str = "urn:system:migrations";
+/// Sentinel subject for the Model/Vocabulary reframe + drop-"ontology" migration.
+const REFRAME_MIGRATION_IRI: &str = "urn:system:migration:model-vocabulary-reframe";
+
+/// One-time content migration for the Model / Vocabulary / Instance reframe and
+/// the drop of the legacy `https://opentriplestore.org/ontology/` IRI base.
+///
+/// Two parts:
+///  1. **Every-boot, idempotent** rewrite of legacy `…/ontology/` predicates in
+///     the tiny `urn:system:audit` and `urn:system:validation-layer` graphs to the
+///     new `…/ns#` base (a no-op once done; these graphs are small).
+///  2. **One-shot** re-detection of stored `model` graphs: a property/SKOS-only
+///     graph (R-Box) classified `model` under the old detector is moved to
+///     `vocabulary`, and the owning dataset's metadata graph is re-emitted so its
+///     `graphRole` triple reflects the new role. Guarded by a sentinel triple so
+///     graph contents are scanned at most once.
+///
+/// Dataset metadata graphs additionally self-heal via `audit_dataset_metadata`
+/// (the old `…/ontology/visibility` IRI fails the refreshed dataset-structure
+/// shape, triggering a re-emit with the new IRIs), and the DCAT catalogue is
+/// generated on the fly — so this function only has to handle the role flips and
+/// the two system graphs.
+pub fn migrate_model_vocabulary_reframe(
+    store: &TripleStore,
+    base_url: &str,
+    db: &crate::auth::db::AuthDb,
+) {
+    // Gate the whole one-shot migration — including the legacy-IRI rewrite —
+    // behind the applied sentinel. The rewrite is idempotent, but each of its
+    // `store.update()`s triggers a full graph-index rebuild (a scan of every
+    // graph, including a dataset's multi-million-triple `…/ifcowl` lift), so
+    // running it on every boot was a recurring full-store scan for no effect.
+    if graph_has_subject(store, MIGRATIONS_GRAPH, REFRAME_MIGRATION_IRI) {
+        return;
+    }
+    rewrite_legacy_ontology_iris(store);
+    let reclassified = reclassify_model_graphs_to_vocabulary(store, base_url, db);
+    if reclassified > 0 {
+        tracing::info!(
+            "model/vocabulary reframe: reclassified {reclassified} property graph(s) \
+             model→vocabulary"
+        );
+    }
+    let mark = format!(
+        "INSERT DATA {{ GRAPH <{MIGRATIONS_GRAPH}> {{ <{REFRAME_MIGRATION_IRI}> \
+         <urn:system:migration#applied> true }} }}"
+    );
+    if let Err(e) = store.update(&mark) {
+        // Non-fatal but observable: if the sentinel write fails the migration
+        // simply re-runs next boot (it is idempotent), but a persistent failure
+        // means it never marks done — surface it instead of swallowing.
+        tracing::warn!("model/vocabulary reframe: failed to record applied marker: {e}");
+    }
+}
+
+/// Rewrite the two known legacy `…/ontology/` predicates to the `…/ns#` base in
+/// the system graphs that materialise them. Idempotent (no-op once migrated).
+fn rewrite_legacy_ontology_iris(store: &TripleStore) {
+    const AUDIT_GRAPH: &str = "urn:system:audit";
+    const VALIDATION_GRAPH: &str = "urn:system:validation-layer";
+    let updates = [
+        format!(
+            "DELETE {{ GRAPH <{AUDIT_GRAPH}> {{ ?s <https://opentriplestore.org/ontology/auditStatus> ?o }} }} \
+             INSERT {{ GRAPH <{AUDIT_GRAPH}> {{ ?s <https://opentriplestore.org/ns#auditStatus> ?o }} }} \
+             WHERE  {{ GRAPH <{AUDIT_GRAPH}> {{ ?s <https://opentriplestore.org/ontology/auditStatus> ?o }} }}"
+        ),
+        format!(
+            "DELETE {{ GRAPH <{VALIDATION_GRAPH}> {{ ?s <https://opentriplestore.org/ontology/validatedBy> ?o }} }} \
+             INSERT {{ GRAPH <{VALIDATION_GRAPH}> {{ ?s <https://opentriplestore.org/ns#validatedBy> ?o }} }} \
+             WHERE  {{ GRAPH <{VALIDATION_GRAPH}> {{ ?s <https://opentriplestore.org/ontology/validatedBy> ?o }} }}"
+        ),
+    ];
+    for q in &updates {
+        if let Err(e) = store.update(q) {
+            tracing::warn!("legacy-IRI rewrite update failed (non-fatal): {e}");
+        }
+    }
+}
+
+/// Re-run content detection over every per-graph role currently stored as
+/// `model`; flip to `vocabulary` when the graph is really R-Box (properties /
+/// SKOS) with no class anchor. Never demotes a real class graph. Returns the
+/// number of graphs reclassified.
+fn reclassify_model_graphs_to_vocabulary(
+    store: &TripleStore,
+    base_url: &str,
+    db: &crate::auth::db::AuthDb,
+) -> usize {
+    let datasets = match db.list_datasets() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("model/vocabulary reframe: list datasets failed: {e}");
+            return 0;
+        }
+    };
+    let mut reclassified = 0usize;
+    for ds in &datasets {
+        let entries = db.list_dataset_graph_entries(&ds.id).unwrap_or_default();
+        let mut changed = false;
+        for e in &entries {
+            if e.graph_role == Some(GraphKind::Model)
+                && detect_graph_role(store, &e.graph_iri) == Some(GraphKind::Vocabulary)
+                && db
+                    .set_dataset_graph_role(&ds.id, &e.graph_iri, Some(GraphKind::Vocabulary))
+                    .is_ok()
+            {
+                reclassified += 1;
+                changed = true;
+            }
+        }
+        if changed {
+            // Re-emit metadata so the stored graphRole triples match the new roles.
+            let updated = db.list_dataset_graph_entries(&ds.id).unwrap_or_default();
+            write_dataset_metadata_graph(store, base_url, ds, &updated);
+        }
+    }
+    reclassified
+}
+
+/// Detect the [`GraphKind`] of a single named graph by scanning its quads.
+/// Returns `None` for an empty or unclassifiable graph.
+fn detect_graph_role(store: &TripleStore, graph_iri: &str) -> Option<GraphKind> {
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, Quad};
+    let g = NamedNodeRef::new(graph_iri).ok()?;
+    let quads: Vec<Quad> = store
+        .store()
+        .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(g)))
+        .filter_map(|r| r.ok())
+        .collect();
+    if quads.is_empty() {
+        return None;
+    }
+    crate::kind_detector::detect(&quads).to_graph_role()
+}
+
 /// True if `subject_iri` appears as a subject in the named graph `graph_iri`.
 /// A cheap targeted lookup via the quad API (no full scan).
 fn graph_has_subject(store: &TripleStore, graph_iri: &str, subject_iri: &str) -> bool {
@@ -404,13 +542,16 @@ fn escape_ttl_string(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
-fn graph_role_iri(role: GraphKind) -> &'static str {
+/// The IRI of a graph-role individual in the Open Triplestore vocabulary
+/// (`https://opentriplestore.org/ns#{Role}`). Single source of truth, also used
+/// by the DCAT catalogue (`dcat::catalog`) so the two never drift.
+pub fn graph_role_iri(role: GraphKind) -> &'static str {
     match role {
-        GraphKind::Instances => "https://opentriplestore.org/ontology/Instances",
-        GraphKind::Model => "https://opentriplestore.org/ontology/Model",
-        GraphKind::Vocabulary => "https://opentriplestore.org/ontology/Vocabulary",
-        GraphKind::Shapes => "https://opentriplestore.org/ontology/Shapes",
-        GraphKind::Entailment => "https://opentriplestore.org/ontology/Entailment",
-        GraphKind::System => "https://opentriplestore.org/ontology/System",
+        GraphKind::Instances => "https://opentriplestore.org/ns#Instances",
+        GraphKind::Model => "https://opentriplestore.org/ns#Model",
+        GraphKind::Vocabulary => "https://opentriplestore.org/ns#Vocabulary",
+        GraphKind::Shapes => "https://opentriplestore.org/ns#Shapes",
+        GraphKind::Entailment => "https://opentriplestore.org/ns#Entailment",
+        GraphKind::System => "https://opentriplestore.org/ns#System",
     }
 }

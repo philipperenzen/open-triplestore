@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** current release **`0.3.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.4.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -56,7 +56,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | 🏠 **Overview** | Live triple & named-graph counts, suggested next steps, and quick links into every workflow |
 | ⌨️ **SPARQL workspace** | CodeMirror editor (`Ctrl+Enter` to run), Table / JSON / Graph result views, query history, CSV & JSON export, optional NL→SPARQL |
 | 🕸️ **Explore & visualize** | Facet triples by subject / predicate / object / graph, then expand resources visually to walk a graph's neighbourhood |
-| 📚 **Datasets · Models** | DCAT metadata, per-dataset SHACL, a unified model registry for ontologies & SKOS vocabularies, and version diffs |
+| 📚 **Datasets · Models** | DCAT metadata, per-dataset SHACL, a unified registry for models & vocabularies (classes, properties, SKOS concept schemes), and version diffs |
 | ✅ **Validate** | SHACL (Core + Advanced) and ShEx, with per-dataset reports and severity filters |
 | 🔐 **Admin** | Users, roles, and graph-level ACLs |
 
@@ -146,6 +146,14 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile llm up 
 
 The first start downloads the model (~5 GB); AI features turn on once it is ready (check `GET /api/llm/health`). Prefer a hosted model? Skip the `llm` profile and point `LLM_GATEWAY_URL` (+ `LLM_API_KEY`) at your endpoint, with `LLM_MODEL` for the model name. The NVIDIA GPU path needs the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
+On an NVIDIA GPU the bundled [vLLM](https://docs.vllm.ai) profile serves faster under load — its automatic prefix caching reuses the chat's shared system prompt across turns and users for near-instant first tokens:
+
+```bash
+docker compose --profile llm-vllm up -d   # then set in .env:
+# LLM_GATEWAY_URL=http://vllm:8000
+# LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+```
+
 ### Native (requires Rust 1.88+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
@@ -187,7 +195,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.3.0"}
+# {"status":"ok","version":"0.4.0"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
@@ -267,6 +275,9 @@ npm install
 npm run dev       # starts on http://localhost:5173 (proxied to :7878)
 npm run build     # production build → frontend/dist/
 ```
+
+Pair this with `make watch` for a hot-reloading backend (see the
+[fast dev loop](#fast-dev-loop) and [docs/development.md](docs/development.md)).
 
 #### Service discovery (optional)
 
@@ -777,18 +788,6 @@ open-triplestore
 
 ---
 
-## Performance (Apple M3 Pro, release build)
-
-| Operation | Dataset | Median |
-|---|---|---|
-| Bulk load | 100 K triples | 98 ms (~1 M t/s) |
-| Simple SELECT | 10 K triples | 980 µs |
-| Simple SELECT LIMIT 10 | 100 K triples | 22 µs |
-| 2-way join | 10 K triples | 1.8 ms |
-| COUNT(*) | 100 K triples | 14 ms |
-
----
-
 ## Conformance
 
 | Test suite | Tests | Pass |
@@ -822,6 +821,27 @@ docker build -t open-triplestore .
 docker run --rm -p 7878:7878 -v ./data:/data open-triplestore
 ```
 
+### Fast dev loop
+
+For day-to-day work, run the server natively and let it rebuild on save instead
+of rebuilding Docker each time. The `make` targets wrap the usual `cargo`
+commands:
+
+```bash
+cargo install cargo-watch cargo-nextest   # one-time
+
+make watch        # hot reload: rebuild + restart the server on every change
+make watch-check  # fastest feedback: type-check only (errors in ~seconds)
+make nextest      # run the test suite in parallel (faster than cargo test)
+make dev-release  # run the fast-to-link, optimised `release-dev` profile
+
+# Faster local Docker image (skips the slow fat-LTO link):
+docker build --build-arg CARGO_PROFILE=release-dev -t open-triplestore:dev .
+```
+
+See **[docs/development.md](docs/development.md)** for the full build-performance
+guide — profiles, the linker, Docker cache mounts, and rust-analyzer tuning.
+
 ---
 
 ## Versioning & releases
@@ -853,10 +873,6 @@ In short:
 - ❌ **No selling** — the Commons Clause forbids selling the software, offering it as a paid or hosted service, or charging for support whose value derives substantially from it.
 
 If you need terms beyond these, contact the author.
-
-## Support the project
-
-Open Triplestore is free, and always will be. If it's useful to you and you'd like to say thanks, you can chip in via **[GitHub Sponsors](https://github.com/sponsors/philipperenzen)**, **[Liberapay](https://liberapay.com/opentriplestore)**, or **[Ko-fi](https://ko-fi.com/opentriplestore)**. Contributions are a **token of appreciation — not payment for the software, support, or any service**, and they buy no features, fixes, or priority. See [`FUNDING.md`](FUNDING.md).
 
 ## Legal & Privacy
 
