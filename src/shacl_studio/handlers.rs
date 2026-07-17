@@ -673,14 +673,16 @@ fn record_binding_commit(
 }
 
 /// POST /api/shacl/bindings — bind a shape graph to a target (dataset/graph/shape
-/// set). Idempotent. The caller must be able to write the target and access the
-/// shape graph.
+/// set). Idempotent. The caller must be able to write the target and *manage* the
+/// shape graph (a binding makes it an enforcing validator).
 pub async fn create_binding(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Json(body): Json<BindingBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    let set = load_set_checked(&state, &user, &body.shape_graph_id, false).await?;
+    // Binding makes this shape graph an enforcing validator of the target, so the
+    // caller must be able to *manage* the shape graph (not merely read it).
+    let set = load_set_checked(&state, &user, &body.shape_graph_id, true).await?;
     let target_iri = resolve_target_for_write(&state, &user, &body.target).await?;
     super::bindings::add_binding(&state.store, &target_iri, &set.graph_iri).map_err(e500)?;
     record_binding_commit(&state, &set, &target_iri, true, &user.user_id);
@@ -700,7 +702,8 @@ pub async fn delete_binding(
     State(state): State<AppState>,
     Json(body): Json<BindingBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    let set = load_set_checked(&state, &user, &body.shape_graph_id, false).await?;
+    // Same authority as create_binding: managing the enforcing validator.
+    let set = load_set_checked(&state, &user, &body.shape_graph_id, true).await?;
     let target_iri = resolve_target_for_write(&state, &user, &body.target).await?;
     super::bindings::remove_binding(&state.store, &target_iri, &set.graph_iri).map_err(e500)?;
     record_binding_commit(&state, &set, &target_iri, false, &user.user_id);
@@ -871,6 +874,23 @@ pub async fn import_shapes(
     let set = load_set_checked(&state, &user, &id, true).await?;
     if body.shapes.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No shapes to import".into()));
+    }
+    // Copying a shape reads its source graph's triples into the destination, so
+    // the caller must have read on every source graph — mirror the read-ACL gate
+    // in resolve_target_for_read / register_shape_graph. Manage on the
+    // destination (above) is not sufficient to pull from an arbitrary graph.
+    for r in &body.shapes {
+        if !crate::auth::acl::check_graph_permission(
+            Some(&user),
+            &r.source_graph,
+            "read",
+            &state.auth_db,
+        ) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Read access denied for graph <{}>", r.source_graph),
+            ));
+        }
     }
     let refs: Vec<(String, String)> = body
         .shapes
@@ -1402,11 +1422,23 @@ async fn resolve_scope(
         return state.auth_db.list_dataset_graphs(ds_id).map_err(e500);
     }
     if let Some(graphs) = q.get("graphs") {
-        return Ok(graphs
+        let graphs: Vec<String> = graphs
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .collect());
+            .collect();
+        // The `?dataset=` branch above gates on can_access_dataset; caller-named
+        // graphs must be gated too, or this leaks model structure from graphs the
+        // caller can't read. Require read on each (same gate as a Graph Store read).
+        for g in &graphs {
+            if !crate::auth::acl::check_graph_permission(Some(user), g, "read", &state.auth_db) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!("Read access denied for graph <{g}>"),
+                ));
+            }
+        }
+        return Ok(graphs);
     }
     Ok(vec![])
 }
@@ -1454,6 +1486,17 @@ pub async fn derive_shapes(
         }
         state.auth_db.list_dataset_graphs(ds_id).map_err(e500)?
     } else {
+        // The dataset branch above gates on can_access_dataset; caller-named graphs
+        // must be gated too, or derivation reads structure/values from graphs the
+        // caller can't read. Require read on each (same gate as a Graph Store read).
+        for g in &body.graphs {
+            if !crate::auth::acl::check_graph_permission(Some(&user), g, "read", &state.auth_db) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!("Read access denied for graph <{g}>"),
+                ));
+            }
+        }
         body.graphs.clone()
     };
     let targets = body.target_classes.clone();

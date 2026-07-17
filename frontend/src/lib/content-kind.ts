@@ -1,6 +1,6 @@
 // Probe one or more named graphs to estimate whether they contain
-// model (OWL/RDFS ontology), shapes (SHACL), vocabulary (SKOS),
-// entailment rules (SWRL/SPIN), or instance data.
+// model (T-Box: classes), vocabulary (R-Box: properties/relations + SKOS),
+// shapes (SHACL), entailment rules (SWRL/SPIN), or instance data (A-Box).
 //
 // Returns: {
 //   classCount, propertyCount, shapeCount, entailmentCount,  // OWL/RDFS/SHACL/SWRL signals
@@ -93,24 +93,33 @@ export async function probeContentKind(graphs: string[]) {
     }));
   } catch { /* ignore */ }
 
-  const modelSignal = classCount + propertyCount;
-  const schemaSignal = modelSignal + shapeCount;
-  const skosSignal = skosSchemeCount + skosConceptCount;
+  // Mirror the backend detector (src/kind_detector.rs): Model = classes (T-Box);
+  // Vocabulary = properties/relations (R-Box) + SKOS concept schemes; ties between
+  // class and vocabulary content go to Model (the class hierarchy anchors the schema).
+  const classSignal = classCount;
+  const vocabSignal = propertyCount + skosSchemeCount + skosConceptCount;
+  const schemaSignal = classSignal + vocabSignal + shapeCount;
+  const hasClasses = classCount > 0;
 
   let verdict: ContentKindVerdict = 'empty';
-  if (schemaSignal === 0 && skosSignal === 0 && instanceCount === 0 && entailmentCount === 0) {
+  if (schemaSignal === 0 && instanceCount === 0 && entailmentCount === 0) {
     verdict = 'empty';
-  } else if (entailmentCount > 0 && entailmentCount >= modelSignal && entailmentCount >= instanceCount) {
+  } else if (entailmentCount > 0 && entailmentCount >= Math.max(classSignal, vocabSignal, shapeCount, instanceCount)) {
     verdict = 'entailment';
-  } else if (skosSignal > 0 && skosSignal >= schemaSignal * 3 && instanceCount < skosSignal) {
-    verdict = 'vocabulary';
-  } else if (shapeCount > 0 && modelSignal === 0 && instanceCount <= Math.max(3, shapeCount)) {
-    // SHACL shapes with no OWL classes → pure shapes graph
+  } else if (shapeCount > 0 && !hasClasses && shapeCount >= vocabSignal * 3 && shapeCount >= instanceCount * 3) {
+    // SHACL shapes with no class hierarchy → pure shapes graph
     verdict = 'shapes';
-  } else if (schemaSignal > 0 && instanceCount <= Math.max(5, schemaSignal) && skosSignal < schemaSignal * 3) {
-    verdict = 'model';
-  } else if (instanceCount > Math.max(5, Math.max(schemaSignal, skosSignal) * 3)) {
+  } else if (instanceCount > schemaSignal * 3) {
     verdict = 'instances';
+  } else if (vocabSignal > 0 && !hasClasses && instanceCount < vocabSignal) {
+    // Properties/relations or SKOS with no class anchor → pure Vocabulary (R-Box)
+    verdict = 'vocabulary';
+  } else if (classSignal > 0 || vocabSignal > 0) {
+    if (classSignal >= vocabSignal) {
+      verdict = instanceCount <= Math.max(classSignal, shapeCount) ? 'model' : 'mixed';
+    } else {
+      verdict = instanceCount <= Math.max(vocabSignal, shapeCount) ? 'vocabulary' : 'mixed';
+    }
   } else {
     verdict = 'mixed';
   }

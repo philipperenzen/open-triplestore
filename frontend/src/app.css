@@ -56,6 +56,46 @@
   --space-4: 1rem;
   --space-5: 1.5rem;
   --space-6: 2rem;
+  /* motion design tokens — shared timing/easing so animations feel consistent */
+  --dur-fast: 130ms;
+  --dur-base: 220ms;
+  --dur-slow: 360ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  /* how long a load must run before we bother showing a spinner/skeleton
+     (avoids the "blank flash" on sub-half-second navigations) */
+  --loading-delay: 480ms;
+}
+
+/* ---- motion primitives ---- */
+@keyframes routeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes rowIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes otsFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Per-route entrance — the routed page wrapper replays this on every navigation. */
+.route-view {
+  animation: routeIn var(--dur-base) var(--ease-out) both;
+}
+
+/* Accessibility: honour the OS "reduce motion" setting everywhere. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 html,

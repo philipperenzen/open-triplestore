@@ -16,7 +16,7 @@ const CELL_SEP: char = '\u{1f}';
 fn hash_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// Outcome of fingerprinting a result set.

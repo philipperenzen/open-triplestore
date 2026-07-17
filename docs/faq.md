@@ -10,7 +10,7 @@ The global SPARQL 1.1 query endpoint is at `/sparql` (GET or POST). SPARQL Updat
 
 ## How are model and vocabulary versions stored?
 
-Each version is stored in a dedicated named graph following the pattern `{base-url}/data-model/{id}/version/{version}`. Ontologies and SKOS vocabularies share one Model Registry, distinguished by the entry's `kind`. Registry metadata (title, namespace, kind, status, version list) lives in a corresponding system graph. Use `/api/models/{id}/latest/data` to retrieve the most recently published version. See [Model & Vocabulary Versioning](/docs/models).
+Each version is stored in a dedicated named graph following the pattern `{base-url}/data-model/{id}/version/{version}`. Data models and vocabularies share one Model Registry, distinguished by the entry's `kind` (`data-model` for classes, `vocabulary` for properties and SKOS concept schemes). Registry metadata (title, namespace, kind, status, version list) lives in a corresponding system graph. Use `/api/models/{id}/latest/data` to retrieve the most recently published version. See [Model & Vocabulary Versioning](/docs/models).
 
 ## Does the triplestore support RDF-star?
 

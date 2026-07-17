@@ -1,9 +1,16 @@
-use serde::{Deserialize, Serialize};
+use oxigraph::model::Term;
 
 /// A SHACL shape (either node shape or property shape).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Internal model only — focus/value nodes and constraint constants are typed
+/// [`Term`]s end-to-end; conversion to display strings happens at
+/// report-building time (see `constraints::display_term`).
+#[derive(Debug, Clone)]
 pub struct Shape {
     pub iri: String,
+    /// Informational (sh:NodeShape vs own-path property shape); not consulted
+    /// during evaluation.
+    #[allow(dead_code)]
     pub shape_type: ShapeType,
     pub targets: Vec<Target>,
     pub constraints: Vec<Constraint>,
@@ -13,35 +20,46 @@ pub struct Shape {
     pub deactivated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapeType {
     NodeShape,
     PropertyShape,
 }
 
 /// Target declarations for a shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum Target {
     TargetClass(String),
-    TargetNode(String),
+    /// The target node term as written in the shapes graph — may be an IRI,
+    /// a literal (`sh:targetNode 42`) or a blank node.
+    TargetNode(Term),
     TargetSubjectsOf(String),
     TargetObjectsOf(String),
     SparqlTarget(String), // SHACL-AF: custom SPARQL target
 }
 
 /// A property shape with path and constraints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PropertyShape {
     pub iri: Option<String>,
     pub path: PropertyPath,
     pub constraints: Vec<Constraint>,
+    /// Informational (`sh:name`/`sh:description`); not consulted during evaluation.
+    #[allow(dead_code)]
     pub name: Option<String>,
+    #[allow(dead_code)]
     pub description: Option<String>,
+    /// `sh:severity` on the property shape itself — overrides the parent
+    /// shape's severity for results produced by this property shape.
+    pub severity: Option<String>,
+    /// `sh:message` on the property shape itself — overrides the engine's
+    /// default result message for results produced by this property shape.
+    pub message: Option<String>,
 }
 
 /// SHACL property paths.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PropertyPath {
     Predicate(String),
     Inverse(Box<PropertyPath>),
@@ -87,7 +105,7 @@ impl PropertyPath {
 }
 
 /// SHACL constraint components.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum Constraint {
     // Value type constraints
@@ -99,11 +117,11 @@ pub enum Constraint {
     MinCount(usize),
     MaxCount(usize),
 
-    // Value range constraints
-    MinExclusive(String),
-    MinInclusive(String),
-    MaxExclusive(String),
-    MaxInclusive(String),
+    // Value range constraints (the bound is the typed literal from the shapes graph)
+    MinExclusive(Term),
+    MinInclusive(Term),
+    MaxExclusive(Term),
+    MaxInclusive(Term),
 
     // String-based constraints
     MinLength(usize),
@@ -128,7 +146,15 @@ pub enum Constraint {
     Xone(Vec<Shape>),
 
     // Shape-based constraints
-    Node(String), // Reference to another shape by IRI
+    /// `sh:node` — the referenced shape is loaded inline at parse time (named or
+    /// blank), so inline `sh:node [ … ]` bodies are enforced. `Shape::iri` keeps
+    /// the reference for messages.
+    Node(Box<Shape>),
+    /// `sh:property` nested inside a *property* shape (SHACL §2.1.3 — a property
+    /// shape's value nodes are themselves validated against the nested property
+    /// shape). Top-level `sh:property` on node shapes stays in
+    /// `Shape::property_shapes`; this variant only carries the nested case.
+    Property(Box<PropertyShape>),
     QualifiedValueShape {
         // The value shape is stored inline (loaded at parse time) so that the standard
         // SHACL idiom `sh:qualifiedValueShape [ … ]` — an inline blank node that is not a
@@ -136,14 +162,23 @@ pub enum Constraint {
         shape: Box<Shape>,
         min_count: Option<usize>,
         max_count: Option<usize>,
+        /// `sh:qualifiedValueShapesDisjoint true`: value nodes that conform to a
+        /// sibling property shape's qualified value shape are excluded from the count.
+        disjoint: bool,
+        /// Qualified value shapes of sibling property shapes (only populated when
+        /// `disjoint` is true; wired after all siblings of the parent are loaded).
+        sibling_shapes: Vec<Shape>,
     },
 
     // Other constraints
     Closed {
         ignored_properties: Vec<String>,
+        /// Predicate-path IRIs of the shape's own property shapes — these are
+        /// the properties a closed shape allows (SHACL §4.8.1).
+        allowed_properties: Vec<String>,
     },
-    HasValue(String),
-    In(Vec<String>),
+    HasValue(Term),
+    In(Vec<Term>),
 
     // SHACL-AF: SPARQL-based constraint. `severity` is the optional sh:severity declared
     // on the sh:SPARQLConstraint node itself (e.g. sh:Warning), overriding the shape's.
@@ -164,7 +199,7 @@ pub enum Constraint {
 }
 
 /// sh:nodeKind values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum NodeKind {
     BlankNode,

@@ -1,8 +1,16 @@
+#[cfg(test)]
+mod account_lifecycle_tests;
 pub mod content_negotiation;
 pub mod error;
 mod linked_data;
+pub mod llm_guard;
+pub mod llm_history;
 pub mod llm_sparql;
 pub mod openapi;
+#[cfg(test)]
+mod passkey_tests;
+#[cfg(test)]
+mod role_visibility_tests;
 pub mod routes;
 #[cfg(test)]
 mod security_regression_tests;
@@ -31,7 +39,7 @@ use crate::saved_queries::routes::{saved_query_auth_routes, saved_query_public_r
 use crate::storage::ObjectStore;
 use crate::store::TripleStore;
 use axum::extract::{ConnectInfo, DefaultBodyLimit};
-use axum::http::{HeaderName, HeaderValue, Method, Request};
+use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
@@ -232,14 +240,22 @@ pub struct AppState {
     pub jwt_config: Arc<JwtConfig>,
     /// S3 object storage for assets.
     pub object_store: Arc<ObjectStore>,
+    /// Transactional email for account flows (verification, password reset).
+    /// Falls back to a log-only backend when SMTP is not configured.
+    pub mailer: Arc<crate::email::Mailer>,
     /// Base URL for minting linked data IRIs (no trailing slash).
     pub base_url: Arc<String>,
     /// In-memory PKCE session store for OAuth 2.0 / OIDC flows.
     pub oauth_sessions: OAuthSessions,
+    /// In-memory WebAuthn challenge store for passkey registration/login.
+    pub passkey_sessions: crate::auth::passkey::PasskeySessions,
     /// OIDC resource-server config (env-driven): JWT verification + legacy-token flag.
     pub auth_ext: Arc<crate::auth::oidc_rs::AuthExt>,
     /// M-1/W4-21: SPARQL query and update timeout in seconds.
     pub query_timeout_secs: u64,
+    /// Write-path timeout in seconds for GSP PUT/POST/DELETE and data-model/dataset
+    /// DELETE/PATCH. Larger than `query_timeout_secs`; bulk import is exempt.
+    pub write_timeout_secs: u64,
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
@@ -277,10 +293,13 @@ impl AppState {
             object_store: Arc::new(
                 ObjectStore::local(std::env::temp_dir().join("triplestore-test-objects")).unwrap(),
             ),
+            mailer: Arc::new(crate::email::Mailer::log_only("http://localhost")),
             base_url: Arc::new("http://localhost".to_string()),
             oauth_sessions: crate::auth::oauth::new_session_store(),
+            passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
+            write_timeout_secs: 120,
             secure_cookies: false,
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -457,6 +476,43 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 })
                 .per_second(period_secs)
                 .burst_size(burst)
+                // Shape the 429 ourselves: tower_governor's default only sets its
+                // own `x-ratelimit-after` header, so standards-compliant clients
+                // (and our frontend's fetchRetry429) never saw a `Retry-After` to
+                // honor and surfaced "Too Many Requests! Wait for 1s" as an error.
+                .error_handler(|err| match err {
+                    GovernorError::TooManyRequests { wait_time, headers } => {
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(
+                            format!("Rate limit reached — retry in {wait_time}s."),
+                        ));
+                        *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                        if let Some(h) = headers {
+                            *resp.headers_mut() = h;
+                        }
+                        let secs = HeaderValue::from_str(&wait_time.to_string())
+                            .unwrap_or(HeaderValue::from_static("1"));
+                        resp.headers_mut()
+                            .insert(axum::http::header::RETRY_AFTER, secs);
+                        resp
+                    }
+                    GovernorError::UnableToExtractKey => {
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(
+                            "Unable to extract rate-limit key".to_string(),
+                        ));
+                        *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                        resp
+                    }
+                    GovernorError::Other { code, msg, headers } => {
+                        let mut resp = axum::response::Response::new(axum::body::Body::from(
+                            msg.unwrap_or_else(|| "rate limiter error".to_string()),
+                        ));
+                        *resp.status_mut() = code;
+                        if let Some(h) = headers {
+                            *resp.headers_mut() = h;
+                        }
+                        resp
+                    }
+                })
                 .finish()
                 .unwrap(),
         )
@@ -467,8 +523,13 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let auth_rate_conf = make_rate_conf(6, 8);
 
     // M-6: SPARQL / graph-store rate limiting — looser than auth (these are functional, not auth).
-    // 20 requests per minute sustained (1 token / 3s); burst of 15. Protects against runaway query loops.
-    let sparql_rate_conf = make_rate_conf(3, 15);
+    // 60/min sustained (1 token/s) with a burst of 40: one interactive page can
+    // legitimately fire a dozen-plus small scoped queries at once (per-graph
+    // content-kind checks, ontology loads, graph expansions, previews), and the
+    // old 15-burst tripped real users mid-click. A runaway query loop still gets
+    // cut off within seconds, and clients are told when to come back via
+    // Retry-After (see make_rate_conf's error_handler).
+    let sparql_rate_conf = make_rate_conf(1, 40);
 
     // Bulk import: a single authenticated upload may legitimately ship many
     // files, and power users ramp through the wizard repeatedly, so the burst
@@ -483,6 +544,25 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route("/api/auth/login", post(handlers::login))
         .route("/api/auth/refresh", post(handlers::refresh))
         .route("/api/auth/logout", post(handlers::logout))
+        // Account recovery + email confirmation: enumeration-safe by design,
+        // but still behind the brute-force limiter (token/code guessing).
+        .route("/api/auth/forgot-password", post(handlers::forgot_password))
+        .route("/api/auth/forgot-username", post(handlers::forgot_username))
+        .route("/api/auth/reset-password", post(handlers::reset_password))
+        .route("/api/auth/verify-email", post(handlers::verify_email))
+        // Second step of a 2FA login (code guessing → same limiter).
+        .route("/api/auth/2fa/verify", post(handlers::verify_2fa))
+        // Passkey (WebAuthn) login: discoverable-credential challenge +
+        // assertion. Unauthenticated by nature → same brute-force limiter.
+        .route(
+            "/api/auth/passkeys/login/start",
+            post(crate::auth::passkey::login_start),
+        )
+        .route(
+            "/api/auth/passkeys/login/finish",
+            post(crate::auth::passkey::login_finish),
+        )
+        .route("/api/auth/features", get(handlers::auth_features))
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
         })
@@ -495,6 +575,32 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // (e.g. GET /api/auth/me) stay in the unthrottled protected group below.
     let auth_sensitive_routes = Router::new()
         .route("/api/auth/change-password", post(handlers::change_password))
+        .route("/api/auth/change-email", post(handlers::change_email))
+        .route(
+            "/api/auth/verify-email/resend",
+            post(handlers::resend_verification),
+        )
+        .route("/api/auth/2fa/setup", post(handlers::totp_setup))
+        .route("/api/auth/2fa/enable", post(handlers::totp_enable))
+        .route("/api/auth/2fa/disable", post(handlers::totp_disable))
+        // Passkey management: enrolling a new credential is as sensitive as a
+        // password change; removal additionally re-proves the password.
+        .route(
+            "/api/auth/passkeys",
+            get(crate::auth::passkey::list_passkeys),
+        )
+        .route(
+            "/api/auth/passkeys/register/start",
+            post(crate::auth::passkey::register_start),
+        )
+        .route(
+            "/api/auth/passkeys/register/finish",
+            post(crate::auth::passkey::register_finish),
+        )
+        .route(
+            "/api/auth/passkeys/:credential_id",
+            delete(crate::auth::passkey::delete_passkey),
+        )
         .route(
             "/api/auth/tokens",
             get(handlers::list_api_tokens).post(handlers::create_api_token),
@@ -564,7 +670,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/admin/backup/:id/verify",
             post(crate::backup::admin_verify_backup),
         )
+        .route(
+            "/api/admin/llm/requests",
+            get(llm_guard::admin_list_llm_requests),
+        )
+        .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
+    // Spark chat history + user memory (strictly per-user, so auth required).
+    let llm_history_routes = llm_history::llm_history_routes()
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -788,6 +904,20 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route(
             "/api/datasets/:dataset_id/viewer-feed",
             get(routes::viewer_feed),
+        )
+        // Geo capability summary (gates the map / 3D-viewer UI affordances).
+        .route(
+            "/api/datasets/:dataset_id/geo-stats",
+            get(routes::geo_stats),
+        )
+        // Batched, scope-wide geo capability — one OR-aggregated probe instead of
+        // one `/geo-stats` request per dataset (the triple browser's Map gate).
+        .route("/api/geo-stats", get(routes::geo_stats_batch))
+        // Anonymous-capable asset download (dataset visibility decides) — the
+        // viewer fetches e.g. the original IFC file through this without auth.
+        .route(
+            "/api/datasets/:dataset_id/assets/:asset_id/download",
+            get(routes::download_asset_public),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
@@ -1021,11 +1151,19 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // LDP routes (feature-gated)
+    // LDP routes (feature-gated). Mounted behind `require_auth`: the LDP handlers
+    // read/write the shared store via raw SPARQL with no per-graph scoping, so an
+    // unauthenticated mount allowed anonymous `PATCH /ldp/*` (arbitrary SPARQL
+    // UPDATE — e.g. `DROP GRAPH`) and `Slug`/path SPARQL injection against ANY
+    // tenant's graphs. Requiring auth closes the anonymous-access hole; full
+    // per-graph ACL scoping for authenticated LDP writes is tracked as a follow-up.
     #[cfg(feature = "ldp")]
     let ldp_router = {
         use crate::ldp::ldp_routes;
-        ldp_routes().with_state(state.clone())
+        Router::new()
+            .merge(ldp_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+            .with_state(state.clone())
     };
 
     // ── ACL management routes (admin required) ────────────────────────────
@@ -1140,6 +1278,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(rml_preview_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
+        .merge(llm_history_routes)
         .merge(graph_store_write_routes)
         .merge(bulk_import_routes)
         .merge(batch_update_routes)
@@ -1158,6 +1297,26 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
                 .with_state(state.clone()),
         );
+
+    // OGC API – Features (Core, P4). Nested router so `optional_auth` populates
+    // AuthenticatedUser for logged-in callers while public datasets stay
+    // anonymously reachable (handlers gate on can_access_dataset).
+    router = router.merge(
+        Router::new()
+            .merge(crate::ogcapi::ogcapi_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone()),
+    );
+
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    #[cfg(feature = "geometry3d")]
+    {
+        let tiles3d_routes = Router::new()
+            .merge(crate::tiles3d::tiles3d_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone());
+        router = router.merge(tiles3d_routes);
+    }
 
     #[cfg(feature = "ldp")]
     {
@@ -1196,6 +1355,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
     router = router.merge(openapi_doc_route);
+
+    // Compile-time plugins (src/plugins.rs): `GET /api/plugins` lists what's
+    // compiled in, and each registered plugin's routes are nested under
+    // `/ext/<name>`. Both are unconditional — with zero `plugin-*` features
+    // enabled the list is empty and no `/ext/*` routes exist, matching
+    // upstream behavior exactly.
+    let plugin_ctx = crate::plugins::plugin_context(&state);
+    router = router.route("/api/plugins", get(crate::plugins::list_plugins));
+    router = crate::plugins::mount_plugins(router, &plugin_ctx);
 
     let mut router = router
         // Innermost global layer (added first ⇒ closest to the route handlers): turn a
@@ -1356,8 +1524,21 @@ pub async fn run(
     cors_origins: &str,
     trusted_cidrs: Vec<IpNet>,
     query_timeout_secs: u64,
+    write_timeout_secs: u64,
     secure_cookies: bool,
     serve_frontend: bool,
+    seed_dir: Option<std::path::PathBuf>,
+    // Opt-in fallback to any free port when `addr`'s port is already in use
+    // (--port-fallback / PORT_FALLBACK, default off — see the listener bind
+    // below). Upstream behavior when this is `false` is unchanged: a busy
+    // port still refuses to start.
+    port_fallback: bool,
+    // Cross-app service-registry self-registration (--discovery /
+    // LD_DISCOVERY), applied AFTER the listener is bound so a port_fallback
+    // rewrite of the advertised URL is reflected in what gets registered.
+    discovery: bool,
+    registry_url: String,
+    registry_token: String,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
 ) -> anyhow::Result<()> {
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
@@ -1432,6 +1613,19 @@ pub async fn run(
         }
     }
 
+    // Transactional account email (verification, password reset). Logs-only
+    // until SMTP_HOST is configured; links default to the public base URL.
+    let mailer = Arc::new(crate::email::Mailer::from_env(
+        base_url.trim_end_matches('/'),
+    ));
+    if mailer.smtp_configured() {
+        tracing::info!("email: SMTP relay configured — account emails will be delivered");
+    } else {
+        tracing::info!(
+            "email: SMTP not configured (set SMTP_HOST) — account emails are written to the log"
+        );
+    }
+
     // Hold a flush handle for graceful shutdown — `store` is moved into AppState below.
     let shutdown_store = store.clone();
     let state = AppState {
@@ -1442,10 +1636,13 @@ pub async fn run(
         backup: backup.clone(),
         jwt_config: jwt_config.clone(),
         object_store,
+        mailer,
         base_url: Arc::new(base_url.trim_end_matches('/').to_string()),
         oauth_sessions: crate::auth::oauth::new_session_store(),
+        passkey_sessions: crate::auth::passkey::new_session_store(),
         auth_ext,
         query_timeout_secs,
+        write_timeout_secs,
         secure_cookies,
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -1454,6 +1651,10 @@ pub async fn run(
         #[cfg(feature = "text-search")]
         text_dirty: Arc::new(AtomicBool::new(false)),
     };
+
+    // Compile-time plugins (src/plugins.rs): on_boot + any background task,
+    // once per process. A no-op with zero `plugin-*` features enabled.
+    crate::plugins::boot_plugins(&crate::plugins::plugin_context(&state));
 
     // Spawn a background task to periodically prune expired PKCE OAuth sessions (L-7)
     {
@@ -1467,6 +1668,18 @@ pub async fn run(
         });
     }
 
+    // Same periodic pruning for in-flight WebAuthn passkey challenges.
+    {
+        let sessions = state.passkey_sessions.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(300); // 5 minutes
+            loop {
+                tokio::time::sleep(interval).await;
+                crate::auth::passkey::prune_sessions(&sessions);
+            }
+        });
+    }
+
     // Backup scheduler.
     if let Some(ref mgr) = backup {
         let hours: u64 = std::env::var("BACKUP_SCHEDULE_HOURS")
@@ -1476,47 +1689,70 @@ pub async fn run(
         crate::backup::spawn_scheduler(mgr.clone(), hours, Some(state.object_store.clone()));
     }
 
-    // SHACL Studio: seed the built-in SHACL-SHACL meta-shapes and import every
-    // dataset's existing shapes graph into the Library (both idempotent), then
-    // start the pipeline scheduler.
+    // Boot-time migration + seeding + the SHACL pipeline scheduler.
     {
-        let migrate_store = state.store.clone();
-        let migrate_auth = state.auth_db.clone();
-        let migrate_base = state.base_url.to_string();
+        // One SEQUENTIAL blocking task, not two concurrent ones. The SHACL/standards
+        // migration and the demo-data seed both write the same SQLite identity DB and
+        // the same RDF store; running them concurrently produced "database is locked"
+        // contention and a boot deadlock that left the public demo datasets
+        // half-seeded — registered graphs with zero triples, which read as "no data"
+        // to logged-out users and made the landing-page total count show zero.
+        // Sequencing removes the contention and lets the dataset-metadata audit run
+        // *after* the datasets it audits exist. Spawned (not awaited) so the server
+        // still starts serving immediately.
+        let seed_state = state.clone();
+        let base = state.base_url.to_string();
         tokio::task::spawn_blocking(move || {
-            if let Err(e) =
-                crate::shacl_studio::seed::seed_shacl_shacl(&migrate_store, &migrate_auth)
-            {
+            let store = &seed_state.store;
+            let auth = &seed_state.auth_db;
+            // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
+            if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
                 tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
             }
-            if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(
-                &migrate_store,
-                &migrate_auth,
-                &migrate_base,
-            ) {
+            if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, &base) {
                 tracing::warn!("shacl_studio: legacy migration failed: {e}");
             }
-            // Built-in per-standard shape graphs + validation pipelines (idempotent).
-            if let Err(e) =
-                crate::shacl_studio::seed_standards::seed_standards(&migrate_store, &migrate_auth)
-            {
+            // Self-healing: adopt every dataset's shapes graph(s) — configured
+            // `shapes_graph_iri` or shapes-role dataset graphs — into the Studio
+            // Library and bind them in the validation layer (idempotent).
+            crate::shacl_studio::migrate::backfill_dataset_shapes(&seed_state);
+            if let Err(e) = crate::shacl_studio::seed_standards::seed_standards(store, auth) {
                 tracing::warn!("shacl_studio: standards seed failed: {e}");
             }
-            // Built-in dataset-structure governance model, then audit + repair
-            // existing dataset metadata against it (idempotent; never deletes).
-            let _ = crate::auth::dataset_audit::seed_dataset_structure_shapes(
-                &migrate_store,
-                &migrate_auth,
+            // 2. Dataset-structure governance shapes (must exist before the audit).
+            let _ = crate::auth::dataset_audit::seed_dataset_structure_shapes(store, auth);
+            // 3. Bundled public demo org + datasets + graph data + saved queries.
+            //    Idempotent and self-healing: back-fills any registered-but-empty
+            //    public demo graph left behind by an earlier interrupted seed.
+            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
+            // 3b. Operator-supplied seed bundles (--seed-dir / SEED_DIR), if any —
+            //     same idempotent/fail-soft engine as the reference bundle above.
+            //     Sequenced here (not a separate spawn) for the same reason the
+            //     demo seed is: concurrent writers to the same SQLite identity DB
+            //     and RDF store previously produced boot-time lock contention.
+            if let Some(ref dir) = seed_dir {
+                crate::seed_bundles::load_seed_dir(&seed_state, dir);
+            }
+            // 4. Standard RDF vocabularies into the model registry.
+            crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
+            // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
+            crate::auth::dataset_graph::reconcile_all_dataset_metadata(
+                store,
+                &seed_state.base_url,
+                auth,
             );
-            if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(
-                &migrate_store,
-                &migrate_auth,
-                &migrate_base,
-            ) {
+            // 5b. Model/Vocabulary/Instance reframe: reclassify stored property
+            //     graphs (model→vocabulary) and rewrite legacy …/ontology/ IRIs to …/ns#.
+            crate::auth::dataset_graph::migrate_model_vocabulary_reframe(
+                store,
+                &seed_state.base_url,
+                auth,
+            );
+            if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(store, auth, &base) {
                 tracing::warn!("dataset metadata audit failed: {e}");
             }
-            // Built-in documentation pages (idempotent; preserves user edits).
-            if let Err(e) = crate::docs::seed_builtin_docs(&migrate_auth) {
+            // 6. Built-in documentation pages (idempotent; preserves user edits).
+            if let Err(e) = crate::docs::seed_builtin_docs(auth) {
                 tracing::warn!("docs seed failed: {e}");
             }
         });
@@ -1534,26 +1770,6 @@ pub async fn run(
             .and_then(|s| s.parse().ok())
             .unwrap_or(365);
         crate::auth::audit::spawn_pseudonymisation_task(state.audit.clone(), days);
-    }
-
-    // Seed the bundled public "Open Triplestore" demo organisation + datasets +
-    // saved queries on first run (idempotent; opt out with SEED_STANDARDS_DEMO=false).
-    // Off the async runtime since it does blocking store/db writes.
-    {
-        let seed_state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
-            // Seed the standard RDF vocabularies (OWL/RDF/RDFS/SKOS/DCAT/PROV/…)
-            // into the model registry as public reference entries (idempotent).
-            crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
-            // Migrate any pre-existing datasets onto the canonical singular dataset
-            // IRI so their metadata node renders complete when browsed/clicked.
-            crate::auth::dataset_graph::reconcile_all_dataset_metadata(
-                &seed_state.store,
-                &seed_state.base_url,
-                &seed_state.auth_db,
-            );
-        });
     }
 
     // Build router — auth endpoint rate limiting is applied inside build_router.
@@ -1579,8 +1795,26 @@ pub async fn run(
     }
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
+    let requested_port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+    let bind_host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
+        // Opt-in fallback (--port-fallback / PORT_FALLBACK, default off): bind any
+        // free port instead of refusing to start. Checked ONLY on AddrInUse, so a
+        // permission error or an invalid bind address still surfaces immediately
+        // below rather than silently wandering off to an unrelated port.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && port_fallback => {
+            tracing::warn!(
+                "PORT_FALLBACK: {addr} is already in use — falling back to any free port on {bind_host}"
+            );
+            crate::netutil::bind_free_port(bind_host)
+                .await
+                .map_err(|e2| {
+                    anyhow::anyhow!(
+                        "port fallback failed: could not bind any free port on {bind_host}: {e2}"
+                    )
+                })?
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             // Fail LOUDLY instead of killing whatever holds the port. The previous behaviour
             // (lsof + kill -9, then re-bind) was a data-corruption footgun: if the occupant was
@@ -1592,13 +1826,45 @@ pub async fn run(
                 "Refusing to start: {addr} is already in use (port {port_str}). Another process — \
                  most likely another open-triplestore — holds it. NOT killing it: doing so and \
                  reopening the same data dir can corrupt RocksDB (\"SST ahead of WALs\"). Stop the \
-                 other instance first (find it with `lsof -ti :{port_str}`), or start this one on a \
-                 different --port and/or --data-dir."
+                 other instance first (find it with `lsof -ti :{port_str}`), start this one on a \
+                 different --port and/or --data-dir, or pass --port-fallback / set PORT_FALLBACK=1 \
+                 to bind any free port automatically."
             );
         }
         Err(e) => return Err(e.into()),
     };
-    info!("Listening on {}", addr);
+    let bound_addr = listener.local_addr()?;
+    // Only true when --port-fallback actually moved the bind: the common case
+    // (flag off, or the requested port was free) leaves this false and every
+    // downstream URL exactly as configured.
+    let port_changed = requested_port.is_some_and(|p| p != bound_addr.port());
+    if port_changed {
+        tracing::warn!(
+            "PORT_FALLBACK: bound port {} instead of the requested {} — the advertised base URL \
+             is rewritten to match for service-registry self-registration, where it references \
+             the requested port",
+            bound_addr.port(),
+            requested_port.unwrap_or(0)
+        );
+    }
+    info!("Listening on {}", bound_addr);
+
+    // Cross-app service discovery is opt-in (LD_DISCOVERY). Self-registration is done HERE
+    // (after the real bind, not in main.rs before it) so the advertised self_url reflects any
+    // --port-fallback rewrite rather than the originally requested port.
+    if discovery {
+        let self_url = if port_changed {
+            crate::netutil::rewrite_url_port(
+                base_url,
+                requested_port.unwrap_or(0),
+                bound_addr.port(),
+            )
+        } else {
+            base_url.to_string()
+        };
+        crate::svc_registry::spawn_registrar(self_url, registry_url, registry_token);
+    }
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

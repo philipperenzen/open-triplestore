@@ -53,6 +53,10 @@ export default defineConfig({
         // trip the per-IP auth/SPARQL rate limiters and cause spurious 429s.
         // Relax them for the test backend only (secure-by-default in production).
         RATE_LIMIT_DISABLED: process.env.RATE_LIMIT_DISABLED ?? '1',
+        // Hermetic e2e: an empty SEED_IFC_URL skips the Schependomlaan IFC demo
+        // seed — a ~49 MB download plus a multi-minute debug-build import whose
+        // store write locks starve the suite (no spec depends on that data).
+        SEED_IFC_URL: process.env.SEED_IFC_URL ?? '',
       },
     },
     {

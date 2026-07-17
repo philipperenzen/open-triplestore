@@ -1,0 +1,107 @@
+# SAREF (Smart Applications REFerence ontology) — the ETSI core ontology for the
+# Internet of Things: devices, the functions and properties they expose, and the
+# measurements they make. Hand-authored term subset bundled so SAREF terms in the
+# demo data render with full definitions.
+# Source: https://saref.etsi.org/core/  (ns https://saref.etsi.org/core/)
+@prefix saref: <https://saref.etsi.org/core/> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+
+<https://saref.etsi.org/core/> a owl:Ontology ;
+  rdfs:label "Smart Applications REFerence ontology (SAREF)"@en ;
+  rdfs:comment "The ETSI core ontology for the Internet of Things, describing devices, the functions and properties they expose, and the measurements they make."@en ;
+  owl:versionInfo "3.1.1" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+saref:Device a owl:Class ;
+  rdfs:label "Device"@en ;
+  rdfs:comment "A tangible object designed to accomplish a particular task in households, common public buildings or offices. A device may consist of, or be made of, other devices and exposes functions, services and measurements."@en ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:Sensor a owl:Class ;
+  rdfs:label "Sensor"@en ;
+  rdfs:comment "A device that detects and responds to events or changes in the physical environment, and that performs a sensing function as the result of a command or by periodically sending the sensed value."@en ;
+  rdfs:subClassOf saref:Device ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:Actuator a owl:Class ;
+  rdfs:label "Actuator"@en ;
+  rdfs:comment "A device responsible for moving or controlling a mechanism or system by performing an actuating function."@en ;
+  rdfs:subClassOf saref:Device ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:Measurement a owl:Class ;
+  rdfs:label "Measurement"@en ;
+  rdfs:comment "A measurement made by a device, carrying a value, the unit of measure it is expressed in, the property it relates to and the time of measurement."@en ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:Property a owl:Class ;
+  rdfs:label "Property"@en ;
+  rdfs:comment "An aspect of an entity that can be observed, measured or controlled, such as temperature, humidity, energy or price."@en ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:Function a owl:Class ;
+  rdfs:label "Function"@en ;
+  rdfs:comment "The functionality necessary to accomplish the task for which a device is designed; a device can be designed to perform more than one function."@en ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:Service a owl:Class ;
+  rdfs:label "Service"@en ;
+  rdfs:comment "A representation of a function to a network that makes the function discoverable, registerable and remotely controllable by other devices in the network."@en ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:UnitOfMeasure a owl:Class ;
+  rdfs:label "Unit of Measure"@en ;
+  rdfs:comment "A standard quantity used to express a physical magnitude, such as degree Celsius for temperature or watt for power."@en ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+saref:hasFunction a owl:ObjectProperty ;
+  rdfs:label "has function"@en ;
+  rdfs:comment "Relates a device to the function it is designed to perform."@en ;
+  rdfs:domain saref:Device ;
+  rdfs:range saref:Function ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:hasMeasurement a owl:ObjectProperty ;
+  rdfs:label "has measurement"@en ;
+  rdfs:comment "Relates a device to a measurement it has made, or relates a property to a measurement of that property."@en ;
+  rdfs:range saref:Measurement ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:measuresProperty a owl:ObjectProperty ;
+  rdfs:label "measures property"@en ;
+  rdfs:comment "Relates a device to a property that it is able to measure."@en ;
+  rdfs:domain saref:Device ;
+  rdfs:range saref:Property ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:relatesToProperty a owl:ObjectProperty ;
+  rdfs:label "relates to property"@en ;
+  rdfs:comment "Relates a measurement to the property it is a measurement of."@en ;
+  rdfs:domain saref:Measurement ;
+  rdfs:range saref:Property ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:isMeasuredIn a owl:ObjectProperty ;
+  rdfs:label "is measured in"@en ;
+  rdfs:comment "Relates a property or measurement to the unit of measure in which it is expressed."@en ;
+  rdfs:range saref:UnitOfMeasure ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+# ── Datatype properties ──────────────────────────────────────────────────────
+
+saref:hasValue a owl:DatatypeProperty ;
+  rdfs:label "has value"@en ;
+  rdfs:comment "The numeric value of a measurement."@en ;
+  rdfs:domain saref:Measurement ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .
+
+saref:hasTimestamp a owl:DatatypeProperty ;
+  rdfs:label "has timestamp"@en ;
+  rdfs:comment "The instant in time at which a measurement was made."@en ;
+  rdfs:domain saref:Measurement ;
+  rdfs:isDefinedBy <https://saref.etsi.org/core/> .

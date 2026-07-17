@@ -18,6 +18,7 @@
   import SkosPanel from './ontology/SkosPanel.svelte';
   import NamespacePanel from './ontology/NamespacePanel.svelte';
   import DiagnosticsPanel from './ontology/DiagnosticsPanel.svelte';
+  import OntologyInfoHeader from './ontology/OntologyInfoHeader.svelte';
 
   /** Primary named graph for this ontology version. */
   export let graphIri: string = '';
@@ -25,6 +26,8 @@
   export let subGraphs: string[] = [];
   /** Optional pre-loaded N3 Store — skips SPARQL fetch when provided. */
   export let preloadedStore: any = null;
+  /** Optional version label, shown in the info header. */
+  export let versionLabel: string = '';
 
   type Tab = 'classes' | 'properties' | 'axioms' | 'shapes' | 'skos' | 'namespaces' | 'diagnostics';
   export let initialTab: Tab = 'classes';
@@ -42,18 +45,36 @@
   $: scopeGraphs = [graphIri, ...(subGraphs || [])].filter(Boolean);
   $: view = model ? applyFilter(model, filter) : null;
 
+  // Which preloadedStore identity `model` was built from. A store that arrives
+  // (or changes) after mount must supersede any model derived from the SPARQL
+  // path — whose named graph is often empty when the data is actually served via
+  // rawDataUrl (model-registry versions). This was the bug behind "the ontology
+  // viewer only works when opening the graph": the SPARQL load set a non-null but
+  // empty model, and the old `!model` guard then refused to rebuild from the
+  // parsed rawDataUrl store.
+  let builtFrom: any = null;
+
+  function buildFromStore(s: any) {
+    store = s;
+    builtFrom = s;
+    try {
+      model = extractSchema(store);
+      error = '';
+    } catch (e: any) {
+      error = e?.message || $t('components.ontologyModelViewer.loadError');
+    }
+  }
+
   async function load() {
     if (!scopeGraphs.length && !preloadedStore) return;
     loading = true;
     error = '';
     try {
       if (preloadedStore) {
-        store = preloadedStore;
-        model = extractSchema(store);
+        buildFromStore(preloadedStore);
       } else {
         const loaded = await loadOntologyGraph(scopeGraphs);
-        store = loaded.store;
-        model = extractSchema(store);
+        buildFromStore(loaded.store);
       }
     } catch (e: any) {
       error = e?.message || $t('components.ontologyModelViewer.loadError');
@@ -64,8 +85,9 @@
 
   onMount(load);
 
-  // Re-run when preloadedStore arrives (async from parent)
-  $: if (preloadedStore && !model) load();
+  // A preloadedStore that arrives or changes after mount rebuilds the model from
+  // it, overriding the (possibly empty) SPARQL-derived model.
+  $: if (preloadedStore && preloadedStore !== builtFrom) buildFromStore(preloadedStore);
 
   function viewResource(iri: string) {
     const qs = new URLSearchParams({ iri });
@@ -87,6 +109,10 @@
 </script>
 
 <div class="omv">
+  {#if model}
+    <OntologyInfoHeader {model} {store} {graphIri} {versionLabel} />
+  {/if}
+
   <div class="omv-toolbar">
     <div class="omv-tabs">
       <button class="omv-tab" class:active={activeTab === 'classes'} on:click={() => (activeTab = 'classes')}>

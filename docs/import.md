@@ -12,26 +12,27 @@ Quad files (`.nq`, `.trig`) carry their own graph IRIs. The wizard parses the fi
 
 ## 3. Graph roles: Model, Vocabulary, Shapes, Instances
 
-Every named graph carries a **graph role** that describes what kind of RDF content it holds. The four user-facing roles map directly onto the classic description-logic distinction between the *terminological layer* (what OWL 2 calls the T-Box) and the *assertion layer* (the A-Box):
+Every named graph carries a **graph role** that describes what kind of RDF content it holds. The four user-facing roles map onto the Description-Logic *boxes* — the *terminological box* (T-Box, classes), the *relational box* (R-Box, properties and concepts) and the *assertion box* (A-Box, facts):
 
 | Role | What it contains | Where it lives | DL equivalent |
 |---|---|---|---|
-| Model | OWL/RDFS class and property definitions — the formal schema for your domain | [Model Registry](/docs/models) — versioned, draft → published lifecycle | T-Box |
-| Vocabulary | SKOS concept schemes and controlled vocabularies | [Model Registry](/docs/models) — versioned, draft → published lifecycle | T-Box |
-| Shapes | SHACL node and property shapes — validation constraints against a model | Model Registry (typically alongside the model they validate) | T-Box |
+| Model | OWL/RDFS **class** definitions and class axioms — the categories of your domain | [Model Registry](/docs/models) — versioned, draft → published lifecycle | T-Box |
+| Vocabulary | OWL/RDFS **property** definitions and relations, plus SKOS concept schemes and controlled vocabularies | [Model Registry](/docs/models) — versioned, draft → published lifecycle | R-Box |
+| Shapes | SHACL node and property shapes — validation constraints against a model | Model Registry (typically alongside the model they validate) | — |
 | Instances | Individual facts and assertions — the actual data that conforms to a model | [Datasets](/docs/datasets) as named graphs with access control and SPARQL endpoints | A-Box |
 
-The wizard auto-detects the role of each uploaded file from its content. A file is classified as **Model** when any of the following signals are found:
+The wizard auto-detects the role of each uploaded file from its content, comparing the **class** signals against the combined **property + SKOS** signals and routing to the dominant side:
 
-| Signal | Examples | Notes |
-|---|---|---|
-| Ontology declaration | `<...> a owl:Ontology`<br>`<owl:Ontology rdf:about="...">`<br>`"@type": "owl:Ontology"` | Strongest signal — also extracts the model IRI and `owl:versionInfo`. |
-| Class / property axioms | `a owl:Class`, `a rdfs:Class`<br>`a owl:ObjectProperty` / `DatatypeProperty`<br>`rdfs:subClassOf`, `rdfs:subPropertyOf` | Classified as Model even without an explicit `owl:Ontology` declaration. |
-| SHACL shapes | `a sh:NodeShape`, `a sh:PropertyShape` | Pure SHACL (no OWL classes) → **Shapes** role. Mixed SHACL + OWL → **Model** role. |
-| SKOS concepts | `a skos:ConceptScheme`, `a skos:Concept` | Classified as **Vocabulary** when SKOS signals dominate. |
-| File extension | `.owl` | Fallback when no inline declaration is present. |
+| Signal | Examples | Routes to | Notes |
+|---|---|---|---|
+| Class definitions / axioms | `a owl:Class`, `a rdfs:Class`<br>`rdfs:subClassOf`, `owl:equivalentClass`, restrictions, `owl:disjointWith` | **Model** | A class-heavy file (OWL, RDFS, GeoSPARQL) reads as Model. |
+| Property definitions / relations | `a owl:ObjectProperty` / `DatatypeProperty` / `AnnotationProperty`, `a rdf:Property`<br>`rdfs:domain`, `rdfs:range`, `rdfs:subPropertyOf`, `owl:inverseOf` | **Vocabulary** | A property-heavy file (DCAT, PROV, FOAF) reads as Vocabulary. |
+| SKOS concepts | `a skos:ConceptScheme`, `a skos:Concept`, any `skos:` predicate | **Vocabulary** | Concept schemes are part of the R-Box / Vocabulary layer. |
+| SHACL shapes | `a sh:NodeShape`, `a sh:PropertyShape` | **Shapes** | Pure SHACL (no schema terms) → **Shapes** role. SHACL mixed with classes/properties is split out. |
+| `owl:Ontology` declaration | `<...> a owl:Ontology`<br>`"@type": "owl:Ontology"` | — | Recognised as a schema marker (also extracts the model IRI and `owl:versionInfo`); it is not itself a layer signal and can sit in either a Model or Vocabulary graph. |
+| File extension | `.owl` | Model | Fallback when no inline class/property signal is present; a tie between class and property counts also breaks toward **Model**. |
 
-Files with no schema signals are classified as **Instances** and routed to a dataset named graph. When a file contains a mix of roles a **Mixed content** badge appears — the wizard offers to split the file into separate named graphs, one per role.
+Files with no schema signals are classified as **Instances** and routed to a dataset named graph. When a file carries a substantial amount of more than one kind — classes **and** properties/concepts, or schema terms joined with instance data — a **Mixed content** badge appears, and the wizard offers to **auto-split** the file into separate named graphs, one per role: classes → a Model graph, properties and concept schemes → a Vocabulary graph, and individuals → an Instances graph.
 
 - **What detection cannot do** — Heuristics work on raw text patterns; they do not parse the file. A model that uses only full IRIs (`<http://www.w3.org/2002/07/owl#Class>`) is also matched, but unusual encodings or heavily abbreviated JSON-LD contexts may fall through. Always verify the detected role before importing.
 - **Quad files preserve their own graph structure** — `.nq` and `.trig` files carry their own named graph IRIs and skip role auto-detection. If a quad file contains model content, upload it through the Model Registry instead.

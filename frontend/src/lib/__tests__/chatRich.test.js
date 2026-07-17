@@ -5,6 +5,8 @@ import {
   describeApiService,
   parseChartSpec,
   parseMapSpec,
+  parseModel3dSpec,
+  parseFileSpec,
   parseInfoCard,
   parseCsv,
   sniffLang,
@@ -176,6 +178,142 @@ describe('parseMapSpec', () => {
   it('reports malformed specs', () => {
     expect(parseMapSpec('{"features":7}').error).toBeTruthy();
     expect(parseMapSpec('{oops').error).toBe('invalid JSON');
+  });
+
+  it('returns empty models for the plain feature forms', () => {
+    expect(parseMapSpec('{"features":[{"wkt":"POINT(1 2)"}]}').models).toEqual([]);
+    expect(parseMapSpec('POINT(1 2)').models).toEqual([]);
+  });
+
+  it('parses validated 3D models alongside features', () => {
+    const { features, models } = parseMapSpec(
+      '{"features":[{"label":"Site","wkt":"POINT(5.86 51.85)"}],' +
+        '"models":[{"label":"Bridge","url":"https://x.example/b.glb","wkt":"POINT(5.86 51.85)"}]}'
+    );
+    expect(features).toHaveLength(1);
+    expect(models).toEqual([
+      { label: 'Bridge', url: 'https://x.example/b.glb', format: 'gltf', wkt: 'POINT(5.86 51.85)' },
+    ]);
+  });
+
+  it('drops invalid models (unsafe URL / undetectable format / non-POINT anchor) and keeps the features', () => {
+    const { features, models, error } = parseMapSpec(
+      '{"features":[{"wkt":"POINT(1 2)"}],"models":[' +
+        '{"url":"javascript:alert(1)","wkt":"POINT(1 2)"},' +
+        '{"url":"https://x.example/page.html","wkt":"POINT(1 2)"},' +
+        '{"url":"https://x.example/m.glb","wkt":"LINESTRING(1 2, 3 4)"}]}'
+    );
+    expect(error).toBeUndefined();
+    expect(models).toEqual([]);
+    expect(features).toHaveLength(1);
+  });
+
+  it('accepts a models-only map — the models carry their own POINT anchors', () => {
+    const { features, models, error } = parseMapSpec(
+      '{"models":[{"url":"/files/t.cityjson","wkt":"POINT(4.3 52.1)"}]}'
+    );
+    expect(error).toBeUndefined();
+    expect(features).toEqual([]);
+    expect(models[0].format).toBe('cityjson');
+  });
+
+  it('still errors when neither features nor models survive', () => {
+    expect(parseMapSpec('{"features":[],"models":[{"url":"javascript:x","wkt":"POINT(1 2)"}]}').error).toBeTruthy();
+  });
+});
+
+describe('parseModel3dSpec / model3d blocks', () => {
+  it('parses a models array into ids + URL-detected formats', () => {
+    const segs = parseChatBlocks(
+      '```model3d\n{"models":[{"label":"Bridge","url":"https://x.example/bridge.glb"},{"label":"Tower","url":"/files/tower.ifc"}]}\n```'
+    );
+    expect(segs).toEqual([
+      {
+        kind: 'model3d',
+        models: [
+          { id: 'm0', label: 'Bridge', url: 'https://x.example/bridge.glb', format: 'gltf' },
+          { id: 'm1', label: 'Tower', url: '/files/tower.ifc', format: 'ifc' },
+        ],
+      },
+    ]);
+  });
+
+  it('wraps a single {url} object into models[]', () => {
+    const segs = parseChatBlocks('```model3d\n{"url":"https://x.example/m.stl","label":"M"}\n```');
+    expect(segs).toEqual([
+      { kind: 'model3d', models: [{ id: 'm0', label: 'M', url: 'https://x.example/m.stl', format: 'stl' }] },
+    ]);
+  });
+
+  it('flags invalid JSON as a broken model3d block', () => {
+    const segs = parseChatBlocks('```model3d\n{nope\n```');
+    expect(segs[0]).toMatchObject({ kind: 'broken', label: 'model3d', raw: '{nope' });
+  });
+
+  it('is broken when no model URL has a detectable format', () => {
+    const segs = parseChatBlocks('```model3d\n{"models":[{"url":"https://x.example/readme.txt"}]}\n```');
+    expect(segs[0]).toMatchObject({ kind: 'broken', label: 'model3d' });
+  });
+
+  it('drops unsafe-scheme models, keeps loadable ones, and re-numbers ids', () => {
+    const mixed = parseModel3dSpec(
+      '{"models":[{"url":"javascript:alert(1)"},{"label":"ok","url":"https://x.example/ok.gltf"}]}'
+    );
+    expect(mixed.models).toEqual([{ id: 'm0', label: 'ok', url: 'https://x.example/ok.gltf', format: 'gltf' }]);
+    expect(parseModel3dSpec('{"models":[{"url":"javascript:alert(1)//x.glb"}]}').error).toBeTruthy();
+  });
+
+  it('only triggers on the explicit fence tag — untagged JSON stays markdown', () => {
+    const segs = parseChatBlocks('```\n{"models":[{"url":"https://x.example/m.glb"}]}\n```');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].kind).toBe('md');
+  });
+});
+
+describe('parseFileSpec / file blocks', () => {
+  it('parses a valid file spec into a file segment', () => {
+    const segs = parseChatBlocks(
+      '```file\n{"label":"Quarterly report","url":"https://x.example/files/report.pdf","filename":"report.pdf"}\n```'
+    );
+    expect(segs).toEqual([
+      {
+        kind: 'file',
+        file: {
+          label: 'Quarterly report',
+          filename: 'report.pdf',
+          url: 'https://x.example/files/report.pdf',
+          blocked: false,
+        },
+      },
+    ]);
+  });
+
+  it('derives the filename from the URL path when missing', () => {
+    const { file } = parseFileSpec('{"url":"/api/assets/a1/download/model%20v2.glb"}');
+    expect(file.filename).toBe('model v2.glb');
+    expect(file.blocked).toBe(false);
+    expect(file.url).toBe('/api/assets/a1/download/model%20v2.glb');
+  });
+
+  it('blocks unsafe schemes — the segment carries no URL a renderer could link', () => {
+    const segs = parseChatBlocks(
+      '```file\n{"label":"x","url":"javascript:alert(document.cookie)","filename":"x.pdf"}\n```'
+    );
+    expect(segs[0].kind).toBe('file');
+    expect(segs[0].file.blocked).toBe(true);
+    expect(segs[0].file.url).toBe('');
+    expect(parseFileSpec('{"url":"data:text/html,<script>1</script>"}').file.blocked).toBe(true);
+  });
+
+  it('reports malformed specs as broken file blocks', () => {
+    expect(parseChatBlocks('```file\n{oops\n```')[0]).toMatchObject({ kind: 'broken', label: 'file' });
+    expect(parseFileSpec('{"label":"no url"}').error).toBeTruthy();
+  });
+
+  it('only triggers on the explicit fence tag', () => {
+    const segs = parseChatBlocks('```\n{"url":"https://x.example/report.pdf"}\n```');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].kind).toBe('md');
   });
 });
 

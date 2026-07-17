@@ -11,8 +11,9 @@ use serde_json::json;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::SystemRole;
 use crate::server::error::AppError;
+use crate::server::routes::run_store_write;
 use crate::server::AppState;
-use crate::store::{escape_sparql_iri, TripleStore};
+use crate::store::{escape_sparql_iri, escape_sparql_literal, TripleStore};
 
 use super::diff::{collect_triples, compute_diff, triple_delta, version_revision};
 use super::merge;
@@ -145,23 +146,27 @@ pub async fn delete_data_model(
         ));
     }
 
-    // Delete all version data graphs in one batched transaction.
-    let versions = registry::list_versions(&state.store, &state.base_url, &id);
-    let mut all_iris: Vec<String> = Vec::new();
-    for ver in &versions {
-        if ver.sub_graphs.is_empty() {
-            all_iris.push(ver.graph_iri.clone());
-        } else {
-            all_iris.extend(ver.sub_graphs.iter().cloned());
+    // Enumerate + delete all version data graphs, then the registry records, in one
+    // blocking task under the write timeout. Held off the async runtime so this
+    // (potentially large) delete can't pin a Tokio worker or block reads/liveness.
+    let store = state.store.clone();
+    let base = state.base_url.to_string();
+    let model_id = id.clone();
+    run_store_write(&state, "data model delete", move || {
+        let versions = registry::list_versions(&store, &base, &model_id);
+        let mut all_iris: Vec<String> = Vec::new();
+        for ver in &versions {
+            if ver.sub_graphs.is_empty() {
+                all_iris.push(ver.graph_iri.clone());
+            } else {
+                all_iris.extend(ver.sub_graphs.iter().cloned());
+            }
         }
-    }
-    let iri_refs: Vec<&str> = all_iris.iter().map(|s| s.as_str()).collect();
-    state
-        .store
-        .bulk_delete_graphs(&iri_refs)
-        .map_err(AppError::from)?;
-
-    registry::delete_data_model(&state.store, &state.base_url, &id).map_err(AppError::from)?;
+        let iri_refs: Vec<&str> = all_iris.iter().map(|s| s.as_str()).collect();
+        store.bulk_delete_graphs(&iri_refs)?;
+        registry::delete_data_model(&store, &base, &model_id)
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -199,18 +204,23 @@ pub async fn update_data_model(
             "Only an administrator may change ontology ownership".to_string(),
         ));
     }
-    registry::update_data_model(
-        &state.store,
-        &state.base_url,
-        &id,
-        body.title.as_deref(),
-        body.namespace.as_deref(),
-        body.description.as_deref(),
-        body.is_public,
-        body.owner_type.as_deref(),
-        body.owner_id.as_deref(),
-    )
-    .map_err(AppError::from)?;
+    let store = state.store.clone();
+    let base = state.base_url.to_string();
+    let model_id = id.clone();
+    run_store_write(&state, "data model update", move || {
+        registry::update_data_model(
+            &store,
+            &base,
+            &model_id,
+            body.title.as_deref(),
+            body.namespace.as_deref(),
+            body.description.as_deref(),
+            body.is_public,
+            body.owner_type.as_deref(),
+            body.owner_id.as_deref(),
+        )
+    })
+    .await?;
     let record = registry::get_data_model(&state.store, &state.base_url, &id)
         .ok_or_else(|| AppError::Internal("Failed to retrieve updated ontology".to_string()))?;
     Ok(Json(record))
@@ -665,6 +675,31 @@ pub async fn upload_version(
             None => detected.primary,
         };
 
+        // Guard BEFORE loading: parse_and_load clears and rewrites the target
+        // graphs, so an existing version must be rejected here — otherwise a
+        // re-upload of an existing version would destroy its data before the
+        // post-load existence check below could reject it.
+        //
+        // Resolve the version exactly the way the loader does: an explicit
+        // override wins, otherwise fall back to the file's owl:versionInfo.
+        let resolved_version = version_override.clone().or_else(|| {
+            quads.iter().find_map(|q| {
+                if q.predicate.as_str() == "http://www.w3.org/2002/07/owl#versionInfo" {
+                    if let oxigraph::model::Term::Literal(lit) = &q.object {
+                        return Some(lit.value().to_string());
+                    }
+                }
+                None
+            })
+        });
+        if let Some(ref v) = resolved_version {
+            if registry::version_exists(&store_clone, &base_url_clone, &id_clone, v) {
+                return Err(format!(
+                    "Version '{v}' already exists. Delete it first or use a different version string."
+                ));
+            }
+        }
+
         // Proceed with loading
         let result = upload::parse_and_load(
             &store_clone,
@@ -854,10 +889,13 @@ pub async fn patch_version_data(
     let mut affected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     // Group removes by target graph (per-triple graph overrides the request-level default)
-    for (graph, triples) in group_by_graph(&body.remove, &default_graph, &record) {
-        let block = sparql_triple_block(&triples);
+    for (graph, triples) in group_by_graph(&body.remove, &default_graph, &record)? {
+        let block = sparql_triple_block(&triples)?;
         if !block.is_empty() {
-            let q = format!("DELETE DATA {{ GRAPH <{graph}> {{ {block} }} }}");
+            let q = format!(
+                "DELETE DATA {{ GRAPH <{}> {{ {block} }} }}",
+                escape_sparql_iri(&graph)
+            );
             state
                 .store
                 .update(&q)
@@ -867,10 +905,13 @@ pub async fn patch_version_data(
     }
 
     // Group adds by target graph
-    for (graph, triples) in group_by_graph(&body.add, &default_graph, &record) {
-        let block = sparql_triple_block(&triples);
+    for (graph, triples) in group_by_graph(&body.add, &default_graph, &record)? {
+        let block = sparql_triple_block(&triples)?;
         if !block.is_empty() {
-            let q = format!("INSERT DATA {{ GRAPH <{graph}> {{ {block} }} }}");
+            let q = format!(
+                "INSERT DATA {{ GRAPH <{}> {{ {block} }} }}",
+                escape_sparql_iri(&graph)
+            );
             state
                 .store
                 .update(&q)
@@ -1085,14 +1126,29 @@ fn group_by_graph<'a>(
     triples: &'a [super::models::RdfTriple],
     default_graph: &str,
     record: &super::models::DataModelVersion,
-) -> Vec<(String, Vec<&'a super::models::RdfTriple>)> {
+) -> Result<Vec<(String, Vec<&'a super::models::RdfTriple>)>, AppError> {
     use std::collections::BTreeMap;
+    // A per-triple absolute graph override may only target THIS version's content:
+    // the base graph, one of its recorded sub-graphs, or a sub-path beneath the
+    // base graph. Anything else would let a writer reach another model/tenant's
+    // graph, so it is rejected.
+    let sub_prefix = format!("{}/", record.graph_iri);
+    let is_authorized_target = |g: &str| -> bool {
+        g == record.graph_iri.as_str()
+            || g.starts_with(&sub_prefix)
+            || record.sub_graphs.iter().any(|sg| sg.as_str() == g)
+    };
     let mut map: BTreeMap<String, Vec<&super::models::RdfTriple>> = BTreeMap::new();
     for t in triples {
         let graph = match t.graph.as_deref() {
             None | Some("") => default_graph.to_string(),
             Some(g) => {
                 if g.starts_with("http://") || g.starts_with("https://") || g.starts_with("urn:") {
+                    if !is_authorized_target(g) {
+                        return Err(AppError::BadRequest(format!(
+                            "Graph '{g}' is not part of this version"
+                        )));
+                    }
                     g.to_string()
                 } else {
                     record
@@ -1106,44 +1162,71 @@ fn group_by_graph<'a>(
         };
         map.entry(graph).or_default().push(t);
     }
-    map.into_iter().collect()
+    Ok(map.into_iter().collect())
 }
 
-fn sparql_triple_block(triples: &[&super::models::RdfTriple]) -> String {
-    triples
-        .iter()
-        .map(|t| {
-            let s = term_to_sparql(&t.s);
-            let p = term_to_sparql(&t.p);
-            let o = rdf_value_to_sparql(&t.o);
-            format!("{s} {p} {o} .")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn term_to_sparql(t: &str) -> String {
-    if (t.starts_with('<') && t.ends_with('>')) || t.starts_with("_:") {
-        t.to_string()
-    } else {
-        format!("<{t}>")
+fn sparql_triple_block(triples: &[&super::models::RdfTriple]) -> Result<String, AppError> {
+    let mut lines = Vec::with_capacity(triples.len());
+    for t in triples {
+        let s = term_to_sparql(&t.s)?;
+        let p = term_to_sparql(&t.p)?;
+        let o = rdf_value_to_sparql(&t.o)?;
+        lines.push(format!("{s} {p} {o} ."));
     }
+    Ok(lines.join("\n"))
 }
 
-fn rdf_value_to_sparql(v: &serde_json::Value) -> String {
+/// Render a subject/predicate (or object IRI/blank node) term as a SPARQL token.
+///
+/// User-supplied input is never interpolated verbatim: a `<...>`-wrapped value
+/// is unwrapped and the inner IRI validated with `NamedNode::new` then re-emitted
+/// through `escape_sparql_iri`; a `_:label` blank node is validated with
+/// `BlankNode::new`; anything else is treated as a bare IRI and validated/escaped
+/// the same way. Invalid terms are rejected as `400 Bad Request` so a payload
+/// cannot break out of the surrounding SPARQL.
+fn term_to_sparql(t: &str) -> Result<String, AppError> {
+    if let Some(label) = t.strip_prefix("_:") {
+        // Validate the blank-node label via the oxigraph model API.
+        oxigraph::model::BlankNode::new(label)
+            .map_err(|_| AppError::BadRequest(format!("Invalid blank node term: '{t}'")))?;
+        return Ok(format!("_:{label}"));
+    }
+    let iri = if t.starts_with('<') && t.ends_with('>') && t.len() >= 2 {
+        &t[1..t.len() - 1]
+    } else {
+        t
+    };
+    oxigraph::model::NamedNode::new(iri)
+        .map_err(|_| AppError::BadRequest(format!("Invalid IRI term: '{t}'")))?;
+    Ok(format!("<{}>", escape_sparql_iri(iri)))
+}
+
+/// Render a triple object (string IRI/blank node, or a JSON literal object) as a
+/// SPARQL token. Literal text is escaped with `escape_sparql_literal`; language
+/// tags are validated against `[A-Za-z0-9-]` and datatype IRIs with
+/// `NamedNode::new`. Invalid input is rejected as `400 Bad Request`.
+fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
     match v {
         serde_json::Value::String(s) => term_to_sparql(s),
         serde_json::Value::Object(map) => {
             let value = map.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            let escaped = escape_sparql_literal(value);
             if let Some(lang) = map.get("lang").and_then(|v| v.as_str()) {
-                format!("\"{value}\"@{lang}")
+                if lang.is_empty() || !lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    return Err(AppError::BadRequest(format!(
+                        "Invalid language tag: '{lang}'"
+                    )));
+                }
+                Ok(format!("\"{escaped}\"@{lang}"))
             } else if let Some(dt) = map.get("datatype").and_then(|v| v.as_str()) {
-                format!("\"{value}\"^^<{dt}>")
+                oxigraph::model::NamedNode::new(dt)
+                    .map_err(|_| AppError::BadRequest(format!("Invalid datatype IRI: '{dt}'")))?;
+                Ok(format!("\"{escaped}\"^^<{}>", escape_sparql_iri(dt)))
             } else {
-                format!("\"{value}\"")
+                Ok(format!("\"{escaped}\""))
             }
         }
-        other => format!("\"{other}\""),
+        other => Ok(format!("\"{}\"", escape_sparql_literal(&other.to_string()))),
     }
 }
 

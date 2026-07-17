@@ -136,7 +136,7 @@ impl TextIndex {
         let query_parser = QueryParser::for_index(&self.index, vec![self.text_field]);
         let query = query_parser.parse_query(query_str)?;
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit * 4))?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit * 4).order_by_score())?;
 
         let mut hits = Vec::new();
         for (score, doc_address) in top_docs {

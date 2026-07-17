@@ -4,12 +4,14 @@ services:
     # Prefer a pre-built release over a local build: comment out `build: .` above
     # and uncomment the line below to pull the published image from GHCR instead.
     # image: ghcr.io/philipperenzen/open-triplestore:latest  # pull the published image instead of building
-    container_name: open-triplestore
     ports:
       # Bind to loopback only: the triplestore must sit behind a TLS-terminating reverse proxy in
       # production, not be published on every interface. Inter-container traffic uses the compose
       # network and is unaffected by this. Override TRIPLESTORE_BIND to expose deliberately.
-      - "${TRIPLESTORE_BIND:-127.0.0.1}:7878:7878"
+      # Override TRIPLESTORE_PORT (e.g. per-worktree in .env) if 7878 is already bound by another
+      # `docker compose up` — container names/networks are already isolated per project, but the
+      # host port is shared and must be freed up explicitly to run two stacks at once.
+      - "${TRIPLESTORE_BIND:-127.0.0.1}:${TRIPLESTORE_PORT:-7878}:7878"
     volumes:
       - triplestore_data:/data
     environment:
@@ -66,6 +68,14 @@ services:
       - LLM_GATEWAY_URL=${LLM_GATEWAY_URL:-http://ollama:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
       - LLM_API_KEY=${LLM_API_KEY:-}
+      # In-memory query accelerator cap. Above this triple count the store keeps
+      # TWO full RAM copies OFF and answers from RocksDB (correct, just slower for
+      # large joins). By default the cap auto-sizes to mem_limit below; set this
+      # explicitly only to force the accelerator on for a bigger dataset on a
+      # roomy host (each held triple costs ~2× in RAM). The server logs a warning
+      # naming this var whenever a store is over the cap, so an off accelerator is
+      # never silent.
+      - OTS_PARALLEL_QUERY_MAX_TRIPLES=${OTS_PARALLEL_QUERY_MAX_TRIPLES:-}
     # Make `host.docker.internal` (used by LD_REGISTRY_URL above) resolve on every
     # platform. Docker Desktop (Windows/macOS) provides it automatically; this mapping
     # adds the same hostname on plain Linux Docker so the config stays portable.
@@ -75,24 +85,37 @@ services:
       minio:
         condition: service_healthy
     restart: unless-stopped
+    # Bound container memory so a large seed/import is a clean, observable OOM
+    # rather than host thrash, and so the in-RAM query accelerator (which sizes
+    # its cap to this budget) never tries to build copies that don't fit. Raise
+    # both for very large datasets. mem_limit/mem_reservation are honoured by
+    # `docker compose up` (non-swarm); the equivalent deploy.resources keys apply
+    # under swarm.
+    mem_limit: ${TRIPLESTORE_MEM_LIMIT:-4g}
+    mem_reservation: ${TRIPLESTORE_MEM_RESERVATION:-1g}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7878/health"]
+      # Probe /livez (pure liveness — no store/DB access), NOT /health: a long but
+      # healthy boot seed (large IFC download + lift) must not be read as a dead
+      # process and restarted. start_period covers that seed window so a slow first
+      # boot never counts toward "unhealthy"; the IFC download alone allows 600s.
+      test: ["CMD", "curl", "-f", "http://localhost:7878/livez"]
       interval: 30s
       timeout: 5s
-      start_period: 10s
+      start_period: 180s
       retries: 3
 
   minio:
     # Pin to an immutable digest in production (e.g. quay.io/minio/minio@sha256:...) instead of a
     # floating tag, so a re-pull can't silently change the image. Override via MINIO_IMAGE.
     image: ${MINIO_IMAGE:-quay.io/minio/minio:latest}
-    container_name: triplestore-minio
     command: server /data --console-address ":9001"
     ports:
       # Loopback only — the S3 API + admin console must not be world-reachable. They are accessed
       # by the triplestore over the compose network (unaffected) and locally for administration.
-      - "${MINIO_BIND:-127.0.0.1}:9000:9000"
-      - "${MINIO_BIND:-127.0.0.1}:9001:9001"
+      # Override MINIO_PORT / MINIO_CONSOLE_PORT per-worktree in .env if 9000/9001 are already
+      # bound by another `docker compose up` — see the note on TRIPLESTORE_PORT above.
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     environment:
@@ -116,6 +139,10 @@ services:
     depends_on:
       triplestore:
         condition: service_healthy
+    environment:
+      - TRIPLESTORE_PORT=${TRIPLESTORE_PORT:-7878}
+      - MINIO_PORT=${MINIO_PORT:-9000}
+      - MINIO_CONSOLE_PORT=${MINIO_CONSOLE_PORT:-9001}
     command:
       - sh
       - -c
@@ -123,11 +150,11 @@ services:
         echo
         echo "=================================================="
         echo "  Open Triplestore is up - reachable at:"
-        echo "    Web UI & API : http://localhost:7878"
-        echo "    Health check : http://localhost:7878/health"
-        echo "    API docs     : http://localhost:7878/api-docs/"
-        echo "    MinIO console: http://localhost:9001"
-        echo "    MinIO S3 API : http://localhost:9000"
+        echo "    Web UI & API : http://localhost:$$TRIPLESTORE_PORT"
+        echo "    Health check : http://localhost:$$TRIPLESTORE_PORT/health"
+        echo "    API docs     : http://localhost:$$TRIPLESTORE_PORT/api-docs/"
+        echo "    MinIO console: http://localhost:$$MINIO_CONSOLE_PORT"
+        echo "    MinIO S3 API : http://localhost:$$MINIO_PORT"
         echo "=================================================="
         echo
     restart: "no"
@@ -139,19 +166,30 @@ services:
   # LLM_GATEWAY_URL / LLM_API_KEY at your endpoint instead.
   ollama:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
-    container_name: triplestore-ollama
     profiles: ["llm"]
     ports:
       # Defaults to loopback. Follows the triplestore's bind (TRIPLESTORE_BIND) unless
       # OLLAMA_BIND is set explicitly, so exposing the store on all interfaces also
       # publishes the LLM on its default port 11434. Override OLLAMA_BIND to decouple.
-      - "${OLLAMA_BIND:-${TRIPLESTORE_BIND:-127.0.0.1}}:11434:11434"
+      # Override OLLAMA_PORT per-worktree in .env if 11434 is already bound elsewhere.
+      - "${OLLAMA_BIND:-${TRIPLESTORE_BIND:-127.0.0.1}}:${OLLAMA_PORT:-11434}:11434"
     environment:
       # Listen on all interfaces inside the container (also the official image default).
       - OLLAMA_HOST=0.0.0.0:11434
       # Browser CORS allowlist for direct ollama calls. Follows the triplestore's
       # CORS_ORIGINS unless OLLAMA_ORIGINS is set explicitly; "*" reflects any origin.
       - OLLAMA_ORIGINS=${OLLAMA_ORIGINS:-${CORS_ORIGINS:-}}
+      # ── Time-to-first-token tuning ──
+      # Keep the model resident between chats: the default 5m unload means the
+      # next question pays the full model load (tens of seconds on CPU) before
+      # the first token. 1h trades RAM/VRAM for instant warm starts.
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-1h}
+      # Serve a few requests concurrently (chat + NL→SPARQL from another tab)
+      # instead of queueing them behind one generation.
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      # Flash attention reduces prompt-processing time on supported GPUs; it is
+      # ignored on CPU, so the default is safe everywhere.
+      - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
     volumes:
       - ollama_models:/root/.ollama
     restart: unless-stopped
@@ -166,7 +204,6 @@ services:
   # exit. Cheap to re-run (already-present layers are skipped).
   ollama-pull:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
-    container_name: triplestore-ollama-pull
     profiles: ["llm"]
     depends_on:
       ollama:
@@ -176,10 +213,58 @@ services:
     command: ["pull", "${LLM_MODEL:-qwen2.5:7b}"]
     restart: "no"
 
+  # ── vLLM (optional, profile: llm-vllm — NVIDIA GPU required) ───────────────
+  # Higher-throughput alternative to Ollama with automatic prefix caching: the
+  # chat's large shared system prompt is computed once and reused across turns
+  # and users, which cuts time-to-first-token dramatically under load. Enable
+  # with `--profile llm-vllm` and point the triplestore at it in .env:
+  #   LLM_GATEWAY_URL=http://vllm:8000
+  #   LLM_MODEL=${VLLM_MODEL}   (the served model name below)
+  # The model downloads from Hugging Face into the hf_cache volume on first start
+  # (several GB — AWQ 7B ≈ 5.6 GB). Gated models need HUGGING_FACE_HUB_TOKEN.
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["llm-vllm"]
+    ports:
+      # Override VLLM_PORT per-worktree in .env if 8000 is already bound elsewhere.
+      - "${VLLM_BIND:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}"
+      # Bound the KV cache: the chat prompt (system + context + a few rounds)
+      # fits comfortably in 16k, and a smaller window leaves VRAM for the
+      # prefix cache on consumer GPUs.
+      - "--max-model-len"
+      - "${VLLM_MAX_MODEL_LEN:-16384}"
+      - "--gpu-memory-utilization"
+      - "${VLLM_GPU_MEM:-0.90}"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health', timeout=3)\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      # First start downloads + loads the model; give it plenty of room.
+      start_period: 600s
+      retries: 10
+
 volumes:
   triplestore_data:
     driver: local
   minio_data:
     driver: local
   ollama_models:
+    driver: local
+  hf_cache:
     driver: local

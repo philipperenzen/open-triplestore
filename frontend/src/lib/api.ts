@@ -92,14 +92,38 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Compute backoff delay for a 429 response, honoring Retry-After when present.
+// Compute backoff delay for a 429 response. Takes the LARGER of the server's
+// suggestion (`Retry-After`, or the governor's `x-ratelimit-after` on older
+// deployments — often `0` when the refill is sub-second) and capped exponential
+// backoff, plus jitter so a burst of throttled requests doesn't retry in
+// lockstep and immediately re-contend for the same refill token.
 function backoffDelayMs(res: Response, attempt: number): number {
-  const ra = res.headers.get('Retry-After');
-  if (ra) {
-    const secs = Number(ra);
-    if (!Number.isNaN(secs) && secs >= 0) return Math.min(secs * 1000, 5000);
+  const expo = Math.min(500 * Math.pow(2, attempt), 8000);
+  const jitter = Math.random() * 250;
+  const ra = res.headers.get('Retry-After') ?? res.headers.get('x-ratelimit-after');
+  const secs = ra ? Number(ra) : NaN;
+  const suggested = !Number.isNaN(secs) && secs >= 0 ? secs * 1000 : 0;
+  return Math.max(suggested, expo) + jitter;
+}
+
+/**
+ * fetch() that transparently retries rate-limited (429) responses with the
+ * server-suggested delay. Every interactive surface that talks to the
+ * rate-limited endpoints (/sparql, /store …) must go through this — pages like
+ * the dataset detail or graph explorer legitimately fire short query bursts,
+ * and a raw 429 would otherwise surface as an error box mid-interaction.
+ */
+export async function fetchRetry429(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  attempts = 5,
+): Promise<Response> {
+  let res = await fetch(input, init);
+  for (let attempt = 0; attempt < attempts && res.status === 429; attempt++) {
+    await sleep(backoffDelayMs(res, attempt));
+    res = await fetch(input, init);
   }
-  return Math.min(500 * Math.pow(2, attempt), 4000);
+  return res;
 }
 
 async function request(method, path, body = null) {
@@ -200,6 +224,40 @@ export const updateMe = (data) => request('PUT', '/api/auth/me', data);
 export const changePassword = (current_password, new_password) =>
   request('POST', '/api/auth/change-password', { current_password, new_password });
 
+// Account recovery, email verification & two-factor login
+export const getAuthFeatures = () => request('GET', '/api/auth/features');
+export const forgotPassword = (identifier) =>
+  request('POST', '/api/auth/forgot-password', { identifier });
+export const forgotUsername = (email) =>
+  request('POST', '/api/auth/forgot-username', { email });
+export const resetPassword = (token, new_password) =>
+  request('POST', '/api/auth/reset-password', { token, new_password });
+export const verifyEmail = (token) =>
+  request('POST', '/api/auth/verify-email', { token });
+export const resendVerification = () =>
+  request('POST', '/api/auth/verify-email/resend');
+export const changeEmail = (new_email, password) =>
+  request('POST', '/api/auth/change-email', { new_email, password });
+export const verify2fa = (mfa_token, code) =>
+  request('POST', '/api/auth/2fa/verify', { mfa_token, code });
+export const totpSetup = () => request('POST', '/api/auth/2fa/setup');
+export const totpEnable = (code) => request('POST', '/api/auth/2fa/enable', { code });
+export const totpDisable = (password, code) =>
+  request('POST', '/api/auth/2fa/disable', { password, code });
+
+// WebAuthn passkeys
+export const listPasskeys = () => request('GET', '/api/auth/passkeys');
+export const passkeyRegisterStart = () =>
+  request('POST', '/api/auth/passkeys/register/start');
+export const passkeyRegisterFinish = (challenge_id, name, credential) =>
+  request('POST', '/api/auth/passkeys/register/finish', { challenge_id, name, credential });
+export const deletePasskey = (passkeyId, password) =>
+  request('DELETE', `/api/auth/passkeys/${passkeyId}`, { password });
+export const passkeyLoginStart = () =>
+  request('POST', '/api/auth/passkeys/login/start');
+export const passkeyLoginFinish = (challenge_id, credential) =>
+  request('POST', '/api/auth/passkeys/login/finish', { challenge_id, credential });
+
 // API Tokens
 export const listApiTokens = () => request('GET', '/api/auth/tokens');
 export const createApiToken = (data) => request('POST', '/api/auth/tokens', data);
@@ -279,8 +337,24 @@ export const revokeDatasetGrant = (id, principalType: 'user' | 'group', principa
   request('DELETE', `/api/datasets/${id}/grants/${principalType}/${principalId}`);
 export const updateDatasetShacl = (id, data) => request('PUT', `/api/datasets/${id}/shacl`, data);
 export const updateDatasetRole = (id, graph_role) => request('PUT', `/api/datasets/${id}/role`, { graph_role });
-export const detectShapes = (graphIri: string) => request('GET', `/api/shacl/detect-shapes?graph=${encodeURIComponent(graphIri)}`);
-export const listAccessibleShapeGraphs = () => request('GET', '/api/shacl/dataset-shape-graphs');
+// `suggested_datasets` may flag candidates that already have shapes attached.
+export type DetectShapesResponse = {
+  shapes_detected: boolean;
+  shape_count: number;
+  suggested_datasets: { id: string; name: string; has_shapes?: boolean }[];
+};
+export const detectShapes = (graphIri: string): Promise<DetectShapesResponse> =>
+  request('GET', `/api/shacl/detect-shapes?graph=${encodeURIComponent(graphIri)}`);
+// Datasets that can act as shapes sources: a configured shapes_graph_iri, a
+// Studio binding, or a shapes-role graph (shapes_graph_iri may be null then).
+export type DatasetShapeGraph = {
+  dataset_id: string;
+  dataset_name: string;
+  shapes_graph_iri: string | null;
+  source?: string;
+};
+export const listAccessibleShapeGraphs = (): Promise<{ shape_graphs: DatasetShapeGraph[] }> =>
+  request('GET', '/api/shacl/dataset-shape-graphs');
 export type DatasetGraph = { graph_iri: string; graph_role?: string | null; private?: boolean; triple_count?: number };
 
 export const listDatasetGraphs = (id): Promise<DatasetGraph[]> => request('GET', `/api/datasets/${id}/graphs`);
@@ -508,9 +582,35 @@ export const browseStats = () => request('GET', '/api/browse/stats');
 // Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
 // references (glTF/IFC/...), resolved from BOT/OMG/FOG/GeoSPARQL. Feeds the
 // dataset 3D & map viewer; optional root IRI scopes to one object + children.
-export const getViewerFeed = (datasetId, root = null) => {
-  const qs = root ? `?root=${encodeURIComponent(root)}` : '';
+// `located: true` fetches only coordinate-bearing elements (+ model refs) — the
+// fast subset the 2D map renders, so the map can paint before the full feed (the
+// structure tree, which on a big BIM dataset includes thousands of sub-elements)
+// finishes loading.
+export const getViewerFeed = (datasetId, root = null, opts: { located?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (root) params.set('root', root);
+  // 'true' (not '1') — the backend parses this as a bool; '1' is a 400.
+  if (opts.located) params.set('located', 'true');
+  const qs = params.toString() ? `?${params.toString()}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
+};
+
+// Cheap geo capability summary that gates the map / 3D-viewer UI affordances.
+// { has_coordinates, has_models, has_3d_geometry, has_3d, element_count }.
+export interface GeoStats {
+  has_coordinates: boolean;
+  has_models: boolean;
+  has_3d_geometry: boolean;
+  has_3d: boolean;
+  element_count: number;
+}
+export const getGeoStats = (datasetId): Promise<GeoStats> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/geo-stats`);
+// OR-aggregated geo capability across a whole browse scope in ONE request, so the
+// Map/3D gate costs a single probe instead of one getGeoStats per dataset.
+export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
+  const qs = new URLSearchParams({ datasets: (datasetIds || []).join(',') }).toString();
+  return request('GET', `/api/geo-stats?${qs}`);
 };
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
@@ -543,7 +643,9 @@ async function executeSparql(url, query) {
     'Accept': graphQ ? 'application/n-triples' : 'application/sparql-results+json',
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(url, { method: 'POST', headers, body: query });
+  // /sparql is rate-limited per IP; retry 429s with the server-suggested delay
+  // so legitimate UI query bursts never surface "Too Many Requests" errors.
+  const res = await fetchRetry429(url, { method: 'POST', headers, body: query });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -577,7 +679,7 @@ export async function nlToSparql(question, schemaHint, currentQuery = null) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/sparql`, {
+  const res = await fetchRetry429(`${API_BASE}/api/llm/sparql`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -600,7 +702,7 @@ export async function llmHealth() {
   try {
     const token = getAccessToken();
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const res = await fetch(`${API_BASE}/api/llm/health`, { headers });
+    const res = await fetchRetry429(`${API_BASE}/api/llm/health`, { headers });
     if (!res.ok) return { reachable: false };
     return res.json(); // { gateway, reachable, detail }
   } catch {
@@ -615,7 +717,7 @@ export async function sendLlmFeedback(signal) {
     const token = getAccessToken();
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    await fetch(`${API_BASE}/api/llm/feedback`, {
+    await fetchRetry429(`${API_BASE}/api/llm/feedback`, {
       method: 'POST',
       headers,
       body: JSON.stringify(signal),
@@ -634,7 +736,7 @@ export async function llmChat(messages, model = null) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/chat`, {
+  const res = await fetchRetry429(`${API_BASE}/api/llm/chat`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -685,6 +787,37 @@ export async function llmChatStream(messages, { model = null, signal, onEvent } 
   }
   throw new ApiError('stream ended unexpectedly');
 }
+
+// ─── Spark chat history + memory (auth required; guests keep no history) ────
+export const llmConversations = () =>
+  request('GET', '/api/llm/conversations'); // { conversations: [{id,title,created_at,updated_at,message_count}] }
+export const llmCreateConversation = (title = '') =>
+  request('POST', '/api/llm/conversations', { title });
+export const llmGetConversation = (id) =>
+  request('GET', `/api/llm/conversations/${encodeURIComponent(id)}`); // { id, messages: [{role,content,queries?,model?,stopped?,created_at}] }
+export const llmRenameConversation = (id, title) =>
+  request('PATCH', `/api/llm/conversations/${encodeURIComponent(id)}`, { title });
+export const llmDeleteConversation = (id) =>
+  request('DELETE', `/api/llm/conversations/${encodeURIComponent(id)}`);
+// message: { role, content, queries?, model?, stopped? }
+export const llmAppendMessage = (id, message) =>
+  request('POST', `/api/llm/conversations/${encodeURIComponent(id)}/messages`, message);
+export const llmMemory = () =>
+  request('GET', '/api/llm/memory'); // { instructions, enabled }
+export const llmSetMemory = (instructions, enabled = true) =>
+  request('PUT', '/api/llm/memory', { instructions, enabled });
+
+// ─── Admin: LLM request telemetry (admin only; server enforces) ─────────────
+export const adminLlmRequests = (opts: { limit?: number; offset?: number; status?: string; endpoint?: string; user_id?: string; since?: string } = {}) => {
+  const p = new URLSearchParams();
+  for (const k of ['limit', 'offset', 'status', 'endpoint', 'user_id', 'since'] as const) {
+    if (opts[k] !== undefined && opts[k] !== '') p.set(k, String(opts[k]));
+  }
+  const qs = p.toString();
+  return request('GET', `/api/admin/llm/requests${qs ? `?${qs}` : ''}`); // { requests, limit, offset }
+};
+export const adminLlmStats = () =>
+  request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
 
 // SHACL
 // Returns { report, run_id, ran_at } — the run is persisted server-side.
@@ -869,7 +1002,7 @@ export async function aiShacl({ task, description, turtle, modelContext, model }
   const token = getAccessToken();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}/api/llm/shacl`, {
+  const res = await fetchRetry429(`${API_BASE}/api/llm/shacl`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -892,7 +1025,7 @@ export function deleteGraph(graphIri) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'DELETE', headers }).then(async (res) => {
+  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'DELETE', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return true;
   });
@@ -994,7 +1127,7 @@ export function exportGraph(graphIri) {
   const token = getAccessToken();
   const headers = { 'Accept': 'text/turtle' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'GET', headers }).then(async (res) => {
+  return fetchRetry429(`/store?graph=${encodeURIComponent(graphIri)}`, { method: 'GET', headers }).then(async (res) => {
     if (!res.ok) throw new Error(await res.text());
     return res.text();
   });
@@ -1008,11 +1141,12 @@ export async function sparqlUpdate(update) {
     if (token) h['Authorization'] = `Bearer ${token}`;
     return h;
   }
-  let res = await fetch('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+  // A 429 rejection happens before the update executes, so retrying is safe.
+  let res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
   if (res.status === 401 && getRefreshToken()) {
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      res = await fetch('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
+      res = await fetchRetry429('/sparql', { method: 'POST', headers: buildHeaders(), body: update });
     } else {
       clearTokens();
       window.dispatchEvent(new CustomEvent('auth-expired'));

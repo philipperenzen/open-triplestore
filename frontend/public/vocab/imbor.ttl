@@ -1,0 +1,76 @@
+# IMBOR (Informatiemodel Beheer Openbare Ruimte) — CROW's Dutch information model
+# for the management of public space: the asset types, attributes and maintenance
+# status concepts that municipalities use to register and maintain street furniture,
+# green spaces, pavements and other public-space assets. This is a small,
+# hand-authored EXCERPT bundled so IMBOR terms in the demo data render with
+# definitions; it is NOT the full IMBOR and IRIs are modelled plausibly against the
+# IMBOR namespace rather than copied verbatim.
+# Source: https://data.crow.nl/imbor/  (ns https://data.crow.nl/imbor/def/)
+@prefix imbor: <https://data.crow.nl/imbor/def/> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+
+<https://data.crow.nl/imbor/def/> a owl:Ontology ;
+  rdfs:label "CROW IMBOR — excerpt"@en ;
+  rdfs:comment "A hand-authored excerpt of CROW's Information Model for the Management of Public Space (IMBOR), describing managed public-space assets and a few core attributes. Not the complete IMBOR."@en ;
+  owl:versionInfo "excerpt" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+imbor:Beheerobject a owl:Class ;
+  rdfs:label "Managed object"@en, "Beheerobject"@nl ;
+  rdfs:comment "A physical asset in the public space that is registered and maintained by a manager, such as a tree, a bench, a road segment or a streetlight."@en ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+imbor:Areaal a owl:Class ;
+  rdfs:label "Asset area"@en, "Areaal"@nl ;
+  rdfs:comment "The collection of managed objects within a defined administrative or geographic area."@en ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+imbor:Onderhoudsstatus a owl:Class ;
+  rdfs:label "Maintenance status"@en, "Onderhoudsstatus"@nl ;
+  rdfs:comment "A coded condition or quality level recorded for a managed object as the outcome of an inspection, used to plan maintenance."@en ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+imbor:Materiaal a owl:Class ;
+  rdfs:label "Material"@en, "Materiaal"@nl ;
+  rdfs:comment "The material a managed object is made of, for example concrete, steel, wood or asphalt."@en ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+imbor:heeftOnderhoudsstatus a owl:ObjectProperty ;
+  rdfs:label "has maintenance status"@en, "heeft onderhoudsstatus"@nl ;
+  rdfs:comment "Relates a managed object to its recorded maintenance status."@en ;
+  rdfs:domain imbor:Beheerobject ;
+  rdfs:range imbor:Onderhoudsstatus ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+imbor:heeftMateriaal a owl:ObjectProperty ;
+  rdfs:label "has material"@en, "heeft materiaal"@nl ;
+  rdfs:comment "Relates a managed object to the material it is made of."@en ;
+  rdfs:domain imbor:Beheerobject ;
+  rdfs:range imbor:Materiaal ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+imbor:behoortTotAreaal a owl:ObjectProperty ;
+  rdfs:label "belongs to area"@en, "behoort tot areaal"@nl ;
+  rdfs:comment "Relates a managed object to the asset area it is part of."@en ;
+  rdfs:domain imbor:Beheerobject ;
+  rdfs:range imbor:Areaal ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+# ── Datatype properties ──────────────────────────────────────────────────────
+
+imbor:beheerder a owl:DatatypeProperty ;
+  rdfs:label "manager"@en, "beheerder"@nl ;
+  rdfs:comment "The organisation or party responsible for managing and maintaining a managed object."@en ;
+  rdfs:domain imbor:Beheerobject ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .
+
+imbor:aanlegjaar a owl:DatatypeProperty ;
+  rdfs:label "year of placement"@en, "aanlegjaar"@nl ;
+  rdfs:comment "The year in which a managed object was placed or constructed."@en ;
+  rdfs:domain imbor:Beheerobject ;
+  rdfs:isDefinedBy <https://data.crow.nl/imbor/def/> .

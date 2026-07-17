@@ -1,10 +1,14 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import { delayedLoading } from '../lib/delayedLoading';
   import { autofocus } from '../lib/actions/autofocus.js';
-  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth } from '../lib/api.js';
-  import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
+  import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth, getViewerFeed, getGeoStatsBatch } from '../lib/api.js';
+  import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, triplesToResults } from '../lib/rdf-utils.js';
   import DataTable from '../components/DataTable.svelte';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
+  // GraphCanvas (cytoscape) and ViewerMap (maplibre + leaflet) are loaded lazily
+  // the first time the graph/map view is opened — see graphCanvasMod/viewerMapMod
+  // below. The table view (default) then never pulls those vendor bundles into the
+  // /browse download.
   import ContextMenu from '../components/ContextMenu.svelte';
   import FacetRail from '../components/browse/FacetRail.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
@@ -13,7 +17,7 @@
     Download, Copy, ChevronLeft, ChevronRight, Search, X,
     Network, Table2, Maximize2, Share2, Unlink, ExternalLink, Plus,
     FileText, Image, Filter, LayoutList, Building2, Database, History,
-    Sparkles, SlidersHorizontal, Code2, HelpCircle,
+    Sparkles, SlidersHorizontal, Code2, HelpCircle, Map as MapIcon, Boxes,
   } from 'lucide-svelte';
   import { slide } from 'svelte/transition';
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
@@ -24,14 +28,89 @@
   import Combobox from '../components/Combobox.svelte';
 
   // ─── View mode ────────────────────────────────────────────────────────────
-  let viewMode = 'table'; // 'table' | 'graph'
+  let viewMode = 'table'; // 'table' | 'graph' | 'map'
+  // Map data is the WHOLE scope's geometry (not the current page): the merged
+  // viewer feed of every scoped dataset — the same rich ViewerElement[] the
+  // dataset viewer feeds to ViewerMap (2D vectors + to-scale 3D models).
+  let mapElements = [];
+  let mapLoading = false;
+  let mapLoadedKey = ''; // scope signature the current mapElements reflect
+  const scopeKey = () => scopedDatasetIds.slice().sort().join(',');
+
+  async function loadMapElements() {
+    const key = scopeKey();
+    if (mapLoadedKey === key && mapElements.length) return; // already current
+    mapLoading = true;
+    try {
+      const feeds = await Promise.all(
+        scopedDatasetIds.map((id) =>
+          getViewerFeed(id).then((d) => d?.elements || []).catch(() => [])
+        )
+      );
+      if (scopeKey() !== key) return; // scope changed mid-flight — drop stale result
+      // Dedupe by id across datasets (BOT/IFC ids could in principle recur).
+      const byId = new Map();
+      for (const el of feeds.flat()) if (el && el.id != null && !byId.has(el.id)) byId.set(el.id, el);
+      mapElements = [...byId.values()];
+      mapLoadedKey = key;
+    } finally {
+      if (scopeKey() === key) mapLoading = false;
+    }
+  }
+
   function switchView(mode) {
     viewMode = mode;
     syncViewToUrl(mode);
     if (mode === 'graph' && graphNodes.length === 0 && graphEdges.length === 0 && !graphLoading) {
       fetchGraphData();
     }
+    if (mode === 'map') loadMapElements();
   }
+  // Reload the map when the scope changes while the Map tab is already open.
+  $: if (viewMode === 'map' && scopedDatasetIds && scopeKey() !== mapLoadedKey && !mapLoading) {
+    loadMapElements();
+  }
+
+  // ─── Map view gating (SCOPE-aware) ────────────────────────────────────────
+  // The Map tab is offered when the browse SCOPE — not just the current page —
+  // carries geometry. One batched probe OR-aggregates the capability across the
+  // whole scope (scopedDatasetIds already expands org items to their datasets):
+  // the server unions the datasets' graphs and answers in a single request, so a
+  // geometry-free scope costs one ASK no matter how many datasets it spans.
+  let scopeGeoStats = null; // GeoStats | null (null = loading or failed)
+  let geoStatsKey = ''; // scope signature scopeGeoStats reflects (de-dupes + races)
+  let geoStatsSettledKey = ''; // scope signature whose probe has resolved
+  async function loadGeoStats(k, ids) {
+    let stats = null;
+    try {
+      stats = await getGeoStatsBatch(ids);
+    } catch {
+      stats = null;
+    }
+    if (geoStatsKey !== k) return; // scope changed mid-load — drop stale result
+    scopeGeoStats = stats;
+    geoStatsSettledKey = k;
+  }
+  $: {
+    const k = scopedDatasetIds.slice().sort().join(',');
+    if (k && k !== geoStatsKey) {
+      geoStatsKey = k;
+      scopeGeoStats = null; // fall back to pageCanMap until the new probe resolves
+      loadGeoStats(k, scopedDatasetIds.slice());
+    }
+  }
+  $: geoStatsSettled =
+    scopedDatasetIds.length > 0 &&
+    geoStatsSettledKey === scopedDatasetIds.slice().sort().join(',');
+  $: scopeHasGeo = !!(scopeGeoStats && (scopeGeoStats.has_coordinates || scopeGeoStats.has_3d));
+  $: scopeHas3d = !!(scopeGeoStats && scopeGeoStats.has_3d);
+  // Per-page fallback: even before the scope probe settles, a page that itself
+  // carries WGS84 rows can already offer the map (graceful; old behaviour).
+  $: pageCanMap = detectGeoBindings(triplesToResults(triples));
+  $: canMap = scopeHasGeo || pageCanMap;
+  // Only bump the user off Map once the scope probe has SETTLED and there is
+  // genuinely no geo — never mid-load (that would bounce them during the probe).
+  $: if (viewMode === 'map' && geoStatsSettled && !canMap && !pageCanMap) switchView('table');
 
   function syncViewToUrl(mode) {
     if (typeof window === 'undefined') return;
@@ -107,6 +186,14 @@
   // ─── Graph (inline) ───────────────────────────────────────────────────────
   let graphCanvas;
   let activeLayout = 'cose-bilkent';
+
+  // Lazily import the heavy view-only components the first time their view is
+  // opened. Memoised (the `!mod` guard) so a data update inside the view never
+  // re-imports and remounts the canvas — only the initial open pays the load.
+  let graphCanvasMod;
+  let viewerMapMod;
+  $: if (viewMode === 'graph' && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
+  $: if (viewMode === 'map' && !viewerMapMod) viewerMapMod = import('../components/viewer/ViewerMap.svelte');
 
   let graphNodes = [];
   let graphEdges = [];
@@ -833,6 +920,14 @@
     flushOnHide(); // client-side route change unmounts us — capture final state
   });
 
+  // Debounced loading: only show the skeleton once a fetch has run past the
+  // motion threshold, so quick page/filter changes keep the current rows visible
+  // instead of flashing a skeleton (then the new rows animate in via DataTable).
+  const tableBusy = delayedLoading();
+  const showSkeleton = tableBusy.show;
+  $: tableBusy.set(loading);
+  onDestroy(() => tableBusy.cancel());
+
   onMount(async () => {
     // Load prefix.cc prefixes in background (non-blocking)
     loadPrefixCcPrefixes();
@@ -1336,6 +1431,11 @@
         <button class="vtoggle-btn" class:vtoggle-active={viewMode === 'graph'}
           on:click={() => switchView('graph')} title={$i18nT('pages.tripleBrowser.graphView')}
         ><Network size={14} /><span class="vtoggle-label">{$i18nT('pages.tripleBrowser.graph')}</span></button>
+        {#if canMap}
+          <button class="vtoggle-btn" class:vtoggle-active={viewMode === 'map'}
+            on:click={() => switchView('map')} title={$i18nT('pages.tripleBrowser.mapView')}
+          >{#if scopeHas3d}<Boxes size={14} />{:else}<MapIcon size={14} />{/if}<span class="vtoggle-label">{scopeHas3d ? $i18nT('pages.tripleBrowser.mapAnd3dLabel') : $i18nT('pages.tripleBrowser.mapLabel')}</span></button>
+        {/if}
       </div>
 
       <span class="count-badge">
@@ -1634,7 +1734,7 @@
       {/if}
 
       <!-- Facet rail (left) + the active view (right) -->
-      <div class="browser-body" class:body-graph={viewMode === 'graph'}>
+      <div class="browser-body" class:body-graph={viewMode === 'graph'} class:body-map={viewMode === 'map'}>
         <FacetRail
           facets={facets}
           loading={facetsLoading}
@@ -1653,7 +1753,7 @@
         </div>
       {/if}
 
-      {#if loading}
+      {#if $showSkeleton}
         <div class="skeleton-rows">
           {#each Array(10) as _}
             <div class="skeleton-row">
@@ -1664,6 +1764,11 @@
             </div>
           {/each}
         </div>
+      {:else if loading && filteredTriples.length === 0}
+        <!-- A fetch is in flight but hasn't crossed the skeleton delay yet and we
+             have no prior rows to keep showing: hold a calm placeholder rather
+             than flashing the "store empty" state. -->
+        <div class="table-placeholder" aria-hidden="true"></div>
       {:else if filteredTriples.length === 0}
         <div class="empty-state">
           {#if tableSearch}
@@ -1737,24 +1842,28 @@
             <p class="graph-empty-sub">{$i18nT('pages.tripleBrowser.noGraphDataSub')}</p>
           </div>
         {:else}
-          <GraphCanvas
-            bind:this={graphCanvas}
-            nodes={graphNodes}
-            edges={graphEdges}
-            layout={activeLayout}
-            height="100%"
-            loading={graphLoading && graphNodes.length === 0}
-            loadingMore={graphLoadingMore}
-            highlightIds={graphHighlightIds}
-            expandedNodes={browseExpandedIris}
-            expandingNode={browseExpandingUri}
-            exhaustedNodes={browseExhaustedIris}
-            on:nodeExpand={handleBrowseNodeExpand}
-            on:nodeOpen={handleBrowseNodeOpen}
-            on:edgeClick={handleBrowseEdgeClick}
-            on:nodeContextMenu={handleBrowseNodeContextMenu}
-            on:canvasContextMenu={handleBrowseCanvasContextMenu}
-          />
+          {#await graphCanvasMod then GC}
+            {#if GC}
+              <svelte:component this={GC.default}
+                bind:this={graphCanvas}
+                nodes={graphNodes}
+                edges={graphEdges}
+                layout={activeLayout}
+                height="100%"
+                loading={graphLoading && graphNodes.length === 0}
+                loadingMore={graphLoadingMore}
+                highlightIds={graphHighlightIds}
+                expandedNodes={browseExpandedIris}
+                expandingNode={browseExpandingUri}
+                exhaustedNodes={browseExhaustedIris}
+                on:nodeExpand={handleBrowseNodeExpand}
+                on:nodeOpen={handleBrowseNodeOpen}
+                on:edgeClick={handleBrowseEdgeClick}
+                on:nodeContextMenu={handleBrowseNodeContextMenu}
+                on:canvasContextMenu={handleBrowseCanvasContextMenu}
+              />
+            {/if}
+          {/await}
         {/if}
         {#if browseGraphHint}
           <div class="graph-hint" role="status">{browseGraphHint}</div>
@@ -1763,6 +1872,30 @@
           <div class="edge-card">
             <button class="edge-card-x" on:click={() => (browseEdgePredicate = null)} title={$i18nT('system.close')} aria-label={$i18nT('system.close')}>✕</button>
             <TermDefinitionCard iri={browseEdgePredicate} variant="rich" />
+          </div>
+        {/if}
+      </div>
+
+    <!-- ─── Map view ─────────────────────────────────────────────────────────── -->
+    {:else if viewMode === 'map'}
+      <div class="map-area">
+        {#if mapElements.length > 0}
+          {#await viewerMapMod then VM}
+            {#if VM}
+              <svelte:component this={VM.default} elements={mapElements} height="100%"
+                on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && !e.detail.id.startsWith('_:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
+            {/if}
+          {/await}
+        {:else if mapLoading}
+          <div class="graph-empty">
+            <MapIcon size={52} strokeWidth={1} />
+            <p class="graph-empty-title">{$i18nT('pages.tripleBrowser.mapLoading')}</p>
+          </div>
+        {:else}
+          <div class="graph-empty">
+            <MapIcon size={52} strokeWidth={1} />
+            <p class="graph-empty-title">{$i18nT('pages.tripleBrowser.noMappable')}</p>
+            <p class="graph-empty-sub">{$i18nT('pages.tripleBrowser.noMappableSub')}</p>
           </div>
         {/if}
       </div>
@@ -1994,6 +2127,9 @@
      graph grows to take the rest of the space (rather than a fixed 62vh box).
      Reset the table-mode max-height so the graph can grow taller than 72vh. */
   .browser-body.body-graph { height: calc(100vh - 235px); min-height: 460px; max-height: none; }
+  /* Map view: same viewport-bounded layout as the graph so the ViewerMap fills
+     the remaining height (it sizes itself to 100% of .map-area). */
+  .browser-body.body-map { height: calc(100vh - 235px); min-height: 460px; max-height: none; }
   .view-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
   /* ─── View toggle ────────────────────────────────────────────────────────── */
@@ -2309,6 +2445,10 @@
   .graph-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; }
   /* Inside the viewport-bounded body the graph fills the remaining height. */
   .body-graph .graph-area { height: auto; flex: 1 1 auto; min-height: 0; }
+  /* Map view shares the graph's framing: a fixed box by default, growing to
+     fill the viewport-bounded body when the Map tab is active. */
+  .map-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; display: flex; }
+  .body-map .map-area { height: auto; flex: 1 1 auto; min-height: 0; }
   .graph-hint {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
     background: rgba(15, 23, 42, 0.92); color: #f1f5f9; font-size: 0.78rem;
@@ -2354,6 +2494,8 @@
   .empty-state a { color: #4a90d9; }
   .muted-tip { font-size: 0.8rem; color: #94a3b8; margin: 0.25rem 0; }
 
+  /* Calm holder shown during a sub-delay first load (no skeleton, no flash). */
+  .table-placeholder { min-height: 220px; }
   .skeleton-rows { padding: 0.5rem 0; }
   .skeleton-row { display: flex; gap: 1rem; padding: 0.55rem 0.75rem; border-bottom: 1px solid #f0f0f0; align-items: center; }
   .skel { height: 12px; border-radius: 6px; background: linear-gradient(90deg, #e8e8e8 25%, #f5f5f5 50%, #e8e8e8 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; }
