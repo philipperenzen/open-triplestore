@@ -50,6 +50,7 @@ pub mod prefixes;
 pub mod reasoning;
 pub mod rml;
 pub mod saved_queries;
+pub mod seed_bundles;
 pub mod server;
 pub mod shacl;
 pub mod shacl_studio;

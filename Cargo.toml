@@ -193,6 +193,9 @@ sfcgal = { version = "0.7", optional = true }
 csv = "1"
 quick-xml = "0.37"
 
+# Seed bundle manifests (src/seed_bundles/manifest.rs)
+toml = "0.8"
+
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
 imagesize = "0.13"

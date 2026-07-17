@@ -28,6 +28,7 @@ mod prefixes;
 mod reasoning;
 mod rml;
 mod saved_queries;
+mod seed_bundles;
 mod server;
 mod shacl;
 mod shacl_studio;
