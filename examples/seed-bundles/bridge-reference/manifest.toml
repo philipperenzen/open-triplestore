@@ -1,0 +1,49 @@
+# Reference seed bundle — the template a downstream operator copies to add an
+# org-owned dataset to their instance without patching any source file. Point
+# `--seed-dir` / `SEED_DIR` at a directory containing one or more folders like
+# this one; see docs/plugins.md for the full manifest reference.
+#
+# This exact bundle is also loaded by `src/seed_bundles::tests::
+# reference_bundle_loads_from_examples_dir`, so the on-disk manifest + payload
+# parsing path runs in CI on every change.
+
+id = "bridge-reference"
+
+# Optional — set to disable this bundle without removing it from --seed-dir.
+# Defaults to SEED_BUNDLE_<ID> (uppercased, `-` -> `_`) when omitted.
+opt_out_env = "SEED_BRIDGE_REFERENCE"
+
+[organisation]
+slug = "seed-bundles-reference"
+name = "Seed Bundles Reference"
+description = "Owns the example dataset shipped as the seed-bundle reference implementation."
+
+[[datasets]]
+slug = "bridge-reference"
+name = "Bridge Reference"
+description = "A tiny worked example: a Bridge/River model plus one instance, split across a Turtle model payload and a TriG instances payload."
+visibility = "public"
+
+# A single-graph payload: format is inferred from the file extension.
+[[datasets.graphs]]
+iri = "https://example.org/seed-bundles/bridge/model"
+role = "model"
+file = "model.ttl"
+
+# Declared so it is registered to the dataset (visible in its graph list and
+# DCAT metadata) even though its triples arrive via the quads payload below,
+# not a per-graph `file`.
+[[datasets.graphs]]
+iri = "https://example.org/seed-bundles/bridge/instances"
+role = "instances"
+
+# A multi-graph payload — the named graph(s) it populates are declared inside
+# the file itself (TriG/N-Quads), not in the manifest.
+[[datasets.quads]]
+file = "instances.trig"
+
+[[datasets.saved_queries]]
+name = "All bridges"
+slug = "all-bridges"
+description = "Every ex:Bridge instance and its length."
+sparql = "PREFIX ex: <https://example.org/seed-bundles/bridge#>\nSELECT ?bridge ?length WHERE { ?bridge a ex:Bridge ; ex:length ?length }"

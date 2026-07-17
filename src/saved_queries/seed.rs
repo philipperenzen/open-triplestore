@@ -18,17 +18,15 @@
 //! or creating one service is logged and skipped without aborting the rest. Opt
 //! out with `SEED_STANDARDS_DEMO=false`.
 
-use bytes::Bytes;
-use uuid::Uuid;
+use std::borrow::Cow;
 
-use crate::auth::models::{OwnerType, Role, SystemRole, Visibility};
-use crate::auth::{dataset_graph, org_graph};
+use bytes::Bytes;
+
+use crate::auth::models::Visibility;
+use crate::seed_bundles::{self, Bundle, BundleDataset, BundleGraph, OrgSpec};
 use crate::server::AppState;
 
-use super::metadata;
-use super::models::QueryScope;
-use super::seed_data::{self, Fmt, GraphSpec, DEMO_BASE, ORG_NAME, ORG_SLUG};
-use super::store::SavedQueryStore;
+use super::seed_data::{self, DEMO_BASE, ORG_NAME, ORG_SLUG};
 
 const ORG_DESCRIPTION: &str =
     "Public reference deployment showcasing every standard Open Triplestore implements: \
@@ -125,181 +123,72 @@ pub fn seed_open_triplestore(state: &AppState) {
     }
 }
 
+/// Build the bundled standards demo as a [`Bundle`] so it runs through the same
+/// generic engine ([`seed_bundles::apply_bundle`]) as an on-disk `--seed-dir`
+/// bundle — this is the "reference bundle": the one every CI run that exercises
+/// the demo seed also exercises the shared seed-bundle code path.
+fn build_bundle() -> Bundle {
+    let datasets = seed_data::datasets()
+        .iter()
+        .map(|ds| {
+            let graphs = ds
+                .graphs
+                .iter()
+                .map(|g| BundleGraph {
+                    iri: format!("{DEMO_BASE}/{}/{}", ds.slug, g.suffix),
+                    role: Some(g.role),
+                    data: Some((Cow::Borrowed(g.data), g.fmt)),
+                })
+                .collect();
+            BundleDataset {
+                slug: ds.slug.to_string(),
+                name: ds.name.to_string(),
+                description: Some(ds.description.to_string()),
+                visibility: Visibility::Public,
+                graphs,
+                quads: Vec::new(),
+                saved_queries: seed_data::services_for(ds.slug),
+            }
+        })
+        .collect();
+
+    Bundle {
+        id: "open-triplestore-standards-demo".to_string(),
+        // Gating already happens in `seed_open_triplestore` before this bundle
+        // is even built; recorded here too so the bundle is self-describing.
+        opt_out_env: Some("SEED_STANDARDS_DEMO".to_string()),
+        org: OrgSpec {
+            slug: ORG_SLUG.to_string(),
+            name: ORG_NAME.to_string(),
+            description: Some(ORG_DESCRIPTION.to_string()),
+        },
+        datasets,
+    }
+}
+
 fn try_seed(state: &AppState) -> anyhow::Result<()> {
-    // Owner of the *owner-attributed* demo content (saved-query services, the IFC
-    // import, org membership): a super_admin (preferred) or any active admin.
-    //
-    // The organisation itself and all its PUBLIC data — datasets, named graphs,
-    // metadata, branding — are created regardless of whether an admin exists yet,
-    // so on a brand-new install they appear on first boot, before anyone has
-    // registered, and logged-out visitors see the public demo immediately. Only
-    // the content that must be attributed to a user waits: it is back-filled
-    // idempotently once the first admin exists (the registration handler reseeds,
-    // and every boot reseeds anyway).
-    let owner = {
-        let users = state.auth_db.list_users()?;
-        users
-            .iter()
-            .find(|u| matches!(u.role, SystemRole::SuperAdmin) && u.is_active)
-            .or_else(|| users.iter().find(|u| u.role.is_admin() && u.is_active))
-            .cloned()
-    };
+    // Snapshot the org's existing branding BEFORE the generic engine runs, so we
+    // know whether to seed fresh artwork or only back-fill what's missing on an
+    // install seeded before branding shipped.
+    let existing_org = state.auth_db.get_organisation_by_slug(ORG_SLUG)?;
 
-    // Resolve or create the public demo organisation. We deliberately do NOT bail
-    // out when it already exists: an earlier boot may have created the org and
-    // registered the demo graphs but failed to load their triples (an interrupted
-    // or lock-contended seed), leaving registered-but-empty public graphs that read
-    // as "no data" to logged-out users. So the whole seed runs idempotently every
-    // boot and back-fills whatever is missing, without ever clobbering admin edits.
-    let org_id = match state.auth_db.get_organisation_by_slug(ORG_SLUG)? {
-        Some(existing) => {
-            // Back-fill org branding for installs seeded before branding shipped.
-            seed_org_branding(
-                state,
-                &existing.id,
-                existing.image_key.is_none(),
-                existing.banner_key.is_none(),
-            );
-            existing.id
-        }
-        None => {
-            let org_id = Uuid::new_v4().to_string();
-            let org = state.auth_db.create_organisation(
-                &org_id,
-                ORG_NAME,
-                ORG_SLUG,
-                Some(ORG_DESCRIPTION),
-                None,
-            )?;
-            org_graph::write_org_metadata_graph(&state.store, &state.base_url, &org, &[]);
-            // Give the public org page a branded logo + banner out of the box.
-            seed_org_branding(state, &org_id, true, true);
-            org_id
-        }
-    };
+    let bundle = build_bundle();
+    let report = seed_bundles::apply_bundle(state, &bundle)?;
 
-    // Make the first admin an Admin member of the org. Idempotent (INSERT OR
-    // REPLACE), so it's safe whether we just created the org or are back-filling
-    // membership on a later reseed once the first admin exists. Skipped entirely
-    // on a brand-new install with no users yet — the org stands member-less until
-    // then, which is fine for a public demo org.
-    if let Some(ref owner) = owner {
-        let _ = state
-            .auth_db
-            .add_org_member(&owner.id, &org_id, Role::Admin);
+    match existing_org {
+        Some(existing) => seed_org_branding(
+            state,
+            &report.org_id,
+            existing.image_key.is_none(),
+            existing.banner_key.is_none(),
+        ),
+        None => seed_org_branding(state, &report.org_id, true, true),
     }
 
-    let sq = SavedQueryStore::new(state.auth_db.pool());
-    let mut graph_count = 0usize;
-    let mut backfilled = 0usize;
-    let mut service_count = 0usize;
-
-    for ds in seed_data::datasets() {
-        // Use the curated, URL-safe slug as the dataset id so the minted IRI
-        // (`{base}/dataset/{id}`) is human-readable — e.g. `…/dataset/spatial`
-        // rather than `…/dataset/<uuid>`. Slugs are unique across the demo set.
-        let ds_id = ds.slug.to_string();
-        let existed = matches!(state.auth_db.get_dataset(&ds_id), Ok(Some(_)));
-        if !existed {
-            if let Err(e) = state.auth_db.create_dataset(
-                &ds_id,
-                ds.name,
-                Some(ds.description),
-                OwnerType::Organisation,
-                &org_id,
-                Visibility::Public,
-                None,
-            ) {
-                tracing::warn!(
-                    "open-triplestore seed: dataset '{}' create failed: {e}",
-                    ds.slug
-                );
-                continue;
-            }
-            // Themed icon + animated banner preset so the public page isn't blank.
-            seed_dataset_branding(state, &ds_id, ds.slug, true, true);
-        }
-
-        for g in ds.graphs {
-            let graph_iri = format!("{DEMO_BASE}/{}/{}", ds.slug, g.suffix);
-            // (Re)load the bundled data only when the target graph is empty: either a
-            // fresh seed, or a previous seed that registered the graph but never
-            // populated it. A graph that already holds triples is left untouched, so
-            // an admin's edits to demo data are never overwritten.
-            let is_empty = state
-                .store
-                .graph_count_cached(Some(&graph_iri))
-                .unwrap_or(0)
-                == 0;
-            if is_empty {
-                if let Err(e) = load_graph(state, &graph_iri, g) {
-                    tracing::warn!("open-triplestore seed: graph <{graph_iri}> load failed: {e}");
-                    continue;
-                }
-                if existed {
-                    backfilled += 1;
-                }
-            }
-            let _ = state.auth_db.add_dataset_graph(&ds_id, &graph_iri);
-            let _ = state
-                .auth_db
-                .set_dataset_graph_role(&ds_id, &graph_iri, Some(g.role));
-            graph_count += 1;
-        }
-
-        // Project the dataset's DCAT/VoID metadata graph so it is discoverable
-        // as linked data (mirrors what the bulk-import path does).
-        if let Ok(Some(dsrec)) = state.auth_db.get_dataset(&ds_id) {
-            let entries = state
-                .auth_db
-                .list_dataset_graph_entries(&ds_id)
-                .unwrap_or_default();
-            dataset_graph::write_dataset_metadata_graph(
-                &state.store,
-                &state.base_url,
-                &dsrec,
-                &entries,
-            );
-        }
-
-        // Saved-query services are attributed to the owning admin, so they wait
-        // until one exists (back-filled on the reseed after the first admin
-        // registers). Create only when the dataset has none yet, so a reseed on
-        // every boot doesn't pile up duplicate services.
-        if let Some(ref owner) = owner {
-            let has_services = sq
-                .list(QueryScope::Dataset, &ds_id)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if !has_services {
-                for req in seed_data::services_for(ds.slug) {
-                    match sq.create(QueryScope::Dataset, &ds_id, &req, &owner.id) {
-                        Ok(svc) => {
-                            metadata::record_service(&state.store, &state.base_url, &svc);
-                            metadata::record_revision(
-                                &state.store,
-                                &state.base_url,
-                                &svc.id,
-                                svc.current_revision,
-                                req.version_name.as_deref(),
-                                req.note.as_deref(),
-                                svc.sparql.as_deref().unwrap_or(&req.sparql),
-                                "manual",
-                                &svc.created_by,
-                                &svc.created_at,
-                            );
-                            service_count += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "open-triplestore seed: service '{}' failed: {e}",
-                                req.name
-                            )
-                        }
-                    }
-                }
-            }
-        }
+    // Themed icon + animated banner preset for each dataset THIS run created
+    // (never for a pre-existing dataset, so an admin's chosen artwork stands).
+    for slug in &report.datasets_created {
+        seed_dataset_branding(state, slug, slug, true, true);
     }
 
     // The Schependomlaan IFC (layered Dutch BIM demo: BOT topology + full ifcOWL
@@ -308,7 +197,7 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     // owner it is also stored as a downloadable asset; without one (brand-new
     // install) the asset is skipped and the FOG file reference points at the
     // source URL — the linked data + decomposition are present either way.
-    seed_ifc_buildings(state, owner.as_ref().map(|o| o.id.as_str()).unwrap_or(""));
+    seed_ifc_buildings(state, report.owner_id.as_deref().unwrap_or(""));
 
     // Lift the bundled CityJSON sample neighbourhoods (the real 3DBAG block + the
     // authored LoD2 zones) into the store as volumetric WKT-Z, so the 3D-Tiles
@@ -317,25 +206,22 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     // after the IFC buildings so its graphs register on the same boot.
     seed_cityjson_volumes(state);
 
+    // Unconditional (unlike `apply_bundle`'s internal marking, which only fires
+    // for its own graphs): `seed_cityjson_volumes` loads store data directly
+    // without going through a handler that marks the index dirty itself.
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
-
-    // Back-filled graph data changes what each principal can see/count, so drop the
-    // accessible-graph cache to reflect it immediately rather than after the TTL.
-    if backfilled > 0 {
-        state.auth_db.invalidate_accessible_graphs_cache();
-    }
 
     tracing::info!(
         "Seeded/verified '{}' organisation ({}): {} datasets, {} graphs ({} back-filled), {} new services",
         ORG_NAME,
-        org_id,
+        report.org_id,
         seed_data::datasets().len(),
-        graph_count,
-        backfilled,
-        service_count
+        report.graphs_registered,
+        report.graphs_backfilled,
+        report.services_created
     );
-    if owner.is_none() {
+    if report.owner_id.is_none() {
         tracing::info!(
             "open-triplestore seed: org + public data created on first load; saved-query \
              services, the IFC demo and org membership are deferred until the first admin registers"
@@ -694,36 +580,12 @@ fn seed_dataset_branding(
     }
 }
 
-/// Load one graph's bundled data into its named graph. Quoted-triple data is
-/// loaded through a SPARQL-star `INSERT DATA`; everything else goes through the
-/// Graph Store PUT path in its declared serialization.
-fn load_graph(state: &AppState, graph_iri: &str, g: &GraphSpec) -> anyhow::Result<()> {
-    match g.fmt {
-        Fmt::SparqlStarUpdate => {
-            state
-                .store
-                .update(&format!(
-                    "INSERT DATA {{ GRAPH <{graph_iri}> {{ {} }} }}",
-                    g.data
-                ))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
-        other => {
-            let format = other
-                .rdf_format()
-                .expect("non-update formats always map to an RdfFormat");
-            state
-                .store
-                .graph_store_put(Some(graph_iri), g.data, format)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::models::{Role, SystemRole};
+    use crate::saved_queries::models::QueryScope;
+    use crate::saved_queries::store::SavedQueryStore;
     use crate::server::AppState;
     use crate::store::TripleStore;
 
