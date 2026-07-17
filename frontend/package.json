@@ -23,7 +23,7 @@
     "@rdfjs/types": "^2.0.1",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@testing-library/jest-dom": "^6.0.0",
-    "@testing-library/svelte": "^5.0.0",
+    "@testing-library/svelte": "^5.4.2",
     "@types/n3": "^1.26.1",
     "@types/proj4": "^2.19.0",
     "@typescript-eslint/parser": "^8.61.0",
