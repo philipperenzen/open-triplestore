@@ -23,6 +23,7 @@ mod imports;
 mod kind_detector;
 #[cfg(feature = "ldp")]
 mod ldp;
+mod netutil;
 mod ogcapi;
 mod plugins;
 mod prefixes;

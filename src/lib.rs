@@ -45,6 +45,7 @@ pub mod imports;
 pub mod kind_detector;
 #[cfg(feature = "ldp")]
 pub mod ldp;
+pub mod netutil;
 pub mod ogcapi;
 pub mod plugins;
 pub mod prefixes;
