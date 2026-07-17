@@ -47,7 +47,10 @@ pub async fn import_ifc_bytes(
     let base = state.base_url.trim_end_matches('/').to_string();
 
     // 1. Keep the original file as a dataset asset — the "download IFC" source.
-    let (asset_id, asset_url) = if state.object_store.is_configured() {
+    // The asset's `uploaded_by` has a FK to users, so a system-owned import (the
+    // first-boot demo seed, which passes an empty owner_id) skips the asset and
+    // falls back to the source URL for the FOG file reference instead.
+    let (asset_id, asset_url) = if state.object_store.is_configured() && !user_id.is_empty() {
         let asset_id = uuid::Uuid::new_v4().to_string();
         let file_name_clean = crate::assets::sanitize_filename(file_name);
         let s3_key = format!("datasets/{dataset_id}/{asset_id}/{file_name_clean}");

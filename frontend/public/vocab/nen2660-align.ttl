@@ -1,0 +1,42 @@
+# NEN 2660-2 alignment axioms — OUR OWN bridge, NOT NEN content.
+#
+# IMPORTANT — licensing: NEN 2660-2 ("Rules for information modelling of the built
+# environment") is a paid Dutch standard published by NEN and is NOT freely
+# redistributable. This file therefore contains NONE of NEN's normative text,
+# labels or class definitions. It declares ONLY Open Triplestore's own alignment
+# statements that reference NEN 2660 IRIs by their identifier, linking the bundled
+# BOT and RWS-OTL excerpt terms to the corresponding upper-level NEN 2660 concepts.
+# The nen2660: IRIs below are used purely as link targets; we assert no NEN content
+# about them. To use the actual NEN 2660 ontology, obtain it from NEN.
+# Source (identifier only): https://www.nen.nl/  (ns https://w3id.org/nen2660/def#)
+@prefix nen2660: <https://w3id.org/nen2660/def#> .
+@prefix bot:     <https://w3id.org/bot#> .
+@prefix otl:     <https://data.rws.nl/otl/def/> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+
+<https://opentriplestore.org/ns/align/nen2660> a owl:Ontology ;
+  rdfs:label "Open Triplestore alignment to NEN 2660-2"@en ;
+  rdfs:comment "Open Triplestore's own alignment axioms linking the bundled BOT and RWS-OTL excerpt terms to NEN 2660-2 upper-level concepts. Contains no NEN content; NEN 2660-2 is a paid, non-redistributable NEN standard referenced here by IRI only."@en ;
+  owl:versionInfo "1.0" .
+
+# ── Our alignment axioms (subClassOf / equivalentClass) ──────────────────────
+# These statements are authored by Open Triplestore. They are deliberately
+# conservative subsumptions to a few NEN 2660 top concepts and do not reproduce
+# any NEN definitions.
+
+otl:Object rdfs:subClassOf nen2660:PhysicalObject ;
+  rdfs:isDefinedBy <https://opentriplestore.org/ns/align/nen2660> .
+
+otl:Kunstwerk rdfs:subClassOf nen2660:BuiltObject ;
+  rdfs:isDefinedBy <https://opentriplestore.org/ns/align/nen2660> .
+
+otl:Onderdeel rdfs:subClassOf nen2660:PhysicalObject ;
+  rdfs:isDefinedBy <https://opentriplestore.org/ns/align/nen2660> .
+
+bot:Element rdfs:subClassOf nen2660:PhysicalObject ;
+  rdfs:isDefinedBy <https://opentriplestore.org/ns/align/nen2660> .
+
+bot:Zone rdfs:subClassOf nen2660:SpaceObject ;
+  rdfs:isDefinedBy <https://opentriplestore.org/ns/align/nen2660> .

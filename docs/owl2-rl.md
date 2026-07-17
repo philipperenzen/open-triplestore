@@ -4,7 +4,7 @@ OWL 2 RL (Rule Language) is a tractable sub-language of OWL 2 that maps cleanly 
 forward chaining.  It covers roughly 80 rules from the W3C OWL 2 RL specification (Table 4 and
 Table 5 in the W3C document) and is complete for OWL 2 RL ontologies.
 
-> **Open Triplestore role names:** TBox content = graph role **Model**; ABox content = graph role **Instances**.
+> **Open Triplestore role names:** class definitions and class axioms = graph role **Model** (the T-Box); ABox content = graph role **Instances**.  Property definitions and relations (the R-Box) belong to the **Vocabulary** role, even though OWL groups them with the TBox for reasoning.  The RL reasoner reasons over the TBox+RBox schema together — the role split concerns where terms are stored and registered, not the reasoning semantics.
 
 OWL 2 RL is suitable for:
 - Reasoning over large ABoxes with moderate TBoxes.

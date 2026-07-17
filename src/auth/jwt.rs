@@ -153,7 +153,7 @@ pub fn generate_api_token() -> String {
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// True for well-known default/placeholder JWT secrets (and the empty string) that must never

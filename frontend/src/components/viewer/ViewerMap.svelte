@@ -18,6 +18,7 @@
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf } from '../../lib/viewer/detect';
   import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
+  import { ifcGuidAt, groupHasGuid, subGeometryForGuids } from '../../lib/viewer/ifc';
   import { styleFor, add3dBuildings, BUILDINGS_LAYER_ID } from '../../lib/viewer/basemaps';
 
   /** @type {import('../../lib/viewer/geometry').ViewerElement[]} */
@@ -44,6 +45,11 @@
   const RAY_B = new THREE.Vector3();
   const RAY_HIT = new THREE.Vector3();
   const RAY = new THREE.Ray();
+  // Precise sub-element picking. A model whose meshes carry IFC GlobalIds (an
+  // IFC building standing on its Site anchor) is one entry but many elements;
+  // a triangle raycast resolves the exact wall/slab/door under the cursor.
+  // Click-only — a per-frame triangle cast over a whole building would jank.
+  const RAYCASTER = new THREE.Raycaster();
 
   let mapEl;
   let map = null;
@@ -67,6 +73,9 @@
   let lastProj = null; // latest map projection matrix (for raycasting)
   let fitted = false;
   let hoverPopup = null;
+  // Client-side model-load progress (web-ifc parse etc.) for the loading chip.
+  let modelsLoading = 0;
+  let modelsFailed = 0;
   // True between a style's 'style.load' and the next setStyle(): addSource /
   // addLayer are safe. (isStyleLoaded() is the wrong guard — it also waits for
   // tiles, so it is still false while 'style.load' fires.)
@@ -84,7 +93,13 @@
   // and folding the mercator offset into a CPU-side double-precision matrix
   // avoids the float32 jitter that placing geometry at raw mercator
   // coordinates causes at street-level zooms.
-  const modelLayer = {
+  // A fresh custom-layer object per add: MapLibre does NOT reliably re-accept the
+  // *same* custom-layer instance after setStyle({diff:false}) (the basemap/theme
+  // swap), so re-adding the one const object silently no-ops — which is why the
+  // 3D models vanished when switching to satellite. A new object each time (its
+  // methods still close over the component-scoped renderer/entries) re-adds
+  // cleanly on every style, raster included.
+  const makeModelLayer = () => ({
     id: 'ots-3d-models',
     type: 'custom',
     renderingMode: '3d',
@@ -109,7 +124,7 @@
       renderer?.dispose();
       renderer = null;
     },
-  };
+  });
 
   /** Model-local (y-up metres, normalised) → mercator placement matrix. */
   function mercMatrixFor(lonLat, meters) {
@@ -156,6 +171,10 @@
   async function attachModel(entry, el) {
     const ref = modelRefOf(el);
     if (!ref) return;
+    // Surface a "loading building model" chip: the 49 MB IFC is parsed by web-ifc
+    // client-side with no progress UI, so until it resolves the building isn't on
+    // the map and the scene reads as empty/broken.
+    modelsLoading += 1;
     try {
       const cached = await loadModel(ref.url, ref.format, { upAxis: ref.upAxis });
       if (entries.get(el.id) !== entry) return; // rebuilt meanwhile
@@ -170,7 +189,13 @@
       // CityJSON/CityGML carry their own georeference — trust it over the WKT dot.
       const anchor = cached.userData.geo?.anchorLonLat ?? entry.anchor;
       if (!anchor) return;
-      const meters = realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
+      // A declared real-world size (ots:modelSizeMeters) wins over guessing from
+      // the model's own units — STL landmarks (Big Ben, Empire State) have
+      // arbitrary units, so without this they fall back to ~90 m and look tiny.
+      const meters =
+        el.size_meters && el.size_meters > 0
+          ? el.size_meters
+          : realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
       const box = new THREE.Box3().setFromObject(model);
       const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.62;
       const holder = new THREE.Group();
@@ -180,12 +205,16 @@
       entry.scene = buildEntryScene(holder);
       entry.meters = meters;
       entry.anchorUsed = anchor;
+      entry.isIfc = ref.format === 'ifc'; // multi-element model → eligible for x-ray
       entry.mercMatrix = mercMatrixFor(anchor, meters);
       themeMaterials();
       highlightModels();
+      updateWalkSuggest(); // a building may have loaded while already zoomed in
       map?.triggerRepaint();
     } catch {
-      /* model failed to load — the vector dot remains */
+      modelsFailed += 1; // model failed to load — the vector dot remains
+    } finally {
+      modelsLoading -= 1;
     }
   }
 
@@ -199,20 +228,284 @@
     map?.triggerRepaint();
   }
 
-  function highlightModels() {
-    for (const [id, e] of entries) {
-      e.modelGroup?.traverse((n) => {
-        if (n.isMesh && n.material && 'emissive' in n.material) {
-          n.material.emissive.setHex(id === selected ? 0xe8590c : 0x000000);
-          n.material.emissiveIntensity = id === selected ? 0.45 : 0;
-        }
-      });
+  const HL_COLOR = 0xff6a00; // vivid highlight for the selected element(s)
+  // Ghost opacity for the rest of the building during an x-ray. Kept high enough
+  // that the building still reads as context (0.16 made it vanish entirely).
+  const GHOST_OPACITY = 0.34;
+
+  /** Stash a material's original render flags once, so any paint is reversible. */
+  function stashMat(m) {
+    if (m.userData.origOpacity === undefined) {
+      m.userData.origOpacity = m.opacity;
+      m.userData.origTransparent = m.transparent;
+      m.userData.origDepthWrite = m.depthWrite;
+      m.userData.origDepthTest = m.depthTest;
+      // Stash the base colour too, so a colour-override highlight is reversible.
+      if (m.color && m.userData.origColor === undefined) m.userData.origColor = m.color.getHex();
     }
-    map?.triggerRepaint();
   }
 
-  /** Screen point → model id, by casting a ray against each model's box. */
-  function raycastModels(point) {
+  // ── Eased highlight transitions ─────────────────────────────────────────────
+  // Selection/x-ray used to be an INSTANT material swap (opacity 1↔0.16, emissive
+  // 0↔0.55) with one forced repaint — the single biggest "feels unsmooth" cause.
+  // Now paintMat sets the discrete flags (transparent/depthWrite/depthTest) up
+  // front and registers the two *scalar* changes (opacity, emissiveIntensity) as
+  // a tween; a short rAF loop eases them over TWEEN_MS, repainting each frame.
+  // Re-selecting RETARGETS from the current value (no restart-snap), so rapid
+  // clicks stay fluid.
+  const TWEEN_MS = 200;
+  const tweenMats = new Set();
+  let tweenStart = 0;
+  let tweenRAF = 0;
+  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+  const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+  function runTweens() {
+    const t = Math.min(1, (nowMs() - tweenStart) / TWEEN_MS);
+    const k = easeOutCubic(t);
+    for (const m of tweenMats) {
+      const td = m.userData.tween;
+      if (!td) continue;
+      m.opacity = td.fromOpacity + (td.toOpacity - td.fromOpacity) * k;
+      if ('emissiveIntensity' in m) {
+        m.emissiveIntensity = td.fromEmis + (td.toEmis - td.fromEmis) * k;
+      }
+    }
+    map?.triggerRepaint();
+    if (t >= 1) {
+      for (const m of tweenMats) {
+        const td = m.userData.tween;
+        if (!td) continue;
+        // Settle the final discrete flags (e.g. transparent back to false on a
+        // now-solid selected material) once the scalars have arrived.
+        m.transparent = td.finalTransparent;
+        m.depthWrite = td.finalDepthWrite;
+        m.depthTest = td.finalDepthTest;
+        m.opacity = td.toOpacity;
+        if ('emissiveIntensity' in m) m.emissiveIntensity = td.toEmis;
+        m.userData.tween = null;
+      }
+      tweenMats.clear();
+      tweenRAF = 0;
+      map?.triggerRepaint();
+      return;
+    }
+    tweenRAF = requestAnimationFrame(runTweens);
+  }
+
+  function startTween() {
+    tweenStart = nowMs();
+    if (!tweenRAF) tweenRAF = requestAnimationFrame(runTweens);
+  }
+
+  /**
+   * Stage a material for one of four states, easing the scalar changes:
+   *  - `selected`     — glow (whole non-IFC model picked); normal depth.
+   *  - `selectedXray` — glow AND render ON TOP (depthTest off) so the picked IFC
+   *                     sub-element is always visible through the ghosted shell.
+   *  - `ghost`        — faint, see-through, doesn't occlude (x-ray of the rest).
+   *  - `normal`       — restore the stashed original flags.
+   */
+  function paintMat(m, state) {
+    if (!m) return;
+    stashMat(m);
+    const emis = 'emissive' in m;
+    let toOpacity;
+    let toEmis;
+    let finalTransparent;
+    let finalDepthWrite;
+    let finalDepthTest;
+    if (state === 'selected' || state === 'selectedXray') {
+      // Solid highlight colour + a strong glow so the pick is unmistakable, not a
+      // faint tint over the model's own colour.
+      if (m.color) m.color.setHex(HL_COLOR);
+      if (emis) m.emissive.setHex(HL_COLOR);
+      toEmis = 0.85;
+      // A selected element ends up SOLID even if its IFC material was glassy.
+      toOpacity = 1;
+      finalTransparent = false;
+      finalDepthWrite = true;
+      finalDepthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
+      // Discrete flags that must read immediately so the pick pops on top.
+      m.depthWrite = true;
+      m.depthTest = finalDepthTest;
+    } else if (state === 'ghost') {
+      toEmis = 0;
+      toOpacity = Math.min(m.userData.origOpacity, GHOST_OPACITY);
+      finalTransparent = true;
+      finalDepthWrite = false;
+      finalDepthTest = m.userData.origDepthTest;
+      m.depthWrite = false; // stop occluding the selected element immediately
+      m.depthTest = finalDepthTest;
+    } else {
+      // Restore the stashed base colour (undo a 'selected' colour override).
+      if (m.color && m.userData.origColor !== undefined) m.color.setHex(m.userData.origColor);
+      toEmis = 0;
+      toOpacity = m.userData.origOpacity;
+      finalTransparent = m.userData.origTransparent;
+      finalDepthWrite = m.userData.origDepthWrite;
+      finalDepthTest = m.userData.origDepthTest;
+      m.depthWrite = m.userData.origDepthWrite;
+      m.depthTest = m.userData.origDepthTest;
+    }
+    const curOpacity = m.opacity;
+    const curEmis = emis ? m.emissiveIntensity : 0;
+    // No scalar change and flags already settled → no tween needed.
+    if (
+      Math.abs(curOpacity - toOpacity) < 0.001 &&
+      Math.abs(curEmis - toEmis) < 0.001 &&
+      m.transparent === finalTransparent
+    ) {
+      m.transparent = finalTransparent;
+      m.opacity = toOpacity;
+      if (emis) m.emissiveIntensity = toEmis;
+      m.userData.tween = null;
+      return;
+    }
+    // Keep transparent during the ease so partial opacity actually blends.
+    m.transparent = true;
+    m.userData.tween = {
+      fromOpacity: curOpacity,
+      toOpacity,
+      fromEmis: curEmis,
+      toEmis,
+      finalTransparent,
+      finalDepthWrite,
+      finalDepthTest,
+    };
+    tweenMats.add(m);
+  }
+
+  // Children index (parent id → child elements) for subtree highlighting, so
+  // selecting a storey lights every wall/slab it contains. Rebuilt per elements.
+  let childrenByParent = new Map();
+  $: {
+    const m = new Map();
+    for (const el of elements) {
+      if (el.parent) {
+        const arr = m.get(el.parent);
+        if (arr) arr.push(el);
+        else m.set(el.parent, [el]);
+      }
+    }
+    childrenByParent = m;
+  }
+
+  /** GlobalIds of an element + all its BOT descendants (a container's subtree). */
+  function descendantGuidSet(id) {
+    const set = new Set();
+    const self = elements.find((e) => e.id === id);
+    if (self?.ifc_guid) set.add(self.ifc_guid);
+    const stack = [id];
+    const seen = new Set([id]);
+    while (stack.length) {
+      for (const k of childrenByParent.get(stack.pop()) || []) {
+        if (seen.has(k.id)) continue;
+        seen.add(k.id);
+        if (k.ifc_guid) set.add(k.ifc_guid);
+        stack.push(k.id);
+      }
+    }
+    return set;
+  }
+
+  function highlightModels() {
+    // The selected element's GlobalId set (its whole BOT subtree for a spatial
+    // container — a storey lights every wall/slab it contains).
+    const selGuids = selected ? descendantGuidSet(selected) : null;
+    const byGuid = selGuids && selGuids.size > 0;
+    for (const [id, e] of entries) {
+      if (e.isIfc) {
+        // The IFC building is MERGED (a few per-material meshes), so a single
+        // element can't be lit by swapping a mesh's material. Instead: ghost the
+        // whole building, and overlay the selected element(s) as a solid, glowing
+        // copy rendered on top (the x-ray effect) — or restore it when nothing in
+        // this building is selected.
+        const xray = byGuid && groupHasGuid(e.modelGroup, selGuids);
+        e.modelGroup?.traverse((n) => {
+          if (!n.isMesh || !n.material || n.userData.isOverlay) return;
+          n.renderOrder = 0;
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          for (const m of mats) paintMat(m, xray ? 'ghost' : 'normal');
+        });
+        setIfcOverlay(e, xray ? selGuids : null);
+      } else {
+        // Non-IFC model (CityJSON/STL/glTF) — light the whole model by id.
+        const on = !byGuid && id === selected;
+        e.modelGroup?.traverse((n) => {
+          if (!n.isMesh || !n.material) return;
+          n.renderOrder = 0;
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          for (const m of mats) paintMat(m, on ? 'selected' : 'normal');
+        });
+      }
+    }
+    // Ease the staged scalar changes (falls back to a single repaint if nothing
+    // actually needs animating).
+    if (tweenMats.size) startTween();
+    else map?.triggerRepaint();
+  }
+
+  /** Add (or remove) a solid, glowing overlay of `selGuids` on top of the ghosted
+   *  merged IFC building — the per-element x-ray highlight a merged mesh can't do
+   *  by material swap. The overlay is non-pickable and disposed on the next change. */
+  function setIfcOverlay(e, selGuids) {
+    if (e.overlay) {
+      e.overlay.parent?.remove(e.overlay);
+      disposeOverlay(e.overlay);
+      e.overlay = null;
+    }
+    if (!selGuids || !e.modelGroup) return;
+    const ov = subGeometryForGuids(e.modelGroup, selGuids);
+    if (!ov.children.length) return;
+    ov.traverse((n) => {
+      if (!n.isMesh) return;
+      const base = Array.isArray(n.material) ? n.material[0] : n.material;
+      const om = base ? base.clone() : new THREE.MeshStandardMaterial();
+      om.transparent = false;
+      om.opacity = 1;
+      om.depthTest = false; // always visible, through the ghosted shell
+      om.depthWrite = true;
+      // Render BOTH faces: a thin floor slab seen from above shows its underside,
+      // which a single-sided material would cull — the "no highlight at all" case.
+      om.side = THREE.DoubleSide;
+      // Solid bright colour (not the element's own grey) + a strong self-lit glow
+      // so it pops regardless of scene lighting or the camera angle.
+      if (om.color) om.color.setHex(HL_COLOR);
+      if ('metalness' in om) om.metalness = 0;
+      if ('roughness' in om) om.roughness = 0.5;
+      if ('emissive' in om) {
+        om.emissive.setHex(HL_COLOR);
+        om.emissiveIntensity = 0.9;
+      }
+      n.material = om;
+      n.renderOrder = 12;
+      n.userData.isOverlay = true;
+      n.raycast = () => {}; // the merged building under it owns picking
+    });
+    // Child of the model group so it inherits the same placement transform as the
+    // merged meshes the geometry was extracted from.
+    e.modelGroup.add(ov);
+    e.overlay = ov;
+  }
+
+  function disposeOverlay(ov) {
+    ov.traverse((n) => {
+      if (!n.isMesh) return;
+      n.geometry?.dispose?.();
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of mats) m?.dispose?.();
+    });
+  }
+
+  /**
+   * Screen point → `{ id, guid }` by casting a ray against each model. A cheap
+   * box test rejects misses and orders entries; when `precise` (a click), a
+   * triangle raycast against the actual meshes resolves the exact IFC
+   * sub-element (GlobalId) under the cursor. `guid` is null for single-element
+   * models or when the ray grazes the box but misses every triangle.
+   */
+  function raycastModels(point, precise = false) {
     if (!lastProj || !map) return null;
     const canvas = map.getCanvas();
     const w = canvas.clientWidth || 1;
@@ -223,6 +516,7 @@
     let best = null;
     for (const [id, e] of entries) {
       if (!e.scene || !e.mercMatrix || !e.box) continue;
+      if (e.modelGroup && !e.modelGroup.visible) continue; // respect the layer toggle
       const fwd = RAY_FWD.multiplyMatrices(proj, e.mercMatrix); // local → NDC
       if (Math.abs(fwd.determinant()) < 1e-20) continue;
       const inv = RAY_INV.copy(fwd).invert();
@@ -232,14 +526,30 @@
       if (!dir.lengthSq()) continue;
       RAY.origin.copy(a);
       RAY.direction.copy(dir).normalize();
-      if (RAY.intersectBox(e.box, RAY_HIT)) {
-        // Model-local distances are not comparable across entries (each local
-        // space has its own metres scale); compare NDC depth instead.
-        const d = RAY_HIT.applyMatrix4(fwd).z;
-        if (!best || d < best.d) best = { id, d };
+      if (!RAY.intersectBox(e.box, RAY_HIT)) continue;
+      // Model-local distances are not comparable across entries (each local
+      // space has its own metres scale); compare NDC depth instead.
+      const d = RAY_HIT.applyMatrix4(fwd).z;
+      let guid = null;
+      if (precise && e.modelGroup) {
+        e.scene.updateMatrixWorld(); // refresh world matrices if a frame hasn't since load
+        RAYCASTER.ray.origin.copy(RAY.origin);
+        RAYCASTER.ray.direction.copy(RAY.direction);
+        const hits = RAYCASTER.intersectObject(e.modelGroup, true);
+        // Take the nearest hit that actually owns a GlobalId — a merged building
+        // mesh resolves the GlobalId from the picked triangle (faceIndex); IFC
+        // openings and other non-rooted triangles carry none and are skipped.
+        for (const hit of hits) {
+          const g = ifcGuidAt(hit.object, hit.faceIndex);
+          if (g) {
+            guid = g;
+            break;
+          }
+        }
       }
+      if (!best || d < best.d) best = { id, guid, d };
     }
-    return best?.id ?? null;
+    return best ? { id: best.id, guid: best.guid } : null;
   }
 
   // ── Vector overlays (re-added after every style swap) ──────────────────────
@@ -296,7 +606,7 @@
         } });
     }
     add3dBuildings(map, dark);
-    if (!map.getLayer('ots-3d-models')) map.addLayer(modelLayer);
+    if (!map.getLayer('ots-3d-models')) map.addLayer(makeModelLayer());
     applySelectedPaint();
     applyLayerVisibility();
     suppressBasemapBuildingsUnderModels();
@@ -311,39 +621,52 @@
   let suppressedIds = new Set();
   function suppressBasemapBuildingsUnderModels() {
     if (!map || !map.getLayer(BUILDINGS_LAYER_ID)) return;
-    let changed = false;
     for (const e of entries.values()) {
       const anchor = e.anchorUsed ?? e.anchor;
-      if (!anchor || !e.modelGroup) continue;
-      let feats = [];
+      // Skip hidden models (3D-models layer toggled off) and unbuilt entries.
+      if (!anchor || !e.modelGroup || e.modelGroup.visible === false || !e.box) continue;
+      e.suppressed ??= new Set();
       try {
         const c = map.project({ lng: anchor[0], lat: anchor[1] });
-        // Query the model's whole FOOTPRINT, not just the anchor pixel — a tall
-        // model can poke through neighbouring extrusion footprints too. Radius =
-        // half the model's real size, converted to screen pixels at this zoom.
         const mpp =
           (156543.03392 * Math.cos((anchor[1] * Math.PI) / 180)) / Math.pow(2, map.getZoom());
-        const r = Math.min(140, Math.max(4, (e.meters || 50) / 2 / Math.max(mpp, 1e-6)));
-        feats = map.queryRenderedFeatures(
-          [
-            [c.x - r, c.y - r],
-            [c.x + r, c.y + r],
-          ],
+        // Radius = the model's real FOOTPRINT (horizontal extent), NOT its height.
+        // The old height-based radius made a 96 m tower (Big Ben) blank out a 96 m
+        // circle of neighbouring blocks that never came back; we only want to hide
+        // the OSM block(s) the model actually stands on. `box` is normalised units,
+        // so scale the horizontal extent by meters/largest-dim to get real metres.
+        const sx = e.box.max.x - e.box.min.x;
+        const sy = e.box.max.y - e.box.min.y;
+        const sz = e.box.max.z - e.box.min.z;
+        const maxDim = Math.max(sx, sy, sz) || 1;
+        const footprintM = (e.meters || 30) * (Math.max(sx, sz) / maxDim);
+        const r = Math.min(70, Math.max(3, footprintM / 2 / Math.max(mpp, 1e-6)));
+        const feats = map.queryRenderedFeatures(
+          [[c.x - r, c.y - r], [c.x + r, c.y + r]],
           { layers: [BUILDINGS_LAYER_ID] }
         );
+        for (const f of feats) if (f.id !== undefined) e.suppressed.add(f.id);
       } catch {
         continue;
       }
-      for (const f of feats) {
-        if (f.id !== undefined && !suppressedIds.has(f.id)) {
-          suppressedIds.add(f.id);
-          changed = true;
-        }
+    }
+    // The active filter is the union over CURRENTLY VISIBLE models — so toggling
+    // the 3D-models layer off (or a model that unloaded) brings its basemap blocks
+    // back, while a block under a standing model stays hidden. Each model keeps
+    // its own accumulated id set, so there is no query→hide→re-query flicker.
+    const next = new Set();
+    for (const e of entries.values()) {
+      if (e.modelGroup && e.modelGroup.visible !== false && e.suppressed) {
+        for (const id of e.suppressed) next.add(id);
       }
     }
-    if (changed) {
-      map.setFilter(BUILDINGS_LAYER_ID, ['!', ['in', ['id'], ['literal', [...suppressedIds]]]]);
-    }
+    const same = next.size === suppressedIds.size && [...next].every((id) => suppressedIds.has(id));
+    if (same) return;
+    suppressedIds = next;
+    map.setFilter(
+      BUILDINGS_LAYER_ID,
+      next.size ? ['!', ['in', ['id'], ['literal', [...next]]]] : null
+    );
   }
 
   function setLayerVis(id, on) {
@@ -367,6 +690,9 @@
   function toggleLayer(key) {
     layersOn = { ...layersOn, [key]: !layersOn[key] };
     applyLayerVisibility();
+    // Toggling models on/off changes which basemap blocks should be hidden, but
+    // doesn't move the map (no 'idle'), so re-evaluate the suppression now.
+    if (key === 'models' || key === 'osm3d') suppressBasemapBuildingsUnderModels();
   }
 
   function applySelectedPaint() {
@@ -394,13 +720,26 @@
   function rebuildData() {
     if (!map || elements === lastElements) return;
     lastElements = elements;
+    for (const e of entries.values()) {
+      if (e.overlay) {
+        e.overlay.parent?.remove(e.overlay);
+        disposeOverlay(e.overlay);
+      }
+    }
     entries = new Map();
     for (const el of elements) {
       const anchor = modelAnchor(el);
       const entry = { anchor, anchorUsed: null, scene: null, modelGroup: null, box: null, mercMatrix: null };
       entries.set(el.id, entry);
-      if (anchor || modelRefOf(el)) attachModel(entry, el);
+      // Load a model only when it can actually be placed: it has an anchor, or
+      // it self-georeferences (CityJSON/CityGML). Anchorless IFC *element* refs
+      // (a `#GlobalId` fragment with no WKT) would just parse the whole building
+      // and bail — the anchored Site already stands it on the map.
+      const ref = modelRefOf(el);
+      const selfPlaces = ref && (ref.format === 'cityjson' || ref.format === 'citygml');
+      if (anchor || selfPlaces) attachModel(entry, el);
     }
+    if (import.meta.env.DEV) window.__otsViewerEntries = entries; // dev: re-point after reassign
     ensureOverlays();
     if (!fitted) {
       const features = elements.map(toMapFeature).filter(Boolean);
@@ -417,9 +756,18 @@
   /** Pan/fly to an element (used when selecting from the list). */
   export function focusElement(id) {
     if (!map) return;
-    const el = elements.find((e) => e.id === id);
+    let el = elements.find((e) => e.id === id);
     if (!el) return;
-    const entry = entries.get(id);
+    // An element with no geometry of its own (an IFC sub-element — a wall, a
+    // door) flies to its nearest located ancestor (the building's Site anchor).
+    // Its own mesh still lights up, driven by `selected`.
+    const seen = new Set();
+    while (el && !el.wkt4326 && !entries.get(el.id)?.anchorUsed && el.parent && !seen.has(el.id)) {
+      seen.add(el.id);
+      el = elements.find((e) => e.id === el.parent) || null;
+    }
+    if (!el) return;
+    const entry = entries.get(el.id);
     const f = toMapFeature(el);
     if (f && f.kind !== 'point') {
       const b = featureBounds([f]);
@@ -437,14 +785,47 @@
     }
   }
 
+  // ── "Walk through this building" suggestion ─────────────────────────────────
+  // When the user is zoomed in close on an IFC building, tell the parent which
+  // one, so it can offer a first-person walkthrough of that model.
+  let walkSuggestId = null;
+  function updateWalkSuggest() {
+    if (!map) return;
+    let suggest = null;
+    if (map.getZoom() >= 18.2) {
+      const c = map.getCenter();
+      const bounds = map.getBounds();
+      let best = null;
+      for (const [id, e] of entries) {
+        if (!e.isIfc || !e.modelGroup || e.modelGroup.visible === false) continue;
+        const a = e.anchorUsed ?? e.anchor;
+        if (!a || !bounds.contains(a)) continue;
+        const dx = a[0] - c.lng;
+        const dy = a[1] - c.lat;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { id, d };
+      }
+      if (best) {
+        const el = elements.find((x) => x.id === best.id);
+        suggest = { id: best.id, label: el?.label || best.id.split(/[/#]/).pop() };
+      }
+    }
+    if ((suggest?.id || null) !== walkSuggestId) {
+      walkSuggestId = suggest?.id || null;
+      dispatch('walksuggest', suggest);
+    }
+  }
+
   // ── Interaction ─────────────────────────────────────────────────────────────
   const HIT_LAYERS = ['ots-point', 'ots-line', 'ots-fill'];
   const hitLayers = () => HIT_LAYERS.filter((l) => map.getLayer(l));
 
   function onClick(e) {
-    const modelId = raycastModels(e.point);
-    if (modelId) {
-      dispatch('select', { id: modelId });
+    const pick = raycastModels(e.point, true);
+    if (pick) {
+      // guid → DatasetViewer resolves it to the specific IFC sub-element and
+      // opens that element's window; id is the whole-model fallback.
+      dispatch('select', { id: pick.id, guid: pick.guid });
       return;
     }
     const pad = 6;
@@ -456,10 +837,15 @@
   function onMouseMove(e) {
     if (!map) return;
     let label = null;
-    const modelId = raycastModels(e.point);
-    if (modelId) {
-      const el = elements.find((x) => x.id === modelId);
-      label = el?.label || modelId.split(/[/#]/).pop();
+    // Hover uses the CHEAP box-level pick (model name), never the per-triangle
+    // cast: the building is now a few MERGED meshes whose bounding spheres each
+    // span the whole building, so a precise hover would triangle-test the entire
+    // building every mouse-move. The exact wall/slab is still resolved on click
+    // (a one-off precise cast), where the cost is paid once.
+    const pick = raycastModels(e.point, false);
+    if (pick) {
+      const el = elements.find((x) => x.id === pick.id);
+      label = el?.label || pick.id.split(/[/#]/).pop();
     } else {
       const pad = 4;
       const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
@@ -498,7 +884,8 @@
       attributionControl: extraAttribution
         ? { compact: true, customAttribution: extraAttribution }
         : { compact: true },
-      maxPitch: 70,
+      maxPitch: 80, // low angle for inspecting building facades
+      maxZoom: 23.5, // zoom right in on individual walls/beams (basemap over-zooms)
     });
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-left');
@@ -509,6 +896,7 @@
       themeMaterials();
     });
     map.on('idle', suppressBasemapBuildingsUnderModels);
+    map.on('moveend', updateWalkSuggest);
     map.on('click', onClick);
     map.on('mousemove', onMouseMove);
     map.on('mouseout', () => {
@@ -516,12 +904,22 @@
       hoverPopup = null;
       map.getCanvas().style.cursor = '';
     });
-    if (import.meta.env.DEV) window.__otsViewerMap = map; // dev console handle
+    if (import.meta.env.DEV) {
+      window.__otsViewerMap = map; // dev console handle
+      window.__otsViewerEntries = entries; // dev: inspect model groups + overlays
+    }
     rebuildData();
   });
 
   onDestroy(() => {
     unsubTheme();
+    if (tweenRAF) cancelAnimationFrame(tweenRAF);
+    for (const e of entries.values()) {
+      if (e.overlay) {
+        e.overlay.parent?.remove(e.overlay);
+        disposeOverlay(e.overlay);
+      }
+    }
     hoverPopup?.remove();
     if (map) map.remove();
     map = null;
@@ -529,7 +927,12 @@
   });
 
   $: if (map && elements) rebuildData();
-  $: if (map && selected !== undefined) {
+  // Guard against redundant repaints: the parent re-sets `selected` to the same
+  // value on every panel focus/close, which used to re-run a full per-mesh
+  // traversal + repaint each time (a hitch on the 4000-element building).
+  let lastSelectedPaint = null;
+  $: if (map && selected !== undefined && selected !== lastSelectedPaint) {
+    lastSelectedPaint = selected;
     applySelectedPaint();
     highlightModels();
   }
@@ -567,6 +970,16 @@
       <span class="ml-name">{$i18nT('viewer.layerSelected')}</span>
     </div>
   </div>
+
+  {#if modelsLoading > 0 || modelsFailed > 0}
+    <div class="model-load-chip" class:err={modelsLoading === 0 && modelsFailed > 0} role="status">
+      {#if modelsLoading > 0}
+        <span class="mlc-spin"></span>{$i18nT('viewer.loadingModels')}
+      {:else}
+        {modelsFailed} {$i18nT('viewer.modelsFailed')}
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -707,5 +1120,46 @@
   }
   :global(.viewer-popup .maplibregl-popup-tip) {
     border-top-color: var(--bg-elevated, #fff);
+  }
+
+  /* "Loading building model…" chip while web-ifc parses a heavy model. */
+  .model-load-chip {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 13px;
+    border-radius: 999px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.96));
+    color: var(--ink-900, #0f172a);
+    border: 1px solid var(--line-soft, #e6eaef);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    font-size: 0.76rem;
+    backdrop-filter: blur(8px);
+  }
+  .model-load-chip.err {
+    color: var(--danger-500, #c0392b);
+  }
+  .mlc-spin {
+    width: 12px;
+    height: 12px;
+    border: 2px solid color-mix(in srgb, var(--brand-500, #2f88d8) 35%, transparent);
+    border-top-color: var(--brand-500, #2f88d8);
+    border-radius: 50%;
+    animation: mlc-spin 0.8s linear infinite;
+  }
+  @keyframes mlc-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mlc-spin {
+      animation: none;
+    }
   }
 </style>

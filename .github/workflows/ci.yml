@@ -19,7 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # The `--all-features` debug build of every test binary fills the runner's small
+  # The `--features full,test-utils,backup-encrypt,alerting` debug build of every test binary fills the runner's small
   # disk ("No space left on device"; the "ld terminated with signal 7 [Bus error]"
   # crash is the same thing — a bus error from mmap on a full disk). Shrink target/:
   # line-tables-only debuginfo (keeps file:line in backtraces) and no incremental
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       # Reclaim ~25 GB of preinstalled tooling the Rust build doesn't need, so the
-      # `--all-features` build of all test binaries doesn't run the disk out.
+      # `--features full,test-utils,backup-encrypt,alerting` build of all test binaries doesn't run the disk out.
       - name: Free up disk space
         run: |
           df -h /
@@ -50,7 +50,7 @@ jobs:
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+          sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -64,13 +64,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting
 
       - name: Build
-        run: cargo build --all-features --locked
+        run: cargo build --features full,test-utils,backup-encrypt,alerting --locked
 
       - name: Test
-        run: cargo test --all-features --locked
+        run: cargo test --features full,test-utils,backup-encrypt,alerting --locked
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          out=$(cargo test --all-features --locked security 2>&1)
+          out=$(cargo test --features full,test-utils,backup-encrypt,alerting --locked security 2>&1)
           echo "$out"
           passed=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
           echo "==> security-named tests passed across all binaries: $passed"
@@ -99,7 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Reclaim ~25 GB of preinstalled tooling so the `--all-features` conformance
+      # Reclaim ~25 GB of preinstalled tooling so the `--features full,test-utils,backup-encrypt,alerting` conformance
       # test binaries don't run the disk out (see the backend job).
       - name: Free up disk space
         run: |
@@ -113,7 +113,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+          sudo apt-get install -y libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -121,7 +121,7 @@ jobs:
       # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
       # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
       - name: Run conformance tests
-        run: cargo test --all-features --locked --test '*conformance*'
+        run: cargo test --features full,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
   frontend:
     name: Frontend (lint, test, build)

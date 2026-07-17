@@ -10,4 +10,9 @@ pub fn bulk_import_routes() -> Router<AppState> {
     Router::new()
         .route("/api/import/bulk", post(handlers::bulk_import))
         .route("/api/import/analyze", post(handlers::analyze_import))
+        // CityJSON (3D BAG) → RDF ingest (spec §4.1). `?preview=true` dry-runs.
+        .route(
+            "/api/datasets/:dataset_id/ingest/cityjson",
+            post(super::cityjson::ingest_cityjson),
+        )
 }

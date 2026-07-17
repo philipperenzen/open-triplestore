@@ -90,6 +90,9 @@ COPY docs/ docs/
 # Shared standard-vocabulary TTLs embedded by the backend (src/data_models/seed_vocab.rs)
 # via include_str!; needed at compile time here since the frontend tree isn't copied.
 COPY frontend/public/vocab/ frontend/public/vocab/
+# Bundled CityJSON sample neighbourhoods embedded by the demo seed
+# (src/saved_queries/seed.rs) via include_str! to lift into the 3D-Tiles pipeline.
+COPY frontend/public/samples/ frontend/public/samples/
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo build --profile ${CARGO_PROFILE} --features full
@@ -132,9 +135,12 @@ EXPOSE 7878
 # Persistent storage volume
 VOLUME ["/data"]
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:7878/health || exit 1
+# Health check — probe /livez (pure liveness, no store/DB access) so a long but
+# healthy boot seed (large IFC download + lift) is never mistaken for a dead
+# process. start-period covers that first-boot seed window (the IFC download
+# alone allows 600s); /health remains the richer O(1) readiness/diagnostics route.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+    CMD curl -f http://localhost:7878/livez || exit 1
 
 # Default command
 ENTRYPOINT ["open-triplestore"]

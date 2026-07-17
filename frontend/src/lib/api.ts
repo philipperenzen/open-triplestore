@@ -582,9 +582,35 @@ export const browseStats = () => request('GET', '/api/browse/stats');
 // Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
 // references (glTF/IFC/...), resolved from BOT/OMG/FOG/GeoSPARQL. Feeds the
 // dataset 3D & map viewer; optional root IRI scopes to one object + children.
-export const getViewerFeed = (datasetId, root = null) => {
-  const qs = root ? `?root=${encodeURIComponent(root)}` : '';
+// `located: true` fetches only coordinate-bearing elements (+ model refs) — the
+// fast subset the 2D map renders, so the map can paint before the full feed (the
+// structure tree, which on a big BIM dataset includes thousands of sub-elements)
+// finishes loading.
+export const getViewerFeed = (datasetId, root = null, opts: { located?: boolean } = {}) => {
+  const params = new URLSearchParams();
+  if (root) params.set('root', root);
+  // 'true' (not '1') — the backend parses this as a bool; '1' is a 400.
+  if (opts.located) params.set('located', 'true');
+  const qs = params.toString() ? `?${params.toString()}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
+};
+
+// Cheap geo capability summary that gates the map / 3D-viewer UI affordances.
+// { has_coordinates, has_models, has_3d_geometry, has_3d, element_count }.
+export interface GeoStats {
+  has_coordinates: boolean;
+  has_models: boolean;
+  has_3d_geometry: boolean;
+  has_3d: boolean;
+  element_count: number;
+}
+export const getGeoStats = (datasetId): Promise<GeoStats> =>
+  request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/geo-stats`);
+// OR-aggregated geo capability across a whole browse scope in ONE request, so the
+// Map/3D gate costs a single probe instead of one getGeoStats per dataset.
+export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
+  const qs = new URLSearchParams({ datasets: (datasetIds || []).join(',') }).toString();
+  return request('GET', `/api/geo-stats?${qs}`);
 };
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,

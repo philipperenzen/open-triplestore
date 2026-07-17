@@ -4,7 +4,8 @@
 //! - GET/POST /sparql — SPARQL Query and Update
 //! - GET/PUT/POST/DELETE /store — Graph Store HTTP Protocol
 //! - GET / — Service Description
-//! - GET /health — Health check
+//! - GET /health — Readiness + subsystem diagnostics (O(1))
+//! - GET /livez — Liveness probe (no subsystem access)
 //!
 //! # Prefix auto-resolution
 //!
@@ -77,6 +78,7 @@ pub fn management_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(service_description_handler))
         .route("/health", get(health_check))
+        .route("/livez", get(liveness_check))
 }
 
 // ─── Query parameters ─────────────────────────────────────────────────────────
@@ -1271,6 +1273,29 @@ fn require_graph_write(
     }
 }
 
+/// Run a blocking store write off the async runtime, under the configured write
+/// timeout (`write_timeout_secs`).
+///
+/// A single stuck or slow write (RocksDB write-stall, disk pressure, a crashed
+/// mid-write job) must never pin a Tokio worker: `spawn_blocking` keeps it off the
+/// async runtime so reads and the `/livez` probe stay responsive, and the timeout
+/// aborts it so the connection isn't held open indefinitely. An elapsed write returns
+/// `503` (retryable) — a possibly-stalled store, not a client error. A panic inside
+/// the write is contained by `spawn_blocking` (surfaced as `500`), never a poisoned
+/// lock. Bulk import is intentionally NOT routed through here — it is uncapped.
+pub(crate) async fn run_store_write<F, T>(state: &AppState, what: &str, f: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> Result<T, crate::store::engine::StoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    let timeout = std::time::Duration::from_secs(state.write_timeout_secs);
+    tokio::time::timeout(timeout, tokio::task::spawn_blocking(f))
+        .await
+        .map_err(|_| AppError::ServiceUnavailable(format!("{what} timed out")))?
+        .map_err(|e| AppError::Internal(format!("{what} task panicked: {e}")))?
+        .map_err(AppError::from)
+}
+
 /// PUT /store?graph=... — Replace graph contents
 async fn graph_store_put(
     State(state): State<AppState>,
@@ -1294,9 +1319,12 @@ async fn graph_store_put(
 
     validate_on_write(&state, params.graph_iri(), &data, format)?;
 
-    state
-        .store
-        .graph_store_put(params.graph_iri(), &data, format)?;
+    let store = state.store.clone();
+    let graph = params.graph_iri().map(|s| s.to_string());
+    run_store_write(&state, "graph store PUT", move || {
+        store.graph_store_put(graph.as_deref(), &data, format)
+    })
+    .await?;
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1325,9 +1353,12 @@ async fn graph_store_post(
 
     validate_on_write(&state, params.graph_iri(), &data, format)?;
 
-    state
-        .store
-        .graph_store_post(params.graph_iri(), &data, format)?;
+    let store = state.store.clone();
+    let graph = params.graph_iri().map(|s| s.to_string());
+    run_store_write(&state, "graph store POST", move || {
+        store.graph_store_post(graph.as_deref(), &data, format)
+    })
+    .await?;
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1340,7 +1371,12 @@ async fn graph_store_delete(
     Query(params): Query<GraphStoreParams>,
 ) -> Result<Response, AppError> {
     require_graph_write(&state, user.as_deref(), params.graph_iri())?;
-    state.store.graph_store_delete(params.graph_iri())?;
+    let store = state.store.clone();
+    let graph = params.graph_iri().map(|s| s.to_string());
+    run_store_write(&state, "graph store DELETE", move || {
+        store.graph_store_delete(graph.as_deref())
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1470,14 +1506,27 @@ async fn service_description_handler(
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }
 
+/// GET /livez — pure liveness probe. Touches no subsystem (no store, no DB), so
+/// it returns instantly even while the process is busy with a large boot seed or
+/// import. Container orchestration should probe THIS for restart decisions; a
+/// long but healthy seed must never be mistaken for a dead process and killed.
+/// Readiness/diagnostics live on the richer (now also O(1)) `/health`.
+async fn liveness_check() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
 /// GET /health — detailed subsystem probe
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    // Triplestore
-    let (store_ok, store_triples, store_graphs) =
-        match (state.store.len(), state.store.named_graphs()) {
-            (Ok(n), Ok(g)) => (true, Some(n as u64), Some(g.len() as u64)),
-            _ => (false, None, None),
-        };
+    // Triplestore — read the maintained O(1) count index, NOT store.len() /
+    // named_graphs(), which scan RocksDB (O(total quads)) and can block past the
+    // healthcheck timeout while a large import holds the store under write
+    // pressure. That blocking scan was the cause of the :7878 flap during a
+    // heavy seed: the probe timed out, the container went unhealthy, despite the
+    // server still serving. The cached reads can never be starved by a write
+    // burst, so the store is reported healthy whenever the index is reachable.
+    let store_triples = Some(state.store.cached_total_triples() as u64);
+    let store_graphs = Some(state.store.cached_named_graph_count() as u64);
+    let store_ok = true;
 
     // Auth / SQLite DB — lightweight read
     let db_ok = state.auth_db.count_users().is_ok();
@@ -4690,7 +4739,7 @@ async fn serve_asset(
 
     let asset = state
         .auth_db
-        .get_asset(&asset_id)
+        .get_asset(asset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Asset not found".to_string()))?;
 
@@ -6954,7 +7003,15 @@ pub struct ViewerFeedQuery {
     /// Optional root object IRI: restrict the feed to this object and its
     /// directly contained elements.
     pub root: Option<String>,
+    /// `located=true` returns only coordinate-bearing elements (+ their model
+    /// refs) — the subset the 2D map renders. Lets the client paint the map fast
+    /// while the full feed (the structure tree) loads behind it. Taken as a
+    /// string (not a bool) so a stray value never 400s the whole feed request.
+    #[serde(default)]
+    pub located: Option<String>,
 }
+
+use crate::geo::viewer_feed::is_tiles3d_graph;
 
 /// GET /api/datasets/:dataset_id/viewer-feed — per-element geometry (reprojected
 /// to EPSG:4326/3857) plus FOG 3D-file references (glTF/IFC/…), resolved from the
@@ -6983,15 +7040,194 @@ pub async fn viewer_feed(
         validate_iri(root)
             .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid root IRI".to_string()))?;
     }
-    let data_graphs = state
+    // Exclude the verbose ifcOWL lift graph (`…/ifcowl`): it is the full 1:1 IFC
+    // schema (millions of triples) and carries none of the BOT/OMG/FOG/GeoSPARQL
+    // the feed resolves, but its unbounded predicate scan dominates the query
+    // time. The BOT topology + geometry live in the sibling building graph.
+    // Also exclude `tiles3d-*` graphs: those hold CityJSON lifted to volumetric
+    // WKT-Z purely to feed the 3D-Tiles pipeline — the 2D map already renders the
+    // same blocks from their client-side CityJSON file-links, so surfacing the
+    // lifted footprints here would double them up and swamp the element list.
+    let data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let elements =
-        crate::geo::viewer_feed::build_viewer_feed(&state.store, &data_graphs, q.root.as_deref());
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
+        .collect();
+    // Tolerant truthy parse so a stray ?located value can't 400 the feed.
+    let located = matches!(
+        q.located.as_deref().map(str::trim),
+        Some("true" | "1" | "yes" | "on")
+    );
+    let elements = crate::geo::viewer_feed::build_viewer_feed_opts(
+        &state.store,
+        &data_graphs,
+        q.root.as_deref(),
+        located,
+    );
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
         "count": elements.len(),
         "elements": elements,
     })))
+}
+
+/// GET /api/datasets/:dataset_id/geo-stats — cheap geo capability summary that
+/// gates the UI: whether the dataset has mappable coordinates (2D map), loadable
+/// 3D models and/or volumetric geometry (3D viewer). Anonymous access works for
+/// public datasets, mirroring the viewer feed.
+pub async fn geo_stats(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+    if !state
+        .auth_db
+        .can_access_dataset(user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+    // Skip the verbose ifcOWL lift graph (see viewer_feed) — it has no geometry
+    // and only slows the capability probe — and the `tiles3d-*` lift graphs, whose
+    // geometry the map view does not render (see viewer_feed).
+    let data_graphs: Vec<String> = state
+        .auth_db
+        .list_dataset_graphs(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
+        .collect();
+    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
+    Ok(Json(stats))
+}
+
+#[derive(Deserialize)]
+pub struct GeoStatsBatchQuery {
+    /// Comma-separated dataset ids to OR-aggregate the geo capability over.
+    pub datasets: Option<String>,
+}
+
+/// GET /api/geo-stats?datasets=a,b,c — geo capability summary OR-aggregated across
+/// a whole browse scope in ONE request. The triple browser gates its Map / 3D
+/// affordances on "does ANY dataset in scope carry geometry", which previously
+/// meant one `/geo-stats` request (4 SPARQL each) per dataset. This collapses that
+/// fan-out: the accessible datasets' graphs are unioned and probed once, so a
+/// geometry-free scope costs a single ASK regardless of how many datasets it spans.
+/// Inaccessible / unknown ids are silently skipped (mirrors per-dataset 403 → no map).
+pub async fn geo_stats_batch(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Query(q): Query<GeoStatsBatchQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Bound the request: a scope of more than a few hundred datasets is never a
+    // real UI gate, and an unbounded id list is a cheap way to fan out work.
+    const MAX_DATASETS: usize = 512;
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+
+    let ids: Vec<&str> = q
+        .datasets
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .take(MAX_DATASETS)
+        .collect();
+
+    // Union the (ifcOWL-filtered) data graphs of every dataset the user may read.
+    // Probing the union answers "does the scope have geometry" in one shot, and an
+    // ASK/COUNT over the union is the exact OR-aggregate the per-dataset loop produced.
+    let mut data_graphs: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+        let dataset = match state
+            .auth_db
+            .get_dataset(id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            Some(d) => d,
+            None => continue,
+        };
+        if !state
+            .auth_db
+            .can_access_dataset(user_id, &dataset)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        {
+            continue;
+        }
+        for g in state
+            .auth_db
+            .list_dataset_graphs(id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .filter(|g| !g.ends_with("/ifcowl") && !is_tiles3d_graph(g))
+        {
+            data_graphs.push(g);
+        }
+    }
+
+    // No accessible/known datasets in scope: report empty stats. (An empty graph
+    // list would otherwise make `dataset_geo_stats` probe the default graph.)
+    if data_graphs.is_empty() {
+        return Ok(Json(crate::geo::viewer_feed::GeoStats::default()));
+    }
+
+    let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
+    Ok(Json(stats))
+}
+
+#[cfg(test)]
+mod write_timeout_tests {
+    use super::run_store_write;
+    use crate::server::error::AppError;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+
+    fn state_with_write_timeout(secs: u64) -> AppState {
+        let mut state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        state.write_timeout_secs = secs;
+        state
+    }
+
+    // A write that outlives `write_timeout_secs` must be aborted and surfaced as a
+    // retryable 503, not left to pin the connection. The blocking closure keeps
+    // running in the background (blocking tasks can't be cancelled), but the caller
+    // is freed the moment the timeout elapses — which is the whole point.
+    #[tokio::test]
+    async fn stuck_write_times_out_as_service_unavailable() {
+        let state = state_with_write_timeout(1);
+        let result: Result<(), AppError> = run_store_write(&state, "slow write", || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            Ok(())
+        })
+        .await;
+        match result {
+            Err(AppError::ServiceUnavailable(msg)) => {
+                assert!(
+                    msg.contains("slow write"),
+                    "message should name the op: {msg}"
+                );
+            }
+            other => panic!("expected ServiceUnavailable, got {other:?}"),
+        }
+    }
+
+    // The happy path returns the closure's value unchanged.
+    #[tokio::test]
+    async fn fast_write_returns_value() {
+        let state = state_with_write_timeout(30);
+        let result: Result<u32, AppError> = run_store_write(&state, "quick write", || Ok(42)).await;
+        assert_eq!(result.unwrap(), 42);
+    }
 }

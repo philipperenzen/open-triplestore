@@ -1,9 +1,13 @@
-// IFC model loading via web-ifc (WASM). Parses an IFC STEP file into three.js
-// meshes with the IFC GlobalId stamped on every mesh's userData — so viewers
-// can pick individual "atoms" (a beam, a floor slab) and link them back to the
-// element's linked-data IRI (the viewer feed exposes the same GlobalId as
-// `ifc_guid`). The heavy WASM engine and the parsed model are both cached, so
-// the building view and any number of per-element panels share one parse.
+// IFC model loading via web-ifc (WASM). Parses an IFC STEP file into a small set
+// of MERGED three.js meshes — one per material — instead of one mesh per
+// geometry. A 49 MB building has thousands of geometries; rendering them as
+// thousands of separate meshes means thousands of draw calls per frame, which is
+// the dominant cause of orbit jank. Merging by material collapses that to a
+// handful of draws while a per-triangle `guidRanges` map preserves per-element
+// picking (raycast → faceIndex → IFC GlobalId), and `subGeometryForGuids` rebuilds
+// just one element/subtree on demand (the modal's isolation + the map's x-ray
+// "selected" overlay). Every viewer links a picked atom back to its linked-data
+// IRI (the viewer feed exposes the same GlobalId as `ifc_guid`).
 //
 // The wasm binary is served as a static file from /wasm/web-ifc.wasm (copied
 // from node_modules — Vite's hashed asset names would break web-ifc's
@@ -11,10 +15,21 @@
 
 import * as THREE from 'three';
 
+/** One element's run of triangles within a merged geometry's index buffer. */
+export interface GuidRange {
+  /** First index (into the geometry's index buffer) of this run. */
+  start: number;
+  /** Number of indices in the run (3 per triangle). */
+  count: number;
+  /** The element's IFC GlobalId (empty for non-rooted geometry). */
+  guid: string;
+}
+
 interface ParsedIfc {
-  /** Master group — never added to a scene; callers receive clones. */
+  /** Master group of MERGED per-material meshes; callers receive clones. Each
+   *  mesh's geometry carries `userData.guidRanges` for picking + extraction. */
   master: THREE.Group;
-  /** All 22-char GlobalIds that own at least one mesh. */
+  /** All 22-char GlobalIds that own at least one triangle. */
   guids: Set<string>;
 }
 
@@ -49,6 +64,64 @@ export function ifcGuidFragment(url: string): string | null {
   return frag.length === 22 ? frag : null;
 }
 
+/** Resolve the IFC GlobalId at a raycast hit: a per-element mesh carries it on
+ *  `userData.ifcGuid`; a merged mesh resolves it from the picked triangle via the
+ *  geometry's `guidRanges`. Returns null when the hit owns no GlobalId. */
+export function ifcGuidAt(mesh: any, faceIndex: number | null | undefined): string | null {
+  const direct = mesh?.userData?.ifcGuid;
+  if (direct) return direct;
+  const ranges: GuidRange[] | undefined = mesh?.geometry?.userData?.guidRanges;
+  if (!ranges || faceIndex == null) return null;
+  const off = faceIndex * 3;
+  // Ranges are in index order → binary-search the last range starting at/below off.
+  let lo = 0;
+  let hi = ranges.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].start <= off) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (ans < 0) return null;
+  const r = ranges[ans];
+  return off < r.start + r.count ? r.guid || null : null;
+}
+
+/** Does a group of (possibly merged) meshes own a triangle for any of these guids? */
+export function groupHasGuid(group: THREE.Object3D, wanted: Set<string>): boolean {
+  let found = false;
+  group.traverse((n: any) => {
+    if (found || !(n as THREE.Mesh).isMesh) return;
+    const direct = n.userData?.ifcGuid;
+    if (direct && wanted.has(direct)) {
+      found = true;
+      return;
+    }
+    const ranges: GuidRange[] | undefined = n.geometry?.userData?.guidRanges;
+    if (ranges) {
+      for (const r of ranges) {
+        if (r.guid && wanted.has(r.guid)) {
+          found = true;
+          return;
+        }
+      }
+    }
+  });
+  return found;
+}
+
+/** One element-geometry accumulated for a material bucket before merging. */
+interface Piece {
+  pos: Float32Array;
+  nrm: Float32Array;
+  idx: Uint32Array;
+  guid: string;
+}
+
 async function parseIfc(url: string): Promise<ParsedIfc> {
   let p = parseCache.get(url);
   if (!p) {
@@ -58,25 +131,34 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
       const buffer = new Uint8Array(await res.arrayBuffer());
       const modelID = api.OpenModel(buffer, { COORDINATE_TO_ORIGIN: true });
       try {
-        const master = new THREE.Group();
         const guids = new Set<string>();
         const guidByExpress = new Map<number, string>();
-        const materials = new Map<string, THREE.Material>();
+        // One bucket per material colour — every piece in a bucket merges into one
+        // mesh sharing that material.
+        const buckets = new Map<
+          string,
+          { material: THREE.Material; pieces: Piece[]; verts: number; inds: number }
+        >();
 
         const materialFor = (c: { x: number; y: number; z: number; w: number }) => {
           const key = `${c.x.toFixed(3)}:${c.y.toFixed(3)}:${c.z.toFixed(3)}:${c.w.toFixed(3)}`;
-          let m = materials.get(key);
-          if (!m) {
-            m = new THREE.MeshStandardMaterial({
-              color: new THREE.Color(c.x, c.y, c.z),
-              opacity: c.w,
-              transparent: c.w < 0.999,
-              roughness: 0.85,
-              side: THREE.DoubleSide,
-            });
-            materials.set(key, m);
+          let b = buckets.get(key);
+          if (!b) {
+            b = {
+              material: new THREE.MeshStandardMaterial({
+                color: new THREE.Color(c.x, c.y, c.z),
+                opacity: c.w,
+                transparent: c.w < 0.999,
+                roughness: 0.85,
+                side: THREE.DoubleSide,
+              }),
+              pieces: [],
+              verts: 0,
+              inds: 0,
+            };
+            buckets.set(key, b);
           }
-          return m;
+          return b;
         };
 
         const guidOf = (expressID: number): string => {
@@ -95,6 +177,11 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
           return g;
         };
 
+        const m4 = new THREE.Matrix4();
+        const nm = new THREE.Matrix3();
+        const vp = new THREE.Vector3();
+        const vn = new THREE.Vector3();
+
         api.StreamAllMeshes(modelID, (mesh: any) => {
           const guid = guidOf(mesh.expressID);
           const placed = mesh.geometries;
@@ -103,36 +190,69 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
             const geom = api.GetGeometry(modelID, pg.geometryExpressID);
             const verts = api.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
             const idx = api.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
-            // web-ifc interleaves position+normal as 6 floats per vertex.
-            const count = verts.length / 6;
+            const count = verts.length / 6; // web-ifc interleaves position+normal
+            if (count === 0 || idx.length === 0) {
+              geom.delete();
+              continue;
+            }
+            // Bake the element's placement into the vertices so the merged mesh can
+            // use an identity transform (the placement no longer needs per-mesh state).
+            m4.fromArray(pg.flatTransformation);
+            nm.getNormalMatrix(m4);
             const pos = new Float32Array(count * 3);
             const nrm = new Float32Array(count * 3);
             for (let v = 0; v < count; v++) {
-              pos[v * 3] = verts[v * 6];
-              pos[v * 3 + 1] = verts[v * 6 + 1];
-              pos[v * 3 + 2] = verts[v * 6 + 2];
-              nrm[v * 3] = verts[v * 6 + 3];
-              nrm[v * 3 + 1] = verts[v * 6 + 4];
-              nrm[v * 3 + 2] = verts[v * 6 + 5];
+              vp.set(verts[v * 6], verts[v * 6 + 1], verts[v * 6 + 2]).applyMatrix4(m4);
+              vn.set(verts[v * 6 + 3], verts[v * 6 + 4], verts[v * 6 + 5])
+                .applyMatrix3(nm)
+                .normalize();
+              pos[v * 3] = vp.x;
+              pos[v * 3 + 1] = vp.y;
+              pos[v * 3 + 2] = vp.z;
+              nrm[v * 3] = vn.x;
+              nrm[v * 3 + 1] = vn.y;
+              nrm[v * 3 + 2] = vn.z;
             }
-            const g = new THREE.BufferGeometry();
-            g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-            g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-            g.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
-            const m = new THREE.Mesh(g, materialFor(pg.color));
-            m.applyMatrix4(new THREE.Matrix4().fromArray(pg.flatTransformation));
-            m.userData.expressID = mesh.expressID;
-            if (guid) {
-              m.userData.ifcGuid = guid;
-              guids.add(guid);
-            }
-            master.add(m);
+            const b = materialFor(pg.color);
+            b.pieces.push({ pos, nrm, idx: new Uint32Array(idx), guid });
+            b.verts += count;
+            b.inds += idx.length;
+            if (guid) guids.add(guid);
             geom.delete();
           }
         });
 
-        // IFC is Z-up; three.js is Y-up.
-        master.rotation.x = -Math.PI / 2;
+        // Concatenate each bucket's pieces into one merged geometry + guidRanges.
+        const master = new THREE.Group();
+        for (const b of buckets.values()) {
+          if (b.verts === 0) continue;
+          const pos = new Float32Array(b.verts * 3);
+          const nrm = new Float32Array(b.verts * 3);
+          const idx = new Uint32Array(b.inds);
+          const ranges: GuidRange[] = [];
+          let vBase = 0;
+          let iOff = 0;
+          for (const piece of b.pieces) {
+            pos.set(piece.pos, vBase * 3);
+            nrm.set(piece.nrm, vBase * 3);
+            for (let k = 0; k < piece.idx.length; k++) idx[iOff + k] = vBase + piece.idx[k];
+            ranges.push({ start: iOff, count: piece.idx.length, guid: piece.guid });
+            vBase += piece.pos.length / 3;
+            iOff += piece.idx.length;
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+          g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+          g.setIndex(new THREE.BufferAttribute(idx, 1));
+          g.userData.guidRanges = ranges;
+          const m = new THREE.Mesh(g, b.material);
+          m.matrixAutoUpdate = false; // identity, transforms baked into vertices
+          master.add(m);
+          // Release this bucket's per-element source arrays now that they're merged
+          // — keeps the transient peak near 1× instead of holding pieces + merged
+          // for the whole 49 MB building at once.
+          b.pieces.length = 0;
+        }
         master.updateMatrixWorld(true);
         return { master, guids };
       } finally {
@@ -146,25 +266,93 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
 }
 
 /**
- * Load an IFC model (or one element of it, when the URL carries a `#GlobalId`
- * fragment) as a fresh three.js group. Clones share geometry with the cached
- * master parse, so repeated loads are cheap.
+ * Build a group containing ONLY the triangles of `wanted` guids, extracted from a
+ * group of merged meshes. Vertices are remapped so the result is compact (one
+ * element is a tiny mesh, not the whole building's buffer). Used for the modal's
+ * isolation and the map's x-ray "selected" overlay. A sub-mesh of a single guid
+ * carries `userData.ifcGuid`; a multi-guid one keeps remapped `guidRanges`.
  */
-export async function loadIfcGroup(url: string): Promise<THREE.Group> {
-  const base = ifcBaseUrl(url);
-  const guid = ifcGuidFragment(url);
-  const { master, guids } = await parseIfc(base);
-  // An element fragment isolates that element's meshes — unless the element has
-  // no geometry of its own (e.g. a storey), in which case show the whole model.
-  if (guid && guids.has(guid)) {
-    const sub = new THREE.Group();
-    for (const child of master.children) {
-      if ((child as THREE.Mesh).userData?.ifcGuid === guid) {
-        sub.add(child.clone());
+export function subGeometryForGuids(group: THREE.Object3D, wanted: Set<string>): THREE.Group {
+  const out = new THREE.Group();
+  group.traverse((node: any) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const ranges: GuidRange[] | undefined = (mesh.geometry as any)?.userData?.guidRanges;
+    const geom = mesh.geometry as THREE.BufferGeometry;
+    if (!ranges) {
+      // Per-element mesh (already isolated) — keep if its guid is wanted.
+      if (mesh.userData?.ifcGuid && wanted.has(mesh.userData.ifcGuid)) {
+        out.add(mesh.clone());
       }
+      return;
     }
-    sub.rotation.copy(master.rotation);
-    return sub;
-  }
-  return master.clone();
+    const keep = ranges.filter((r) => r.guid && wanted.has(r.guid));
+    if (!keep.length) return;
+    const srcPos = geom.attributes.position.array as ArrayLike<number>;
+    const srcNrm = (geom.attributes.normal?.array as ArrayLike<number>) || null;
+    const srcIdx = geom.index!.array as ArrayLike<number>;
+    const remap = new Map<number, number>();
+    const pos: number[] = [];
+    const nrm: number[] = [];
+    const idx: number[] = [];
+    const subRanges: GuidRange[] = [];
+    for (const r of keep) {
+      const rangeStart = idx.length;
+      for (let k = r.start; k < r.start + r.count; k++) {
+        const old = srcIdx[k];
+        let ni = remap.get(old);
+        if (ni === undefined) {
+          ni = pos.length / 3;
+          remap.set(old, ni);
+          pos.push(srcPos[old * 3], srcPos[old * 3 + 1], srcPos[old * 3 + 2]);
+          if (srcNrm) nrm.push(srcNrm[old * 3], srcNrm[old * 3 + 1], srcNrm[old * 3 + 2]);
+        }
+        idx.push(ni);
+      }
+      subRanges.push({ start: rangeStart, count: r.count, guid: r.guid });
+    }
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    sg.setIndex(idx);
+    // Merged source geometry always carries normals (parseIfc bakes them); the
+    // fallback runs only for a hypothetical normal-less source, and needs the
+    // index set first so it computes per the actual (remapped) triangles.
+    if (nrm.length) sg.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    else sg.computeVertexNormals();
+    const uniq = new Set(keep.map((r) => r.guid));
+    const sm = new THREE.Mesh(sg, mesh.material);
+    sm.matrixAutoUpdate = false;
+    if (uniq.size === 1) sm.userData.ifcGuid = [...uniq][0];
+    else sg.userData.guidRanges = subRanges;
+    out.add(sm);
+  });
+  return out;
+}
+
+/**
+ * Load an IFC model (or one element/subtree of it, when the URL carries a
+ * `#GlobalId` fragment or `opts.guids`) as a fresh three.js group. The
+ * whole-building clone shares the merged geometry with the cache; an isolation
+ * extracts just the requested elements.
+ */
+export async function loadIfcGroup(
+  url: string,
+  opts: { guids?: string[] } = {},
+): Promise<THREE.Group> {
+  const base = ifcBaseUrl(url);
+  const fragGuid = ifcGuidFragment(url);
+  const { master, guids } = await parseIfc(base);
+  // Decide which GlobalIds to isolate. A `#GlobalId` fragment isolates that one
+  // element (a wall, a beam). `opts.guids` — a spatial container's descendant
+  // leaf elements — isolates a whole subtree, which is how a storey/building is
+  // shown: spatial containers own NO mesh of their own, so isolating *their* guid
+  // is futile; isolating their descendants is what makes their contents visible.
+  // Only requested guids that actually own meshes are kept.
+  const wanted = new Set<string>();
+  if (fragGuid && guids.has(fragGuid)) wanted.add(fragGuid);
+  for (const g of opts.guids || []) if (guids.has(g)) wanted.add(g);
+  // Nothing renderable requested (the whole-building ref, or a bare container ref
+  // with no descendant set) → the merged whole building (few draw calls).
+  if (wanted.size === 0) return master.clone();
+  return subGeometryForGuids(master, wanted);
 }

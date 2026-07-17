@@ -34,7 +34,15 @@
 
   const dispatch = createEventDispatcher();
 
-  let tab = 'properties';
+  // Collapsible sections (accordion) — MULTIPLE can be open at once, so you can
+  // read Properties, the Structure tree and the 3D model together. Persisted
+  // across element navigation so the user's chosen layout sticks.
+  let openSections = new Set(['properties']);
+  function toggleSection(key) {
+    const next = new Set(openSections);
+    next.has(key) ? next.delete(key) : next.add(key);
+    openSections = next;
+  }
   let full = false;
   let pos = { x: offset * 30, y: offset * 30 };
   let dragging = null;
@@ -43,19 +51,91 @@
   let error = '';
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
+  // The Structure tab is only useful when there's containment to show — a parent
+  // ("part of") or sub-elements. Hide it for a standalone element with neither.
+  $: hasStructure = (children.length > 0 || !!element?.parent);
+  // GlobalIds of all descendant leaf elements (BFS over the BOT parent links), so
+  // a spatial container (storey / building / space) — which owns no geometry of
+  // its own — can isolate its whole subtree in the IFC loader instead of falling
+  // back to the entire building. Empty for a leaf element (it has no children),
+  // so leaf picks keep isolating their single atom via the URL #GlobalId.
+  $: descendantGuids = (() => {
+    if (!element) return [];
+    const out = [];
+    const seen = new Set([element.id]);
+    const stack = [element.id];
+    while (stack.length) {
+      const id = stack.pop();
+      for (const e of elements) {
+        if (e.parent === id && !seen.has(e.id)) {
+          seen.add(e.id);
+          if (e.ifc_guid) out.push(e.ifc_guid);
+          stack.push(e.id);
+        }
+      }
+    }
+    return out;
+  })();
   // All linked 3D representations of this element (glTF / CityJSON / STL /
   // IFC …). The user can switch between them in the 3D tab; the preferred
   // format is the default.
   $: modelOptions = element ? modelRefsOf(element) : [];
   let chosenFormat = null;
-  $: if (element?.id) chosenFormat = null; // element switch resets the choice
+  // Reset per-element view state on an element switch.
+  let loadRequested = false;
+  let structExpanded = new Set();
+  $: if (element?.id) {
+    chosenFormat = null;
+    loadRequested = false;
+    structExpanded = new Set();
+  }
   $: modelRef = modelOptions.find((o) => o.format === chosenFormat) ?? modelOptions[0] ?? null;
-  // parent id → number of children, in one pass (the structure tree reads a
-  // count per row; filtering elements per row would be O(N²)).
-  $: childCount = elements.reduce(
-    (m, e) => (e.parent ? m.set(e.parent, (m.get(e.parent) || 0) + 1) : m),
-    new Map()
-  );
+  // A "lite" panel (3D viewer capped) auto-loads its model in the background the
+  // moment the user opens its 3D section — no manual "Load" button to click.
+  $: if (openSections.has('3d') && lite && modelRef && !loadRequested) {
+    loadRequested = true;
+    dispatch('loadmodel');
+  }
+
+  // ── Inline structure tree ───────────────────────────────────────────────────
+  // The Structure tab shows the element's DIRECT children expanded (n+1); each
+  // child with its own children gets a caret that expands them INLINE (n+2…)
+  // rather than opening a new window. Clicking a child's name still opens it.
+  $: byIdMap = new Map(elements.map((e) => [e.id, e]));
+  $: childIdsMap = (() => {
+    const m = new Map();
+    for (const e of elements) {
+      if (!e.parent) continue;
+      const arr = m.get(e.parent);
+      if (arr) arr.push(e.id);
+      else m.set(e.parent, [e.id]);
+    }
+    const lbl = (id) => byIdMap.get(id)?.label || id;
+    for (const ids of m.values()) ids.sort((a, b) => lbl(a).localeCompare(lbl(b)));
+    return m;
+  })();
+  // Flatten the focused element's descendants to the rows currently visible.
+  $: structRows = (() => {
+    if (!element) return [];
+    const rows = [];
+    const walk = (pid, depth) => {
+      for (const cid of childIdsMap.get(pid) || []) {
+        const el = byIdMap.get(cid);
+        if (!el) continue;
+        const count = (childIdsMap.get(cid) || []).length;
+        const open = structExpanded.has(cid);
+        rows.push({ el, depth, count, open });
+        if (count && open) walk(cid, depth + 1);
+      }
+    };
+    walk(element.id, 0);
+    return rows;
+  })();
+  function toggleStruct(id) {
+    const next = new Set(structExpanded);
+    next.has(id) ? next.delete(id) : next.add(id);
+    structExpanded = next;
+  }
 
   async function load(iri) {
     if (!iri) return;
@@ -96,8 +176,6 @@
   }
 
   $: load(element?.id);
-  // When the element loses its model, fall back from the 3D tab.
-  $: if (tab === '3d' && !modelRef) tab = 'properties';
 
   // "Show on map" target: this element when it is located, else the nearest
   // located ancestor (a beam flies to its building/site anchor). Null hides
@@ -150,128 +228,175 @@
       </div>
     </header>
 
-    <nav class="tabs">
-      <button class:active={tab === 'properties'} on:click={() => (tab = 'properties')}>
-        {$i18nT('viewer.properties')}
-      </button>
-      <button class:active={tab === 'structure'} on:click={() => (tab = 'structure')}>
-        {$i18nT('viewer.structure')}
-        {#if children.length}<span class="count">{children.length}</span>{/if}
-      </button>
-      {#if modelRef}
-        <button class:active={tab === '3d'} on:click={() => (tab = '3d')}>
-          {$i18nT('viewer.model3d')}
-        </button>
-      {/if}
-      <span class="spacer"></span>
+    <!-- Whole-element actions, always visible above the collapsible sections. -->
+    <div class="modal-toolbar">
       {#if mapTargetId}
-        <!-- span wrapper: `.tabs > button` styles direct children as tabs -->
-        <span class="map-action">
-          <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: mapTargetId })}>
-            <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
-          </button>
-        </span>
+        <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: element.id })}>
+          <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
+        </button>
       {/if}
       <Link to={`/resource?iri=${encodeURIComponent(element.id)}`} class="btn btn-sm">
         {$i18nT('pages.datasetViewer.openResource')}
       </Link>
-    </nav>
+    </div>
 
-    <div class="body">
-      {#if tab === 'properties'}
-        {#if element.ifc_guid || element.ifc_url || element.gltf_url || (element.files || []).length}
-          <section class="bim card-flat">
-            <h4>{$i18nT('viewer.bimFiles')}</h4>
-            {#if element.ifc_guid}
-              <div class="bim-row">
-                <span class="k">IFC GlobalId</span>
-                <code>{element.ifc_guid}</code>
-              </div>
-            {/if}
-            {#each element.files || [] as [format, url]}
-              <div class="bim-row">
-                <span class="k">{format}</span>
-                <a href={safeExternalUrl(url)} target="_blank" rel="noreferrer" title={url}>{shortenIRI(url)}</a>
-              </div>
-            {/each}
-          </section>
-        {/if}
-        {#if loading}
-          <p class="hint">…</p>
-        {:else if error}
-          <p class="hint error">{error}</p>
-        {:else if data}
-          <table class="props">
-            <tbody>
-              {#each data.outgoing || [] as row}
-                <tr>
-                  <td class="pred" title={row.p?.value}>{shortenIRI(row.p?.value || '')}</td>
-                  <td><RdfTerm term={row.o} /></td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {/if}
-      {:else if tab === 'structure'}
-        {#if children.length === 0}
-          <p class="hint">{$i18nT('viewer.noChildren')}</p>
-        {:else}
-          <ul class="tree">
-            {#each children as child}
-              <li>
-                <button class="tree-row" on:click={() => dispatch('navigate', { id: child.id })}>
-                  <ChevronRight size={13} />
-                  <span class="label">{child.label || shortenIRI(child.id)}</span>
-                  {#if modelRefOf(child)}<span class="badge"><Boxes size={11} /> 3D</span>{/if}
-                  {#if child.wkt4326}<span class="badge geo">geo</span>{/if}
-                  {#if childCount.get(child.id)}
-                    <span class="sub-count">{childCount.get(child.id)} ▸</span>
-                  {/if}
-                </button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-        {#if element.parent}
-          <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
-            ↑ {$i18nT('viewer.parent')}:
-            {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
-          </button>
-        {/if}
-      {:else if tab === '3d' && modelRef}
-        {#if lite}
-          <div class="model-locked">
-            <Boxes size={26} />
-            <p class="hint center">{$i18nT('viewer.modelLimited')}</p>
-            <button class="btn btn-sm" on:click={() => dispatch('loadmodel')}>{$i18nT('viewer.load3d')}</button>
-          </div>
-        {:else}
-          <div class="model-wrap">
-            {#if modelOptions.length > 1}
-              <div class="fmt-picker" role="group" aria-label={$i18nT('viewer.modelFormat')}>
-                {#each modelOptions as opt (opt.format)}
-                  <button
-                    class="fmt-chip"
-                    class:active={opt.format === modelRef.format}
-                    on:click={() => (chosenFormat = opt.format)}
-                  >{FORMAT_LABELS[opt.format]}</button>
+    <!-- Collapsible sections — multiple can be open at once. -->
+    <div class="body sections">
+      <section class="acc">
+        <button
+          class="acc-head"
+          class:open={openSections.has('properties')}
+          on:click={() => toggleSection('properties')}
+          aria-expanded={openSections.has('properties')}
+        >
+          <ChevronRight class="acc-caret" size={14} />
+          <span class="acc-title">{$i18nT('viewer.properties')}</span>
+        </button>
+        {#if openSections.has('properties')}
+          <div class="acc-content">
+            {#if element.ifc_guid || element.ifc_url || element.gltf_url || (element.files || []).length}
+              <section class="bim card-flat">
+                <h4>{$i18nT('viewer.bimFiles')}</h4>
+                {#if element.ifc_guid}
+                  <div class="bim-row">
+                    <span class="k">IFC GlobalId</span>
+                    <code>{element.ifc_guid}</code>
+                  </div>
+                {/if}
+                {#each element.files || [] as [format, url]}
+                  <div class="bim-row">
+                    <span class="k">{format}</span>
+                    <a href={safeExternalUrl(url)} target="_blank" rel="noreferrer" title={url}>{shortenIRI(url)}</a>
+                  </div>
                 {/each}
-              </div>
+              </section>
             {/if}
-            <Model3D
-              refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis }]}
-              on:select={(e) => {
-                // Picking an IFC mesh selects that atom (beam, slab, …): resolve
-                // its GlobalId to the feed element and open that panel.
-                const guid = e.detail?.guid;
-                const hit = guid && elements.find((el) => el.ifc_guid === guid);
-                if (hit && hit.id !== element.id) dispatch('navigate', { id: hit.id });
-              }}
-              height="100%"
-            />
-            <p class="hint center">{$i18nT('viewer.orbitHint')}</p>
+            {#if loading}
+              <p class="hint">…</p>
+            {:else if error}
+              <p class="hint error">{error}</p>
+            {:else if data}
+              <table class="props">
+                <tbody>
+                  {#each data.outgoing || [] as row}
+                    <tr>
+                      <td class="pred" title={row.p?.value}>{shortenIRI(row.p?.value || '')}</td>
+                      <td><RdfTerm term={row.o} /></td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
           </div>
         {/if}
+      </section>
+
+      {#if hasStructure}
+        <section class="acc">
+          <button
+            class="acc-head"
+            class:open={openSections.has('structure')}
+            on:click={() => toggleSection('structure')}
+            aria-expanded={openSections.has('structure')}
+          >
+            <ChevronRight class="acc-caret" size={14} />
+            <span class="acc-title">{$i18nT('viewer.structure')}</span>
+            {#if children.length}<span class="count">{children.length}</span>{/if}
+          </button>
+          {#if openSections.has('structure')}
+            <div class="acc-content">
+              <!-- The containment context (what this is "part of") leads, so you
+                   see where you are before drilling into the contained parts. -->
+              {#if element.parent}
+                <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
+                  ↑ {$i18nT('viewer.parent')}:
+                  {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
+                </button>
+              {/if}
+              {#if structRows.length === 0}
+                <p class="hint">{$i18nT('viewer.noChildren')}</p>
+              {:else}
+                <!-- Inline tree: the caret expands a child's own children HERE;
+                     the name opens that child in its own panel. -->
+                <ul class="tree">
+                  {#each structRows as r (r.el.id)}
+                    <li class="struct-row" style:--d={r.depth}>
+                      {#if r.count}
+                        <button
+                          class="twist"
+                          class:open={r.open}
+                          on:click={() => toggleStruct(r.el.id)}
+                          title={r.open ? $i18nT('viewer.collapse') : $i18nT('viewer.expand')}
+                          aria-label={r.open ? $i18nT('viewer.collapse') : $i18nT('viewer.expand')}
+                        ><ChevronRight size={13} /></button>
+                      {:else}
+                        <span class="twist-spacer"></span>
+                      {/if}
+                      <button class="struct-main" on:click={() => dispatch('navigate', { id: r.el.id })} title={r.el.id}>
+                        <span class="label">{r.el.label || shortenIRI(r.el.id)}</span>
+                        {#if modelRefOf(r.el)}<span class="badge"><Boxes size={11} /> 3D</span>{/if}
+                        {#if r.el.wkt4326}<span class="badge geo">geo</span>{/if}
+                        {#if r.count}<span class="sub-count">{r.count}</span>{/if}
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+                <p class="hint struct-hint">{$i18nT('viewer.structHint')}</p>
+              {/if}
+            </div>
+          {/if}
+        </section>
+      {/if}
+
+      {#if modelRef}
+        <section class="acc">
+          <button
+            class="acc-head"
+            class:open={openSections.has('3d')}
+            on:click={() => toggleSection('3d')}
+            aria-expanded={openSections.has('3d')}
+          >
+            <ChevronRight class="acc-caret" size={14} />
+            <span class="acc-title">{$i18nT('viewer.model3d')}</span>
+          </button>
+          {#if openSections.has('3d')}
+            <div class="acc-content model">
+              {#if lite}
+                <!-- Capped 3D viewer: auto-load in the background (no button). -->
+                <div class="model-locked">
+                  <span class="m3d-spin"></span>
+                  <p class="hint center">{$i18nT('viewer.loadingModels')}</p>
+                </div>
+              {:else}
+                <div class="model-wrap">
+                  {#if modelOptions.length > 1}
+                    <div class="fmt-picker" role="group" aria-label={$i18nT('viewer.modelFormat')}>
+                      {#each modelOptions as opt (opt.format)}
+                        <button
+                          class="fmt-chip"
+                          class:active={opt.format === modelRef.format}
+                          on:click={() => (chosenFormat = opt.format)}
+                        >{FORMAT_LABELS[opt.format]}</button>
+                      {/each}
+                    </div>
+                  {/if}
+                  <Model3D
+                    refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis, guids: modelRef.format === 'ifc' ? descendantGuids : undefined }]}
+                    on:select={(e) => {
+                      // Picking an IFC mesh selects that atom (beam, slab, …):
+                      // resolve its GlobalId to the feed element and open it.
+                      const guid = e.detail?.guid;
+                      const hit = guid && elements.find((el) => el.ifc_guid === guid);
+                      if (hit && hit.id !== element.id) dispatch('navigate', { id: hit.id });
+                    }}
+                    height="100%"
+                  />
+                  <p class="hint center">{$i18nT('viewer.orbitHint')}</p>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </section>
       {/if}
     </div>
   </div>
@@ -296,6 +421,18 @@
     overflow: hidden;
     backdrop-filter: blur(10px);
   }
+  .element-modal {
+    animation: emFade 180ms var(--ease-out, ease) both;
+  }
+  /* Opacity-only entrance — must NOT animate transform (the inline drag transform
+     owns it). */
+  @keyframes emFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .element-modal { animation: none; }
+  }
   .element-modal.full {
     inset: 3vh 3vw;
     margin: 0;
@@ -305,12 +442,36 @@
   }
   header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 0.6rem;
-    padding: 12px 12px 8px 16px;
-    cursor: move;
+    padding: 10px 12px 10px 12px;
+    cursor: grab;
     user-select: none;
+    background: var(--bg-subtle, #fafcfe);
+    border-bottom: 1px solid var(--line-soft, #eef1f4);
+  }
+  header:active {
+    cursor: grabbing;
+  }
+  /* Drag-handle affordance (a grip of dots) — there was no visual cue the panel
+     was draggable. Hidden in full-screen, where dragging is disabled. */
+  header::before {
+    content: '';
+    flex: none;
+    align-self: center;
+    width: 9px;
+    height: 18px;
+    background-image: radial-gradient(currentColor 1px, transparent 1.4px);
+    background-size: 4px 4px;
+    color: var(--muted, #94a3b8);
+    opacity: 0.55;
+  }
+  .element-modal.full header {
+    cursor: default;
+  }
+  .element-modal.full header::before {
+    display: none;
   }
   .head-text {
     min-width: 0;
@@ -353,29 +514,18 @@
     background: var(--bg-hover, rgba(0, 0, 0, 0.05));
     color: var(--ink-900, #0f172a);
   }
-  .tabs {
+  .modal-toolbar {
     display: flex;
     align-items: center;
-    gap: 2px;
-    padding: 0 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--line-soft, #eef1f4);
   }
-  .tabs > button {
-    border: 0;
-    background: transparent;
-    padding: 8px 12px;
-    font-size: 0.84rem;
-    color: var(--muted, #64748b);
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
-    display: flex;
+  .modal-toolbar :global(.btn) {
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-  }
-  .tabs > button.active {
-    color: var(--brand-600, #1d6fb8);
-    border-bottom-color: var(--brand-500, #2f88d8);
-    font-weight: 600;
+    gap: 5px;
   }
   .count {
     font-size: 0.68rem;
@@ -384,23 +534,71 @@
     padding: 0 7px;
     color: var(--ink-700, #334155);
   }
-  .spacer {
-    flex: 1;
-  }
-  .map-action {
-    display: inline-flex;
-    margin-right: 6px;
-  }
-  .map-action button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-  }
   .body {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 12px 16px;
+    padding: 0;
+  }
+  /* Accordion: each section toggles independently, so several can be open. */
+  .acc + .acc,
+  .acc {
+    border-top: 1px solid var(--line-soft, #eef1f4);
+  }
+  .acc:first-child {
+    border-top: 0;
+  }
+  .acc-head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    border: 0;
+    background: transparent;
+    padding: 9px 14px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--ink-700, #334155);
+    text-align: left;
+  }
+  .acc-head:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.03));
+  }
+  .acc-head.open {
+    color: var(--brand-600, #1d6fb8);
+  }
+  .acc-head :global(.acc-caret) {
+    flex: none;
+    color: var(--muted, #94a3b8);
+    transition: transform 0.14s ease;
+  }
+  .acc-head.open :global(.acc-caret) {
+    transform: rotate(90deg);
+    color: var(--brand-500, #2f88d8);
+  }
+  .acc-title {
+    flex: 1;
+  }
+  .acc-head:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--brand-400, #5aa9e0);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .acc-head :global(.acc-caret) {
+      transition: none;
+    }
+  }
+  .acc-content {
+    padding: 2px 16px 14px;
+  }
+  /* The 3D section needs an explicit height now that it isn't the sole content. */
+  .acc-content.model {
+    height: min(340px, 48vh);
+    padding: 8px 12px 12px;
+  }
+  .element-modal.full .acc-content.model {
+    height: 62vh;
   }
   .bim {
     border: 1px solid var(--line-soft, #eef1f4);
@@ -468,12 +666,6 @@
   .tree-row:hover {
     background: var(--bg-hover, rgba(0, 0, 0, 0.04));
   }
-  .tree-row .label {
-    flex: 0 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
   .tree-row.parent {
     margin-top: 8px;
     color: var(--muted, #64748b);
@@ -497,6 +689,100 @@
     margin-left: auto;
     font-size: 0.72rem;
     color: var(--muted, #64748b);
+  }
+  /* Inline structure tree: a caret (expand here) + a name (open in a panel),
+     each its own control so it's clear both are clickable. */
+  .struct-row {
+    display: flex;
+    align-items: center;
+    border-radius: var(--radius-sm, 8px);
+    padding-left: calc(var(--d, 0) * 14px);
+  }
+  .struct-row .twist {
+    flex: none;
+    width: 24px;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    background: transparent;
+    color: var(--muted, #64748b);
+    cursor: pointer;
+    padding: 0;
+    border-radius: var(--radius-sm, 6px);
+  }
+  .struct-row .twist:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.07));
+    color: var(--ink-900, #0f172a);
+  }
+  .struct-row .twist :global(svg) {
+    transition: transform 0.12s ease;
+  }
+  .struct-row .twist.open :global(svg) {
+    transform: rotate(90deg);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .struct-row .twist :global(svg) {
+      transition: none;
+    }
+  }
+  .twist-spacer {
+    flex: none;
+    width: 24px;
+  }
+  .struct-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 7px 8px;
+    border-radius: var(--radius-sm, 8px);
+    cursor: pointer;
+    font-size: 0.87rem;
+    color: var(--ink-900, #0f172a);
+  }
+  .struct-main:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
+  }
+  .struct-main .label {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .struct-row .twist:focus-visible,
+  .struct-main:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--brand-400, #5aa9e0);
+  }
+  .struct-hint {
+    margin: 10px 4px 0;
+    font-size: 0.72rem;
+    opacity: 0.85;
+  }
+  /* Spinner shown while a capped 3D viewer auto-loads its model. */
+  .m3d-spin {
+    width: 24px;
+    height: 24px;
+    border: 3px solid color-mix(in srgb, var(--brand-500, #2f88d8) 30%, transparent);
+    border-top-color: var(--brand-500, #2f88d8);
+    border-radius: 50%;
+    animation: m3d-spin 0.8s linear infinite;
+  }
+  @keyframes m3d-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .m3d-spin {
+      animation: none;
+    }
   }
   .model-wrap {
     height: 100%;
@@ -551,5 +837,14 @@
   }
   .hint.error {
     color: var(--danger-500, #c0392b);
+  }
+
+  /* Visible keyboard focus on every interactive control (the global ring is
+     box-shadow only and gets clipped by some of these containers). */
+  .actions button:focus-visible,
+  .fmt-chip:focus-visible,
+  .tree-row:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--brand-400, #5aa9e0);
   }
 </style>

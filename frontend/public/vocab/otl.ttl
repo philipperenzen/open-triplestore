@@ -1,0 +1,81 @@
+# OTL (Rijkswaterstaat Objecttypenbibliotheek / Object Type Library) — the Dutch
+# national roads & waterways authority's object library for civil infrastructure
+# assets (bridges, tunnels, locks, …) and their parts. This is a small,
+# hand-authored EXCERPT bundled so OTL terms in the demo data render with
+# definitions; it is NOT the full OTL and class/property IRIs are modelled
+# plausibly against the OTL namespace rather than copied verbatim.
+# Source: https://data.rws.nl/  (ns https://data.rws.nl/otl/def/)
+@prefix otl:  <https://data.rws.nl/otl/def/> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<https://data.rws.nl/otl/def/> a owl:Ontology ;
+  rdfs:label "RWS Object Type Library (OTL) — excerpt"@en ;
+  rdfs:comment "A hand-authored excerpt of the Rijkswaterstaat Object Type Library describing civil infrastructure asset types and a few core relations. Not the complete OTL."@en ;
+  owl:versionInfo "excerpt" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+otl:Object a owl:Class ;
+  rdfs:label "Object"@en, "Object"@nl ;
+  rdfs:comment "A physical or functional infrastructure asset managed by the authority; the root of the OTL object-type hierarchy."@en ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:Kunstwerk a owl:Class ;
+  rdfs:label "Engineering structure"@en, "Kunstwerk"@nl ;
+  rdfs:comment "A civil engineering structure such as a bridge, tunnel, lock or viaduct; a subclass of otl:Object."@en ;
+  rdfs:subClassOf otl:Object ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:Brug a owl:Class ;
+  rdfs:label "Bridge"@en, "Brug"@nl ;
+  rdfs:comment "A structure carrying a road, path or railway across an obstacle such as a river, valley or another road; a subclass of otl:Kunstwerk."@en ;
+  rdfs:subClassOf otl:Kunstwerk ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:Tunnel a owl:Class ;
+  rdfs:label "Tunnel"@en, "Tunnel"@nl ;
+  rdfs:comment "An enclosed passage constructed below ground or water level to carry a road, railway or canal; a subclass of otl:Kunstwerk."@en ;
+  rdfs:subClassOf otl:Kunstwerk ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:Sluis a owl:Class ;
+  rdfs:label "Lock"@en, "Sluis"@nl ;
+  rdfs:comment "A hydraulic structure for raising and lowering vessels between stretches of water of different levels; a subclass of otl:Kunstwerk."@en ;
+  rdfs:subClassOf otl:Kunstwerk ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:Onderdeel a owl:Class ;
+  rdfs:label "Component"@en, "Onderdeel"@nl ;
+  rdfs:comment "A constituent part of an object, such as a bridge deck, a pier or a lock gate."@en ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+otl:heeftOnderdeel a owl:ObjectProperty ;
+  rdfs:label "has component"@en, "heeft onderdeel"@nl ;
+  rdfs:comment "Relates an object to a component (part) that makes up that object."@en ;
+  rdfs:domain otl:Object ;
+  rdfs:range otl:Onderdeel ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:heeftGeometrie a owl:ObjectProperty ;
+  rdfs:label "has geometry"@en, "heeft geometrie"@nl ;
+  rdfs:comment "Relates an object or component to a geometry resource that gives its spatial representation."@en ;
+  rdfs:domain otl:Object ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+# ── Datatype properties ──────────────────────────────────────────────────────
+
+otl:beheerder a owl:DatatypeProperty ;
+  rdfs:label "manager"@en, "beheerder"@nl ;
+  rdfs:comment "The party responsible for the management and maintenance of an object."@en ;
+  rdfs:domain otl:Object ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .
+
+otl:bouwjaar a owl:DatatypeProperty ;
+  rdfs:label "year of construction"@en, "bouwjaar"@nl ;
+  rdfs:comment "The year in which an object was constructed."@en ;
+  rdfs:domain otl:Object ;
+  rdfs:isDefinedBy <https://data.rws.nl/otl/def/> .

@@ -2,8 +2,8 @@
 # they render with full definitions in the term-definition card, exactly like the
 # bundled standard vocabularies (DCAT, OWL, SKOS, …). Hand-authored; the term IRIs
 # match those emitted by the backend (src/auth/dataset_graph.rs, src/dcat/catalog.rs,
-# src/shacl_studio/seed_standards.rs).
-@prefix otso: <https://opentriplestore.org/ontology/> .
+# src/shacl_studio/seed_standards.rs). All OTS terms share the single `…/ns#`
+# namespace (graph roles, the graphRole relation, standards and asset stats).
 @prefix ots:  <https://opentriplestore.org/ns#> .
 @prefix otsa: <https://opentriplestore.org/ns/asset#> .
 @prefix owl:  <http://www.w3.org/2002/07/owl#> .
@@ -13,74 +13,74 @@
 @prefix void: <http://rdfs.org/ns/void#> .
 @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
 
-otso: a owl:Ontology ;
-  rdfs:label "Open Triplestore ontology"@en ;
-  rdfs:label "Open Triplestore-ontologie"@nl ;
+ots: a owl:Ontology ;
+  rdfs:label "Open Triplestore vocabulary"@en ;
+  rdfs:label "Open Triplestore-vocabulaire"@nl ;
   rdfs:comment "Terms that describe how Open Triplestore organises datasets, named graphs and standards."@en ;
   owl:versionInfo "1.0" .
 
 # ── Graph roles ────────────────────────────────────────────────────────────────
 
-otso:GraphRole a owl:Class ;
-  rdfs:isDefinedBy otso: ;
+ots:GraphRole a owl:Class ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "Graph role"@en ;
   rdfs:label "Graafrol"@nl ;
   rdfs:comment "The role a named graph plays within a dataset (instances, model, vocabulary, shapes, entailment or system)."@en ;
   skos:definition "A classification of a named graph by the kind of content it holds within its dataset."@en ;
   skos:definition "Een classificatie van een benoemde graaf naar het soort inhoud dat hij binnen zijn dataset bevat."@nl .
 
-otso:graphRole a owl:ObjectProperty ;
-  rdfs:isDefinedBy otso: ;
+ots:graphRole a owl:ObjectProperty ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "graph role"@en ;
   rdfs:label "graafrol"@nl ;
   rdfs:comment "Links a named graph to the role it plays in its dataset."@en ;
   skos:definition "Relates a named graph to the GraphRole that classifies its content."@en ;
-  rdfs:range otso:GraphRole .
+  rdfs:range ots:GraphRole .
 
-otso:auditStatus a owl:AnnotationProperty ;
-  rdfs:isDefinedBy otso: ;
+ots:auditStatus a owl:AnnotationProperty ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "audit status"@en ;
   rdfs:label "auditstatus"@nl ;
   rdfs:comment "Records the access-control audit state of a dataset or graph."@en ;
   skos:definition "The current audit state recorded for a dataset or graph by the access-management system."@en .
 
-otso:Instances a otso:GraphRole ;
-  rdfs:isDefinedBy otso: ;
+ots:Instances a ots:GraphRole ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "Instances"@en ;
   rdfs:label "Instanties"@nl ;
   rdfs:comment "The graph holding the dataset's instance data (the actual records)."@en ;
   skos:definition "Named graph that contains a dataset's instance data — the asserted facts, as opposed to schema, shapes or vocabulary."@en .
 
-otso:Model a otso:GraphRole ;
-  rdfs:isDefinedBy otso: ;
+ots:Model a ots:GraphRole ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "Model"@en ;
   rdfs:label "Model"@nl ;
-  rdfs:comment "The graph holding the dataset's ontology / schema (classes and properties)."@en ;
-  skos:definition "Named graph that contains a dataset's ontology or schema: its class and property definitions."@en .
+  rdfs:comment "The graph holding the dataset's model — its class definitions and class axioms (the T-Box)."@en ;
+  skos:definition "Named graph that contains a dataset's model: its class definitions and class axioms (the T-Box), as opposed to the properties/relations (Vocabulary) or the data (Instances)."@en .
 
-otso:Vocabulary a otso:GraphRole ;
-  rdfs:isDefinedBy otso: ;
+ots:Vocabulary a ots:GraphRole ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "Vocabulary"@en ;
   rdfs:label "Vocabulaire"@nl ;
-  rdfs:comment "The graph holding controlled vocabularies / code lists (e.g. SKOS concept schemes)."@en ;
-  skos:definition "Named graph that contains controlled vocabularies or code lists used by the dataset, such as SKOS concept schemes."@en .
+  rdfs:comment "The graph holding the dataset's vocabulary — its properties and relations (the R-Box) plus any SKOS concept schemes / controlled vocabularies."@en ;
+  skos:definition "Named graph that contains a dataset's vocabulary: the object/datatype/annotation properties and relations (the R-Box) that describe how things relate, together with any SKOS concept schemes or controlled vocabularies."@en .
 
-otso:Shapes a otso:GraphRole ;
-  rdfs:isDefinedBy otso: ;
+ots:Shapes a ots:GraphRole ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "Shapes"@en ;
   rdfs:label "Vormen"@nl ;
   rdfs:comment "The graph holding the dataset's SHACL shapes used for validation."@en ;
   skos:definition "Named graph that contains the SHACL shapes used to validate the dataset's instance data."@en .
 
-otso:Entailment a otso:GraphRole ;
-  rdfs:isDefinedBy otso: ;
+ots:Entailment a ots:GraphRole ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "Entailment"@en ;
   rdfs:label "Gevolgtrekking"@nl ;
   rdfs:comment "The graph holding inferred (entailed) triples produced by a reasoning regime."@en ;
   skos:definition "Named graph that contains triples inferred from the dataset under an entailment regime (RDFS, OWL 2 RL/EL/QL)."@en .
 
-otso:System a otso:GraphRole ;
-  rdfs:isDefinedBy otso: ;
+ots:System a ots:GraphRole ;
+  rdfs:isDefinedBy ots: ;
   rdfs:label "System"@en ;
   rdfs:label "Systeem"@nl ;
   rdfs:comment "A system graph holding internal metadata (registry, versions, catalogue)."@en ;

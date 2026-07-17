@@ -253,6 +253,9 @@ pub struct AppState {
     pub auth_ext: Arc<crate::auth::oidc_rs::AuthExt>,
     /// M-1/W4-21: SPARQL query and update timeout in seconds.
     pub query_timeout_secs: u64,
+    /// Write-path timeout in seconds for GSP PUT/POST/DELETE and data-model/dataset
+    /// DELETE/PATCH. Larger than `query_timeout_secs`; bulk import is exempt.
+    pub write_timeout_secs: u64,
     /// When true, auth cookies are issued with the `Secure` attribute (HTTPS only).
     /// Disabled by default so plain-HTTP local development still works.
     pub secure_cookies: bool,
@@ -296,6 +299,7 @@ impl AppState {
             passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
+            write_timeout_secs: 120,
             secure_cookies: false,
             browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
             expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -901,6 +905,14 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/viewer-feed",
             get(routes::viewer_feed),
         )
+        // Geo capability summary (gates the map / 3D-viewer UI affordances).
+        .route(
+            "/api/datasets/:dataset_id/geo-stats",
+            get(routes::geo_stats),
+        )
+        // Batched, scope-wide geo capability — one OR-aggregated probe instead of
+        // one `/geo-stats` request per dataset (the triple browser's Map gate).
+        .route("/api/geo-stats", get(routes::geo_stats_batch))
         // Anonymous-capable asset download (dataset visibility decides) — the
         // viewer fetches e.g. the original IFC file through this without auth.
         .route(
@@ -1286,6 +1298,26 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .with_state(state.clone()),
         );
 
+    // OGC API – Features (Core, P4). Nested router so `optional_auth` populates
+    // AuthenticatedUser for logged-in callers while public datasets stay
+    // anonymously reachable (handlers gate on can_access_dataset).
+    router = router.merge(
+        Router::new()
+            .merge(crate::ogcapi::ogcapi_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone()),
+    );
+
+    // 3D Tiles 1.1 (P5): tileset.json + content.glb, anonymous-capable.
+    #[cfg(feature = "geometry3d")]
+    {
+        let tiles3d_routes = Router::new()
+            .merge(crate::tiles3d::tiles3d_routes())
+            .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+            .with_state(state.clone());
+        router = router.merge(tiles3d_routes);
+    }
+
     #[cfg(feature = "ldp")]
     {
         router = router.merge(ldp_router);
@@ -1483,6 +1515,7 @@ pub async fn run(
     cors_origins: &str,
     trusted_cidrs: Vec<IpNet>,
     query_timeout_secs: u64,
+    write_timeout_secs: u64,
     secure_cookies: bool,
     serve_frontend: bool,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
@@ -1588,6 +1621,7 @@ pub async fn run(
         passkey_sessions: crate::auth::passkey::new_session_store(),
         auth_ext,
         query_timeout_secs,
+        write_timeout_secs,
         secure_cookies,
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_BROWSE_QUERIES)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
@@ -1670,6 +1704,13 @@ pub async fn run(
             crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
             // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
             crate::auth::dataset_graph::reconcile_all_dataset_metadata(
+                store,
+                &seed_state.base_url,
+                auth,
+            );
+            // 5b. Model/Vocabulary/Instance reframe: reclassify stored property
+            //     graphs (model→vocabulary) and rewrite legacy …/ontology/ IRIs to …/ns#.
+            crate::auth::dataset_graph::migrate_model_vocabulary_reframe(
                 store,
                 &seed_state.base_url,
                 auth,
