@@ -191,7 +191,7 @@ rstar = "0.13"
 # Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
 # parry3d-f64 re-exports nalgebra as `parry3d_f64::na`; we use that re-export
 # rather than adding a separate `nalgebra` dependency, to avoid version skew.
-parry3d-f64 = { version = "0.17", optional = true }
+parry3d-f64 = { version = "0.29", optional = true }
 # Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
 # libSFCGAL C library, so it is excluded from `full` and the default CI build.
 sfcgal = { version = "0.7", optional = true }
