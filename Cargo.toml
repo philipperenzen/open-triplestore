@@ -223,7 +223,7 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "fla
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
 
 # Full-text search (text-search feature)
-tantivy = { version = "0.22", optional = true }
+tantivy = { version = "0.26", optional = true }
 
 # SAML 2.0 SSO (saml feature)
 samael = { version = "0.0.22", optional = true }
