@@ -14,6 +14,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- None.
+
+### Changed
+- None.
+
+### Deprecated
+- None.
+
+### Removed
+- None.
+
+### Fixed
+- None.
+
+### Security
+- None.
+
+## [0.4.0] — 2026-07-17
+
+### Added
 - **Extension/plugin architecture**, so a downstream operator can customize an
   instance without patching upstream source — see [`docs/plugins.md`](docs/plugins.md):
   - **Seed bundles** (`src/seed_bundles/`, `--seed-dir` / `SEED_DIR`): boot-time
@@ -99,6 +119,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer replayed as context on later turns — one blocked message used to
   re-block every following turn and freeze the chat; rejected questions stay
   visible but dimmed and are excluded from the conversation and from history.
+- `docker-compose.yml` no longer hardcodes container names — every service's
+  name (and its containers/networks/volumes) now derives from the compose
+  project, so a second concurrent `docker compose up` (e.g. a second git
+  worktree) no longer fails with "container name already in use".
+- Published host ports (`7878`, `9000`/`9001`, `11434`, `8000`) are now
+  overridable via `TRIPLESTORE_PORT` / `MINIO_PORT` / `MINIO_CONSOLE_PORT` /
+  `OLLAMA_PORT` / `VLLM_PORT` (`.env`), so two concurrent `docker compose up`
+  checkouts no longer fight over the same host port; the `info` banner service
+  reports the actual configured ports.
 
 ### Security
 - Authorization matrix tests (role × visibility × endpoint) pinning anonymous
@@ -386,7 +415,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.2...v0.2.3
