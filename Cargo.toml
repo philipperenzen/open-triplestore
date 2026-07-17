@@ -194,7 +194,7 @@ rstar = "0.13"
 parry3d-f64 = { version = "0.17", optional = true }
 # Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
 # libSFCGAL C library, so it is excluded from `full` and the default CI build.
-sfcgal = { version = "0.7", optional = true }
+sfcgal = { version = "0.8", optional = true }
 
 # RML mapping sources
 csv = "1"
