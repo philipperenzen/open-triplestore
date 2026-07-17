@@ -11,11 +11,19 @@ repository = "https://github.com/philipperenzen/open-triplestore"
 # Bundled with the workspace, not published to crates.io (see root Cargo.toml).
 publish = false
 
+[features]
+## RDF 1.2 / SPARQL 1.2 triple terms. The oxigraph 0.5 crate family gates the
+## `oxrdf::Term::Triple` variant per-crate behind rdf-12/sparql-12; once any of
+## them turns it on, ALL of them must, or their `Term`/`TermRef` matches go
+## non-exhaustive. `oxigraph/rdf-12` cascades to oxrdfio/oxttl/oxrdfxml/spareval/
+## sparesults; `spargebra/sparql-12` (→ oxrdf/rdf-12) covers the algebra crate.
+sparql-12 = ["oxigraph/rdf-12", "spargebra/sparql-12"]
+
 [dependencies]
 # Oxigraph engine — opengraph wraps and extends these (re-exported from lib.rs).
-oxigraph  = "0.4"
-oxrdf     = "0.2"
-spargebra = "0.3"
+oxigraph  = "0.5"
+oxrdf     = "0.3"
+spargebra = "0.4"
 
 # Durable blank-node identity: SHA-256 canonical hashing + hex encoding.
 # 0.11 to match the workspace root (RustCrypto `digest` 0.11 family).

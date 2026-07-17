@@ -1273,6 +1273,29 @@ fn require_graph_write(
     }
 }
 
+/// Run a blocking store write off the async runtime, under the configured write
+/// timeout (`write_timeout_secs`).
+///
+/// A single stuck or slow write (RocksDB write-stall, disk pressure, a crashed
+/// mid-write job) must never pin a Tokio worker: `spawn_blocking` keeps it off the
+/// async runtime so reads and the `/livez` probe stay responsive, and the timeout
+/// aborts it so the connection isn't held open indefinitely. An elapsed write returns
+/// `503` (retryable) — a possibly-stalled store, not a client error. A panic inside
+/// the write is contained by `spawn_blocking` (surfaced as `500`), never a poisoned
+/// lock. Bulk import is intentionally NOT routed through here — it is uncapped.
+pub(crate) async fn run_store_write<F, T>(state: &AppState, what: &str, f: F) -> Result<T, AppError>
+where
+    F: FnOnce() -> Result<T, crate::store::engine::StoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    let timeout = std::time::Duration::from_secs(state.write_timeout_secs);
+    tokio::time::timeout(timeout, tokio::task::spawn_blocking(f))
+        .await
+        .map_err(|_| AppError::ServiceUnavailable(format!("{what} timed out")))?
+        .map_err(|e| AppError::Internal(format!("{what} task panicked: {e}")))?
+        .map_err(AppError::from)
+}
+
 /// PUT /store?graph=... — Replace graph contents
 async fn graph_store_put(
     State(state): State<AppState>,
@@ -1296,9 +1319,12 @@ async fn graph_store_put(
 
     validate_on_write(&state, params.graph_iri(), &data, format)?;
 
-    state
-        .store
-        .graph_store_put(params.graph_iri(), &data, format)?;
+    let store = state.store.clone();
+    let graph = params.graph_iri().map(|s| s.to_string());
+    run_store_write(&state, "graph store PUT", move || {
+        store.graph_store_put(graph.as_deref(), &data, format)
+    })
+    .await?;
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1327,9 +1353,12 @@ async fn graph_store_post(
 
     validate_on_write(&state, params.graph_iri(), &data, format)?;
 
-    state
-        .store
-        .graph_store_post(params.graph_iri(), &data, format)?;
+    let store = state.store.clone();
+    let graph = params.graph_iri().map(|s| s.to_string());
+    run_store_write(&state, "graph store POST", move || {
+        store.graph_store_post(graph.as_deref(), &data, format)
+    })
+    .await?;
     #[cfg(feature = "text-search")]
     state.mark_text_dirty();
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1342,7 +1371,12 @@ async fn graph_store_delete(
     Query(params): Query<GraphStoreParams>,
 ) -> Result<Response, AppError> {
     require_graph_write(&state, user.as_deref(), params.graph_iri())?;
-    state.store.graph_store_delete(params.graph_iri())?;
+    let store = state.store.clone();
+    let graph = params.graph_iri().map(|s| s.to_string());
+    run_store_write(&state, "graph store DELETE", move || {
+        store.graph_store_delete(graph.as_deref())
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -7151,4 +7185,49 @@ pub async fn geo_stats_batch(
 
     let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
     Ok(Json(stats))
+}
+
+#[cfg(test)]
+mod write_timeout_tests {
+    use super::run_store_write;
+    use crate::server::error::AppError;
+    use crate::server::AppState;
+    use crate::store::TripleStore;
+
+    fn state_with_write_timeout(secs: u64) -> AppState {
+        let mut state = AppState::test_default_with_store(TripleStore::in_memory().unwrap());
+        state.write_timeout_secs = secs;
+        state
+    }
+
+    // A write that outlives `write_timeout_secs` must be aborted and surfaced as a
+    // retryable 503, not left to pin the connection. The blocking closure keeps
+    // running in the background (blocking tasks can't be cancelled), but the caller
+    // is freed the moment the timeout elapses — which is the whole point.
+    #[tokio::test]
+    async fn stuck_write_times_out_as_service_unavailable() {
+        let state = state_with_write_timeout(1);
+        let result: Result<(), AppError> = run_store_write(&state, "slow write", || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            Ok(())
+        })
+        .await;
+        match result {
+            Err(AppError::ServiceUnavailable(msg)) => {
+                assert!(
+                    msg.contains("slow write"),
+                    "message should name the op: {msg}"
+                );
+            }
+            other => panic!("expected ServiceUnavailable, got {other:?}"),
+        }
+    }
+
+    // The happy path returns the closure's value unchanged.
+    #[tokio::test]
+    async fn fast_write_returns_value() {
+        let state = state_with_write_timeout(30);
+        let result: Result<u32, AppError> = run_store_write(&state, "quick write", || Ok(42)).await;
+        assert_eq!(result.unwrap(), 42);
+    }
 }
