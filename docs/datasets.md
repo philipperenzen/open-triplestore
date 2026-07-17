@@ -15,19 +15,22 @@ Datasets serve as the organizational unit for:
 
 ## Dataset Graphs & Roles
 
-Within each dataset, graphs are organized by **role**, indicating their purpose and content type:
+Within each dataset, graphs are organized by **role**, indicating their purpose and content type. The store recognises six role strings — `instances`, `model`, `vocabulary`, `shapes`, `entailment` and `system` — aligned to the Description-Logic *boxes*:
 
 | Role | Purpose | Content Type | Queryable | Editable | Description |
 |---|---|---|---|---|---|
-| **abox** | Application Box / Instance Data | RDF assertions about individuals (instances) | ✓ | ✓ | Contains concrete data instances, facts, and relationships. Used for storing actual data (e.g., people, organizations, events). Multiple ABox graphs allowed per dataset. |
-| **tbox** | Terminological Box / Schema / Model & Vocabulary | Class and property definitions (ontologies) | ✓ | ✓ | Contains the ontological model: classes, properties, and their relationships. Defines the vocabulary and structure. Typically one TBox per dataset, though multiple are supported. |
+| **instances** | Instance Data (A-Box) | RDF assertions about individuals | ✓ | ✓ | Contains concrete data instances, facts, and relationships. Used for storing actual data (e.g., people, organizations, events). Multiple instance graphs allowed per dataset. |
+| **model** | Model (T-Box) | **Class** definitions and class axioms | ✓ | ✓ | Contains the categories of the domain: `owl:Class` / `rdfs:Class`, `rdfs:subClassOf`, restrictions, disjointness. Typically managed in the [Model Registry](/docs/models), but a dataset may carry its own. |
+| **vocabulary** | Vocabulary (R-Box) | **Property** definitions and SKOS concepts | ✓ | ✓ | Contains the relations and controlled terms: `owl:ObjectProperty` / `DatatypeProperty`, `rdfs:domain`/`range`, `rdfs:subPropertyOf`, `owl:inverseOf`, plus SKOS concept schemes and concepts. |
 | **shapes** | SHACL Shapes Graph | Shape definitions for validation | ✓ | ✓ | Contains SHACL NodeShapes and PropertyShapes for validating data. Used by SHACL validation engine when `shacl_on_write` is enabled. |
-| **entailment** | Inferred / Derived Data | Computed triples from reasoning | ✓ | ✗ | Contains triples derived by the reasoning engine (OWL 2 RL, RDFS, etc.). Read-only; automatically populated based on TBox + ABox. |
+| **entailment** | Inferred / Derived Data | Computed triples from reasoning | ✓ | ✗ | Contains triples derived by the reasoning engine (OWL 2 RL, RDFS, etc.). Read-only; automatically populated from the schema (Model + Vocabulary) plus instances. |
 | **system** | Internal / System Metadata | Configuration and metadata | ✓ | ✗ | Reserved for system use (RML mappings metadata, dataset configuration, internal bookkeeping). Read-only for end users. |
 
 ### Notes on Graph Roles
 
-- **Multiple graphs per role**: Datasets can contain multiple graphs with the same role (e.g., multiple ABox graphs for different data subsets).
+- **Three first-class layers**: `model`, `vocabulary` and `instances` are the three primary layers; `shapes` and `entailment` are orthogonal roles and `system` is internal. A single upload that mixes them can be **auto-split** into one graph per role on import (see [Import Auto-Detection](/docs/import)).
+- **Legacy aliases**: the older role names `tbox` (Terminological Box) and `abox` (Assertion Box) are still accepted on input as aliases — `tbox` for `model` and `abox` for `instances` — but the canonical strings are `model`, `vocabulary` and `instances`. Note that `tbox` historically lumped properties together with classes; properties now belong to the `vocabulary` role.
+- **Multiple graphs per role**: Datasets can contain multiple graphs with the same role (e.g., multiple instance graphs for different data subsets).
 - **Entailment is computed**: The `entailment` graph is automatically populated by the reasoning engine and cannot be directly written to.
 - **System is reserved**: The `system` role is reserved for internal metadata and should not be modified by end users.
 - **Role assignment**: Graphs are assigned roles via the dataset API (`PUT /api/datasets/:id/role`).
@@ -79,7 +82,7 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/role \
   -H 'Content-Type: application/json' \
   -d '{
     "graph_iri": "urn:example:my-graph",
-    "role": "abox"
+    "role": "instances"
   }'
 ```
 
@@ -178,8 +181,8 @@ curl -H "Authorization: Bearer <token>" \
 
 ## Best Practices
 
-1. **Organize by role**: Use graph roles consistently (e.g., keep all instance data in `abox` graphs, schema in `tbox`).
+1. **Organize by role**: Use graph roles consistently — keep instance data in `instances` graphs, classes in `model`, properties and concept schemes in `vocabulary`.
 2. **Enable validation early**: Set up SHACL shapes and enable `shacl_on_write` to catch data quality issues proactively.
-3. **Use meaningful IRIs**: Graph IRIs like `urn:dataset:<id>:abox:main` are more readable than UUIDs.
-4. **Plan for growth**: Multiple ABox graphs allow logical separation of data subsets without changing schema.
+3. **Use meaningful IRIs**: Graph IRIs like `urn:dataset:<id>:instances:main` are more readable than UUIDs.
+4. **Plan for growth**: Multiple instance graphs allow logical separation of data subsets without changing the schema.
 5. **Version metadata**: Store dataset metadata as RDF for discoverability via SPARQL.

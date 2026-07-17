@@ -47,6 +47,7 @@
     listBindingsForTarget,
     getLatestValidationRun,
     getValidationHistory,
+    getGeoStats,
   } from '../lib/api.js';
   import { unwrapValidationRun, validationErrorMessage } from '../lib/validationReport.js';
   import { toastSuccess } from '../lib/toast.ts';
@@ -57,10 +58,12 @@
   import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
   import { copyToClipboard } from '../lib/clipboard.js';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
+  // GraphCanvas (cytoscape) loads lazily once there are graph nodes to show
+  // (graphCanvasMod below), keeping cytoscape out of the main bundle that this
+  // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
@@ -84,6 +87,9 @@
   let graphs = [];
   let services = [];
   let error = '';
+  // Geo capability of the dataset — gates the map / 3D-viewer action tile so it
+  // only appears when there is something to show (coordinates and/or 3D data).
+  let geoStats = null;
   let newGraphIri = '';
 
   // Per-graph role editing
@@ -457,7 +463,7 @@
   // Whether there is any rich metadata worth showing beyond the basics.
   $: hasRichMetadata = !!(dataset && (dataset.license || mdThemes.length || mdKeywords.length
     || dataset.adms_status || dataset.version_notes || dataset.spatial || dataset.landing_page
-    || hasContact || dataset.conforms_to_ontology));
+    || hasContact || dataset.conforms_to_model));
 
   // Breadcrumb: org name when dataset is org-owned
   let ownerOrgName = null;
@@ -541,6 +547,9 @@
 
   // Linked data preview
   let graphNodes = [];
+  // Lazily import GraphCanvas once there are nodes to render (memoised).
+  let graphCanvasMod;
+  $: if (graphNodes.length > 0 && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
   let graphEdges = [];
   let sampleTriples = [];
   let loadingPreview = false;
@@ -747,10 +756,16 @@
     await Promise.all([fetchAccess(), loadDataPreview(), loadEffectiveShapes(), loadValidationState()]);
   });
 
+  // Probe geo capability (independent of the dataset load) to gate the viewer tile.
+  async function fetchGeoStats() {
+    try { geoStats = await getGeoStats(id); } catch { geoStats = null; }
+  }
+  fetchGeoStats();
+
   async function fetchDataset() {
     try {
       dataset = await getDataset(id);
-      editConformsToOntology = dataset.conforms_to_ontology || '';
+      editConformsToOntology = dataset.conforms_to_model || '';
       editConformsToVersion = dataset.conforms_to_version || '';
       imageKey = dataset.image_key;
       bannerKey = dataset.banner_key;
@@ -847,7 +862,7 @@
     try {
       dataset = await updateDataset(id, {
         ...e.detail,
-        conforms_to_ontology: editConformsToOntology || null,
+        conforms_to_model: editConformsToOntology || null,
         conforms_to_version: editConformsToVersion || null,
       });
       metadataDialogOpen = false;
@@ -1390,10 +1405,10 @@
       </div>
     {/if}
 
-    {#if dataset.conforms_to_ontology}
+    {#if dataset.conforms_to_model}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.conformsToModel')}</dt>
-        <dd><a href="/models/{dataset.conforms_to_ontology}" class="md-link">{dataset.conforms_to_ontology}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
+        <dd><a href="/models/{dataset.conforms_to_model}" class="md-link">{dataset.conforms_to_model}{#if dataset.conforms_to_version} · v{dataset.conforms_to_version}{/if}</a></dd>
       </div>
     {/if}
 
@@ -1484,11 +1499,21 @@
       <strong>{$i18nT('pages.datasetDetail.sparql')}</strong>
       <span>{$i18nT('pages.datasetDetail.sparqlDesc')}</span>
     </Link>
-    <Link to="/datasets/{id}/viewer" class="action-tile">
-      <Boxes size={22} />
-      <strong>{$i18nT('pages.datasetDetail.viewer3d')}</strong>
-      <span>{$i18nT('pages.datasetDetail.viewer3dDesc')}</span>
-    </Link>
+    {#if geoStats && (geoStats.has_coordinates || geoStats.has_3d)}
+      <!-- Gated by data capability: 3D viewer when there's 3D data, otherwise a
+           plain map for coordinate-only features. -->
+      <Link to="/datasets/{id}/viewer" class="action-tile">
+        {#if geoStats.has_3d}
+          <Boxes size={22} />
+          <strong>{$i18nT('pages.datasetDetail.viewer3d')}</strong>
+          <span>{$i18nT('pages.datasetDetail.viewer3dDesc')}</span>
+        {:else}
+          <MapPin size={22} />
+          <strong>{$i18nT('pages.datasetDetail.viewerMap')}</strong>
+          <span>{$i18nT('pages.datasetDetail.viewerMapDesc')}</span>
+        {/if}
+      </Link>
+    {/if}
     <Link to="/datasets/{id}/api-services" class="action-tile">
       <Bookmark size={22} />
       <strong>{$i18nT('pages.datasetDetail.apiServices')}</strong>
@@ -1528,17 +1553,21 @@
     {:else if previewError || versionError}
       <p class="error">{previewError || versionError}</p>
     {:else}
-      <GraphCanvas
-        nodes={graphNodes}
-        edges={graphEdges}
-        height="400px"
-        expandedNodes={previewExpandedIris}
-        expandingNode={previewExpandingUri}
-        exhaustedNodes={previewExhaustedIris}
-        on:nodeExpand={handlePreviewNodeExpand}
-        on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)}
-        on:nodeContextMenu={handlePreviewNodeContextMenu}
-      />
+      {#await graphCanvasMod then GC}
+        {#if GC}
+          <svelte:component this={GC.default}
+            nodes={graphNodes}
+            edges={graphEdges}
+            height="400px"
+            expandedNodes={previewExpandedIris}
+            expandingNode={previewExpandingUri}
+            exhaustedNodes={previewExhaustedIris}
+            on:nodeExpand={handlePreviewNodeExpand}
+            on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)}
+            on:nodeContextMenu={handlePreviewNodeContextMenu}
+          />
+        {/if}
+      {/await}
       <ContextMenu
         visible={previewCtxVisible}
         x={previewCtxX}

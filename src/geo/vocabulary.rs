@@ -14,6 +14,65 @@ pub const WKT_LITERAL: &str = "http://www.opengis.net/ont/geosparql#wktLiteral";
 /// GML literal datatype IRI
 pub const GML_LITERAL: &str = "http://www.opengis.net/ont/geosparql#gmlLiteral";
 
+// ─── 3D / volumetric datatypes (additive; spec §3.3) ───
+// Canonical datatype IRIs the platform defines and advertises; emitted by the
+// CityJSON converter (which inlines the same string) and consumed by external
+// clients, so they are allow(dead_code) for internal-usage analysis.
+
+/// A CityJSON geometry object embedded as a JSON literal (loss-free 3D BAG).
+#[allow(dead_code)]
+pub const CITYJSON_LITERAL: &str = "https://open-triplestore.org/def/cityjsonGeometryLiteral";
+/// A base64 glTF/GLB fragment or a URI to one (render-ready).
+#[allow(dead_code)]
+pub const GLTF_LITERAL: &str = "https://open-triplestore.org/def/gltfGeometryLiteral";
+
+// ─── ots-geof: 3D function IRIs (additive; spec §3.4) ───
+// Namespace https://open-triplestore.org/def/function/geo3d/ — never collides
+// with geof:, so GeoSPARQL 1.1 stays conformant.
+
+pub const OTS3D_DISTANCE3D: &str = "https://open-triplestore.org/def/function/geo3d/distance3d";
+pub const OTS3D_VOLUME: &str = "https://open-triplestore.org/def/function/geo3d/volume";
+pub const OTS3D_AREA3D: &str = "https://open-triplestore.org/def/function/geo3d/area3d";
+pub const OTS3D_ZMIN: &str = "https://open-triplestore.org/def/function/geo3d/zMin";
+pub const OTS3D_ZMAX: &str = "https://open-triplestore.org/def/function/geo3d/zMax";
+pub const OTS3D_HEIGHT: &str = "https://open-triplestore.org/def/function/geo3d/height";
+pub const OTS3D_BBOX3D: &str = "https://open-triplestore.org/def/function/geo3d/boundingBox3d";
+pub const OTS3D_CENTROID3D: &str = "https://open-triplestore.org/def/function/geo3d/centroid3d";
+pub const OTS3D_FOOTPRINT2D: &str = "https://open-triplestore.org/def/function/geo3d/footprint2d";
+pub const OTS3D_EXTRUDE: &str = "https://open-triplestore.org/def/function/geo3d/extrude";
+pub const OTS3D_SF_INTERSECTS: &str =
+    "https://open-triplestore.org/def/function/geo3d/sf3dIntersects";
+pub const OTS3D_SF_DISJOINT: &str = "https://open-triplestore.org/def/function/geo3d/sf3dDisjoint";
+
+// ─── ots-geof: exact 3D solid-kernel function IRIs (parry3d narrow phase) ───
+// The `sf3dContains`/`sf3dWithin` point-in-solid predicates and the convex hull
+// constructor. Exact (not AABB broad-phase). Same geo3d/ namespace.
+
+/// Convex hull of a 3D geometry as a `POLYHEDRALSURFACE Z` solid.
+pub const OTS3D_CONVEXHULL3D: &str = "https://open-triplestore.org/def/function/geo3d/convexHull3d";
+/// Exact "first solid contains the second" (every vertex of B inside A's volume).
+pub const OTS3D_SF_CONTAINS: &str = "https://open-triplestore.org/def/function/geo3d/sf3dContains";
+/// Exact "first geometry is within the second solid" (inverse of contains).
+pub const OTS3D_SF_WITHIN: &str = "https://open-triplestore.org/def/function/geo3d/sf3dWithin";
+
+// ─── ots-geof: certified CSG function IRIs (SFCGAL; sfcgal3d feature only) ───
+// These are advertised only when the platform is built with `sfcgal3d`; the
+// default build neither registers nor resolves them.
+
+/// Boolean union of two solids (certified, SFCGAL).
+#[allow(dead_code)]
+pub const OTS3D_UNION3D: &str = "https://open-triplestore.org/def/function/geo3d/union3d";
+/// Boolean intersection of two solids (certified, SFCGAL).
+#[allow(dead_code)]
+pub const OTS3D_INTERSECTION3D: &str =
+    "https://open-triplestore.org/def/function/geo3d/intersection3d";
+/// Boolean difference of two solids (certified, SFCGAL).
+#[allow(dead_code)]
+pub const OTS3D_DIFFERENCE3D: &str = "https://open-triplestore.org/def/function/geo3d/difference3d";
+/// Certified exact volume of a closed solid (SFCGAL, exact arithmetic).
+#[allow(dead_code)]
+pub const OTS3D_VOLUME_EXACT: &str = "https://open-triplestore.org/def/function/geo3d/volumeExact";
+
 // ─── Simple Features topological function IRIs ───
 
 pub const SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";

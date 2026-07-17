@@ -319,7 +319,7 @@ impl BackupManager {
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn write_secure(path: &Path, data: &[u8]) -> anyhow::Result<()> {

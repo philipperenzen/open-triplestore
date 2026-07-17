@@ -383,9 +383,10 @@ pub struct CreateDatasetRequest {
     pub owner_type: String,
     pub owner_id: String,
     pub visibility: Option<String>,
-    pub conforms_to_ontology: Option<String>,
+    #[serde(alias = "conforms_to_ontology")]
+    pub conforms_to_model: Option<String>,
     pub conforms_to_version: Option<String>,
-    /// Optional box classification: "abox" | "tbox" | "shapes" | "entailment" | "system"
+    /// Optional role classification: "instances" | "model" | "vocabulary" | "shapes" | "entailment" | "system"
     pub graph_role: Option<String>,
 }
 
@@ -394,7 +395,8 @@ pub struct UpdateDatasetRequest {
     pub name: String,
     pub description: Option<String>,
     pub visibility: String,
-    pub conforms_to_ontology: Option<String>,
+    #[serde(alias = "conforms_to_ontology")]
+    pub conforms_to_model: Option<String>,
     pub conforms_to_version: Option<String>,
     // DCAT / ADMS / VoID metadata
     pub license: Option<String>,
@@ -1685,9 +1687,10 @@ pub async fn forgot_username(
     if validate::validate_email(email).is_ok() {
         if let Ok(Some(user)) = db.get_user_by_email(email) {
             if user.is_active {
-                state
-                    .mailer
-                    .send_username_reminder_email(&user.email, &[user.username.clone()]);
+                state.mailer.send_username_reminder_email(
+                    &user.email,
+                    std::slice::from_ref(&user.username),
+                );
                 let mut b = AuditEventBuilder::new(
                     AuditEventType::UsernameReminderRequested,
                     AuditOutcome::Success,
@@ -3545,11 +3548,11 @@ pub async fn create_dataset(
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Set ontology conformance if provided
-    if req.conforms_to_ontology.is_some() || req.conforms_to_version.is_some() {
+    // Set model conformance if provided
+    if req.conforms_to_model.is_some() || req.conforms_to_version.is_some() {
         db.update_dataset_conformance(
             &id,
-            req.conforms_to_ontology.as_deref(),
+            req.conforms_to_model.as_deref(),
             req.conforms_to_version.as_deref(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -3782,10 +3785,10 @@ pub async fn update_dataset(
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Update ontology conformance
+    // Update model conformance
     db.update_dataset_conformance(
         &dataset_id,
-        req.conforms_to_ontology.as_deref(),
+        req.conforms_to_model.as_deref(),
         req.conforms_to_version.as_deref(),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -3850,33 +3853,55 @@ pub async fn delete_dataset(
         return Err((StatusCode::FORBIDDEN, "Manage access required".to_string()));
     }
 
-    // Delete all named graphs associated with this dataset from Oxigraph,
-    // but only when no other dataset still references the same graph IRI.
+    // Delete all named graphs associated with this dataset from Oxigraph, but only
+    // when no other dataset still references the same graph IRI. Run the whole
+    // sequence off the async runtime under the write timeout: this can touch many
+    // (potentially large) graphs, and a stalled store must not pin a Tokio worker or
+    // block reads/liveness. Individual deletes stay best-effort (a graph may already
+    // be absent); a timeout aborts the batch with 503.
     let graph_iris = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    for iri in &graph_iris {
-        let shared = state
-            .auth_db
-            .graph_has_other_dataset_refs(iri.as_str(), &dataset_id)
-            .unwrap_or(false);
-        if !shared {
-            // Tolerate errors (graph may already be absent); never abort the delete.
-            let _ = state.store.graph_store_delete(Some(iri.as_str()));
-        }
-    }
-
-    // Also delete the shapes graph, which is stored only in the datasets table
-    // and is therefore not listed in dataset_graphs — it would otherwise be
-    // left orphaned in Oxigraph.
-    if let Some(ref shapes_iri) = dataset.shapes_graph_iri {
-        let _ = state.store.graph_store_delete(Some(shapes_iri.as_str()));
-    }
-
-    // Delete the DCAT metadata named graph for this dataset.
+    let store = state.store.clone();
+    let auth_db = state.auth_db.clone();
+    let del_dataset_id = dataset_id.clone();
+    let shapes_iri = dataset.shapes_graph_iri.clone();
     let meta_graph = dataset_graph::dataset_metadata_graph_iri(&dataset_id);
-    let _ = state.store.graph_store_delete(Some(&meta_graph));
+    let write_timeout = std::time::Duration::from_secs(state.write_timeout_secs);
+    tokio::time::timeout(
+        write_timeout,
+        tokio::task::spawn_blocking(move || {
+            for iri in &graph_iris {
+                let shared = auth_db
+                    .graph_has_other_dataset_refs(iri.as_str(), &del_dataset_id)
+                    .unwrap_or(false);
+                if !shared {
+                    let _ = store.graph_store_delete(Some(iri.as_str()));
+                }
+            }
+            // The shapes graph is stored only in the datasets table (not listed in
+            // dataset_graphs), so delete it explicitly or it is orphaned in Oxigraph.
+            if let Some(ref shapes_iri) = shapes_iri {
+                let _ = store.graph_store_delete(Some(shapes_iri.as_str()));
+            }
+            // The DCAT metadata named graph for this dataset.
+            let _ = store.graph_store_delete(Some(&meta_graph));
+        }),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dataset delete timed out".to_string(),
+        )
+    })?
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("dataset delete task panicked: {e}"),
+        )
+    })?;
 
     state
         .auth_db

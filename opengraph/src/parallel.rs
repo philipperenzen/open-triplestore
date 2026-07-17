@@ -143,10 +143,10 @@ impl ParallelStore {
             .into_par_iter()
             .zip(self.shards.par_iter())
             .try_for_each(|(quads, shard)| {
-                shard
-                    .bulk_loader()
-                    .load_quads(quads)
-                    .map_err(|e| e.to_string())
+                // oxigraph 0.5: stage with the bulk loader, then commit() to persist.
+                let mut loader = shard.bulk_loader();
+                loader.load_quads(quads).map_err(|e| e.to_string())?;
+                loader.commit().map_err(|e| e.to_string())
             })
     }
 
@@ -1154,10 +1154,9 @@ fn materialize_partials(rows: &[Vec<Option<Term>>], n_cols: usize) -> Result<Sto
             }
         }
     }
-    store
-        .bulk_loader()
-        .load_quads(quads)
-        .map_err(|e| e.to_string())?;
+    let mut loader = store.bulk_loader();
+    loader.load_quads(quads).map_err(|e| e.to_string())?;
+    loader.commit().map_err(|e| e.to_string())?;
     Ok(store)
 }
 
@@ -1462,10 +1461,9 @@ mod tests {
     /// multiset of stringified rows (or "ASK:<bool>").
     fn single_store_answer(quads: &[Quad], sparql: &str) -> Vec<String> {
         let store = Store::new().unwrap();
-        store
-            .bulk_loader()
-            .load_quads(quads.iter().cloned())
-            .unwrap();
+        let mut loader = store.bulk_loader();
+        loader.load_quads(quads.iter().cloned()).unwrap();
+        loader.commit().unwrap();
         normalise(store.query(sparql).unwrap())
     }
 

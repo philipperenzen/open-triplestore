@@ -21,8 +21,13 @@ keywords = ["rdf", "sparql", "triplestore", "geosparql", "linked-data"]
 categories = ["database-implementations", "web-programming::http-server"]
 
 [features]
-## RDF 1.2 / SPARQL 1.2 triple term support (oxrdf rdf-star variant)
-rdf-12          = ["oxrdf/rdf-star"]
+## RDF 1.2 / SPARQL 1.2 triple term support. oxrdf 0.3 renamed its `rdf-star`
+## feature to `rdf-12`. In the oxigraph 0.5 family the `oxrdf::Term::Triple`
+## variant is gated per-crate, so enabling it anywhere forces enabling it
+## everywhere (else their `Term` matches go non-exhaustive): `oxigraph/rdf-12`
+## cascades to the parser/serializer/eval crates, `spargebra/sparql-12` covers
+## the algebra crate, and `opengraph/sparql-12` covers our engine layer.
+rdf-12          = ["oxigraph/rdf-12", "spargebra/sparql-12", "opengraph/sparql-12"]
 ## RDFS forward-chaining entailment
 rdfs-entailment = []
 ## OWL 2 EL profile (existential/intersection reasoning)
@@ -41,6 +46,15 @@ ldp             = []
 shex            = []
 ## SWRL (Semantic Web Rule Language) rule engine
 swrl            = []
+## Additive 3D / volumetric geometry: the ots-geof: 3D function surface, WKT-Z
+## parsing and the 3D R-tree (spec §3). The exact narrow-phase / hull kernel is
+## backed by `parry3d-f64` (pure Rust, no native dep — it re-exports nalgebra,
+## which we reach as `parry3d_f64::na` to avoid a separate, skew-prone dep).
+geometry3d      = ["dep:parry3d-f64"]
+## Certified constructive solid geometry (boolean union/intersection/difference
+## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
+## `full`: it links the native libSFCGAL C library, which CI does not provide.
+sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
@@ -60,14 +74,16 @@ asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
 ## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
-# Core triple store engine
-oxigraph = "0.4"
-oxrdf = "0.2"
-spargebra = "0.3"
+# Core triple store engine. oxrdf/spargebra are pinned to the exact majors
+# oxigraph 0.5 re-exports so the model/algebra types unify to a single version
+# (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
+oxigraph = "0.5"
+oxrdf = "0.3"
+spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable
 # blank-node identity (canonical labels + opt-in Skolemization) applied on import.
@@ -119,8 +135,14 @@ jsonwebtoken = "9"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-# TOTP two-factor codes (RFC 6238: HMAC-SHA1)
+# Kept in lockstep with `hkdf` (below): both ride the RustCrypto `digest` 0.11
+# trait family, so `Hkdf::<Sha256>` type-checks. The digest 0.11 `Output` is a
+# `hybrid_array::Array`, which (unlike the old `GenericArray`) does not impl
+# `LowerHex` — hex-encode digests via the `hex` crate instead of `{:x}`.
+sha2 = "0.11"
+hex = "0.4"
+# TOTP two-factor codes (RFC 6238: HMAC-SHA1). Left on the digest 0.10 family;
+# self-consistent with each other and independent of the sha2/hkdf path above.
 hmac = "0.12"
 sha1 = "0.10"
 # WebAuthn / FIDO2 passkey login. In-progress challenge state stays in memory
@@ -143,7 +165,11 @@ tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 
 # OpenAPI documentation
-utoipa = { version = "4", features = ["axum_extras"] }
+# NB: utoipa-swagger-ui stays on 7.x — it pairs with utoipa 5 and targets axum
+# 0.7. Bumping it to 8/9 would force an axum 0.8 migration. (Swagger UI itself is
+# disabled at runtime; only the JSON spec is served.) swagger-ui 7 carries its
+# own utoipa 4 transitively, which coexists fine with our utoipa 5.
+utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "7", features = ["axum"] }
 
 # SHACL Compact Syntax parser
@@ -153,7 +179,15 @@ nom = "7"
 rayon = "1"
 
 # Spatial R-tree index (GeoSPARQL pre-filtering)
-rstar = "0.12"
+rstar = "0.13"
+
+# Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
+# parry3d-f64 re-exports nalgebra as `parry3d_f64::na`; we use that re-export
+# rather than adding a separate `nalgebra` dependency, to avoid version skew.
+parry3d-f64 = { version = "0.17", optional = true }
+# Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
+# libSFCGAL C library, so it is excluded from `full` and the default CI build.
+sfcgal = { version = "0.7", optional = true }
 
 # RML mapping sources
 csv = "1"
@@ -163,7 +197,8 @@ quick-xml = "0.37"
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
 imagesize = "0.13"
 infer = "0.16"
-lopdf = { version = "0.34", optional = true }
+# >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
+lopdf = { version = "0.44", optional = true }
 kamadak-exif = { version = "0.5", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 calamine = { version = "0.26", optional = true }
@@ -178,12 +213,12 @@ tantivy = { version = "0.22", optional = true }
 samael = { version = "0.0.18", optional = true }
 
 # OAuth 2.0 / OIDC
-openidconnect = { version = "3", default-features = false, features = ["reqwest", "rustls-tls"] }
-oauth2 = "4"
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
+oauth2 = "5"
 
 # Credential encryption (AES-256-GCM for stored OAuth client secrets)
 aes-gcm = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 
 # In-memory concurrent cache (OAuth PKCE sessions)
 dashmap = "6"

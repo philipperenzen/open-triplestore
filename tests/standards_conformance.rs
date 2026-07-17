@@ -74,6 +74,7 @@ fn test_state() -> AppState {
         passkey_sessions: open_triplestore::auth::passkey::new_session_store(),
         auth_ext: Arc::new(open_triplestore::auth::oidc_rs::AuthExt::disabled()),
         query_timeout_secs: 30,
+        write_timeout_secs: 120,
         secure_cookies: false,
         browse_semaphore: Arc::new(tokio::sync::Semaphore::new(64)),
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),

@@ -1,0 +1,65 @@
+# Ontology for Managing Geometry (OMG) — a community ontology for attaching one
+# or more geometry descriptions to objects and for relating those geometries to
+# each other (e.g. derived, transformed or alternative representations). It is the
+# bridge between domain ontologies such as BOT and file-format ontologies such as
+# FOG. Hand-authored term subset bundled for the demo data.
+# Source: https://w3id.org/omg  (ns https://w3id.org/omg#)
+@prefix omg:  <https://w3id.org/omg#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+omg: a owl:Ontology ;
+  rdfs:label "Ontology for Managing Geometry (OMG)"@en ;
+  rdfs:comment "An ontology for managing multiple, alternative and derived geometry descriptions of objects."@en ;
+  owl:versionInfo "0.0.1" .
+
+# ── Classes ──────────────────────────────────────────────────────────────────
+
+omg:Geometry a owl:Class ;
+  rdfs:label "Geometry"@en ;
+  rdfs:comment "A geometric representation of an object. Its actual content is provided through fog: properties that point at a serialization in a specific file format."@en ;
+  rdfs:isDefinedBy omg: .
+
+# ── Object properties ────────────────────────────────────────────────────────
+
+omg:hasGeometry a owl:ObjectProperty ;
+  rdfs:label "has geometry"@en ;
+  rdfs:comment "Relates an object to an omg:Geometry that describes its shape. A super-property of the simple, complex and block geometry relations."@en ;
+  rdfs:range omg:Geometry ;
+  rdfs:isDefinedBy omg: .
+
+omg:hasComplexGeometry a owl:ObjectProperty ;
+  rdfs:label "has complex geometry"@en ;
+  rdfs:comment "Relates an object to an omg:Geometry whose description carries additional metadata (for example provenance or coordinate context) beyond a bare file reference; a sub-property of omg:hasGeometry."@en ;
+  rdfs:subPropertyOf omg:hasGeometry ;
+  rdfs:range omg:Geometry ;
+  rdfs:isDefinedBy omg: .
+
+omg:hasSimpleGeometry a owl:ObjectProperty ;
+  rdfs:label "has simple geometry"@en ;
+  rdfs:comment "Relates an object directly to an omg:Geometry that is described by a single file reference without further metadata; a sub-property of omg:hasGeometry."@en ;
+  rdfs:subPropertyOf omg:hasGeometry ;
+  rdfs:range omg:Geometry ;
+  rdfs:isDefinedBy omg: .
+
+omg:hasBlockGeometry a owl:ObjectProperty ;
+  rdfs:label "has block geometry"@en ;
+  rdfs:comment "Relates an object to an omg:Geometry that is a reusable geometry block (a prototype) shared by several objects through transformations."@en ;
+  rdfs:subPropertyOf omg:hasGeometry ;
+  rdfs:range omg:Geometry ;
+  rdfs:isDefinedBy omg: .
+
+omg:isDerivedFromGeometry a owl:ObjectProperty ;
+  rdfs:label "is derived from geometry"@en ;
+  rdfs:comment "States that one omg:Geometry was derived from another omg:Geometry, for example a simplified or converted version."@en ;
+  rdfs:domain omg:Geometry ;
+  rdfs:range omg:Geometry ;
+  rdfs:isDefinedBy omg: .
+
+omg:transformsGeometry a owl:ObjectProperty ;
+  rdfs:label "transforms geometry"@en ;
+  rdfs:comment "Relates an omg:Geometry to the block (prototype) geometry it instantiates by applying a coordinate transformation."@en ;
+  rdfs:domain omg:Geometry ;
+  rdfs:range omg:Geometry ;
+  rdfs:isDefinedBy omg: .

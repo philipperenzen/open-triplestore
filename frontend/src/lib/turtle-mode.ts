@@ -89,17 +89,17 @@ export const turtleLanguage = StreamLanguage.define({
     if (stream.match('^^')) return 'operator';
 
     // Blank nodes
-    if (stream.match(/_:[a-zA-Z0-9_\-]+/)) return 'variableName';
+    if (stream.match(/_:[a-zA-Z0-9_-]+/)) return 'variableName';
 
     // Keywords: a, true, false
     if (stream.match(/\b(true|false)\b/)) return 'bool';
     if (stream.match(/\ba\b/)) return 'keyword';
 
     // Prefixed names and prefix declarations
-    if (stream.match(/[a-zA-Z_][a-zA-Z0-9_\-]*/)) {
+    if (stream.match(/[a-zA-Z_][a-zA-Z0-9_-]*/)) {
       if (stream.peek() === ':') {
         stream.eat(':');
-        stream.match(/[a-zA-Z0-9_\-\.]*/);
+        stream.match(/[a-zA-Z0-9_\-.]*/);
         return 'namespace';
       }
       return 'variableName';
@@ -107,11 +107,11 @@ export const turtleLanguage = StreamLanguage.define({
 
     // Bare colon
     if (stream.eat(':')) {
-      stream.match(/[a-zA-Z0-9_\-\.]*/);
+      stream.match(/[a-zA-Z0-9_\-.]*/);
       return 'namespace';
     }
 
-    if (stream.match(/[{}\[\]().,;!^]/)) return 'operator';
+    if (stream.match(/[{}[\]().,;!^]/)) return 'operator';
 
     stream.next();
     return null;

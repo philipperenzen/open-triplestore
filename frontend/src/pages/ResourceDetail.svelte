@@ -5,12 +5,16 @@
   import { shortenIRI, graphResultsToElements } from '../lib/rdf-utils.js';
   import { safeExternalUrl, safeImageUrl } from '../lib/safeUrl.js';
   import RdfTerm from '../components/RdfTerm.svelte';
-  import GraphCanvas from '../components/GraphCanvas.svelte';
+  // GraphCanvas (cytoscape) loads lazily when the graph tab opens (graphCanvasMod
+  // below), so it no longer rides into the main bundle via this eagerly-imported
+  // page — cytoscape is off the initial/landing download.
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
-  import GeoPreview from '../components/GeoPreview.svelte';
-  import { modelFormatFromUrl, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
+  // GeoPreview pulls in leaflet; load it lazily only when the resource actually
+  // has geometry (geoPreviewMod below) so leaflet stays out of the main bundle.
+  import FileViewer from '../components/viewer/FileViewer.svelte';
+  import { modelFormatFromUrl, fileResourceKind, isGeometryPredicate, isIfcGuidPredicate, FORMAT_LABELS } from '../lib/viewer/detect';
 
   // Model3D pulls the heavy three.js chunk; this page is in the main bundle,
   // so load the viewer only when the resource actually has a 3D model.
@@ -89,7 +93,7 @@
     ArrowLeft, ArrowRight, ArrowDownLeft,
     BookOpen, Tag, Layers, Copy, Check, MapPin, Image as ImageIcon, Link2, Info,
     Search, X, ArrowDownUp, LayoutGrid, List, Network, Table2, ChevronDown, ChevronRight, Share2,
-    Hash, CalendarClock, Boxes,
+    Hash, CalendarClock, Boxes, FileText,
   } from 'lucide-svelte';
   import { tick } from 'svelte';
   import { detectValueKind, datatypeLabel } from '../lib/ontology/valueType.js';
@@ -166,12 +170,24 @@
   let data = null;
   let error = '';
   let loading = false;
+  // When the ?iri= is actually a file (a samples/asset path or an http(s) URL
+  // ending in a known extension), we render a FileViewer instead of resolving it
+  // as an RDF resource — browseResource would otherwise throw "IRI must be
+  // absolute" for a site-relative path like "/samples/x.city.json".
+  let fileResource = null;
   let graphElements = { nodes: [], edges: [] };
   let types = [];
   let showLdMenu = false;
   let showTbMenu = false;
   let copied = false;
   let activeTab = 'overview'; // overview | properties | linkedFrom | graph
+
+  // Lazily import GraphCanvas the first time the graph tab opens (memoised).
+  let graphCanvasMod;
+  $: if (activeTab === 'graph' && !graphCanvasMod) graphCanvasMod = import('../components/GraphCanvas.svelte');
+  // GeoPreview (leaflet) only when the resource carries geometry.
+  let geoPreviewMod;
+  $: if (allWkts.length > 0 && !geoPreviewMod) geoPreviewMod = import('../components/GeoPreview.svelte');
 
   // Properties tab controls
   let propSearch = '';
@@ -218,6 +234,14 @@
     incomingCollapsed = new Set();
     flash = '';
     activeTab = 'overview';
+    // A file (relative samples/asset path or an http(s) URL with a known
+    // extension) is rendered by FileViewer — never sent to browseResource, which
+    // rejects non-absolute IRIs ("IRI must be absolute").
+    fileResource = fileResourceKind(iri);
+    if (fileResource) {
+      loading = false;
+      return;
+    }
     try {
       data = await browseResource(iri, graphScope || undefined);
       buildGraph();
@@ -626,6 +650,26 @@
     {/if}
   </div>
 
+  {#if fileResource}
+    <!-- File resource: a samples/asset path or a file URL — render the file
+         directly instead of resolving it as an RDF resource. -->
+    <div class="card file-header">
+      <div class="file-title">
+        <FileText size={16} />
+        <h2>{shortenIRI(iri)}</h2>
+      </div>
+      <div class="iri-full">
+        <span class="truncate">{iri}</span>
+        <button class="icon-btn" on:click={copyIri} title={$i18nT('pages.resource.copyIri')}>
+          {#if copied}<Check size={12} />{:else}<Copy size={12} />{/if}
+        </button>
+      </div>
+    </div>
+    <div class="card">
+      <FileViewer url={iri} height="360px" />
+    </div>
+  {:else}
+
   <!-- Header -->
   <div class="card resource-header">
     <div class="header-top">
@@ -743,12 +787,16 @@
           <Network size={12} /> {$i18nT('pages.resource.graphNeighbourhood')} — {$i18nT('pages.resource.graphHint')}
         </p>
         {#if graphElements.nodes.length > 0}
-          <GraphCanvas
-            nodes={graphElements.nodes}
-            edges={graphElements.edges}
-            height="460px"
-            on:nodeOpen={(e) => e.detail.fullIri && e.detail.fullIri !== iri && viewResource(e.detail.fullIri)}
-          />
+          {#await graphCanvasMod then GC}
+            {#if GC}
+              <svelte:component this={GC.default}
+                nodes={graphElements.nodes}
+                edges={graphElements.edges}
+                height="460px"
+                on:nodeOpen={(e) => e.detail.fullIri && e.detail.fullIri !== iri && viewResource(e.detail.fullIri)}
+              />
+            {/if}
+          {/await}
         {:else}
           <p class="muted empty-inline">{$i18nT('pages.resource.noGraphNeighbourhood')}</p>
         {/if}
@@ -779,7 +827,11 @@
       {#if allWkts.length > 0}
         <div class="card">
           <h3><MapPin size={14} /> {$i18nT('pages.resource.geometry')}</h3>
-          <GeoPreview wkts={allWkts} scaleMeters={modelMeters} />
+          {#await geoPreviewMod then GP}
+            {#if GP}
+              <svelte:component this={GP.default} wkts={allWkts} scaleMeters={modelMeters} />
+            {/if}
+          {/await}
         </div>
       {/if}
 
@@ -1174,6 +1226,7 @@
       </div>
     {/if}
   {/if}
+  {/if}
 </div>
 
 <style>
@@ -1196,6 +1249,9 @@
 
   /* Header card */
   .resource-header { background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%); }
+  .file-header { display: flex; flex-direction: column; gap: 0.4rem; }
+  .file-title { display: inline-flex; align-items: center; gap: 0.45rem; color: var(--ink-800, #2b3445); }
+  .file-title h2 { margin: 0; }
   .vocab-def-card { border-left: 3px solid #6366f1; }
   .vocab-def-title { margin: 0 0 0.5rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #6366f1; }
   .header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }

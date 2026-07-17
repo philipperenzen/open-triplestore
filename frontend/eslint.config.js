@@ -34,8 +34,48 @@ export default [
     },
   },
   {
+    // Standalone TypeScript modules (src/lib/**/*.ts, viewer/*.ts, …) were
+    // previously unlinted: the lint script only matched .js/.svelte, so a whole
+    // tier of code (much of it added with the 3D/CityJSON/IFC work) escaped the
+    // linter entirely. Parse them with the TS parser and lint with the base
+    // rules. `no-undef` is turned OFF here on the @typescript-eslint project's
+    // own recommendation — TypeScript's compiler already checks for undefined
+    // identifiers, and the base rule misfires on type references and ambient
+    // declarations. `no-unused-vars` stays a (non-failing) warning.
+    files: ['**/*.ts'],
+    languageOptions: {
+      parser: tsParser,
+      globals: { ...globals.browser },
+    },
+    rules: {
+      'no-undef': 'off',
+      // The base (JS) no-unused-vars misfires on TypeScript type-signature
+      // parameter names (e.g. the `xy` in `convert: (xy: …) => …`), which are
+      // documentation, not bindings. Skip args here — TypeScript's own
+      // noUnusedParameters is the right tool for those — but keep catching
+      // genuinely dead locals and imports.
+      'no-unused-vars': [
+        'warn',
+        { args: 'none', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
+      ],
+    },
+  },
+  {
+    // Ambient declaration files: every name is a declaration consumed by the
+    // compiler or other modules, so no-unused-vars is meaningless here.
+    files: ['**/*.d.ts'],
+    rules: {
+      'no-unused-vars': 'off',
+    },
+  },
+  {
     // Test files run under Node / Vitest — allow Node globals (e.g. `process`).
-    files: ['**/*.test.js', '**/__tests__/**/*.js'],
+    files: [
+      '**/*.test.js',
+      '**/__tests__/**/*.js',
+      '**/*.test.ts',
+      '**/__tests__/**/*.ts',
+    ],
     languageOptions: { globals: { ...globals.node } },
   },
   {

@@ -4,11 +4,13 @@
   // Class panels and the resource page. `variant='rich'` shows everything;
   // `variant='compact'` shows a header + one definition + a "More details" link.
   import { t, locale } from 'svelte-i18n';
+  import { Sparkles } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.js';
   import { navigate } from '../../lib/router/index.js';
   import { langToFlag } from '../../lib/i18n/langFlag.js';
   import { pickLang, groupByLang } from '../../lib/ontology/termDisplay.js';
   import { lookupTerm, lookupTermSync } from '../../lib/ontology/termDictionary.js';
+  import { openSparkExplain } from '../../lib/sparkHelp.js';
 
   /** @type {string} */
   export let iri = '';
@@ -95,6 +97,12 @@
       {#if badge}<span class="tdc-badge {badge.cls}">{$t(`components.termDefinitionCard.type.${badge.key}`)}</span>{/if}
       {#if resolved.deprecated}<span class="tdc-badge b-deprecated">{$t('components.termDefinitionCard.deprecated')}</span>{/if}
       <span class="tdc-src" title={$t('components.termDefinitionCard.source')}>{resolved.source}</span>
+      <button
+        class="tdc-spark"
+        on:click|stopPropagation={() => openSparkExplain({ iri, label: headLabel })}
+        title={$t('components.termDefinitionCard.askSpark')}
+        aria-label={$t('components.termDefinitionCard.askSpark')}
+      ><Sparkles size={13} /></button>
     </div>
     <div class="tdc-iri">{shortenIRI(iri)}</div>
 
@@ -155,6 +163,9 @@
   .b-term { background: #f1f5f9; color: #475569; }
   .b-deprecated { background: #fee2e2; color: #b91c1c; }
   .tdc-src { margin-left: auto; font-size: 0.64rem; font-weight: 700; color: #64748b; background: #f1f5f9; border-radius: 999px; padding: 1px 7px; text-transform: lowercase; }
+  /* "Ask Spark" term helper — sits after the source pill, kept unobtrusive. */
+  .tdc-spark { display: inline-flex; align-items: center; justify-content: center; padding: 2px; border: none; background: none; color: #7c5cff; cursor: pointer; border-radius: 6px; }
+  .tdc-spark:hover { background: #ede9fe; color: #6d28d9; }
 
   .tdc-compact-def { margin: 0.35rem 0 0.3rem; color: #334155; line-height: 1.4; }
   .tdc-more { background: #eef5ff; color: #1565c0; border: 1px solid #bbdefb; padding: 0.18rem 0.55rem; border-radius: 6px; font-size: 0.72rem; cursor: pointer; }
@@ -185,6 +196,8 @@
   :global(html.dark) .tdc-val { color: #cbd5e1; }
   :global(html.dark) .tdc-lang { color: #cbd5e1; background: #1e293b; }
   :global(html.dark) .tdc-src { color: #94a3b8; background: #1e293b; }
+  :global(html.dark) .tdc-spark { color: #c4b5fd; }
+  :global(html.dark) .tdc-spark:hover { background: rgba(124,58,237,0.22); color: #ddd6fe; }
   :global(html.dark) .tdc-sec, :global(html.dark) .tdc-rels, :global(html.dark) .tdc-version { border-top-color: #1e293b; }
   :global(html.dark) .tdc-more { background: rgba(59,130,246,0.15); color: #93c5fd; border-color: rgba(59,130,246,0.3); }
   :global(html.dark) .b-object { background: rgba(59,130,246,0.2); color: #93c5fd; }

@@ -1,0 +1,88 @@
+# File Ontology for Geometry formats (FOG) — a community ontology that links an
+# omg:Geometry to its serialization in a specific geometry file format/version.
+# It declares one datatype property per file format (named as<Format>, e.g.
+# fog:asObj, fog:asGltf_v2.0-glb), whose object is either an inline literal or a
+# reference to an external file in that format. Hand-authored subset bundled for
+# the demo data.
+# Source: https://w3id.org/fog  (ns https://w3id.org/fog#)
+@prefix fog:  <https://w3id.org/fog#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+fog: a owl:Ontology ;
+  rdfs:label "File Ontology for Geometry formats (FOG)"@en ;
+  rdfs:comment "Relates a geometry to its serialization in a specific file format. FOG provides one as<Format> datatype property per geometry file format and version."@en ;
+  owl:versionInfo "0.0.1" .
+
+# ── Datatype properties (one per file format/version) ────────────────────────
+
+fog:asStl a owl:DatatypeProperty ;
+  rdfs:label "as STL"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the STL (stereolithography) format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asObj a owl:DatatypeProperty ;
+  rdfs:label "as OBJ"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the Wavefront OBJ format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asCityjson a owl:DatatypeProperty ;
+  rdfs:label "as CityJSON"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the CityJSON format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asCitygml a owl:DatatypeProperty ;
+  rdfs:label "as CityGML"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the OGC CityGML format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asIfc a owl:DatatypeProperty ;
+  rdfs:label "as IFC"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the IFC (Industry Foundation Classes) STEP format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asLas a owl:DatatypeProperty ;
+  rdfs:label "as LAS"@en ;
+  rdfs:comment "Relates a geometry (point cloud) to its serialization, inline or by file reference, in the ASPRS LAS format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asLaz a owl:DatatypeProperty ;
+  rdfs:label "as LAZ"@en ;
+  rdfs:comment "Relates a geometry (point cloud) to its serialization, inline or by file reference, in the compressed LAZ format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asPly a owl:DatatypeProperty ;
+  rdfs:label "as PLY"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the Polygon File Format (PLY)."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asDxf a owl:DatatypeProperty ;
+  rdfs:label "as DXF"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the Autodesk DXF format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asDae a owl:DatatypeProperty ;
+  rdfs:label "as DAE"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the COLLADA (DAE) format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asX3d a owl:DatatypeProperty ;
+  rdfs:label "as X3D"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the X3D format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asGeoJSON a owl:DatatypeProperty ;
+  rdfs:label "as GeoJSON"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the GeoJSON format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asGltf_v2.0-glb a owl:DatatypeProperty ;
+  rdfs:label "as glTF 2.0 (GLB)"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the binary glTF 2.0 (.glb) format."@en ;
+  rdfs:isDefinedBy fog: .
+
+fog:asGltf_v2.0-gltf a owl:DatatypeProperty ;
+  rdfs:label "as glTF 2.0 (glTF)"@en ;
+  rdfs:comment "Relates a geometry to its serialization, inline or by file reference, in the JSON-based glTF 2.0 (.gltf) format."@en ;
+  rdfs:isDefinedBy fog: .

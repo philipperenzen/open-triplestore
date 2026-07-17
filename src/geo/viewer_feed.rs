@@ -46,11 +46,112 @@ pub struct ViewerElement {
     /// Source up-axis of the element's 3D model(s) (`ots:modelUpAxis`, e.g.
     /// "Z" for Z-up STL exports) — viewers rotate into their own convention.
     pub up_axis: Option<String>,
+    /// Real-world largest extent of the model in metres (`ots:modelSizeMeters`) —
+    /// lets the map scale a unit-less STL (a landmark) to true size instead of
+    /// guessing. `None` when the model's own units are already trustworthy.
+    pub size_meters: Option<f64>,
     /// Geometry as WKT in EPSG:4326, `(x y) = (lon lat)` — feeds map layers.
     pub wkt4326: Option<String>,
 }
 
 const FOG_AS: &str = "https://w3id.org/fog#as";
+
+/// A `tiles3d-*` graph holds CityJSON lifted to volumetric WKT-Z **solely** to
+/// feed the 3D-Tiles pipeline (`/3dtiles`, which reads every registered graph).
+/// The 2D map, the OGC API – Features endpoint and the DCAT capability probe all
+/// render the same blocks from their client-side CityJSON file-links instead, so
+/// every feed-style reader skips these graphs (the same way they skip `/ifcowl`)
+/// to avoid doubling the geometry and swamping the element list. The 3D-Tiles
+/// route deliberately does NOT apply this filter.
+pub(crate) fn is_tiles3d_graph(graph: &str) -> bool {
+    graph.contains("/tiles3d-")
+}
+
+/// Lightweight geo capability summary for a dataset/scope — drives the UI gating
+/// (show a 2D map when there are coordinates; show the 3D viewer only when there
+/// is 3D data). Computed with cheap `ASK`/`COUNT` queries rather than building
+/// the full feed, so it is safe to call per-dataset on list pages.
+#[derive(Debug, Clone, Serialize, ToSchema, Default)]
+pub struct GeoStats {
+    /// Any feature carries a `geo:asWKT` / `geo:asGML` geometry (mappable in 2D).
+    pub has_coordinates: bool,
+    /// Any feature links a loadable 3D model file (glTF/STL/CityJSON/CityGML/IFC).
+    pub has_models: bool,
+    /// Any stored WKT geometry is volumetric (`POLYHEDRALSURFACE`/`TIN`/`SOLID`/Z).
+    pub has_3d_geometry: bool,
+    /// Convenience: a 3D viewer is worthwhile (models or volumetric geometry).
+    pub has_3d: bool,
+    /// Number of distinct geometry-bearing features.
+    pub element_count: usize,
+}
+
+/// Compute the [`GeoStats`] for `data_graphs` (empty = default graph).
+pub fn dataset_geo_stats(store: &TripleStore, data_graphs: &[String]) -> GeoStats {
+    let from: String = data_graphs
+        .iter()
+        .map(|g| format!("FROM <{g}> "))
+        .collect::<Vec<_>>()
+        .join("");
+
+    let ask = |where_clause: &str| -> bool {
+        let q = format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>\n\
+             PREFIX omg: <https://w3id.org/omg#>\n\
+             ASK {from} WHERE {{ {where_clause} }}"
+        );
+        matches!(
+            store.query(&q),
+            Ok(oxigraph::sparql::QueryResults::Boolean(true))
+        )
+    };
+
+    // Cheap early-out: every flag below requires a `geo:hasGeometry` or
+    // `omg:hasGeometry` link (the same superset the element count walks), so a
+    // dataset with neither — the common case on a catalog/list page — is fully
+    // described by the default (all-false) stats after a single ASK, instead of
+    // running three more scans and a COUNT(DISTINCT) that can only return zero.
+    if !ask("?el (geo:hasGeometry|omg:hasGeometry) ?x") {
+        return GeoStats::default();
+    }
+
+    let has_coordinates =
+        ask("?s geo:hasGeometry ?g . { ?g geo:asWKT ?w } UNION { ?g geo:asGML ?w }");
+    let has_models = ask("?el omg:hasGeometry ?g . ?g ?p ?f . \
+         FILTER(STRSTARTS(STR(?p), \"https://w3id.org/fog#as\")) \
+         FILTER(REGEX(STR(?p), \"Gltf|Stl|Cityjson|Citygml|Ifc|Obj\", \"i\"))");
+    let has_3d_geometry = ask(
+        "?s geo:hasGeometry/geo:asWKT ?w . BIND(UCASE(STR(?w)) AS ?u) \
+         FILTER(CONTAINS(?u, \"POLYHEDRALSURFACE\") || CONTAINS(?u, \"TIN Z\") \
+             || CONTAINS(?u, \"TIN (\") || CONTAINS(?u, \"SOLID\") \
+             || CONTAINS(?u, \" Z (\") || CONTAINS(?u, \" Z(\"))",
+    );
+
+    let element_count = {
+        let q = format!(
+            "PREFIX geo: <http://www.opengis.net/ont/geosparql#>\n\
+             PREFIX omg: <https://w3id.org/omg#>\n\
+             SELECT (COUNT(DISTINCT ?el) AS ?c) {from} \
+             WHERE {{ ?el (geo:hasGeometry|omg:hasGeometry) ?x }}"
+        );
+        match store.query(&q) {
+            Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                .next()
+                .and_then(|s| s.ok())
+                .and_then(|s| s.get("c").map(term_value))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0),
+            _ => 0,
+        }
+    };
+
+    GeoStats {
+        has_coordinates,
+        has_models,
+        has_3d_geometry,
+        has_3d: has_models || has_3d_geometry,
+        element_count,
+    }
+}
 
 /// Build the viewer feed over `data_graphs` (empty = default graph). With
 /// `root`, only that object and its directly contained elements are returned.
@@ -59,36 +160,70 @@ pub fn build_viewer_feed(
     data_graphs: &[String],
     root: Option<&str>,
 ) -> Vec<ViewerElement> {
+    build_viewer_feed_opts(store, data_graphs, root, false)
+}
+
+/// As [`build_viewer_feed`], but with `located_only` to fetch just the elements
+/// that carry actual coordinates (`geo:asWKT`/`geo:asGML`) plus their model
+/// references — the subset the 2D map renders. On a big BIM dataset the IFC
+/// sub-elements (walls/beams/…) inherit their location and number in the
+/// thousands; they matter only to the structure tree, not the map. Skipping the
+/// BOT containment closure for the map turns a multi-second whole-building scan
+/// into a sub-second query, so the map paints immediately while the full feed
+/// (for the tree) streams in behind it.
+pub fn build_viewer_feed_opts(
+    store: &TripleStore,
+    data_graphs: &[String],
+    root: Option<&str>,
+    located_only: bool,
+) -> Vec<ViewerElement> {
     let from: String = data_graphs
         .iter()
         .map(|g| format!("FROM <{g}> "))
         .collect::<Vec<_>>()
         .join("");
-    let root_filter = match root {
-        Some(r) => format!("FILTER(?el = <{r}> || ?parent = <{r}>)"),
-        None => String::new(),
+    // Selection of candidate ?el (+ optional ?parent). Located mode anchors on a
+    // real coordinate; full mode walks the BOT hierarchy.
+    //
+    // Containment follows the BOT hierarchy — bot:containsElement / hasSubElement
+    // (used by the IFC importer) plus bot:hasStorey / hasSpace / hasElement (the
+    // Site→Building→Storey→Space→Element decomposition). Roots (containment
+    // subjects that are nobody's child) appear as rows with unbound ?parent;
+    // children come from the closure. The third arm admits plain geo/omg subjects
+    // outside any BOT topology, also as parentless roots — a dataset needs no BOT
+    // topology to feed the viewer.
+    let selection = if located_only {
+        // Only coordinate-bearing features; ?parent stays unbound (the map's
+        // located elements are roots/anchors — the tree resolves parents).
+        "?el geo:hasGeometry ?gg . { ?gg geo:asWKT ?w0 } UNION { ?gg geo:asGML ?g0 }".to_string()
+    } else {
+        let root_filter = match root {
+            Some(r) => format!("FILTER(?el = <{r}> || ?parent = <{r}>)"),
+            None => String::new(),
+        };
+        format!(
+            r#"{{ ?parent (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el . }}
+            UNION
+            {{ ?el (bot:containsElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?child .
+               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el }} }}
+            UNION
+            {{ ?el (geo:hasGeometry|omg:hasGeometry) ?anyg .
+               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement|bot:hasStorey|bot:hasSpace|bot:hasElement) ?el }} }}
+            {root_filter}"#
+        )
     };
-    // Roots (subjects of bot:containsElement that are nobody's child) appear as
-    // rows with unbound ?parent; children come from the containment closure. The
-    // third arm admits plain geo/omg subjects outside any BOT containment, also
-    // as parentless roots — a dataset needs no BOT topology to feed the viewer.
+    // ifcGuid lives on a known predicate (props#ifcGuid); binding it directly
+    // avoids the unbounded `?el ?p ?o` predicate scan a STRENDS filter forces.
     let query = format!(
         r#"
         PREFIX bot:  <https://w3id.org/bot#>
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guidp ?guid ?up
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guid ?up ?msize
         {from}
         WHERE {{
-            {{ ?parent (bot:containsElement|bot:hasSubElement) ?el . }}
-            UNION
-            {{ ?el bot:containsElement ?child .
-               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement) ?el }} }}
-            UNION
-            {{ ?el (geo:hasGeometry|omg:hasGeometry) ?anyg .
-               FILTER NOT EXISTS {{ ?up (bot:containsElement|bot:hasSubElement) ?el }} }}
-            {root_filter}
+            {selection}
             OPTIONAL {{ ?el rdfs:label ?label }}
             OPTIONAL {{ ?el a ?type }}
             OPTIONAL {{ ?el geo:hasGeometry ?g .
@@ -96,8 +231,9 @@ pub fn build_viewer_feed(
                         OPTIONAL {{ ?g geo:asGML ?gml }} }}
             OPTIONAL {{ ?el omg:hasGeometry ?og . ?og ?fp ?file .
                         FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
-                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }} }}
-            OPTIONAL {{ ?el ?guidp ?guid . FILTER(STRENDS(STR(?guidp), "ifcGuid")) }}
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }}
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelSizeMeters> ?msize }} }}
+            OPTIONAL {{ ?el <https://w3id.org/props#ifcGuid> ?guid }}
         }}
         "#
     );
@@ -130,6 +266,13 @@ pub fn build_viewer_feed(
         }
         if entry.up_axis.is_none() {
             entry.up_axis = sol.get("up").map(term_value);
+        }
+        if entry.size_meters.is_none() {
+            entry.size_meters = sol
+                .get("msize")
+                .map(term_value)
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|m| m.is_finite() && *m > 0.0);
         }
         if let (Some(fp), Some(file)) = (sol.get("fp").map(term_str), sol.get("file")) {
             let format = fp.trim_start_matches(FOG_AS).to_string();
@@ -282,6 +425,52 @@ mod tests {
     }
 
     #[test]
+    fn geo_stats_detects_2d_models_and_3d() {
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(DATA, RdfFormat::Turtle, None).unwrap();
+        let s = dataset_geo_stats(&store, &[]);
+        assert!(s.has_coordinates, "DATA has geo:asWKT");
+        assert!(s.has_models, "DATA has fog:asGltf + fog:asIfc");
+        assert!(s.has_3d, "models ⇒ 3D viewer worthwhile");
+        assert!(!s.has_3d_geometry, "DATA's WKT is 2D (LINESTRING/POINT)");
+        assert_eq!(s.element_count, 2, "Bridge + Arch");
+
+        // A volumetric solid flips has_3d_geometry.
+        let store3d = TripleStore::in_memory().unwrap();
+        store3d
+            .load_str(
+                "@prefix geo: <http://www.opengis.net/ont/geosparql#> .\n\
+                 @prefix ex: <http://example.org/> .\n\
+                 ex:b geo:hasGeometry [ geo:asWKT \"POLYHEDRALSURFACE Z (((0 0 0,1 0 0,1 1 0,0 0 0)))\"^^geo:wktLiteral ] .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let s3 = dataset_geo_stats(&store3d, &[]);
+        assert!(s3.has_coordinates && s3.has_3d_geometry && s3.has_3d);
+        assert!(!s3.has_models);
+    }
+
+    #[test]
+    fn geo_stats_early_out_on_non_geo_dataset() {
+        // A dataset with no geo:/omg: geometry link (the common catalog/list case)
+        // must report empty stats via the single-ASK early-out, not four scans.
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "@prefix ex: <http://example.org/> .\n\
+                 ex:a ex:name \"Alice\" ; ex:knows ex:b .\n\
+                 ex:b ex:name \"Bob\" .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let s = dataset_geo_stats(&store, &[]);
+        assert!(!s.has_coordinates && !s.has_models && !s.has_3d_geometry && !s.has_3d);
+        assert_eq!(s.element_count, 0);
+    }
+
+    #[test]
     fn unsupported_crs_yields_no_wkt4326() {
         let data = r#"
             @prefix geo: <http://www.opengis.net/ont/geosparql#> .
@@ -320,5 +509,48 @@ mod tests {
             .filter_map(|t| t.parse().ok())
             .collect();
         assert_eq!(nums, [4.0, 52.0], "unprefixed WKT stays WGS84: {wkt}");
+    }
+
+    #[test]
+    fn located_only_drops_uncoordinated_subelements() {
+        // A multi-level BIM tree: one located Site → Building → Storey → many
+        // walls, none of which carry coordinates of their own (they inherit the
+        // Site's location). This is the shape that makes the full feed slow.
+        let mut data = String::from(
+            "@prefix bot:  <https://w3id.org/bot#> .\n\
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+             @prefix geo:  <http://www.opengis.net/ont/geosparql#> .\n\
+             @prefix ex:   <http://example.org/> .\n\
+             ex:Site geo:hasGeometry [ geo:asWKT \"POINT(4 52)\"^^geo:wktLiteral ] ;\n\
+                 bot:containsElement ex:Building .\n\
+             ex:Building bot:hasStorey ex:Storey .\n\
+             ex:Storey a bot:Storey ;\n",
+        );
+        for i in 0..50 {
+            data.push_str(&format!("    bot:hasElement ex:Wall{i} ;\n"));
+        }
+        data.push_str("    rdfs:label \"Storey\" .\n");
+        for i in 0..50 {
+            data.push_str(&format!("ex:Wall{i} rdfs:label \"Wall {i}\" .\n"));
+        }
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(&data, RdfFormat::Turtle, None).unwrap();
+
+        // Full feed walks the whole BOT closure → Site + Building + Storey + 50 walls.
+        let full = build_viewer_feed(&store, &[], None);
+        assert_eq!(
+            full.len(),
+            53,
+            "full feed includes every sub-element: {}",
+            full.len()
+        );
+
+        // Located feed (the map's fast path) returns ONLY the coordinate-bearing
+        // Site — its size does not grow with the tree, however deep it gets. This
+        // is the contract that keeps the map paint fast on big buildings.
+        let located = build_viewer_feed_opts(&store, &[], None, true);
+        assert_eq!(located.len(), 1, "located feed stays tiny: {located:?}");
+        assert_eq!(located[0].id, "http://example.org/Site");
+        assert!(located[0].wkt4326.is_some(), "Site keeps its coordinate");
     }
 }

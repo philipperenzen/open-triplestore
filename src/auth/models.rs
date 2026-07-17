@@ -569,9 +569,18 @@ impl OwnerType {
 /// unrelated to [`SystemRole`], [`ResourceRole`], or [`AccessLevel`]. The
 /// owning field and DB column remain named `graph_role` for backward compat.
 ///
-/// * `Instances` — instance data / assertions (default for user-created datasets).
-/// * `Model`     — OWL/RDFS terminological schema (classes and properties).
-/// * `Vocabulary` — SKOS concept schemes and controlled vocabularies.
+/// The three logical layers map to the Description-Logic boxes:
+///
+/// * `Model`      — **T-Box**: class definitions and class axioms (`owl:Class`,
+///   `rdfs:subClassOf`, restrictions).
+/// * `Vocabulary` — **R-Box**: object/datatype/annotation properties and
+///   relations, plus SKOS concept schemes / controlled vocabularies — the terms
+///   that describe how things relate.
+/// * `Instances`  — **A-Box**: instance data / assertions (default for
+///   user-created datasets).
+///
+/// plus two orthogonal roles:
+///
 /// * `Shapes`    — SHACL shape graphs used to validate instance data.
 /// * `Entailment` — materialised inference results (written by the reasoner).
 /// * `System`    — internal system graphs (registry metadata, etc.).
@@ -601,9 +610,9 @@ impl GraphKind {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "instances" | "abox" => Some(GraphKind::Instances),
-            "model" | "tbox" => Some(GraphKind::Model),
-            "vocabulary" => Some(GraphKind::Vocabulary),
+            "instances" | "instance" | "abox" => Some(GraphKind::Instances),
+            "model" | "data-model" | "tbox" => Some(GraphKind::Model),
+            "vocabulary" | "vocab" | "rbox" => Some(GraphKind::Vocabulary),
             "shapes" => Some(GraphKind::Shapes),
             "entailment" => Some(GraphKind::Entailment),
             "system" => Some(GraphKind::System),
@@ -634,7 +643,7 @@ pub struct Dataset {
     pub shacl_on_write: bool,
     pub shapes_graph_iri: Option<String>,
     /// Model registry ID this dataset's instance data conforms to.
-    pub conforms_to_ontology: Option<String>,
+    pub conforms_to_model: Option<String>,
     /// Specific model version (semver) the dataset conforms to.
     pub conforms_to_version: Option<String>,
     pub image_key: Option<String>,

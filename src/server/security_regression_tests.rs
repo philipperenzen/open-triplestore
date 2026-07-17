@@ -40,6 +40,7 @@ mod tests {
             passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
             query_timeout_secs: 30,
+            write_timeout_secs: 120,
             secure_cookies: false,
             browse_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(64)),
             expensive_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(4)),

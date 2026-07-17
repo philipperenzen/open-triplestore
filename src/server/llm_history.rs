@@ -192,6 +192,10 @@ impl ChatHistoryStore {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)
     }
 
+    // One persisted chat message has this many independent, non-groupable columns
+    // (identity, authorship, payload, model, stop-flag); a params struct would add
+    // indirection without removing any of them.
+    #[allow(clippy::too_many_arguments)]
     pub fn append(
         &self,
         id: &str,
