@@ -1,5 +1,9 @@
 [workspace]
-members = [".", "opengraph"]
+# `plugins/*` is a glob: dropping in a new `plugins/<name>/Cargo.toml` (e.g. by
+# copying `plugins/hello`) makes it a workspace member automatically — no edit
+# needed here. It still needs an optional dependency entry + feature flag
+# below, and a registration in `src/plugins.rs`, to actually be built in.
+members = [".", "opengraph", "plugins/*"]
 resolver = "2"
 
 [package]
@@ -21,8 +25,13 @@ keywords = ["rdf", "sparql", "triplestore", "geosparql", "linked-data"]
 categories = ["database-implementations", "web-programming::http-server"]
 
 [features]
-## RDF 1.2 / SPARQL 1.2 triple term support (oxrdf rdf-star variant)
-rdf-12          = ["oxrdf/rdf-star"]
+## RDF 1.2 / SPARQL 1.2 triple term support. oxrdf 0.3 renamed its `rdf-star`
+## feature to `rdf-12`. In the oxigraph 0.5 family the `oxrdf::Term::Triple`
+## variant is gated per-crate, so enabling it anywhere forces enabling it
+## everywhere (else their `Term` matches go non-exhaustive): `oxigraph/rdf-12`
+## cascades to the parser/serializer/eval crates, `spargebra/sparql-12` covers
+## the algebra crate, and `opengraph/sparql-12` covers our engine layer.
+rdf-12          = ["oxigraph/rdf-12", "spargebra/sparql-12", "opengraph/sparql-12"]
 ## RDFS forward-chaining entailment
 rdfs-entailment = []
 ## OWL 2 EL profile (existential/intersection reasoning)
@@ -54,6 +63,9 @@ sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
+## Template/example compile-time plugin (plugins/hello), mounted at /ext/hello.
+## Off by default — the pattern every real plugin follows, see docs/plugins.md.
+plugin-hello    = ["dep:ots-plugin-hello"]
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
 ## Optional SMTP alerting (lettre itself is a core dependency — the auth
@@ -73,10 +85,12 @@ full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-s
 
 [dependencies]
 libc = "0.2"
-# Core triple store engine
-oxigraph = "0.4"
-oxrdf = "0.2"
-spargebra = "0.3"
+# Core triple store engine. oxrdf/spargebra are pinned to the exact majors
+# oxigraph 0.5 re-exports so the model/algebra types unify to a single version
+# (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
+oxigraph = "0.5"
+oxrdf = "0.3"
+spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable
 # blank-node identity (canonical labels + opt-in Skolemization) applied on import.
@@ -186,11 +200,21 @@ sfcgal = { version = "0.7", optional = true }
 csv = "1"
 quick-xml = "0.37"
 
+# Seed bundle manifests (src/seed_bundles/manifest.rs)
+toml = "0.8"
+
+# Compile-time plugin architecture (src/plugins.rs). The API crate is always
+# present (the registry/mount code needs its types); individual plugin crates
+# are optional, enabled by their own `plugin-<name>` feature.
+ots-plugin-api = { path = "plugins/api" }
+ots-plugin-hello = { path = "plugins/hello", optional = true }
+
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
 imagesize = "0.13"
 infer = "0.16"
-lopdf = { version = "0.34", optional = true }
+# >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
+lopdf = { version = "0.44", optional = true }
 kamadak-exif = { version = "0.5", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 calamine = { version = "0.26", optional = true }

@@ -63,14 +63,19 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
+      # `plugin-hello` rides along with the main feature set (not a separate job) so
+      # the compile-time plugin architecture — and its cycle-free crate wiring
+      # (plugins/api / plugins/hello, src/plugins.rs) — is exercised on every CI run,
+      # same as any other optional capability. The plugin crates ALSO build/test
+      # standalone at their own default features in the "Plugin crates" job below.
       - name: Clippy
-        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting
+        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello
 
       - name: Build
-        run: cargo build --features full,test-utils,backup-encrypt,alerting --locked
+        run: cargo build --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
 
       - name: Test
-        run: cargo test --features full,test-utils,backup-encrypt,alerting --locked
+        run: cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
@@ -84,7 +89,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          out=$(cargo test --features full,test-utils,backup-encrypt,alerting --locked security 2>&1)
+          out=$(cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked security 2>&1)
           echo "$out"
           passed=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
           echo "==> security-named tests passed across all binaries: $passed"
@@ -92,6 +97,30 @@ jobs:
             echo "::error::Expected at least 40 security tests to run, but only $passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
             exit 1
           fi
+
+  plugins:
+    name: Plugin crates (standalone, default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Plugin crates (plugins/api, plugins/hello — see docs/plugins.md) are
+      # deliberately independent of the main crate (no dependency on it — see
+      # ots-plugin-api's crate docs for why), so they get their own lightweight
+      # job: no GEOS/SFCGAL/libxmlsec system deps, no giant feature matrix. This
+      # is the "each plugin crate builds/tests on its own, at its own default
+      # features" guarantee — the "backend" job separately exercises plugin-hello
+      # wired INTO the main crate via the `plugin-hello` feature.
+      - name: Clippy (plugin crates)
+        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello --all-targets
+
+      - name: Build & test (plugin crates)
+        run: cargo test -p ots-plugin-api -p ots-plugin-hello --locked
 
   conformance:
     name: Conformance suites
