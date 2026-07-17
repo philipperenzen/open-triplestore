@@ -24,6 +24,7 @@ mod kind_detector;
 #[cfg(feature = "ldp")]
 mod ldp;
 mod ogcapi;
+mod plugins;
 mod prefixes;
 mod reasoning;
 mod rml;

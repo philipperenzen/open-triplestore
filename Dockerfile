@@ -54,6 +54,12 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
+# `ots-plugin-api` is an unconditional dependency (src/plugins.rs' registry needs
+# its types regardless of which plugin-<name> features are on) and `ots-plugin-hello`
+# is pulled in by the `plugin-hello` feature — both must be present for ANY build,
+# including the default `--features full` release image, which does not enable
+# `plugin-hello` but still needs `plugins/api` to resolve.
+COPY plugins/ plugins/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2b: cook dependencies (cached unless recipe.json changes), then build.
@@ -83,6 +89,7 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 COPY benches/ benches/
 COPY opengraph/ opengraph/
+COPY plugins/ plugins/
 # The binary embeds the user-facing docs at compile time — src/docs/mod.rs uses
 # include_str!("../../docs/*.md") — so the docs/ tree must be present for the build.
 # (.dockerignore's `*.md` only excludes root-level markdown, not docs/.)

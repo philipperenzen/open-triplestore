@@ -46,6 +46,7 @@ pub mod kind_detector;
 #[cfg(feature = "ldp")]
 pub mod ldp;
 pub mod ogcapi;
+pub mod plugins;
 pub mod prefixes;
 pub mod reasoning;
 pub mod rml;
