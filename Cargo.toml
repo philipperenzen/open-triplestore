@@ -177,7 +177,7 @@ futures = "0.3"
 # disabled at runtime; only the JSON spec is served.) swagger-ui 7 carries its
 # own utoipa 4 transitively, which coexists fine with our utoipa 5.
 utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "7", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # SHACL Compact Syntax parser
 nom = "7"
@@ -194,7 +194,7 @@ rstar = "0.13"
 parry3d-f64 = { version = "0.17", optional = true }
 # Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
 # libSFCGAL C library, so it is excluded from `full` and the default CI build.
-sfcgal = { version = "0.7", optional = true }
+sfcgal = { version = "0.8", optional = true }
 
 # RML mapping sources
 csv = "1"
@@ -211,7 +211,7 @@ ots-plugin-hello = { path = "plugins/hello", optional = true }
 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
-imagesize = "0.13"
+imagesize = "0.15"
 infer = "0.16"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
 lopdf = { version = "0.44", optional = true }
@@ -226,7 +226,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 tantivy = { version = "0.22", optional = true }
 
 # SAML 2.0 SSO (saml feature)
-samael = { version = "0.0.18", optional = true }
+samael = { version = "0.0.22", optional = true }
 
 # OAuth 2.0 / OIDC
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
