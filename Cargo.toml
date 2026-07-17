@@ -211,7 +211,7 @@ ots-plugin-hello = { path = "plugins/hello", optional = true }
 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
-imagesize = "0.13"
+imagesize = "0.15"
 infer = "0.16"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
 lopdf = { version = "0.44", optional = true }
