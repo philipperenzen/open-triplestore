@@ -4,7 +4,6 @@ services:
     # Prefer a pre-built release over a local build: comment out `build: .` above
     # and uncomment the line below to pull the published image from GHCR instead.
     # image: ghcr.io/philipperenzen/open-triplestore:latest  # pull the published image instead of building
-    container_name: open-triplestore
     ports:
       # Bind to loopback only: the triplestore must sit behind a TLS-terminating reverse proxy in
       # production, not be published on every interface. Inter-container traffic uses the compose
@@ -106,7 +105,6 @@ services:
     # Pin to an immutable digest in production (e.g. quay.io/minio/minio@sha256:...) instead of a
     # floating tag, so a re-pull can't silently change the image. Override via MINIO_IMAGE.
     image: ${MINIO_IMAGE:-quay.io/minio/minio:latest}
-    container_name: triplestore-minio
     command: server /data --console-address ":9001"
     ports:
       # Loopback only — the S3 API + admin console must not be world-reachable. They are accessed
@@ -159,7 +157,6 @@ services:
   # LLM_GATEWAY_URL / LLM_API_KEY at your endpoint instead.
   ollama:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
-    container_name: triplestore-ollama
     profiles: ["llm"]
     ports:
       # Defaults to loopback. Follows the triplestore's bind (TRIPLESTORE_BIND) unless
@@ -197,7 +194,6 @@ services:
   # exit. Cheap to re-run (already-present layers are skipped).
   ollama-pull:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
-    container_name: triplestore-ollama-pull
     profiles: ["llm"]
     depends_on:
       ollama:
@@ -218,7 +214,6 @@ services:
   # (several GB — AWQ 7B ≈ 5.6 GB). Gated models need HUGGING_FACE_HUB_TOKEN.
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
-    container_name: triplestore-vllm
     profiles: ["llm-vllm"]
     ports:
       - "${VLLM_BIND:-127.0.0.1}:8000:8000"

@@ -63,7 +63,7 @@ Use the `--promote-super-admin` flag. The process starts, promotes the user, pri
 ### Docker
 
 ```bash
-docker exec open-triplestore \
+docker compose exec triplestore \
   open-triplestore \
   --data-dir /data \
   --promote-super-admin alice
@@ -329,10 +329,10 @@ docker compose build --no-cache && docker compose up -d
 docker compose logs -f triplestore
 
 # Open a shell in the running container
-docker exec -it open-triplestore /bin/bash
+docker compose exec triplestore /bin/bash
 
 # Promote a user without stopping the server
-docker exec open-triplestore \
+docker compose exec triplestore \
   open-triplestore --data-dir /data --promote-super-admin <username>
 
 # Stop and keep data

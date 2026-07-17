@@ -71,7 +71,7 @@ docker compose down                    # stop, keep data
 docker compose down -v                 # stop and WIPE all data (destructive)
 
 # Promote a user without stopping the server
-docker exec open-triplestore open-triplestore --data-dir /data --promote-super-admin <username>
+docker compose exec triplestore open-triplestore --data-dir /data --promote-super-admin <username>
 ```
 
 ### Standalone container (no MinIO)
