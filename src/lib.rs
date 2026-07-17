@@ -45,11 +45,14 @@ pub mod imports;
 pub mod kind_detector;
 #[cfg(feature = "ldp")]
 pub mod ldp;
+pub mod netutil;
 pub mod ogcapi;
+pub mod plugins;
 pub mod prefixes;
 pub mod reasoning;
 pub mod rml;
 pub mod saved_queries;
+pub mod seed_bundles;
 pub mod server;
 pub mod shacl;
 pub mod shacl_studio;
@@ -59,6 +62,7 @@ pub mod shex;
 pub mod sparql;
 pub mod storage;
 pub mod store;
+pub mod svc_registry;
 #[cfg(feature = "swrl")]
 pub mod swrl;
 #[cfg(feature = "text-search")]
