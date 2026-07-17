@@ -8,7 +8,10 @@ services:
       # Bind to loopback only: the triplestore must sit behind a TLS-terminating reverse proxy in
       # production, not be published on every interface. Inter-container traffic uses the compose
       # network and is unaffected by this. Override TRIPLESTORE_BIND to expose deliberately.
-      - "${TRIPLESTORE_BIND:-127.0.0.1}:7878:7878"
+      # Override TRIPLESTORE_PORT (e.g. per-worktree in .env) if 7878 is already bound by another
+      # `docker compose up` — container names/networks are already isolated per project, but the
+      # host port is shared and must be freed up explicitly to run two stacks at once.
+      - "${TRIPLESTORE_BIND:-127.0.0.1}:${TRIPLESTORE_PORT:-7878}:7878"
     volumes:
       - triplestore_data:/data
     environment:
@@ -109,8 +112,10 @@ services:
     ports:
       # Loopback only — the S3 API + admin console must not be world-reachable. They are accessed
       # by the triplestore over the compose network (unaffected) and locally for administration.
-      - "${MINIO_BIND:-127.0.0.1}:9000:9000"
-      - "${MINIO_BIND:-127.0.0.1}:9001:9001"
+      # Override MINIO_PORT / MINIO_CONSOLE_PORT per-worktree in .env if 9000/9001 are already
+      # bound by another `docker compose up` — see the note on TRIPLESTORE_PORT above.
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     environment:
@@ -134,6 +139,10 @@ services:
     depends_on:
       triplestore:
         condition: service_healthy
+    environment:
+      - TRIPLESTORE_PORT=${TRIPLESTORE_PORT:-7878}
+      - MINIO_PORT=${MINIO_PORT:-9000}
+      - MINIO_CONSOLE_PORT=${MINIO_CONSOLE_PORT:-9001}
     command:
       - sh
       - -c
@@ -141,11 +150,11 @@ services:
         echo
         echo "=================================================="
         echo "  Open Triplestore is up - reachable at:"
-        echo "    Web UI & API : http://localhost:7878"
-        echo "    Health check : http://localhost:7878/health"
-        echo "    API docs     : http://localhost:7878/api-docs/"
-        echo "    MinIO console: http://localhost:9001"
-        echo "    MinIO S3 API : http://localhost:9000"
+        echo "    Web UI & API : http://localhost:$$TRIPLESTORE_PORT"
+        echo "    Health check : http://localhost:$$TRIPLESTORE_PORT/health"
+        echo "    API docs     : http://localhost:$$TRIPLESTORE_PORT/api-docs/"
+        echo "    MinIO console: http://localhost:$$MINIO_CONSOLE_PORT"
+        echo "    MinIO S3 API : http://localhost:$$MINIO_PORT"
         echo "=================================================="
         echo
     restart: "no"
@@ -162,7 +171,8 @@ services:
       # Defaults to loopback. Follows the triplestore's bind (TRIPLESTORE_BIND) unless
       # OLLAMA_BIND is set explicitly, so exposing the store on all interfaces also
       # publishes the LLM on its default port 11434. Override OLLAMA_BIND to decouple.
-      - "${OLLAMA_BIND:-${TRIPLESTORE_BIND:-127.0.0.1}}:11434:11434"
+      # Override OLLAMA_PORT per-worktree in .env if 11434 is already bound elsewhere.
+      - "${OLLAMA_BIND:-${TRIPLESTORE_BIND:-127.0.0.1}}:${OLLAMA_PORT:-11434}:11434"
     environment:
       # Listen on all interfaces inside the container (also the official image default).
       - OLLAMA_HOST=0.0.0.0:11434
@@ -216,7 +226,8 @@ services:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
     profiles: ["llm-vllm"]
     ports:
-      - "${VLLM_BIND:-127.0.0.1}:8000:8000"
+      # Override VLLM_PORT per-worktree in .env if 8000 is already bound elsewhere.
+      - "${VLLM_BIND:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
     command:
       - "--model"
       - "${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}"
