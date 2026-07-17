@@ -27,6 +27,10 @@ pub enum AppError {
     },
     /// 500 Internal Server Error — message is logged server-side only
     Internal(String),
+    /// 503 Service Unavailable — a write timed out (store possibly stalled). Retryable:
+    /// signals orchestration/clients that the request was aborted to protect the runtime,
+    /// not that the input was malformed.
+    ServiceUnavailable(String),
 }
 
 impl AppError {
@@ -38,7 +42,8 @@ impl AppError {
             | AppError::Forbidden(m)
             | AppError::NotFound(m)
             | AppError::UnsupportedMediaType(m)
-            | AppError::Internal(m) => m.clone(),
+            | AppError::Internal(m)
+            | AppError::ServiceUnavailable(m) => m.clone(),
             AppError::Conflict(v) => v.to_string(),
             AppError::RateLimited { message, .. } => message.clone(),
             AppError::ValidationFailed(_) => "SHACL validation failed".to_string(),
@@ -95,6 +100,10 @@ impl IntoResponse for AppError {
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "Internal server error".to_string(),
                         )
+                    }
+                    AppError::ServiceUnavailable(msg) => {
+                        tracing::error!("Service unavailable: {}", msg);
+                        (StatusCode::SERVICE_UNAVAILABLE, msg)
                     }
                     AppError::ValidationFailed(_)
                     | AppError::Conflict(_)

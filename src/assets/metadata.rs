@@ -576,6 +576,48 @@ fn symphonia_metadata(bytes: &[u8], filename: &str, meta: &mut AssetMetadata) {
 mod tests {
     use super::*;
 
+    // Pins the PDF page-count path (`lopdf::Document::load_mem` + `get_pages`), which
+    // is otherwise untested. lopdf was bumped 0.34 -> 0.44 for RUSTSEC-2026-0187, so a
+    // silent behaviour change here would go unnoticed.
+    #[cfg(feature = "asset-pdf")]
+    #[test]
+    fn pdf_page_count() {
+        use lopdf::{dictionary, Document, Object};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page_ids: Vec<Object> = (0..2)
+            .map(|_| {
+                doc.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                })
+                .into()
+            })
+            .collect();
+        let count = page_ids.len() as i64;
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids,
+                "Count" => count,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).expect("save pdf");
+
+        let m = extract_for(AssetKind::Document, &bytes, "application/pdf", "a.pdf");
+        assert_eq!(m.pages, Some(2));
+    }
+
     const PNG_1X1: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
