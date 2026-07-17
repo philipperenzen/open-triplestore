@@ -1,0 +1,15 @@
+[package]
+name = "ots-plugin-api"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Plugin trait + host context for Open Triplestore compile-time plugins"
+license-file = "../../LICENSE"
+publish = false
+
+# Deliberately minimal: this crate must NEVER depend on `open-triplestore`
+# itself (that would make every plugin crate — which depends on this one —
+# form a package-level dependency cycle with the crate that depends on THEM).
+# See docs/plugins.md "Why a context object, not `&AppState`".
+[dependencies]
+axum = "0.7"

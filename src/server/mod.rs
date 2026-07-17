@@ -1356,6 +1356,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .with_state(state.clone());
     router = router.merge(openapi_doc_route);
 
+    // Compile-time plugins (src/plugins.rs): `GET /api/plugins` lists what's
+    // compiled in, and each registered plugin's routes are nested under
+    // `/ext/<name>`. Both are unconditional — with zero `plugin-*` features
+    // enabled the list is empty and no `/ext/*` routes exist, matching
+    // upstream behavior exactly.
+    let plugin_ctx = crate::plugins::plugin_context(&state);
+    router = router.route("/api/plugins", get(crate::plugins::list_plugins));
+    router = crate::plugins::mount_plugins(router, &plugin_ctx);
+
     let mut router = router
         // Innermost global layer (added first ⇒ closest to the route handlers): turn a
         // panic in any handler into a clean `500` instead of letting it unwind the
@@ -1518,6 +1527,18 @@ pub async fn run(
     write_timeout_secs: u64,
     secure_cookies: bool,
     serve_frontend: bool,
+    seed_dir: Option<std::path::PathBuf>,
+    // Opt-in fallback to any free port when `addr`'s port is already in use
+    // (--port-fallback / PORT_FALLBACK, default off — see the listener bind
+    // below). Upstream behavior when this is `false` is unchanged: a busy
+    // port still refuses to start.
+    port_fallback: bool,
+    // Cross-app service-registry self-registration (--discovery /
+    // LD_DISCOVERY), applied AFTER the listener is bound so a port_fallback
+    // rewrite of the advertised URL is reflected in what gets registered.
+    discovery: bool,
+    registry_url: String,
+    registry_token: String,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
 ) -> anyhow::Result<()> {
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
@@ -1631,6 +1652,10 @@ pub async fn run(
         text_dirty: Arc::new(AtomicBool::new(false)),
     };
 
+    // Compile-time plugins (src/plugins.rs): on_boot + any background task,
+    // once per process. A no-op with zero `plugin-*` features enabled.
+    crate::plugins::boot_plugins(&crate::plugins::plugin_context(&state));
+
     // Spawn a background task to periodically prune expired PKCE OAuth sessions (L-7)
     {
         let sessions = state.oauth_sessions.clone();
@@ -1700,6 +1725,14 @@ pub async fn run(
             //    Idempotent and self-healing: back-fills any registered-but-empty
             //    public demo graph left behind by an earlier interrupted seed.
             crate::saved_queries::seed::seed_open_triplestore(&seed_state);
+            // 3b. Operator-supplied seed bundles (--seed-dir / SEED_DIR), if any —
+            //     same idempotent/fail-soft engine as the reference bundle above.
+            //     Sequenced here (not a separate spawn) for the same reason the
+            //     demo seed is: concurrent writers to the same SQLite identity DB
+            //     and RDF store previously produced boot-time lock contention.
+            if let Some(ref dir) = seed_dir {
+                crate::seed_bundles::load_seed_dir(&seed_state, dir);
+            }
             // 4. Standard RDF vocabularies into the model registry.
             crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
             // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
@@ -1762,8 +1795,26 @@ pub async fn run(
     }
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
+    let requested_port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+    let bind_host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
+        // Opt-in fallback (--port-fallback / PORT_FALLBACK, default off): bind any
+        // free port instead of refusing to start. Checked ONLY on AddrInUse, so a
+        // permission error or an invalid bind address still surfaces immediately
+        // below rather than silently wandering off to an unrelated port.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && port_fallback => {
+            tracing::warn!(
+                "PORT_FALLBACK: {addr} is already in use — falling back to any free port on {bind_host}"
+            );
+            crate::netutil::bind_free_port(bind_host)
+                .await
+                .map_err(|e2| {
+                    anyhow::anyhow!(
+                        "port fallback failed: could not bind any free port on {bind_host}: {e2}"
+                    )
+                })?
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             // Fail LOUDLY instead of killing whatever holds the port. The previous behaviour
             // (lsof + kill -9, then re-bind) was a data-corruption footgun: if the occupant was
@@ -1775,13 +1826,45 @@ pub async fn run(
                 "Refusing to start: {addr} is already in use (port {port_str}). Another process — \
                  most likely another open-triplestore — holds it. NOT killing it: doing so and \
                  reopening the same data dir can corrupt RocksDB (\"SST ahead of WALs\"). Stop the \
-                 other instance first (find it with `lsof -ti :{port_str}`), or start this one on a \
-                 different --port and/or --data-dir."
+                 other instance first (find it with `lsof -ti :{port_str}`), start this one on a \
+                 different --port and/or --data-dir, or pass --port-fallback / set PORT_FALLBACK=1 \
+                 to bind any free port automatically."
             );
         }
         Err(e) => return Err(e.into()),
     };
-    info!("Listening on {}", addr);
+    let bound_addr = listener.local_addr()?;
+    // Only true when --port-fallback actually moved the bind: the common case
+    // (flag off, or the requested port was free) leaves this false and every
+    // downstream URL exactly as configured.
+    let port_changed = requested_port.is_some_and(|p| p != bound_addr.port());
+    if port_changed {
+        tracing::warn!(
+            "PORT_FALLBACK: bound port {} instead of the requested {} — the advertised base URL \
+             is rewritten to match for service-registry self-registration, where it references \
+             the requested port",
+            bound_addr.port(),
+            requested_port.unwrap_or(0)
+        );
+    }
+    info!("Listening on {}", bound_addr);
+
+    // Cross-app service discovery is opt-in (LD_DISCOVERY). Self-registration is done HERE
+    // (after the real bind, not in main.rs before it) so the advertised self_url reflects any
+    // --port-fallback rewrite rather than the originally requested port.
+    if discovery {
+        let self_url = if port_changed {
+            crate::netutil::rewrite_url_port(
+                base_url,
+                requested_port.unwrap_or(0),
+                bound_addr.port(),
+            )
+        } else {
+            base_url.to_string()
+        };
+        crate::svc_registry::spawn_registrar(self_url, registry_url, registry_token);
+    }
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
