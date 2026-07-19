@@ -1417,7 +1417,19 @@ fn serve_frontend_enabled() -> bool {
 fn spa_shell_response(headers: &HeaderMap) -> Option<Response> {
     if serve_frontend_enabled() && prefers_html(headers) {
         if let Ok(html) = std::fs::read_to_string("frontend/dist/index.html") {
-            return Some(axum::response::Html(html).into_response());
+            let mut resp = axum::response::Html(html).into_response();
+            // Marker for the outermost frame-policy middleware (server::mod):
+            // this response is the SPA *document* leaving through an API route,
+            // so the API layers' strict CSP (`connect-src 'self'`, …) is about
+            // to be stamped onto it — which would block the map's external tile
+            // hosts and the Cesium CDN for the whole SPA session whenever a user
+            // enters at `/`. The middleware swaps it for the SPA policy (same as
+            // fallback-served index.html) and strips this internal header.
+            resp.headers_mut().insert(
+                "x-ots-spa-shell",
+                axum::http::HeaderValue::from_static("1"),
+            );
+            return Some(resp);
         }
     }
     None
@@ -4700,8 +4712,16 @@ pub async fn download_asset(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
-    serve_asset(&state, Some(&current_user.user_id), &dataset_id, &asset_id).await
+    serve_asset(
+        &state,
+        Some(&current_user.user_id),
+        &dataset_id,
+        &asset_id,
+        &headers,
+    )
+    .await
 }
 
 /// Anonymous-capable asset download (`…/assets/:id/download`, optional auth):
@@ -4712,9 +4732,28 @@ pub async fn download_asset_public(
     user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
-    serve_asset(&state, user_id, &dataset_id, &asset_id).await
+    serve_asset(&state, user_id, &dataset_id, &asset_id, &headers).await
+}
+
+/// Strong-enough validator for an asset's bytes: assets are immutable per id in
+/// the object store (a re-upload mints a new id; only title/description rows
+/// change), so id + size + created stamp identifies the payload.
+fn asset_etag(asset: &crate::auth::models::Asset) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in asset
+        .id
+        .as_bytes()
+        .iter()
+        .chain(asset.created_at.as_bytes())
+        .chain(asset.s3_key.as_bytes())
+    {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("\"{:x}-{:x}\"", h, asset.size_bytes)
 }
 
 async fn serve_asset(
@@ -4722,6 +4761,7 @@ async fn serve_asset(
     user_id: Option<&str>,
     dataset_id: &str,
     asset_id: &str,
+    req_headers: &HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
     let dataset = state
         .auth_db
@@ -4748,6 +4788,30 @@ async fn serve_asset(
             StatusCode::NOT_FOUND,
             "Asset not in this dataset".to_string(),
         ));
+    }
+
+    // Conditional request: asset bytes are immutable per id (a re-upload mints a
+    // new id + s3_key), so a matching ETag can answer 304 without touching the
+    // object store. This is what stops the viewer re-downloading a 50 MB IFC on
+    // every open. `immutable` lets browsers skip even the revalidation.
+    let etag = asset_etag(&asset);
+    const ASSET_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+    let if_none_match = req_headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if if_none_match
+        .split(',')
+        .any(|t| t.trim().trim_start_matches("W/") == etag || t.trim() == "*")
+    {
+        return Ok((
+            StatusCode::NOT_MODIFIED,
+            [
+                (axum::http::header::ETAG, etag.as_str()),
+                (axum::http::header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
+            ],
+        )
+            .into_response());
     }
 
     let (data, content_type) = state
@@ -4788,6 +4852,8 @@ async fn serve_asset(
         [
             (CONTENT_TYPE, served_ct.as_str()),
             (CONTENT_DISPOSITION, disposition.as_str()),
+            (axum::http::header::ETAG, etag.as_str()),
+            (axum::http::header::CACHE_CONTROL, ASSET_CACHE_CONTROL),
         ],
         data,
     )
@@ -5266,6 +5332,26 @@ pub async fn linked_data_asset(
             .body(axum::body::Body::from(body))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
     } else {
+        // Same immutable-per-id caching contract as `serve_asset` (the bytes of
+        // an asset id never change; a re-upload mints a new id).
+        let etag = asset_etag(&asset);
+        const ASSET_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+        let if_none_match = headers
+            .get(axum::http::header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if if_none_match
+            .split(',')
+            .any(|t| t.trim().trim_start_matches("W/") == etag || t.trim() == "*")
+        {
+            return axum::http::Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(axum::http::header::ETAG, etag.as_str())
+                .header(axum::http::header::CACHE_CONTROL, ASSET_CACHE_CONTROL)
+                .header("vary", "Accept")
+                .body(axum::body::Body::empty())
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        }
         let (data, content_type) = state
             .object_store
             .download(&asset.s3_key)
@@ -5276,6 +5362,8 @@ pub async fn linked_data_asset(
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, content_type.as_str())
             .header(CONTENT_DISPOSITION, disposition)
+            .header(axum::http::header::ETAG, etag.as_str())
+            .header(axum::http::header::CACHE_CONTROL, ASSET_CACHE_CONTROL)
             .header("vary", "Accept")
             .body(axum::body::Body::from(data))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -7185,6 +7273,53 @@ pub async fn geo_stats_batch(
 
     let stats = crate::geo::viewer_feed::dataset_geo_stats(&state.store, &data_graphs);
     Ok(Json(stats))
+}
+
+#[cfg(test)]
+mod asset_etag_tests {
+    use super::asset_etag;
+    use crate::auth::models::Asset;
+
+    fn asset(id: &str, key: &str, size: i64, created: &str) -> Asset {
+        Asset {
+            id: id.to_string(),
+            dataset_id: "ds".to_string(),
+            filename: "f.ifc".to_string(),
+            content_type: "application/x-step".to_string(),
+            s3_key: key.to_string(),
+            size_bytes: size,
+            uploaded_by: "u".to_string(),
+            created_at: created.to_string(),
+            updated_at: None,
+            title: None,
+            description: None,
+            public: true,
+        }
+    }
+
+    // The validator is the browser's cache key for immutable asset bytes — it must
+    // be stable across requests and be a well-formed strong ETag (quoted, no
+    // whitespace), or the 50 MB IFC gets re-downloaded on every viewer open.
+    #[test]
+    fn etag_is_deterministic_and_quoted() {
+        let a = asset("a1", "datasets/ds/a1/f.ifc", 1234, "2026-01-01T00:00:00Z");
+        let e1 = asset_etag(&a);
+        let e2 = asset_etag(&a);
+        assert_eq!(e1, e2);
+        assert!(e1.starts_with('"') && e1.ends_with('"'), "quoted: {e1}");
+        assert!(!e1.trim_matches('"').contains(' '), "no spaces: {e1}");
+    }
+
+    // Different assets (id/key/size/created) must never collide on the validator —
+    // a collision would serve one asset's cached bytes for another.
+    #[test]
+    fn etag_differs_per_asset() {
+        let a = asset("a1", "datasets/ds/a1/f.ifc", 1234, "2026-01-01T00:00:00Z");
+        let b = asset("a2", "datasets/ds/a2/f.ifc", 1234, "2026-01-01T00:00:00Z");
+        let c = asset("a1", "datasets/ds/a1/f.ifc", 999, "2026-01-01T00:00:00Z");
+        assert_ne!(asset_etag(&a), asset_etag(&b));
+        assert_ne!(asset_etag(&a), asset_etag(&c));
+    }
 }
 
 #[cfg(test)]

@@ -375,6 +375,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 112,
     },
     Builtin {
+        slug: "embedding",
+        title: "Embedding & Web Apps",
+        category: "API & Operations",
+        body: include_str!("../../docs/embedding.md"),
+        admin_only: false,
+        sort: 114,
+    },
+    Builtin {
         slug: "operations",
         title: "Operations",
         category: "API & Operations",
