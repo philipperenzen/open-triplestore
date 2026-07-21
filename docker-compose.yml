@@ -46,6 +46,31 @@ services:
       - OIDC_ROLE_CLAIMS=${OIDC_ROLE_CLAIMS:-}
       - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-}
       - OIDC_ORG_GROUP_PREFIX=${OIDC_ORG_GROUP_PREFIX:-}
+      # Outbound account email (verification, password reset, reminders). With
+      # SMTP_HOST unset every message — including its action link — goes to the
+      # server log instead (fine for dev). For real delivery either enable the
+      # bundled relay below (`--profile mail`, then SMTP_HOST=mail + SMTP_TLS=none)
+      # or point these at an external SMTP provider. See .env.example / docs/auth.md.
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      # none | starttls | implicit (default: implicit TLS on 465, else STARTTLS).
+      # `none` is ONLY for a relay on the private compose network, like `mail` below.
+      - SMTP_TLS=${SMTP_TLS:-}
+      - SMTP_STARTTLS=${SMTP_STARTTLS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      # Public base URL of the deployment (linked-data IRIs, WebAuthn/passkey
+      # relying party, default base for emailed links). Set it to the
+      # browser-facing origin whenever the store is served via a proxy / real
+      # hostname, e.g. https://data.example.org. Must never be empty.
+      - BASE_URL=${BASE_URL:-http://localhost:7878}
+      # Overrides the base URL for emailed action links only (rarely needed —
+      # e.g. UI on a different origin than the API).
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      # 1 ⇒ password login requires a verified email address (only sensible once
+      # delivery works; a fresh verification link is auto-sent on blocked logins).
+      - OTS_REQUIRE_VERIFIED_EMAIL=${OTS_REQUIRE_VERIFIED_EMAIL:-}
       # CORS allowlist for trusted frontend origin(s), comma-separated (dev + prod).
       # "*" reflects any origin with credentials (mirror mode) — lets a browser client
       # on an arbitrary host (e.g. the OTL viewer) connect. Prefer an explicit list in prod.
@@ -159,6 +184,49 @@ services:
         echo
     restart: "no"
 
+  # ── Outbound mail relay (optional, profile: mail) ─────────────────────────
+  # A send-only Postfix relay so account email (verification links, password
+  # resets) actually leaves the stack. Enable with `--profile mail` (or
+  # COMPOSE_PROFILES=mail in .env) and point the triplestore at it:
+  #   SMTP_HOST=mail
+  #   SMTP_TLS=none          # the hop to the relay stays on the compose network
+  # The SMTP port is reachable ONLY from other containers — nothing is published
+  # on the host, so the relay cannot be abused as an open relay from outside.
+  #
+  # Deliverability: by default Postfix delivers straight to each recipient's MX.
+  # That only lands when this host can egress port 25 and MAIL_HOSTNAME has
+  # matching forward/reverse DNS plus an SPF record — true for a well-set-up
+  # server, false for laptops and most consumer/cloud IPs (big providers defer
+  # or spam-folder them). In that case route through a smarthost you already
+  # have (workspace or transactional provider) via MAIL_RELAYHOST below. The
+  # image also supports DKIM signing if you mount keys:
+  # https://github.com/bokysan/docker-postfix#dkim--domainkeys
+  mail:
+    # Pin to an immutable digest in production, like MINIO_IMAGE above.
+    image: ${MAIL_IMAGE:-boky/postfix:latest}
+    profiles: ["mail"]
+    environment:
+      # HELO/EHLO + Message-ID hostname. For direct-MX delivery set a real FQDN
+      # whose A record matches this host's reverse DNS.
+      - HOSTNAME=${MAIL_HOSTNAME:-mail.localhost}
+      # Envelope-sender domain(s) the relay accepts, space-separated. Must cover
+      # the domain used in SMTP_FROM (the app default is @localhost).
+      - ALLOWED_SENDER_DOMAINS=${MAIL_SENDER_DOMAINS:-localhost}
+      # Optional upstream smarthost, e.g. [smtp.eu.mailgun.org]:587 — the
+      # brackets skip the MX lookup. Empty ⇒ deliver directly to recipient MXes.
+      - RELAYHOST=${MAIL_RELAYHOST:-}
+      - RELAYHOST_USERNAME=${MAIL_RELAYHOST_USERNAME:-}
+      - RELAYHOST_PASSWORD=${MAIL_RELAYHOST_PASSWORD:-}
+    volumes:
+      # Persist the queue: mail deferred by a busy/greylisting receiver keeps
+      # retrying across container restarts instead of being lost. Note the
+      # applied postfix config also persists here — changing a MAIL_* value
+      # takes effect on recreate, but *removing* one keeps its last value until
+      # the volume is reset (docker compose rm -sf mail && docker volume rm
+      # <project>_mail_queue).
+      - mail_queue:/var/spool/postfix
+    restart: unless-stopped
+
   # ── LLM (optional, profile: llm) ──────────────────────────────────────────
   # A local OpenAI-compatible model server for the platform's AI features. Enable
   # with `--profile llm`; on an NVIDIA host add `-f docker-compose.gpu.yml` to use
@@ -263,6 +331,8 @@ volumes:
   triplestore_data:
     driver: local
   minio_data:
+    driver: local
+  mail_queue:
     driver: local
   ollama_models:
     driver: local

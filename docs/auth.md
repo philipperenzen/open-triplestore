@@ -102,10 +102,28 @@ Account email (verification, resets, reminders) is sent through SMTP when config
 | `SMTP_HOST` | SMTP relay host (unset → log-only mode) |
 | `SMTP_PORT` | Relay port (default 587) |
 | `SMTP_USERNAME` / `SMTP_PASSWORD` | Optional credentials |
-| `SMTP_STARTTLS` | Force STARTTLS on/off (default: implicit TLS on 465, STARTTLS otherwise) |
+| `SMTP_TLS` | `none` \| `starttls` \| `implicit` (default: implicit TLS on 465, STARTTLS otherwise). `none` is plaintext — only for a relay on a trusted private network, like the bundled compose relay |
+| `SMTP_STARTTLS` | Legacy switch: force STARTTLS on/off; ignored when `SMTP_TLS` is set |
 | `SMTP_FROM` | From mailbox, e.g. `Open Triplestore <no-reply@example.org>` |
 | `PUBLIC_BASE_URL` | Base URL minted into emailed links (defaults to the server base URL) |
 | `OTS_REQUIRE_VERIFIED_EMAIL` | `1` → password login requires a verified address (a fresh link is auto-resent on blocked logins) |
+
+All of these are wired through `docker-compose.yml`, so setting them in `.env` is enough.
+
+#### Bundled relay (Docker Compose)
+
+The compose stack ships a send-only [Postfix relay](https://github.com/bokysan/docker-postfix) behind the `mail` profile. Enable it and point the store at it in `.env`:
+
+```bash
+COMPOSE_PROFILES=mail
+SMTP_HOST=mail
+SMTP_TLS=none          # the hop to the relay stays on the private compose network
+SMTP_FROM=Open Triplestore <no-reply@example.org>
+MAIL_SENDER_DOMAINS=example.org
+BASE_URL=https://data.example.org   # browser-facing origin — the base for emailed links
+```
+
+The relay listens only on the compose network (no host port is published, so it cannot be abused as an open relay) and persists its queue, so deferred mail keeps retrying across restarts. By default it delivers straight to each recipient's MX — that only lands when the host can egress port 25 and `MAIL_HOSTNAME` has matching forward/reverse DNS plus an SPF record. From a laptop or an IP without mail reputation, set `MAIL_RELAYHOST` (+ `MAIL_RELAYHOST_USERNAME` / `MAIL_RELAYHOST_PASSWORD`) to route through a provider smarthost instead. See `.env.example` for the full variable list.
 
 ## SSO provider setup (OIDC / SAML)
 

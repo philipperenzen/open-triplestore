@@ -154,6 +154,19 @@ docker compose --profile llm-vllm up -d   # then set in .env:
 # LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
 ```
 
+**Optional — outbound email.** Account mail (verification links, password resets) is written to the server log until SMTP is configured. The stack bundles a send-only Postfix relay; enable it and point the store at it in `.env`:
+
+```bash
+docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
+# SMTP_HOST=mail
+# SMTP_TLS=none
+# SMTP_FROM=Open Triplestore <no-reply@example.org>
+# MAIL_SENDER_DOMAINS=example.org
+# BASE_URL=https://your-public-origin
+```
+
+Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
+
 ### Native (requires Rust 1.88+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
