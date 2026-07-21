@@ -14,7 +14,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- None.
+- **Outbound email in Docker Compose** (`--profile mail`): a bundled send-only
+  Postfix relay ([`boky/postfix`](https://github.com/bokysan/docker-postfix)) so
+  account mail (verification links, password resets, username reminders) is
+  actually delivered instead of only logged. The relay is reachable solely on the
+  compose network (no host port), persists its queue across restarts, and either
+  delivers directly to recipient MXes or routes through a smarthost
+  (`MAIL_RELAYHOST` + credentials). All account-email settings (`SMTP_*`,
+  `PUBLIC_BASE_URL`, `OTS_REQUIRE_VERIFIED_EMAIL`) are now wired through
+  `docker-compose.yml`, so setting them in `.env` is enough. See `.env.example`
+  and [`docs/auth.md`](docs/auth.md).
+- `SMTP_TLS` option for the account mailer: `none` | `starttls` | `implicit`.
+  `none` (plaintext) enables the hop to a relay on a trusted private network —
+  like the bundled compose relay; the legacy `SMTP_STARTTLS` switch still works
+  and the port-based default (465 ⇒ implicit TLS, else STARTTLS) is unchanged.
 
 ### Changed
 - None.
@@ -26,7 +39,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
-- None.
+- `BASE_URL` set in `.env` now actually reaches the compose container (it was
+  recommended in the production `.env` docs but never forwarded), so linked-data
+  IRIs, the WebAuthn/passkey relying party and emailed action links pick up the
+  deployment's public origin in Docker deployments.
 
 ### Security
 - None.

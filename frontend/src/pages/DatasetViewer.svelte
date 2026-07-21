@@ -9,7 +9,8 @@
   import { Link } from '../lib/router/index.js';
   import { getViewerFeed, listDatasetGraphs } from '../lib/api.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
-  import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown, Footprints } from 'lucide-svelte';
+  import { copyToClipboard } from '../lib/clipboard.ts';
+  import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown, Footprints, Code2, Check } from 'lucide-svelte';
   import { modelRefOf } from '../lib/viewer/detect';
   import { modelRefs } from '../lib/viewer/geometry';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
@@ -279,6 +280,18 @@
     onMapSelect(e);
   }
 
+  // ── Embed snippet ───────────────────────────────────────────────────────────
+  // Copyable <iframe> code for the current canvas mode; the /embed/* pages are
+  // the chrome-less variants of this explorer (see docs/embedding.md).
+  let embedOpen = false;
+  let embedCopied = false;
+  $: embedUrl = `${window.location.origin}/embed/${canvasMode === 'cesium' ? 'cesium' : 'map'}/${encodeURIComponent(id)}`;
+  $: embedSnippet = `<iframe src="${embedUrl}" width="100%" height="480" style="border:0;border-radius:12px" loading="lazy" allowfullscreen></iframe>`;
+  async function copyEmbed() {
+    embedCopied = await copyToClipboard(embedSnippet);
+    if (embedCopied) setTimeout(() => (embedCopied = false), 1600);
+  }
+
   load();
 </script>
 
@@ -303,6 +316,22 @@
         <button class:active={canvasMode === 'cesium'} on:click={() => (canvasMode = 'cesium')} title={$i18nT('pages.datasetViewer.cesium3dDesc')}>
           <Boxes size={13} /> {$i18nT('pages.datasetViewer.cesium3d')}
         </button>
+      </div>
+    {/if}
+    {#if !loading && elements.length}
+      <div class="dl-wrap embed-wrap">
+        <button class="btn btn-sm" on:click={() => (embedOpen = !embedOpen)} aria-expanded={embedOpen}>
+          <Code2 size={14} /> {$i18nT('embed.embedTitle')}
+        </button>
+        {#if embedOpen}
+          <div class="dl-menu embed-menu">
+            <div class="dl-head">{$i18nT('embed.embedDesc')}</div>
+            <code class="embed-code">{embedSnippet}</code>
+            <button class="btn btn-sm embed-copy" on:click={copyEmbed}>
+              {#if embedCopied}<Check size={13} /> {$i18nT('embed.copied')}{:else}{$i18nT('embed.copy')}{/if}
+            </button>
+          </div>
+        {/if}
       </div>
     {/if}
     {#if !loading && (ifcUrl || graphs.length)}
@@ -858,6 +887,22 @@
 
   /* Download menu (IFC + linked-data formats) */
   .dl-wrap { position: relative; margin-left: auto; }
+  /* When the Embed button is present it owns the auto push; Download follows it. */
+  .embed-wrap ~ .dl-wrap { margin-left: 0; }
+  .embed-menu { min-width: 340px; }
+  .embed-code {
+    display: block;
+    margin: 6px 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--bg-soft, #f1f5f9);
+    color: var(--ink-700, #334155);
+    font-size: 0.68rem;
+    line-height: 1.5;
+    word-break: break-all;
+    user-select: all;
+  }
+  .embed-copy { margin: 0 8px 6px; }
   .dl-menu {
     position: absolute;
     right: 0;
