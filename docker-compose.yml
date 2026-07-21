@@ -217,6 +217,11 @@ services:
       - RELAYHOST=${MAIL_RELAYHOST:-}
       - RELAYHOST_USERNAME=${MAIL_RELAYHOST_USERNAME:-}
       - RELAYHOST_PASSWORD=${MAIL_RELAYHOST_PASSWORD:-}
+      # Safety net: repair non-compliant submissions by adding any missing
+      # Message-ID/Date/From headers at the relay. Gmail hard-rejects mail
+      # without a valid Message-ID (550 5.7.1), and postfix normally only adds
+      # headers for clients it considers local — container siblings are not.
+      - POSTFIX_always_add_missing_headers=yes
     volumes:
       # Persist the queue: mail deferred by a busy/greylisting receiver keeps
       # retrying across container restarts instead of being lost. Note the

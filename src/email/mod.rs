@@ -87,6 +87,18 @@ pub struct Mailer {
     link_base: String,
 }
 
+/// A fresh RFC 5322 `Message-ID` (`<uuid@domain>`) for an outgoing message.
+/// Large receivers (Gmail: 550 5.7.1) reject mail without a valid Message-ID
+/// outright, and SMTP relays only repair the header for clients they consider
+/// local — which a sibling container is not — so the app must stamp its own.
+pub(crate) fn rfc5322_message_id(from_domain: &str) -> String {
+    let domain = match from_domain.trim() {
+        "" => "localhost",
+        d => d,
+    };
+    format!("<{}@{}>", uuid::Uuid::new_v4(), domain)
+}
+
 fn env_opt(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -150,6 +162,31 @@ impl Mailer {
         &self.link_base
     }
 
+    /// Build one RFC 5322-complete plain-text message (From/To/Subject/Date/
+    /// Message-ID). Errors are descriptive strings for the caller to log.
+    fn build_message(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<lettre::Message, String> {
+        use lettre::message::{header::ContentType, Mailbox};
+        let from_mbox: Mailbox = self
+            .from
+            .parse()
+            .map_err(|e| format!("bad SMTP_FROM address: {e}"))?;
+        let to_mbox: Mailbox = to.parse().map_err(|e| format!("invalid recipient: {e}"))?;
+        let message_id = rfc5322_message_id(from_mbox.email.domain());
+        lettre::Message::builder()
+            .from(from_mbox)
+            .to(to_mbox)
+            .subject(subject)
+            .message_id(Some(message_id))
+            .header(ContentType::TEXT_PLAIN)
+            .body(body.to_string())
+            .map_err(|e| format!("build message failed: {e}"))
+    }
+
     /// Deliver one plain-text message. Best-effort: failures are logged, never
     /// propagated (account flows must not 500 because a relay hiccupped).
     pub async fn send(&self, to: &str, subject: &str, body: &str) -> bool {
@@ -168,10 +205,7 @@ impl Mailer {
                 password,
                 tls,
             } => {
-                use lettre::{
-                    message::header::ContentType, AsyncSmtpTransport, AsyncTransport, Message,
-                    Tokio1Executor,
-                };
+                use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
                 let builder = match tls {
                     SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
                     SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
@@ -194,30 +228,10 @@ impl Mailer {
                 } else {
                     builder
                 };
-                let from_mbox = match self.from.parse() {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!("email: bad SMTP_FROM address: {e}");
-                        return false;
-                    }
-                };
-                let to_mbox = match to.parse() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!("email: invalid recipient: {e}");
-                        return false;
-                    }
-                };
-                let msg = match Message::builder()
-                    .from(from_mbox)
-                    .to(to_mbox)
-                    .subject(subject)
-                    .header(ContentType::TEXT_PLAIN)
-                    .body(body.to_string())
-                {
+                let msg = match self.build_message(to, subject, body) {
                     Ok(m) => m,
                     Err(e) => {
-                        tracing::warn!("email: build message failed: {e}");
+                        tracing::warn!("email: {e}");
                         return false;
                     }
                 };
@@ -338,6 +352,32 @@ mod tests {
         assert_eq!(resolve_tls(587, None, Some("0")), SmtpTls::Implicit);
         assert_eq!(resolve_tls(465, None, Some("1")), SmtpTls::StartTls);
         assert_eq!(resolve_tls(587, None, Some("false")), SmtpTls::Implicit);
+    }
+
+    #[test]
+    fn message_id_shape_and_uniqueness() {
+        let a = rfc5322_message_id("example.org");
+        let b = rfc5322_message_id("example.org");
+        assert!(a.starts_with('<') && a.ends_with("@example.org>"), "{a}");
+        assert_ne!(a, b, "each message must get a fresh id");
+        assert!(rfc5322_message_id("  ").ends_with("@localhost>"));
+    }
+
+    #[test]
+    fn built_message_has_message_id_and_date() {
+        let mailer = Mailer::log_only("http://localhost");
+        let msg = mailer
+            .build_message("user@example.com", "Subject", "Body")
+            .expect("message builds");
+        let raw = String::from_utf8(msg.formatted()).expect("utf8");
+        // Gmail rejects mail without a valid Message-ID (550 5.7.1); the id
+        // domain follows the From mailbox (default no-reply@localhost).
+        assert!(
+            raw.contains("Message-ID: <"),
+            "missing Message-ID in:\n{raw}"
+        );
+        assert!(raw.contains("@localhost>"), "id domain should follow From");
+        assert!(raw.contains("Date: "), "missing Date in:\n{raw}");
     }
 
     #[test]

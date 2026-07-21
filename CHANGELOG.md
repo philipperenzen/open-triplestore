@@ -39,6 +39,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- Outgoing email now carries a proper RFC 5322 `Message-ID` (`<uuid@from-domain>`),
+  in the account mailer and in both `ALERT_SMTP_*` alerting senders. Gmail
+  rejects messages without a valid Message-ID outright (`550 5.7.1`), and SMTP
+  relays only repair the header for clients they consider local — which a
+  compose sibling container is not. The bundled relay additionally runs with
+  `always_add_missing_headers = yes` as a safety net for any submitter.
 - `BASE_URL` set in `.env` now actually reaches the compose container (it was
   recommended in the production `.env` docs but never forwarded), so linked-data
   IRIs, the WebAuthn/passkey relying party and emailed action links pick up the
