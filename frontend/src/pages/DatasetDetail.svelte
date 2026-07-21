@@ -759,6 +759,15 @@
   // Probe geo capability (independent of the dataset load) to gate the viewer tile.
   async function fetchGeoStats() {
     try { geoStats = await getGeoStats(id); } catch { geoStats = null; }
+    // The viewer tile is about to render — prefetch its code-split chunks
+    // (page + three.js + MapLibre) during idle time so clicking "3D viewer"
+    // opens instantly instead of first downloading a couple of MB of WebGL
+    // libraries. Best-effort: a failed prefetch just falls back to on-click load.
+    if (geoStats && (geoStats.has_coordinates || geoStats.has_3d)) {
+      const prefetch = () => import('../pages/DatasetViewer.svelte').catch(() => {});
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(prefetch, { timeout: 4000 });
+      else setTimeout(prefetch, 600);
+    }
   }
   fetchGeoStats();
 

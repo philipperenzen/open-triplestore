@@ -18,7 +18,8 @@
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf } from '../../lib/viewer/detect';
   import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
-  import { ifcGuidAt, groupHasGuid, subGeometryForGuids } from '../../lib/viewer/ifc';
+  import { ifcGuidAt, groupHasGuid, subGeometryForGuids, ifcProgress } from '../../lib/viewer/ifc';
+  import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import { styleFor, add3dBuildings, BUILDINGS_LAYER_ID } from '../../lib/viewer/basemaps';
 
   /** @type {import('../../lib/viewer/geometry').ViewerElement[]} */
@@ -54,7 +55,8 @@
   let mapEl;
   let map = null;
   let dark = false;
-  let basemap = 'streets'; // 'streets' | 'satellite'
+  /** Initial basemap ('streets' | 'satellite') — the toggle still switches live. */
+  export let basemap = 'streets';
   // Layer visibility (doubles as the legend). 3D models are a custom WebGL layer,
   // so they're toggled via each model group's `.visible` rather than a layout prop.
   let layersOn = { points: true, lines: true, areas: true, models: true, labels: true, osm3d: true };
@@ -69,6 +71,7 @@
   /** id → { anchor, anchorUsed, scene, modelGroup, box, mercMatrix, meters } */
   let entries = new Map();
   let renderer = null;
+  let envFailed = false; // PMREM failed on this context — don't retry per frame
   const camera = new THREE.Camera();
   let lastProj = null; // latest map projection matrix (for raycasting)
   let fitted = false;
@@ -106,6 +109,9 @@
     onAdd(m, gl) {
       renderer = new THREE.WebGLRenderer({ canvas: m.getCanvas(), context: gl, antialias: true });
       renderer.autoClear = false;
+      // Filmic tone mapping for the standing models (same studio look as the
+      // modal viewer / walkthrough) — only affects our own draw calls.
+      applyStudioLook(renderer);
     },
     render(gl, args) {
       // MapLibre v5 passes {defaultProjectionData}; v4 passed the raw matrix.
@@ -116,6 +122,18 @@
       renderer.resetState();
       for (const e of entries.values()) {
         if (!e.scene || !e.mercMatrix) continue;
+        // Entry scenes are built as soon as their model loads, which can be
+        // before this layer exists — attach the per-renderer environment on
+        // first sight (a WeakMap-cached texture; a no-op after the first frame).
+        // Guarded: a PMREM failure on the shared MapLibre context must degrade
+        // to lights-only shading (once), never break model rendering.
+        if (!e.scene.environment && !envFailed) {
+          try {
+            e.scene.environment = studioEnvironment(renderer);
+          } catch {
+            envFailed = true;
+          }
+        }
         camera.projectionMatrix.copy(proj).multiply(e.mercMatrix);
         renderer.render(e.scene, camera);
       }
@@ -160,9 +178,12 @@
   }
 
   function buildEntryScene(holder) {
+    // The studio environment (attached in the layer's render pass) provides the
+    // fill light; these two only add directional definition, so they are far
+    // dimmer than the pre-environment values.
     const scene = new THREE.Scene();
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x46506b, dark ? 1.15 : 1.5);
-    const sun = new THREE.DirectionalLight(0xffffff, dark ? 1.5 : 2.1);
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x46506b, dark ? 0.4 : 0.5);
+    const sun = new THREE.DirectionalLight(0xffffff, dark ? 1.1 : 1.4);
     sun.position.set(0.6, 1, 0.8);
     scene.add(hemi, sun, holder);
     return scene;
@@ -974,7 +995,16 @@
   {#if modelsLoading > 0 || modelsFailed > 0}
     <div class="model-load-chip" class:err={modelsLoading === 0 && modelsFailed > 0} role="status">
       {#if modelsLoading > 0}
-        <span class="mlc-spin"></span>{$i18nT('viewer.loadingModels')}
+        <span class="mlc-spin"></span>
+        {#if $ifcProgress?.phase === 'parse'}
+          {$i18nT('viewer.parsingModel')}
+        {:else if $ifcProgress?.phase === 'fetch' && $ifcProgress.total > 0}
+          {$i18nT('viewer.loadingModels')} {Math.min(99, Math.round(($ifcProgress.loaded / $ifcProgress.total) * 100))}%
+        {:else if $ifcProgress?.phase === 'fetch'}
+          {$i18nT('viewer.loadingModels')} {($ifcProgress.loaded / 1048576).toFixed(0)} MB
+        {:else}
+          {$i18nT('viewer.loadingModels')}
+        {/if}
       {:else}
         {modelsFailed} {$i18nT('viewer.modelsFailed')}
       {/if}

@@ -1511,6 +1511,75 @@ fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::r
         .expect("static 500 response is always valid")
 }
 
+/// Path-aware framing policy, applied OUTSIDE the whole router (API routes,
+/// their security-header layers, and the static SPA fallback):
+///
+///  - `/embed/*` pages exist to be iframed by third-party sites, so they get
+///    `Content-Security-Policy: frame-ancestors <EMBED_FRAME_ANCESTORS>`
+///    (default `*`) and no `X-Frame-Options`. Operators can restrict embedding
+///    to specific hosts (`EMBED_FRAME_ANCESTORS="https://example.com"`) or
+///    disable it (`"'none'"`).
+///  - Every other response that carries NO CSP — which is exactly the static
+///    SPA files, since they are served by the fallback service that the
+///    security-header layers in [`build_router`] do not wrap — gets the
+///    anti-clickjacking pair the API already has. This closes the gap where
+///    the app shell itself was frameable while the API was not.
+///
+/// API responses already carry the strict CSP from [`build_router`]; those are
+/// left untouched (except under `/embed`, a path no API route uses).
+async fn frame_policy_headers(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    static EMBED_ANCESTORS: std::sync::OnceLock<Option<HeaderValue>> = std::sync::OnceLock::new();
+    let ancestors = EMBED_ANCESTORS.get_or_init(|| {
+        let v = std::env::var("EMBED_FRAME_ANCESTORS").unwrap_or_else(|_| "*".to_string());
+        let v = v.trim().to_string();
+        if v.is_empty() || v == "'none'" || v == "none" {
+            None // embedding disabled — /embed falls through to the default policy
+        } else {
+            HeaderValue::from_str(&format!("frame-ancestors {v}")).ok()
+        }
+    });
+
+    let is_embed = req.uri().path().starts_with("/embed");
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    // The SPA document can also leave through content-negotiating API routes
+    // (`/` and `/sparql` serve index.html to browsers — see `spa_shell_response`).
+    // Those picked up the strict API CSP (`connect-src 'self'`, …) from the
+    // inner layers, which blocks the viewer's external basemap tiles and the
+    // Cesium CDN for the whole SPA session — the "map never loads" failure in
+    // production. The marker tells us to re-stamp them with the SPA policy.
+    let spa_shell = headers.remove("x-ots-spa-shell").is_some();
+    match ancestors {
+        Some(allow) if is_embed => {
+            headers.insert(
+                HeaderName::from_static("content-security-policy"),
+                allow.clone(),
+            );
+            headers.remove("x-frame-options");
+        }
+        _ => {
+            if spa_shell || !headers.contains_key("content-security-policy") {
+                headers.insert(
+                    HeaderName::from_static("content-security-policy"),
+                    HeaderValue::from_static("frame-ancestors 'self'"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-frame-options"),
+                    HeaderValue::from_static("SAMEORIGIN"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-content-type-options"),
+                    HeaderValue::from_static("nosniff"),
+                );
+            }
+        }
+    }
+    resp
+}
+
 /// Start the HTTP server.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -1793,6 +1862,10 @@ pub async fn run(
     } else if !serve_frontend {
         info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
     }
+    // Outermost, path-aware framing policy: /embed/* is iframable (that is its
+    // purpose), everything else that carries no CSP (the static SPA) gets the
+    // anti-clickjacking headers. See `frame_policy_headers`.
+    let app = app.layer(middleware::from_fn(frame_policy_headers));
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
     let requested_port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());

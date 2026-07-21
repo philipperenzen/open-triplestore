@@ -111,3 +111,10 @@ bundled — it is not freely redistributable).
 OGC GeoSPARQL 1.1 · OGC CityJSON 2.0 / CityGML · OGC API – Features 1.0 · OGC 3D
 Tiles 1.1 (glTF `EXT_mesh_features` / `EXT_structural_metadata`) · W3C BOT ·
 OMG/FOG · W3C SOSA/SSN · ISO 19107 · EPSG 28992/7415/4978.
+
+## 8. Embedding these viewers elsewhere
+
+The map, 3D scene and Cesium globe are all available as chrome-less
+`/embed/…` pages for iframing into external sites, and every underlying API
+(GeoJSON, 3D Tiles, viewer feed, model files) is directly consumable from any
+web app — see **Embedding & Web Apps** (`docs/embedding.md`).

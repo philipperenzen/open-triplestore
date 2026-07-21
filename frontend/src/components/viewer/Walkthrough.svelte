@@ -12,7 +12,8 @@
   import { X, Footprints, MousePointerClick } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { loadModel, realWorldMeters, NORMALISED_DIM } from '../../lib/viewer/models';
-  import { ifcGuidAt } from '../../lib/viewer/ifc';
+  import { ifcGuidAt, ifcProgress } from '../../lib/viewer/ifc';
+  import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import { shortenIRI } from '../../lib/rdf-utils.js';
 
   /** Whole-building model to walk through. */
@@ -95,9 +96,12 @@
   onMount(() => {
     let ro;
     (async () => {
+      // Daylight scene: an architectural walkthrough at "midnight" (the old
+      // near-black background) read as unnatural and left interiors murky. A
+      // soft overcast sky + the shared studio environment lights rooms evenly.
       scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x0c121c);
-      scene.fog = new THREE.Fog(0x0c121c, 60, 240);
+      scene.background = new THREE.Color(0xdce6f0);
+      scene.fog = new THREE.Fog(0xdce6f0, 120, 500);
       camera = new THREE.PerspectiveCamera(75, 1, 0.03, 3000);
       renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true, powerPreference: 'high-performance' });
       // Cap DPR — a retina building walkthrough is heavily fill-rate bound.
@@ -105,13 +109,15 @@
       renderer.xr.enabled = true;
       raycaster = new THREE.Raycaster();
 
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4658, 1.5));
-      const sun = new THREE.DirectionalLight(0xffffff, 2.1);
+      applyStudioLook(renderer);
+      scene.environment = studioEnvironment(renderer);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa4b0, 0.5));
+      const sun = new THREE.DirectionalLight(0xfff4e0, 1.6);
       sun.position.set(18, 40, 12);
       scene.add(sun);
-      grid = new THREE.GridHelper(500, 100, 0x2c3e54, 0x1a2533);
+      grid = new THREE.GridHelper(500, 100, 0x8fa0b2, 0xaebbc9);
       grid.material.transparent = true;
-      grid.material.opacity = 0.5;
+      grid.material.opacity = 0.45;
       scene.add(grid);
 
       controls = new PointerLockControls(camera, renderer.domElement);
@@ -254,7 +260,18 @@
   </header>
 
   {#if loading}
-    <div class="wt-overlay"><div class="spin"></div><p>{$i18nT('viewer.walkLoading')}</p></div>
+    <div class="wt-overlay">
+      <div class="spin"></div>
+      <p>
+        {#if $ifcProgress?.phase === 'parse'}
+          {$i18nT('viewer.parsingModel')}
+        {:else if $ifcProgress?.phase === 'fetch' && $ifcProgress.total > 0}
+          {$i18nT('viewer.walkLoading')} {Math.min(99, Math.round(($ifcProgress.loaded / $ifcProgress.total) * 100))}%
+        {:else}
+          {$i18nT('viewer.walkLoading')}
+        {/if}
+      </p>
+    </div>
   {:else if error}
     <div class="wt-overlay"><p class="err">{error}</p></div>
   {:else if !locked}
@@ -285,7 +302,7 @@
     position: fixed;
     inset: 0;
     z-index: 1400;
-    background: #0c121c;
+    background: #dce6f0; /* matches the daylight scene while it loads */
   }
   canvas {
     width: 100%;
@@ -385,16 +402,16 @@
     align-items: center;
     justify-content: center;
     gap: 12px;
-    color: #c7d4e2;
+    color: #3c4a5a; /* readable over the daylight backdrop */
   }
   .err {
-    color: #ff8a6a;
+    color: #c0392b;
   }
   .spin {
     width: 34px;
     height: 34px;
-    border: 3px solid rgba(255, 255, 255, 0.2);
-    border-top-color: #ff8a2a;
+    border: 3px solid rgba(20, 30, 44, 0.18);
+    border-top-color: #e8590c;
     border-radius: 50%;
     animation: sp 0.9s linear infinite;
   }

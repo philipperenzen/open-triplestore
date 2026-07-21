@@ -3692,9 +3692,20 @@
     "downloadIfc": "IFC-model (.ifc)",
     "downloadLd": "Linked data (per graaf)",
     "loadingModels": "Gebouwmodel laden…",
+    "parsingModel": "Geometrie opbouwen…",
     "modelsFailed": "model(len) niet geladen",
     "loadingStructure": "Volledige structuur laden…",
     "loadingElements": "Elementen laden…"
+  },
+  "embed": {
+    "signInNeeded": "Deze dataset vereist inloggen.",
+    "loadFailed": "Kon deze dataset niet laden.",
+    "openInApp": "Openen in Open Triplestore",
+    "badModelSrc": "Geen laadbaar model op deze src-URL — geef ?format=gltf|ifc|cityjson|citygml|stl mee als de URL geen bestandsextensie heeft.",
+    "embedTitle": "Insluiten",
+    "embedDesc": "Kopieer een iframe-snippet om deze weergave in een webpagina in te sluiten.",
+    "copied": "Gekopieerd!",
+    "copy": "Kopiëren"
   },
   "fileViewer": {
     "kind3d": "3D-model",
