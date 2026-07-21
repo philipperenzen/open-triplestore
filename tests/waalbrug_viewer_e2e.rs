@@ -222,8 +222,8 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
         6,
         "collection root + 5 landmarks (the synthetic CityJSON block moved to the 3DBAG context graph): {j}"
     );
-    // Orientation annotations flow through: the two Z-up scans carry it, the
-    // Y-up models stay unannotated (no rotation).
+    // Orientation annotations flow through: the Z-up STL landmarks carry it (their
+    // vertical extent is along Z), the Y-up torii stays unannotated (no rotation).
     let up = |name: &str| {
         elements
             .iter()
@@ -233,8 +233,10 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     assert_eq!(up("BigBen").as_deref(), Some("Z"));
     assert_eq!(up("EmpireStateBuilding").as_deref(), Some("Z"));
     assert_eq!(up("WhiteHouse").as_deref(), Some("Z"));
+    // Dragon Bridge's STL is Z-up (deck height along Z); without this it rendered
+    // tipped ~82 m onto its side instead of lying flat on the map.
+    assert_eq!(up("DragonBridge").as_deref(), Some("Z"));
     assert_eq!(up("SannoShrine"), None);
-    assert_eq!(up("DragonBridge"), None);
 
     let bridge = elements
         .iter()
