@@ -3692,9 +3692,20 @@
     "downloadIfc": "IFC model (.ifc)",
     "downloadLd": "Linked data (per graph)",
     "loadingModels": "Loading building model…",
+    "parsingModel": "Building geometry…",
     "modelsFailed": "model(s) failed to load",
     "loadingStructure": "Loading full structure…",
     "loadingElements": "Loading elements…"
+  },
+  "embed": {
+    "signInNeeded": "This dataset requires sign-in.",
+    "loadFailed": "Could not load this dataset.",
+    "openInApp": "Open in Open Triplestore",
+    "badModelSrc": "No loadable model at this src URL — pass ?format=gltf|ifc|cityjson|citygml|stl when the URL has no file extension.",
+    "embedTitle": "Embed",
+    "embedDesc": "Copy an iframe snippet to embed this view in any web page.",
+    "copied": "Copied!",
+    "copy": "Copy"
   },
   "fileViewer": {
     "kind3d": "3D model",

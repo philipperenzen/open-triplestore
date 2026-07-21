@@ -10,6 +10,7 @@
   import { isDark } from '../../lib/theme.js';
   import { loadModel, defaultMaterial } from '../../lib/viewer/models';
   import { ifcGuidAt } from '../../lib/viewer/ifc';
+  import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
 
   /** Models to show: [{ id, label, url, format, slot?: [x, z] }]. */
   export let refs = [];
@@ -201,8 +202,12 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     raycaster = new THREE.Raycaster();
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.9));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+    // Studio look: image-based fill light + filmic tone mapping (see studio.ts)
+    // with one directional key light for shading definition — replaces the old
+    // flat ambient+sun combo that made models look like unlit plastic.
+    applyStudioLook(renderer);
+    scene.environment = studioEnvironment(renderer);
+    const sun = new THREE.DirectionalLight(0xffffff, 1.3);
     sun.position.set(4, 8, 5);
     scene.add(sun);
     grid = new THREE.GridHelper(20, 20, 0x5a7a9a, 0x44607a);
