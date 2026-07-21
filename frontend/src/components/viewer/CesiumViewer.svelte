@@ -41,6 +41,9 @@
   // component's own lightweight SPARQL panel — so switching to 3D Tiles
   // sacrifices no features. A "full screen" button opens the standalone page.
   export let embedded = false;
+  /** Show the "open full screen" in-app navigation button (embedded mode).
+   *  Iframe embeds turn this off — there is no SPA router to navigate. */
+  export let expand = true;
   /** Currently-selected element id (from the parent) to highlight in the scene. */
   export let selected = '';
 
@@ -428,7 +431,7 @@
        recovery otherwise once the user orbits away from a small tileset. -->
   {#if !loading && !error}
     <div class="cam-controls">
-      {#if embedded}
+      {#if embedded && expand}
         <button class="cam-btn" title="Open full screen" aria-label="Open full screen" on:click={openFullScreen}>
           <Maximize2 size={15} />
         </button>

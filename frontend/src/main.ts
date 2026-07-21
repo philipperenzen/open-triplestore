@@ -30,8 +30,13 @@ loadRuntimeConfig();
 
 let app: ReturnType<typeof mount>;
 
-waitLocale().then(() => {
-  app = mount(App, {
+// /embed/* mounts a chrome-less single-viewer app for iframing by external
+// sites (see EmbedApp.svelte + docs/embedding.md) — no nav, auth or polling.
+const isEmbed = /^\/embed(\/|$)/.test(window.location.pathname);
+
+waitLocale().then(async () => {
+  const Root = isEmbed ? (await import('./EmbedApp.svelte')).default : App;
+  app = mount(Root, {
     target: document.getElementById('app') as HTMLElement,
   });
 });
