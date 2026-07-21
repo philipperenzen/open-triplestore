@@ -1425,10 +1425,8 @@ fn spa_shell_response(headers: &HeaderMap) -> Option<Response> {
             // hosts and the Cesium CDN for the whole SPA session whenever a user
             // enters at `/`. The middleware swaps it for the SPA policy (same as
             // fallback-served index.html) and strips this internal header.
-            resp.headers_mut().insert(
-                "x-ots-spa-shell",
-                axum::http::HeaderValue::from_static("1"),
-            );
+            resp.headers_mut()
+                .insert("x-ots-spa-shell", axum::http::HeaderValue::from_static("1"));
             return Some(resp);
         }
     }
