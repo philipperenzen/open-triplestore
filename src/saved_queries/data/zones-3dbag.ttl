@@ -40,12 +40,19 @@ z2:NeighbourBlock omg:hasGeometry [ a omg:Geometry ;
 z2:NeighbourHouse a bot:Element ;
     rdfs:label "Neighbour house (LoD2)"@en ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POINT(5.83305 51.84048)"^^geo:wktLiteral ] .
+        geo:asWKT "POINT(5.83305 51.84048)"^^geo:wktLiteral ] ;
+    # This building's own CityObject in the shared zone model (a `#objectId`
+    # fragment, like an IFC element's `#GlobalId`): the block renders once and a
+    # pick on this house resolves back to this element.
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asCityjson "/samples/schependomlaan-zone2.city.json#zone2-house"^^xsd:anyURI ] .
 
 z2:NeighbourShop a bot:Element ;
     rdfs:label "Neighbour shop (LoD2)"@en ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POINT(5.83330 51.84052)"^^geo:wktLiteral ] .
+        geo:asWKT "POINT(5.83330 51.84052)"^^geo:wktLiteral ] ;
+    omg:hasGeometry [ a omg:Geometry ;
+        fog:asCityjson "/samples/schependomlaan-zone2.city.json#zone2-shop"^^xsd:anyURI ] .
 
 # ── A second reference to the real 3DBAG excerpt, as its own zone element so the
 #    canonical block and this richer block both appear as selectable "zones". ──
