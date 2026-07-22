@@ -87,6 +87,25 @@ export function fileResourceKind(url: string | null | undefined): FileResource |
   return { kind: 'binary' };
 }
 
+/** The base file of a CityJSON/CityGML URL, without any `#objectId` fragment. */
+export function cityBaseUrl(url: string): string {
+  const at = url.indexOf('#');
+  return at === -1 ? url : url.slice(0, at);
+}
+
+/** The `#objectId` fragment of a CityJSON/CityGML URL — the CityObject to isolate
+ *  from a shared file (the CityJSON counterpart of an IFC `#GlobalId`). */
+export function cityObjectFragment(url: string): string | null {
+  const at = url.indexOf('#');
+  const frag = at === -1 ? '' : url.slice(at + 1);
+  if (!frag) return null;
+  try {
+    return decodeURIComponent(frag);
+  } catch {
+    return frag;
+  }
+}
+
 /** FOG format key (the local name after `fog:as`, e.g. `Gltf_v2.0-glb`) → format. */
 function formatFromFogKey(key: string): ModelFormat | null {
   const k = key.toLowerCase();

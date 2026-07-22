@@ -50,7 +50,7 @@ bim:Townhouse a bot:Building ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(5.83395 51.84198)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asCityjson "/samples/neighbourhood.city.json"^^xsd:anyURI ] ;
+        fog:asCityjson "/samples/neighbourhood.city.json#nbh-house"^^xsd:anyURI ] ;
     bot:hasStorey bim:TownhouseGround , bim:TownhouseFirst .
 
 # Ground floor → two spaces + two elements.
@@ -88,7 +88,7 @@ bim:CornerShop a bot:Building ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(5.83419 51.84198)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asCityjson "/samples/neighbourhood.city.json"^^xsd:anyURI ] ;
+        fog:asCityjson "/samples/neighbourhood.city.json#nbh-shop"^^xsd:anyURI ] ;
     bot:hasStorey bim:ShopGround .
 
 bim:ShopGround a bot:Storey ;
@@ -112,7 +112,7 @@ bim:ApartmentBlock a bot:Building ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((187400 428514 0,187400 428526 0,187416 428526 0,187416 428514 0,187400 428514 0)),((187400 428514 13,187416 428514 13,187416 428526 13,187400 428526 13,187400 428514 13)),((187400 428514 0,187400 428514 13,187400 428526 13,187400 428526 0,187400 428514 0)),((187416 428514 0,187416 428526 0,187416 428526 13,187416 428514 13,187416 428514 0)),((187400 428514 0,187416 428514 0,187416 428514 13,187400 428514 13,187400 428514 0)),((187400 428526 0,187400 428526 13,187416 428526 13,187416 428526 0,187400 428526 0)))"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asCityjson "/samples/neighbourhood.city.json"^^xsd:anyURI ] ;
+        fog:asCityjson "/samples/neighbourhood.city.json#nbh-apartment"^^xsd:anyURI ] ;
     bot:hasStorey bim:ApartmentFloor1 , bim:ApartmentFloor2 .
 
 bim:ApartmentFloor1 a bot:Storey ;
@@ -134,7 +134,7 @@ bim:OfficeBuilding a bot:Building ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "POINT(5.83423 51.84210)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
-        fog:asCityjson "/samples/neighbourhood.city.json"^^xsd:anyURI ] ;
+        fog:asCityjson "/samples/neighbourhood.city.json#nbh-office"^^xsd:anyURI ] ;
     bot:hasStorey bim:OfficeGround , bim:OfficeFirst .
 
 bim:OfficeGround a bot:Storey ;
