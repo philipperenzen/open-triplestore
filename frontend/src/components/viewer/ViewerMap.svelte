@@ -13,14 +13,34 @@
   import 'maplibre-gl/dist/maplibre-gl.css';
   import * as THREE from 'three';
   import { t as i18nT } from 'svelte-i18n';
-  import { Map as MapIcon, Satellite } from 'lucide-svelte';
+  import { Map as MapIcon, Satellite, Crosshair } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf } from '../../lib/viewer/detect';
   import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
-  import { ifcGuidAt, groupHasGuid, subGeometryForGuids, ifcProgress } from '../../lib/viewer/ifc';
+  import { ifcGuidAt, groupHasGuid, ifcProgress } from '../../lib/viewer/ifc';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
-  import { styleFor, add3dBuildings, BUILDINGS_LAYER_ID } from '../../lib/viewer/basemaps';
+  import {
+    styleFor,
+    add3dBuildings,
+    buildingLayerIds,
+    OSM_BUILDING_SOURCE_LAYER,
+  } from '../../lib/viewer/basemaps';
+  import {
+    buildingIdFilter,
+    buildingSuppressionFilter,
+    combineFilters,
+    footprintPolygon,
+    footprintsFromLocalPoints,
+    footprintsToMultiPolygon,
+    polygonsIntersect,
+  } from '../../lib/viewer/footprint';
+  import {
+    HL_COLOR,
+    HL_EMISSIVE,
+    buildHighlightOverlay,
+    disposeHighlightOverlay,
+  } from '../../lib/viewer/highlight';
 
   /** @type {import('../../lib/viewer/geometry').ViewerElement[]} */
   export let elements = [];
@@ -60,6 +80,11 @@
   // Layer visibility (doubles as the legend). 3D models are a custom WebGL layer,
   // so they're toggled via each model group's `.visible` rather than a layout prop.
   let layersOn = { points: true, lines: true, areas: true, models: true, labels: true, osm3d: true };
+  // Opt-in x-ray: ghost the surrounding building and draw the selected element
+  // THROUGH it. Off by default — an automatic x-ray on every pick made the model
+  // dissolve around the selection and let the ground contact-shadow show through
+  // as a dark ring, which is what "a x-ray circle … through the 3d model" was.
+  let xrayOn = false;
   const LAYER_DEFS = [
     { key: 'points', shape: 'dot', color: '#2f88d8', label: 'viewer.layerPoints' },
     { key: 'lines', shape: 'line', color: '#2f88d8', label: 'viewer.layerLines' },
@@ -155,14 +180,22 @@
   }
 
   let shadowTexture = null;
-  /** Soft radial "contact shadow" under a model — a cheap grounding cue. */
+  /**
+   * Soft radial "contact shadow" under a model — a cheap grounding cue.
+   *
+   * Toned down from 0.42 to 0.26 alpha: while a selection ghosted the building
+   * the disc was no longer depth-rejected and surfaced as a dark circle roughly
+   * 1.24× the footprint, hanging inside the model. It is now also hidden
+   * whenever its model is ghosted (see highlightModels) and drawn first, so it
+   * can only ever read as ground shading.
+   */
   function makeShadowDisc(radius) {
     if (!shadowTexture) {
       const c = document.createElement('canvas');
       c.width = c.height = 128;
       const ctx = c.getContext('2d');
       const g = ctx.createRadialGradient(64, 64, 8, 64, 64, 64);
-      g.addColorStop(0, 'rgba(0,0,0,0.42)');
+      g.addColorStop(0, 'rgba(0,0,0,0.26)');
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, 128, 128);
@@ -174,6 +207,7 @@
     );
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.y = 0.02;
+    mesh.renderOrder = -1;
     return mesh;
   }
 
@@ -220,17 +254,23 @@
       const box = new THREE.Box3().setFromObject(model);
       const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.62;
       const holder = new THREE.Group();
-      holder.add(model, makeShadowDisc(radius));
+      const disc = makeShadowDisc(radius);
+      holder.add(model, disc);
       entry.modelGroup = model;
+      entry.shadow = disc;
       entry.box = box;
       entry.scene = buildEntryScene(holder);
       entry.meters = meters;
       entry.anchorUsed = anchor;
+      entry.footprint = null; // computed on demand by the suppression pass
       entry.isIfc = ref.format === 'ifc'; // multi-element model → eligible for x-ray
       entry.mercMatrix = mercMatrixFor(anchor, meters);
       themeMaterials();
       highlightModels();
       updateWalkSuggest(); // a building may have loaded while already zoomed in
+      // The basemap blocks this model now covers can only be resolved once its
+      // geometry exists; nothing else fires after an async load.
+      scheduleBuildingSuppression();
       map?.triggerRepaint();
     } catch {
       modelsFailed += 1; // model failed to load — the vector dot remains
@@ -249,10 +289,11 @@
     map?.triggerRepaint();
   }
 
-  const HL_COLOR = 0xff6a00; // vivid highlight for the selected element(s)
   // Ghost opacity for the rest of the building during an x-ray. Kept high enough
   // that the building still reads as context (0.16 made it vanish entirely).
   const GHOST_OPACITY = 0.34;
+  /** Emissive intensity of a selected (but not overlaid) model. */
+  const SELECT_EMISSIVE = 0.6;
 
   /** Stash a material's original render flags once, so any paint is reversible. */
   function stashMat(m) {
@@ -323,7 +364,8 @@
    * Stage a material for one of four states, easing the scalar changes:
    *  - `selected`     — glow (whole non-IFC model picked); normal depth.
    *  - `selectedXray` — glow AND render ON TOP (depthTest off) so the picked IFC
-   *                     sub-element is always visible through the ghosted shell.
+   *                     sub-element is visible through the ghosted shell. Only
+   *                     reachable while the X-ray toggle is on.
    *  - `ghost`        — faint, see-through, doesn't occlude (x-ray of the rest).
    *  - `normal`       — restore the stashed original flags.
    */
@@ -337,18 +379,20 @@
     let finalDepthWrite;
     let finalDepthTest;
     if (state === 'selected' || state === 'selectedXray') {
-      // Solid highlight colour + a strong glow so the pick is unmistakable, not a
-      // faint tint over the model's own colour.
-      if (m.color) m.color.setHex(HL_COLOR);
+      // Non-destructive glow: light the material's OWN colour rather than
+      // repainting it orange, and leave opacity/transparency exactly as they
+      // were, so a CityJSON facade keeps its per-surface colours and a glassy
+      // surface stays glassy. A material with no emissive channel (a plain
+      // MeshBasicMaterial) has no other way to read as selected, so those — and
+      // only those — still take the colour override.
       if (emis) m.emissive.setHex(HL_COLOR);
-      toEmis = 0.85;
-      // A selected element ends up SOLID even if its IFC material was glassy.
-      toOpacity = 1;
-      finalTransparent = false;
-      finalDepthWrite = true;
+      else if (m.color) m.color.setHex(HL_COLOR);
+      toEmis = emis ? SELECT_EMISSIVE : 0;
+      toOpacity = m.userData.origOpacity;
+      finalTransparent = m.userData.origTransparent;
+      finalDepthWrite = m.userData.origDepthWrite;
       finalDepthTest = state === 'selectedXray' ? false : m.userData.origDepthTest;
-      // Discrete flags that must read immediately so the pick pops on top.
-      m.depthWrite = true;
+      m.depthWrite = finalDepthWrite;
       m.depthTest = finalDepthTest;
     } else if (state === 'ghost') {
       toEmis = 0;
@@ -438,18 +482,22 @@
     for (const [id, e] of entries) {
       if (e.isIfc) {
         // The IFC building is MERGED (a few per-material meshes), so a single
-        // element can't be lit by swapping a mesh's material. Instead: ghost the
-        // whole building, and overlay the selected element(s) as a solid, glowing
-        // copy rendered on top (the x-ray effect) — or restore it when nothing in
-        // this building is selected.
-        const xray = byGuid && groupHasGuid(e.modelGroup, selGuids);
+        // element can't be lit by swapping a mesh's material — the selection is
+        // drawn as a highlight copy over the original instead. The surrounding
+        // building KEEPS its full opacity and keeps occluding; only the opt-in
+        // X-ray ghosts it so an enclosed element shows through.
+        const isSel = byGuid && groupHasGuid(e.modelGroup, selGuids);
+        const ghost = isSel && xrayOn;
         e.modelGroup?.traverse((n) => {
           if (!n.isMesh || !n.material || n.userData.isOverlay) return;
           n.renderOrder = 0;
           const mats = Array.isArray(n.material) ? n.material : [n.material];
-          for (const m of mats) paintMat(m, xray ? 'ghost' : 'normal');
+          for (const m of mats) paintMat(m, ghost ? 'ghost' : 'normal');
         });
-        setIfcOverlay(e, xray ? selGuids : null);
+        // A ghosted shell stops writing depth, which un-hides the contact-shadow
+        // disc underneath it as a dark ring floating inside the building.
+        if (e.shadow) e.shadow.visible = !ghost;
+        setIfcOverlay(e, isSel ? selGuids : null, xrayOn);
       } else {
         // Non-IFC model (CityJSON/STL/glTF) — light the whole model by id.
         const on = !byGuid && id === selected;
@@ -467,55 +515,42 @@
     else map?.triggerRepaint();
   }
 
-  /** Add (or remove) a solid, glowing overlay of `selGuids` on top of the ghosted
-   *  merged IFC building — the per-element x-ray highlight a merged mesh can't do
-   *  by material swap. The overlay is non-pickable and disposed on the next change. */
-  function setIfcOverlay(e, selGuids) {
+  /** Add (or remove) a glowing copy of `selGuids` over the merged IFC building —
+   *  the per-element highlight a merged mesh can't do by material swap. The copy
+   *  is non-pickable and disposed on the next change. In the default mode it
+   *  RESPECTS depth (it sits on the geometry, and whatever stands in front still
+   *  covers it); `xray` restores the draw-through behaviour. */
+  function setIfcOverlay(e, selGuids, xray) {
     if (e.overlay) {
       e.overlay.parent?.remove(e.overlay);
-      disposeOverlay(e.overlay);
+      disposeHighlightOverlay(e.overlay);
       e.overlay = null;
     }
     if (!selGuids || !e.modelGroup) return;
-    const ov = subGeometryForGuids(e.modelGroup, selGuids);
-    if (!ov.children.length) return;
-    ov.traverse((n) => {
-      if (!n.isMesh) return;
-      const base = Array.isArray(n.material) ? n.material[0] : n.material;
-      const om = base ? base.clone() : new THREE.MeshStandardMaterial();
-      om.transparent = false;
-      om.opacity = 1;
-      om.depthTest = false; // always visible, through the ghosted shell
-      om.depthWrite = true;
-      // Render BOTH faces: a thin floor slab seen from above shows its underside,
-      // which a single-sided material would cull — the "no highlight at all" case.
-      om.side = THREE.DoubleSide;
-      // Solid bright colour (not the element's own grey) + a strong self-lit glow
-      // so it pops regardless of scene lighting or the camera angle.
-      if (om.color) om.color.setHex(HL_COLOR);
-      if ('metalness' in om) om.metalness = 0;
-      if ('roughness' in om) om.roughness = 0.5;
-      if ('emissive' in om) {
-        om.emissive.setHex(HL_COLOR);
-        om.emissiveIntensity = 0.9;
-      }
-      n.material = om;
-      n.renderOrder = 12;
-      n.userData.isOverlay = true;
-      n.raycast = () => {}; // the merged building under it owns picking
-    });
+    const ov = buildHighlightOverlay(e.modelGroup, selGuids, xray);
+    if (!ov) return;
     // Child of the model group so it inherits the same placement transform as the
     // merged meshes the geometry was extracted from.
     e.modelGroup.add(ov);
     e.overlay = ov;
-  }
-
-  function disposeOverlay(ov) {
+    // Fade the copy in on the same 200 ms curve the rest of the selection uses —
+    // buildHighlightOverlay hands it over fully transparent and unlit.
     ov.traverse((n) => {
       if (!n.isMesh) return;
-      n.geometry?.dispose?.();
       const mats = Array.isArray(n.material) ? n.material : [n.material];
-      for (const m of mats) m?.dispose?.();
+      for (const m of mats) {
+        if (!m) continue;
+        m.userData.tween = {
+          fromOpacity: 0,
+          toOpacity: 1,
+          fromEmis: 0,
+          toEmis: HL_EMISSIVE,
+          finalTransparent: false,
+          finalDepthWrite: true,
+          finalDepthTest: !xray,
+        };
+        tweenMats.add(m);
+      }
     });
   }
 
@@ -630,64 +665,218 @@
     if (!map.getLayer('ots-3d-models')) map.addLayer(makeModelLayer());
     applySelectedPaint();
     applyLayerVisibility();
-    suppressBasemapBuildingsUnderModels();
+    scheduleBuildingSuppression();
   }
 
   // ── Basemap-building suppression ────────────────────────────────────────────
-  // Our georeferenced models stand where the OSM extrusion layer also raises a
-  // generic grey block — the two overlap and z-fight (Big Ben inside a slab).
-  // Fix: query the extrusion features under each model anchor and filter those
-  // footprints out of the layer. Feature ids vary per tile/zoom, so re-resolve
-  // whenever the map goes idle after movement.
-  let suppressedIds = new Set();
-  function suppressBasemapBuildingsUnderModels() {
-    if (!map || !map.getLayer(BUILDINGS_LAYER_ID)) return;
-    for (const e of entries.values()) {
-      const anchor = e.anchorUsed ?? e.anchor;
-      // Skip hidden models (3D-models layer toggled off) and unbuilt entries.
-      if (!anchor || !e.modelGroup || e.modelGroup.visible === false || !e.box) continue;
-      e.suppressed ??= new Set();
-      try {
-        const c = map.project({ lng: anchor[0], lat: anchor[1] });
-        const mpp =
-          (156543.03392 * Math.cos((anchor[1] * Math.PI) / 180)) / Math.pow(2, map.getZoom());
-        // Radius = the model's real FOOTPRINT (horizontal extent), NOT its height.
-        // The old height-based radius made a 96 m tower (Big Ben) blank out a 96 m
-        // circle of neighbouring blocks that never came back; we only want to hide
-        // the OSM block(s) the model actually stands on. `box` is normalised units,
-        // so scale the horizontal extent by meters/largest-dim to get real metres.
-        const sx = e.box.max.x - e.box.min.x;
-        const sy = e.box.max.y - e.box.min.y;
-        const sz = e.box.max.z - e.box.min.z;
-        const maxDim = Math.max(sx, sy, sz) || 1;
-        const footprintM = (e.meters || 30) * (Math.max(sx, sz) / maxDim);
-        const r = Math.min(70, Math.max(3, footprintM / 2 / Math.max(mpp, 1e-6)));
-        const feats = map.queryRenderedFeatures(
-          [[c.x - r, c.y - r], [c.x + r, c.y + r]],
-          { layers: [BUILDINGS_LAYER_ID] }
-        );
-        for (const f of feats) if (f.id !== undefined) e.suppressed.add(f.id);
-      } catch {
+  // Our georeferenced models stand where the basemap also raises a generic grey
+  // block — the two overlap and z-fight (Big Ben inside a slab). The fix is a
+  // DATA-level filter: each model's real ground footprint is computed in WGS84
+  // (lib/viewer/footprint.ts) and every basemap building that INTERSECTS it is
+  // filtered out, in every layer of the style that draws buildings.
+  //
+  // What this replaces: the old pass queried the *rendered* features inside a
+  // screen-space square around the model's anchor POINT. That under-covered on
+  // four independent counts — the radius was capped at 70 px, the
+  // metres-per-pixel conversion used the 256-px-tile constant while MapLibre's
+  // zoom is in the 512-px scheme (so it was 2× too small again), a pitched
+  // camera turns a screen square into a ground trapezoid, and
+  // queryRenderedFeatures sees nothing off-screen, below the layer's minzoom or
+  // before tiles have arrived. It also only ever filtered our own layer, so the
+  // hosted Liberty style's `building-3d` kept drawing the block straight through
+  // the model. A geometry filter is independent of the camera entirely: it is
+  // computed once per model and stays correct across pans, zooms and style swaps.
+  /** Absorbs the mismatch between a generalised OSM footprint and a survey
+   *  accurate IFC/CityJSON one, without swallowing the neighbours. */
+  const SUPPRESSION_BUFFER_M = 0.5;
+  /** Vertices sampled per model to trace its outline (see sampleModelXZ). */
+  const FOOTPRINT_SAMPLE_CAP = 4000;
+  /** Each building layer's own filter, stashed before we ever touch it. Cleared
+   *  on style.load — layer objects are recreated by setStyle. */
+  let baseFilters = new Map();
+  let suppressTimer = 0;
+  /** 'geometry' uses MapLibre's `distance` expression (evaluated in the tile
+   *  worker, viewport-independent); 'ids' is the fallback below. Latched once. */
+  let suppressionMode = 'geometry';
+  /** Bumped when a building source finishes loading tiles — only the id fallback
+   *  depends on which tiles are present. */
+  let sourceGen = 0;
+  let lastSuppressionKey = '';
+
+  /**
+   * A bounded sample of a model's vertices as model-local `[x, z]` pairs — the
+   * space `mercMatrixFor()` consumes. An IFC building has millions of vertices
+   * and the footprint only needs its outline, so this strides through the
+   * position buffers instead of reading every vertex.
+   */
+  function sampleModelXZ(entry) {
+    const out = [];
+    const group = entry.modelGroup;
+    if (!group) return out;
+    group.updateMatrixWorld(true);
+    let total = 0;
+    group.traverse((n) => {
+      if (n.isMesh && !n.userData.isOverlay && n.geometry?.attributes?.position) {
+        total += n.geometry.attributes.position.count;
+      }
+    });
+    if (!total) return out;
+    const stride = Math.max(1, Math.ceil(total / FOOTPRINT_SAMPLE_CAP));
+    const v = new THREE.Vector3();
+    group.traverse((n) => {
+      if (!n.isMesh || n.userData.isOverlay) return;
+      const pos = n.geometry?.attributes?.position;
+      if (!pos) return;
+      for (let i = 0; i < pos.count; i += stride) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(n.matrixWorld);
+        out.push([v.x, v.z]);
+      }
+    });
+    return out;
+  }
+
+  /** Ground footprint polygons of a built model, cached on the entry: they are
+   *  camera-independent, so they only change when the model itself does. */
+  function entryFootprints(e) {
+    const anchor = e.anchorUsed ?? e.anchor;
+    if (!anchor || !e.modelGroup || !e.box) return [];
+    if (e.footprint) return e.footprint;
+    const meters = e.meters || 30;
+    const pts = sampleModelXZ(e);
+    e.footprint = pts.length
+      ? footprintsFromLocalPoints(pts, meters, anchor, { normalisedDim: NORMALISED_DIM })
+      : // No readable geometry (a placeholder, an exotic loader) — fall back to
+        // the bounding box, padded, which is what the old code approximated.
+        [
+          footprintPolygon(e.box, meters, anchor, {
+            normalisedDim: NORMALISED_DIM,
+            padMeters: SUPPRESSION_BUFFER_M,
+          }),
+        ];
+    return e.footprint;
+  }
+
+  /**
+   * Set `filter` on every building layer, preserving the layer's own filter.
+   * Returns 'ok', 'retry' (a transient failure — the style was mid-load) or
+   * 'unsupported' (MapLibre would not accept the expression, which latches the
+   * id fallback).
+   */
+  function applyFilterToBuildingLayers(filter) {
+    let result = 'ok';
+    for (const id of buildingLayerIds(map)) {
+      if (!baseFilters.has(id)) baseFilters.set(id, map.getFilter(id) ?? null);
+      const combined = combineFilters(baseFilters.get(id), filter);
+      if (combined === undefined) {
+        // A LEGACY (non-expression) filter cannot be wrapped in ['all', …] —
+        // the style would fail validation — so that layer is left untouched.
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn(`[viewer] ${id} has a legacy filter; basemap suppression skipped there`);
+        }
         continue;
       }
-    }
-    // The active filter is the union over CURRENTLY VISIBLE models — so toggling
-    // the 3D-models layer off (or a model that unloaded) brings its basemap blocks
-    // back, while a block under a standing model stays hidden. Each model keeps
-    // its own accumulated id set, so there is no query→hide→re-query flicker.
-    const next = new Set();
-    for (const e of entries.values()) {
-      if (e.modelGroup && e.modelGroup.visible !== false && e.suppressed) {
-        for (const id of e.suppressed) next.add(id);
+      try {
+        map.setFilter(id, combined);
+      } catch {
+        result = 'retry'; // e.g. "Style is not done loading"
+        continue;
+      }
+      // setFilter does NOT throw on an expression it rejects: it fires an
+      // 'error' event and leaves the layer's filter untouched. Read it back to
+      // find out whether the filter actually landed.
+      if (JSON.stringify(map.getFilter(id) ?? null) !== JSON.stringify(combined ?? null)) {
+        result = 'unsupported';
       }
     }
-    const same = next.size === suppressedIds.size && [...next].every((id) => suppressedIds.has(id));
-    if (same) return;
-    suppressedIds = next;
-    map.setFilter(
-      BUILDINGS_LAYER_ID,
-      next.size ? ['!', ['in', ['id'], ['literal', [...next]]]] : null
-    );
+    return result;
+  }
+
+  /**
+   * Fallback for an engine or style where the `distance` expression is not
+   * available: intersect the footprint with each LOADED building feature in JS
+   * and hide the matches by feature id. `querySourceFeatures` (not
+   * `queryRenderedFeatures`) is used so the answer does not depend on the
+   * viewport or the layer's zoom range — but it still only sees tiles that have
+   * been fetched, hence the re-run on 'sourcedata'. Features that carry no id
+   * cannot be addressed by an id filter at all and therefore stay visible;
+   * OpenFreeMap's building features all carry planetiler ids, so in practice
+   * this only loses coverage on an exotic tile source.
+   */
+  function applyIdSuppression(multi) {
+    const rings = multi ? multi.coordinates.map((c) => c[0]) : [];
+    const ids = new Set();
+    if (rings.length) {
+      const sources = new Set();
+      for (const id of buildingLayerIds(map)) {
+        const src = map.getLayer(id)?.source;
+        if (src) sources.add(src);
+      }
+      for (const src of sources) {
+        let feats = [];
+        try {
+          feats = map.querySourceFeatures(src, { sourceLayer: OSM_BUILDING_SOURCE_LAYER });
+        } catch {
+          continue;
+        }
+        for (const f of feats) {
+          if (f.id === undefined || f.id === null) continue;
+          const g = f.geometry;
+          const polys =
+            g?.type === 'Polygon' ? [g.coordinates] : g?.type === 'MultiPolygon' ? g.coordinates : [];
+          for (const p of polys) {
+            if (rings.some((r) => polygonsIntersect(r, p[0]))) {
+              ids.add(f.id);
+              break;
+            }
+          }
+        }
+      }
+    }
+    applyFilterToBuildingLayers(buildingIdFilter([...ids]));
+  }
+
+  function applyBuildingSuppression() {
+    if (!map || !styleReady) return;
+    // Nothing to suppress on a raster basemap — and bailing before the key is
+    // latched means a style that hasn't attached its layers yet retries later.
+    if (!buildingLayerIds(map).length) return;
+    const polys = [];
+    for (const e of entries.values()) {
+      // A hidden model (the "3D models" layer toggled off) gives its blocks back.
+      if (!e.modelGroup || e.modelGroup.visible === false) continue;
+      polys.push(...entryFootprints(e));
+    }
+    const multi = footprintsToMultiPolygon(polys);
+    // setFilter marks the whole vector source for reload, so skip a no-op pass.
+    // The tile generation only matters to the id fallback (see applyIdSuppression).
+    const key = `${suppressionMode}|${suppressionMode === 'ids' ? sourceGen : 0}|${
+      multi ? JSON.stringify(multi.coordinates) : ''
+    }`;
+    if (key === lastSuppressionKey) return;
+    lastSuppressionKey = key;
+    if (suppressionMode === 'ids') {
+      applyIdSuppression(multi);
+      return;
+    }
+    const res = applyFilterToBuildingLayers(buildingSuppressionFilter(multi, SUPPRESSION_BUFFER_M));
+    if (res === 'retry') {
+      lastSuppressionKey = ''; // transient — let the next trigger try again
+    } else if (res === 'unsupported') {
+      suppressionMode = 'ids';
+      lastSuppressionKey = '';
+      applyIdSuppression(multi);
+    }
+  }
+
+  /** Coalesce suppression passes: several models finishing within a frame of
+   *  each other would otherwise reload the vector source once each. */
+  function scheduleBuildingSuppression() {
+    if (suppressTimer) return;
+    suppressTimer = setTimeout(() => {
+      suppressTimer = 0;
+      applyBuildingSuppression();
+    }, 60);
   }
 
   function setLayerVis(id, on) {
@@ -702,7 +891,10 @@
     setLayerVis('ots-fill', layersOn.areas);
     setLayerVis('ots-fill-line', layersOn.areas);
     setLayerVis('ots-label', layersOn.labels);
-    setLayerVis(BUILDINGS_LAYER_ID, layersOn.osm3d);
+    // Every building layer of the active style, not just ours: the hosted light
+    // style draws its own `building` fill and `building-3d` extrusion, which the
+    // toggle never reached before.
+    for (const id of buildingLayerIds(map)) setLayerVis(id, layersOn.osm3d);
     for (const e of entries.values()) {
       if (e.modelGroup) e.modelGroup.visible = layersOn.models;
     }
@@ -711,9 +903,15 @@
   function toggleLayer(key) {
     layersOn = { ...layersOn, [key]: !layersOn[key] };
     applyLayerVisibility();
-    // Toggling models on/off changes which basemap blocks should be hidden, but
-    // doesn't move the map (no 'idle'), so re-evaluate the suppression now.
-    if (key === 'models' || key === 'osm3d') suppressBasemapBuildingsUnderModels();
+    // Hiding the models must give their basemap blocks back.
+    if (key === 'models') scheduleBuildingSuppression();
+  }
+
+  /** Toggle the see-through selection. Called directly (not via a reactive
+   *  statement) so it does not fight the `lastSelectedPaint` guard below. */
+  function toggleXray() {
+    xrayOn = !xrayOn;
+    highlightModels();
   }
 
   function applySelectedPaint() {
@@ -744,7 +942,7 @@
     for (const e of entries.values()) {
       if (e.overlay) {
         e.overlay.parent?.remove(e.overlay);
-        disposeOverlay(e.overlay);
+        disposeHighlightOverlay(e.overlay);
       }
     }
     entries = new Map();
@@ -774,13 +972,69 @@
     }
   }
 
-  /** Pan/fly to an element (used when selecting from the list). */
-  export function focusElement(id) {
+  // ── Framing a target ────────────────────────────────────────────────────────
+  // Selecting something must never move the camera by itself; that was the
+  // "camera collapse" — every pick flew in to zoom 16.4 and slammed the pitch to
+  // 55°, throwing away whatever viewpoint the user had set up. focusElement now
+  // only runs for an EXPLICIT action (the modal's "Show on map", the map's own
+  // "Zoom to selection" button) and is conservative even then.
+  /** Zoom a framing action pulls up to when the target is too far away. */
+  const COMFORT_ZOOM = 16.4;
+  /** Fraction of the canvas that counts as "comfortably framed". */
+  const COMFORT_BOX = 0.6;
+  /** Fraction of the canvas an extended feature must cover to count as framed. */
+  const COMFORT_SPAN = 0.12;
+
+  const reducedMotion = () =>
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const flightMs = () => (reducedMotion() ? 0 : 800);
+
+  /**
+   * "Comfortably in view" — the rule that decides whether a framing action moves
+   * the camera at all. Two conditions, both required:
+   *  1. every given point projects inside the middle 60 % of the canvas, so the
+   *     target is not tucked behind the map chrome or the panel dock; and
+   *  2. it is big enough to actually look at — an extended feature must cover at
+   *     least 12 % of the canvas, and a bare anchor point (which has no extent)
+   *     falls back to "the camera is at least at COMFORT_ZOOM".
+   * When both hold the camera stays exactly where the user put it.
+   */
+  function comfortablyInView(points) {
+    if (!map || !points.length) return false;
+    const canvas = map.getCanvas();
+    const w = canvas.clientWidth || 1;
+    const h = canvas.clientHeight || 1;
+    const mx = (w * (1 - COMFORT_BOX)) / 2;
+    const my = (h * (1 - COMFORT_BOX)) / 2;
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    for (const p of points) {
+      const c = map.project({ lng: p[0], lat: p[1] });
+      if (c.x < mx || c.x > w - mx || c.y < my || c.y > h - my) return false;
+      x0 = Math.min(x0, c.x);
+      x1 = Math.max(x1, c.x);
+      y0 = Math.min(y0, c.y);
+      y1 = Math.max(y1, c.y);
+    }
+    const span = Math.max(x1 - x0, y1 - y0);
+    return span >= COMFORT_SPAN * Math.min(w, h) || map.getZoom() >= COMFORT_ZOOM;
+  }
+
+  /**
+   * Bring an element into view. Pitch and bearing are left exactly as the user
+   * set them (fitBounds resets the bearing unless it is passed explicitly), the
+   * zoom is only ever RAISED, and a target that is already comfortably framed
+   * does not move the camera at all — pass `{ force: true }` to frame it anyway.
+   */
+  export function focusElement(id, opts = {}) {
     if (!map) return;
     let el = elements.find((e) => e.id === id);
     if (!el) return;
     // An element with no geometry of its own (an IFC sub-element — a wall, a
-    // door) flies to its nearest located ancestor (the building's Site anchor).
+    // door) frames its nearest located ancestor (the building's Site anchor).
     // Its own mesh still lights up, driven by `selected`.
     const seen = new Set();
     while (el && !el.wkt4326 && !entries.get(el.id)?.anchorUsed && el.parent && !seen.has(el.id)) {
@@ -792,18 +1046,35 @@
     const f = toMapFeature(el);
     if (f && f.kind !== 'point') {
       const b = featureBounds([f]);
-      if (b) map.fitBounds([[b[0][1], b[0][0]], [b[1][1], b[1][0]]], { padding: 90, duration: 800 });
+      if (!b) return;
+      const corners = [
+        [b[0][1], b[0][0]],
+        [b[1][1], b[1][0]],
+      ];
+      if (!opts.force && comfortablyInView(corners)) return;
+      map.fitBounds([corners[0], corners[1]], {
+        padding: 90,
+        bearing: map.getBearing(),
+        duration: flightMs(),
+      });
       return;
     }
     const anchor = entry?.anchorUsed ?? modelAnchor(el);
-    if (anchor) {
-      map.flyTo({
-        center: anchor,
-        zoom: Math.max(map.getZoom(), 16.4),
-        pitch: entry?.scene ? 55 : map.getPitch(),
-        duration: 900,
-      });
-    }
+    if (!anchor) return;
+    if (!opts.force && comfortablyInView([anchor])) return;
+    // easeTo, not flyTo: the zoom-out-and-back arc is what read as the camera
+    // "collapsing" away from the building.
+    map.easeTo({
+      center: anchor,
+      zoom: Math.max(map.getZoom(), COMFORT_ZOOM),
+      duration: flightMs(),
+    });
+  }
+
+  /** The map's own "zoom to selection" control — the explicit replacement for
+   *  the camera travel that used to happen on every pick. */
+  function zoomToSelection() {
+    if (selected) focusElement(selected, { force: true });
   }
 
   // ── "Walk through this building" suggestion ─────────────────────────────────
@@ -912,11 +1183,23 @@
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-left');
     map.on('style.load', () => {
       styleReady = true;
-      suppressedIds = new Set(); // feature ids are style/source-specific
+      // setStyle recreates every layer, so the stashed originals and the
+      // last-applied key belong to the previous style and must go.
+      baseFilters = new Map();
+      lastSuppressionKey = '';
       ensureOverlays();
       themeMaterials();
     });
-    map.on('idle', suppressBasemapBuildingsUnderModels);
+    // No 'idle' handler any more: the suppression is a data-level filter, so
+    // nothing about the camera can change its answer — and re-running it per
+    // idle both cost a queryRenderedFeatures and made the hidden set depend on
+    // where the user had happened to look. Only the id fallback cares which
+    // tiles have arrived.
+    map.on('sourcedata', (ev) => {
+      if (suppressionMode !== 'ids' || !ev.isSourceLoaded) return;
+      sourceGen += 1;
+      scheduleBuildingSuppression();
+    });
     map.on('moveend', updateWalkSuggest);
     map.on('click', onClick);
     map.on('mousemove', onMouseMove);
@@ -935,10 +1218,11 @@
   onDestroy(() => {
     unsubTheme();
     if (tweenRAF) cancelAnimationFrame(tweenRAF);
+    if (suppressTimer) clearTimeout(suppressTimer);
     for (const e of entries.values()) {
       if (e.overlay) {
         e.overlay.parent?.remove(e.overlay);
-        disposeOverlay(e.overlay);
+        disposeHighlightOverlay(e.overlay);
       }
     }
     hoverPopup?.remove();
@@ -948,6 +1232,10 @@
   });
 
   $: if (map && elements) rebuildData();
+  /** Label for the selection chip; falls back to the IRI's last segment. */
+  $: selectedLabel = selected
+    ? elements.find((e) => e.id === selected)?.label || String(selected).split(/[/#]/).pop()
+    : '';
   // Guard against redundant repaints: the parent re-sets `selected` to the same
   // value on every panel focus/close, which used to re-run a full per-mesh
   // traversal + repaint each time (a hitch on the 4000-element building).
@@ -976,6 +1264,23 @@
     ><Satellite size={14} /></button>
   </div>
 
+  <!-- Selection chip. A depth-respecting highlight is invisible when the picked
+       element is fully enclosed (an interior wall), so the chip is what tells the
+       user the selection landed — and it carries the explicit framing control
+       that replaced the camera flight every pick used to trigger. -->
+  {#if selected}
+    <div class="sel-chip">
+      <span class="sel-dot" style:--sw={SELECT_COLOR}></span>
+      <span class="sel-name" title={selectedLabel}>{selectedLabel}</span>
+      <button
+        class="sel-zoom"
+        title={$i18nT('viewer.zoomToSelection')}
+        aria-label={$i18nT('viewer.zoomToSelection')}
+        on:click={zoomToSelection}
+      ><Crosshair size={13} /></button>
+    </div>
+  {/if}
+
   <!-- Layers + legend: toggle each feature kind on/off; the swatch is the legend. -->
   <div class="map-layers" role="group" aria-label={$i18nT('viewer.layers')}>
     <div class="ml-title">{$i18nT('viewer.layers')}</div>
@@ -986,6 +1291,14 @@
         <span class="ml-name">{$i18nT(L.label)}</span>
       </label>
     {/each}
+    <!-- Selection presentation. Off by default: a pick is drawn in place and
+         respects depth, so the building around it stays solid and keeps
+         occluding. Turning this on restores the old see-through x-ray. -->
+    <label class="ml-row ml-divider" class:off={!xrayOn} title={$i18nT('viewer.layerXrayHint')}>
+      <input type="checkbox" checked={xrayOn} on:change={toggleXray} />
+      <span class="ml-swatch ml-xray" style:--sw={SELECT_COLOR}></span>
+      <span class="ml-name">{$i18nT('viewer.layerXray')}</span>
+    </label>
     <div class="ml-legend-sel">
       <span class="ml-swatch ml-dot" style:--sw={SELECT_COLOR}></span>
       <span class="ml-name">{$i18nT('viewer.layerSelected')}</span>
@@ -1053,6 +1366,59 @@
     color: var(--brand-600, #2563a8);
   }
 
+  /* Selection chip (top-left, under the basemap toggle) */
+  .sel-chip {
+    position: absolute;
+    top: 48px;
+    left: 10px;
+    z-index: 5;
+    max-width: min(46%, 260px);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 4px 4px 9px;
+    border-radius: 999px;
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.95));
+    border: 1px solid var(--line-soft, #e6eaef);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(8px);
+    font-size: 0.74rem;
+    color: var(--ink-900, #0f172a);
+  }
+  .sel-dot {
+    width: 9px;
+    height: 9px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--sw);
+  }
+  .sel-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sel-zoom {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--bg-accent-soft, #e7f0fb);
+    color: var(--brand-600, #2563a8);
+    cursor: pointer;
+  }
+  .sel-zoom:hover {
+    background: var(--bg-accent, #d7e7fa);
+  }
+  .sel-zoom:focus-visible {
+    outline: 2px solid var(--brand-500, #2f88d8);
+    outline-offset: 2px;
+  }
+
   /* Layers + legend control (top-right) */
   .map-layers {
     position: absolute;
@@ -1094,6 +1460,21 @@
     margin: 0;
     cursor: pointer;
     accent-color: var(--brand-500, #2f88d8);
+  }
+  .ml-row input:focus-visible {
+    outline: 2px solid var(--brand-500, #2f88d8);
+    outline-offset: 1px;
+  }
+  .ml-divider {
+    margin-top: 4px;
+    padding-top: 5px;
+    border-top: 1px solid var(--line-soft, #e6eaef);
+  }
+  /* X-ray swatch: a ringed dot, i.e. "seen through something". */
+  .ml-xray {
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--sw) 28%, transparent);
+    border: 1.5px dashed var(--sw);
   }
   .ml-swatch {
     width: 14px;

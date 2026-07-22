@@ -86,7 +86,10 @@
       loading = false;
       if (elementParam) {
         selected = elementParam;
-        setTimeout(() => mapComponent?.focusElement?.(elementParam), 400);
+        // `force`: an ?element= deep link is an explicit framing request, so it
+        // must move the camera even when the element happens to already be in
+        // view at the dataset's default extent.
+        setTimeout(() => mapComponent?.focusElement?.(elementParam, { force: true }), 400);
       }
     } catch (e) {
       loading = false;

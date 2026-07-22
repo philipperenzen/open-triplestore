@@ -5,6 +5,7 @@
   // properties, BOT/IFC substructure (all navigable) and an interactive 3D
   // viewer. Datasets without any located element fall back to a pure 3D
   // explorer over their models. Light/dark follows the app theme.
+  import { onDestroy, tick } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
   import { getViewerFeed, listDatasetGraphs } from '../lib/api.js';
@@ -13,6 +14,29 @@
   import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown, Footprints, Code2, Check } from 'lucide-svelte';
   import { modelRefOf } from '../lib/viewer/detect';
   import { modelRefs } from '../lib/viewer/geometry';
+  import { preview } from '../lib/viewer/preview';
+  import { resourceCache } from '../lib/viewer/resourceCache';
+  import { Z_INSPECTOR_BASE, reportInspectorTopZ } from '../lib/viewer/zLayers';
+  import {
+    activeTabOf,
+    closeAll as closeAllWindows,
+    closeTab,
+    closeWindow,
+    createState,
+    detachTabToNewWindow,
+    findTab,
+    focusWindow,
+    minimizeWindow,
+    moveTabToWindow,
+    moveWindow,
+    openInNewWindow,
+    openTabInWindow,
+    requestModel,
+    restoreWindow,
+    setActiveTab,
+    tabKey,
+    toggleFull,
+  } from '../lib/viewer/windows';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
   import Model3D from '../components/viewer/Model3D.svelte';
   import CesiumViewer from '../components/viewer/CesiumViewer.svelte';
@@ -51,20 +75,76 @@
     ? '© 3DBAG by tudelft3d and 3DGI (CC BY 4.0)'
     : '';
 
-  // Several movable inspector panels can be open at once (one per element).
-  // Only the first MODEL_CAP panels mount the heavy 3D viewer; the rest open
-  // "info-only" with a button to load 3D on demand (which evicts the oldest 3D
-  // viewer). A small dock lists the open panels and brings them to front.
-  const MAX_PANELS = 5;
-  const MODEL_CAP = 2;
-  let panels = []; // { id, z, loadModel, seq }
-  let zTop = 1100;
-  let seqCounter = 0;
+  // Several movable inspector WINDOWS can be open at once, each holding a group
+  // of tabs: a pick in this list or on the map opens a new window, while a link
+  // followed INSIDE a window opens a tab of that window (see lib/viewer/windows
+  // for the whole state machine — caps, stacking, eviction, the 3D budget).
+  // Only MODEL_CAP live windows mount the heavy 3D viewer; the rest open
+  // "info-only" and claim a slot on demand. Minimised windows unmount their body
+  // (freeing the WebGL context, and no longer counting against the cap) and
+  // collapse into the dock at the bottom, which restores them again.
+  let wstate = createState();
+  $: windows = wstate.windows;
+  /** Inspector components by window id, so a restore can return focus to it. */
+  let modalRefs = {};
 
-  const panelLabel = (pid) => {
-    const el = elements.find((e) => e.id === pid);
-    return el?.label || shortenIRI(pid);
+  // Rendered stacking. `w.z` from the state module is a monotonic ORDER counter,
+  // not a CSS value: every focus bumps it, so a long session would walk it past
+  // the preview overlay (1200), then the dock (1300) and finally the walkthrough
+  // (1400), burying each in turn. Rank the windows instead, so the band they
+  // actually render in is bounded by MAX_WINDOWS — see lib/viewer/zLayers.ts for
+  // the invariant (windows < preview < dock < walkthrough).
+  $: zByWid = (() => {
+    const m = new Map();
+    [...windows]
+      .sort((a, b) => a.z - b.z)
+      .forEach((w, i) => m.set(w.wid, Z_INSPECTOR_BASE + i));
+    return m;
+  })();
+  // Tell the preview overlay where the top of that band currently is, so it can
+  // sit just above it instead of relying on a hard-coded literal.
+  $: reportInspectorTopZ(windows.length ? Z_INSPECTOR_BASE + windows.length - 1 : 0);
+
+  // Labels resolve against the live feed first, so a window opened during the
+  // fast (located-only) phase picks up its real label once the full feed lands.
+  //
+  // These two are reactive ASSIGNMENTS, not plain declarations, on purpose: a
+  // function declaration carries no dirty bit, so `element={resolveTab(w)}` in
+  // the template only ever re-ran when `windows` changed — never when the feed
+  // did, which is exactly the upgrade they exist for.
+  $: windowLabel = (w) => {
+    const tab = activeTabOf(w);
+    if (!tab) return '';
+    return byId.get(tab.id)?.label || tab.label || shortenIRI(tab.id);
   };
+  // Feed elements resolved by IRI keep their structure tree and 3D section, so a
+  // plain RDF link that happens to point at a dataset element opens as a full
+  // element tab; anything else opens as a resource tab (properties only).
+  function tabFor({ kind, id, label }) {
+    const el = byId.get(id);
+    if (el) {
+      return { key: tabKey('element', el.id), kind: 'element', id: el.id, label: el.label || shortenIRI(el.id) };
+    }
+    const k = kind === 'element' ? 'element' : 'resource';
+    return { key: tabKey(k, id), kind: k, id, label: label || shortenIRI(id) };
+  }
+  /** The subject a window's active tab shows, for the inspector's `element` prop. */
+  const syntheticEls = new Map(); // stable identities so the child doesn't re-derive
+  $: resolveTab = (w) => {
+    const tab = activeTabOf(w);
+    if (!tab) return null;
+    const el = byId.get(tab.id);
+    if (el) return el;
+    let synth = syntheticEls.get(tab.key);
+    if (!synth || synth.label !== tab.label) {
+      synth = { id: tab.id, label: tab.label, types: [] };
+      syntheticEls.set(tab.key, synth);
+    }
+    return synth;
+  };
+  // One derived view per window, so the subject and the label are re-resolved
+  // whenever EITHER the windows or the feed change.
+  $: windowViews = windows.map((w) => ({ w, element: resolveTab(w), label: windowLabel(w) }));
 
   $: filtered = query
     ? elements.filter((e) =>
@@ -187,58 +267,169 @@
     }
   }
 
-  function open(elId, { fly = true } = {}) {
-    selected = elId;
-    const el = elements.find((e) => e.id === elId);
-    // Fly even for an element with no geometry of its own — the map walks up to
-    // its located ancestor (the building) and lights this element's mesh.
-    if (el && fly && hasGeo) mapComponent?.focusElement(elId);
-    if (!el) return;
-    if (panels.some((p) => p.id === elId)) {
-      focusPanel(elId);
+  // Every window operation goes through apply(): the state module returns the
+  // SAME object for a no-op (e.g. focusing the window that is already on top),
+  // and skipping the assignment then skips a re-render — which is what used to
+  // make a mere pointerdown inside a panel refetch its RDF and rebuild its scene.
+  function apply(next) {
+    if (next === wstate) return;
+    wstate = next;
+    syncSelection();
+  }
+  // The map highlight follows the top-most visible window's active ELEMENT tab;
+  // a resource tab (an IRI outside the feed) leaves the current highlight alone,
+  // and closing everything clears it.
+  function syncSelection() {
+    if (!wstate.windows.length) {
+      selected = '';
       return;
     }
-    const wantsModel = hasModel(el);
-    const modelCount = panels.filter((p) => p.loadModel).length;
-    const panel = { id: elId, z: ++zTop, seq: seqCounter++, loadModel: wantsModel && modelCount < MODEL_CAP };
-    panels = [...panels, panel];
-    if (panels.length > MAX_PANELS) panels = panels.slice(panels.length - MAX_PANELS);
+    const top = wstate.windows.filter((w) => !w.minimized).sort((a, b) => b.z - a.z)[0];
+    const tab = activeTabOf(top);
+    if (tab?.kind === 'element') selected = tab.id;
   }
 
-  function focusPanel(id) {
-    selected = id;
-    panels = panels.map((p) => (p.id === id ? { ...p, z: ++zTop } : p));
+  // A pick in the side list / on the map opens a NEW window…
+  //
+  // It NEVER moves the camera. Selecting used to fly the map in and slam the
+  // pitch over, which threw away whatever viewpoint the user had set up — the
+  // "camera collapse". Framing is an explicit action now: the modal's "Show on
+  // map" button and the map's own "zoom to selection" control.
+  function open(elId) {
+    selected = elId;
+    const el = byId.get(elId);
+    if (!el) return;
+    const before = wstate.windows;
+    apply(openInNewWindow(wstate, tabFor({ kind: 'element', id: elId }), { wantsModel: hasModel(el) }));
+    rememberOpener(before);
   }
-  function closePanel(id) {
-    panels = panels.filter((p) => p.id !== id);
-    if (!panels.length) selected = ''; // clear the highlight + x-ray when nothing is open
+  // …while a link followed inside a window opens a TAB of that window.
+  // Focus follows the new tab: activating a link destroys the very control the
+  // user pressed, and without this focus falls back to <body> — the next Tab
+  // then restarts at the top of the page and nothing announces the new subject.
+  async function openTab(wid, detail) {
+    const tab = tabFor(detail);
+    apply(openTabInWindow(wstate, wid, tab));
+    await tick();
+    // The subject may already be open elsewhere — that window is revealed
+    // instead of the tab being copied, so focus follows it there.
+    const host = findTab(wstate, tab.key);
+    if (host) modalRefs[host.wid]?.focusActive();
   }
-  function closeAll() {
-    panels = [];
-    selected = '';
+  // Shift-click escape hatch: the same subject in a window of its own.
+  function openWindowFor(detail) {
+    const el = byId.get(detail.id);
+    const before = wstate.windows;
+    apply(openInNewWindow(wstate, tabFor(detail), { wantsModel: !!el && hasModel(el) }));
+    rememberOpener(before);
   }
-  // Promote an info-only panel to a live 3D viewer, evicting the oldest one when
-  // the model cap is reached — so the user can always inspect the 3D they want.
-  function loadModelFor(id) {
-    let next = panels;
-    if (panels.filter((p) => p.loadModel).length >= MODEL_CAP) {
-      const oldest = panels.filter((p) => p.loadModel).sort((a, b) => a.z - b.z)[0];
-      if (oldest) next = next.map((p) => (p.id === oldest.id ? { ...p, loadModel: false } : p));
+
+  // The control each window was opened from, so closing it can hand focus back
+  // (WCAG 2.4.3) instead of dropping it on <body>.
+  const openerByWid = new Map();
+  function rememberOpener(before) {
+    // Drop openers of windows that are gone (an eviction at the cap never runs
+    // closeWin): each entry pins a DOM node, so a long session would retain
+    // detached subtrees.
+    const live = new Set(wstate.windows.map((w) => w.wid));
+    for (const wid of [...openerByWid.keys()]) if (!live.has(wid)) openerByWid.delete(wid);
+    const prev = new Set(before.map((w) => w.wid));
+    const fresh = wstate.windows.find((w) => !prev.has(w.wid));
+    if (fresh) openerByWid.set(fresh.wid, document.activeElement);
+  }
+
+  const focusWin = (wid) => apply(focusWindow(wstate, wid));
+  async function closeWin(wid) {
+    const opener = openerByWid.get(wid);
+    openerByWid.delete(wid);
+    apply(closeWindow(wstate, wid));
+    await tick();
+    if (opener?.isConnected) {
+      opener.focus();
+      return;
     }
-    panels = next.map((p) => (p.id === id ? { ...p, loadModel: true, z: ++zTop } : p));
+    const top = wstate.windows.filter((w) => !w.minimized).sort((a, b) => b.z - a.z)[0];
+    if (top) modalRefs[top.wid]?.focusActive();
+  }
+  const closeAll = () => apply(closeAllWindows(wstate));
+  const moveWin = (wid, pos) => apply(moveWindow(wstate, wid, pos));
+  const toggleWinFull = (wid) => apply(toggleFull(wstate, wid));
+  const minimizeWin = (wid) => apply(minimizeWindow(wstate, wid));
+  async function selectTab(wid, key) {
+    apply(setActiveTab(wstate, wid, key));
+    await tick();
+    modalRefs[wid]?.focusActive();
+  }
+  // Closing a tab destroys its × button; focus moves to the tab that takes its
+  // place, or — when that was the window's last tab — back to the opener.
+  async function closeTabIn(wid, key) {
+    apply(closeTab(wstate, wid, key));
+    await tick();
+    if (wstate.windows.some((w) => w.wid === wid)) modalRefs[wid]?.focusActive();
+    else {
+      const opener = openerByWid.get(wid);
+      openerByWid.delete(wid);
+      if (opener?.isConnected) opener.focus();
+    }
+  }
+  const moveTab = (wid, { key, toWid }) => apply(moveTabToWindow(wstate, wid, key, toWid));
+  const detachTab = (wid, { key, pos }) => apply(detachTabToNewWindow(wstate, wid, key, pos));
+  // Promote an info-only window to a live 3D viewer; the state module revokes the
+  // lowest-stacked live viewer when the cap is reached, so the user can always
+  // inspect the 3D they asked for.
+  const loadModelFor = (wid) => apply(requestModel(wstate, wid));
+
+  // Restoring returns keyboard focus to the window's active tab — the dock chip
+  // that was just clicked disappears from under the pointer otherwise.
+  async function restoreWin(wid) {
+    apply(restoreWindow(wstate, wid));
+    await tick();
+    modalRefs[wid]?.focusActive();
   }
 
-  // Fly the map to a located element (panels stay open; the flown-to element
+  // ONE Escape handler for the whole viewer: each inspector used to register its
+  // own, and since none of them marked the event handled, a single press closed
+  // every open panel at once.
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    // Precedence follows the stacking bands (lib/viewer/zLayers.ts): the
+    // immersive walkthrough sits on top of everything and owns Escape (the
+    // browser also uses it to leave pointer lock), then the preview overlay,
+    // then the windows. A tab drag cancels itself on Escape and marks the event
+    // handled, which `defaultPrevented` covers.
+    if (e.defaultPrevented || walkthrough || $preview) return;
+    // Escape in the search box clears the search — it must not also close a window.
+    const tag = e.target?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+    const top = wstate.windows.filter((w) => !w.minimized).sort((a, b) => b.z - a.z)[0];
+    if (!top) return;
+    e.preventDefault();
+    closeWin(top.wid);
+  }
+
+  // The browse cache is shared by every window — drop it with the page so a long
+  // session can't pin memory (and so a re-entry re-reads live data). The z report
+  // has to be retracted too, or the preview overlay would keep making room for
+  // windows that no longer exist.
+  onDestroy(() => {
+    resourceCache.clear();
+    reportInspectorTopZ(0);
+  });
+
+  // Fly the map to a located element (windows stay open; the flown-to element
   // gets the selection highlight so it's findable among the rooftops). When the
   // canvas is in 3D-Tiles (Cesium) mode the MapLibre component isn't mounted, so
   // switch back to the map first and focus once it has initialised.
+  // `force` because this is the user asking, in so many words, to be taken
+  // there: focusElement leaves the camera alone for a target that is already
+  // comfortably framed, which would make the button look broken.
   function showOnMap(elId) {
     selected = elId;
     if (canvasMode === 'cesium') {
       canvasMode = 'map';
-      setTimeout(() => mapComponent?.focusElement(elId), 650);
+      setTimeout(() => mapComponent?.focusElement(elId, { force: true }), 650);
     } else {
-      mapComponent?.focusElement(elId);
+      mapComponent?.focusElement(elId, { force: true });
     }
   }
 
@@ -249,11 +440,11 @@
     if (guid) {
       const byGuid = elements.find((e) => e.ifc_guid === guid);
       if (byGuid) {
-        open(byGuid.id, { fly: false });
+        open(byGuid.id);
         return;
       }
     }
-    if (elId) open(elId, { fly: false });
+    if (elId) open(elId);
   }
 
   // ── First-person walkthrough ────────────────────────────────────────────────
@@ -458,7 +649,7 @@
               <ul>
                 {#each unlocated as el (el.id)}
                   <li>
-                    <button class="row" class:active={el.id === selected} on:click={() => open(el.id, { fly: false })} title={el.id}>
+                    <button class="row" class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
                       <span class="label">{nodeLabel(el)}</span>
                       {#if hasModel(el)}<span class="badge">3D</span>{/if}
                     </button>
@@ -506,38 +697,67 @@
   {/if}
 </div>
 
-{#each panels as p (p.id)}
-  <ElementModal
-    element={elements.find((e) => e.id === p.id) || null}
-    {elements}
-    datasetId={id}
-    offset={p.seq % 6}
-    z={p.z}
-    lite={!p.loadModel}
-    hasMap={hasGeo}
-    on:focus={() => focusPanel(p.id)}
-    on:close={() => closePanel(p.id)}
-    on:navigate={(e) => open(e.detail.id)}
-    on:loadmodel={() => loadModelFor(p.id)}
-    on:showonmap={(e) => showOnMap(e.detail.id)}
-  />
+<svelte:window on:keydown={onKey} />
+
+{#each windowViews as { w, element } (w.wid)}
+  <!-- A minimised window keeps its tabs (in wstate) but unmounts its body, so
+       its WebGL context and every heavy child are released until it's restored. -->
+  {#if !w.minimized}
+    <ElementModal
+      bind:this={modalRefs[w.wid]}
+      {element}
+      {elements}
+      datasetId={id}
+      wid={w.wid}
+      tabs={w.tabs}
+      activeKey={w.activeKey}
+      targets={windowViews.filter((x) => x.w.wid !== w.wid).map((x) => ({ wid: x.w.wid, label: x.label }))}
+      pos={w.pos}
+      full={w.full}
+      z={zByWid.get(w.wid)}
+      lite={!w.loadModel}
+      hasMap={hasGeo}
+      on:focus={() => focusWin(w.wid)}
+      on:close={() => closeWin(w.wid)}
+      on:minimize={() => minimizeWin(w.wid)}
+      on:togglefull={() => toggleWinFull(w.wid)}
+      on:move={(e) => moveWin(w.wid, e.detail)}
+      on:opentab={(e) => openTab(w.wid, e.detail)}
+      on:navigate={(e) => openWindowFor(e.detail)}
+      on:tabselect={(e) => selectTab(w.wid, e.detail.key)}
+      on:tabclose={(e) => closeTabIn(w.wid, e.detail.key)}
+      on:tabmove={(e) => moveTab(w.wid, e.detail)}
+      on:tabdetach={(e) => detachTab(w.wid, e.detail)}
+      on:loadmodel={() => loadModelFor(w.wid)}
+      on:showonmap={(e) => showOnMap(e.detail.id)}
+    />
+  {/if}
 {/each}
 
-{#if panels.length}
+{#if windows.length}
   <div class="panel-dock">
-    <span class="dock-label">{panels.length} {$i18nT('viewer.openPanels')}</span>
-    {#each panels as p (p.id)}
-      <span class="dock-chip" class:has3d={p.loadModel}>
-        <button class="dock-focus" on:click={() => focusPanel(p.id)} title={panelLabel(p.id)}>
-          {#if p.loadModel}<Boxes size={11} />{/if}
-          <span class="dock-name">{panelLabel(p.id)}</span>
+    <span class="dock-label" title={$i18nT('pages.datasetViewer.windowsHint')}>
+      {windows.length}
+      {$i18nT('viewer.openWindows')}
+    </span>
+    {#each windowViews as { w, label } (w.wid)}
+      <span class="dock-chip" class:has3d={w.loadModel && !w.minimized} class:minimized={w.minimized}>
+        <button
+          class="dock-focus"
+          on:click={() => (w.minimized ? restoreWin(w.wid) : focusWin(w.wid))}
+          title={w.tabs.map((t) => t.label).join(' · ')}
+          aria-label={`${label} — ${$i18nT('viewer.tabCount', { values: { count: w.tabs.length } })}${w.minimized ? ` — ${$i18nT('viewer.restoreWindow')}` : ''}`}
+        >
+          {#if w.loadModel && !w.minimized}<Boxes size={11} />{/if}
+          <span class="dock-name">{label}</span>
+          {#if w.tabs.length > 1}<span class="dock-tabs">+{w.tabs.length - 1}</span>{/if}
         </button>
-        <button class="dock-close" on:click={() => closePanel(p.id)} aria-label={$i18nT('viewer.close')}>
+        <button class="dock-close" on:click={() => closeWin(w.wid)} aria-label={$i18nT('viewer.closeWindow')}>
           <X size={12} />
         </button>
       </span>
     {/each}
-    {#if panels.length > 1}
+    {#if windows.length > 1}
       <button class="dock-closeall" on:click={closeAll}>{$i18nT('viewer.closeAll')}</button>
     {/if}
   </div>
@@ -954,7 +1174,7 @@
   .dl-fmts a { font-size: 0.74rem; color: var(--brand-600, #1d6fb8); text-decoration: none; }
   .dl-fmts a:hover { text-decoration: underline; }
 
-  /* Dock — manages the open inspector panels (focus / close). */
+  /* Dock — manages the open inspector windows (focus / restore / close). */
   .panel-dock {
     position: fixed;
     left: 50%;
@@ -991,6 +1211,22 @@
   }
   .dock-chip.has3d {
     border-color: rgba(232, 89, 12, 0.4);
+  }
+  /* A minimised window is still open — dashed and dimmed says "parked here",
+     and clicking the chip brings it back with its tabs intact. */
+  .dock-chip.minimized {
+    border-style: dashed;
+    border-color: var(--line-soft, #cbd5e1);
+    opacity: 0.75;
+  }
+  /* "+N" = how many more tabs this window holds beyond the active one. */
+  .dock-tabs {
+    flex: none;
+    font-size: 0.66rem;
+    padding: 0 6px;
+    border-radius: 99px;
+    background: var(--bg-accent-soft, #e7f0fb);
+    color: var(--brand-600, #1d6fb8);
   }
   .dock-focus {
     display: inline-flex;
