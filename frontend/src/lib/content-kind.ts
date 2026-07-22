@@ -18,22 +18,39 @@ function fromClauses(graphs: string[]): string {
   return graphs.map(g => `FROM <${g}>`).join('\n');
 }
 
-async function askCount(query: string): Promise<number> {
+// Returns the count, or RETHROWS on abort / HTTP error. Returning 0 on failure was
+// the bug behind the spurious "model-in-dataset" banner: a timed-out instanceCount
+// of 0 combined with a real classCount yielded verdict 'model'. The caller catches
+// and returns the neutral empty shape instead.
+async function askCount(query: string, signal?: AbortSignal): Promise<number> {
+  const res = await sparqlQuery(query, { signal });
+  const binding = res?.results?.bindings?.[0];
+  return parseInt(binding?.n?.value || '0', 10);
+}
+
+const EMPTY_PROBE = {
+  classCount: 0, propertyCount: 0, shapeCount: 0, entailmentCount: 0,
+  skosSchemeCount: 0, skosConceptCount: 0, instanceCount: 0,
+  verdict: 'empty' as ContentKindVerdict, sampleTypes: [] as { cls: string; count: number }[],
+};
+
+export async function probeContentKind(graphs: string[], signal?: AbortSignal) {
+  const from = fromClauses(graphs);
+  if (!from) return { ...EMPTY_PROBE };
+
   try {
-    const res = await sparqlQuery(query);
-    const binding = res?.results?.bindings?.[0];
-    return parseInt(binding?.n?.value || '0', 10);
+    return await probeContentKindInner(graphs, from, signal);
   } catch {
-    return 0;
+    // Abort or query error → neutral result, so a partial/failed probe never
+    // produces a misleading verdict. (Return, don't rethrow: callers treat this as
+    // "no signal", which suppresses the banner.)
+    return { ...EMPTY_PROBE };
   }
 }
 
-export async function probeContentKind(graphs: string[]) {
-  const from = fromClauses(graphs);
-  if (!from) return { classCount: 0, propertyCount: 0, shapeCount: 0, entailmentCount: 0, instanceCount: 0, verdict: 'empty' as ContentKindVerdict, sampleTypes: [] };
-
+async function probeContentKindInner(graphs: string[], from: string, signal?: AbortSignal) {
   let classCount = 0, propertyCount = 0, shapeCount = 0, skosSchemeCount = 0, skosConceptCount = 0, entailmentCount = 0, instanceCount = 0;
-  try {
+  {
     const combined = await sparqlQuery(`SELECT
       (COUNT(DISTINCT ?c)  AS ?classes)
       (COUNT(DISTINCT ?p)  AS ?props)
@@ -49,7 +66,7 @@ export async function probeContentKind(graphs: string[]) {
       OPTIONAL { ?sc a <http://www.w3.org/2004/02/skos/core#ConceptScheme> }
       OPTIONAL { ?sk a <http://www.w3.org/2004/02/skos/core#Concept> }
       OPTIONAL { ?en a <http://www.w3.org/2003/11/swrl#Imp> }
-    }`);
+    }`, { signal });
     const b = combined?.results?.bindings?.[0];
     if (b) {
       classCount      = parseInt(b.classes?.value     || '0', 10);
@@ -59,7 +76,7 @@ export async function probeContentKind(graphs: string[]) {
       skosConceptCount= parseInt(b.concepts?.value    || '0', 10);
       entailmentCount = parseInt(b.entailments?.value || '0', 10);
     }
-  } catch { /* ignore — probe returns empty on error */ }
+  }
 
   // Instance count as a separate query (complex FILTER NOT EXISTS can't inline easily).
   instanceCount = await askCount(`SELECT (COUNT(DISTINCT ?s) AS ?n) ${from} WHERE {
@@ -75,11 +92,11 @@ export async function probeContentKind(graphs: string[]) {
     FILTER NOT EXISTS { ?s a <http://www.w3.org/2002/07/owl#Ontology> }
     FILTER NOT EXISTS { ?s a <http://www.w3.org/2004/02/skos/core#ConceptScheme> }
     FILTER NOT EXISTS { ?s a <http://www.w3.org/2004/02/skos/core#Concept> }
-  }`);
+  }`, signal);
 
   // Sample the top-5 instance types for display
   let sampleTypes = [];
-  try {
+  {
     const res = await sparqlQuery(`SELECT ?t (COUNT(DISTINCT ?s) AS ?n) ${from} WHERE {
       ?s a ?t .
       FILTER(ISIRI(?t))
@@ -87,11 +104,11 @@ export async function probeContentKind(graphs: string[]) {
       FILTER NOT EXISTS { ?s a <http://www.w3.org/2002/07/owl#Class> }
       FILTER NOT EXISTS { ?s a <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> }
       FILTER NOT EXISTS { ?s a <http://www.w3.org/ns/shacl#NodeShape> }
-    } GROUP BY ?t ORDER BY DESC(?n) LIMIT 5`);
+    } GROUP BY ?t ORDER BY DESC(?n) LIMIT 5`, { signal });
     sampleTypes = (res?.results?.bindings || []).map(b => ({
       cls: b.t?.value, count: parseInt(b.n?.value || '0', 10)
     }));
-  } catch { /* ignore */ }
+  }
 
   // Mirror the backend detector (src/kind_detector.rs): Model = classes (T-Box);
   // Vocabulary = properties/relations (R-Box) + SKOS concept schemes; ties between

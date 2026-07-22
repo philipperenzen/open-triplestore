@@ -3665,6 +3665,7 @@
     "basemap": "Ondergrond",
     "basemapStreets": "Kaart",
     "basemapSatellite": "Satelliet",
+    "fitAll": "Alles in beeld",
     "toScale": "op schaal",
     "geometry": "Geometrie",
     "mapUnavailable": "Kaart niet beschikbaar. Coördinaten:",

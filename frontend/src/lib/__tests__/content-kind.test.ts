@@ -102,4 +102,38 @@ describe('probeContentKind verdict classification', () => {
     expect(r.propertyCount).toBe(3);
     expect(r.shapeCount).toBe(1);
   });
+
+  // Regression: a FAILED probe must yield the neutral empty result, never a partial
+  // verdict. Previously the instance-count query swallowed its error and returned 0,
+  // so a real classCount + a timed-out instanceCount=0 produced a spurious "model"
+  // classification (→ a false "model in dataset" banner). It now rethrows and the
+  // outer catch returns the empty shape.
+  it('returns "empty" (not a partial verdict) when a probe query fails', async () => {
+    let call = 0;
+    (sparqlQuery as unknown as ReturnType<typeof vi.fn>).mockImplementation((q: string) => {
+      call++;
+      if (q.includes('?classes')) {
+        return Promise.resolve({
+          results: { bindings: [{ classes: { value: '5' }, props: { value: '0' }, shapes: { value: '0' }, schemes: { value: '0' }, concepts: { value: '0' }, entailments: { value: '0' } }] },
+        });
+      }
+      // The instance-count query times out / errors.
+      return Promise.reject(new Error('query timeout'));
+    });
+    const r = await probeContentKind(['g']);
+    expect(r.verdict).toBe('empty');
+    expect(r.classCount).toBe(0);
+    expect(r.instanceCount).toBe(0);
+    expect(call).toBeGreaterThan(1); // it did reach the failing query
+  });
+
+  it('threads an AbortSignal through to the SPARQL transport', async () => {
+    mockCounts({ classes: 1, instances: 1 });
+    const ctrl = new AbortController();
+    await probeContentKind(['g'], ctrl.signal);
+    const calls = (sparqlQuery as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    // Every probe query is passed { signal } as its second arg.
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c[1]).toMatchObject({ signal: ctrl.signal });
+  });
 });

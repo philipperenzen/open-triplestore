@@ -369,7 +369,9 @@ async fn execute_query(
             Some(query.to_string())
         } else {
             let mut from_clauses = String::new();
-            for iri in all_registered {
+            // Sorted: see `sorted_iris` — an unordered HashSet walk makes this
+            // prologue (and therefore the query-cache key) change every TTL refresh.
+            for iri in sorted_iris(all_registered) {
                 from_clauses.push_str(&format!("FROM <{}>\nFROM NAMED <{}>\n", iri, iri));
             }
             Some(inject_from_clauses(query, &from_clauses))
@@ -1958,6 +1960,26 @@ fn build_q_filter(q: &str) -> Result<Option<String>, AppError> {
     }
 }
 
+/// Graph IRIs in a stable, sorted order.
+///
+/// The accessible-graph set is a `HashSet` rebuilt from scratch on a 30-second TTL,
+/// and each rebuild gets a fresh `RandomState` — so its iteration order changes with
+/// no data change at all. Every site that serialises that set into SPARQL text
+/// (`FROM`/`FROM NAMED` prologues, `VALUES ?g { … }`) therefore emitted a different
+/// query string on that cadence, and the result cache is keyed on the literal
+/// string — so the whole cache went cold every ~30 seconds.
+///
+/// Order is semantically free here: a SPARQL dataset is a set, so membership (not
+/// order) determines what is readable. This cannot add or drop a graph.
+fn sorted_iris<'a, I>(iris: I) -> Vec<&'a str>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let mut v: Vec<&str> = iris.into_iter().map(String::as_str).collect();
+    v.sort_unstable();
+    v
+}
+
 /// Resolved named-graph scope for a browse/facets request.
 enum ScopeGraphs {
     /// Admin with no dataset/org scope — query every graph (`GRAPH ?g`).
@@ -2472,11 +2494,71 @@ pub async fn browse_triples(
     // they share one list and emit one FILTER each — unlike the OR-ed positive
     // buckets above.
     let mut neg_clauses: Vec<String> = Vec::new();
+
+    // ── Bind single exact-IRI chips into the triple pattern ────────────────────
+    // An `exact` chip compiles to `FILTER(?s = <iri>)`, which leaves the pattern
+    // fully unbound so the engine range-scans the whole scope and post-filters.
+    // sparopt has no equality-into-pattern rewrite (`push_filters` only wraps a
+    // QuadPattern in a Filter), so this is a full scan for a point lookup —
+    // measured ~1.2s vs ~0.2s for the bound form on a 3.1M-triple store, paid
+    // twice by every graph-view node expansion.
+    //
+    // A field qualifies only when it has EXACTLY ONE positive chip, in `exact`
+    // mode, whose value is an IRI. Two positive chips on a field are OR-ed, so
+    // binding either one would silently drop rows.
+    //
+    // `graph` is deliberately NOT eligible: substituting `GRAPH <chipvalue>`
+    // would drop ?g from the pattern, so the ACL-bearing `VALUES ?g { … }` would
+    // no longer join on anything — a cross-tenant read. Graph narrowing keeps
+    // going through the ACL-checked candidate set.
+    #[derive(Default)]
+    struct BindSlot {
+        iri: Option<String>,
+        poisoned: bool,
+    }
+    impl BindSlot {
+        fn offer(&mut self, iri: Option<&str>) {
+            match iri {
+                Some(v) if self.iri.is_none() && !self.poisoned => self.iri = Some(v.to_string()),
+                // Second positive chip on this field (OR-ed), or a non-bindable
+                // value — fall back to the FILTER form for the whole field.
+                _ => {
+                    self.poisoned = true;
+                    self.iri = None;
+                }
+            }
+        }
+    }
+    let is_iri_value =
+        |v: &str| v.starts_with("http://") || v.starts_with("https://") || v.starts_with("urn:");
+    let mut bind_s = BindSlot::default();
+    let mut bind_p = BindSlot::default();
+    let mut bind_o = BindSlot::default();
+
     for chip in &chips {
         if chip.value.is_empty() {
             continue;
         }
         let mode = chip.mode.as_deref().unwrap_or("contains");
+        // Record bindability BEFORE the clause is built, for positive chips only.
+        // A negated chip stays a FILTER and does not disturb a positive binding:
+        // the variable is still bound by the BIND we emit alongside the pattern.
+        if !chip.neg.unwrap_or(false) {
+            let exact = mode == "exact";
+            match chip.field.as_str() {
+                "subject" => bind_s
+                    .offer((exact && is_iri_value(&chip.value)).then_some(chip.value.as_str())),
+                "predicate" => bind_p
+                    .offer((exact && is_iri_value(&chip.value)).then_some(chip.value.as_str())),
+                // Only IRI-valued object chips: for other values chip_clause emits
+                // `str(?o) = "v"`, which deliberately also matches typed and
+                // language-tagged literals AND an IRI of the same lexical form,
+                // whereas `?s ?p "v"` matches only the plain literal.
+                "object" => bind_o
+                    .offer((exact && is_iri_value(&chip.value)).then_some(chip.value.as_str())),
+                _ => {}
+            }
+        }
         let clause = match chip.field.as_str() {
             "subject" => chip_clause("s", &chip.value, mode, false)?,
             "predicate" => chip_clause("p", &chip.value, mode, false)?,
@@ -2503,6 +2585,10 @@ pub async fn browse_triples(
             _ => unreachable!("field validated above"),
         }
     }
+    // NOTE: the decision to drop a field's equality FILTER is deliberately deferred
+    // until after the legacy single-field params below have had their say — a legacy
+    // param can poison a chip-derived binding, and clearing the chip's clause here
+    // would then lose that constraint entirely.
     // Graph chips scan/bind ?g, which the single-graph fast path doesn't expose,
     // so any graph chip — positive or negated — forces a ?g-binding branch (ACL
     // still enforced by the candidate ?g set in every branch).
@@ -2564,20 +2650,83 @@ pub async fn browse_triples(
             ));
         }
     } else {
+        // Legacy single-field exact params get the same treatment as chips: bind
+        // into the pattern when possible, else keep the equality FILTER.
         if let Some(ref s) = params.subject {
-            filters.push(format!("FILTER(?s = <{}>)", s));
+            bind_s.offer(is_iri_value(s).then_some(s.as_str()));
+            if bind_s.iri.is_none() {
+                filters.push(format!("FILTER(?s = <{}>)", s));
+            }
         }
         if let Some(ref p) = params.predicate {
-            filters.push(format!("FILTER(?p = <{}>)", p));
+            bind_p.offer(is_iri_value(p).then_some(p.as_str()));
+            if bind_p.iri.is_none() {
+                filters.push(format!("FILTER(?p = <{}>)", p));
+            }
         }
         if let Some(ref o) = params.object {
-            if o.starts_with("http://") || o.starts_with("https://") || o.starts_with("urn:") {
-                filters.push(format!("FILTER(?o = <{}>)", o));
+            if is_iri_value(o) {
+                bind_o.offer(Some(o.as_str()));
+                if bind_o.iri.is_none() {
+                    filters.push(format!("FILTER(?o = <{}>)", o));
+                }
             } else {
+                bind_o.offer(None); // literal form — keep the lexical comparison
                 filters.push(format!("FILTER(str(?o) = \"{}\")", o));
             }
         }
     }
+
+    // Every bound term is validated exactly as chip_clause / the legacy path would
+    // have, since we bypassed those calls for the bound field.
+    for iri in [
+        bind_s.iri.as_deref(),
+        bind_p.iri.as_deref(),
+        bind_o.iri.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_iri(iri)?;
+    }
+
+    // Now that both chip and legacy bindings are final, a field that IS bound into
+    // the pattern no longer needs its equality FILTER: the pattern restricts it, and
+    // the BIND keeps the variable in scope for any other filter (`q`, vocabulary,
+    // negations) that references it.
+    if bind_s.iri.is_some() {
+        subj_clauses.clear();
+    }
+    if bind_p.iri.is_some() {
+        pred_clauses.clear();
+    }
+    if bind_o.iri.is_some() {
+        obj_clauses.clear();
+    }
+
+    // The triple pattern, with any bound terms substituted. A BIND re-exposes each
+    // substituted variable so the SELECT projection and every FILTER below still
+    // see it. (A `SELECT (<iri> AS ?s)` projection would NOT be in scope for the
+    // filters in the same group, which silently returns zero rows.)
+    let bgp = {
+        let term = |slot: &BindSlot, var: &str| match slot.iri.as_deref() {
+            Some(iri) => format!("<{iri}>"),
+            None => format!("?{var}"),
+        };
+        let mut binds = String::new();
+        for (slot, var) in [(&bind_s, "s"), (&bind_p, "p"), (&bind_o, "o")] {
+            if let Some(iri) = slot.iri.as_deref() {
+                binds.push_str(&format!(" . BIND(<{iri}> AS ?{var})"));
+            }
+        }
+        format!(
+            "{} {} {}{}",
+            term(&bind_s, "s"),
+            term(&bind_p, "p"),
+            term(&bind_o, "o"),
+            binds
+        )
+    };
 
     // Free-text quick-search, parsed as a boolean mini-language (AND/OR/XOR/NOT,
     // parentheses, quoted phrases) over every bound column. ?g is bound in every
@@ -2635,12 +2784,12 @@ pub async fn browse_triples(
     let (query, count_query): (String, Option<String>) = if let Some(graph) = exact_graph {
         (
             format!(
-                "SELECT ?s ?p ?o (<{g}> AS ?g) WHERE {{ GRAPH <{g}> {{ ?s ?p ?o{fc} }} }} LIMIT {pl} OFFSET {off}",
-                g = graph, fc = fc, pl = probe_limit, off = offset,
+                "SELECT ?s ?p ?o (<{g}> AS ?g) WHERE {{ GRAPH <{g}> {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                g = graph, bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH <{g}> {{ ?s ?p ?o{fc} }} }} }}",
-                g = graph, fc = fc,
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH <{g}> {{ {bgp}{fc} }} }} }}",
+                g = graph, bgp = bgp, fc = fc,
             )),
         )
     } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
@@ -2681,23 +2830,23 @@ pub async fn browse_triples(
         }
         (
             format!(
-                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ ?s ?p ?o{fc} }} }} LIMIT {pl} OFFSET {off}",
-                v = values, fc = fc, pl = probe_limit, off = offset,
+                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                v = values, bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ ?s ?p ?o{fc} }} }} }}",
-                v = values, fc = fc,
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} }}",
+                v = values, bgp = bgp, fc = fc,
             )),
         )
     } else if is_admin {
         (
             format!(
-                "SELECT ?s ?p ?o ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o{fc} }} }} LIMIT {pl} OFFSET {off}",
-                fc = fc, pl = probe_limit, off = offset,
+                "SELECT ?s ?p ?o ?g WHERE {{ GRAPH ?g {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH ?g {{ ?s ?p ?o{fc} }} }} }}",
-                fc = fc,
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ GRAPH ?g {{ {bgp}{fc} }} }} }}",
+                bgp = bgp, fc = fc,
             )),
         )
     } else {
@@ -2710,19 +2859,19 @@ pub async fn browse_triples(
             return Ok(Json(empty_browse_body(limit, offset, want_count)));
         }
         let mut values = String::with_capacity(accessible.len() * 40);
-        for iri in accessible {
+        for iri in sorted_iris(accessible) {
             values.push('<');
             values.push_str(iri);
             values.push_str("> ");
         }
         (
             format!(
-                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ ?s ?p ?o{fc} }} }} LIMIT {pl} OFFSET {off}",
-                v = values, fc = fc, pl = probe_limit, off = offset,
+                "SELECT ?s ?p ?o ?g WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} LIMIT {pl} OFFSET {off}",
+                v = values, bgp = bgp, fc = fc, pl = probe_limit, off = offset,
             ),
             want_count.then(|| format!(
-                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ ?s ?p ?o{fc} }} }} }}",
-                v = values, fc = fc,
+                "SELECT (COUNT(*) AS ?count) WHERE {{ SELECT ?s WHERE {{ VALUES ?g {{ {v}}} GRAPH ?g {{ {bgp}{fc} }} }} }}",
+                v = values, bgp = bgp, fc = fc,
             )),
         )
     };
@@ -2808,13 +2957,19 @@ pub async fn browse_facets(
     let empty = || serde_json::json!({ "classes": [], "properties": [], "graphs": [] });
 
     // Resolve the scope; `GRAPH ?g { … }` for admins with no scope, else a
-    // `VALUES ?g { … }`-restricted set.
-    let (open, close) = match resolve_scope_graphs(&state, &params, user_id, is_admin)? {
+    // `VALUES ?g { … }`-restricted set. Keep the resolved set — the graphs facet is
+    // served from the maintained graph-count index rather than a SPARQL aggregate.
+    let scope = resolve_scope_graphs(&state, &params, user_id, is_admin)?;
+    let scoped_graphs: Option<Vec<String>> = match &scope {
+        ScopeGraphs::Set(graphs) => Some(graphs.clone()),
+        _ => None,
+    };
+    let (open, close) = match &scope {
         ScopeGraphs::Empty => return Ok(Json(empty())),
         ScopeGraphs::All => ("GRAPH ?g { ".to_string(), " }".to_string()),
         ScopeGraphs::Set(graphs) => {
             let mut values = String::with_capacity(graphs.len() * 40);
-            for iri in &graphs {
+            for iri in sorted_iris(graphs) {
                 values.push('<');
                 values.push_str(iri);
                 values.push_str("> ");
@@ -2833,10 +2988,6 @@ pub async fn browse_facets(
     let prop_q = format!(
         "SELECT ?p (COUNT(*) AS ?c) WHERE {{ {open}?s ?p ?o . FILTER(?p != <{RDF_TYPE}>){close} }} GROUP BY ?p ORDER BY DESC(?c) LIMIT 300"
     );
-    let graph_q = format!(
-        "SELECT ?g (COUNT(*) AS ?c) WHERE {{ {open}?s ?p ?o{close} }} GROUP BY ?g ORDER BY DESC(?c) LIMIT 1000"
-    );
-
     let _browse_permit = state
         .browse_semaphore
         .clone()
@@ -2844,38 +2995,85 @@ pub async fn browse_facets(
         .await
         .map_err(|_| AppError::Internal("browse concurrency limiter closed".to_string()))?;
 
-    let store = state.store.clone();
-    let facets = tokio::task::spawn_blocking(move || {
-        // Pull distinct IRI key + integer count rows out of an aggregate result.
-        let collect = |query: &str, key: &str| -> Vec<serde_json::Value> {
-            let mut out = Vec::new();
-            if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(query) {
-                for sol in solutions.filter_map(|s| s.ok()) {
-                    let iri = match sol.get(key) {
-                        Some(oxigraph::model::Term::NamedNode(n)) => n.as_str().to_string(),
-                        _ => continue,
-                    };
-                    let count = match sol.get("c") {
-                        Some(oxigraph::model::Term::Literal(l)) => {
-                            l.value().parse::<u64>().unwrap_or(0)
-                        }
-                        _ => 0,
-                    };
-                    out.push(serde_json::json!({ "iri": iri, "count": count }));
-                }
-            }
-            out
-        };
-        serde_json::json!({
-            "classes": collect(&cls_q, "cls"),
-            "properties": collect(&prop_q, "p"),
-            "graphs": collect(&graph_q, "g"),
-        })
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    // The class and property aggregates are genuine scans; run them CONCURRENTLY
+    // rather than back-to-back in one blocking task. Both handles must be spawned
+    // before the first await — that is what buys the overlap, not the join itself.
+    // (One semaphore permit still bounds the whole request, matching browse_triples,
+    // which likewise fans out to two blocking tasks under a single permit.)
+    let cls_task = {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || collect_facet(&store, &cls_q, "cls"))
+    };
+    let prop_task = {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || collect_facet(&store, &prop_q, "p"))
+    };
 
-    Ok(Json(facets))
+    // The graphs facet was `SELECT ?g (COUNT(*)) … GROUP BY ?g` — a full scan of
+    // every quad in scope purely to recover per-graph totals the process already
+    // maintains in an index (the same one /api/browse/graphs serves). ~1.5s → ~0ms.
+    let graphs_facet = {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut rows: Vec<(String, u64)> = match scoped_graphs {
+                Some(graphs) => graphs
+                    .into_iter()
+                    .filter_map(|iri| {
+                        // `or_else` mirrors try_fast_count: an index miss must fall
+                        // back to a real count, never silently drop the graph.
+                        let n = store
+                            .graph_count_cached(Some(&iri))
+                            .or_else(|| store.count_graph(Some(&iri)).ok())?;
+                        (n > 0).then_some((iri, n as u64))
+                    })
+                    .collect(),
+                // Admin, unscoped. `GRAPH ?g` never binds the default graph, so a
+                // `None` key must not become an empty-labelled facet.
+                None => store
+                    .graph_counts()
+                    .into_iter()
+                    .filter_map(|(iri, n)| iri.filter(|_| n > 0).map(|i| (i, n as u64)))
+                    .collect(),
+            };
+            // Explicit IRI tie-break: index iteration order is unspecified, so
+            // without it the rail reshuffles between two identical refreshes.
+            rows.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            rows.truncate(1000);
+            rows.into_iter()
+                .map(|(iri, count)| serde_json::json!({ "iri": iri, "count": count }))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let (classes, properties, graphs) = tokio::try_join!(cls_task, prop_task, graphs_facet)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok(Json(
+        serde_json::json!({ "classes": classes, "properties": properties, "graphs": graphs }),
+    ))
+}
+
+/// Pull `{ iri, count }` rows out of an aggregate facet query.
+fn collect_facet(
+    store: &crate::store::TripleStore,
+    query: &str,
+    key: &str,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(query) {
+        for sol in solutions.filter_map(|s| s.ok()) {
+            let iri = match sol.get(key) {
+                Some(oxigraph::model::Term::NamedNode(n)) => n.as_str().to_string(),
+                _ => continue,
+            };
+            let count = match sol.get("c") {
+                Some(oxigraph::model::Term::Literal(l)) => l.value().parse::<u64>().unwrap_or(0),
+                _ => 0,
+            };
+            out.push(serde_json::json!({ "iri": iri, "count": count }));
+        }
+    }
+    out
 }
 
 /// GET /api/browse/resource — get all triples about a resource (scoped to accessible graphs)
@@ -3054,42 +3252,93 @@ pub async fn browse_resource(
         params.graph.as_deref(),
         MAX_BNODE_DEPTH,
     ));
-    let (outgoing, bnodes) = split_resource_closure(state.store.query(&outgoing_query)?)?;
 
     // Incoming triples (resource as object)
+    // Incoming links, capped. A high-in-degree hub (an rdf:type class node can have
+    // 170k referrers) returned 29MB / 170k rows in 13-16s, then the client laid out
+    // 170k table rows and a 170k-edge cytoscape graph. `ORDER BY` forced oxigraph to
+    // sort ALL matches before the truncation (~7.9s vs ~1.0s for a bare LIMIT), and
+    // the client re-sorts anyway (ResourceDetail byPredThenSubject), so the server
+    // sort was pure waste. LIMIT 501 lets us detect "more than 500" from the row
+    // count without a second query.
+    const INCOMING_CAP: usize = 500;
     let incoming_query = build_query(&if let Some(ref graph) = params.graph {
         format!(
-            "SELECT ?s ?p WHERE {{ GRAPH <{}> {{ ?s ?p <{}> }} }} ORDER BY ?s ?p",
-            graph, iri
+            "SELECT ?s ?p WHERE {{ GRAPH <{}> {{ ?s ?p <{}> }} }} LIMIT {}",
+            graph,
+            iri,
+            INCOMING_CAP + 1
         )
     } else {
-        format!("SELECT ?s ?p WHERE {{ ?s ?p <{}> }} ORDER BY ?s ?p", iri)
+        format!(
+            "SELECT ?s ?p WHERE {{ ?s ?p <{}> }} LIMIT {}",
+            iri,
+            INCOMING_CAP + 1
+        )
     });
 
-    let incoming_results = state.store.query(&incoming_query)?;
-    let incoming = format_sparql_results_as_pairs(incoming_results, "s", "p")?;
+    // Both queries are CPU-bound store work. They used to run inline on a Tokio
+    // worker with no concurrency bound, unlike every sibling browse handler — and a
+    // single resource page fans out up to five of these concurrently, parking five
+    // workers. Take a permit and move them onto the blocking pool, and run the two
+    // concurrently (only the closure needs single-query blank-node label scoping).
+    let _browse_permit = state
+        .browse_semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| AppError::Internal("browse concurrency limiter closed".to_string()))?;
 
-    // Get label if available
-    let label_query = build_query(&format!(
-        "SELECT ?label WHERE {{ <{}> <http://www.w3.org/2000/01/rdf-schema#label> ?label }} LIMIT 1",
-        iri
-    ));
-    let label = if let Ok(oxigraph::sparql::QueryResults::Solutions(mut solutions)) =
-        state.store.query(&label_query)
-    {
-        solutions
-            .next()
-            .and_then(|r| r.ok())
-            .and_then(|s| s.get("label").map(format_term))
-    } else {
-        None
+    let out_task = {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+            Ok(split_resource_closure(store.query(&outgoing_query)?)?)
+        })
     };
+    let in_task = {
+        let store = state.store.clone();
+        tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+            Ok(format_sparql_results_as_pairs(
+                store.query(&incoming_query)?,
+                "s",
+                "p",
+            )?)
+        })
+    };
+    let (out_res, in_res) =
+        tokio::try_join!(out_task, in_task).map_err(|e| AppError::Internal(e.to_string()))?;
+    let (outgoing, bnodes) = out_res?;
+    let mut incoming = in_res?;
+    // Signal truncation to the client (label reads "500+") and cap the payload.
+    let incoming_truncated = incoming.len() > INCOMING_CAP;
+    incoming.truncate(INCOMING_CAP);
+
+    // The label comes out of the closure we already have — the depth-0 branch of
+    // build_resource_closure_query is `<iri> ?p ?o`, so rdfs:label is already in
+    // `outgoing`. The old dedicated third query was not only redundant, it was
+    // BROKEN in the `?graph=` case: `from_clauses` is None there, so it got neither
+    // a FROM nor a GRAPH and evaluated against the (empty) default graph, always
+    // returning null.
+    // Shape note: this stays the full `format_term` object ({type, value, …}),
+    // exactly what the dedicated query produced — not a bare string.
+    const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
+    let label = outgoing
+        .iter()
+        .find(|row| {
+            row.get("p")
+                .and_then(|p| p.get("value"))
+                .and_then(|v| v.as_str())
+                == Some(RDFS_LABEL)
+        })
+        .and_then(|row| row.get("o"))
+        .cloned();
 
     Ok(Json(serde_json::json!({
         "iri": iri,
         "label": label,
         "outgoing": outgoing,
         "incoming": incoming,
+        "incoming_truncated": incoming_truncated,
         "bnodes": bnodes,
     })))
 }
@@ -3102,51 +3351,42 @@ pub async fn browse_stats(
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
     let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
 
+    // Served entirely from the write-maintained graph-count index (the same one
+    // /health and /api/browse/graphs already trust) — O(#graphs) DashMap reads, no
+    // store scan. The old code was a full COUNT: for a non-admin it built a
+    // 34-graph FROM/FROM NAMED prologue and ran `SELECT (COUNT(*))`, which
+    // try_fast_count refuses for multiple FROM, so it materialised a ~3.1M-row scan
+    // (~2.7s cold) on the endpoint the landing page hits; the admin path called
+    // `store.len()`, an O(N) RocksDB key scan. Neither used spawn_blocking, so it
+    // blocked a Tokio worker — now there is no multi-second work to offload.
     let (total_triples, named_graph_count) = if is_admin {
-        let total = state.store.len()?;
-        let graphs = state.store.named_graphs()?;
-        (total, graphs.len())
+        (
+            state.store.cached_total_triples(),
+            state.store.cached_named_graph_count(),
+        )
     } else {
         let cached_graphs = state
             .auth_db
             .get_accessible_graph_iris_cached(user_id)
             .map_err(|e| AppError::Internal(e.to_string()))?;
         let accessible = &cached_graphs.0;
-        let count = accessible.len();
-        // Count triples only in accessible named graphs
-        let total: usize = if accessible.is_empty() {
-            0
-        } else {
-            let mut from_clauses = String::new();
-            for iri in accessible {
-                from_clauses.push_str(&format!("FROM <{}>\nFROM NAMED <{}>\n", iri, iri));
-            }
-            let count_query = inject_from_clauses(
-                "SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }",
-                &from_clauses,
-            );
-            if let Ok(oxigraph::sparql::QueryResults::Solutions(mut solutions)) =
-                state.store.query(&count_query)
-            {
-                solutions
-                    .next()
-                    .and_then(|r| r.ok())
-                    .and_then(|s| {
-                        s.get("count").and_then(|v| {
-                            let str_val = v.to_string();
-                            str_val
-                                .trim_matches('"')
-                                .split('"')
-                                .next()
-                                .and_then(|n| n.parse::<usize>().ok())
-                        })
-                    })
+        // Sum the per-graph counts. `.or_else(count_graph)` mirrors try_fast_count's
+        // fallback so a momentarily-lagging index can't silently undercount. This is
+        // a quad-sum (a triple counted once per graph it appears in), which equals
+        // the old RDF-merge COUNT(*) when the accessible graphs are triple-disjoint
+        // — true here (version snapshots, the only duplicate source, are excluded
+        // from dataset_graphs) and consistent with /api/browse/graphs.
+        let total: usize = accessible
+            .iter()
+            .map(|iri| {
+                state
+                    .store
+                    .graph_count_cached(Some(iri))
+                    .or_else(|| state.store.count_graph(Some(iri)).ok())
                     .unwrap_or(0)
-            } else {
-                0
-            }
-        };
-        (total, count)
+            })
+            .sum();
+        (total, accessible.len())
     };
 
     Ok(Json(serde_json::json!({
@@ -3301,7 +3541,7 @@ pub async fn browse_suggest(
                 return Ok(Json(serde_json::json!({ "values": [] })));
             }
             let mut from_clauses = String::new();
-            for iri in &graphs {
+            for iri in sorted_iris(&graphs) {
                 from_clauses.push_str(&format!("FROM NAMED <{}>\n", iri));
             }
             inject_from_clauses(&base_query, &from_clauses)
@@ -3895,6 +4135,13 @@ pub(crate) fn scope_query_to_authorized(
             .collect()
     };
 
+    // Deterministic order. `authorized` is a HashSet rebuilt every 30s (TTL), and a
+    // fresh HashSet gets a fresh RandomState — so this prologue, and therefore the
+    // query-cache key for EVERY non-admin /sparql query, changed on a 30s cadence
+    // with no data change. It also made the browser's unordered OFFSET/LIMIT
+    // pagination unstable across pages fetched either side of a refresh.
+    let mut effective = effective;
+    effective.sort_unstable();
     let mut from_clauses = String::new();
     if effective.is_empty() {
         // Nothing the caller may read — scope to a non-existent graph so the
@@ -3925,6 +4172,47 @@ mod query_scoping_tests {
 
     fn authz(iris: &[&str]) -> HashSet<String> {
         iris.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The scoped prologue must be byte-identical for the same SET of graphs,
+    /// regardless of `HashSet` iteration order.
+    ///
+    /// The accessible-graph set is rebuilt on a 30s TTL and each rebuild gets a
+    /// fresh `RandomState`, so the order changed with no data change — which
+    /// changed this prologue, which is the result-cache key. Effect: every
+    /// non-admin `/sparql` query went cold roughly twice a minute. It also made
+    /// the browser's unordered `OFFSET/LIMIT` pagination unstable across pages
+    /// fetched either side of a refresh.
+    #[test]
+    fn scoped_prologue_is_stable_across_hashset_orderings() {
+        let iris = [
+            "http://ex.org/g/zulu",
+            "http://ex.org/g/alpha",
+            "http://ex.org/g/mike",
+            "http://ex.org/g/bravo",
+            "http://ex.org/g/echo",
+        ];
+        let query = "SELECT * WHERE { ?s ?p ?o }";
+        let first = scope_query_to_authorized(query, &authz(&iris));
+
+        // Independently-constructed sets: different RandomState, and we insert in a
+        // different order each round to shake the iteration order further.
+        for round in 0..12 {
+            let mut rotated: Vec<&str> = iris.to_vec();
+            rotated.rotate_left(round % iris.len());
+            let set: HashSet<String> = rotated.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                scope_query_to_authorized(query, &set),
+                first,
+                "prologue must not depend on HashSet iteration order (round {round})",
+            );
+        }
+
+        // …and it still scopes to every authorised graph.
+        for iri in iris {
+            assert!(first.contains(&format!("FROM <{iri}>")), "{first}");
+            assert!(first.contains(&format!("FROM NAMED <{iri}>")), "{first}");
+        }
     }
 
     #[test]

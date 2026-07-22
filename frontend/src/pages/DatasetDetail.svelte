@@ -17,6 +17,7 @@
     validateDataset,
     sparqlQuery,
     datasetSparqlQuery,
+    browseTriples,
     uploadDatasetImage,
     getDatasetImageUrl,
     uploadDatasetBanner,
@@ -86,6 +87,14 @@
   let dataset = null;
   let graphs = [];
   let services = [];
+  // Total triples across the dataset's graphs (from listDatasetGraphs' counts).
+  // Gates the content-kind probe: that probe runs COUNT(DISTINCT ?s) + 11×
+  // FILTER-NOT-EXISTS over the graph merge, which on a multi-million-triple dataset
+  // is ~30-60s of scanning that starves every other query on the page and can leak
+  // in-flight across navigation. A genuinely mis-filed ontology is small, so a size
+  // cap is a safe guard (graph_role can't be used — the 2.6M ifcowl graph has none).
+  const CONTENT_KIND_MAX_TRIPLES = 200_000;
+  $: kindProbeTotal = graphs.reduce((a, g) => a + (typeof g === 'object' ? (g.triple_count || 0) : 0), 0);
   let error = '';
   // Geo capability of the dataset — gates the map / 3D-viewer action tile so it
   // only appears when there is something to show (coordinates and/or 3D data).
@@ -1058,16 +1067,23 @@
     loadingPreview = true;
     previewError = '';
     try {
-      // Use the dataset-scoped SPARQL service so results are not filtered by
-      // the accessible_graphs_cache (which may be stale right after upload).
-      const sparql = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 80`;
+      let bindings;
       const firstSvcSlug = services[0]?.slug ?? null;
-      const res = (firstSvcSlug
-          ? await datasetSparqlQuery(id, firstSvcSlug, sparql).catch(() => null)
-          : null)
-        // Fall back to global SPARQL if the dataset service doesn't exist yet.
-        || await sparqlQuery(`SELECT ?s ?p ?o WHERE { VALUES ?g { ${graphs.slice(0, 8).map(g => `<${typeof g === 'string' ? g : g.graph_iri}>`).join(' ')} } GRAPH ?g { ?s ?p ?o } } LIMIT 80`);
-      const bindings = res?.results?.bindings || [];
+      if (firstSvcSlug) {
+        // A dataset service exists: query through it so results aren't filtered by
+        // the accessible_graphs_cache (which can be stale right after an upload).
+        // Surface a failure rather than chaining a second full global query — the
+        // old `|| await sparqlQuery(...)` fired a redundant scan whenever this failed.
+        const res = await datasetSparqlQuery(id, firstSvcSlug, `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 80`);
+        bindings = res?.results?.bindings || [];
+      } else {
+        // No service (the common case): the scoped browse endpoint is cached,
+        // semaphore-bounded and runs on the blocking pool — unlike /sparql. It
+        // returns {subject,predicate,object,graph}; remap to the {s,p,o,g} the
+        // graph builder and the sample table read.
+        const res = await browseTriples({ dataset_id: id, limit: '80' });
+        bindings = (res?.triples || []).map(t => ({ s: t.subject, p: t.predicate, o: t.object, g: t.graph }));
+      }
       const { nodes, edges } = graphResultsToElements(bindings);
       graphNodes = nodes;
       graphEdges = edges;
@@ -1455,8 +1471,10 @@
 </div>
 {/if}
 
-<!-- Content kind warning: flags ontology/model data inside a dataset -->
-{#if graphs.length > 0}
+<!-- Content kind warning: flags ontology/model data inside a dataset. Skipped for
+     large datasets — the probe's scan cost is prohibitive and a mis-filed ontology
+     is always small (see CONTENT_KIND_MAX_TRIPLES). -->
+{#if graphs.length > 0 && kindProbeTotal <= CONTENT_KIND_MAX_TRIPLES}
   {#key graphs.map(g => graphIri(g)).join('|')}
     <ContentKindWarning
       graphs={graphs.map(g => graphIri(g))}

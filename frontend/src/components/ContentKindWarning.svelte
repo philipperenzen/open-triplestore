@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { probeContentKind } from '../lib/content-kind.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -18,16 +18,22 @@
   let converting = $state(false);
   let convertError = $state('');
 
+  // Abort the probe's SPARQL scans if we unmount mid-flight (e.g. the user
+  // navigates away) so a slow probe doesn't keep running against the server after
+  // the banner is gone.
+  let probeAbort = null;
   async function run() {
     if (!graphs?.length) return;
+    probeAbort = new AbortController();
     try {
-      probe = await probeContentKind(graphs);
+      probe = await probeContentKind(graphs, probeAbort.signal);
     } catch {
       // probe stays null — no warning shown
     }
   }
 
   onMount(run);
+  onDestroy(() => probeAbort?.abort());
 
   function computeMismatch(p, dis, exp, role) {
     if (!p || dis) return null;

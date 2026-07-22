@@ -3665,6 +3665,7 @@
     "basemap": "Basemap",
     "basemapStreets": "Map",
     "basemapSatellite": "Satellite",
+    "fitAll": "Fit all in view",
     "toScale": "to scale",
     "geometry": "Geometry",
     "mapUnavailable": "Map unavailable. Showing coordinates:",

@@ -45,7 +45,9 @@ export async function parseTurtle(turtle: string): Promise<{ store: Store; prefi
  * @param sparqlUrl  e.g. '/api/sparql'
  */
 export async function loadOntologyGraph(graphs: string[], sparqlUrl = '/sparql'): Promise<{ turtle: string; store: Store; prefixes: Record<string, string> }> {
-  const scope = (graphs || []).filter(Boolean);
+  // Dedupe: `sub_graphs` from /api/models/:id/versions repeats `graph_iri` itself
+  // for seeded versions, which produced `{GRAPH <g>{…}} UNION {GRAPH <g>{…}}`.
+  const scope = [...new Set((graphs || []).filter(Boolean))];
   const graphPattern = scope.length === 0
     ? '?s ?p ?o'
     : scope.length === 1
