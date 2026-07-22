@@ -18,6 +18,7 @@
 
 import * as THREE from 'three';
 import { subGeometryForGuids } from './ifc';
+import { subCityGeometryForObjects } from './cityjson';
 
 /** Vivid highlight colour for the selected element(s). */
 export const HL_COLOR = 0xff6a00;
@@ -64,21 +65,16 @@ export function makeHighlightMaterial(base: THREE.Material | null, xray = false)
 }
 
 /**
- * A non-pickable copy of `wantedGuids`' triangles inside `group`, materialised
- * as a highlight. Returns null when nothing in this model matches, so callers
- * can skip the add/dispose dance entirely.
- *
- * The result must be added as a child of the SAME group the geometry came from,
- * so it inherits the identical placement transform and the polygon offset stays
- * exact.
+ * Materialise an already-extracted sub-geometry group as a highlight overlay.
+ * Shared by both selection kinds — an IFC element (GlobalId) and a CityJSON
+ * building (CityObject id) — because the two differ only in how the triangles
+ * are sliced out, never in how the highlight should look or behave.
  */
-export function buildHighlightOverlay(
+function materialiseOverlay(
   group: THREE.Object3D,
-  wantedGuids: Set<string>,
-  xray = false,
+  ov: THREE.Group,
+  xray: boolean,
 ): THREE.Group | null {
-  if (!group || !wantedGuids || wantedGuids.size === 0) return null;
-  const ov = subGeometryForGuids(group, wantedGuids);
   if (!ov.children.length) return null;
   // subGeometryForGuids rebuilds the buffers when it slices a MERGED mesh, but
   // returns a plain `mesh.clone()` for an already-isolated per-element mesh —
@@ -102,6 +98,35 @@ export function buildHighlightOverlay(
   });
   ov.userData.isOverlay = true;
   return ov;
+}
+
+/**
+ * A non-pickable copy of `wantedGuids`' triangles inside `group`, materialised
+ * as a highlight. Returns null when nothing in this model matches, so callers
+ * can skip the add/dispose dance entirely.
+ *
+ * The result must be added as a child of the SAME group the geometry came from,
+ * so it inherits the identical placement transform and the polygon offset stays
+ * exact.
+ */
+export function buildHighlightOverlay(
+  group: THREE.Object3D,
+  wantedGuids: Set<string>,
+  xray = false,
+): THREE.Group | null {
+  if (!group || !wantedGuids || wantedGuids.size === 0) return null;
+  return materialiseOverlay(group, subGeometryForGuids(group, wantedGuids), xray);
+}
+
+/** The CityJSON counterpart of [buildHighlightOverlay]: highlights whole
+ *  CityObjects (one building of a merged 3DBAG block) instead of IFC elements. */
+export function buildCityHighlightOverlay(
+  group: THREE.Object3D,
+  wantedObjects: Set<string>,
+  xray = false,
+): THREE.Group | null {
+  if (!group || !wantedObjects || wantedObjects.size === 0) return null;
+  return materialiseOverlay(group, subCityGeometryForObjects(group, wantedObjects), xray);
 }
 
 /** Free an overlay's materials, and only the geometry it built for itself (see

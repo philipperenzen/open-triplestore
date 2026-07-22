@@ -16,9 +16,10 @@
   import { Map as MapIcon, Satellite, Crosshair } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
-  import { modelRefOf } from '../../lib/viewer/detect';
+  import { modelRefOf, modelRefsOf, cityBaseUrl, cityObjectFragment } from '../../lib/viewer/detect';
   import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
   import { ifcGuidAt, groupHasGuid, ifcProgress } from '../../lib/viewer/ifc';
+  import { cityObjectIdAt, groupHasCityObject } from '../../lib/viewer/cityjson';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import {
     styleFor,
@@ -39,6 +40,7 @@
     HL_COLOR,
     HL_EMISSIVE,
     buildHighlightOverlay,
+    buildCityHighlightOverlay,
     disposeHighlightOverlay,
   } from '../../lib/viewer/highlight';
 
@@ -101,6 +103,13 @@
   let lastProj = null; // latest map projection matrix (for raycasting)
   let fitted = false;
   let hoverPopup = null;
+  // Persistent popup for a picked CityObject that has NO backing RDF element
+  // (e.g. a 3DBAG house — geometry only). Buildings that DO map to an element
+  // open the rich ElementModal instead. `citySel` is the locally-picked CityObject
+  // to x-ray when it has no element; a selection that maps to an element drives
+  // the highlight through `selected` (see reconcileCitySel).
+  let cityPopup = null;
+  let citySel = null; // { entryId, objId } | null
   // Client-side model-load progress (web-ifc parse etc.) for the loading chip.
   let modelsLoading = 0;
   let modelsFailed = 0;
@@ -264,12 +273,18 @@
       entry.anchorUsed = anchor;
       entry.footprint = null; // computed on demand by the suppression pass
       entry.isIfc = ref.format === 'ifc'; // multi-element model → eligible for x-ray
+      // CityJSON/CityGML blocks carry per-CityObject picking (the building-level
+      // x-ray + info); cache the metadata by object id for hover/popup.
+      entry.isCity = ref.format === 'cityjson' || ref.format === 'citygml';
+      entry.cityObjectById = new Map((cached.userData.geo?.cityObjects || []).map((o) => [o.id, o]));
       entry.mercMatrix = mercMatrixFor(anchor, meters);
       themeMaterials();
       highlightModels();
       updateWalkSuggest(); // a building may have loaded while already zoomed in
       // The basemap blocks this model now covers can only be resolved once its
-      // geometry exists; nothing else fires after an async load.
+      // geometry exists, and nothing else fires after an async load — the map may
+      // already be idle, so a landmark would otherwise z-fight the basemap block
+      // until the next pan.
       scheduleBuildingSuppression();
       map?.triggerRepaint();
     } catch {
@@ -441,6 +456,28 @@
     tweenMats.add(m);
   }
 
+  // CityObject ↔ element linkage, derived from each element's CityJSON
+  // `#objectId` fragment ref (the seed points a building's model at its object).
+  // A picked CityObject resolves to its RDF element (→ open the inspector), and a
+  // selected element resolves to the CityObject to x-ray in the block's model.
+  let cityObjectToElement = new Map(); // objId → elementId
+  let elementToCityObject = new Map(); // elementId → objId
+  $: {
+    const o2e = new Map();
+    const e2o = new Map();
+    for (const el of elements) {
+      for (const ref of modelRefsOf(el)) {
+        if (ref.format !== 'cityjson' && ref.format !== 'citygml') continue;
+        const obj = cityObjectFragment(ref.url);
+        if (!obj) continue;
+        if (!o2e.has(obj)) o2e.set(obj, el.id);
+        if (!e2o.has(el.id)) e2o.set(el.id, obj);
+      }
+    }
+    cityObjectToElement = o2e;
+    elementToCityObject = e2o;
+  }
+
   // Children index (parent id → child elements) for subtree highlighting, so
   // selecting a storey lights every wall/slab it contains. Rebuilt per elements.
   let childrenByParent = new Map();
@@ -479,6 +516,11 @@
     // container — a storey lights every wall/slab it contains).
     const selGuids = selected ? descendantGuidSet(selected) : null;
     const byGuid = selGuids && selGuids.size > 0;
+    // The CityObject to x-ray inside a shared block: a locally-picked object with
+    // no RDF element (citySel) wins; otherwise the selected element's own
+    // CityObject (when it is one of the block's buildings).
+    const activeCityObj = citySel?.objId ?? (selected ? elementToCityObject.get(selected) : null);
+    const cityWanted = activeCityObj ? new Set([activeCityObj]) : null;
     for (const [id, e] of entries) {
       if (e.isIfc) {
         // The IFC building is MERGED (a few per-material meshes), so a single
@@ -498,8 +540,22 @@
         // disc underneath it as a dark ring floating inside the building.
         if (e.shadow) e.shadow.visible = !ghost;
         setIfcOverlay(e, isSel ? selGuids : null, xrayOn);
+      } else if (e.isCity) {
+        // A CityJSON block is MERGED by colour, so — exactly like IFC — the
+        // picked building is drawn as a highlight copy over the block. Ghosting
+        // the rest of the block is opt-in for the same reason it is for IFC.
+        const isSel = cityWanted && groupHasCityObject(e.modelGroup, cityWanted);
+        const ghost = isSel && xrayOn;
+        e.modelGroup?.traverse((n) => {
+          if (!n.isMesh || !n.material || n.userData.isOverlay) return;
+          n.renderOrder = 0;
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          for (const m of mats) paintMat(m, ghost ? 'ghost' : 'normal');
+        });
+        if (e.shadow) e.shadow.visible = !ghost;
+        setCityOverlay(e, isSel ? cityWanted : null, xrayOn);
       } else {
-        // Non-IFC model (CityJSON/STL/glTF) — light the whole model by id.
+        // Single-object model (STL/glTF landmark) — light the whole model by id.
         const on = !byGuid && id === selected;
         e.modelGroup?.traverse((n) => {
           if (!n.isMesh || !n.material) return;
@@ -515,26 +571,43 @@
     else map?.triggerRepaint();
   }
 
+  /** Drop the entry's current highlight copy, if any. */
+  function clearOverlay(e) {
+    if (!e.overlay) return;
+    e.overlay.parent?.remove(e.overlay);
+    disposeHighlightOverlay(e.overlay);
+    e.overlay = null;
+  }
+
   /** Add (or remove) a glowing copy of `selGuids` over the merged IFC building —
    *  the per-element highlight a merged mesh can't do by material swap. The copy
    *  is non-pickable and disposed on the next change. In the default mode it
    *  RESPECTS depth (it sits on the geometry, and whatever stands in front still
    *  covers it); `xray` restores the draw-through behaviour. */
   function setIfcOverlay(e, selGuids, xray) {
-    if (e.overlay) {
-      e.overlay.parent?.remove(e.overlay);
-      disposeHighlightOverlay(e.overlay);
-      e.overlay = null;
-    }
+    clearOverlay(e);
     if (!selGuids || !e.modelGroup) return;
     const ov = buildHighlightOverlay(e.modelGroup, selGuids, xray);
-    if (!ov) return;
+    if (ov) attachOverlay(e, ov, xray);
+  }
+
+  /** The CityJSON counterpart of {@link setIfcOverlay}: highlights the picked
+   *  building(s) of a merged block, one CityObject at a time. */
+  function setCityOverlay(e, objIds, xray) {
+    clearOverlay(e);
+    if (!objIds || !e.modelGroup) return;
+    const ov = buildCityHighlightOverlay(e.modelGroup, objIds, xray);
+    if (ov) attachOverlay(e, ov, xray);
+  }
+
+  /** Attach `ov` (already materialised as a highlight) to the model group and
+   *  fade it in on the same 200 ms curve the rest of the selection uses —
+   *  buildHighlightOverlay hands it over fully transparent and unlit. */
+  function attachOverlay(e, ov, xray) {
     // Child of the model group so it inherits the same placement transform as the
     // merged meshes the geometry was extracted from.
     e.modelGroup.add(ov);
     e.overlay = ov;
-    // Fade the copy in on the same 200 ms curve the rest of the selection uses —
-    // buildHighlightOverlay hands it over fully transparent and unlit.
     ov.traverse((n) => {
       if (!n.isMesh) return;
       const mats = Array.isArray(n.material) ? n.material : [n.material];
@@ -587,25 +660,34 @@
       // space has its own metres scale); compare NDC depth instead.
       const d = RAY_HIT.applyMatrix4(fwd).z;
       let guid = null;
-      if (precise && e.modelGroup) {
+      let cityObj = null;
+      if (precise && e.modelGroup && (e.isIfc || e.isCity)) {
         e.scene.updateMatrixWorld(); // refresh world matrices if a frame hasn't since load
         RAYCASTER.ray.origin.copy(RAY.origin);
         RAYCASTER.ray.direction.copy(RAY.direction);
         const hits = RAYCASTER.intersectObject(e.modelGroup, true);
-        // Take the nearest hit that actually owns a GlobalId — a merged building
-        // mesh resolves the GlobalId from the picked triangle (faceIndex); IFC
-        // openings and other non-rooted triangles carry none and are skipped.
+        // Take the nearest hit that owns an identity — a merged IFC building
+        // resolves the GlobalId from the picked triangle, a CityJSON block the
+        // CityObject; overlay/non-rooted triangles carry none and are skipped.
         for (const hit of hits) {
-          const g = ifcGuidAt(hit.object, hit.faceIndex);
-          if (g) {
-            guid = g;
-            break;
+          if (e.isIfc) {
+            const g = ifcGuidAt(hit.object, hit.faceIndex);
+            if (g) {
+              guid = g;
+              break;
+            }
+          } else {
+            const oid = cityObjectIdAt(hit.object, hit.faceIndex);
+            if (oid) {
+              cityObj = oid;
+              break;
+            }
           }
         }
       }
-      if (!best || d < best.d) best = { id, guid, d };
+      if (!best || d < best.d) best = { id, guid, cityObj, d };
     }
-    return best ? { id: best.id, guid: best.guid } : null;
+    return best ? { id: best.id, guid: best.guid, cityObj: best.cityObj } : null;
   }
 
   // ── Vector overlays (re-added after every style swap) ──────────────────────
@@ -946,6 +1028,20 @@
       }
     }
     entries = new Map();
+    citySel = null;
+    hideCityPopup();
+    // Which base CityJSON/CityGML files carry a WHOLE-file (no-fragment) reference:
+    // those render the entire block once; every `#objectId` fragment ref for the
+    // same file then only maps a pick back to its element (no second render).
+    const cityWholeFileBases = new Set();
+    for (const el of elements) {
+      for (const ref of modelRefsOf(el)) {
+        if ((ref.format === 'cityjson' || ref.format === 'citygml') && !cityObjectFragment(ref.url)) {
+          cityWholeFileBases.add(cityBaseUrl(ref.url));
+        }
+      }
+    }
+    const placedCityKeys = new Set(); // dedup identical (file[, object]) renders
     for (const el of elements) {
       const anchor = modelAnchor(el);
       const entry = { anchor, anchorUsed: null, scene: null, modelGroup: null, box: null, mercMatrix: null };
@@ -955,8 +1051,23 @@
       // (a `#GlobalId` fragment with no WKT) would just parse the whole building
       // and bail — the anchored Site already stands it on the map.
       const ref = modelRefOf(el);
-      const selfPlaces = ref && (ref.format === 'cityjson' || ref.format === 'citygml');
-      if (anchor || selfPlaces) attachModel(entry, el);
+      const isCity = ref && (ref.format === 'cityjson' || ref.format === 'citygml');
+      if (isCity) {
+        // A self-georeferenced CityJSON places itself, so several elements pointing
+        // at the SAME file (a zone + its buildings, or duplicate block refs across
+        // graphs) would each re-render it at the identical spot — the "duplicates"
+        // artefact. Render each file ONCE: a whole-file ref supersedes its object
+        // fragments, and identical refs are deduped.
+        const base = cityBaseUrl(ref.url);
+        const frag = cityObjectFragment(ref.url);
+        if (frag && cityWholeFileBases.has(base)) continue; // the whole-file entry renders it
+        const key = `${base}#${frag || ''}`;
+        if (placedCityKeys.has(key)) continue; // this exact geometry is already placed
+        placedCityKeys.add(key);
+        attachModel(entry, el);
+        continue;
+      }
+      if (anchor) attachModel(entry, el);
     }
     if (import.meta.env.DEV) window.__otsViewerEntries = entries; // dev: re-point after reassign
     ensureOverlays();
@@ -1084,7 +1195,7 @@
   function updateWalkSuggest() {
     if (!map) return;
     let suggest = null;
-    if (map.getZoom() >= 18.2) {
+    if (map.getZoom() >= 17.6) {
       const c = map.getCenter();
       const bounds = map.getBounds();
       let best = null;
@@ -1115,15 +1226,82 @@
   function onClick(e) {
     const pick = raycastModels(e.point, true);
     if (pick) {
-      // guid → DatasetViewer resolves it to the specific IFC sub-element and
-      // opens that element's window; id is the whole-model fallback.
-      dispatch('select', { id: pick.id, guid: pick.guid });
+      if (pick.guid) {
+        // guid → DatasetViewer resolves it to the specific IFC sub-element and
+        // opens that element's window.
+        citySel = null;
+        hideCityPopup();
+        dispatch('select', { id: pick.id, guid: pick.guid });
+        return;
+      }
+      if (pick.cityObj) {
+        const elId = cityObjectToElement.get(pick.cityObj);
+        if (elId) {
+          // The building maps to an RDF element → open its rich inspector; the
+          // highlight then follows `selected`.
+          citySel = null;
+          hideCityPopup();
+          dispatch('select', { id: elId });
+        } else {
+          // Geometry-only building (e.g. a 3DBAG house) → local highlight + info popup.
+          selectCityObject(pick.id, pick.cityObj, e.lngLat);
+        }
+        return;
+      }
+      // Whole single-object model (STL/glTF landmark).
+      citySel = null;
+      hideCityPopup();
+      dispatch('select', { id: pick.id });
       return;
     }
+    // Vector features (dots/lines/areas) — clear any floating building selection.
+    citySel = null;
+    hideCityPopup();
+    highlightModels();
     const pad = 6;
     const box = [[e.point.x - pad, e.point.y - pad], [e.point.x + pad, e.point.y + pad]];
     const fs = map.queryRenderedFeatures(box, { layers: hitLayers() });
     if (fs.length) dispatch('select', { id: fs[0].properties.id });
+  }
+
+  // ── Geometry-only CityObject selection (a building with no RDF element) ──────
+  const escHtml = (s) =>
+    String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+  /** Local highlight + attributes popup for a picked building that has no
+   *  linked-data element (the 3DBAG block's houses — geometry only). */
+  function selectCityObject(entryId, objId, lngLat) {
+    const info = entries.get(entryId)?.cityObjectById?.get(objId);
+    citySel = { entryId, objId };
+    highlightModels();
+    const label = escHtml(info?.label || objId);
+    const attrs = info?.attributes || {};
+    const rows = Object.entries(attrs)
+      .filter(([k]) => k !== 'identificatie')
+      .map(([k, v]) => `<div class="cbp-row"><span>${escHtml(k)}</span><b>${escHtml(v)}</b></div>`)
+      .join('');
+    const ident = attrs.identificatie
+      ? `<div class="cbp-id">${$i18nT('viewer.bagId')}: ${escHtml(attrs.identificatie)}</div>`
+      : '';
+    const html = `<div class="city-bldg-popup"><div class="cbp-title">${label}</div>${ident}${rows}</div>`;
+    if (!cityPopup) {
+      cityPopup = new maplibregl.Popup({
+        closeButton: true, closeOnClick: false, offset: 14, className: 'city-popup', maxWidth: '260px',
+      });
+      // User closed it via the ✕ → drop the highlight too (a programmatic remove
+      // clears citySel first, so this only fires for genuine user closes).
+      cityPopup.on('close', () => {
+        if (citySel) {
+          citySel = null;
+          highlightModels();
+        }
+      });
+    }
+    cityPopup.setLngLat(lngLat).setHTML(html).addTo(map);
+  }
+
+  function hideCityPopup() {
+    cityPopup?.remove();
   }
 
   function onMouseMove(e) {
@@ -1226,6 +1404,8 @@
       }
     }
     hoverPopup?.remove();
+    cityPopup?.remove();
+    cityPopup = null;
     if (map) map.remove();
     map = null;
     entries = new Map();
@@ -1242,6 +1422,11 @@
   let lastSelectedPaint = null;
   $: if (map && selected !== undefined && selected !== lastSelectedPaint) {
     lastSelectedPaint = selected;
+    // A parent-driven selection supersedes a floating geometry-only building pick.
+    if (citySel) {
+      citySel = null;
+      hideCityPopup();
+    }
     applySelectedPaint();
     highlightModels();
   }
@@ -1531,6 +1716,45 @@
   }
   :global(.viewer-popup .maplibregl-popup-tip) {
     border-top-color: var(--bg-elevated, #fff);
+  }
+
+  /* Attributes popup for a geometry-only building (a 3DBAG house with no RDF). */
+  :global(.city-popup .maplibregl-popup-content) {
+    padding: 9px 12px;
+    border-radius: 9px;
+    background: var(--bg-elevated, #fff);
+    color: var(--ink-900, #0f172a);
+    box-shadow: 0 3px 14px rgba(0, 0, 0, 0.32);
+    font-size: 0.78rem;
+  }
+  :global(.city-popup .maplibregl-popup-tip) {
+    border-top-color: var(--bg-elevated, #fff);
+  }
+  :global(.city-popup .cbp-title) {
+    font-weight: 600;
+    font-size: 0.84rem;
+    margin-bottom: 2px;
+    color: var(--ink-900, #0f172a);
+  }
+  :global(.city-popup .cbp-id) {
+    font-size: 0.68rem;
+    color: var(--muted, #64748b);
+    margin-bottom: 6px;
+    word-break: break-all;
+  }
+  :global(.city-popup .cbp-row) {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 1px 0;
+  }
+  :global(.city-popup .cbp-row span) {
+    color: var(--muted, #64748b);
+    text-transform: capitalize;
+  }
+  :global(.city-popup .cbp-row b) {
+    color: var(--ink-900, #0f172a);
+    font-weight: 600;
   }
 
   /* "Loading building model…" chip while web-ifc parses a heavy model. */

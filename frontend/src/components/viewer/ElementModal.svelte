@@ -17,7 +17,7 @@
   //   3D         — interactive model viewer (orbit: rotate / pan / zoom)
   import { createEventDispatcher, onDestroy, setContext, tick } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
-  import { X, Maximize2, Minimize2, Minus, Boxes, ChevronRight, MapPin } from 'lucide-svelte';
+  import { X, Maximize2, Minimize2, Minus, Boxes, ChevronRight, MapPin, Footprints } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.js';
   import { safeExternalUrl } from '../../lib/safeUrl';
   import { Link } from '../../lib/router/index.js';
@@ -165,6 +165,10 @@
   // format is the default.
   $: modelOptions = element ? modelRefsOf(element) : [];
   $: modelRef = modelOptions.find((o) => o.format === chosenFormat) ?? modelOptions[0] ?? null;
+  // A first-person walkthrough is offered for an IFC *container* (Site / Building
+  // / Storey — it has contained elements): walking through a single leaf wall is
+  // pointless, so a bare element with no substructure doesn't get the action.
+  $: canWalk = children.length > 0 && modelOptions.some((o) => o.format === 'ifc');
   // A "lite" window (3D viewer capped) auto-loads its model in the background the
   // moment the user opens its 3D section — no manual "Load" button to click.
   // The request is one-shot on purpose: another window can later take the slot
@@ -389,6 +393,11 @@
       {#if mapTargetId}
         <button class="btn btn-sm" on:click={() => dispatch('showonmap', { id: element.id })}>
           <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
+        </button>
+      {/if}
+      {#if canWalk}
+        <button class="btn btn-sm walk-btn" on:click={() => dispatch('walkthrough', { id: element.id })}>
+          <Footprints size={13} /> {$i18nT('viewer.exploreInside')}
         </button>
       {/if}
       <!-- The deliberate "leave the viewer" escape hatch: everything else in

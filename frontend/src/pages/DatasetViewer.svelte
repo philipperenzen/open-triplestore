@@ -12,7 +12,7 @@
   import { shortenIRI } from '../lib/rdf-utils.js';
   import { copyToClipboard } from '../lib/clipboard.ts';
   import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown, Footprints, Code2, Check } from 'lucide-svelte';
-  import { modelRefOf } from '../lib/viewer/detect';
+  import { modelRefOf, modelRefsOf } from '../lib/viewer/detect';
   import { modelRefs } from '../lib/viewer/geometry';
   import { preview } from '../lib/viewer/preview';
   import { resourceCache } from '../lib/viewer/resourceCache';
@@ -466,6 +466,19 @@
       label: walkSuggest.label,
     };
   }
+  // "Explore inside" from an element inspector — open the walkthrough for the
+  // element's whole IFC building (a container: Site / Building / Storey).
+  function walkthroughFor(elId) {
+    const el = elements.find((x) => x.id === elId);
+    const ref = el && modelRefsOf(el).find((r) => r.format === 'ifc');
+    if (!ref) return;
+    walkthrough = {
+      url: ref.url.split('#')[0],
+      format: 'ifc',
+      upAxis: ref.upAxis,
+      label: el.label || shortenIRI(el.id),
+    };
+  }
   function walkInspect(e) {
     walkthrough = null; // leave the immersive view to show the full RDF panel
     onMapSelect(e);
@@ -730,6 +743,7 @@
       on:tabdetach={(e) => detachTab(w.wid, e.detail)}
       on:loadmodel={() => loadModelFor(w.wid)}
       on:showonmap={(e) => showOnMap(e.detail.id)}
+      on:walkthrough={(e) => walkthroughFor(e.detail.id)}
     />
   {/if}
 {/each}

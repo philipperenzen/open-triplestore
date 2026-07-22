@@ -35,10 +35,59 @@
   let picked = null; // { label, type, guid, id }
   let wtNeedsRender = true; // draw a frame while paused (render-on-demand)
 
+  // Movement mode: 'walk' = first-person, bound by gravity to the floors/stairs
+  // (Space jumps) — the natural way to inspect an interior; 'fly' = free/creative
+  // "god" mode (Space/Q–E move vertically). Toggle with the header buttons or `F`.
+  let mode = 'walk';
+  let vy = 0; // vertical velocity (m/s) in walk mode
+  let grounded = false;
+  let groundRay = null; // downward raycaster for the floor under the camera
+  const EYE_HEIGHT = 1.7; // metres — camera height above the floor when grounded
+  const GRAVITY = 18; // m/s²
+  const JUMP_SPEED = 4.6; // m/s
+  const DOWN = new THREE.Vector3(0, -1, 0);
+
   const move = { f: false, b: false, l: false, r: false, up: false, down: false, fast: false };
   let prevT = 0;
   let lastPickT = 0; // throttle the crosshair raycast against the merged building
   const CENTER = new THREE.Vector2(0, 0);
+
+  function setMode(m) {
+    if (m === mode) return;
+    mode = m;
+    vy = 0;
+    wtNeedsRender = true;
+  }
+
+  /** World-space Y of the floor directly under `pos` (−∞ when nothing is below —
+   *  e.g. standing outside the building), via a BVH-accelerated downward ray. */
+  function floorUnder(pos) {
+    if (!model || !groundRay) return -Infinity;
+    groundRay.set(pos, DOWN);
+    const hit = groundRay.intersectObject(model, true)[0];
+    return hit ? hit.point.y : -Infinity;
+  }
+
+  /** Walk-mode vertical: gravity pulls the eye to `floor + EYE_HEIGHT`; over open
+   *  space (no floor below) the camera hovers so you can walk onto a floor. */
+  function applyWalkGravity(dt) {
+    const floorY = floorUnder(camera.position);
+    if (!Number.isFinite(floorY)) {
+      vy = 0;
+      grounded = false;
+      return;
+    }
+    vy -= GRAVITY * dt;
+    camera.position.y += vy * dt;
+    const eyeTarget = floorY + EYE_HEIGHT;
+    if (camera.position.y <= eyeTarget) {
+      camera.position.y = eyeTarget;
+      vy = 0;
+      grounded = true;
+    } else {
+      grounded = false;
+    }
+  }
 
   // mesh GlobalId → feed element (for the crosshair label + click-to-inspect).
   $: guidToEl = (() => {
@@ -71,9 +120,23 @@
       case 'KeyS': case 'ArrowDown': move.b = down; break;
       case 'KeyA': case 'ArrowLeft': move.l = down; break;
       case 'KeyD': case 'ArrowRight': move.r = down; break;
-      case 'Space': case 'KeyE': move.up = down; break;
+      case 'Space':
+        // Walk: jump (once, when grounded). Fly: hold to ascend.
+        if (mode === 'walk') {
+          if (down && grounded) {
+            vy = JUMP_SPEED;
+            grounded = false;
+          }
+        } else {
+          move.up = down;
+        }
+        break;
+      case 'KeyE': move.up = down; break;
       case 'KeyQ': move.down = down; break;
       case 'ShiftLeft': case 'ShiftRight': move.fast = down; break;
+      case 'KeyF': // toggle walk ↔ fly
+        if (down) setMode(mode === 'walk' ? 'fly' : 'walk');
+        break;
       default: hit = false;
     }
     if (hit) e.preventDefault();
@@ -108,6 +171,10 @@
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
       renderer.xr.enabled = true;
       raycaster = new THREE.Raycaster();
+      // Dedicated downward ray for the walk-mode floor follow — firstHitOnly keeps
+      // it O(log n) against the merged building's BVH.
+      groundRay = new THREE.Raycaster();
+      groundRay.firstHitOnly = true;
 
       applyStudioLook(renderer);
       scene.environment = studioEnvironment(renderer);
@@ -189,12 +256,18 @@
         const active = locked || renderer.xr.isPresenting;
         if (active) {
           const v = (move.fast ? 9 : 3.4) * dt;
+          // moveForward/moveRight travel on the horizontal plane regardless of
+          // look pitch, so both modes stay level; only the vertical axis differs.
           if (move.f) controls.moveForward(v);
           if (move.b) controls.moveForward(-v);
           if (move.r) controls.moveRight(v);
           if (move.l) controls.moveRight(-v);
-          if (move.up) camera.position.y += v;
-          if (move.down) camera.position.y -= v;
+          if (mode === 'fly') {
+            if (move.up) camera.position.y += v;
+            if (move.down) camera.position.y -= v;
+          } else {
+            applyWalkGravity(dt); // first-person: gravity + floor/stair follow
+          }
           // Throttle the crosshair pick: it raycasts the MERGED building (whose
           // few meshes each span the whole model), so casting it every frame would
           // triangle-test the entire building 60×/s. ~8/s keeps the reticle label
@@ -255,6 +328,18 @@
 
   <header class="wt-head">
     <span class="wt-title"><Footprints size={15} /> {$i18nT('viewer.walkthrough')}{label ? ` · ${label}` : ''}</span>
+    <div class="wt-mode" role="group" aria-label={$i18nT('viewer.walkthrough')}>
+      <button
+        class:active={mode === 'walk'}
+        on:click={() => setMode('walk')}
+        title={$i18nT('viewer.walkModeTitle')}
+      >{$i18nT('viewer.walkMode')}</button>
+      <button
+        class:active={mode === 'fly'}
+        on:click={() => setMode('fly')}
+        title={$i18nT('viewer.flyModeTitle')}
+      >{$i18nT('viewer.flyMode')}</button>
+    </div>
     <span class="vr-slot" bind:this={vrSlot}></span>
     <button class="wt-close" on:click={() => dispatch('close')} aria-label={$i18nT('viewer.close')}><X size={18} /></button>
   </header>
@@ -277,7 +362,7 @@
   {:else if !locked}
     <button class="wt-enter" on:click={() => controls?.lock()}>
       <MousePointerClick size={18} /> {$i18nT('viewer.walkClickToEnter')}
-      <small>{$i18nT('viewer.walkControls')}</small>
+      <small>{mode === 'walk' ? $i18nT('viewer.walkControlsWalk') : $i18nT('viewer.walkControls')}</small>
     </button>
   {/if}
 
@@ -329,6 +414,35 @@
     gap: 6px;
     font-weight: 600;
     font-size: 0.9rem;
+  }
+  /* Walk ↔ Fly mode toggle (usable while unlocked; `F` toggles while walking). */
+  .wt-mode {
+    pointer-events: auto;
+    display: inline-flex;
+    margin-left: 12px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+  }
+  .wt-mode button {
+    border: 0;
+    background: rgba(20, 30, 44, 0.82);
+    color: #cdd9e6;
+    font-size: 0.76rem;
+    font-weight: 600;
+    padding: 5px 12px;
+    cursor: pointer;
+  }
+  .wt-mode button + button {
+    border-left: 1px solid rgba(255, 255, 255, 0.18);
+  }
+  .wt-mode button.active {
+    background: var(--brand-600, #2563a8);
+    color: #fff;
+  }
+  .wt-mode button:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px #ff8a2a;
   }
   .vr-slot {
     margin-left: auto;

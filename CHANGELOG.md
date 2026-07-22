@@ -28,6 +28,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `none` (plaintext) enables the hop to a relay on a trusted private network —
   like the bundled compose relay; the legacy `SMTP_STARTTLS` switch still works
   and the port-based default (465 ⇒ implicit TLS, else STARTTLS) is unchanged.
+- **Per-building selection in shared CityJSON blocks** (3D/map viewer): CityJSON
+  now carries per-`CityObject` identity (the analogue of an IFC `#GlobalId`), so
+  clicking one house in a LoD2 block selects *that* building — opening its
+  linked-data inspector when it maps to an RDF element (the authored
+  neighbourhood/zone buildings, wired via a `#objectId` model link in the seed),
+  or a BAG-id/attributes popup with an x-ray highlight for geometry-only houses
+  (the 3DBAG block). A `#objectId` fragment also isolates a single building in the
+  element modal's 3D tab.
+- **Walk / Fly walkthrough modes** for IFC buildings: the first-person view now
+  offers a true ground-bound **Walk** mode (eye-height, gravity, floor/stair
+  follow, Space to jump) alongside free-fly **Fly** (creative/"god") mode —
+  toggle in the header or with `F`. An **Explore inside** action in a building's
+  inspector opens the walkthrough directly (no longer only via the zoomed-in map
+  hint).
 
 ### Changed
 - None.
@@ -49,6 +63,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recommended in the production `.env` docs but never forwarded), so linked-data
   IRIs, the WebAuthn/passkey relying party and emailed action links pick up the
   deployment's public origin in Docker deployments.
+- **3D map viewer — duplicate CityJSON blocks.** A self-georeferenced CityJSON
+  file referenced from several elements (a zone *and* its buildings, or the same
+  3DBAG block linked from three demo graphs) was rendered once per reference at
+  the identical spot, z-fighting into a "duplicated" blur. Each file now renders
+  exactly once (a whole-file reference supersedes its object fragments).
+- **Big Ben (and other landmark models) colliding with the basemap building.** A
+  just-loaded model now suppresses the OSM 3D extrusion it stands on immediately
+  (previously only re-evaluated on the next map pan), and a tall, thin tower's
+  suppression footprint is floored at a real building size so its own OSM block no
+  longer pokes through the model.
+- **Ungrounded Dragon Bridge landmark.** Its STL is Z-up (deck height along Z) but
+  was unannotated, so it rendered tipped ~82 m onto its side; it now lies flat
+  (`ots:modelUpAxis "Z"`).
 
 ### Security
 - None.
