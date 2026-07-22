@@ -7,6 +7,7 @@
   import { t as i18nT } from 'svelte-i18n';
   import { X, Maximize2, Minimize2 } from 'lucide-svelte';
   import { preview, closePreview } from '../../lib/viewer/preview';
+  import { inspectorTopZ, previewZ } from '../../lib/viewer/zLayers';
 
   // Model3D (three.js) and GeoPreview (leaflet) both pull heavy vendor chunks —
   // load each only when its preview is actually opened. This overlay is mounted
@@ -47,12 +48,23 @@
   }
 </script>
 
-<svelte:window on:keydown={onKeydown} />
+<!-- Capture phase, deliberately. This overlay renders above the viewer's
+     inspector windows, so it must be the one that answers Escape. Bubble-phase
+     window listeners fire in registration order, and this component is mounted
+     once in App.svelte — any window opened later would otherwise get Escape
+     first. Capturing keeps the existing contract intact: we only mark the event
+     defaultPrevented, so handlers underneath still see it and can bow out
+     (DatasetViewer's single Escape handler checks `e.defaultPrevented`). -->
+<svelte:window on:keydown|capture={onKeydown} />
 
 {#if $preview}
+  <!-- z-index comes from lib/viewer/zLayers.ts rather than the stylesheet: the
+       viewer raises its focused inspector window with a running counter, and a
+       fixed literal here is how the overlay ended up buried underneath one. -->
   <div
     class="preview-overlay"
     class:full
+    style:z-index={previewZ($inspectorTopZ)}
     style:transform={full ? '' : `translate(${pos.x}px, ${pos.y}px)`}
     role="dialog"
     aria-label={$preview.title}
@@ -96,6 +108,8 @@
 <style>
   .preview-overlay {
     position: fixed;
+    /* Resting value only — the inline style above (Z_PREVIEW … Z_DOCK - 1) is
+       the authority. Kept so the panel still stacks sanely if that ever fails. */
     z-index: 1200;
     right: 32px;
     bottom: 32px;
@@ -151,6 +165,10 @@
   .actions button:hover {
     background: var(--bg-hover, rgba(0, 0, 0, 0.05));
     color: var(--ink-900, #0f172a);
+  }
+  .actions button:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--brand-400, #5aa9e0);
   }
   .body {
     flex: 1;

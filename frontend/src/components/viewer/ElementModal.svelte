@@ -1,59 +1,143 @@
+<script context="module">
+  // Per-tab reading state (which accordions are open, which sub-trees are
+  // expanded). It lives outside the component because minimising a window
+  // unmounts its body — the user's layout must survive a restore.
+  const VIEW_MAX = 120;
+  const VIEW = new Map(); // tab key → { sections, expanded, format, requested }
+</script>
+
 <script>
-  // Element inspector modal for the dataset explorer. Draggable by its header,
-  // expandable to fullscreen. Three tabs:
-  //   Properties — the element's RDF (browse API + RdfTerm) and BIM/IFC facts
+  // Element inspector window for the dataset explorer. Draggable by its header,
+  // minimisable to the dock, expandable to fullscreen, and — since links inside
+  // a window open as TABS rather than as new windows — a tab group of subjects.
+  // Each tab shows:
+  //   Properties — the subject's RDF (browse API + RdfTerm) and BIM/IFC facts
   //   Structure  — the BOT/IFC decomposition tree (sub-elements), each row
   //                navigable so every substructure can be inspected/visualised
   //   3D         — interactive model viewer (orbit: rotate / pan / zoom)
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy, setContext, tick } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
-  import { X, Maximize2, Minimize2, Boxes, ChevronRight, MapPin, Footprints } from 'lucide-svelte';
-  import { browseResource } from '../../lib/api.js';
+  import { X, Maximize2, Minimize2, Minus, Boxes, ChevronRight, MapPin, Footprints } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.js';
   import { safeExternalUrl } from '../../lib/safeUrl';
   import { Link } from '../../lib/router/index.js';
   import { modelRefOf, modelRefsOf, FORMAT_LABELS } from '../../lib/viewer/detect';
-  import { preview } from '../../lib/viewer/preview';
+  import { resourceCache } from '../../lib/viewer/resourceCache';
+  import { OPEN_RESOURCE_CONTEXT } from '../../lib/viewer/windows';
   import RdfTerm from '../RdfTerm.svelte';
   import Model3D from './Model3D.svelte';
+  import InspectorTabs from './InspectorTabs.svelte';
 
-  /** The focused element (viewer-feed shape). */
+  /** The subject of the ACTIVE tab (viewer-feed shape; synthetic for a plain
+   *  resource that isn't part of the dataset's element feed). */
   export let element = null;
   /** All feed elements — used to derive the substructure tree. */
   export let elements = [];
   export let datasetId = '';
-  /** Cascade index so stacked panels don't open exactly on top of each other. */
-  export let offset = 0;
-  /** Stacking order — the parent bumps this to bring a panel to the front. */
+  /** Window identity + tab group, owned by the parent (see lib/viewer/windows). */
+  export let wid = '';
+  export let tabs = [];
+  export let activeKey = '';
+  /** The other open windows, for the tab menu's "move to window" fallback. */
+  export let targets = [];
+  /** Drag offset from the CSS-centred origin; the parent stores it so it
+   *  survives a minimise/restore cycle. */
+  export let pos = { x: 0, y: 0 };
+  /** Fullscreen state — also parent-owned for the same reason. */
+  export let full = false;
+  /** Stacking order — the parent bumps this to bring a window to the front. */
   export let z = 1100;
   /** Info-only mode: the 3D model isn't mounted (the parent caps how many heavy
-   *  3D viewers run at once); the 3D tab offers a "load" button instead. */
+   *  3D viewers run at once); the 3D section auto-requests a slot instead. */
   export let lite = false;
   /** Whether the hosting page shows a map — enables the "Show on map" action. */
   export let hasMap = false;
 
   const dispatch = createEventDispatcher();
 
+  // An RDF link inside this window becomes a TAB of this window instead of a
+  // full-page navigation. RdfTerm picks this up through the context ONLY when an
+  // ancestor provided it, so every other surface keeps routing to /resource.
+  setContext(OPEN_RESOURCE_CONTEXT, (req) => {
+    const iri = req?.iri;
+    if (!iri) return false;
+    dispatch('opentab', { kind: 'resource', id: iri, label: shortenIRI(iri) });
+    return true;
+  });
+
+  let tabsComponent;
+  /** Move DOM focus to the active tab — used after a restore from the dock. */
+  export function focusActive() {
+    tabsComponent?.focusActive();
+  }
+
   // Collapsible sections (accordion) — MULTIPLE can be open at once, so you can
-  // read Properties, the Structure tree and the 3D model together. Persisted
-  // across element navigation so the user's chosen layout sticks.
+  // read Properties, the Structure tree and the 3D model together. Persisted per
+  // tab so switching back restores the reader's layout.
   let openSections = new Set(['properties']);
+  let structExpanded = new Set();
+  let chosenFormat = null;
+  let loadRequested = false;
+  let viewKey = '';
+
   function toggleSection(key) {
     const next = new Set(openSections);
     next.has(key) ? next.delete(key) : next.add(key);
     openSections = next;
   }
-  let full = false;
-  let pos = { x: offset * 30, y: offset * 30 };
+  function toggleStruct(id) {
+    const next = new Set(structExpanded);
+    next.has(id) ? next.delete(id) : next.add(id);
+    structExpanded = next;
+  }
+
+  function stashView() {
+    if (!viewKey) return;
+    VIEW.delete(viewKey);
+    VIEW.set(viewKey, {
+      sections: [...openSections],
+      expanded: [...structExpanded],
+      format: chosenFormat,
+      requested: loadRequested,
+    });
+    while (VIEW.size > VIEW_MAX) VIEW.delete(VIEW.keys().next().value);
+  }
+  function switchView(key) {
+    stashView();
+    viewKey = key;
+    const v = VIEW.get(key);
+    openSections = new Set(v?.sections ?? ['properties']);
+    structExpanded = new Set(v?.expanded ?? []);
+    chosenFormat = v?.format ?? null;
+    loadRequested = v?.requested ?? false;
+  }
+  $: if (activeKey && activeKey !== viewKey) switchView(activeKey);
+  onDestroy(() => {
+    stashView();
+    // A window that is minimised or closed stops waiting on its read; the shared
+    // cache only cancels the request when no other window still wants it.
+    inflightAbort?.abort();
+  });
+
+  let dragPos = null; // local override while dragging (avoids a state round-trip per frame)
   let dragging = null;
   let data = null;
   let loading = false;
   let error = '';
+  let reqSeq = 0;
+  let loadedKey = '';
+
+  $: shownPos = dragPos ?? pos;
+  // Release the local override once the parent's stored position matches.
+  $: if (dragPos && pos.x === dragPos.x && pos.y === dragPos.y) dragPos = null;
+  $: activeIndex = Math.max(0, tabs.findIndex((t) => t.key === activeKey));
+  $: activeTab = tabs.find((t) => t.key === activeKey) ?? null;
 
   $: children = element ? elements.filter((e) => e.parent === element.id) : [];
-  // The Structure tab is only useful when there's containment to show — a parent
-  // ("part of") or sub-elements. Hide it for a standalone element with neither.
-  $: hasStructure = (children.length > 0 || !!element?.parent);
+  // The Structure section is only useful when there's containment to show — a
+  // parent ("part of") or sub-elements. Hidden for a subject with neither
+  // (which is also the case for an off-dataset resource tab).
+  $: hasStructure = children.length > 0 || !!element?.parent;
   // GlobalIds of all descendant leaf elements (BFS over the BOT parent links), so
   // a spatial container (storey / building / space) — which owns no geometry of
   // its own — can isolate its whole subtree in the IFC loader instead of falling
@@ -77,34 +161,54 @@
     return out;
   })();
   // All linked 3D representations of this element (glTF / CityJSON / STL /
-  // IFC …). The user can switch between them in the 3D tab; the preferred
+  // IFC …). The user can switch between them in the 3D section; the preferred
   // format is the default.
   $: modelOptions = element ? modelRefsOf(element) : [];
-  let chosenFormat = null;
-  // Reset per-element view state on an element switch.
-  let loadRequested = false;
-  let structExpanded = new Set();
-  $: if (element?.id) {
-    chosenFormat = null;
-    loadRequested = false;
-    structExpanded = new Set();
-  }
   $: modelRef = modelOptions.find((o) => o.format === chosenFormat) ?? modelOptions[0] ?? null;
   // A first-person walkthrough is offered for an IFC *container* (Site / Building
   // / Storey — it has contained elements): walking through a single leaf wall is
   // pointless, so a bare element with no substructure doesn't get the action.
   $: canWalk = children.length > 0 && modelOptions.some((o) => o.format === 'ifc');
-  // A "lite" panel (3D viewer capped) auto-loads its model in the background the
+  // A "lite" window (3D viewer capped) auto-loads its model in the background the
   // moment the user opens its 3D section — no manual "Load" button to click.
+  // The request is one-shot on purpose: another window can later take the slot
+  // back, and an automatic re-request would make the two windows fight over it
+  // forever. When that happens the section offers an explicit "load" instead.
+  let modelPending = false;
+  // Holding a slot counts as "already asked", however the slot was obtained: a
+  // window granted one at open time never went through the branch below, so
+  // without this an eviction (a third window claiming the budget) would make it
+  // silently re-request — the two evicted windows then leap-frogged in front of
+  // the one the user was reading, each remounting its viewer on the way.
+  $: if (!lite) loadRequested = true;
   $: if (openSections.has('3d') && lite && modelRef && !loadRequested) {
     loadRequested = true;
+    modelPending = true;
     dispatch('loadmodel');
+    tick().then(() => (modelPending = false));
   }
+  $: modelRevoked = lite && loadRequested && !modelPending;
+  // Passed straight to <Model3D refs={…}>: the array literal is re-derived on
+  // every reactive pass, but Model3D compares the CONTENT (lib/viewer/
+  // refsSignature.ts), so a re-render or a pointerdown no longer tears the scene
+  // down and re-frames the camera. Nothing to memoise here.
+  $: model3dRefs = modelRef
+    ? [
+        {
+          id: element.id,
+          label: element.label || '',
+          url: modelRef.url,
+          format: modelRef.format,
+          upAxis: modelRef.upAxis,
+          guids: modelRef.format === 'ifc' ? descendantGuids : undefined,
+        },
+      ]
+    : [];
 
   // ── Inline structure tree ───────────────────────────────────────────────────
-  // The Structure tab shows the element's DIRECT children expanded (n+1); each
-  // child with its own children gets a caret that expands them INLINE (n+2…)
-  // rather than opening a new window. Clicking a child's name still opens it.
+  // The Structure section shows the element's DIRECT children expanded (n+1);
+  // each child with its own children gets a caret that expands them INLINE
+  // (n+2…). Clicking a child's name opens it as a tab of THIS window.
   $: byIdMap = new Map(elements.map((e) => [e.id, e]));
   $: childIdsMap = (() => {
     const m = new Map();
@@ -135,51 +239,77 @@
     walk(element.id, 0);
     return rows;
   })();
-  function toggleStruct(id) {
-    const next = new Set(structExpanded);
-    next.has(id) ? next.delete(id) : next.add(id);
-    structExpanded = next;
+
+  // In-window navigation. Shift-click (or the tab menu) is the escape hatch that
+  // opens a subject in a window of its own instead.
+  function openSubject(e, id, label) {
+    const detail = { kind: 'element', id, label };
+    dispatch(e?.shiftKey ? 'navigate' : 'opentab', detail);
   }
 
-  async function load(iri) {
+  // The fetch is keyed on the TAB, not on the element object: a re-render (for
+  // instance the pointerdown that raises this window) must never re-issue it.
+  // The shared resourceCache does the rest — a tab you already read resolves
+  // from cache within the same task (so the table never blanks), two windows on
+  // the same subject share ONE request, and abort + the sequence token together
+  // guarantee a superseded answer can't land on the visible tab.
+  let inflightAbort = null;
+  async function load(iri, scope) {
     if (!iri) return;
-    loading = true;
     error = '';
+    inflightAbort?.abort();
+    const controller = new AbortController();
+    inflightAbort = controller;
+    const seq = ++reqSeq;
     data = null;
+    loading = true;
     try {
-      data = await browseResource(iri, { dataset_id: datasetId });
+      const res = await resourceCache.get(iri, scope, { signal: controller.signal });
+      if (seq !== reqSeq) return; // superseded by a newer tab — never overwrite
+      data = res;
     } catch (e) {
+      if (seq !== reqSeq || e?.name === 'AbortError') return;
       error = e?.message || 'failed';
     } finally {
-      loading = false;
+      if (seq === reqSeq) loading = false;
     }
   }
+  // Scope follows the TAB KIND. An element tab is by definition part of this
+  // dataset, so scoping the lookup to it is both correct and cheaper. A resource
+  // tab is an arbitrary IRI reached from a link — overwhelmingly a vocabulary
+  // term (rdf:type objects, geo:/dcat:/owl: predicates) that lives in the shared
+  // vocabulary graphs, NOT in the dataset. Forcing the dataset scope on those
+  // returned an empty answer, which is exactly the "the link does nothing"
+  // complaint; the broad accessible set is what /resource itself resolves against.
+  $: if (activeKey && element?.id && activeKey !== loadedKey) {
+    loadedKey = activeKey;
+    load(element.id, activeTab?.kind === 'resource' ? {} : { dataset_id: datasetId });
+  }
+
+  // Both halves of the browse payload are shown: `outgoing` (this subject's own
+  // statements) and `incoming` (what links here). The incoming list is capped —
+  // see the template — because the endpoint returns it unbounded.
+  const INCOMING_SHOWN = 50;
+  $: outgoingRows = data?.outgoing || [];
+  $: incomingRows = (data?.incoming || []).slice(0, INCOMING_SHOWN);
+  $: incomingMore = Math.max(0, (data?.incoming || []).length - incomingRows.length);
 
   function startDrag(e) {
-    if (full || e.target.closest('button, a')) return;
-    dragging = { x: e.clientX - pos.x, y: e.clientY - pos.y };
+    if (full || e.target.closest('button, a, [role="tab"]')) return;
+    dragging = { x: e.clientX - shownPos.x, y: e.clientY - shownPos.y };
+    dragPos = shownPos;
     window.addEventListener('pointermove', onDrag);
     window.addEventListener('pointerup', stopDrag, { once: true });
   }
   function onDrag(e) {
     if (!dragging) return;
-    pos = { x: e.clientX - dragging.x, y: e.clientY - dragging.y };
+    dragPos = { x: e.clientX - dragging.x, y: e.clientY - dragging.y };
   }
   function stopDrag() {
     dragging = null;
     window.removeEventListener('pointermove', onDrag);
+    if (dragPos) dispatch('move', { ...dragPos }); // hand the final position to the parent
   }
-  function onKeydown(e) {
-    if (e.key !== 'Escape') return;
-    // The preview overlay can be stacked on top (RdfTerm chips in the
-    // Properties tab open it) and owns Escape while visible — both the
-    // defaultPrevented mark and the store check make this robust regardless
-    // of svelte:window listener order.
-    if (e.defaultPrevented || $preview) return;
-    dispatch('close');
-  }
-
-  $: load(element?.id);
 
   // "Show on map" target: this element when it is located, else the nearest
   // located ancestor (a beam flies to its building/site anchor). Null hides
@@ -196,22 +326,27 @@
   })();
 </script>
 
-<svelte:window on:keydown={onKeydown} />
-
 {#if element}
+  <!-- `focusin` raises the window alongside the pointer path: windows render in
+       insertion order but stack by rank, so tabbing into a window that sits
+       behind another one would otherwise put focus on controls the user cannot
+       see (WCAG 2.2 SC 2.4.11). focusWindow() no-ops for the top window, so the
+       extra handler costs nothing. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="element-modal"
     class:full
-    style:transform={full ? '' : `translate(${pos.x}px, ${pos.y}px)`}
+    style:transform={full ? '' : `translate(${shownPos.x}px, ${shownPos.y}px)`}
     style:z-index={z}
     on:pointerdown|capture={() => dispatch('focus')}
+    on:focusin={() => dispatch('focus')}
     role="dialog"
+    aria-modal="false"
     tabindex="-1"
     aria-label={element.label || element.id}
   >
     <!-- Drag handle: pointer-only affordance; all controls inside stay
-         keyboard-accessible and Escape closes the panel. -->
+         keyboard-accessible and Escape closes the window. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <header on:pointerdown={startDrag}>
       <div class="head-text">
@@ -223,14 +358,35 @@
         </div>
       </div>
       <div class="actions">
-        <button on:click={() => (full = !full)} title={$i18nT('viewer.resize')} aria-label={$i18nT('viewer.resize')}>
+        <button
+          on:click={() => dispatch('minimize')}
+          title={$i18nT('viewer.minimizeWindow')}
+          aria-label={$i18nT('viewer.minimizeWindow')}
+        >
+          <Minus size={15} />
+        </button>
+        <button on:click={() => dispatch('togglefull')} title={$i18nT('viewer.resize')} aria-label={$i18nT('viewer.resize')}>
           {#if full}<Minimize2 size={15} />{:else}<Maximize2 size={15} />{/if}
         </button>
-        <button on:click={() => dispatch('close')} title={$i18nT('viewer.close')} aria-label={$i18nT('viewer.close')}>
+        <button on:click={() => dispatch('close')} title={$i18nT('viewer.closeWindow')} aria-label={$i18nT('viewer.closeWindow')}>
           <X size={15} />
         </button>
       </div>
     </header>
+
+    <!-- Tab strip — always rendered, even for a single tab: it is also the drop
+         surface a tab dragged from another window lands on. -->
+    <InspectorTabs
+      bind:this={tabsComponent}
+      {wid}
+      {tabs}
+      {activeKey}
+      {targets}
+      on:select={(e) => dispatch('tabselect', e.detail)}
+      on:close={(e) => dispatch('tabclose', e.detail)}
+      on:move={(e) => dispatch('tabmove', e.detail)}
+      on:detach={(e) => dispatch('tabdetach', e.detail)}
+    />
 
     <!-- Whole-element actions, always visible above the collapsible sections. -->
     <div class="modal-toolbar">
@@ -244,13 +400,20 @@
           <Footprints size={13} /> {$i18nT('viewer.exploreInside')}
         </button>
       {/if}
+      <!-- The deliberate "leave the viewer" escape hatch: everything else in
+           this window now stays in this window. -->
       <Link to={`/resource?iri=${encodeURIComponent(element.id)}`} class="btn btn-sm">
         {$i18nT('pages.datasetViewer.openResource')}
       </Link>
     </div>
 
     <!-- Collapsible sections — multiple can be open at once. -->
-    <div class="body sections">
+    <div
+      class="body sections"
+      id={`tabpanel-${wid}`}
+      role="tabpanel"
+      aria-labelledby={`tab-${wid}-${activeIndex}`}
+    >
       <section class="acc">
         <button
           class="acc-head"
@@ -280,21 +443,52 @@
                 {/each}
               </section>
             {/if}
-            {#if loading}
+            <!-- Keep the rows mounted while a revalidation is in flight: the old
+                 "blank then refetch" pass destroyed the very link the user was
+                 pressing, which is why in-modal links appeared dead. -->
+            {#if loading && !data}
               <p class="hint">…</p>
             {:else if error}
               <p class="hint error">{error}</p>
             {:else if data}
-              <table class="props">
-                <tbody>
-                  {#each data.outgoing || [] as row}
-                    <tr>
-                      <td class="pred" title={row.p?.value}>{shortenIRI(row.p?.value || '')}</td>
-                      <td><RdfTerm term={row.o} /></td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
+              {#if outgoingRows.length}
+                <table class="props">
+                  <tbody>
+                    {#each outgoingRows as row}
+                      <tr>
+                        <td class="pred" title={row.p?.value}>{shortenIRI(row.p?.value || '')}</td>
+                        <td><RdfTerm term={row.o} /></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+              <!-- "Linked from" — the other half of the browse payload. Without
+                   it a term whose only statements point AT it (a class, a
+                   vocabulary property) rendered as an empty table, which read
+                   as a broken link. -->
+              {#if incomingRows.length}
+                <h4 class="sub-head">{$i18nT('viewer.linkedFrom')}</h4>
+                <table class="props">
+                  <tbody>
+                    {#each incomingRows as row}
+                      <tr>
+                        <td class="pred" title={row.p?.value}>{shortenIRI(row.p?.value || '')}</td>
+                        <td><RdfTerm term={row.s} /></td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+                <!-- The endpoint does not cap `incoming`, and a hub term (a
+                     class every element is typed with) can carry thousands of
+                     them — far too many for a panel this size. -->
+                {#if incomingMore > 0}
+                  <p class="hint">{$i18nT('viewer.moreLinks', { values: { count: incomingMore } })}</p>
+                {/if}
+              {/if}
+              {#if !outgoingRows.length && !incomingRows.length}
+                <p class="hint">{$i18nT('viewer.noStatements')}</p>
+              {/if}
             {/if}
           </div>
         {/if}
@@ -317,7 +511,16 @@
               <!-- The containment context (what this is "part of") leads, so you
                    see where you are before drilling into the contained parts. -->
               {#if element.parent}
-                <button class="tree-row parent" on:click={() => dispatch('navigate', { id: element.parent })}>
+                <button
+                  class="tree-row parent"
+                  title={$i18nT('pages.datasetViewer.openInNewWindow')}
+                  on:click={(e) =>
+                    openSubject(
+                      e,
+                      element.parent,
+                      elements.find((x) => x.id === element.parent)?.label || shortenIRI(element.parent)
+                    )}
+                >
                   ↑ {$i18nT('viewer.parent')}:
                   {elements.find((e) => e.id === element.parent)?.label || shortenIRI(element.parent)}
                 </button>
@@ -326,7 +529,7 @@
                 <p class="hint">{$i18nT('viewer.noChildren')}</p>
               {:else}
                 <!-- Inline tree: the caret expands a child's own children HERE;
-                     the name opens that child in its own panel. -->
+                     the name opens that child as a tab of this window. -->
                 <ul class="tree">
                   {#each structRows as r (r.el.id)}
                     <li class="struct-row" style:--d={r.depth}>
@@ -341,7 +544,11 @@
                       {:else}
                         <span class="twist-spacer"></span>
                       {/if}
-                      <button class="struct-main" on:click={() => dispatch('navigate', { id: r.el.id })} title={r.el.id}>
+                      <button
+                        class="struct-main"
+                        on:click={(e) => openSubject(e, r.el.id, r.el.label || shortenIRI(r.el.id))}
+                        title={r.el.id}
+                      >
                         <span class="label">{r.el.label || shortenIRI(r.el.id)}</span>
                         {#if modelRefOf(r.el)}<span class="badge"><Boxes size={11} /> 3D</span>{/if}
                         {#if r.el.wkt4326}<span class="badge geo">geo</span>{/if}
@@ -370,7 +577,16 @@
           </button>
           {#if openSections.has('3d')}
             <div class="acc-content model">
-              {#if lite}
+              {#if modelRevoked}
+                <!-- The 3D budget went to another window while this one waited;
+                     asking again is a deliberate click, never automatic. -->
+                <div class="model-locked">
+                  <p class="hint center">{$i18nT('viewer.modelLimited')}</p>
+                  <button class="btn btn-sm" on:click={() => dispatch('loadmodel')}>
+                    <Boxes size={13} /> {$i18nT('viewer.load3d')}
+                  </button>
+                </div>
+              {:else if lite}
                 <!-- Capped 3D viewer: auto-load in the background (no button). -->
                 <div class="model-locked">
                   <span class="m3d-spin"></span>
@@ -390,13 +606,20 @@
                     </div>
                   {/if}
                   <Model3D
-                    refs={[{ id: element.id, label: element.label || '', url: modelRef.url, format: modelRef.format, upAxis: modelRef.upAxis, guids: modelRef.format === 'ifc' ? descendantGuids : undefined }]}
+                    refs={model3dRefs}
                     on:select={(e) => {
                       // Picking an IFC mesh selects that atom (beam, slab, …):
-                      // resolve its GlobalId to the feed element and open it.
+                      // resolve its GlobalId to the feed element and open it as
+                      // a tab here.
                       const guid = e.detail?.guid;
                       const hit = guid && elements.find((el) => el.ifc_guid === guid);
-                      if (hit && hit.id !== element.id) dispatch('navigate', { id: hit.id });
+                      if (hit && hit.id !== element.id) {
+                        dispatch('opentab', {
+                          kind: 'element',
+                          id: hit.id,
+                          label: hit.label || shortenIRI(hit.id),
+                        });
+                      }
                     }}
                     height="100%"
                   />
@@ -653,6 +876,14 @@
     white-space: nowrap;
     color: var(--muted, #64748b);
   }
+  /* "Linked from" heading between the two statement tables. */
+  .sub-head {
+    margin: 14px 0 2px;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted, #64748b);
+  }
   .tree {
     list-style: none;
     margin: 0;
@@ -699,7 +930,7 @@
     font-size: 0.72rem;
     color: var(--muted, #64748b);
   }
-  /* Inline structure tree: a caret (expand here) + a name (open in a panel),
+  /* Inline structure tree: a caret (expand here) + a name (open as a tab),
      each its own control so it's clear both are clickable. */
   .struct-row {
     display: flex;

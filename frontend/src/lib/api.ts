@@ -126,8 +126,14 @@ export async function fetchRetry429(
   return res;
 }
 
-async function request(method, path, body = null) {
+// `init.signal` is optional and defaulted, so no existing call site changes: it
+// exists so callers that can be superseded mid-flight (the dataset viewer's
+// inspector windows switch resource on every click) can cancel the request
+// instead of merely ignoring its answer. The same `opts` object is reused by the
+// 429-retry and 401-refresh retries below, so the abort applies to those too.
+async function request(method, path, body = null, init: { signal?: AbortSignal } = {}) {
   const opts: RequestInit = { method, headers: authHeaders(), credentials: 'include' };
+  if (init.signal) opts.signal = init.signal;
   if (body) opts.body = JSON.stringify(body);
   let res = await fetch(`${API_BASE}${path}`, opts);
 
@@ -570,13 +576,15 @@ export const browseTriples = (params) => {
 // scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
 // Scope lets the graph view expand a resource within the active browse scope
 // (dataset/org + version pins) instead of the broad accessible set.
-export const browseResource = (iri, opts = {}) => {
+// `init.signal` cancels an in-flight lookup — the viewer's inspector windows
+// switch resource faster than the endpoint (three SPARQL queries) can answer.
+export const browseResource = (iri, opts = {}, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams({ iri });
   const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
   for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
     if (o[k]) qs.set(k, o[k]);
   }
-  return request('GET', `/api/browse/resource?${qs.toString()}`);
+  return request('GET', `/api/browse/resource?${qs.toString()}`, null, init);
 };
 export const browseStats = () => request('GET', '/api/browse/stats');
 // Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
