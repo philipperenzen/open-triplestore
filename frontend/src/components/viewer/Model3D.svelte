@@ -11,12 +11,23 @@
   import { loadModel, defaultMaterial } from '../../lib/viewer/models';
   import { ifcGuidAt } from '../../lib/viewer/ifc';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
+  import { refsSignature, guidsSignature } from '../../lib/viewer/refsSignature';
+  import { buildHighlightOverlay, disposeHighlightOverlay } from '../../lib/viewer/highlight';
 
   /** Models to show: [{ id, label, url, format, slot?: [x, z] }]. */
   export let refs = [];
   export let height = '100%';
   /** Currently selected model id (highlighted). */
   export let selected = '';
+  /**
+   * IFC GlobalIds to light up *inside* the loaded model, without isolating them.
+   * The highlight is a copy of those triangles drawn over the original, so the
+   * element is shown in the context of the building rather than floating alone.
+   */
+  export let highlightGuids = [];
+  /** Frame the model set after a (re)load. Hosts that manage their own camera
+   *  can turn this off; a re-render never refits either way (see `sig` below). */
+  export let autoFit = true;
 
   const dispatch = createEventDispatcher();
 
@@ -59,6 +70,9 @@
     for (const [id, group] of groupsById) {
       const isSel = id === selected && groupsById.size > 1;
       group.traverse((node) => {
+        // Highlight overlays run their own ease (applyGuidHighlight) — leaving
+        // them in here would reset their target to 0 on the next selection.
+        if (node.userData.isOverlay) return;
         if (node.isMesh && node.material && 'emissive' in node.material) {
           // Set the highlight colour once; the intensity eases in the render loop
           // (no per-mesh Color allocation per call, no instant snap).
@@ -113,14 +127,16 @@
     });
   }
 
-  async function loadAll() {
+  async function loadAll(sig) {
     // Clear any previous set: the modal/preview overlay reuse one live
     // instance across `refs` changes, so stale groups must not linger. Dispose the
     // evicted groups' cloned materials so a long session doesn't leak them.
     for (const group of groupsById.values()) {
       scene.remove(group);
+      disposeHighlightOverlay(overlaysById.get(group.userData.elementId));
       disposeGroup(group);
     }
+    overlaysById = new Map();
     groupsById = new Map();
     loadedCount = 0;
     failedCount = 0;
@@ -137,7 +153,7 @@
       groupsById.set(ref.id, group);
       try {
         const model = (await loadModel(ref.url, ref.format, { upAxis: ref.upAxis, guids: ref.guids })).clone(true);
-        if (refs !== wanted) return; // a newer refs set superseded this load
+        if (sig !== lastSig) return; // a newer refs set superseded this load
         // clone(true) shares material instances with the loadModel cache -
         // clone materials per instance so highlight()/theming never mutates
         // the cache (other viewers, incl. the map layer, clone from it too).
@@ -152,9 +168,15 @@
           }
         });
         group.add(model);
+        // The overlay has to hang off the NORMALISED model, not off this slot
+        // wrapper: loadModel() scales and re-centres the model it returns, and
+        // subGeometryForGuids slices raw vertices out of the meshes underneath
+        // it. Attached a level too high, a highlight would render at raw IFC
+        // metres — tens of units next to a 1.6-unit building.
+        group.userData.model = model;
         loadedCount += 1;
       } catch {
-        if (refs !== wanted) return;
+        if (sig !== lastSig) return;
         failedCount += 1;
         const placeholder = new THREE.Mesh(
           new THREE.BoxGeometry(1, 1, 1),
@@ -165,9 +187,52 @@
       }
     });
     await Promise.allSettled(tasks);
-    if (refs !== wanted) return;
+    if (sig !== lastSig) return;
     highlight();
-    fitView(); // frame the loaded set (multi-model layouts used to spill off-screen)
+    applyGuidHighlight(); // the groups only exist now, so re-attach the overlays
+    // Frame the loaded set (multi-model layouts used to spill off-screen). This
+    // only runs on a genuine content change, never on a re-render.
+    if (autoFit) fitView();
+  }
+
+  // ── In-place sub-element highlight ──────────────────────────────────────────
+  // A copy of `highlightGuids`' triangles, added to the same group as the source
+  // meshes so it inherits the identical transform. It respects depth (see
+  // lib/viewer/highlight.ts), so the element is lit where it actually sits
+  // instead of being cut out of its building.
+  let overlaysById = new Map();
+  let lastHighlightSig = null;
+
+  function applyGuidHighlight() {
+    for (const ov of overlaysById.values()) {
+      ov.parent?.remove(ov);
+      disposeHighlightOverlay(ov);
+    }
+    overlaysById = new Map();
+    if (!highlightGuids?.length) {
+      needsRender = true;
+      return;
+    }
+    const wanted = new Set(highlightGuids);
+    for (const [id, group] of groupsById) {
+      // `group` is the slot wrapper; the model inside it carries normalise()'s
+      // scale + translation, so both the slice and the attach happen there.
+      const host = group.userData.model || group;
+      const ov = buildHighlightOverlay(host, wanted, false);
+      if (!ov) continue;
+      // The tween loop below eases every emissive toward `emisTarget`; give the
+      // overlay a target so it fades in with the same feel as a model selection.
+      ov.traverse((n) => {
+        if (!n.isMesh || !n.material) return;
+        n.material.opacity = 1;
+        n.material.transparent = false;
+        n.material.userData.emisTarget = 0.9;
+      });
+      host.add(ov);
+      overlaysById.set(id, ov);
+    }
+    emisFrames = 24;
+    needsRender = true;
   }
 
   function onClick(event) {
@@ -269,22 +334,46 @@
     // Free the cloned materials + grid; the shared cached geometry is left for the
     // model cache to own. Without this a session that opens many panels leaks GPU
     // resources until the browser drops the WebGL context (models turn black).
+    for (const ov of overlaysById.values()) disposeHighlightOverlay(ov);
+    overlaysById = new Map();
     for (const group of groupsById.values()) disposeGroup(group);
     groupsById = new Map();
     if (grid) {
       grid.geometry?.dispose?.();
       grid.material?.dispose?.();
     }
-    if (renderer) renderer.dispose();
+    if (renderer) {
+      renderer.dispose();
+      // dispose() frees three's own GPU objects but leaves the WebGL context
+      // itself alive until the browser garbage-collects the canvas. Inspector
+      // windows can now be minimised (which unmounts this component) and
+      // restored, so a session churns through viewers — and a browser only
+      // grants ~16 contexts before it starts dropping the OLDEST one, which is
+      // how a still-open model turns black. Hand the context back explicitly.
+      try {
+        renderer.forceContextLoss();
+      } catch {
+        /* WEBGL_lose_context unavailable — nothing else to do */
+      }
+    }
     renderer = null;
   });
 
   $: if (scene && selected !== undefined) highlight();
-  // Reload when the refs set changes identity (modal navigation, next preview).
-  let lastRefs = null;
-  $: if (scene && refs !== lastRefs) {
-    lastRefs = refs;
-    loadAll();
+  // Reload when the refs set changes CONTENT (modal navigation, next preview).
+  // Identity is useless here: hosts pass an inline array literal, which Svelte
+  // re-derives on every reactive pass, so an identity check turned any click in
+  // the page into a full teardown + reload + camera refit. See refsSignature.ts.
+  let lastSig = null;
+  $: sig = refsSignature(refs);
+  $: if (scene && sig !== lastSig) {
+    lastSig = sig;
+    loadAll(sig);
+  }
+  $: highlightSig = guidsSignature(highlightGuids);
+  $: if (scene && highlightSig !== lastHighlightSig) {
+    lastHighlightSig = highlightSig;
+    applyGuidHighlight();
   }
 </script>
 

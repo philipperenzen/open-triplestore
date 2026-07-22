@@ -1,7 +1,9 @@
 <script>
+  import { getContext, hasContext } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
   import { shortenIRI } from '../lib/rdf-utils.js';
   import { navigate } from '../lib/router/index.js';
+  import { OPEN_RESOURCE_CONTEXT } from '../lib/viewer/windows';
   import { isDark } from '../lib/theme.js';
   import { langToFlag } from '../lib/i18n/langFlag.js';
   import { Check, Copy, MapPin, Boxes } from 'lucide-svelte';
@@ -27,6 +29,16 @@
   export let nested = false;
 
   let copied = false;
+
+  // A host surface can take over IRI clicks: the dataset viewer's inspector
+  // window provides this so a link opens as a TAB of that window instead of a
+  // full page navigation that would destroy every open window. Read ONCE at init
+  // (getContext is init-only) and null everywhere else, so every other consumer
+  // of this component keeps the router navigation unchanged. The handler returns
+  // false to decline, in which case the default path still runs.
+  const openResourceInTab = hasContext(OPEN_RESOURCE_CONTEXT)
+    ? getContext(OPEN_RESOURCE_CONTEXT)
+    : null;
 
   // Theme-aware term colours. The light defaults are kept close to the originals;
   // the dark variants are brightened so URIs/literals/bnodes stay legible on a
@@ -124,13 +136,12 @@
     if (!navigable || !isClickable) return;
     if (e) e.stopPropagation();
     const t = term?.type;
-    if (t === 'uri' || t === 'iri') {
-      navigate(`/resource?iri=${encodeURIComponent(term.value)}${graph ? `&graph=${encodeURIComponent(graph)}` : ''}`);
-    } else if (t === 'bnode') {
-      // Blank-node identity is graph-local; carry the graph scope so the resource
-      // view can resolve it within the right graph.
-      navigate(`/resource?iri=${encodeURIComponent(`_:${term.value}`)}${graph ? `&graph=${encodeURIComponent(graph)}` : ''}`);
-    }
+    // Blank-node identity is graph-local; carry the graph scope so the resource
+    // view can resolve it within the right graph.
+    const iri = t === 'bnode' ? `_:${term.value}` : term.value;
+    if (t !== 'uri' && t !== 'iri' && t !== 'bnode') return;
+    if (openResourceInTab?.({ iri, graph })) return;
+    navigate(`/resource?iri=${encodeURIComponent(iri)}${graph ? `&graph=${encodeURIComponent(graph)}` : ''}`);
   }
 
   async function copyValue(e) {

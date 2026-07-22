@@ -4,7 +4,27 @@
 declare module '*.css';
 declare module '*.css?*';
 
-// Leaflet attaches itself to the global `window` as `L` when loaded via CDN.
+// Image assets imported for their URL. Vite resolves these at build time to
+// either a hashed `assets/…` path or an inlined `data:` URI, which is what makes
+// them correct under a sub-path deployment (OTS_BASE_PATH) — see
+// lib/viewer/leafletIcons.ts, where guessing the path at runtime is exactly the
+// bug that broke the map markers.
+declare module '*.png' {
+  const src: string;
+  export default src;
+}
+declare module '*.svg' {
+  const src: string;
+  export default src;
+}
+declare module '*.webp' {
+  const src: string;
+  export default src;
+}
+
+// Historical: Leaflet used to be CDN-loaded onto the global `window` as `L`. It
+// is a bundled npm dependency now (imported through lib/viewer/leafletIcons.ts),
+// but the optional global is kept declared because third-party embeds still set it.
 interface Window {
   L?: any;
 }
