@@ -234,7 +234,7 @@ openidconnect = { version = "4", default-features = false, features = ["reqwest"
 oauth2 = "5"
 
 # Credential encryption (AES-256-GCM for stored OAuth client secrets)
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 
 # In-memory concurrent cache (OAuth PKCE sessions)
