@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
     Layers, Shapes, Puzzle, AlertTriangle, Network, RefreshCw, Tag, Globe2, GitBranch
@@ -28,6 +28,13 @@
   export let preloadedStore: any = null;
   /** Optional version label, shown in the info header. */
   export let versionLabel: string = '';
+  /**
+   * Allow falling back to a `CONSTRUCT` over `/sparql` when no `preloadedStore` is
+   * supplied. Off by default: the model registry serves version data over its own
+   * endpoint, and those graphs are not query-visible, so the fallback is dead
+   * latency there. Callers whose graph genuinely lives in the quad store opt in.
+   */
+  export let allowSparqlFallback: boolean = false;
 
   type Tab = 'classes' | 'properties' | 'axioms' | 'shapes' | 'skos' | 'namespaces' | 'diagnostics';
   export let initialTab: Tab = 'classes';
@@ -43,7 +50,8 @@
   let filter: FilterState = emptyFilter();
 
   $: scopeGraphs = [graphIri, ...(subGraphs || [])].filter(Boolean);
-  $: view = model ? applyFilter(model, filter) : null;
+  // NOTE: `$: view = …` is declared further down, immediately after the reactive
+  // block that assigns `model`. Order matters — see the comment there.
 
   // Which preloadedStore identity `model` was built from. A store that arrives
   // (or changes) after mount must supersede any model derived from the SPARQL
@@ -54,15 +62,30 @@
   // parsed rawDataUrl store.
   let builtFrom: any = null;
 
+  const dispatch = createEventDispatcher();
+  // Reload is the owner's job: when the model comes from a preloadedStore, calling
+  // load() here would only re-extract the store we already hold (a dead control).
+  function requestReload() {
+    if (preloadedStore) dispatch('reload');
+    else load();
+  }
+
+  // Pure producer: parse a store into a schema model without touching component
+  // state, so the imperative and reactive paths below can share it verbatim.
+  function schemaFrom(s: any): { model: SchemaModel | null; error: string } {
+    try {
+      return { model: extractSchema(s), error: '' };
+    } catch (e: any) {
+      return { model: null, error: e?.message || $t('components.ontologyModelViewer.loadError') };
+    }
+  }
+
   function buildFromStore(s: any) {
     store = s;
     builtFrom = s;
-    try {
-      model = extractSchema(store);
-      error = '';
-    } catch (e: any) {
-      error = e?.message || $t('components.ontologyModelViewer.loadError');
-    }
+    const r = schemaFrom(s);
+    model = r.model;
+    error = r.error;
   }
 
   async function load() {
@@ -72,10 +95,20 @@
     try {
       if (preloadedStore) {
         buildFromStore(preloadedStore);
-      } else {
-        const loaded = await loadOntologyGraph(scopeGraphs);
-        buildFromStore(loaded.store);
+        return;
       }
+      // The SPARQL path is opt-in. Model-registry version graphs are never
+      // inserted into `dataset_graphs`, so scope_query_to_authorized excludes them
+      // for every principal (admins included) and this CONSTRUCT returns HTTP 200
+      // with zero bytes — ~0.5s of latency whose only effect was to overwrite a
+      // good preloadedStore-derived model with an empty one.
+      if (!allowSparqlFallback) return;
+      const loaded = await loadOntologyGraph(scopeGraphs);
+      // Re-check the prop after the await: if a preloadedStore landed while the
+      // CONSTRUCT was in flight, it wins. A sequence token alone is not enough —
+      // the prop path never bumps one.
+      if (preloadedStore) return;
+      buildFromStore(loaded.store);
     } catch (e: any) {
       error = e?.message || $t('components.ontologyModelViewer.loadError');
     } finally {
@@ -85,9 +118,26 @@
 
   onMount(load);
 
-  // A preloadedStore that arrives or changes after mount rebuilds the model from
-  // it, overriding the (possibly empty) SPARQL-derived model.
-  $: if (preloadedStore && preloadedStore !== builtFrom) buildFromStore(preloadedStore);
+  // A preloadedStore that arrives or changes after mount rebuilds the model from it.
+  //
+  // These MUST be plain identifier assignments in the reactive block itself, not a
+  // call to buildFromStore(). Svelte's `order_reactive_statements` pass collects the
+  // identifiers a `$:` statement assigns; when the assignment happens inside a called
+  // function it sees an empty set and does not order `$: view = …` after this block.
+  // That is the bug behind "Classes 0 / Properties 0 under a header saying 7 / 54":
+  // `view` was computed from a stale `model` and only recovered when some other
+  // dependency (e.g. a keystroke in the filter box) re-triggered it.
+  $: if (preloadedStore && preloadedStore !== builtFrom) {
+    builtFrom = preloadedStore;
+    store = preloadedStore;
+    const r = schemaFrom(preloadedStore);
+    model = r.model;
+    error = r.error;
+  }
+
+  // Declared AFTER the block above so source order matches data flow even if the
+  // compiler's dependency inference changes again.
+  $: view = model ? applyFilter(model, filter) : null;
 
   function viewResource(iri: string) {
     const qs = new URLSearchParams({ iri });
@@ -142,7 +192,7 @@
       <button class="btn btn-sm btn-ghost" on:click={viewInGraph} title={$t('components.ontologyModelViewer.visualizeTitle')}>
         <Network size={12} /> {$t('components.ontologyModelViewer.visualize')}
       </button>
-      <button class="btn btn-sm btn-ghost" on:click={load} disabled={loading} title={$t('components.ontologyModelViewer.reload')}>
+      <button class="btn btn-sm btn-ghost" on:click={requestReload} disabled={loading} title={$t('components.ontologyModelViewer.reload')}>
         <RefreshCw size={12} /> {$t('components.ontologyModelViewer.reload')}
       </button>
     </div>

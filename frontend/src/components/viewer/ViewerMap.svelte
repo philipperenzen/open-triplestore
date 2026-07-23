@@ -13,7 +13,7 @@
   import 'maplibre-gl/dist/maplibre-gl.css';
   import * as THREE from 'three';
   import { t as i18nT } from 'svelte-i18n';
-  import { Map as MapIcon, Satellite, Crosshair } from 'lucide-svelte';
+  import { Map as MapIcon, Satellite, Crosshair, Maximize } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf, modelRefsOf, cityBaseUrl, cityObjectFragment } from '../../lib/viewer/detect';
@@ -102,6 +102,11 @@
   const camera = new THREE.Camera();
   let lastProj = null; // latest map projection matrix (for raycasting)
   let fitted = false;
+  // Auto-fit bookkeeping. `userMoved` goes true on the first USER-initiated camera
+  // move so we never yank the view out from under someone. `modelsAutoFitted` makes
+  // the "include the 3D models once they finish loading" refit happen at most once.
+  let userMoved = false;
+  let modelsAutoFitted = false;
   let hoverPopup = null;
   // Persistent popup for a picked CityObject that has NO backing RDF element
   // (e.g. a 3DBAG house — geometry only). Buildings that DO map to an element
@@ -291,6 +296,8 @@
       modelsFailed += 1; // model failed to load — the vector dot remains
     } finally {
       modelsLoading -= 1;
+      // Last model in this batch just settled → include the standing 3D in view.
+      if (modelsLoading === 0) maybeAutoFitModels();
     }
   }
 
@@ -1083,6 +1090,71 @@
     }
   }
 
+  // ── Fit everything (2D features + 3D models) ────────────────────────────────
+  // The initial fit in render() runs ONCE, before any model has loaded, over the
+  // WKT features only (toMapFeature/modelAnchor both require el.wkt4326). So a
+  // self-georeferencing CityJSON/IFC model — which carries its own anchor and has
+  // no WKT dot — is never framed, and a dataset whose 3D content is *all*
+  // self-placing gets no fit at all (the camera sits at the style's default). These
+  // helpers include each loaded model's real-world footprint so "all in view" means
+  // all of it.
+  const M_PER_DEG_LAT = 111320;
+  /** A loaded model's geographic bbox: [[minLat,minLng],[maxLat,maxLng]] or null. */
+  function modelGeoBounds(entry) {
+    const a = entry?.anchorUsed;
+    if (!a || !(entry.meters > 0)) return null;
+    const [lng, lat] = a;
+    const half = entry.meters / 2;
+    const dLat = half / M_PER_DEG_LAT;
+    const dLng = half / (M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180) || M_PER_DEG_LAT);
+    return [[lat - dLat, lng - dLng], [lat + dLat, lng + dLng]];
+  }
+  /** Union of every WKT feature bound and every loaded model's footprint. */
+  function combinedBounds() {
+    const acc = [Infinity, Infinity, -Infinity, -Infinity]; // minLat,minLng,maxLat,maxLng
+    const merge = (b) => {
+      if (!b) return;
+      acc[0] = Math.min(acc[0], b[0][0]);
+      acc[1] = Math.min(acc[1], b[0][1]);
+      acc[2] = Math.max(acc[2], b[1][0]);
+      acc[3] = Math.max(acc[3], b[1][1]);
+    };
+    merge(featureBounds(elements.map(toMapFeature).filter(Boolean)));
+    for (const e of entries.values()) merge(modelGeoBounds(e));
+    if (!Number.isFinite(acc[0])) return null;
+    return [[acc[0], acc[1]], [acc[2], acc[3]]];
+  }
+  /** Frame the whole dataset — 2D geometry and standing 3D models alike. */
+  export function fitAll({ duration = 700, pitch } = {}) {
+    if (!map) return;
+    const b = combinedBounds();
+    if (!b) return;
+    // A near-global span (this demo scatters models across four continents) breaks
+    // MapLibre's ANIMATED fitBounds — the flyTo path across >180° of longitude
+    // silently no-ops and the camera stays put. Jump instantly for wide spans, and
+    // skip the tilt (you can't meaningfully pitch a whole-globe view; MapLibre
+    // clamps it anyway). Single-site datasets keep the smooth animated fit + tilt.
+    const wide = b[1][1] - b[0][1] > 90 || b[1][0] - b[0][0] > 90;
+    // fitBounds wants [[west,south],[east,north]] = [[minLng,minLat],[maxLng,maxLat]].
+    map.fitBounds([[b[0][1], b[0][0]], [b[1][1], b[1][0]]], {
+      padding: 70,
+      maxZoom: 17.5,
+      duration: wide ? 0 : duration,
+    });
+    if (pitch != null && !wide) map.easeTo({ pitch, duration: Math.max(duration, 900) });
+  }
+  // After the async model loads settle, pull the self-placing 3D into view — once,
+  // and only if the user hasn't taken the camera themselves.
+  function maybeAutoFitModels() {
+    if (userMoved || modelsAutoFitted || modelsLoading > 0) return;
+    const anyModel = [...entries.values()].some((e) => e.anchorUsed && e.meters > 0);
+    if (!anyModel) return;
+    modelsAutoFitted = true;
+    // Instant if we never did the vector fit (pure-3D dataset), gentle otherwise.
+    fitAll({ duration: fitted ? 800 : 0, pitch: elements.some((el) => modelRefOf(el)) ? 52 : undefined });
+    fitted = true;
+  }
+
   // ── Framing a target ────────────────────────────────────────────────────────
   // Selecting something must never move the camera by itself; that was the
   // "camera collapse" — every pick flew in to zoom 16.4 and slammed the pitch to
@@ -1379,6 +1451,9 @@
       scheduleBuildingSuppression();
     });
     map.on('moveend', updateWalkSuggest);
+    // A user-initiated camera move carries an originalEvent; a programmatic
+    // fitBounds/easeTo does not. Once the user has taken the wheel, stop auto-fitting.
+    map.on('movestart', (e) => { if (e.originalEvent) userMoved = true; });
     map.on('click', onClick);
     map.on('mousemove', onMouseMove);
     map.on('mouseout', () => {
@@ -1447,6 +1522,12 @@
       aria-label={$i18nT('viewer.basemapSatellite')}
       on:click={() => setBasemap('satellite')}
     ><Satellite size={14} /></button>
+    <button
+      class="fit-all-btn"
+      title={$i18nT('viewer.fitAll')}
+      aria-label={$i18nT('viewer.fitAll')}
+      on:click={() => fitAll({ duration: 700, pitch: elements.some((el) => modelRefOf(el)) ? 52 : undefined })}
+    ><Maximize size={14} /></button>
   </div>
 
   <!-- Selection chip. A depth-respecting highlight is invisible when the picked

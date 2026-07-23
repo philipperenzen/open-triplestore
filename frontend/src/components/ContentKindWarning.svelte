@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { probeContentKind } from '../lib/content-kind.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -8,26 +8,39 @@
   import { updateDatasetRole } from '../lib/api.js';
 
   /**
-   * @type {{ graphs?: string[], expected?: string, contextName?: string, datasetId?: string|null, declaredRole?: string|null, onresolved?: (detail: {role: string}) => void }}
+   * `preloadedProbe`, when supplied, is a content-kind result the parent already
+   * computed (the dataset page derives one cheaply from the browse facets via
+   * datasetContentKind). Given it, this component renders the mismatch warning
+   * without running the heavy FILTER-NOT-EXISTS scan itself.
+   * @type {{ graphs?: string[], expected?: string, contextName?: string, datasetId?: string|null, declaredRole?: string|null, preloadedProbe?: any, onresolved?: (detail: {role: string}) => void }}
    */
-  let { graphs = [], expected = 'model', contextName = '', datasetId = null, declaredRole = null, onresolved } = $props();
+  let { graphs = [], expected = 'model', contextName = '', datasetId = null, declaredRole = null, preloadedProbe = null, onresolved } = $props();
 
   let probe = $state(null);
+  // A parent-supplied probe wins over (and replaces) any local scan.
+  $effect(() => { if (preloadedProbe) probe = preloadedProbe; });
   let dismissed = $state(false);
   let showModal = $state(false);
   let converting = $state(false);
   let convertError = $state('');
 
+  // Abort the probe's SPARQL scans if we unmount mid-flight (e.g. the user
+  // navigates away) so a slow probe doesn't keep running against the server after
+  // the banner is gone.
+  let probeAbort = null;
   async function run() {
+    if (preloadedProbe) return; // parent supplied the probe — no local scan
     if (!graphs?.length) return;
+    probeAbort = new AbortController();
     try {
-      probe = await probeContentKind(graphs);
+      probe = await probeContentKind(graphs, probeAbort.signal);
     } catch {
       // probe stays null — no warning shown
     }
   }
 
   onMount(run);
+  onDestroy(() => probeAbort?.abort());
 
   function computeMismatch(p, dis, exp, role) {
     if (!p || dis) return null;

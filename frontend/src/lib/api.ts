@@ -568,9 +568,12 @@ export const browseSuggest = (
   }).toString();
   return request('GET', `/api/browse/suggest?${qs}`);
 };
-export const browseTriples = (params) => {
+// `init` carries optional fetch options — in practice `{ signal }`, so a superseded
+// page/count fetch can release its socket. Aborting does NOT stop the server-side
+// work (it is already running in a blocking task); it only frees the client.
+export const browseTriples = (params, init: RequestInit = {}) => {
   const qs = new URLSearchParams(params).toString();
-  return request('GET', `/api/browse/triples?${qs}`);
+  return request('GET', `/api/browse/triples?${qs}`, null, init);
 };
 // `opts` may be a bare graph IRI (back-compat) or an object carrying the same
 // scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
@@ -597,7 +600,8 @@ export const browseStats = () => request('GET', '/api/browse/stats');
 export const getViewerFeed = (datasetId, root = null, opts: { located?: boolean } = {}) => {
   const params = new URLSearchParams();
   if (root) params.set('root', root);
-  // 'true' (not '1') — the backend parses this as a bool; '1' is a 400.
+  // The backend parses this tolerantly (true|1|yes|on all work); 'true' is the
+  // canonical spelling we send.
   if (opts.located) params.set('located', 'true');
   const qs = params.toString() ? `?${params.toString()}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
@@ -623,9 +627,9 @@ export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.
-export const browseFacets = (params) => {
+export const browseFacets = (params, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams(params).toString();
-  return request('GET', `/api/browse/facets?${qs}`);
+  return request('GET', `/api/browse/facets?${qs}`, null, init);
 };
 
 // SPARQL
@@ -643,7 +647,7 @@ function isGraphQuery(query) {
   return /\b(CONSTRUCT|DESCRIBE)\b/i.test(stripped);
 }
 
-async function executeSparql(url, query) {
+async function executeSparql(url, query, init: RequestInit = {}) {
   const token = getAccessToken();
   const graphQ = isGraphQuery(query);
   const headers = {
@@ -653,7 +657,9 @@ async function executeSparql(url, query) {
   if (token) headers['Authorization'] = `Bearer ${token}`;
   // /sparql is rate-limited per IP; retry 429s with the server-suggested delay
   // so legitimate UI query bursts never surface "Too Many Requests" errors.
-  const res = await fetchRetry429(url, { method: 'POST', headers, body: query });
+  // `init` carries an optional `{ signal }` so a caller can abort a long probe
+  // (e.g. the content-kind scan) when it unmounts.
+  const res = await fetchRetry429(url, { method: 'POST', headers, body: query, ...init });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -667,8 +673,8 @@ async function executeSparql(url, query) {
   return res.json();
 }
 
-export const sparqlQuery = (query) =>
-  executeSparql(`${API_BASE}/sparql`, query);
+export const sparqlQuery = (query, init: RequestInit = {}) =>
+  executeSparql(`${API_BASE}/sparql`, query, init);
 
 /** Query a dataset service, optionally scoped to a version snapshot. A version
  *  of '', 'live', 'latest' or 'current' means live data. */

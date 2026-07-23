@@ -904,6 +904,7 @@
       "validate": "Valideren",
       "validateDesc": "SHACL-conformiteitscontroles uitvoeren",
       "linkedDataGraph": "Linked Data Voorbeeld",
+      "previewEmpty": "Nog geen linked data om te tonen.",
       "sampleTriples": "Voorbeeldtriples",
       "graphs": "Grafen",
       "graphIri": "Graaf-IRI",
@@ -2941,6 +2942,18 @@
       "daysAgo": "{count}d geleden",
       "addedRemoved": "toegevoegd / verwijderd"
     },
+    "datasetContentSummary": {
+      "types": "typen",
+      "properties": "eigenschappen",
+      "instances": "instanties",
+      "topTypes": "Top-typen:",
+      "kindModel": "Model",
+      "kindVocabulary": "Vocabulaire",
+      "kindShapes": "SHACL-shapes",
+      "kindEntailment": "Afleidingsregels",
+      "kindInstances": "Instantiegegevens",
+      "kindMixed": "Gemengde inhoud"
+    },
     "contentKindWarning": {
       "noStatus": "geen status",
       "convertFailed": "Converteren van datasetrol mislukt.",
@@ -3665,6 +3678,7 @@
     "basemap": "Ondergrond",
     "basemapStreets": "Kaart",
     "basemapSatellite": "Satelliet",
+    "fitAll": "Alles in beeld",
     "toScale": "op schaal",
     "geometry": "Geometrie",
     "mapUnavailable": "Kaart niet beschikbaar. Coördinaten:",
