@@ -66,7 +66,7 @@
     "swagger-ui-dist": "^5.32.6",
     "tailwindcss": "^4.3.1",
     "three": "^0.184.0",
-    "three-mesh-bvh": "^0.9.11",
+    "three-mesh-bvh": "^0.9.13",
     "uqr": "^0.1.2",
     "web-ifc": "^0.0.77",
     "wellknown": "^0.5.0"
