@@ -3142,6 +3142,211 @@ mod browse {
         );
     }
 
+    /// An `exact` chip on an http(s)/urn IRI is bound INTO the triple pattern
+    /// (`GRAPH ?g { <iri> ?p ?o . BIND(<iri> AS ?s) }`) instead of being emitted as a
+    /// trailing `FILTER(?s = <iri>)`. sparopt has no equality-into-pattern rewrite, so
+    /// the FILTER form range-scanned the whole scope for a point lookup — measured
+    /// ~1.2s vs ~0.2s on a 3.1M-triple store, paid twice per graph-view expansion.
+    ///
+    /// These cases pin the SEMANTICS, which must be identical either way.
+    mod exact_chip_binding {
+        use super::*;
+
+        fn pct(s: &str) -> String {
+            s.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        }
+
+        async fn browse(
+            state: open_triplestore::server::AppState,
+            query: &str,
+        ) -> serde_json::Value {
+            let resp = test_app(state)
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(format!("/api/browse/triples?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp.into_body()).await
+        }
+
+        /// Public dataset with three subjects under http:// IRIs (the form that
+        /// qualifies for binding) plus a literal object.
+        fn seeded() -> open_triplestore::server::AppState {
+            let state = test_state();
+            state
+                .auth_db
+                .create_user("u1", "alice", "a@t.com", "h", SystemRole::User)
+                .unwrap();
+            state
+                .auth_db
+                .create_organisation("o1", "Acme", "acme", None, None)
+                .unwrap();
+            state
+                .auth_db
+                .create_dataset(
+                    "d1",
+                    "Pub",
+                    None,
+                    OwnerType::Organisation,
+                    "o1",
+                    Visibility::Public,
+                    None,
+                )
+                .unwrap();
+            state
+                .auth_db
+                .add_dataset_graph("d1", "http://has.ex.org/g")
+                .unwrap();
+            state
+                .store
+                .update(
+                    "INSERT DATA { GRAPH <http://has.ex.org/g> { \
+                     <http://ex.org/a> <http://ex.org/keep> <http://ex.org/o1> . \
+                     <http://ex.org/a> <http://ex.org/keep> \"alpha\" . \
+                     <http://ex.org/b> <http://ex.org/keep> <http://ex.org/o1> . \
+                     <http://ex.org/c> <http://ex.org/other> \"beta\" . } }",
+                )
+                .unwrap();
+            state
+        }
+
+        #[tokio::test]
+        async fn exact_subject_chip_returns_exactly_that_subject() {
+            let f = r#"[{"field":"subject","value":"http://ex.org/a","mode":"exact"}]"#;
+            let json = browse(seeded(), &format!("filters={}", pct(f))).await;
+            let triples = json["triples"].as_array().unwrap();
+            assert_eq!(triples.len(), 2, "only <a>'s two triples: {json}");
+            for t in triples {
+                assert_eq!(t["subject"]["value"], "http://ex.org/a", "{json}");
+            }
+        }
+
+        /// The critical correctness property of the BIND: the substituted variable
+        /// must stay in scope for every other FILTER in the same group. A
+        /// `SELECT (<iri> AS ?s)` projection would NOT be, and silently returns zero
+        /// rows — the frontend routinely sends chips together with `q`.
+        #[tokio::test]
+        async fn exact_subject_chip_composes_with_free_text_q() {
+            let f = r#"[{"field":"subject","value":"http://ex.org/a","mode":"exact"}]"#;
+            // `q` matches the subject IRI itself — only reachable if ?s is bound.
+            let json = browse(seeded(), &format!("filters={}&q=ex.org%2Fa", pct(f))).await;
+            assert_eq!(
+                json["triples"].as_array().unwrap().len(),
+                2,
+                "q must see the BOUND ?s, not an unbound variable: {json}"
+            );
+
+            // And `q` still narrows within the bound subject.
+            let json2 = browse(seeded(), &format!("filters={}&q=alpha", pct(f))).await;
+            assert_eq!(
+                json2["triples"].as_array().unwrap().len(),
+                1,
+                "q must still filter the bound subject's rows: {json2}"
+            );
+        }
+
+        /// Two positive chips on one field are OR-ed. Binding either one would
+        /// silently drop the other's rows, so the field must fall back to FILTER.
+        #[tokio::test]
+        async fn two_positive_chips_on_one_field_still_or() {
+            let f = r#"[{"field":"subject","value":"http://ex.org/a","mode":"exact"},{"field":"subject","value":"http://ex.org/b","mode":"exact"}]"#;
+            let json = browse(seeded(), &format!("filters={}", pct(f))).await;
+            let triples = json["triples"].as_array().unwrap();
+            assert_eq!(triples.len(), 3, "<a>'s 2 rows OR <b>'s 1 row: {json}");
+        }
+
+        /// A negated chip on the SAME field as a bound positive chip still applies.
+        #[tokio::test]
+        async fn bound_field_still_honours_a_negated_chip() {
+            let f = r#"[{"field":"subject","value":"http://ex.org/a","mode":"exact"},{"field":"object","value":"alpha","mode":"exact","neg":true}]"#;
+            let json = browse(seeded(), &format!("filters={}", pct(f))).await;
+            let triples = json["triples"].as_array().unwrap();
+            assert_eq!(triples.len(), 1, "the literal row is excluded: {json}");
+            assert_eq!(triples[0]["object"]["value"], "http://ex.org/o1", "{json}");
+        }
+
+        /// The count query must stay consistent with the row set — it is built from
+        /// the same pattern, so a divergence here means the two drifted.
+        #[tokio::test]
+        async fn exact_chip_count_matches_row_count() {
+            let f = r#"[{"field":"object","value":"http://ex.org/o1","mode":"exact"}]"#;
+            let json = browse(seeded(), &format!("filters={}&count=true", pct(f))).await;
+            let rows = json["triples"].as_array().unwrap().len();
+            assert_eq!(rows, 2, "two subjects point at o1: {json}");
+            assert_eq!(json["total"], 2, "count must match the rows: {json}");
+        }
+
+        /// A NON-IRI object value keeps the lexical `str(?o) = "v"` comparison, which
+        /// deliberately also matches typed/language-tagged literals. Binding it as a
+        /// plain literal term would silently narrow that.
+        #[tokio::test]
+        async fn literal_object_chip_is_not_bound_into_the_pattern() {
+            let f = r#"[{"field":"object","value":"alpha","mode":"exact"}]"#;
+            let json = browse(seeded(), &format!("filters={}", pct(f))).await;
+            assert_eq!(
+                json["triples"].as_array().unwrap().len(),
+                1,
+                "the plain literal still matches: {json}"
+            );
+        }
+
+        /// ACL: binding a subject must never widen the graph scope. An anonymous
+        /// caller asking for a subject that only exists in a PRIVATE graph gets
+        /// nothing — the candidate ?g set is still the authority.
+        #[tokio::test]
+        async fn exact_chip_cannot_read_outside_the_authorized_graph_set() {
+            let state = seeded();
+            state
+                .auth_db
+                .create_dataset(
+                    "d2",
+                    "Priv",
+                    None,
+                    OwnerType::Organisation,
+                    "o1",
+                    Visibility::Private,
+                    None,
+                )
+                .unwrap();
+            state
+                .auth_db
+                .add_dataset_graph("d2", "http://secret.ex.org/g")
+                .unwrap();
+            state
+                .store
+                .update(
+                    "INSERT DATA { GRAPH <http://secret.ex.org/g> { \
+                     <http://ex.org/hidden> <http://ex.org/keep> \"classified\" . } }",
+                )
+                .unwrap();
+
+            let f = r#"[{"field":"subject","value":"http://ex.org/hidden","mode":"exact"}]"#;
+            let json = browse(state, &format!("filters={}", pct(f))).await;
+            assert_eq!(
+                json["triples"].as_array().unwrap().len(),
+                0,
+                "a bound subject must not escape the ACL graph set: {json}"
+            );
+            assert!(
+                !json.to_string().contains("classified"),
+                "private object value leaked: {json}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn browse_triples_has_more_false_when_done() {
         let state = test_state();

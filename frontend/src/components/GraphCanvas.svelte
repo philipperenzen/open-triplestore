@@ -80,17 +80,68 @@
   let internalSearch = '';
   // Search box starts minimised (just an icon) and expands on hover/focus.
   let searchExpanded = false;
-  // Autocomplete options drawn ONLY from nodes currently in the graph.
+  let searchCb;              // Combobox instance — exposes isBusy()
+  let searchHits = [];       // node ids matching the committed query, in graph order
+  let searchIdx = 0;         // which hit the camera is parked on
+  let lastAppliedQuery = null;
+  // Autocomplete options drawn ONLY from nodes currently in the graph. No pre-slice:
+  // Combobox caps AFTER filtering (via `max`), which is the correct place — slicing
+  // first hid every node past the 200th from the suggestion list entirely.
   $: nodeSuggestions = [...new Set(
     (nodes || [])
       .map((n) => n?.data?.label || n?.data?.fullIri)
       .filter(Boolean)
-  )].slice(0, 200);
+  )];
   function expandSearch() {
     searchExpanded = true;
   }
+  // Collapse only when the widget is genuinely idle. The Combobox popup is portalled
+  // to <body>, so travelling toward a suggestion fires mouseleave on the wrapper;
+  // collapsing there unmounted the input and destroyed the popup mid-reach.
   function maybeCollapseSearch() {
-    if (!internalSearch) searchExpanded = false;
+    if (internalSearch) return;
+    if (searchCb?.isBusy?.()) return;
+    searchExpanded = false;
+  }
+  function clearSearch() {
+    internalSearch = '';
+    searchHits = [];
+    searchIdx = 0;
+    lastAppliedQuery = null;
+    searchExpanded = false;
+  }
+
+  // Commit a search: resolve hits against the FULL node list, select and fly to one.
+  // Repeat submits cycle forward through the hits (shift = backwards).
+  function runSearch(detail) {
+    if (!cy) return;
+    const q = (detail?.value ?? internalSearch ?? '').trim().toLowerCase();
+    if (!q) { searchHits = []; searchIdx = 0; lastAppliedQuery = null; return; }
+
+    if (q !== lastAppliedQuery) {
+      lastAppliedQuery = q;
+      searchIdx = 0;
+      searchHits = cy.nodes()
+        .filter((n) =>
+          (n.data('label') || '').toLowerCase().includes(q) ||
+          (n.data('fullIri') || '').toLowerCase().includes(q))
+        .map((n) => n.id());
+    } else if (searchHits.length > 1) {
+      const step = detail?.shift ? -1 : 1;
+      searchIdx = (searchIdx + step + searchHits.length) % searchHits.length;
+    }
+    if (!searchHits.length) return;
+
+    const hit = cy.getElementById(searchHits[searchIdx]);
+    if (!hit || hit.length === 0) return;
+    // Select exactly ONE node: selection drives destructive bulk actions
+    // (Delete removes every selected node, `p` pins them all).
+    cy.$('node:selected').unselect();
+    hit.select();
+    cy.animate(
+      { center: { eles: hit }, zoom: Math.max(cy.zoom(), 0.8) },
+      { duration: 250 },
+    );
   }
 
   // ─── User-adjustable settings ────────────────────────────────────────────────
@@ -102,15 +153,21 @@
   };
 
   function applySettings() {
-    if (!cy) return;
+    applySettingsTo(cy ? cy.elements() : null);
+  }
+
+  // Scoped variant: re-apply size/font styles to just `eles` (an expansion's new
+  // nodes and their neighbours) instead of the whole graph.
+  function applySettingsTo(eles) {
+    if (!cy || !eles) return;
     cy.batch(() => {
-      cy.nodes().style({
+      eles.nodes().style({
         'width':     (ele) => nodeSize(ele),
         'height':    (ele) => nodeSize(ele),
         'font-size': `${settings.textSize}px`,
         'min-zoomed-font-size': Math.max(5, settings.textSize * 0.6),
       });
-      cy.edges().style({
+      eles.edges().style({
         'font-size': `${Math.max(8, settings.textSize - 1)}px`,
         'min-zoomed-font-size': Math.max(4, (settings.textSize - 1) * 0.55),
         'width': settings.edgeWidth,
@@ -347,7 +404,8 @@
       case 'breadthfirst':
         return { name: 'breadthfirst', ...base, directed: false, spacingFactor: 1.8 };
       case 'grid':
-        return { name: 'grid', ...base, rows: Math.ceil(Math.sqrt(nodes.length)) };
+        // Read the LIVE node count: the `nodes` prop is stale after incremental growth.
+        return { name: 'grid', ...base, rows: Math.ceil(Math.sqrt(cy ? cy.nodes().length : nodes.length)) };
       case 'circle':
         return { name: 'circle', ...base };
       case 'concentric':
@@ -441,8 +499,12 @@
     layoutDebounce = setTimeout(() => {
       if (!cy) return;
       const nodeCount = cy.nodes().length;
-      // Auto-switch to faster layout for large graphs
-      const effectiveLayout = nodeCount > 300 ? 'breadthfirst' : internalLayout;
+      // Auto-switch to a faster layout for large graphs. 'grid' — NOT
+      // 'breadthfirst': undirected breadthfirst puts every component's root in row 0,
+      // which on a 1,000-node browse graph produced a ~130,000px-wide single row whose
+      // fit clamped at minZoom, i.e. an unreadable horizontal sliver. Grid bounds the
+      // result in both axes.
+      const effectiveLayout = nodeCount > 300 ? 'grid' : internalLayout;
       cy.layout(getLayoutOptions(effectiveLayout)).run();
     }, 120);
   }
@@ -520,8 +582,8 @@
       const node = evt.target;
       const hood = node.closedNeighborhood();
       cy.batch(() => {
-        cy.elements().not(hood).style({ opacity: 0.2 });
-        hood.style({ opacity: 1 });
+        cy.elements().not(hood).addClass('hover-dim');
+        hood.removeClass('hover-dim');
         node.data('hovered', true);
       });
       const { x1, y1 } = node.renderedBoundingBox();
@@ -546,7 +608,8 @@
 
     cy.on('mouseout', 'node', (evt) => {
       evt.target.data('hovered', false);
-      cy.elements().style({ opacity: 1 });
+      // Clear ONLY the hover concern — an active search keeps its own dimming.
+      cy.elements().removeClass('hover-dim');
       tooltip = { ...tooltip, visible: false };
     });
 
@@ -744,6 +807,21 @@
         selector: 'edge:active',
         style: { 'overlay-opacity': 0 }
       },
+      // ── Dimming, as CLASSES rather than per-element style bypasses ──────────
+      // Hover-dim and search-dim are independent concerns that both used to write
+      // `ele.style({opacity})`. A style() call sets an element *bypass* that
+      // outranks every stylesheet rule and is only cleared by removeStyle(), so
+      // `mouseout`'s blanket `opacity: 1` permanently masked the search dimming —
+      // one stray pointer pass over the canvas killed the search for the session.
+      // Classes compose and are individually removable, so the two can coexist.
+      // Search rules are declared AFTER hover rules so they win on ties.
+      { selector: '.hover-dim',        style: { 'opacity': 0.2 } },
+      { selector: 'node.search-dim',   style: { 'opacity': 0.15 } },
+      { selector: 'edge.search-dim',   style: { 'opacity': 0.1 } },
+      {
+        selector: 'node.search-hit',
+        style: { 'opacity': 1, 'border-color': '#f59e0b', 'border-width': 4 },
+      },
     ];
   }
 
@@ -771,7 +849,9 @@
         if (!!n.data('expanded') !== !!shouldBeExpanded) n.data('expanded', shouldBeExpanded);
       });
     });
-    cy.style().update();
+    // No cy.style().update() here: cytoscape's data setter is declared
+    // `updateStyle: true`, so n.data() already dirties exactly that element. The
+    // blanket call re-applied styles across the whole graph on every expansion.
   }
 
   // Sync expandingNode prop → node data so nodeBadge/border re-renders
@@ -783,7 +863,6 @@
         if (!!n.data('expanding') !== !!shouldBeExpanding) n.data('expanding', shouldBeExpanding);
       });
     });
-    cy.style().update();
     updateSpinnerPos();
   }
 
@@ -1076,64 +1155,156 @@
     }
   }
 
-  // Compute effective highlight set: external prop takes priority, then internal search
-  $: internalSearchIds = internalSearch.trim().length > 1
+  // Highlight set. A single character is a legitimate query (numeric literals), so
+  // the gate is >= 1, not > 1.
+  $: internalSearchIds = internalSearch.trim().length >= 1
     ? new Set(nodes
         .filter(n => {
-          const q = internalSearch.toLowerCase();
+          const q = internalSearch.trim().toLowerCase();
           return (n.data.label || '').toLowerCase().includes(q) ||
                  (n.data.fullIri || '').toLowerCase().includes(q);
         })
         .map(n => n.data.id))
     : null;
-  $: effectiveHighlightIds = highlightIds ?? internalSearchIds;
+  // The box the user is actively typing in wins. Previously `highlightIds ?? …`
+  // let the host's table search shadow this one with a NON-NULL but EMPTY Set,
+  // which silently disabled the canvas search outright.
+  $: effectiveHighlightIds = internalSearch.trim() ? internalSearchIds : (highlightIds ?? null);
 
-  // Highlight matching nodes when effectiveHighlightIds changes
+  // Highlight matching nodes when effectiveHighlightIds changes.
   $: if (cy) {
     if (effectiveHighlightIds && effectiveHighlightIds.size > 0) {
       cy.batch(() => {
         cy.nodes().forEach(n => {
           const match = effectiveHighlightIds.has(n.id());
-          n.style({ opacity: match ? 1 : 0.15 });
+          n.toggleClass('search-dim', !match);
+          n.toggleClass('search-hit', match);
         });
-        cy.edges().style({ opacity: 0.1 });
+        cy.edges().addClass('search-dim');
       });
     } else {
       cy.batch(() => {
-        cy.nodes().style({ opacity: 1 });
-        cy.edges().style({ opacity: 1 });
+        cy.elements().removeClass('search-dim search-hit');
       });
     }
   }
 
-  // Fan new nodes around their existing connected neighbors so they don’t scatter randomly.
+  // Fan new nodes around their existing connected neighbours.
+  //
+  // The old version put every new node on ONE circle of radius max(110, count*24).
+  // A single expand can add up to 160 nodes, so that ring reached ~3,840px — far
+  // outside the viewport, with labels smeared around a huge arc — while nodes whose
+  // neighbours were all also new were left stacked exactly on (0,0). This lays them
+  // out on concentric shells sized from real node geometry instead, so the radius
+  // grows as O(sqrt(n)), and nudges each slot off occupied space.
   function placeIncrementalNodes(addedNodeIds) {
     const addedSet = new Set(addedNodeIds);
-    // Group incoming nodes by the anchor point = average position of their pre-existing neighbors
-    const byAnchor = new Map(); // anchorKey → { ax, ay, nodes[] }
-    cy.nodes().filter(n => addedSet.has(n.id())).forEach(newNode => {
+    const added = cy.nodes().filter(n => addedSet.has(n.id()));
+    if (added.length === 0) return;
+
+    // Spatial hash of the nodes that were already on the canvas, so new slots can
+    // step outward past anything occupied.
+    const CELL = 80;
+    const occupied = new Set();
+    const key = (x, y) => `${Math.round(x / CELL)},${Math.round(y / CELL)}`;
+    cy.nodes().not(added).forEach(n => {
+      const p = n.position();
+      occupied.add(key(p.x, p.y));
+    });
+
+    // Group by the most-connected pre-existing neighbour so siblings fan together.
+    const byAnchor = new Map(); // anchorId → { ax, ay, nodes[] }
+    const unanchored = [];
+    added.forEach(newNode => {
       const existingNeighbors = newNode.neighborhood().nodes().filter(n => !addedSet.has(n.id()));
-      if (existingNeighbors.length === 0) return; // orphan — stays at (0,0)
-      let ax = 0, ay = 0;
-      existingNeighbors.forEach(a => { ax += a.position('x'); ay += a.position('y'); });
-      ax /= existingNeighbors.length; ay /= existingNeighbors.length;
-      // Key by the most-connected existing neighbor to group siblings together
+      if (existingNeighbors.length === 0) { unanchored.push(newNode); return; }
       const primary = existingNeighbors.reduce((best, a) =>
         (a.degree(false) > best.degree(false) ? a : best), existingNeighbors[0]);
-      const key = primary.id();
-      if (!byAnchor.has(key)) byAnchor.set(key, { ax, ay, nodes: [] });
-      byAnchor.get(key).nodes.push(newNode);
+      const k = primary.id();
+      if (!byAnchor.has(k)) {
+        const p = primary.position();
+        byAnchor.set(k, { ax: p.x, ay: p.y, nodes: [] });
+      }
+      byAnchor.get(k).nodes.push(newNode);
     });
+
+    // Nodes whose only neighbours are ALSO new (nested blank-node descriptions, or
+    // offset-paginated batches) used to pile up on the origin. Attach them to the
+    // group of any added neighbour, transitively; only truly disconnected ones fall
+    // back to a shell of their own — never to (0,0).
+    for (let pass = 0; pass < 4 && unanchored.length; pass++) {
+      for (let i = unanchored.length - 1; i >= 0; i--) {
+        const n = unanchored[i];
+        const placedNeighbour = n.neighborhood().nodes().filter(m => {
+          for (const g of byAnchor.values()) if (g.nodes.some(x => x.id() === m.id())) return true;
+          return false;
+        });
+        if (placedNeighbour.length) {
+          for (const g of byAnchor.values()) {
+            if (g.nodes.some(x => x.id() === placedNeighbour[0].id())) { g.nodes.push(n); break; }
+          }
+          unanchored.splice(i, 1);
+        }
+      }
+    }
+    if (unanchored.length) {
+      const ext = cy.extent();
+      byAnchor.set('__floating__', {
+        ax: (ext.x1 + ext.x2) / 2, ay: (ext.y1 + ext.y2) / 2, nodes: unanchored,
+      });
+    }
+
     cy.batch(() => {
       for (const { ax, ay, nodes } of byAnchor.values()) {
-        const count = nodes.length;
-        const radius = Math.max(110, count * 24);
-        nodes.forEach((n, i) => {
-          const angle = (2 * Math.PI * i / count) - Math.PI / 2;
-          n.position({ x: ax + Math.cos(angle) * radius, y: ay + Math.sin(angle) * radius });
-        });
+        // Widest node in the batch drives the shell spacing. Literal nodes use
+        // `width: 'label'`, so they are far wider (~110px) than URI circles.
+        let widest = 0;
+        nodes.forEach(n => { widest = Math.max(widest, n.outerWidth() || 40); });
+        const spacing = Math.max(70, widest + 26);
+        // URI nodes on the inner shells, literals outward: literals are the widest,
+        // and packing them into the smallest circumferences maximises overlap.
+        const ordered = nodes.slice().sort((a, b) =>
+          (a.data('nodeType') === 'literal' ? 1 : 0) - (b.data('nodeType') === 'literal' ? 1 : 0));
+
+        let i = 0, shell = 0;
+        while (i < ordered.length) {
+          const r = Math.max(120, spacing * (shell + 1));
+          const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / spacing));
+          const take = Math.min(capacity, ordered.length - i);
+          for (let k = 0; k < take; k++) {
+            const angle = (2 * Math.PI * k / take) - Math.PI / 2 + (shell % 2 ? Math.PI / take : 0);
+            // Step outward while the target cell is taken (bounded, so it terminates).
+            let rr = r;
+            for (let step = 0; step < 6; step++) {
+              const x = ax + Math.cos(angle) * rr;
+              const y = ay + Math.sin(angle) * rr;
+              if (!occupied.has(key(x, y))) break;
+              rr += spacing;
+            }
+            const x = ax + Math.cos(angle) * rr;
+            const y = ay + Math.sin(angle) * rr;
+            occupied.add(key(x, y));
+            ordered[i + k].position({ x, y });
+          }
+          i += take;
+          shell++;
+        }
       }
     });
+
+    // Bring the result into view. Nothing used to fit, centre or pan after an
+    // expansion, so a large fan simply landed off-screen and looked like nothing
+    // had happened. Only move when something actually arrived outside the viewport,
+    // so a user zoomed into detail is not yanked around.
+    const ext = cy.extent();
+    const offscreen = added.filter(n => {
+      const p = n.position();
+      return p.x < ext.x1 || p.x > ext.x2 || p.y < ext.y1 || p.y > ext.y2;
+    });
+    if (offscreen.length) {
+      const focus = added.union(added.neighborhood().nodes());
+      cy.animate({ fit: { eles: focus, padding: 60 } }, { duration: 250 });
+    }
   }
 
   function updateGraph(newNodes, newEdges) {
@@ -1165,10 +1336,13 @@
     }
 
     if (toAdd.length > 0) {
-      cy.add(toAdd);
-      // Keep data.degree in sync with the live graph so nodeSize() returns correct values
-      cy.nodes().forEach(n => n.data('degree', n.degree(false)));
-      applySettings(); // re-applies sizes and font styles with updated degrees
+      const addedEles = cy.add(toAdd);
+      // Keep data.degree in sync so nodeSize() is right — but only for the nodes
+      // whose degree can have changed, batched. The old whole-graph loop fired an
+      // updateStyle + renderer notify per node, on every expansion.
+      const touched = addedEles.nodes().union(addedEles.edges().connectedNodes());
+      cy.batch(() => { touched.forEach(n => n.data('degree', n.degree(false))); });
+      applySettingsTo(touched); // re-applies sizes/fonts with updated degrees
       if (isIncremental && addedNodeIds.size > 0) {
         // Incremental expansion: place new nodes near their connected existing nodes
         placeIncrementalNodes(addedNodeIds);
@@ -1177,9 +1351,12 @@
         scheduleLayout();
       }
     } else if (removedAny) {
-      cy.nodes().forEach(n => n.data('degree', n.degree(false)));
+      // Removal cannot create overlap, so do NOT re-layout: cose-bilkent randomises
+      // from scratch (its incremental mode is off by default) and `fit: true` yanks
+      // the viewport, so collapsing one node reshuffled the entire graph. 'r' and the
+      // prettify button remain available for a deliberate reshuffle.
+      cy.batch(() => { cy.nodes().forEach(n => n.data('degree', n.degree(false))); });
       applySettings();
-      scheduleLayout();
     }
     scheduleMinimapRender();
     refreshInspector();
@@ -1307,20 +1484,21 @@
   export function highlightNodes(nodeIds) {
     if (!cy) return;
     if (!nodeIds || nodeIds.length === 0) {
-      cy.elements().style({ opacity: 1 });
+      cy.elements().removeClass('search-dim search-hit');
       return;
     }
     const idSet = new Set(nodeIds);
     cy.batch(() => {
       cy.nodes().forEach(n => {
         const match = idSet.has(n.id());
-        n.style({ opacity: match ? 1 : 0.15, 'border-width': match ? 4 : 2 });
+        n.toggleClass('search-dim', !match);
+        n.toggleClass('search-hit', match);
       });
-      cy.edges().style({ opacity: 0.15 });
+      cy.edges().addClass('search-dim');
     });
     // Pan to first match
     const first = cy.getElementById(nodeIds[0]);
-    if (first.length) cy.animate({ center: { eles: first }, zoom: Math.max(cy.zoom(), 1) }, { duration: 350 });
+    if (first.length) cy.animate({ center: { eles: first }, zoom: Math.max(cy.zoom(), 0.8) }, { duration: 350 });
   }
 
   export function pinSelected() {
@@ -1384,15 +1562,22 @@
     </button>
     {#if searchExpanded || internalSearch}
       <Combobox
+        bind:this={searchCb}
         class="graph-search-input"
-        suggestions={nodeSuggestions.map(s => s)}
+        suggestions={nodeSuggestions}
+        max={100}
         placeholder={$t('pages.graphViz.searchNodesPlaceholder')}
         bind:value={internalSearch}
+        on:submit={(e) => runSearch(e.detail)}
         on:blur={maybeCollapseSearch}
+        on:cancel={clearSearch}
         ariaLabel={$t('pages.graphViz.searchNodes')}
       />
       {#if internalSearch}
-        <button class="graph-search-clear" on:click={() => { internalSearch = ''; searchExpanded = false; }} aria-label={$t('pages.graphViz.clearSearch')}>×</button>
+        <span class="graph-search-count">
+          {searchHits.length ? `${searchIdx + 1}/${searchHits.length}` : (internalSearchIds?.size ?? 0)}
+        </span>
+        <button class="graph-search-clear" on:click={clearSearch} aria-label={$t('pages.graphViz.clearSearch')}>×</button>
       {/if}
     {/if}
   </div>
@@ -2117,19 +2302,35 @@
     flex-shrink: 0;
   }
 
-  .graph-search-input {
+  /* `class="graph-search-input"` is passed as a PROP to <Combobox>, so it lands on
+     Combobox's own <input>, which carries Combobox's scope hash — a plain scoped
+     rule here never matches it (the same trap documented in ShapeBuilder). Reach it
+     through a scoped ancestor + :global(), doubling the class so the specificity
+     (0,3,0) beats `.cb-input:focus`, and neutralise the border/radius/shadow/padding
+     the original rules never reset. */
+  .graph-search-box :global(.graph-search-input.graph-search-input) {
     flex: 1;
-    border: none;
-    background: transparent;
-    outline: none;
-    font-size: 0.75rem;
-    color: #1e293b;
-    font-family: inherit;
     min-width: 0;
+    border: none;
+    border-radius: 0;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+    font-size: 0.75rem;
+    font-family: inherit;
+    color: #1e293b;
+  }
+  .graph-search-box :global(.graph-search-input.graph-search-input::placeholder) {
+    color: #94a3b8;
   }
 
-  .graph-search-input::placeholder {
-    color: #94a3b8;
+  .graph-search-count {
+    font-size: 0.66rem;
+    font-weight: 600;
+    color: #64748b;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
   }
 
   .graph-search-clear {
@@ -2238,7 +2439,10 @@
   :global(html.dark) .layout-pill-btn:hover { background: rgba(59, 130, 246, 0.15); border-color: #3b82f6; color: #93c5fd; }
   :global(html.dark) .layout-pill-active { background: rgba(59, 130, 246, 0.2) !important; border-color: #3b82f6 !important; color: #93c5fd !important; }
   :global(html.dark) .graph-search-box { background: rgba(30, 41, 59, 0.95); border-color: rgba(255, 255, 255, 0.12); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4); }
-  :global(html.dark) .graph-search-input { color: #e2e8f0; }
+  :global(html.dark) .graph-search-box :global(.graph-search-input.graph-search-input) {
+    background: transparent; border: none; box-shadow: none; color: #e2e8f0;
+  }
+  :global(html.dark) .graph-search-count { color: #94a3b8; }
   :global(html.dark) .graph-search-icon-btn { color: #94a3b8; }
   :global(html.dark) .graph-loading-overlay { background: rgba(11, 18, 32, 0.85); }
   :global(html.dark) .graph-spinner-ring { border-color: rgba(255, 255, 255, 0.14); border-top-color: #3b82f6; }

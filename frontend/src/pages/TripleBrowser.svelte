@@ -23,6 +23,7 @@
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
   import { navigate } from '../lib/router/index.js';
   import { copyToClipboard } from '../lib/clipboard.js';
+  import { collapseClosure } from '../lib/graphCollapse';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
   import Combobox from '../components/Combobox.svelte';
@@ -34,17 +35,40 @@
   // dataset viewer feeds to ViewerMap (2D vectors + to-scale 3D models).
   let mapElements = [];
   let mapLoading = false;
+  let mapFeedFailed = false; // a feed request errored — distinct from "no geometry"
   let mapLoadedKey = ''; // scope signature the current mapElements reflect
   const scopeKey = () => scopedDatasetIds.slice().sort().join(',');
+
+  // Fetch one dataset's mappable elements. `located: true` asks the server for only
+  // the elements that actually carry a WGS84 geometry — measured on the demo store:
+  // 25 elements / 11 KB / 5 ms versus 4,128 elements / 3.0 MB / 3.9 s for the full
+  // feed, with an IDENTICAL rendered id-set (the 4,103 extras are IFC sub-element
+  // refs with no wkt4326, which ViewerMap skips anyway).
+  //
+  // PRECONDITION for using the located subset here: it leaves `?parent` unbound on
+  // some elements. That is safe only because this view passes no `selected`, holds no
+  // `bind:this` on ViewerMap and renders no structure tree — so nothing consumes the
+  // parent chain. Revisit if any of that changes.
+  async function fetchMapFeed(id) {
+    const fast = await getViewerFeed(id, null, { located: true });
+    const els = fast?.elements || [];
+    if (els.length) return els;
+    // Empty can legitimately mean "no geometry", but it also covers elements that
+    // self-place via a CityJSON/CityGML model ref without a WKT anchor — those the
+    // located branch does not match. Only such a dataset pays the full feed.
+    const full = await getViewerFeed(id);
+    return full?.elements || [];
+  }
 
   async function loadMapElements() {
     const key = scopeKey();
     if (mapLoadedKey === key && mapElements.length) return; // already current
     mapLoading = true;
+    mapFeedFailed = false;
     try {
       const feeds = await Promise.all(
         scopedDatasetIds.map((id) =>
-          getViewerFeed(id).then((d) => d?.elements || []).catch(() => [])
+          fetchMapFeed(id).catch(() => { mapFeedFailed = true; return []; })
         )
       );
       if (scopeKey() !== key) return; // scope changed mid-flight — drop stale result
@@ -272,9 +296,14 @@
         return !dirs || !dirs.has('in') || !dirs.has('out');
       });
       if (unexplored.length > 0) {
-        // Expand up to 10 nodes — their neighbors become new graph nodes
-        for (const node of unexplored.slice(0, 10)) {
-          await browseExpandUri(node.data.fullIri, 'both');
+        // Expand up to 10 nodes — their neighbours become new graph nodes. Run them
+        // 4-at-a-time rather than strictly sequentially: at ~1.3s per expansion the
+        // old serial loop took ~13s for one "load more". The bound keeps us from
+        // stampeding the server's browse concurrency limiter.
+        const batch = unexplored.slice(0, 10).map((n) => n.data.fullIri);
+        const CONCURRENCY = 4;
+        for (let i = 0; i < batch.length; i += CONCURRENCY) {
+          await Promise.all(batch.slice(i, i + CONCURRENCY).map((iri) => browseExpandUri(iri, 'both')));
         }
         // More to load if any URI nodes still have unexplored directions
         graphHasMore = graphNodes.some(n => {
@@ -389,37 +418,38 @@
   }
 
   function browseCollapseUri(uri) {
-    const expanded = browseExpandedUris.get(uri);
-    if (!expanded) return;
-    const { nodeIds, edgeIds } = expanded;
+    // Collapse the whole expansion SUBTREE, not just this one expansion. Expanding
+    // A→B then B→D and collapsing A used to delete B (owned only by A) while D
+    // survived as an edgeless floater, with a stale expansion entry keyed on the
+    // now-deleted B. See lib/graphCollapse.ts — logic lives there so it is testable
+    // without a canvas.
+    const { keysToDrop, removeNodeIds, removeEdgeIds } = collapseClosure(uri, browseExpandedUris);
+    if (!keysToDrop.size) return;
 
-    // Collect nodes/edges still owned by OTHER expansions so we don't remove them
-    const otherNodeIds = new Set();
-    const otherEdgeIds = new Set();
-    for (const [otherUri, data] of browseExpandedUris) {
-      if (otherUri === uri) continue;
-      for (const id of data.nodeIds) otherNodeIds.add(id);
-      for (const id of data.edgeIds) otherEdgeIds.add(id);
-    }
-
-    const removeNodes = new Set([...nodeIds].filter(id => !otherNodeIds.has(id)));
-    const removeEdges = new Set([...edgeIds].filter(id => !otherEdgeIds.has(id)));
-
-    graphNodes = graphNodes.filter(n => !removeNodes.has(n.data.id));
+    graphNodes = graphNodes.filter(n => !removeNodeIds.has(n.data.id));
     // Also drop edges whose endpoints no longer exist
     const keptNodeIds = new Set(graphNodes.map(n => n.data.id));
     graphEdges = graphEdges.filter(e =>
-      !removeEdges.has(e.data.id) &&
+      !removeEdgeIds.has(e.data.id) &&
       keptNodeIds.has(e.data.source) &&
       keptNodeIds.has(e.data.target)
     );
 
     const next = new Map(browseExpandedUris);
-    next.delete(uri);
-    browseExpandedUris = next;
     const nextDirs = new Map(browseExpandedDirs);
-    nextDirs.delete(uri);
+    const nextCache = new Map(browseExpansionCache);
+    for (const key of keysToDrop) {
+      next.delete(key);
+      nextDirs.delete(key);
+      // Drop cached neighbourhoods for the collapsed keys so a later re-expand
+      // refetches rather than replaying a stale snapshot.
+      for (const ck of [...nextCache.keys()]) {
+        if (ck === `bnode::${key}` || ck.startsWith(`${key}::`)) nextCache.delete(ck);
+      }
+    }
+    browseExpandedUris = next;
     browseExpandedDirs = nextDirs;
+    browseExpansionCache = nextCache;
   }
 
   function handleBrowseNodeExpand(e) {
@@ -534,11 +564,17 @@
   $: graphHighlightIds = (() => {
     const q = tableSearch.trim().toLowerCase();
     if (q.length < 2) return null;
-    return new Set(
+    const hits = new Set(
       graphNodes
         .filter((n) => (n.data.label || '').toLowerCase().includes(q) || (n.data.fullIri || '').toLowerCase().includes(q))
         .map((n) => n.data.id)
     );
+    // Return null (not an empty Set) when nothing matches: a non-null empty Set
+    // took priority over the canvas's own search box and silently disabled it.
+    // This matcher is a naive substring test while the server parses `q` as a
+    // boolean mini-language over s/p/o/g, so "no local match" is common and says
+    // nothing about the server-side result set.
+    return hits.size ? hits : null;
   })();
 
 
@@ -740,16 +776,16 @@
     scopeGraphs = scopeGraphs.includes(iri)
       ? scopeGraphs.filter(g => g !== iri)
       : [...scopeGraphs, iri];
-    refetchResults();
+    refetchResultsSoon();
   }
   function removeScopeGraph(iri) {
     scopeGraphs = scopeGraphs.filter(g => g !== iri);
-    refetchResults();
+    refetchResultsSoon();
   }
   function clearScopeGraphs() {
     if (!scopeGraphs.length) return;
     scopeGraphs = [];
-    refetchResults();
+    refetchResultsSoon();
   }
 
 
@@ -998,9 +1034,11 @@
     listDatasets().then(ds => { allDatasets = ds || []; }).catch(() => {});
     listOrganisations().then(os => { allOrgs = os || []; }).catch(() => {});
     fetchTriples();
-    // Compute the exact total up-front so users see "Page X of Y" immediately
-    // (and the Last/jump-to-page controls work). The backend caps the count.
-    fetchExactCount();
+    // Compute the exact total up-front so users see "Page X of Y" immediately (and
+    // the Last/jump-to-page controls work) — but only when that count is cheap. It
+    // is NOT capped server-side, so a filtered count is a full scan; see
+    // countIsCheap(). Otherwise the header shows the "Show total" reveal instead.
+    maybeAutoCount();
     // Facets + graph roles power the always-visible rail across every view.
     fetchFacets();
     loadGraphRoles();
@@ -1098,13 +1136,38 @@
   // ── Shared refetch paths ───────────────────────────────────────────────────
   // Results-only: table rows + count (+ graph sample). Used when the query
   // narrows but the set of available facets in scope is unchanged (q, chips).
+  // An exact COUNT is a second, full scan of the filtered set — measured at ~1.9s
+  // unfiltered and 12–14s for a vocabulary chip, and nothing cancels it server-side.
+  // Only fire it automatically when it is cheap; otherwise `total = null` makes the
+  // UI fall back to its existing "Show total" reveal, which is what that control is
+  // for. The gate is on the chip MODE, not on chip presence: exact-IRI chips count
+  // about as fast as no filter at all, while any STR()-based clause (contains,
+  // regex, negation, and `vocabulary` even in exact mode — vocab_clause still emits
+  // three STRSTARTS) is the expensive shape.
+  const countIsCheap = () =>
+    !tableSearch.trim() &&
+    activeChips.every((c) => c.mode === 'exact' && c.field !== 'vocabulary' && !c.neg);
+  function maybeAutoCount() {
+    if (countIsCheap()) fetchExactCount();
+  }
+
   function refetchResults() {
     page = 0;
     total = null;
     fetchTriples();
-    fetchExactCount();
+    maybeAutoCount();
     if (viewMode === 'graph') fetchGraphData();
   }
+  // Coalesce bursts of discrete selections (facet clicks, graph checkboxes). Each
+  // used to fire its own pair of requests with no debounce at all, so a quick
+  // drill-down stacked several full scans that nothing cancels.
+  let _resultsDebounce = null;
+  function refetchResultsSoon(delay = 250) {
+    if (_resultsDebounce) clearTimeout(_resultsDebounce);
+    _resultsDebounce = setTimeout(() => { _resultsDebounce = null; refetchResults(); }, delay);
+  }
+  onDestroy(() => clearTimeout(_resultsDebounce));
+
   // Full: also re-scan facets and graph roles. Used when scope/version changes.
   function refetchAll() {
     loadGraphRoles();
@@ -1154,7 +1217,7 @@
       for (const nc of chips) if (!merged.some((c) => chipEq(c, nc))) merged.push(nc);
       facetChips = merged;
     }
-    refetchResults();
+    refetchResultsSoon();
   }
   function handleFacetAdd(e) { toggleFacet(e.detail); }
 
@@ -1279,9 +1342,18 @@
   let _triplesSeq = 0;
   let _countSeq = 0;
   let _facetsSeq = 0;
+  // Abort superseded page/count fetches. Deliberately NOT on the shared
+  // browseTriples helper: that is also used by the export-all loop, the graph
+  // sample and node expansion, and a module-level controller would cancel a
+  // user's export download on the next filter change.
+  let _triplesAbort = null;
+  let _countAbort = null;
 
   async function fetchTriples() {
     const seq = ++_triplesSeq;
+    _triplesAbort?.abort();
+    const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    _triplesAbort = ctl;
     loading = true;
     error = '';
     try {
@@ -1291,7 +1363,7 @@
         ...buildFilterParams(),
       };
 
-      const res = await browseTriples(params);
+      const res = await browseTriples(params, ctl ? { signal: ctl.signal } : {});
       if (seq !== _triplesSeq) return; // superseded by a newer fetch
       triples = res.triples || [];
       hasMore = !!res.hasMore;
@@ -1308,6 +1380,9 @@
 
   async function fetchExactCount() {
     const seq = ++_countSeq;
+    _countAbort?.abort();
+    const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    _countAbort = ctl;
     loadingCount = true;
     try {
       const params = {
@@ -1316,7 +1391,7 @@
         count:  'true',
         ...buildFilterParams(),
       };
-      const res = await browseTriples(params);
+      const res = await browseTriples(params, ctl ? { signal: ctl.signal } : {});
       if (seq !== _countSeq) return; // superseded
       // An explicit count always resolves to a number — when the caller has no
       // graphs in scope the backend reports 0 rather than omitting the field, so
@@ -1879,17 +1954,28 @@
     <!-- ─── Map view ─────────────────────────────────────────────────────────── -->
     {:else if viewMode === 'map'}
       <div class="map-area">
-        {#if mapElements.length > 0}
+        <!-- Mount the map as soon as the tab opens, even before the feed resolves,
+             so the basemap is interactive immediately instead of showing a static
+             icon. The loading chip is an absolutely-positioned, pointer-events:none
+             overlay so it never swallows map drags. -->
+        {#if mapLoading || mapElements.length > 0}
           {#await viewerMapMod then VM}
             {#if VM}
               <svelte:component this={VM.default} elements={mapElements} height="100%"
                 on:select={(e) => e.detail.id && !e.detail.id.startsWith('row:') && !e.detail.id.startsWith('_:') && navigate(`/resource?iri=${encodeURIComponent(e.detail.id)}`)} />
             {/if}
           {/await}
-        {:else if mapLoading}
+          {#if mapLoading}
+            <div class="map-loading-chip" role="status">
+              <span class="map-loading-dot"></span>
+              {$i18nT('pages.tripleBrowser.mapLoading')}
+            </div>
+          {/if}
+        {:else if mapFeedFailed}
           <div class="graph-empty">
             <MapIcon size={52} strokeWidth={1} />
-            <p class="graph-empty-title">{$i18nT('pages.tripleBrowser.mapLoading')}</p>
+            <p class="graph-empty-title">{$i18nT('pages.tripleBrowser.noMappable')}</p>
+            <p class="graph-empty-sub">{$i18nT('pages.tripleBrowser.errorLoading')}</p>
           </div>
         {:else}
           <div class="graph-empty">
@@ -2449,6 +2535,20 @@
      fill the viewport-bounded body when the Map tab is active. */
   .map-area { height: 62vh; min-height: 360px; position: relative; overflow: hidden; display: flex; }
   .body-map .map-area { height: auto; flex: 1 1 auto; min-height: 0; }
+  /* Overlay, not a layout box: the live map stays draggable underneath. */
+  .map-loading-chip {
+    position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+    display: inline-flex; align-items: center; gap: 0.45rem;
+    background: rgba(15, 23, 42, 0.9); color: #f1f5f9; font-size: 0.76rem;
+    padding: 0.32rem 0.75rem; border-radius: 999px; pointer-events: none; z-index: 6;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  }
+  .map-loading-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #38bdf8;
+    animation: mapPulse 1s ease-in-out infinite;
+  }
+  @keyframes mapPulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .map-loading-dot { animation: none; } }
   .graph-hint {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
     background: rgba(15, 23, 42, 0.92); color: #f1f5f9; font-size: 0.78rem;
