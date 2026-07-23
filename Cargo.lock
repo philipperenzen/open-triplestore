@@ -4117,7 +4117,7 @@ dependencies = [
  "oxrdf",
  "parry3d-f64",
  "percent-encoding",
- "quick-xml 0.37.5",
+ "quick-xml 0.41.0",
  "r2d2",
  "r2d2_sqlite",
  "rand 0.8.5",
