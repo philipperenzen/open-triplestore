@@ -904,6 +904,7 @@
       "validate": "Valideren",
       "validateDesc": "SHACL-conformiteitscontroles uitvoeren",
       "linkedDataGraph": "Linked Data Voorbeeld",
+      "previewEmpty": "Nog geen linked data om te tonen.",
       "sampleTriples": "Voorbeeldtriples",
       "graphs": "Grafen",
       "graphIri": "Graaf-IRI",
@@ -2940,6 +2941,18 @@
       "hoursAgo": "{count}u geleden",
       "daysAgo": "{count}d geleden",
       "addedRemoved": "toegevoegd / verwijderd"
+    },
+    "datasetContentSummary": {
+      "types": "typen",
+      "properties": "eigenschappen",
+      "instances": "instanties",
+      "topTypes": "Top-typen:",
+      "kindModel": "Model",
+      "kindVocabulary": "Vocabulaire",
+      "kindShapes": "SHACL-shapes",
+      "kindEntailment": "Afleidingsregels",
+      "kindInstances": "Instantiegegevens",
+      "kindMixed": "Gemengde inhoud"
     },
     "contentKindWarning": {
       "noStatus": "geen status",

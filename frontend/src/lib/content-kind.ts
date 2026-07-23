@@ -9,9 +9,107 @@
 //   verdict: 'model' | 'shapes' | 'vocabulary' | 'entailment' | 'instances' | 'mixed' | 'empty'
 // }
 
-import { sparqlQuery } from './api.js';
+import { sparqlQuery, browseFacets } from './api.js';
 
 export type ContentKindVerdict = 'model' | 'shapes' | 'vocabulary' | 'entailment' | 'instances' | 'mixed' | 'empty';
+
+export interface ContentKindSignals {
+  classCount: number;
+  propertyCount: number;
+  shapeCount: number;
+  skosSchemeCount: number;
+  skosConceptCount: number;
+  entailmentCount: number;
+  instanceCount: number;
+}
+
+// Mirror the backend detector (src/kind_detector.rs): Model = classes (T-Box);
+// Vocabulary = properties/relations (R-Box) + SKOS concept schemes; ties between
+// class and vocabulary content go to Model (the class hierarchy anchors the schema).
+// Shared by the (heavy) graph probe and the (cheap) dataset-facet path so both
+// classify identically.
+export function classifyVerdict(s: ContentKindSignals): ContentKindVerdict {
+  const classSignal = s.classCount;
+  const vocabSignal = s.propertyCount + s.skosSchemeCount + s.skosConceptCount;
+  const schemaSignal = classSignal + vocabSignal + s.shapeCount;
+  const hasClasses = s.classCount > 0;
+
+  if (schemaSignal === 0 && s.instanceCount === 0 && s.entailmentCount === 0) return 'empty';
+  if (s.entailmentCount > 0 && s.entailmentCount >= Math.max(classSignal, vocabSignal, s.shapeCount, s.instanceCount)) return 'entailment';
+  if (s.shapeCount > 0 && !hasClasses && s.shapeCount >= vocabSignal * 3 && s.shapeCount >= s.instanceCount * 3) return 'shapes';
+  if (s.instanceCount > schemaSignal * 3) return 'instances';
+  if (vocabSignal > 0 && !hasClasses && s.instanceCount < vocabSignal) return 'vocabulary';
+  if (classSignal > 0 || vocabSignal > 0) {
+    if (classSignal >= vocabSignal) return s.instanceCount <= Math.max(classSignal, s.shapeCount) ? 'model' : 'mixed';
+    return s.instanceCount <= Math.max(vocabSignal, s.shapeCount) ? 'vocabulary' : 'mixed';
+  }
+  return 'mixed';
+}
+
+// ── Cheap, always-on content summary from the browse facets ──────────────────
+// The facet endpoint returns per-type `?s a ?cls` counts (COUNT(DISTINCT ?s))
+// straight from the store — index-backed for graphs, and a single concurrent
+// scan for classes/properties — so it works on a multi-million-triple dataset in
+// ~1s where the old FILTER-NOT-EXISTS probe took 30-60s (or was skipped entirely).
+// A type IRI that is itself a schema meta-type tells us the dataset carries
+// definitions (T-Box/R-Box/SHACL/SKOS/SWRL); everything else is instance data.
+const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
+const OWL = 'http://www.w3.org/2002/07/owl#';
+const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+const SH = 'http://www.w3.org/ns/shacl#';
+const SKOS = 'http://www.w3.org/2004/02/skos/core#';
+const SWRL = 'http://www.w3.org/2003/11/swrl#';
+const CLASS_META = new Set([RDFS + 'Class', OWL + 'Class']);
+const PROP_META = new Set([RDF + 'Property', OWL + 'ObjectProperty', OWL + 'DatatypeProperty', OWL + 'AnnotationProperty']);
+const SHAPE_META = new Set([SH + 'NodeShape', SH + 'PropertyShape']);
+const IGNORE_META = new Set([OWL + 'Ontology', OWL + 'NamedIndividual']); // headers, not instances
+
+export interface DatasetContentSummary extends ContentKindSignals {
+  verdict: ContentKindVerdict;
+  /** Top instance types (non-meta) by count — the "what's in here" chips. */
+  sampleTypes: { cls: string; count: number }[];
+  /** Distinct instance types (non-meta classes) present. */
+  instanceTypeCount: number;
+  /** Distinct predicates used in the dataset. */
+  predicateCount: number;
+  /** True if the facet lists hit their server cap (counts are lower bounds). */
+  capped: boolean;
+}
+
+/**
+ * A lightweight content summary for a dataset, derived from `/api/browse/facets`.
+ * Unlike `probeContentKind` this never scans the store with FILTER-NOT-EXISTS, so
+ * it is cheap enough to run on every dataset page regardless of size.
+ */
+export async function datasetContentKind(datasetId: string, signal?: AbortSignal): Promise<DatasetContentSummary> {
+  const facets = await browseFacets({ dataset_id: datasetId }, { signal });
+  const classes: { iri: string; count: number }[] = facets?.classes || [];
+  const properties: { iri: string; count: number }[] = facets?.properties || [];
+
+  let classCount = 0, propertyCount = 0, shapeCount = 0, skosSchemeCount = 0, skosConceptCount = 0, entailmentCount = 0, instanceCount = 0;
+  const instanceTypes: { cls: string; count: number }[] = [];
+  for (const c of classes) {
+    const n = Number(c.count) || 0;
+    if (CLASS_META.has(c.iri)) classCount += n;
+    else if (PROP_META.has(c.iri)) propertyCount += n;
+    else if (SHAPE_META.has(c.iri)) shapeCount += n;
+    else if (c.iri === SKOS + 'ConceptScheme') skosSchemeCount += n;
+    else if (c.iri === SKOS + 'Concept') skosConceptCount += n;
+    else if (c.iri === SWRL + 'Imp') entailmentCount += n;
+    else if (IGNORE_META.has(c.iri)) { /* ontology header / bare individual — not a distinct instance kind */ }
+    else { instanceCount += n; instanceTypes.push({ cls: c.iri, count: n }); }
+  }
+  const signals = { classCount, propertyCount, shapeCount, skosSchemeCount, skosConceptCount, entailmentCount, instanceCount };
+  return {
+    ...signals,
+    verdict: classifyVerdict(signals),
+    sampleTypes: instanceTypes.slice(0, 6), // facet is already sorted DESC by count
+    instanceTypeCount: instanceTypes.length,
+    predicateCount: properties.length,
+    // browse_facets caps classes/properties at 300; hitting it means the sums are lower bounds.
+    capped: classes.length >= 300 || properties.length >= 300,
+  };
+}
 
 function fromClauses(graphs: string[]): string {
   if (!graphs?.length) return '';
@@ -110,36 +208,7 @@ async function probeContentKindInner(graphs: string[], from: string, signal?: Ab
     }));
   }
 
-  // Mirror the backend detector (src/kind_detector.rs): Model = classes (T-Box);
-  // Vocabulary = properties/relations (R-Box) + SKOS concept schemes; ties between
-  // class and vocabulary content go to Model (the class hierarchy anchors the schema).
-  const classSignal = classCount;
-  const vocabSignal = propertyCount + skosSchemeCount + skosConceptCount;
-  const schemaSignal = classSignal + vocabSignal + shapeCount;
-  const hasClasses = classCount > 0;
-
-  let verdict: ContentKindVerdict = 'empty';
-  if (schemaSignal === 0 && instanceCount === 0 && entailmentCount === 0) {
-    verdict = 'empty';
-  } else if (entailmentCount > 0 && entailmentCount >= Math.max(classSignal, vocabSignal, shapeCount, instanceCount)) {
-    verdict = 'entailment';
-  } else if (shapeCount > 0 && !hasClasses && shapeCount >= vocabSignal * 3 && shapeCount >= instanceCount * 3) {
-    // SHACL shapes with no class hierarchy → pure shapes graph
-    verdict = 'shapes';
-  } else if (instanceCount > schemaSignal * 3) {
-    verdict = 'instances';
-  } else if (vocabSignal > 0 && !hasClasses && instanceCount < vocabSignal) {
-    // Properties/relations or SKOS with no class anchor → pure Vocabulary (R-Box)
-    verdict = 'vocabulary';
-  } else if (classSignal > 0 || vocabSignal > 0) {
-    if (classSignal >= vocabSignal) {
-      verdict = instanceCount <= Math.max(classSignal, shapeCount) ? 'model' : 'mixed';
-    } else {
-      verdict = instanceCount <= Math.max(vocabSignal, shapeCount) ? 'vocabulary' : 'mixed';
-    }
-  } else {
-    verdict = 'mixed';
-  }
+  const verdict = classifyVerdict({ classCount, propertyCount, shapeCount, skosSchemeCount, skosConceptCount, entailmentCount, instanceCount });
 
   return { classCount, propertyCount, shapeCount, entailmentCount, skosSchemeCount, skosConceptCount, instanceCount, sampleTypes, verdict };
 }

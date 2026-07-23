@@ -8,11 +8,17 @@
   import { updateDatasetRole } from '../lib/api.js';
 
   /**
-   * @type {{ graphs?: string[], expected?: string, contextName?: string, datasetId?: string|null, declaredRole?: string|null, onresolved?: (detail: {role: string}) => void }}
+   * `preloadedProbe`, when supplied, is a content-kind result the parent already
+   * computed (the dataset page derives one cheaply from the browse facets via
+   * datasetContentKind). Given it, this component renders the mismatch warning
+   * without running the heavy FILTER-NOT-EXISTS scan itself.
+   * @type {{ graphs?: string[], expected?: string, contextName?: string, datasetId?: string|null, declaredRole?: string|null, preloadedProbe?: any, onresolved?: (detail: {role: string}) => void }}
    */
-  let { graphs = [], expected = 'model', contextName = '', datasetId = null, declaredRole = null, onresolved } = $props();
+  let { graphs = [], expected = 'model', contextName = '', datasetId = null, declaredRole = null, preloadedProbe = null, onresolved } = $props();
 
   let probe = $state(null);
+  // A parent-supplied probe wins over (and replaces) any local scan.
+  $effect(() => { if (preloadedProbe) probe = preloadedProbe; });
   let dismissed = $state(false);
   let showModal = $state(false);
   let converting = $state(false);
@@ -23,6 +29,7 @@
   // the banner is gone.
   let probeAbort = null;
   async function run() {
+    if (preloadedProbe) return; // parent supplied the probe — no local scan
     if (!graphs?.length) return;
     probeAbort = new AbortController();
     try {

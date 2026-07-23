@@ -904,6 +904,7 @@
       "validate": "Validate",
       "validateDesc": "Run SHACL conformance checks",
       "linkedDataGraph": "Linked Data Preview",
+      "previewEmpty": "No linked data to preview yet.",
       "sampleTriples": "Sample Triples",
       "graphs": "Graphs",
       "graphIri": "Graph IRI",
@@ -2940,6 +2941,18 @@
       "hoursAgo": "{count}h ago",
       "daysAgo": "{count}d ago",
       "addedRemoved": "added / removed"
+    },
+    "datasetContentSummary": {
+      "types": "types",
+      "properties": "properties",
+      "instances": "instances",
+      "topTypes": "Top types:",
+      "kindModel": "Model",
+      "kindVocabulary": "Vocabulary",
+      "kindShapes": "SHACL shapes",
+      "kindEntailment": "Entailment rules",
+      "kindInstances": "Instance data",
+      "kindMixed": "Mixed content"
     },
     "contentKindWarning": {
       "noStatus": "no status",

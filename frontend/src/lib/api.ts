@@ -627,9 +627,9 @@ export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.
-export const browseFacets = (params) => {
+export const browseFacets = (params, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams(params).toString();
-  return request('GET', `/api/browse/facets?${qs}`);
+  return request('GET', `/api/browse/facets?${qs}`, null, init);
 };
 
 // SPARQL

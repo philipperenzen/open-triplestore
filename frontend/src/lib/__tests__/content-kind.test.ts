@@ -4,9 +4,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // an OWL/RDFS model, a SHACL shapes graph, a SKOS vocabulary, a SWRL entailment
 // graph, instance data, mixed, or empty. We mock the SPARQL transport and assert
 // the verdict logic — the standards-classification heuristic the UI relies on.
-vi.mock('../api.js', () => ({ sparqlQuery: vi.fn() }));
-import { sparqlQuery } from '../api.js';
-import { probeContentKind } from '../content-kind.js';
+vi.mock('../api.js', () => ({ sparqlQuery: vi.fn(), browseFacets: vi.fn() }));
+import { sparqlQuery, browseFacets } from '../api.js';
+import { probeContentKind, datasetContentKind } from '../content-kind.js';
 
 interface Counts {
   classes?: number;
@@ -135,5 +135,66 @@ describe('probeContentKind verdict classification', () => {
     // Every probe query is passed { signal } as its second arg.
     expect(calls.length).toBeGreaterThan(0);
     for (const c of calls) expect(c[1]).toMatchObject({ signal: ctrl.signal });
+  });
+});
+
+const OWL = 'http://www.w3.org/2002/07/owl#';
+const SKOS = 'http://www.w3.org/2004/02/skos/core#';
+const SH = 'http://www.w3.org/ns/shacl#';
+
+describe('datasetContentKind (facet-derived summary)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function mockFacets(classes: { iri: string; count: number }[], properties: { iri: string; count: number }[] = []) {
+    (browseFacets as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ classes, properties, graphs: [] });
+  }
+
+  it('buckets meta-types into signals and everything else into instances', async () => {
+    mockFacets(
+      [
+        { iri: 'http://ex.org/Building', count: 40 },
+        { iri: 'http://ex.org/Wall', count: 120 },
+        { iri: OWL + 'Class', count: 3 },
+        { iri: OWL + 'ObjectProperty', count: 2 },
+        { iri: SH + 'NodeShape', count: 1 },
+        { iri: SKOS + 'Concept', count: 5 },
+      ],
+      [{ iri: 'http://ex.org/p1', count: 9 }, { iri: 'http://ex.org/p2', count: 4 }],
+    );
+    const r = await datasetContentKind('ds1');
+    expect(r.classCount).toBe(3);       // owl:Class instances = class definitions
+    expect(r.propertyCount).toBe(2);    // owl:ObjectProperty instances
+    expect(r.shapeCount).toBe(1);
+    expect(r.skosConceptCount).toBe(5);
+    expect(r.instanceCount).toBe(160);  // Building + Wall (non-meta)
+    expect(r.instanceTypeCount).toBe(2);
+    expect(r.predicateCount).toBe(2);
+    expect(r.sampleTypes.map(s => s.cls)).toEqual(['http://ex.org/Building', 'http://ex.org/Wall']);
+    expect(r.verdict).toBe('instances'); // 160 instances >> tiny schema signal
+  });
+
+  it('classifies a schema-only dataset as model, not instances', async () => {
+    mockFacets([
+      { iri: OWL + 'Class', count: 8 },
+      { iri: OWL + 'ObjectProperty', count: 4 },
+    ]);
+    const r = await datasetContentKind('ds2');
+    expect(r.instanceCount).toBe(0);
+    expect(r.verdict).toBe('model');
+  });
+
+  it('flags the cap when the facet list is saturated', async () => {
+    mockFacets(Array.from({ length: 300 }, (_, i) => ({ iri: `http://ex.org/T${i}`, count: 1 })));
+    const r = await datasetContentKind('ds3');
+    expect(r.capped).toBe(true);
+  });
+
+  it('threads an AbortSignal into browseFacets', async () => {
+    mockFacets([{ iri: 'http://ex.org/A', count: 1 }]);
+    const ctrl = new AbortController();
+    await datasetContentKind('ds4', ctrl.signal);
+    const call = (browseFacets as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[0]).toEqual({ dataset_id: 'ds4' });
+    expect(call[1]).toMatchObject({ signal: ctrl.signal });
   });
 });
