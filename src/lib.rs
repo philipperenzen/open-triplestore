@@ -69,3 +69,4 @@ pub mod swrl;
 pub mod text_search;
 #[cfg(feature = "geometry3d")]
 pub mod tiles3d;
+pub mod vocab_search;

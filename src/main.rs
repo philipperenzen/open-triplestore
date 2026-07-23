@@ -47,6 +47,7 @@ mod swrl;
 mod text_search;
 #[cfg(feature = "geometry3d")]
 mod tiles3d;
+mod vocab_search;
 
 #[derive(Parser, Debug)]
 #[command(name = "open-triplestore")]
@@ -360,13 +361,21 @@ async fn main() -> anyhow::Result<()> {
         info!("Data loaded successfully");
     }
 
-    // Initialize the prefix registry (loads local cache if it exists).
+    // Initialize the prefix registry: bundled prefix.cc/LOV snapshot +
+    // persisted lookup cache.  Live prefix.cc is only contacted when the
+    // operator opts in with PREFIX_CC_FALLBACK=true.
+    let prefix_cc_fallback = std::env::var("PREFIX_CC_FALLBACK")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
     let prefix_registry = Arc::new(prefixes::PrefixRegistry::open(
         cli.data_dir.join("prefix_cache.json"),
+        prefix_cc_fallback,
     )?);
     info!(
-        "Prefix registry ready (cache at {:?})",
-        cli.data_dir.join("prefix_cache.json")
+        "Prefix registry ready ({} bundled prefixes, cache at {:?}, prefix.cc fallback {})",
+        prefix_registry.dataset_len(),
+        cli.data_dir.join("prefix_cache.json"),
+        if prefix_cc_fallback { "on" } else { "off" }
     );
 
     // Initialize JWT config — prefer explicit secret, then file-backed persistent secret,
@@ -534,8 +543,13 @@ async fn main() -> anyhow::Result<()> {
         cli.discovery,
         cli.registry_url,
         cli.registry_token,
+        cli.data_dir.clone(),
         #[cfg(feature = "text-search")]
         text_index,
+        #[cfg(feature = "vocab-search")]
+        Some(Arc::new(vocab_search::index::VocabSearchEngine::new(
+            cli.data_dir.clone(),
+        ))),
     )
     .await?;
 

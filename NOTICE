@@ -18,5 +18,23 @@ distributed under their own licenses, including but not limited to:
   - and other crates / npm packages listed in Cargo.toml, Cargo.lock,
     and frontend/package.json.
 
+Bundled datasets:
+
+  - Linked Open Vocabularies (LOV) — vocabulary catalog metadata
+    (assets/vocab/lov-catalog.json.gz), vocabulary contents extracted into
+    frontend/public/vocab/, and the optional lov.nq.gz corpus baked into the
+    Docker image. © the LOV team (Pierre-Yves Vandenbussche et al.),
+    https://lov.linkeddata.es/ — CC BY 4.0.
+  - prefix.cc — community prefix→namespace mappings, merged into
+    src/prefixes/data/prefixes-snapshot.json. Community-contributed data from
+    https://prefix.cc/ (site code released under The Unlicense).
+  - The vocabulary recommender algorithm ports the CLARIAH
+    vocabulary-recommender (Triply B.V.) — MIT.
+    https://github.com/CLARIAH/vocabulary-recommender
+  - IMBOR 2025 Vocabulaire — © Stichting CROW, bundled verbatim
+    (frontend/public/vocab/imbor.ttl) from the official IMBOR 2025 Linked
+    Data release, https://github.com/Stichting-CROW/imbor (open standard
+    for public-space asset management; see https://www.crow.nl/kennisproducten/imbor/).
+
 The licenses of bundled and dependency components are unaffected by the Commons
 Clause condition above, which applies only to Open Triplestore itself.
