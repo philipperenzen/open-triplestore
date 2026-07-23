@@ -4105,7 +4105,7 @@ dependencies = [
  "lettre",
  "libc",
  "lopdf",
- "lru 0.12.5",
+ "lru 0.16.4",
  "mp4",
  "nom 7.1.3",
  "oauth2",
