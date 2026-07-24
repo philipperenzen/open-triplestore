@@ -120,7 +120,8 @@ impl<'a> QLQueryRewriter<'a> {
     /// asserted dataset alone.
     pub fn rewrite_query(&self, sparql: &str) -> Result<String, ReasoningError> {
         let tbox = self.load_tbox()?;
-        let query = Query::parse(sparql, None)
+        let query = spargebra::SparqlParser::new()
+            .parse_query(sparql)
             .map_err(|e| ReasoningError::Query(format!("SPARQL parse error: {e}")))?;
 
         let rewritten = match query {

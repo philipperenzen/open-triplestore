@@ -51,8 +51,8 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
                 return None;
             }
             let s = match &args[0] {
-                Term::NamedNode(nn) => oxrdf::Subject::NamedNode(nn.clone()),
-                Term::BlankNode(bn) => oxrdf::Subject::BlankNode(bn.clone()),
+                Term::NamedNode(nn) => oxrdf::NamedOrBlankNode::NamedNode(nn.clone()),
+                Term::BlankNode(bn) => oxrdf::NamedOrBlankNode::BlankNode(bn.clone()),
                 _ => return None,
             };
             let p = match &args[1] {
@@ -72,8 +72,8 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
                 // RDF 1.2 / oxrdf 0.3: a triple term's subject is a NamedNode or
                 // BlankNode only (quoted-triple subjects were dropped vs rdf-star).
                 Some(match tt.subject.clone() {
-                    oxrdf::Subject::NamedNode(nn) => Term::NamedNode(nn),
-                    oxrdf::Subject::BlankNode(bn) => Term::BlankNode(bn),
+                    oxrdf::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
+                    oxrdf::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
                 })
             } else {
                 None
@@ -311,8 +311,8 @@ pub fn triple_term_to_json(tt: &oxrdf::Triple) -> serde_json::Value {
 
     // RDF 1.2 / oxrdf 0.3: a triple term's subject is a NamedNode or BlankNode only.
     let subj: Term = match tt.subject.clone() {
-        oxrdf::Subject::NamedNode(nn) => Term::NamedNode(nn),
-        oxrdf::Subject::BlankNode(bn) => Term::BlankNode(bn),
+        oxrdf::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
+        oxrdf::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
     };
 
     serde_json::json!({

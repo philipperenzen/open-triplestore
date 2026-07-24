@@ -3,7 +3,6 @@
 //! Translates SWRL rules to SPARQL INSERT WHERE queries and executes them
 //! in a fixed-point loop until no new triples are inferred.
 
-use oxigraph::sparql::Update;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
@@ -163,33 +162,30 @@ pub fn execute_rules(
         debug!("Iteration {}: {} triples before", iteration, count_before);
 
         for (name, sparql) in &sparql_rules {
-            match Update::parse(sparql, None) {
-                Ok(update) => {
-                    let opts = store.query_options();
-                    match store.store().update_opt(update, opts) {
-                        Ok(()) => {
-                            if iteration == 1 {
-                                rule_results.push(RuleResult {
-                                    rule_name: name.clone(),
-                                    sparql: sparql.clone(),
-                                    success: true,
-                                    error: None,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Rule {} failed: {}", name, e);
-                            if iteration == 1 {
-                                rule_results.push(RuleResult {
-                                    rule_name: name.clone(),
-                                    sparql: sparql.clone(),
-                                    success: false,
-                                    error: Some(e.to_string()),
-                                });
-                            }
+            match store.query_options().parse_update(sparql) {
+                Ok(update) => match update.on_store(store.store()).execute() {
+                    Ok(()) => {
+                        if iteration == 1 {
+                            rule_results.push(RuleResult {
+                                rule_name: name.clone(),
+                                sparql: sparql.clone(),
+                                success: true,
+                                error: None,
+                            });
                         }
                     }
-                }
+                    Err(e) => {
+                        warn!("Rule {} failed: {}", name, e);
+                        if iteration == 1 {
+                            rule_results.push(RuleResult {
+                                rule_name: name.clone(),
+                                sparql: sparql.clone(),
+                                success: false,
+                                error: Some(e.to_string()),
+                            });
+                        }
+                    }
+                },
                 Err(e) => {
                     if iteration == 1 {
                         rule_results.push(RuleResult {

@@ -51,7 +51,10 @@ pub fn gml_srs_name(gml: &str) -> Option<String> {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 for attr in e.attributes().flatten() {
                     if attr.key.local_name().as_ref() == b"srsName" {
-                        if let Ok(v) = attr.decode_and_unescape_value(decoder) {
+                        if let Ok(v) = attr.decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Explicit1_0,
+                            decoder,
+                        ) {
                             return Some(v.to_string());
                         }
                     }
@@ -129,7 +132,7 @@ fn srs_dimension(e: &quick_xml::events::BytesStart, decoder: quick_xml::Decoder)
     for attr in e.attributes().flatten() {
         if attr.key.local_name().as_ref() == b"srsDimension" {
             let dim = attr
-                .decode_and_unescape_value(decoder)
+                .decoded_and_normalized_value(quick_xml::XmlVersion::Explicit1_0, decoder)
                 .ok()
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(0);

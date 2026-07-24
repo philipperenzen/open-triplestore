@@ -69,7 +69,7 @@ jobs:
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
       - name: Clippy
-        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello
+        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
 
       - name: Build
         run: cargo build --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
@@ -117,7 +117,7 @@ jobs:
       # features" guarantee — the "backend" job separately exercises plugin-hello
       # wired INTO the main crate via the `plugin-hello` feature.
       - name: Clippy (plugin crates)
-        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello --all-targets
+        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello --all-targets -- -D warnings
 
       - name: Build & test (plugin crates)
         run: cargo test -p ots-plugin-api -p ots-plugin-hello --locked

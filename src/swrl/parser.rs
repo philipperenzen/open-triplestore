@@ -429,7 +429,9 @@ fn collect_attrs(
     let mut map = std::collections::HashMap::new();
     for attr in e.attributes().flatten() {
         let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-        if let Ok(val) = attr.decode_and_unescape_value(reader.decoder()) {
+        if let Ok(val) =
+            attr.decoded_and_normalized_value(quick_xml::XmlVersion::Explicit1_0, reader.decoder())
+        {
             map.insert(key, val.to_string());
         }
     }

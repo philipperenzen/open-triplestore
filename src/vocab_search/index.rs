@@ -162,7 +162,7 @@ impl VocabIndex {
             let mut d = TantivyDocument::default();
             d.add_text(fields.iri, &doc.iri);
             d.add_text(fields.local_name, &doc.local_name);
-            d.add_text(fields.local_ngram, &doc.local_name.to_lowercase());
+            d.add_text(fields.local_ngram, doc.local_name.to_lowercase());
             d.add_text(fields.prefixed, &doc.prefixed);
             d.add_text(fields.prefixed_lower, doc.prefixed.to_lowercase());
             d.add_text(fields.ttype, doc.ttype.as_str());

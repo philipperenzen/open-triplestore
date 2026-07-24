@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn bbox_filter_includes_and_excludes() {
-        let els = vec![
+        let els = [
             el("a", Some("POINT(5 51)")),  // inside
             el("b", Some("POINT(50 50)")), // outside
             el("c", None),                 // no geometry

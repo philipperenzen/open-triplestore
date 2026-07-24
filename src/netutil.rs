@@ -27,6 +27,9 @@ pub async fn bind_free_port(host: &str) -> io::Result<TcpListener> {
 /// the listener is dropped immediately, another process could in principle
 /// grab the same port before it is used — prefer [`bind_free_port`] for the
 /// real server-startup path.
+// Retained as a documented counterpart to `bind_free_port` (referenced from its
+// docs); currently only exercised by tests, so allow it to be otherwise unused.
+#[allow(dead_code)]
 pub fn find_free_port(host: &str) -> io::Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
     listener.local_addr().map(|a| a.port())
