@@ -300,6 +300,7 @@ fn get_objects(
             Term::NamedNode(n) => Some(n.as_str().to_string()),
             Term::BlankNode(b) => Some(format!("_:{}", b.as_str())),
             Term::Literal(l) => Some(l.value().to_string()),
+            #[cfg(feature = "rdf-12")]
             Term::Triple(_) => None,
         })
         .collect()
@@ -319,6 +320,7 @@ fn query_col(store: &TripleStore, sparql: &str, col: &str) -> Vec<String> {
                         Term::NamedNode(n) => n.as_str().to_string(),
                         Term::BlankNode(b) => format!("_:{}", b.as_str()),
                         Term::Literal(l) => l.value().to_string(),
+                        #[cfg(feature = "rdf-12")]
                         Term::Triple(_) => continue,
                     };
                     results.push(s);
