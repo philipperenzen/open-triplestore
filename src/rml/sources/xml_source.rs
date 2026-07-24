@@ -52,9 +52,7 @@ fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
                     let text = e
                         .decode()
                         .ok()
-                        .and_then(|s| {
-                            quick_xml::escape::unescape(&s).ok().map(|u| u.into_owned())
-                        })
+                        .and_then(|s| quick_xml::escape::unescape(&s).ok().map(|u| u.into_owned()))
                         .unwrap_or_default();
                     if !text.is_empty() {
                         row.insert(field.to_string(), text);
