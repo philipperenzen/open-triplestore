@@ -9,7 +9,8 @@
   // hosted light style and a custom midnight-with-colours dark style — plus an
   // Esri satellite toggle. Right-drag (or Ctrl-drag) tilts and rotates.
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-  import maplibregl from 'maplibre-gl';
+  // maplibre-gl 6 dropped its `default` export in favour of named exports.
+  import * as maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
   import * as THREE from 'three';
   import { t as i18nT } from 'svelte-i18n';

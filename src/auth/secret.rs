@@ -7,8 +7,8 @@
 //! standard base64.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    AeadCore, Aes256Gcm, Key,
+    aead::{Aead, Generate, KeyInit},
+    Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hkdf::Hkdf;
@@ -29,7 +29,7 @@ fn derive_key(jwt_secret: &str) -> Key<Aes256Gcm> {
 pub fn encrypt_secret(plaintext: &str, jwt_secret: &str) -> anyhow::Result<String> {
     let key = derive_key(jwt_secret);
     let cipher = Aes256Gcm::new(&key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|e| anyhow::anyhow!("AES-GCM encrypt error: {e}"))?;

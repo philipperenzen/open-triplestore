@@ -174,7 +174,11 @@ pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
             }
             Ok(Event::Text(ref e)) => {
                 // Handle literal text content
-                if let Ok(text) = e.unescape() {
+                if let Ok(text) = e.decode().map_err(|_| ()).and_then(|s| {
+                    quick_xml::escape::unescape(&s)
+                        .map(|u| u.into_owned())
+                        .map_err(|_| ())
+                }) {
                     let text = text.to_string();
                     if !text.trim().is_empty() {
                         // Update the last literal arg with its value

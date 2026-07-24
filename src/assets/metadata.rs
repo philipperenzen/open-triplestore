@@ -450,7 +450,11 @@ fn kml_bbox(bytes: &[u8]) -> Option<(f64, f64, f64, f64)> {
                 }
             }
             Ok(quick_xml::events::Event::Text(e)) if in_coords => {
-                if let Ok(txt) = e.unescape() {
+                if let Ok(txt) = e.decode().map_err(|_| ()).and_then(|s| {
+                    quick_xml::escape::unescape(&s)
+                        .map(|u| u.into_owned())
+                        .map_err(|_| ())
+                }) {
                     for tuple in txt.split_whitespace() {
                         let mut parts = tuple.split(',');
                         if let (Some(lon), Some(lat)) = (parts.next(), parts.next()) {

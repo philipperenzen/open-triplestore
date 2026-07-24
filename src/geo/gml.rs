@@ -98,7 +98,11 @@ fn tokenize(gml: &str) -> Vec<Ev> {
             }
             Ok(Event::End(_)) => out.push(Ev::End),
             Ok(Event::Text(e)) => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.decode().map_err(|_| ()).and_then(|s| {
+                    quick_xml::escape::unescape(&s)
+                        .map(|u| u.into_owned())
+                        .map_err(|_| ())
+                }) {
                     let s = t.trim();
                     if !s.is_empty() {
                         out.push(Ev::Text(s.to_string()));
