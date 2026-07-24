@@ -156,21 +156,29 @@ pub fn convert_cityjson(
             &format!("{BOT_NS}Element"),
             &mut stats,
         );
-        triple_lit(&mut out, &feature, RDFS_LABEL, id, None, None, &mut stats);
-        triple_lit(
-            &mut out,
-            &feature,
-            &format!("{BAG_NS}identificatie"),
-            id,
-            None,
-            None,
-            &mut stats,
-        );
+        // Descriptive triples (label / identificatie / attributes) are skipped
+        // in volumetric-only mode: that mode exists solely to feed the 3D-Tiles
+        // mesh pipeline, and the viewer-profile graph
+        // ([`convert_cityjson_viewer_buildings`]) already asserts the same
+        // facts about the same IRIs — duplicating them across two graphs would
+        // double every row in non-DISTINCT SPARQL results over the union.
+        if !opts.volumetric_only {
+            triple_lit(&mut out, &feature, RDFS_LABEL, id, None, None, &mut stats);
+            triple_lit(
+                &mut out,
+                &feature,
+                &format!("{BAG_NS}identificatie"),
+                id,
+                None,
+                None,
+                &mut stats,
+            );
 
-        // Attributes → bag:{key} typed literals.
-        if let Some(attrs) = obj.get("attributes").and_then(Value::as_object) {
-            for (k, v) in attrs {
-                emit_attribute(&mut out, &feature, k, v, &mut stats);
+            // Attributes → bag:{key} typed literals.
+            if let Some(attrs) = obj.get("attributes").and_then(Value::as_object) {
+                for (k, v) in attrs {
+                    emit_attribute(&mut out, &feature, k, v, &mut stats);
+                }
             }
         }
 
@@ -317,6 +325,431 @@ pub fn convert_cityjson(
     }
 
     Ok((out, stats))
+}
+
+// ─── Viewer-profile converter (per-building linked data) ─────────────────────
+
+/// Options for [`convert_cityjson_viewer_buildings`].
+pub struct CityJsonViewerOptions {
+    /// IRI prefix for minted resources; feature IRIs become `{inst_base}bag/{id}`
+    /// — the SAME IRIs the WKT-Z lift mints, so the two graphs describe one
+    /// resource (geometry solids in the tiles graph, viewer facts here).
+    pub inst_base: String,
+    /// URL of the shared CityJSON file the client renders (site-relative or
+    /// absolute). The zone references it whole; each building references
+    /// `{file_url}#{objectId}` so a pick resolves to its own element.
+    pub file_url: String,
+    /// Label / comment for the zone element that groups the buildings.
+    pub zone_label: String,
+    pub zone_comment: String,
+    /// License IRI, attribution string and source IRI for the zone (PROV/DCT).
+    pub license: Option<String>,
+    pub attribution: Option<String>,
+    pub source: Option<String>,
+}
+
+/// Convert a CityJSON document into the **viewer-feed layer**: one `bot:Zone`
+/// holding a whole-file `fog:asCityjson` reference (the client renders the block
+/// once), plus one element per root `Building` CityObject carrying its real
+/// attributes, a WGS84 footprint polygon for the 2D map, a `#objectId` fragment
+/// reference for per-building picking, and `owl:sameAs` links into the national
+/// BAG registry (for `NL.IMBAG.Pand.*` identifiers).
+///
+/// Complements [`convert_cityjson`] (which externalises the full geometry): this
+/// profile deliberately emits NO volumetric WKT so a feed-visible graph never
+/// doubles the client-side CityJSON render.
+pub fn convert_cityjson_viewer_buildings(
+    doc: &Value,
+    opts: &CityJsonViewerOptions,
+) -> Result<(String, CityJsonStats), String> {
+    use crate::geo::crs::{transform_xy, Crs};
+    const OWL_SAMEAS: &str = "http://www.w3.org/2002/07/owl#sameAs";
+    const RDFS_SEEALSO: &str = "http://www.w3.org/2000/01/rdf-schema#seeAlso";
+    const RDFS_COMMENT: &str = "http://www.w3.org/2000/01/rdf-schema#comment";
+    const OMG_NS: &str = "https://w3id.org/omg#";
+    const FOG_AS_CITYJSON: &str = "https://w3id.org/fog#asCityjson";
+    const BAG_PAND_LD: &str = "https://bag.basisregistraties.overheid.nl/bag/id/pand/";
+    const BAG_API_ITEM: &str = "https://api.3dbag.nl/collections/pand/items/";
+
+    if doc.get("type").and_then(Value::as_str) != Some("CityJSON") {
+        return Err("not a CityJSON document".to_string());
+    }
+    let (scale, translate) = transform_of(doc);
+    let vertices: Vec<[f64; 3]> = doc
+        .get("vertices")
+        .and_then(Value::as_array)
+        .map(|vs| {
+            vs.iter()
+                .map(|v| {
+                    let a = v.as_array();
+                    let g = |i: usize| {
+                        a.and_then(|x| x.get(i))
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0)
+                    };
+                    [
+                        g(0) * scale[0] + translate[0],
+                        g(1) * scale[1] + translate[1],
+                        g(2) * scale[2] + translate[2],
+                    ]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let crs_uri = doc
+        .get("metadata")
+        .and_then(|m| m.get("referenceSystem"))
+        .and_then(Value::as_str)
+        .map(normalise_crs_uri);
+    // Source planar CRS for footprint reprojection; CRS84 (no-op) when absent.
+    let source_crs = crs_uri
+        .as_deref()
+        .and_then(Crs::from_uri)
+        .unwrap_or(Crs::Wgs84);
+    let to_lonlat = |x: f64, y: f64| transform_xy(source_crs, Crs::Wgs84, x, y);
+
+    let objects = doc
+        .get("CityObjects")
+        .and_then(Value::as_object)
+        .ok_or("CityJSON has no CityObjects")?;
+
+    let inst = opts.inst_base.trim_end_matches('/');
+    let zone = format!("{inst}/bag/zone");
+    let mut out = String::new();
+    let mut stats = CityJsonStats {
+        crs: crs_uri.clone(),
+        ..Default::default()
+    };
+
+    // ── The zone: one whole-file render + provenance/attribution. ──
+    triple_iri(
+        &mut out,
+        &zone,
+        RDF_TYPE,
+        &format!("{BOT_NS}Zone"),
+        &mut stats,
+    );
+    triple_iri(
+        &mut out,
+        &zone,
+        RDF_TYPE,
+        &format!("{GEO_NS}Feature"),
+        &mut stats,
+    );
+    triple_lit(
+        &mut out,
+        &zone,
+        RDFS_LABEL,
+        &opts.zone_label,
+        None,
+        Some("en"),
+        &mut stats,
+    );
+    triple_lit(
+        &mut out,
+        &zone,
+        RDFS_COMMENT,
+        &opts.zone_comment,
+        None,
+        Some("en"),
+        &mut stats,
+    );
+    if let Some(l) = &opts.license {
+        triple_iri(&mut out, &zone, &format!("{DCT_NS}license"), l, &mut stats);
+    }
+    if let Some(a) = &opts.attribution {
+        triple_lit(
+            &mut out,
+            &zone,
+            &format!("{DCT_NS}rightsHolder"),
+            a,
+            None,
+            None,
+            &mut stats,
+        );
+    }
+    if let Some(s) = &opts.source {
+        triple_iri(&mut out, &zone, &format!("{DCT_NS}source"), s, &mut stats);
+    }
+    let zone_model = format!("{zone}/model");
+    triple_iri(
+        &mut out,
+        &zone,
+        &format!("{OMG_NS}hasGeometry"),
+        &zone_model,
+        &mut stats,
+    );
+    triple_iri(
+        &mut out,
+        &zone_model,
+        RDF_TYPE,
+        &format!("{OMG_NS}Geometry"),
+        &mut stats,
+    );
+    triple_lit(
+        &mut out,
+        &zone_model,
+        FOG_AS_CITYJSON,
+        &opts.file_url,
+        Some(&format!("{XSD}anyURI")),
+        None,
+        &mut stats,
+    );
+    // Zone map anchor: centroid of every vertex, reprojected to lon/lat.
+    if !vertices.is_empty() {
+        let (sx, sy) = vertices
+            .iter()
+            .fold((0.0, 0.0), |(ax, ay), v| (ax + v[0], ay + v[1]));
+        let n = vertices.len() as f64;
+        if let Some((lon, lat)) = to_lonlat(sx / n, sy / n) {
+            let gnode = format!("{zone}/anchor");
+            triple_iri(
+                &mut out,
+                &zone,
+                &format!("{GEO_NS}hasGeometry"),
+                &gnode,
+                &mut stats,
+            );
+            triple_iri(
+                &mut out,
+                &gnode,
+                RDF_TYPE,
+                &format!("{GEO_NS}Geometry"),
+                &mut stats,
+            );
+            triple_lit(
+                &mut out,
+                &gnode,
+                &format!("{GEO_NS}asWKT"),
+                &format!("POINT({} {})", fmt5(lon), fmt5(lat)),
+                Some(WKT_LITERAL),
+                None,
+                &mut stats,
+            );
+        }
+    }
+
+    // ── One element per root Building. ──
+    for (id, obj) in objects {
+        if obj.get("type").and_then(Value::as_str) != Some("Building") {
+            continue;
+        }
+        stats.objects += 1;
+        let feature = format!("{inst}/bag/{}", iri_safe(id));
+        triple_iri(
+            &mut out,
+            &feature,
+            RDF_TYPE,
+            &format!("{BAG_NS}Building"),
+            &mut stats,
+        );
+        triple_iri(
+            &mut out,
+            &feature,
+            RDF_TYPE,
+            &format!("{BOT_NS}Building"),
+            &mut stats,
+        );
+        triple_iri(
+            &mut out,
+            &feature,
+            RDF_TYPE,
+            &format!("{GEO_NS}Feature"),
+            &mut stats,
+        );
+        triple_iri(
+            &mut out,
+            &zone,
+            &format!("{BOT_NS}containsElement"),
+            &feature,
+            &mut stats,
+        );
+
+        let attrs = obj.get("attributes").and_then(Value::as_object);
+        let year = attrs
+            .and_then(|a| a.get("oorspronkelijkbouwjaar"))
+            .and_then(Value::as_i64);
+        // "NL.IMBAG.Pand.0268100000007417" → registry digits "0268100000007417".
+        let digits = id
+            .strip_prefix("NL.IMBAG.Pand.")
+            .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()));
+        let label = match (digits, year) {
+            (Some(d), Some(y)) => format!("Pand {d} ({y})"),
+            (Some(d), None) => format!("Pand {d}"),
+            (None, Some(y)) => format!("{id} ({y})"),
+            (None, None) => id.clone(),
+        };
+        triple_lit(
+            &mut out, &feature, RDFS_LABEL, &label, None, None, &mut stats,
+        );
+        triple_lit(
+            &mut out,
+            &feature,
+            &format!("{BAG_NS}identificatie"),
+            id,
+            None,
+            None,
+            &mut stats,
+        );
+        if let Some(attrs) = attrs {
+            for (k, v) in attrs {
+                if k != "identificatie" {
+                    emit_attribute(&mut out, &feature, k, v, &mut stats);
+                }
+            }
+        }
+        if let Some(d) = digits {
+            // The official, dereferenceable government registry URI (303 → doc).
+            triple_iri(
+                &mut out,
+                &feature,
+                OWL_SAMEAS,
+                &format!("{BAG_PAND_LD}{d}"),
+                &mut stats,
+            );
+            triple_iri(
+                &mut out,
+                &feature,
+                RDFS_SEEALSO,
+                &format!("{BAG_API_ITEM}{}", iri_safe(id)),
+                &mut stats,
+            );
+        }
+
+        // Per-building model reference: the shared file + `#objectId` fragment.
+        let model = format!("{feature}/model");
+        triple_iri(
+            &mut out,
+            &feature,
+            &format!("{OMG_NS}hasGeometry"),
+            &model,
+            &mut stats,
+        );
+        triple_iri(
+            &mut out,
+            &model,
+            RDF_TYPE,
+            &format!("{OMG_NS}Geometry"),
+            &mut stats,
+        );
+        triple_lit(
+            &mut out,
+            &model,
+            FOG_AS_CITYJSON,
+            &format!("{}#{}", opts.file_url, id),
+            Some(&format!("{XSD}anyURI")),
+            None,
+            &mut stats,
+        );
+
+        // 2D footprint: the largest flat face over the building and its parts
+        // (3DBAG puts the LoD0 footprint on the Building object itself),
+        // reprojected to a CRS84 lon/lat POLYGON for the map's Areas layer.
+        let mut rings: Vec<Vec<usize>> = Vec::new();
+        let mut collect_obj = |o: &Value| {
+            for geom in o
+                .get("geometry")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                for face in collect_surfaces(geom.get("boundaries").unwrap_or(&Value::Null)) {
+                    if let Some(outer) = face.into_iter().next() {
+                        rings.push(outer);
+                    }
+                }
+            }
+        };
+        collect_obj(obj);
+        for child in obj
+            .get("children")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if let Some(c) = objects.get(child) {
+                collect_obj(c);
+            }
+        }
+        let footprint = rings
+            .iter()
+            .filter(|r| r.len() >= 3)
+            .max_by(|a, b| {
+                let area = |r: &Vec<usize>| ring_area_xy(r, &vertices);
+                area(a)
+                    .partial_cmp(&area(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .and_then(|ring| {
+                let mut coords: Vec<String> = ring
+                    .iter()
+                    .filter_map(|&i| vertices.get(i))
+                    .filter_map(|v| to_lonlat(v[0], v[1]))
+                    .map(|(lon, lat)| format!("{} {}", fmt5(lon), fmt5(lat)))
+                    .collect();
+                if coords.len() < 3 {
+                    return None;
+                }
+                if coords.first() != coords.last() {
+                    coords.push(coords[0].clone());
+                }
+                Some(format!("POLYGON(({}))", coords.join(",")))
+            });
+        if let Some(wkt) = footprint {
+            let gnode = format!("{feature}/footprint");
+            triple_iri(
+                &mut out,
+                &feature,
+                &format!("{GEO_NS}hasGeometry"),
+                &gnode,
+                &mut stats,
+            );
+            triple_iri(
+                &mut out,
+                &gnode,
+                RDF_TYPE,
+                &format!("{GEO_NS}Geometry"),
+                &mut stats,
+            );
+            triple_lit(
+                &mut out,
+                &gnode,
+                &format!("{GEO_NS}asWKT"),
+                &wkt,
+                Some(WKT_LITERAL),
+                None,
+                &mut stats,
+            );
+            stats.geometries += 1;
+        }
+    }
+    Ok((out, stats))
+}
+
+/// Planar (XY) shoelace area of a vertex-index ring — picks the footprint face.
+fn ring_area_xy(ring: &[usize], vertices: &[[f64; 3]]) -> f64 {
+    let pts: Vec<&[f64; 3]> = ring.iter().filter_map(|&i| vertices.get(i)).collect();
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let mut a = 0.0;
+    for i in 0..pts.len() {
+        let j = (i + 1) % pts.len();
+        a += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+    }
+    (a / 2.0).abs()
+}
+
+/// Lon/lat formatting: 1e-5° ≈ 1 m — plenty for map footprints, keeps N-Triples lean.
+fn fmt5(v: f64) -> String {
+    let s = format!("{v:.5}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 // ─── Geometry flattening + WKT ────────────────────────────────────────────────
@@ -985,6 +1418,102 @@ mod tests {
         // Without the flag both geometries are kept (default behaviour intact).
         let (_nt2, stats2) = convert_cityjson(&doc, &opts()).unwrap();
         assert_eq!(stats2.geometries, 2, "default keeps every LoD");
+    }
+
+    #[test]
+    fn viewer_profile_emits_zone_buildings_links_and_footprints() {
+        // A 3DBAG-shaped doc: Building (LoD0 footprint + attributes) + its
+        // BuildingPart child (LoD2.2 Solid), georeferenced in EPSG:7415.
+        let doc = serde_json::json!({
+            "type": "CityJSON",
+            "version": "2.0",
+            "metadata": { "referenceSystem": "https://www.opengis.net/def/crs/EPSG/0/7415" },
+            "transform": { "scale": [1.0, 1.0, 1.0], "translate": [185700.0, 428100.0, 0.0] },
+            "CityObjects": {
+                "NL.IMBAG.Pand.0268100000007417": {
+                    "type": "Building",
+                    "attributes": {
+                        "oorspronkelijkbouwjaar": 1920,
+                        "status": "Pand in gebruik",
+                        "b3_h_dak_max": 13.139
+                    },
+                    "children": ["NL.IMBAG.Pand.0268100000007417-0"],
+                    "geometry": [
+                        { "type": "MultiSurface", "lod": "0", "boundaries": [[[0,1,2,3]]] }
+                    ]
+                },
+                "NL.IMBAG.Pand.0268100000007417-0": {
+                    "type": "BuildingPart",
+                    "parents": ["NL.IMBAG.Pand.0268100000007417"],
+                    "geometry": [{
+                        "type": "Solid", "lod": "2.2",
+                        "boundaries": [[
+                            [[0,1,2,3]], [[4,7,6,5]],
+                            [[0,4,5,1]], [[1,5,6,2]], [[2,6,7,3]], [[3,7,4,0]]
+                        ]]
+                    }]
+                }
+            },
+            "vertices": [
+                [0,0,0],[10,0,0],[10,8,0],[0,8,0],
+                [0,0,7],[10,0,7],[10,8,7],[0,8,7]
+            ]
+        });
+        let opts = CityJsonViewerOptions {
+            inst_base: "https://ex.org/dataset/d1/".to_string(),
+            file_url: "/samples/block.city.json".to_string(),
+            zone_label: "Test block".to_string(),
+            zone_comment: "A block".to_string(),
+            license: Some("https://creativecommons.org/licenses/by/4.0/".to_string()),
+            attribution: Some("© 3DBAG by tudelft3d and 3DGI".to_string()),
+            source: Some("https://docs.3dbag.nl/en/copyright/".to_string()),
+        };
+        let (nt, stats) = convert_cityjson_viewer_buildings(&doc, &opts).unwrap();
+        // Only the root Building becomes an element (the part is geometry detail).
+        assert_eq!(stats.objects, 1, "{nt}");
+
+        // Zone: whole-file render + attribution + centroid anchor.
+        assert!(nt.contains("<https://ex.org/dataset/d1/bag/zone> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://w3id.org/bot#Zone>"));
+        assert!(
+            nt.contains("\"/samples/block.city.json\"^^<http://www.w3.org/2001/XMLSchema#anyURI>")
+        );
+        assert!(nt.contains(
+            "<http://purl.org/dc/terms/license> <https://creativecommons.org/licenses/by/4.0/>"
+        ));
+        assert!(
+            nt.contains("/bag/zone/anchor> <http://www.opengis.net/ont/geosparql#asWKT> \"POINT(")
+        );
+
+        // Building: typed, labelled with the registry number + year, attributed.
+        let b = "<https://ex.org/dataset/d1/bag/NL.IMBAG.Pand.0268100000007417>";
+        assert!(nt.contains(&format!(
+            "{b} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://w3id.org/bot#Building>"
+        )));
+        assert!(nt.contains("\"Pand 0268100000007417 (1920)\""));
+        assert!(nt.contains("\"1920\"^^<http://www.w3.org/2001/XMLSchema#integer>"));
+        // Zone → building containment (drives the viewer tree).
+        assert!(nt.contains(&format!(
+            "<https://ex.org/dataset/d1/bag/zone> <https://w3id.org/bot#containsElement> {b}"
+        )));
+        // The dereferenceable national-registry identity + the 3DBAG API doc.
+        assert!(nt.contains(&format!("{b} <http://www.w3.org/2002/07/owl#sameAs> <https://bag.basisregistraties.overheid.nl/bag/id/pand/0268100000007417>")));
+        assert!(nt.contains(
+            "<https://api.3dbag.nl/collections/pand/items/NL.IMBAG.Pand.0268100000007417>"
+        ));
+        // Per-building pick fragment into the shared file.
+        assert!(nt.contains("\"/samples/block.city.json#NL.IMBAG.Pand.0268100000007417\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"));
+        // Footprint: an unprefixed CRS84 lon/lat POLYGON near Nijmegen — the RD
+        // coordinates must NOT leak through unprojected.
+        assert!(
+            nt.contains("/footprint> <http://www.opengis.net/ont/geosparql#asWKT> \"POLYGON((5.8"),
+            "{nt}"
+        );
+        assert!(
+            !nt.contains("185700 428100"),
+            "no raw RD in the viewer graph"
+        );
+        // And no volumetric WKT: rendering stays with the client-side CityJSON.
+        assert!(!nt.contains("POLYHEDRALSURFACE"));
     }
 
     #[test]

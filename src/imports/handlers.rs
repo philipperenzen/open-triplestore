@@ -534,6 +534,7 @@ pub async fn bulk_import(
             true,
             None,
             None,
+            crate::imports::ifc::IfcImportBranding::default(),
         )
         .await
         {

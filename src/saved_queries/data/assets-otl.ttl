@@ -1,12 +1,14 @@
 # OTL / IMBOR-style asset-management alignment (Dutch public-asset registry).
 #
-# Demonstrates aligning a feature in the demo with an asset-management "object"
-# from an Object Type Library (OTL) / IMBOR registry, the way Dutch road & water
-# authorities (Rijkswaterstaat, provinces, municipalities) link their BIM/GIS
-# data to maintenance registries:
+# Demonstrates aligning a REAL building in the demo with an asset-management
+# "object" from an Object Type Library (OTL) / IMBOR registry, the way Dutch
+# road & water authorities (Rijkswaterstaat, provinces, municipalities) link
+# their BIM/GIS data to maintenance registries:
 #
-#   * otl:Building-0001 owl:sameAs z2:NeighbourHouse   — same real-world thing,
-#     two identifiers (the asset register's URI and the linked-data feature).
+#   * otl:Building-0001 owl:sameAs bag:NL.IMBAG.Pand.0268100000007789 — same
+#     real-world thing (a 1918 three-storey block in the Schependomlaan
+#     neighbourhood), two identifiers: the asset register's URI and the
+#     linked-data BAG feature seeded from the 3DBAG excerpt.
 #   * imbor:onderhoudsstatus / imbor:beheerobjecttype  — IMBOR attributes.
 #
 # NOTE: the NEN 2660-2 / OTL / IMBOR vocabularies themselves are NOT bundled with
@@ -14,20 +16,21 @@
 # otl: / imbor: IRIs here are illustrative placeholders under example.nl so the
 # *alignment pattern* is shown without shipping the third-party vocabulary. The
 # values for imbor:onderhoudsstatus ("goed") are from the IMBOR domain of
-# discourse, used here as plain string literals.
+# discourse, used here as plain string literals. The bouwjaar matches the BAG
+# registry's oorspronkelijkbouwjaar for this pand.
 
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 @prefix owl:     <http://www.w3.org/2002/07/owl#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
-@prefix z2:      <https://opentriplestore.org/demo/viewer-3d-demo/zones#> .
+@prefix bag:     <https://opentriplestore.org/demo/viewer-3d-demo/bag/> .
 @prefix otl:     <https://data.example.nl/otl/object/> .
 @prefix imbor:   <https://data.example.nl/imbor/term/> .
 
 otl:Building-0001 a otl:Bouwwerk ;
-    rdfs:label "Asset object: neighbour house"@en ;
-    dcterms:description "OTL/IMBOR asset-register object aligned with the linked-data building feature." ;
-    owl:sameAs z2:NeighbourHouse ;
+    rdfs:label "Asset object: Pand 0268100000007789"@en ;
+    dcterms:description "OTL/IMBOR asset-register object aligned with the real BAG building feature from the 3DBAG block." ;
+    owl:sameAs bag:NL.IMBAG.Pand.0268100000007789 ;
     imbor:beheerobjecttype "Gebouw" ;
     imbor:onderhoudsstatus "goed" ;
-    imbor:bouwjaar "1998"^^xsd:gYear .
+    imbor:bouwjaar "1918"^^xsd:gYear .

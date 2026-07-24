@@ -22,6 +22,17 @@ pub struct IfcImportOutcome {
     pub stats: IfcStats,
 }
 
+/// Presentation + provenance extras for an import — a friendly display label
+/// for the model's root element and the source/license/attribution stamped on
+/// it. `Default` (all `None`) keeps the file's own naming untouched.
+#[derive(Debug, Default, Clone)]
+pub struct IfcImportBranding {
+    pub root_label: Option<String>,
+    pub source: Option<String>,
+    pub license: Option<String>,
+    pub attribution: Option<String>,
+}
+
 /// Import one IFC file into `dataset_id`: persist the bytes as an asset (so
 /// users can download the original), convert to RDF, load the graphs, and
 /// register them on the dataset. Heavy work (parse + store load) runs on the
@@ -43,6 +54,7 @@ pub async fn import_ifc_bytes(
     // Map anchor override — wins over the file's own IfcSite georeference
     // (exporters often leave a default location like the RD origin in there).
     anchor_wkt: Option<String>,
+    branding: IfcImportBranding,
 ) -> Result<IfcImportOutcome, String> {
     let base = state.base_url.trim_end_matches('/').to_string();
 
@@ -106,6 +118,10 @@ pub async fn import_ifc_bytes(
         ifc_file_url: asset_url.clone(),
         anchor_wkt, // None ⇒ emit() falls back to the file's own IfcSite georeference
         include_ifcowl,
+        root_label: branding.root_label,
+        provenance_source: branding.source,
+        license: branding.license,
+        attribution: branding.attribution,
     };
     let bot_graph_c = bot_graph.clone();
     let ifcowl_graph_c = ifcowl_graph.clone();

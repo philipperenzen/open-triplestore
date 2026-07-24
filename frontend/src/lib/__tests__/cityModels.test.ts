@@ -69,10 +69,15 @@ describe('modelRefsOf', () => {
 describe('parseCityJSON (3DBAG excerpt)', () => {
   it('parses the bundled Schependomlaan 3DBAG block with real geometry near the site', () => {
     const model = parseCityJSON(bagSample);
-    // Semantics are stripped from the excerpt, so all 157 buildings merge into
-    // one mesh bucket — assert on the actual triangulated geometry instead.
-    const mesh = model.group.children[0] as Mesh;
-    expect(mesh.geometry.getAttribute('position').count).toBeGreaterThan(3000);
+    // The excerpt keeps its semantic surfaces (roof/wall/ground), so geometry
+    // buckets per surface type — assert on the total triangulated geometry.
+    const total = model.group.children.reduce(
+      (n, child) => n + (child as Mesh).geometry.getAttribute('position').count,
+      0
+    );
+    expect(total).toBeGreaterThan(3000);
+    // Roof/wall/ground buckets carry distinct semantic colours.
+    expect(model.group.children.length).toBeGreaterThan(1);
     const [lon, lat] = model.anchorLonLat!;
     expect(lon).toBeCloseTo(5.834, 1);
     expect(lat).toBeCloseTo(51.841, 1);
@@ -117,8 +122,8 @@ describe('CityJSON per-object picking + isolation', () => {
 
   it('folds 3DBAG BuildingParts into their parent Building for picking', () => {
     const model = parseCityJSON(bagSample);
-    // 78 root Buildings — the `…-0` LoD2.2 BuildingParts fold into their parents.
-    expect(model.objects.length).toBe(78);
+    // 77 root Buildings — the `…-0` LoD2.2 BuildingParts fold into their parents.
+    expect(model.objects.length).toBe(77);
     const mesh = model.group.children[0] as Mesh;
     const id = cityObjectIdAt(mesh, 0)!;
     expect(id.startsWith('NL.IMBAG.Pand.')).toBe(true);
