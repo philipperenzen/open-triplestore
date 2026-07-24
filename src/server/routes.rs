@@ -524,7 +524,8 @@ async fn execute_update(
     let effective_str = effective_update.as_deref().unwrap_or(update);
 
     // Parse with spargebra to extract target graph IRIs for ACL checking.
-    let parsed = spargebra::Update::parse(effective_str, None)
+    let parsed = spargebra::SparqlParser::new()
+        .parse_update(effective_str)
         .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
 
     // M-8: Enforce API token write scope — read-only tokens may not perform SPARQL UPDATE.
@@ -864,7 +865,8 @@ async fn sparql_batch_update(
         ));
     }
     for stmt in &resolved {
-        let parsed = spargebra::Update::parse(stmt.as_str(), None)
+        let parsed = spargebra::SparqlParser::new()
+            .parse_update(stmt.as_str())
             .map_err(|e| AppError::BadRequest(format!("Invalid SPARQL UPDATE: {}", e)))?;
         // H-1: per-graph read+write ACL, admin-gate variable-graph/SERVICE/all-graph ops.
         authorize_update(&state, Some(&user), &parsed)?;
@@ -3292,17 +3294,13 @@ pub async fn browse_resource(
     let out_task = {
         let store = state.store.clone();
         tokio::task::spawn_blocking(move || -> Result<_, AppError> {
-            Ok(split_resource_closure(store.query(&outgoing_query)?)?)
+            split_resource_closure(store.query(&outgoing_query)?)
         })
     };
     let in_task = {
         let store = state.store.clone();
         tokio::task::spawn_blocking(move || -> Result<_, AppError> {
-            Ok(format_sparql_results_as_pairs(
-                store.query(&incoming_query)?,
-                "s",
-                "p",
-            )?)
+            format_sparql_results_as_pairs(store.query(&incoming_query)?, "s", "p")
         })
     };
     let (out_res, in_res) =
@@ -6807,7 +6805,7 @@ fn resolve_blank_node(
     serde_json::Map<String, serde_json::Value>,
     Vec<serde_json::Value>,
 ) {
-    use oxigraph::model::{BlankNode, GraphNameRef, NamedNode, SubjectRef, Term, TermRef};
+    use oxigraph::model::{BlankNode, GraphNameRef, NamedNode, NamedOrBlankNodeRef, Term, TermRef};
     use std::collections::{HashSet, VecDeque};
 
     let mut outgoing: Vec<serde_json::Value> = Vec::new();
@@ -6838,7 +6836,7 @@ fn resolve_blank_node(
         };
         let mut pairs: Vec<serde_json::Value> = Vec::new();
         for g in &graph_nodes {
-            let subj = SubjectRef::BlankNode(bn.as_ref());
+            let subj = NamedOrBlankNodeRef::BlankNode(bn.as_ref());
             for quad in store.quads_for_pattern(
                 Some(subj),
                 None,

@@ -516,16 +516,15 @@ fn evaluate_node_constraint(
                     n
                 ));
             }
-            StringFacet::Pattern(pat, _flags) => {
+            StringFacet::Pattern(pat, _flags)
                 // Simple substring match for basic patterns; full regex
                 // support would require adding the `regex` crate as a dependency.
-                if !lexical.contains(pat.as_str()) {
+                if !lexical.contains(pat.as_str()) => {
                     return ShExStatus::NonConformant(format!(
                         "Pattern '{}' did not match: {}",
                         pat, lexical
                     ));
                 }
-            }
             _ => {}
         }
     }

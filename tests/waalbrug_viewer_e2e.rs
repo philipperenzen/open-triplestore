@@ -379,10 +379,11 @@ async fn viewer_feed_serves_per_building_3dbag_layer() {
 /// byte-identical to the canonical fixtures (below their 2-line SEED COPY header).
 #[test]
 fn seed_copies_match_canonical_fixtures() {
-    for (seed, fixture) in [(
-        include_str!("../src/saved_queries/data/landmarks.ttl"),
-        include_str!("fixtures/landmarks/landmarks.ttl"),
-    )] {
+    {
+        let (seed, fixture) = (
+            include_str!("../src/saved_queries/data/landmarks.ttl"),
+            include_str!("fixtures/landmarks/landmarks.ttl"),
+        );
         let body: String = seed.lines().skip(2).collect::<Vec<_>>().join("\n");
         let canon: String = fixture.lines().collect::<Vec<_>>().join("\n");
         assert_eq!(

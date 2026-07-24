@@ -174,7 +174,11 @@ pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
             }
             Ok(Event::Text(ref e)) => {
                 // Handle literal text content
-                if let Ok(text) = e.unescape() {
+                if let Ok(text) = e.decode().map_err(|_| ()).and_then(|s| {
+                    quick_xml::escape::unescape(&s)
+                        .map(|u| u.into_owned())
+                        .map_err(|_| ())
+                }) {
                     let text = text.to_string();
                     if !text.trim().is_empty() {
                         // Update the last literal arg with its value
@@ -425,7 +429,9 @@ fn collect_attrs(
     let mut map = std::collections::HashMap::new();
     for attr in e.attributes().flatten() {
         let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-        if let Ok(val) = attr.decode_and_unescape_value(reader.decoder()) {
+        if let Ok(val) =
+            attr.decoded_and_normalized_value(quick_xml::XmlVersion::Explicit1_0, reader.decoder())
+        {
             map.insert(key, val.to_string());
         }
     }

@@ -15,7 +15,7 @@
 //! SHACL-SPARQL constraint instead.
 
 use crate::store::TripleStore;
-use oxigraph::model::{GraphName, NamedNodeRef, Subject, Term as OxTerm, TermRef};
+use oxigraph::model::{GraphName, NamedNodeRef, NamedOrBlankNode, Term as OxTerm, TermRef};
 use oxrdf::{NamedNode, Term};
 use std::sync::{Arc, OnceLock};
 
@@ -53,7 +53,7 @@ pub fn all_functions(store: &TripleStore) -> Vec<(NamedNode, FnHandler)> {
     {
         let Ok(quad) = quad else { continue };
         let iri = match quad.subject {
-            Subject::NamedNode(nn) => nn,
+            NamedOrBlankNode::NamedNode(nn) => nn,
             _ => continue, // only named functions are callable
         };
         let graph: Option<String> = match quad.graph_name {

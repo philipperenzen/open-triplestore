@@ -4416,7 +4416,7 @@ impl AuthDb {
             all_rules.extend(rows.collect::<Result<Vec<_>, _>>()?);
         }
 
-        all_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        all_rules.sort_by_key(|b| std::cmp::Reverse(b.priority));
         Ok(all_rules)
     }
 

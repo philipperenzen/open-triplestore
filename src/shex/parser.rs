@@ -318,7 +318,7 @@ impl<'a> ShExParser<'a> {
                 Err(format!(
                     "Expected shape expression at position {}: {:?}",
                     self.pos,
-                    &self.remaining().chars().take(20).collect::<String>()
+                    self.remaining().chars().take(20).collect::<String>()
                 ))
             }
         }

@@ -1,12 +1,12 @@
 //! HTTP-level regression tests for auth-handler authorization fixes.
 //!
 //! Covers:
-//!   * [S3]  DELETE /api/datasets/:id requires *manage* (not merely write), so a
-//!           plain Editor is refused.
-//!   * [CB14] PUT/DELETE /api/organisations/:org/groups/:group reject a group that
-//!           belongs to a *different* org (cross-org path) with 404.
-//!   * [CB3] PUT /api/datasets/:id/shacl rejects a `shapes_graph_iri` that points
-//!           at another dataset's namespace for a non-admin caller.
+//! * [S3]  DELETE /api/datasets/:id requires *manage* (not merely write), so a
+//!   plain Editor is refused.
+//! * [CB14] PUT/DELETE /api/organisations/:org/groups/:group reject a group that
+//!   belongs to a *different* org (cross-org path) with 404.
+//! * [CB3] PUT /api/datasets/:id/shacl rejects a `shapes_graph_iri` that points
+//!   at another dataset's namespace for a non-admin caller.
 //!
 //! Driven through the real Axum router via `tower::ServiceExt::oneshot` (no socket).
 
