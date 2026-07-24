@@ -146,26 +146,53 @@ fn name_arg(inst: &Instance, idx: usize) -> Option<&str> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// IFC compound angle `(deg, min, sec[, millionth-sec])` → decimal degrees.
-/// The sign of the leading degrees applies to the whole value.
+/// IFC compound plane angle → decimal degrees.
+///
+/// Handles the STEP list form `(deg, min, sec[, millionth-sec])` and, for
+/// robustness against exporters/lifts that stringify it, a plain-text form like
+/// `"(49 1 59 680200)"` (whitespace- or comma-separated, optional parens).
+/// Per `IfcCompoundPlaneAngleMeasure` every component carries the sign of the
+/// whole angle — so a Chicago longitude arrives as `(-87, -38, -21, -839999)`
+/// and the components must be combined by magnitude under one overall sign
+/// (summing signed components would cancel the minutes against the degrees).
 fn dms_to_deg(arg: &Arg) -> Option<f64> {
-    let items = arg.as_list()?;
-    let mut vals = items.iter().filter_map(Arg::as_f64);
+    let parts: Vec<f64> = match arg.as_list() {
+        Some(items) => items.iter().filter_map(Arg::as_f64).collect(),
+        None => arg
+            .as_str()?
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty())
+            .map(str::parse::<f64>)
+            .collect::<Result<_, _>>()
+            .ok()?,
+    };
+    let mut vals = parts.into_iter();
     let deg = vals.next()?;
     let min = vals.next().unwrap_or(0.0);
     let sec = vals.next().unwrap_or(0.0);
     let micro = vals.next().unwrap_or(0.0);
-    let sign = if deg < 0.0 { -1.0 } else { 1.0 };
-    Some(sign * (deg.abs() + min / 60.0 + sec / 3600.0 + micro / 3_600_000_000.0))
+    let sign = if deg < 0.0 || min < 0.0 || sec < 0.0 || micro < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    Some(sign * (deg.abs() + min.abs() / 60.0 + sec.abs() / 3600.0 + micro.abs() / 3_600_000_000.0))
 }
 
 /// WGS84 anchor from the file's own IfcSite georeference (RefLatitude /
-/// RefLongitude, attributes 9/10), when present.
+/// RefLongitude, attributes 9/10), when present and plausible. A site at
+/// exactly (0, 0) is an exporter default (Null Island), not a georeference.
 pub fn site_anchor_wkt(file: &StepFile) -> Option<String> {
     let site = file.of_entity("IFCSITE").next()?;
     let lat = site.args.get(9).and_then(dms_to_deg)?;
     let lon = site.args.get(10).and_then(dms_to_deg)?;
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    if lat.abs() < 1e-9 && lon.abs() < 1e-9 {
         return None;
     }
     Some(format!("POINT({lon} {lat})"))
@@ -241,71 +268,92 @@ pub fn emit(
 
     // ── BOT layer ───────────────────────────────────────────────────────────────
     let mut bot = NtSink::new(bot_out);
-    let mut bnode = 0usize;
     let fog_ifc_pred = if file.schema.starts_with("IFC4") {
         format!("{FOG}asIfc_v4")
     } else {
         format!("{FOG}asIfc_v2x3")
     };
 
+    // Root spatial element (the last site, else the first building) — resolved
+    // up front so the friendly `root_label` override applies during emission.
     let mut site_or_building_anchor: Option<u64> = None;
-    let emit_node = |bot: &mut NtSink,
-                     inst: &Instance,
-                     bot_class: Option<&str>,
-                     is_element: bool,
-                     bnode: &mut usize| {
-        let s = inst_iri(base, inst);
-        if let Some(cls) = bot_class {
-            bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}{cls}")));
-        }
-        if is_element {
-            bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}Element")));
-        }
-        bot.triple(
-            &s,
-            &iri(RDF_TYPE),
-            &iri(&format!("{ifc_ns}{}", names::camel(&inst.entity))),
-        );
-        if let Some(label) = label_of(inst) {
-            bot.triple(&s, &iri(RDFS_LABEL), &lit(label));
-        }
-        if let Some(g) = guid_of(inst) {
-            bot.triple(&s, &iri(&format!("{PROPS}ifcGuid")), &lit(g));
-            if let Some(uuid) = decode_ifc_guid(g) {
-                bot.triple(&s, &iri(&format!("{PROPS}uuid")), &lit(&uuid));
+    for inst in file.instances.values() {
+        match inst.entity.as_str() {
+            "IFCSITE" => site_or_building_anchor = Some(inst.id),
+            "IFCBUILDING" if site_or_building_anchor.is_none() => {
+                site_or_building_anchor = Some(inst.id)
             }
-            // FOG reference into the stored IFC (fragment = GlobalId) so every
-            // element row in the viewer can reach the file it came from.
-            if let Some(url) = &opts.ifc_file_url {
-                *bnode += 1;
-                let b = format!("_:fog{bnode}");
-                bot.triple(&s, &iri(&format!("{OMG}hasGeometry")), &b);
-                bot.triple(&b, &iri(RDF_TYPE), &iri(&format!("{OMG}Geometry")));
-                let target = if is_element {
-                    format!("{url}#{g}")
-                } else {
-                    url.clone()
-                };
-                bot.triple(
-                    &b,
-                    &iri(&fog_ifc_pred),
-                    &format!("{}^^<{XSD}anyURI>", lit(&target)),
-                );
-            }
+            _ => {}
         }
-    };
+    }
+    let root_id = site_or_building_anchor;
+
+    let emit_node =
+        |bot: &mut NtSink, inst: &Instance, bot_class: Option<&str>, is_element: bool| {
+            let s = inst_iri(base, inst);
+            if let Some(cls) = bot_class {
+                bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}{cls}")));
+            }
+            if is_element {
+                bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}Element")));
+            }
+            bot.triple(
+                &s,
+                &iri(RDF_TYPE),
+                &iri(&format!("{ifc_ns}{}", names::camel(&inst.entity))),
+            );
+            // The caller's friendly label wins on the ROOT only (exporters leave
+            // "Site" / "Default" / "Gelaende" there, which then headlines the whole
+            // model in every viewer tree); the file's own name survives as
+            // props:ifcName. Every other element keeps its authored name.
+            let friendly = opts
+                .root_label
+                .as_deref()
+                .filter(|_| Some(inst.id) == root_id);
+            match (friendly, label_of(inst)) {
+                (Some(f), authored) => {
+                    bot.triple(&s, &iri(RDFS_LABEL), &lit(f));
+                    if let Some(a) = authored {
+                        bot.triple(&s, &iri(&format!("{PROPS}ifcName")), &lit(a));
+                    }
+                }
+                (None, Some(label)) => bot.triple(&s, &iri(RDFS_LABEL), &lit(label)),
+                (None, None) => {}
+            }
+            if let Some(g) = guid_of(inst) {
+                bot.triple(&s, &iri(&format!("{PROPS}ifcGuid")), &lit(g));
+                if let Some(uuid) = decode_ifc_guid(g) {
+                    bot.triple(&s, &iri(&format!("{PROPS}uuid")), &lit(&uuid));
+                }
+                // FOG reference into the stored IFC (fragment = GlobalId) so every
+                // element row in the viewer can reach the file it came from. The
+                // node is a STABLE IRI, not a blank node: `_:fog1`-style labels
+                // repeat across separately imported buildings, and a union query
+                // over their graphs joins equal labels into ONE node — so every
+                // building inherited every other building's file URL (the
+                // "duplicate models" bug). Per-GUID IRIs cannot collide.
+                if let Some(url) = &opts.ifc_file_url {
+                    let node = format!("{}/filelink>", s.trim_end_matches('>'));
+                    bot.triple(&s, &iri(&format!("{OMG}hasGeometry")), &node);
+                    bot.triple(&node, &iri(RDF_TYPE), &iri(&format!("{OMG}Geometry")));
+                    let target = if is_element {
+                        format!("{url}#{g}")
+                    } else {
+                        url.clone()
+                    };
+                    bot.triple(
+                        &node,
+                        &iri(&fog_ifc_pred),
+                        &format!("{}^^<{XSD}anyURI>", lit(&target)),
+                    );
+                }
+            }
+        };
 
     // Spatial structure nodes.
     for inst in file.instances.values() {
         if let Some(cls) = spatial_class.get(inst.entity.as_str()) {
-            emit_node(&mut bot, inst, Some(cls), false, &mut bnode);
-            match inst.entity.as_str() {
-                "IFCSITE" => site_or_building_anchor = Some(inst.id),
-                "IFCBUILDING" if site_or_building_anchor.is_none() => {
-                    site_or_building_anchor = Some(inst.id)
-                }
-                _ => {}
-            }
+            emit_node(&mut bot, inst, Some(cls), false);
             match inst.entity.as_str() {
                 "IFCBUILDINGSTOREY" => stats.storeys += 1,
                 "IFCSPACE" => stats.spaces += 1,
@@ -316,7 +364,7 @@ pub fn emit(
     // Element nodes.
     for &id in &element_ids {
         if let Some(inst) = file.get(id) {
-            emit_node(&mut bot, inst, None, true, &mut bnode);
+            emit_node(&mut bot, inst, None, true);
         }
     }
     stats.elements = element_ids.len();
@@ -366,9 +414,9 @@ pub fn emit(
     let anchor_wkt = opts.anchor_wkt.clone().or_else(|| site_anchor_wkt(file));
     if let (Some(anchor_id), Some(wkt)) = (site_or_building_anchor, &anchor_wkt) {
         if let Some(inst) = file.get(anchor_id) {
-            bnode += 1;
-            let b = format!("_:geo{bnode}");
             let s = inst_iri(base, inst);
+            // Stable IRI, not a blank node — see the FOG node comment above.
+            let b = format!("{}/anchor>", s.trim_end_matches('>'));
             bot.triple(&s, &iri(&format!("{GEO}hasGeometry")), &b);
             bot.triple(&b, &iri(RDF_TYPE), &iri(&format!("{GEO}Geometry")));
             bot.triple(
@@ -376,6 +424,23 @@ pub fn emit(
                 &iri(&format!("{GEO}asWKT")),
                 &format!("{}^^<{GEO}wktLiteral>", lit(wkt)),
             );
+        }
+    }
+
+    // Provenance on the root: where this model came from, its license and the
+    // attribution line — real open BIM datasets (Schependomlaan, the KIT
+    // models) require credit, and the root element is where viewers look.
+    if let Some(inst) = root_id.and_then(|id| file.get(id)) {
+        let s = inst_iri(base, inst);
+        const DCT: &str = "http://purl.org/dc/terms/";
+        if let Some(src) = &opts.provenance_source {
+            bot.triple(&s, &iri(&format!("{DCT}source")), &iri(src));
+        }
+        if let Some(l) = &opts.license {
+            bot.triple(&s, &iri(&format!("{DCT}license")), &iri(l));
+        }
+        if let Some(a) = &opts.attribution {
+            bot.triple(&s, &iri(&format!("{DCT}rightsHolder")), &lit(a));
         }
     }
 
@@ -547,6 +612,23 @@ mod tests {
     use super::*;
     use crate::ifc::{convert, ConvertOptions};
 
+    #[test]
+    fn dms_handles_positive_negative_and_string_forms() {
+        let list = |v: &[f64]| Arg::List(v.iter().map(|&f| Arg::Float(f)).collect());
+        // KIT Smiley West latitude: (49 1 59 680200) ≈ 49.0332°.
+        let lat = dms_to_deg(&list(&[49.0, 1.0, 59.0, 680200.0])).unwrap();
+        assert!((lat - 49.0333).abs() < 1e-3, "{lat}");
+        // Chicago longitude, all components negative per IfcCompoundPlaneAngleMeasure:
+        // magnitudes must ADD under one sign, not cancel each other.
+        let lon = dms_to_deg(&list(&[-87.0, -38.0, -21.0, -839999.0])).unwrap();
+        assert!((lon - -87.6394).abs() < 1e-3, "{lon}");
+        // Stringified form (as it appears in ifcOWL lifts / lax exporters).
+        let s = dms_to_deg(&Arg::Str("(49 1 59 680200)".to_string())).unwrap();
+        assert!((s - lat).abs() < 1e-9, "{s}");
+        let s2 = dms_to_deg(&Arg::Str("-87, -38, -21, -839999".to_string())).unwrap();
+        assert!((s2 - lon).abs() < 1e-9, "{s2}");
+    }
+
     const SAMPLE: &str = "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC2X3'));\nENDSEC;\nDATA;\n\
 #1= IFCPROJECT('0AAAAAAAAAAAAAAAAAAAA1',$,'Proj',$,$,$,$,(),$);\n\
 #2= IFCSITE('0AAAAAAAAAAAAAAAAAAAA2',$,'Site',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);\n\
@@ -572,6 +654,7 @@ ENDSEC;\nEND-ISO-10303-21;";
                 ifc_file_url: Some("http://ex.test/files/model.ifc".into()),
                 anchor_wkt: Some("POINT(5.83 51.84)".into()),
                 include_ifcowl,
+                ..Default::default()
             },
             &mut |c| bot.push_str(c),
             &mut |c| owl.push_str(c),
@@ -626,6 +709,7 @@ ENDSEC;\nEND-ISO-10303-21;";
                 ifc_file_url: Some("http://ex.test/files/schependomlaan.ifc".into()),
                 anchor_wkt: Some("POINT(5.8337 51.8411)".into()),
                 include_ifcowl: true,
+                ..Default::default()
             },
             &mut |c| bot_len += c.len(),
             &mut |c| owl_len += c.len(),

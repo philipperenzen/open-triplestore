@@ -479,7 +479,13 @@
       label: el.label || shortenIRI(el.id),
     };
   }
+  // Leaving the walkthrough to read an element's data keeps the trip resumable:
+  // the walkthrough component remembers its camera pose per model URL, and the
+  // chip below re-opens the same model — together they put you back exactly
+  // where you stood in the house.
+  let lastWalkthrough = null;
   function walkInspect(e) {
+    lastWalkthrough = walkthrough;
     walkthrough = null; // leave the immersive view to show the full RDF panel
     onMapSelect(e);
   }
@@ -787,6 +793,16 @@
     on:close={() => (walkthrough = null)}
     on:inspect={walkInspect}
   />
+{:else if lastWalkthrough}
+  <button
+    class="walk-resume"
+    on:click={() => {
+      walkthrough = lastWalkthrough;
+      lastWalkthrough = null;
+    }}
+  >
+    <Footprints size={15} /> {$i18nT('viewer.resumeWalkthrough')}{lastWalkthrough.label ? ` · ${lastWalkthrough.label}` : ''}
+  </button>
 {/if}
 
 <style>
@@ -858,8 +874,33 @@
   .walk-suggest:hover {
     background: #e8590c;
   }
+  /* Floating "pick up where you left off" chip after leaving the walkthrough
+     to inspect an element. Fixed: it must survive scrolling the RDF panel. */
+  .walk-resume {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    z-index: 1350; /* above windows + dock, below an active walkthrough */
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 17px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--brand-600, #2563a8);
+    color: #fff;
+    font-size: 0.84rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 6px 22px rgba(37, 99, 168, 0.5);
+    animation: rowIn var(--dur-base, 220ms) var(--ease-out, ease) both;
+  }
+  .walk-resume:hover {
+    background: #e8590c;
+  }
   @media (prefers-reduced-motion: reduce) {
     .walk-suggest,
+    .walk-resume,
     .panel-dock,
     .dl-menu {
       animation: none;
