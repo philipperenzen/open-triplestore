@@ -573,7 +573,10 @@ static DATASETS: &[DatasetSpec] = &[
                       Smiley West student housing (Karlsruhe) and the buildingSMART Duplex \
                       Apartment — are downloaded on first boot, stored as downloadable assets and \
                       transformed to linked data (BOT topology, property sets and a full ifcOWL \
-                      lift), so storeys, spaces, walls and beams are individually selectable. \
+                      lift), so storeys, spaces, walls and beams are individually selectable; each \
+                      stands at its real-world site from the file's own IfcSite georeference \
+                      (KIT Campus North, Karlsruhe, Chicago) or, for Schependomlaan, its actual \
+                      street in Nijmegen. \
                       The real city block around the Schependomlaan site comes from 3DBAG (LoD2.2 \
                       CityJSON, © 3DBAG by tudelft3d and 3DGI, CC BY 4.0): every one of its ~77 \
                       buildings is a live BAG pand carrying its registry attributes (year built, \

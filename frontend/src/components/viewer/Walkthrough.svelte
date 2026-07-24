@@ -1,9 +1,18 @@
+<script context="module">
+  // Camera pose per model URL, so leaving the walkthrough (to inspect an
+  // element's data, or closing it by accident) and coming back RESUMES exactly
+  // where you stood instead of restarting outside the front door. Module-level:
+  // survives component unmount for the whole SPA session.
+  const wtPoseByUrl = new Map(); // url → { pos:[x,y,z], quat:[x,y,z,w], mode }
+</script>
+
 <script>
   // First-person "walk through the building" viewer. Loads the IFC model at real
   // metre scale into a standalone three.js scene and lets you walk through it:
   // mouse-look (pointer lock) + WASD/arrows to move, Space/Q-E for up/down, Shift
   // to sprint. A centre crosshair names the wall/door/furniture you're looking at;
-  // click it to inspect. WebXR/VR is supported where the browser + headset allow.
+  // click it to select + inspect (persistent edge/fill highlight, X toggles
+  // x-ray). WebXR/VR is supported where the browser + headset allow.
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
   import * as THREE from 'three';
@@ -13,6 +22,7 @@
   import { isDark } from '../../lib/theme.js';
   import { loadModel, realWorldMeters, NORMALISED_DIM } from '../../lib/viewer/models';
   import { ifcGuidAt, ifcProgress } from '../../lib/viewer/ifc';
+  import { buildHighlightOverlay, disposeHighlightOverlay, HL_EMISSIVE } from '../../lib/viewer/highlight';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import { shortenIRI } from '../../lib/rdf-utils.js';
 
@@ -46,6 +56,71 @@
   const GRAVITY = 18; // m/s²
   const JUMP_SPEED = 4.6; // m/s
   const DOWN = new THREE.Vector3(0, -1, 0);
+  // Highest rise the walk mode steps onto. Anything taller under your feet is a
+  // wall / table / parapet — WITHOUT this limit the floor-follow snapped the eye
+  // onto any surface below, so brushing a wall top ratcheted you storey by
+  // storey until you were walking on the roof.
+  const MAX_STEP = 0.5;
+
+  // ── Selection highlight + x-ray ─────────────────────────────────────────────
+  let selOverlay = null; // persistent copy of the picked element's triangles
+  let xrayOn = false; // ghost the rest of the building around the selection
+
+  /** Ghost (or restore) every non-overlay mesh so the selected element reads
+   *  solid through the building. Original material state is stashed once. */
+  function applyGhost(on) {
+    if (!model) return;
+    model.traverse((n) => {
+      if (!n.isMesh || !n.material || n.userData.isOverlay) return;
+      const mats = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of mats) {
+        if (m.userData.wtOrig === undefined) {
+          m.userData.wtOrig = { transparent: m.transparent, opacity: m.opacity, depthWrite: m.depthWrite };
+        }
+        if (on) {
+          m.transparent = true;
+          m.opacity = 0.18;
+          m.depthWrite = false;
+        } else {
+          m.transparent = m.userData.wtOrig.transparent;
+          m.opacity = m.userData.wtOrig.opacity;
+          m.depthWrite = m.userData.wtOrig.depthWrite;
+        }
+      }
+    });
+  }
+
+  /** (Re)build the persistent highlight for `guid` — orange fill + always-visible
+   *  edge outline; in x-ray the fill renders through the ghosted building. */
+  function applySelection(guid) {
+    if (selOverlay) {
+      selOverlay.parent?.remove(selOverlay);
+      disposeHighlightOverlay(selOverlay);
+      selOverlay = null;
+    }
+    const ghost = xrayOn && !!guid;
+    applyGhost(ghost);
+    if (guid && model) {
+      const ov = buildHighlightOverlay(model, new Set([guid]), ghost);
+      if (ov) {
+        // No tween loop here — settle the fill to its final look immediately.
+        ov.traverse((n) => {
+          if (!n.isMesh || !n.material || n.userData.isOverlayEdges) return;
+          n.material.opacity = 1;
+          n.material.transparent = false;
+          if ('emissiveIntensity' in n.material) n.material.emissiveIntensity = HL_EMISSIVE;
+        });
+        model.add(ov);
+        selOverlay = ov;
+      }
+    }
+    wtNeedsRender = true;
+  }
+
+  function toggleXray() {
+    xrayOn = !xrayOn;
+    applySelection(picked?.guid || null);
+  }
 
   const move = { f: false, b: false, l: false, r: false, up: false, down: false, fast: false };
   let prevT = 0;
@@ -69,13 +144,26 @@
   }
 
   /** Walk-mode vertical: gravity pulls the eye to `floor + EYE_HEIGHT`; over open
-   *  space (no floor below) the camera hovers so you can walk onto a floor. */
+   *  space (no floor below) the camera hovers so you can walk onto a floor.
+   *
+   *  Step limit: a surface more than MAX_STEP above the feet (a wall top, a
+   *  table, a parapet you brushed against) is NOT a floor — the old
+   *  snap-onto-anything popped the eye onto it, and from there the next "floor"
+   *  was the ceiling, ratcheting you storey by storey onto the roof. Such an
+   *  obstacle now just holds the current level (pass-through stays possible);
+   *  stairs (risers ≪ MAX_STEP) and deliberate jumps still land normally. */
   function applyWalkGravity(dt) {
     const floorY = floorUnder(camera.position);
     if (!Number.isFinite(floorY)) {
       vy = 0;
       grounded = false;
       return;
+    }
+    const rise = floorY - (camera.position.y - EYE_HEIGHT);
+    if (rise > MAX_STEP) {
+      vy = 0;
+      grounded = false;
+      return; // obstacle underfoot — glide at the current level
     }
     vy -= GRAVITY * dt;
     camera.position.y += vy * dt;
@@ -132,10 +220,15 @@
         }
         break;
       case 'KeyE': move.up = down; break;
-      case 'KeyQ': move.down = down; break;
+      // Two descend keys: Q (existing) plus C — reachable with the left hand on
+      // WASD, and layout-independent enough for AZERTY users where Q sits under A.
+      case 'KeyQ': case 'KeyC': move.down = down; break;
       case 'ShiftLeft': case 'ShiftRight': move.fast = down; break;
       case 'KeyF': // toggle walk ↔ fly
         if (down) setMode(mode === 'walk' ? 'fly' : 'walk');
+        break;
+      case 'KeyX': // toggle x-ray around the selected element
+        if (down) toggleXray();
         break;
       default: hit = false;
     }
@@ -153,7 +246,15 @@
     const p = pickAhead();
     if (p?.el) {
       picked = { label: p.el.label || shortenIRI(p.el.id), type: shortType(p.el.types), guid: p.guid, id: p.el.id };
+      // Persistent highlight (edge outline + fill) until deselected — the brief
+      // reticle flash alone never told you WHAT was selected.
+      applySelection(p.guid);
     }
+  }
+
+  function clearPicked() {
+    picked = null;
+    applySelection(null);
   }
 
   onMount(() => {
@@ -213,13 +314,22 @@
           }
         });
         scene.add(model);
-        // Start at eye height just outside the building, facing in.
-        const box = new THREE.Box3().setFromObject(model);
-        const size = box.getSize(new THREE.Vector3());
-        const c = box.getCenter(new THREE.Vector3());
-        const eye = box.min.y + 1.6;
-        camera.position.set(c.x, eye, box.max.z + Math.max(3, size.z * 0.35));
-        camera.lookAt(c.x, eye, c.z);
+        // Resume the previous session's pose for this model (leaving to inspect
+        // an element's data no longer restarts you outside the front door); a
+        // first visit starts at eye height just outside the building, facing in.
+        const saved = wtPoseByUrl.get(url);
+        if (saved) {
+          camera.position.fromArray(saved.pos);
+          camera.quaternion.fromArray(saved.quat);
+          mode = saved.mode || mode;
+        } else {
+          const box = new THREE.Box3().setFromObject(model);
+          const size = box.getSize(new THREE.Vector3());
+          const c = box.getCenter(new THREE.Vector3());
+          const eye = box.min.y + 1.6;
+          camera.position.set(c.x, eye, box.max.z + Math.max(3, size.z * 0.35));
+          camera.lookAt(c.x, eye, c.z);
+        }
       } catch (e) {
         error = e?.message || 'Failed to load the building model.';
       }
@@ -295,6 +405,19 @@
   });
 
   onDestroy(() => {
+    // Remember where the user stood so re-opening this model resumes in place.
+    if (camera && model) {
+      wtPoseByUrl.set(url, {
+        pos: camera.position.toArray(),
+        quat: camera.quaternion.toArray(),
+        mode,
+      });
+    }
+    if (selOverlay) {
+      selOverlay.parent?.remove(selOverlay);
+      disposeHighlightOverlay(selOverlay);
+      selOverlay = null;
+    }
     renderer?.setAnimationLoop(null);
     try { controls?.unlock(); } catch { /* noop */ }
     // Free the cloned (per-instance, double-sided) materials + grid; the model's
@@ -324,6 +447,12 @@
     {#if hoverLabel && locked}
       <div class="reticle-label">{hoverLabel}</div>
     {/if}
+    {#if locked}
+      <!-- Always-visible control hints; Esc is the one nobody guesses. -->
+      <div class="wt-hints">
+        {mode === 'walk' ? $i18nT('viewer.walkHintsWalk') : $i18nT('viewer.walkHintsFly')}
+      </div>
+    {/if}
   {/if}
 
   <header class="wt-head">
@@ -339,6 +468,14 @@
         on:click={() => setMode('fly')}
         title={$i18nT('viewer.flyModeTitle')}
       >{$i18nT('viewer.flyMode')}</button>
+    </div>
+    <div class="wt-mode" role="group" aria-label={$i18nT('viewer.layerXray')}>
+      <button
+        class:active={xrayOn}
+        disabled={!picked}
+        on:click={toggleXray}
+        title={$i18nT('viewer.walkXrayTitle')}
+      >{$i18nT('viewer.layerXray')}</button>
     </div>
     <span class="vr-slot" bind:this={vrSlot}></span>
     <button class="wt-close" on:click={() => dispatch('close')} aria-label={$i18nT('viewer.close')}><X size={18} /></button>
@@ -371,7 +508,7 @@
     <div class="wt-info">
       <div class="wt-info-head">
         <strong>{picked.label}</strong>
-        <button on:click={() => (picked = null)} aria-label={$i18nT('viewer.close')}><X size={14} /></button>
+        <button on:click={clearPicked} aria-label={$i18nT('viewer.close')}><X size={14} /></button>
       </div>
       {#if picked.type}<div class="wt-row"><span>{$i18nT('viewer.type')}</span><code>{picked.type}</code></div>{/if}
       <div class="wt-row"><span>IFC GlobalId</span><code>{picked.guid}</code></div>
@@ -507,6 +644,27 @@
     max-width: 60vw;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .wt-hints {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    background: rgba(8, 13, 22, 0.72);
+    color: #c8d6e4;
+    padding: 5px 14px;
+    border-radius: 8px;
+    font-size: 0.74rem;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    pointer-events: none;
+    max-width: 92vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wt-mode button:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
   .wt-overlay {
     position: absolute;

@@ -213,6 +213,10 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     // (attributes, registry sameAs links, footprints, per-building picking).
     seed_bag_buildings(state);
 
+    // Everything above is idempotent and has now run — stamp the content
+    // version so the next boot skips the refresh wipe.
+    record_demo_version(state);
+
     // Unconditional (unlike `apply_bundle`'s internal marking, which only fires
     // for its own graphs): `seed_cityjson_volumes` loads store data directly
     // without going through a handler that marks the index dirty itself.
@@ -266,17 +270,21 @@ const SCHEPENDOMLAAN_IFC_URL: &str = "https://raw.githubusercontent.com/jakob-be
 
 /// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
 /// once (first boot), stored as a public asset, and lifted to BOT + ifcOWL in its
-/// OWN graph; the WKT anchor overrides the file's IfcSite (exporters leave default
-/// locations) so the buildings cluster as a little BIM neighbourhood near the
-/// Schependomlaan site in Nijmegen. URLs are CORS-enabled (raw.githubusercontent)
-/// so the web-ifc viewer can fetch them client-side too.
+/// OWN graph. Buildings stand at their REAL location: the file's own IfcSite
+/// georeference (RefLatitude/RefLongitude) is used whenever it is genuine; only
+/// a file whose georef is an exporter default gets an authored anchor. URLs are
+/// CORS-enabled (raw.githubusercontent) so the web-ifc viewer can fetch them
+/// client-side too.
 struct IfcBuildingSeed {
     /// Stored asset filename.
     name: &'static str,
     /// Open IFC download URL.
     url: &'static str,
-    /// `POINT(lon lat)` map anchor (overrides the file's own IfcSite georef).
-    anchor: &'static str,
+    /// `POINT(lon lat)` map anchor override. `None` trusts the file's own
+    /// IfcSite georeference (the conversion falls back to it); `Some(..)` is for
+    /// files whose georef is a known exporter default — e.g. the Schependomlaan
+    /// model carries the RD false origin (Amersfoort) instead of its real site.
+    anchor: Option<&'static str>,
     /// Distinct BOT graph suffix per building so they don't collide.
     graph_suffix: &'static str,
     /// Short label for logs.
@@ -290,17 +298,21 @@ struct IfcBuildingSeed {
     attribution: &'static str,
 }
 
-/// The demo IFC buildings — all REAL, openly licensed models. The smaller KIT /
-/// buildingSMART files come FIRST so rich IFC buildings appear within seconds of
-/// first boot; the 49 MB Schependomlaan (which honours `SEED_IFC_URL`) imports
-/// last so it doesn't hold the others up. All carry full BOT topology, property
-/// sets and an ifcOWL lift. Anchors cluster the models around the real
-/// Schependomlaan site (the Schependomlaan model stands on its actual street).
+/// The demo IFC buildings — all REAL, openly licensed models, each standing at
+/// its real-world site: FZK-Haus on the KIT Campus North, Smiley West in
+/// Karlsruhe, the Duplex Apartment at its nominal Chicago location (all three
+/// from their own IfcSite georeference), and Schependomlaan on its actual
+/// street in Nijmegen (authored anchor — the file's georef is the RD-origin
+/// default). The smaller files come FIRST so rich IFC buildings appear within
+/// seconds of first boot; the 49 MB Schependomlaan (which honours
+/// `SEED_IFC_URL`) imports last so it doesn't hold the others up. All carry
+/// full BOT topology, property sets and an ifcOWL lift.
 const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
         name: "FZK-Haus.ifc",
         url: "https://raw.githubusercontent.com/tum-gis/ifc-to-citygml3/master/input/AC20-FZK-Haus.ifc",
-        anchor: "POINT(5.83240 51.84151)",
+        // Real georef in the file: (49 6 1 566000), (8 26 11 540400) — KIT Campus North.
+        anchor: None,
         graph_suffix: "building-fzk",
         label: "FZK-Haus",
         display_label: "FZK-Haus (KIT research residence, IFC4)",
@@ -311,7 +323,8 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
         name: "Duplex.ifc",
         url: "https://raw.githubusercontent.com/MadsHolten/BOT-Duplex-house/master/Model%20files/IFC/Duplex.ifc",
-        anchor: "POINT(5.83085 51.84060)",
+        // Real georef in the file: (41 52 27 840000), (-87 -38 -21 -839999) — Chicago.
+        anchor: None,
         graph_suffix: "building-duplex",
         label: "Duplex Apartment",
         display_label: "Duplex Apartment (buildingSMART Common BIM Files)",
@@ -322,7 +335,8 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
         name: "Smiley-West.ifc",
         url: "https://raw.githubusercontent.com/ibpsa/project1-wp-2-2-bim/master/IFC_Files/MISC/AC-20-Smiley-West-10-Bldg.ifc",
-        anchor: "POINT(5.83190 51.83944)",
+        // Real georef in the file: (49 1 59 680200), (8 23 27 528000) — Karlsruhe.
+        anchor: None,
         graph_suffix: "building-smiley",
         label: "Smiley West",
         display_label: "Smiley West (Karlsruhe student housing, IFC4)",
@@ -333,7 +347,9 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
         name: "Schependomlaan.ifc",
         url: SCHEPENDOMLAAN_IFC_URL,
-        anchor: "POINT(5.83668 51.84156)",
+        // The file's georef is the RD false origin (Amersfoort) — an ArchiCAD
+        // default, not the site. Anchor on the real Schependomlaan street.
+        anchor: Some("POINT(5.83668 51.84156)"),
         graph_suffix: "building",
         label: "Schependomlaan",
         display_label: "Schependomlaan housing project (Nijmegen, IFC2x3)",
@@ -415,7 +431,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
             true,
             true,
             Some(url.clone()),
-            Some(b.anchor.to_string()),
+            b.anchor.map(str::to_string),
             crate::imports::ifc::IfcImportBranding {
                 root_label: Some(b.display_label.to_string()),
                 source: Some(b.source_page.to_string()),
@@ -545,7 +561,9 @@ fn seed_bag_buildings(state: &AppState) {
 /// whole-block refs; authored zone2/neighbourhood graphs removed; IFC FOG/anchor
 /// nodes became stable IRIs (blank-node labels collided across buildings in the
 /// dataset union — the "duplicate models" bug); friendly IFC root labels.
-const DEMO_CONTENT_VERSION: u32 = 2;
+/// v3: IFC buildings stand at their REAL site (the file's own IfcSite georef,
+/// with the fixed negative-DMS parsing) instead of an authored Nijmegen cluster.
+const DEMO_CONTENT_VERSION: u32 = 3;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -611,6 +629,22 @@ fn refresh_demo_content(state: &AppState) {
         let _ = state.auth_db.remove_dataset_graph(DS, &graph);
     }
     state.auth_db.invalidate_accessible_graphs_cache();
+    tracing::info!(
+        "demo content refreshed to v{DEMO_CONTENT_VERSION} (was v{recorded}): {wiped} stale graphs wiped, reseeding"
+    );
+}
+
+/// Record [`DEMO_CONTENT_VERSION`] in the seed-meta graph. Called at the END of
+/// a seed pass — deliberately not from `refresh_demo_content`: a fresh install's
+/// first pass never runs the refresh (the dataset doesn't exist yet when it
+/// checks), and stamping the marker mid-pass would leave a crashed seed looking
+/// up-to-date. Writing after the seeders makes both cases self-healing.
+fn record_demo_version(state: &AppState) {
+    const DS: &str = "viewer-3d-demo";
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    let meta_graph = format!("{}/{}/seed-meta", seed_data::DEMO_BASE, DS);
     let marker = format!(
         "<{}/{DS}> <https://opentriplestore.org/ns#demoContentVersion> \
          \"{DEMO_CONTENT_VERSION}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
@@ -621,11 +655,8 @@ fn refresh_demo_content(state: &AppState) {
         &marker,
         oxigraph::io::RdfFormat::NTriples,
     ) {
-        tracing::warn!("demo content refresh: version marker write failed: {e}");
+        tracing::warn!("demo seed: version marker write failed: {e}");
     }
-    tracing::info!(
-        "demo content refreshed to v{DEMO_CONTENT_VERSION} (was v{recorded}): {wiped} stale graphs wiped, reseeding"
-    );
 }
 
 /// Lift the bundled CityJSON neighbourhoods into the demo dataset's store as

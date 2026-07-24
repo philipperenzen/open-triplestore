@@ -146,26 +146,53 @@ fn name_arg(inst: &Instance, idx: usize) -> Option<&str> {
         .filter(|s| !s.trim().is_empty())
 }
 
-/// IFC compound angle `(deg, min, sec[, millionth-sec])` → decimal degrees.
-/// The sign of the leading degrees applies to the whole value.
+/// IFC compound plane angle → decimal degrees.
+///
+/// Handles the STEP list form `(deg, min, sec[, millionth-sec])` and, for
+/// robustness against exporters/lifts that stringify it, a plain-text form like
+/// `"(49 1 59 680200)"` (whitespace- or comma-separated, optional parens).
+/// Per `IfcCompoundPlaneAngleMeasure` every component carries the sign of the
+/// whole angle — so a Chicago longitude arrives as `(-87, -38, -21, -839999)`
+/// and the components must be combined by magnitude under one overall sign
+/// (summing signed components would cancel the minutes against the degrees).
 fn dms_to_deg(arg: &Arg) -> Option<f64> {
-    let items = arg.as_list()?;
-    let mut vals = items.iter().filter_map(Arg::as_f64);
+    let parts: Vec<f64> = match arg.as_list() {
+        Some(items) => items.iter().filter_map(Arg::as_f64).collect(),
+        None => arg
+            .as_str()?
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty())
+            .map(str::parse::<f64>)
+            .collect::<Result<_, _>>()
+            .ok()?,
+    };
+    let mut vals = parts.into_iter();
     let deg = vals.next()?;
     let min = vals.next().unwrap_or(0.0);
     let sec = vals.next().unwrap_or(0.0);
     let micro = vals.next().unwrap_or(0.0);
-    let sign = if deg < 0.0 { -1.0 } else { 1.0 };
-    Some(sign * (deg.abs() + min / 60.0 + sec / 3600.0 + micro / 3_600_000_000.0))
+    let sign = if deg < 0.0 || min < 0.0 || sec < 0.0 || micro < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    Some(sign * (deg.abs() + min.abs() / 60.0 + sec.abs() / 3600.0 + micro.abs() / 3_600_000_000.0))
 }
 
 /// WGS84 anchor from the file's own IfcSite georeference (RefLatitude /
-/// RefLongitude, attributes 9/10), when present.
+/// RefLongitude, attributes 9/10), when present and plausible. A site at
+/// exactly (0, 0) is an exporter default (Null Island), not a georeference.
 pub fn site_anchor_wkt(file: &StepFile) -> Option<String> {
     let site = file.of_entity("IFCSITE").next()?;
     let lat = site.args.get(9).and_then(dms_to_deg)?;
     let lon = site.args.get(10).and_then(dms_to_deg)?;
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    if lat.abs() < 1e-9 && lon.abs() < 1e-9 {
         return None;
     }
     Some(format!("POINT({lon} {lat})"))
@@ -584,6 +611,23 @@ fn arg_to_literal(arg: &Arg) -> Option<String> {
 mod tests {
     use super::*;
     use crate::ifc::{convert, ConvertOptions};
+
+    #[test]
+    fn dms_handles_positive_negative_and_string_forms() {
+        let list = |v: &[f64]| Arg::List(v.iter().map(|&f| Arg::Float(f)).collect());
+        // KIT Smiley West latitude: (49 1 59 680200) ≈ 49.0332°.
+        let lat = dms_to_deg(&list(&[49.0, 1.0, 59.0, 680200.0])).unwrap();
+        assert!((lat - 49.0333).abs() < 1e-3, "{lat}");
+        // Chicago longitude, all components negative per IfcCompoundPlaneAngleMeasure:
+        // magnitudes must ADD under one sign, not cancel each other.
+        let lon = dms_to_deg(&list(&[-87.0, -38.0, -21.0, -839999.0])).unwrap();
+        assert!((lon - -87.6394).abs() < 1e-3, "{lon}");
+        // Stringified form (as it appears in ifcOWL lifts / lax exporters).
+        let s = dms_to_deg(&Arg::Str("(49 1 59 680200)".to_string())).unwrap();
+        assert!((s - lat).abs() < 1e-9, "{s}");
+        let s2 = dms_to_deg(&Arg::Str("-87, -38, -21, -839999".to_string())).unwrap();
+        assert!((s2 - lon).abs() < 1e-9, "{s2}");
+    }
 
     const SAMPLE: &str = "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC2X3'));\nENDSEC;\nDATA;\n\
 #1= IFCPROJECT('0AAAAAAAAAAAAAAAAAAAA1',$,'Proj',$,$,$,$,(),$);\n\
