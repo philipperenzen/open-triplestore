@@ -339,5 +339,10 @@ export function leafletTiles(dark: boolean): { url: string; attribution: string 
         url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
         attribution: '&copy; OpenStreetMap &copy; CARTO',
       }
-    : { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', attribution: '&copy; OpenStreetMap' };
+    : {
+        // Carto Voyager, not tile.openstreetmap.org — the OSM tile policy 403s
+        // app/localhost traffic, which broke the light preview basemap.
+        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        attribution: '&copy; OpenStreetMap &copy; CARTO',
+      };
 }

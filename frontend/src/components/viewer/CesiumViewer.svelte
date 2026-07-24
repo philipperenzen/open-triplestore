@@ -59,6 +59,11 @@
   const ESRI_IMAGERY =
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
   const ESRI_CREDIT = 'Esri, Maxar, Earthstar Geographics, and the GIS User Community';
+  // Streets base: Carto Voyager (keyless, usage-policy friendly). NOT
+  // tile.openstreetmap.org — the OSM tile policy 403s app/localhost traffic,
+  // which rendered the whole globe as "broken 3D Tiles" for users.
+  const CARTO_STREETS = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
+  const CARTO_CREDIT = '© OpenStreetMap contributors © CARTO';
 
   let containerEl;
   let viewer = null;
@@ -153,10 +158,15 @@
               maximumLevel: 19,
               credit: ESRI_CREDIT,
             })
-          : new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' });
+          : new Cesium.UrlTemplateImageryProvider({
+              url: CARTO_STREETS,
+              subdomains: ['a', 'b', 'c', 'd'],
+              maximumLevel: 19,
+              credit: CARTO_CREDIT,
+            });
       layers.addImageryProvider(provider);
-      // If tiles fail to load (network/provider outage), drop back to OSM streets
-      // once so the demo never silently shows a blank base.
+      // If satellite tiles fail (network/provider outage), drop back to the
+      // streets base once so the demo never silently shows a blank globe.
       if (provider.errorEvent) {
         provider.errorEvent.addEventListener(() => {
           if (baseLayer !== 'streets') {

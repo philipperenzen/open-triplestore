@@ -86,6 +86,7 @@ function materialiseOverlay(
     const mesh = n as THREE.Mesh;
     if (mesh.isMesh && mesh.geometry) shared.add(mesh.geometry);
   });
+  const edgeLines: Array<[THREE.Mesh, THREE.LineSegments]> = [];
   ov.traverse((n: THREE.Object3D) => {
     const mesh = n as THREE.Mesh;
     if (!mesh.isMesh) return;
@@ -95,7 +96,28 @@ function materialiseOverlay(
     mesh.userData.isOverlay = true;
     mesh.userData.ownsGeometry = !shared.has(mesh.geometry);
     mesh.raycast = () => {}; // the merged model under it owns picking
+    // Persistent edge outline: drawn with the depth test OFF so the selected
+    // element's silhouette stays visible even where walls occlude the fill —
+    // the always-there selection cue the fade-in fill alone couldn't give.
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(mesh.geometry, 25),
+      new THREE.LineBasicMaterial({
+        color: HL_COLOR,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+      }),
+    );
+    edges.renderOrder = HL_RENDER_ORDER_XRAY + 1;
+    edges.userData.isOverlay = true;
+    edges.userData.isOverlayEdges = true;
+    edges.userData.ownsGeometry = true; // EdgesGeometry is always overlay-owned
+    edges.raycast = () => {};
+    edgeLines.push([mesh, edges]);
   });
+  // Attached as children of their meshes AFTER the traversal (so the walk never
+  // visits the new nodes) — a child inherits the mesh's exact world transform.
+  for (const [mesh, edges] of edgeLines) mesh.add(edges);
   ov.userData.isOverlay = true;
   return ov;
 }
@@ -130,12 +152,13 @@ export function buildCityHighlightOverlay(
 }
 
 /** Free an overlay's materials, and only the geometry it built for itself (see
- *  `ownsGeometry` above — a shared buffer belongs to the source model). */
+ *  `ownsGeometry` above — a shared buffer belongs to the source model). Covers
+ *  the mesh fills AND the LineSegments edge outlines. */
 export function disposeHighlightOverlay(ov: THREE.Object3D | null | undefined): void {
   if (!ov) return;
   ov.traverse((n: THREE.Object3D) => {
     const mesh = n as THREE.Mesh;
-    if (!mesh.isMesh) return;
+    if (!mesh.isMesh && !(n as THREE.LineSegments).isLineSegments) return;
     if (mesh.userData.ownsGeometry !== false) mesh.geometry?.dispose?.();
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const m of mats) m?.dispose?.();

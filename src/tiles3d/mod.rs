@@ -19,15 +19,16 @@
 //! 3D Tiles / glTF positions are emitted directly in **ECEF metres** (EPSG:4978,
 //! geocentric) and the tile transform is left **identity** — the simplest correct
 //! choice. Stored geometry is reprojected to WGS84 `(lon, lat)` (RD New via
-//! [`crate::geo::crs`]), the stored Z is treated as ellipsoidal height (an
-//! approximation: 3D BAG heights are NAP/orthometric, off by the geoid undulation
-//! — a few tens of metres in NL, acceptable for visualisation), and
-//! `(lon, lat, h)` is mapped to ECEF by the standard WGS84 ellipsoidal formula
-//! [`wgs84_to_ecef`].
+//! [`crate::geo::crs`]), each feature is GROUNDED (its lowest vertex shifted to
+//! h = 0: stored heights are orthometric — NAP for 3DBAG, base at ~10 m around
+//! Nijmegen — and would float every solid a storey above the bare-ellipsoid
+//! terrain the viewer renders), and `(lon, lat, h)` is mapped to ECEF by the
+//! standard WGS84 ellipsoidal formula [`wgs84_to_ecef`].
 //!
 //! TODO: implicit tiling (quadtree/octree subdivision) for large datasets; Draco
-//! mesh compression; per-feature batching beyond one GLB; orthometric→ellipsoidal
-//! height correction via a geoid model.
+//! mesh compression; per-feature batching beyond one GLB; true
+//! orthometric→ellipsoidal height correction via a geoid + terrain model instead
+//! of per-feature grounding.
 
 pub mod glb;
 
@@ -290,18 +291,32 @@ fn triangulate_feature(wkt_literal: &str, region: &mut RegionAccum) -> Option<Ve
         return None;
     }
 
+    // Ground the feature: stored heights are orthometric (NAP for 3DBAG — a
+    // building base sits at ~10 m around Nijmegen), but the viewer renders on
+    // the bare WGS84 ellipsoid, so absolute heights float every solid a storey
+    // above the ground. Shifting each feature so its lowest vertex touches
+    // h = 0 keeps building shapes exact and looks right on ellipsoid terrain;
+    // only the sub-metre ground slope BETWEEN features is flattened.
+    let min_z = tris
+        .iter()
+        .flatten()
+        .map(|&(_, _, z)| z)
+        .fold(f64::INFINITY, f64::min);
+    let min_z = if min_z.is_finite() { min_z } else { 0.0 };
+
     let mut out: Vec<f64> = Vec::with_capacity(tris.len() * 9);
     for [a, b, c] in &tris {
         for &(x, y, z) in &[*a, *b, *c] {
-            // XY → WGS84 lon/lat; the stored Z passes through as height (metres).
+            // XY → WGS84 lon/lat; Z becomes height above the feature's base.
             let (lon, lat) = transform_xy(source, Crs::Wgs84, x, y).unwrap_or((x, y));
             if !lon.is_finite() || !lat.is_finite() {
                 return None;
             }
-            region.add(lon, lat, z);
+            let h = z - min_z;
+            region.add(lon, lat, h);
             out.push(lon);
             out.push(lat);
-            out.push(z);
+            out.push(h);
         }
     }
     Some(out)

@@ -8,11 +8,13 @@
 #
 # Geometry is in EPSG:7415 (RD New + NAP height), the same CRS the bundled 3DBAG
 # CityJSON uses — so the metric measures (height, footprint, volume) come out in
-# metres at real-world scale near the Schependomlaan site (RD easting ≈ 185673,
-# northing ≈ 428054). The volumetric literal carries the <crs> prefix so the
-# store records its source CRS; the 2D map path leaves POLYHEDRALSURFACE to the
-# 3D engine, so each block also carries a plain CRS84 POINT geometry as its 2D
-# map anchor (lon/lat), listed first.
+# metres at real-world scale. The blocks stand on open ground JUST SOUTH of the
+# real 3DBAG excerpt (whose bbox is RD 185610..185760 × 428010..428160) so the
+# synthetic solids never overlap or z-fight the real BAG buildings. The
+# volumetric literal carries the <crs> prefix so the store records its source
+# CRS; the 2D map path leaves POLYHEDRALSURFACE to the 3D engine, so each block
+# also carries a plain CRS84 POINT geometry as its 2D map anchor (lon/lat),
+# listed first.
 #
 # Block A: 12 m × 20 m footprint, 9 m tall (a small apartment block).
 # Block B: 10 m × 15 m footprint, 6 m tall (a workshop).
@@ -26,7 +28,7 @@
 # Zone grouping the two extruded blocks (a "zone" of volumetric demo buildings).
 v3:ExtrudedBlocksZone a bot:Zone ;
     rdfs:label "Extruded building blocks (WKT-Z demo)"@en ;
-    rdfs:comment "Two simple closed POLYHEDRALSURFACE Z solids near the Schependomlaan site, for the native-volumetric 3D path."@en ;
+    rdfs:comment "Two simple closed POLYHEDRALSURFACE Z solids south of the Schependomlaan block, for the native-volumetric 3D path."@en ;
     bot:containsElement v3:BlockA , v3:BlockB .
 
 # ── Block A — 12 m × 20 m × 9 m apartment block ──
@@ -34,15 +36,15 @@ v3:BlockA a bot:Element ;
     rdfs:label "Apartment block A (extruded solid)"@en ;
     dcterms:description "12 m × 20 m footprint extruded to 9 m — a closed polyhedral solid." ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POINT(5.83330 51.84090)"^^geo:wktLiteral ] ;
+        geo:asWKT "POINT(5.83220 51.83930)"^^geo:wktLiteral ] ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185660 428040 0,185660 428060 0,185672 428060 0,185672 428040 0,185660 428040 0)),((185660 428040 9,185672 428040 9,185672 428060 9,185660 428060 9,185660 428040 9)),((185660 428040 0,185660 428040 9,185660 428060 9,185660 428060 0,185660 428040 0)),((185672 428040 0,185672 428060 0,185672 428060 9,185672 428040 9,185672 428040 0)),((185660 428040 0,185672 428040 0,185672 428040 9,185660 428040 9,185660 428040 0)),((185660 428060 0,185660 428060 9,185672 428060 9,185672 428060 0,185660 428060 0)))"^^geo:wktLiteral ] .
+        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185660 427940 0,185660 427960 0,185672 427960 0,185672 427940 0,185660 427940 0)),((185660 427940 9,185672 427940 9,185672 427960 9,185660 427960 9,185660 427940 9)),((185660 427940 0,185660 427940 9,185660 427960 9,185660 427960 0,185660 427940 0)),((185672 427940 0,185672 427960 0,185672 427960 9,185672 427940 9,185672 427940 0)),((185660 427940 0,185672 427940 0,185672 427940 9,185660 427940 9,185660 427940 0)),((185660 427960 0,185660 427960 9,185672 427960 9,185672 427960 0,185660 427960 0)))"^^geo:wktLiteral ] .
 
 # ── Block B — 10 m × 15 m × 6 m workshop ──
 v3:BlockB a bot:Element ;
     rdfs:label "Workshop B (extruded solid)"@en ;
     dcterms:description "10 m × 15 m footprint extruded to 6 m — a closed polyhedral solid." ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POINT(5.83400 51.84090)"^^geo:wktLiteral ] ;
+        geo:asWKT "POINT(5.83275 51.83928)"^^geo:wktLiteral ] ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185700 428040 0,185700 428055 0,185710 428055 0,185710 428040 0,185700 428040 0)),((185700 428040 6,185710 428040 6,185710 428055 6,185700 428055 6,185700 428040 6)),((185700 428040 0,185700 428040 6,185700 428055 6,185700 428055 0,185700 428040 0)),((185710 428040 0,185710 428055 0,185710 428055 6,185710 428040 6,185710 428040 0)),((185700 428040 0,185710 428040 0,185710 428040 6,185700 428040 6,185700 428040 0)),((185700 428055 0,185700 428055 6,185710 428055 6,185710 428055 0,185700 428055 0)))"^^geo:wktLiteral ] .
+        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185700 427940 0,185700 427955 0,185710 427955 0,185710 427940 0,185700 427940 0)),((185700 427940 6,185710 427940 6,185710 427955 6,185700 427955 6,185700 427940 6)),((185700 427940 0,185700 427940 6,185700 427955 6,185700 427955 0,185700 427940 0)),((185710 427940 0,185710 427955 0,185710 427955 6,185710 427940 6,185710 427940 0)),((185700 427940 0,185710 427940 0,185710 427940 6,185700 427940 6,185700 427940 0)),((185700 427955 0,185700 427955 6,185710 427955 6,185710 427955 0,185700 427955 0)))"^^geo:wktLiteral ] .
