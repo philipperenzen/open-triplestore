@@ -43,6 +43,7 @@ impl Plugin for HelloPlugin {
         Router::new()
             .route("/", get(hello))
             .route("/info", get(info))
+            .route("/whoami", get(whoami))
     }
 
     fn on_boot(&self, ctx: &PluginContext) {
@@ -95,6 +96,28 @@ async fn info(State(ctx): State<PluginContext>) -> Json<InfoResponse> {
     })
 }
 
+/// `GET /ext/hello/whoami` — demonstrates [`ots_plugin_api::PluginAuth`]: the
+/// host resolves the caller's bearer credential (session, API token, or a
+/// provider access token) and the plugin just relays the principal JSON.
+async fn whoami(
+    State(ctx): State<PluginContext>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .unwrap_or("");
+    let principal = ctx
+        .auth
+        .introspect_bearer(bearer)
+        .map_err(|e| (axum::http::StatusCode::UNAUTHORIZED, e))?;
+    Ok(axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(principal))
+        .unwrap())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,7 +140,23 @@ mod tests {
         PluginContext {
             base_url: Arc::new("http://localhost:7878".to_string()),
             store: Arc::new(FakeStore),
+            auth: Arc::new(ots_plugin_api::NoAuth),
         }
+    }
+
+    #[tokio::test]
+    async fn whoami_rejects_without_a_resolvable_credential() {
+        let app = HelloPlugin.routes().with_state(test_ctx());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/whoami")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

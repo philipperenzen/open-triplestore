@@ -1760,6 +1760,72 @@ impl AuthDb {
         Ok(rows)
     }
 
+    /// Active members of one organisation.
+    pub fn count_org_members(&self, org_id: &str) -> anyhow::Result<i64> {
+        let conn = self.pool.get()?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM org_memberships WHERE org_id = ?1",
+            [org_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Groups/teams of one organisation.
+    pub fn count_org_groups(&self, org_id: &str) -> anyhow::Result<i64> {
+        let conn = self.pool.get()?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM groups WHERE org_id = ?1",
+            [org_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Compact LLM request-log aggregates for the plugin capability / dashboard:
+    /// `{ last_24h: { by_status, requests }, top_users_7d: [{user, requests}] }`.
+    /// (The richer admin endpoint lives in `server::llm_guard`.)
+    pub fn llm_request_aggregates(&self) -> anyhow::Result<serde_json::Value> {
+        let conn = self.pool.get()?;
+        let day_ago = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+        let mut by_status = serde_json::Map::new();
+        let mut total: i64 = 0;
+        {
+            let mut stmt = conn.prepare(
+                "SELECT status, COUNT(*) FROM llm_request_log WHERE timestamp >= ?1 GROUP BY status",
+            )?;
+            let rows = stmt
+                .query_map([&day_ago], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (s, n) = row?;
+                total += n;
+                by_status.insert(s, serde_json::Value::from(n));
+            }
+        }
+        let mut top_users = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT COALESCE(u.username, l.user_id, 'anonymous'), COUNT(*)
+                 FROM llm_request_log l LEFT JOIN users u ON u.id = l.user_id
+                 WHERE l.timestamp >= ?1
+                 GROUP BY COALESCE(u.username, l.user_id, 'anonymous')
+                 ORDER BY COUNT(*) DESC LIMIT 10",
+            )?;
+            let rows = stmt.query_map([&week_ago], |r| {
+                Ok(serde_json::json!({
+                    "user": r.get::<_, String>(0)?,
+                    "requests": r.get::<_, i64>(1)?,
+                }))
+            })?;
+            for row in rows {
+                top_users.push(row?);
+            }
+        }
+        Ok(serde_json::json!({
+            "last_24h": { "by_status": by_status, "requests": total },
+            "top_users_7d": top_users,
+        }))
+    }
+
     // ─── OIDC provider: clients, codes, refresh tokens, consents, keys ────────
 
     /// Create or update a relying-party client. `redirect_uris` is stored as a
