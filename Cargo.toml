@@ -44,6 +44,10 @@ owl2-rl         = ["rdfs-entailment"]
 owl2-dl         = ["owl2-rl"]
 ## SPARQL + Tantivy full-text search (text:search magic property)
 text-search     = ["dep:tantivy"]
+## Vocabulary term search engine + recommender (LOV replacement) — Tantivy
+## index over the bundled LOV corpus and platform registry vocabularies.
+## The vocabulary catalog, prefix service and offline install work without it.
+vocab-search    = ["dep:tantivy"]
 ## Linked Data Platform HTTP layer
 ldp             = []
 ## ShEx (Shape Expressions) validation
@@ -58,7 +62,10 @@ swrl            = []
 geometry3d      = ["dep:parry3d-f64"]
 ## Certified constructive solid geometry (boolean union/intersection/difference
 ## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
-## `full`: it links the native libSFCGAL C library, which CI does not provide.
+## `full`: it links the native libSFCGAL C library (>= 2.0), which the Docker
+## image and the GitHub feature-list builds do not provide. Only the GitLab
+## `--all-features` job compiles it (on a trixie-based rust image — see
+## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
 saml            = ["dep:samael", "samael/xmlsec"]
@@ -82,7 +89,7 @@ asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
 ## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
