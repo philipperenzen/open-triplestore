@@ -833,6 +833,14 @@ export const adminLlmRequests = (opts: { limit?: number; offset?: number; status
 export const adminLlmStats = () =>
   request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
 
+// ─── Admin: instance settings (admin only; server enforces) ──────────────────
+export const adminGetGuestRegistration = () =>
+  request('GET', '/api/admin/settings/guest-registration'); // { enabled }
+// Flipping OFF bulk-disables guest accounts (with a clear sign-in message);
+// flipping ON re-enables exactly those. Returns { enabled, guests_swept }.
+export const adminSetGuestRegistration = (enabled) =>
+  request('PUT', '/api/admin/settings/guest-registration', { enabled });
+
 // SHACL
 // Returns { report, run_id, ran_at } — the run is persisted server-side.
 // Pass { test: true } for a dry run that validates but is NOT recorded.

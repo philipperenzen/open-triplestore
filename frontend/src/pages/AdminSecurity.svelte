@@ -3,7 +3,7 @@
   import { isAdmin, authInitialized } from '../lib/stores.js';
   import { SYSTEM_ROLES, GRAPH_PERMISSIONS } from '../lib/permissions.js';
   import { navigate } from '../lib/router/index.js';
-  import { Shield, Plus, Trash2, Edit3, Loader2, Key, Globe, Lock, Server, Check, Minus } from 'lucide-svelte';
+  import { Shield, Plus, Trash2, Edit3, Loader2, Key, Globe, Lock, Server, Check, Minus, UserPlus } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import Select from '../components/Select.svelte';
   import Combobox from '../components/Combobox.svelte';
@@ -13,10 +13,32 @@
     listGraphAclRules, grantGraphPermission, revokeGraphPermission,
     listTripleSecurityLabels, createTripleSecurityLabel, deleteTripleSecurityLabel,
     browseGraphs, adminListUsers, listOrganisations,
+    adminGetGuestRegistration, adminSetGuestRegistration,
   } from '../lib/api.js';
 
   // ── Tab state ────────────────────────────────────────────────────────────────
-  let activeTab = 'providers'; // 'providers' | 'endpoint-acl' | 'graph-acl' | 'triple-labels'
+  let activeTab = 'providers'; // 'providers' | 'endpoint-acl' | 'graph-acl' | 'triple-labels' | 'registration'
+
+  // ── Guest self-registration toggle ───────────────────────────────────────────
+  let guestReg = null;        // null = not loaded; { enabled }
+  let guestRegBusy = false;
+  let guestSwept = null;      // last sweep result: { enabled, guests_swept }
+
+  async function loadGuestReg() {
+    try { guestReg = await adminGetGuestRegistration(); } catch (e) { alert(e.message); }
+  }
+
+  async function toggleGuestReg() {
+    if (!guestReg || guestRegBusy) return;
+    guestRegBusy = true;
+    try {
+      guestSwept = await adminSetGuestRegistration(!guestReg.enabled);
+      guestReg = { enabled: guestSwept.enabled };
+    } catch (e) {
+      alert(e.message);
+    }
+    guestRegBusy = false;
+  }
 
   // ── OAuth Providers ───────────────────────────────────────────────────────────
   let providers = [];
@@ -276,6 +298,7 @@
     showEndpointForm = false;
     showGraphForm = false;
     showTripleForm = false;
+    if (tab === 'registration' && guestReg === null) loadGuestReg();
   }
 </script>
 
@@ -303,7 +326,45 @@
       on:click={() => switchTab('triple-labels')}>
       <Lock size={15} /> {$t('pages.adminSecurity.tabTripleLabels')}
     </button>
+    <button class="tab" class:active={activeTab === 'registration'} role="tab"
+      on:click={() => switchTab('registration')}>
+      <UserPlus size={15} /> {$t('pages.adminSecurity.tabRegistration')}
+    </button>
   </div>
+
+  <!-- ── Registration (guest self-registration toggle) ── -->
+  {#if activeTab === 'registration'}
+    <section class="tab-panel">
+      <div class="panel-header">
+        <p class="hint">{$t('pages.adminSecurity.guestRegHint')}</p>
+      </div>
+      {#if guestReg === null}
+        <p class="hint"><Loader2 size={14} class="spin" /> {$t('common.loading')}</p>
+      {:else}
+        <div class="form-card">
+          <h3>{$t('pages.adminSecurity.guestRegTitle')}</h3>
+          <p class="hint">
+            {guestReg.enabled
+              ? $t('pages.adminSecurity.guestRegOnState')
+              : $t('pages.adminSecurity.guestRegOffState')}
+          </p>
+          <button class="btn btn-sm" disabled={guestRegBusy} on:click={toggleGuestReg}>
+            {#if guestRegBusy}<Loader2 size={14} class="spin" />{/if}
+            {guestReg.enabled
+              ? $t('pages.adminSecurity.guestRegTurnOff')
+              : $t('pages.adminSecurity.guestRegTurnOn')}
+          </button>
+          {#if guestSwept}
+            <p class="hint">
+              {guestSwept.enabled
+                ? $t('pages.adminSecurity.guestSweptEnabled', { values: { n: guestSwept.guests_swept } })
+                : $t('pages.adminSecurity.guestSweptDisabled', { values: { n: guestSwept.guests_swept } })}
+            </p>
+          {/if}
+        </div>
+      {/if}
+    </section>
+  {/if}
 
   <!-- ── SSO / OAuth Providers ── -->
   {#if activeTab === 'providers'}

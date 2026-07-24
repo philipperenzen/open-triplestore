@@ -1419,7 +1419,8 @@
       "verifyBody": "We hebben een bevestigingslink gestuurd naar {email}. Open die om je e-mailadres te verifiëren.",
       "verifyNoSmtpHint": "Deze server heeft geen mailserver geconfigureerd - de bevestigingslink staat in het serverlog.",
       "goToLogin": "Naar inloggen",
-      "continue": "Doorgaan"
+      "continue": "Doorgaan",
+      "guestModeNote": "Open registratie is hier beperkt tot gastaccounts: je kunt inloggen en invullen wat met gasten is gedeeld, maar niet publiceren of ontwerpen."
     },
     "settings": {
       "title": "Instellingen",
@@ -1884,7 +1885,16 @@
       "revokeGraphTitle": "Deze graaftoestemming intrekken?",
       "revokeGraphMessage": "De principal verliest onmiddellijk toegang tot de graaf.",
       "removeLabelTitle": "Dit beveiligingslabel verwijderen?",
-      "removeLabelConfirm": "Label verwijderen"
+      "removeLabelConfirm": "Label verwijderen",
+      "tabRegistration": "Registratie",
+      "guestRegTitle": "Zelfregistratie voor gasten",
+      "guestRegHint": "Bepaal of de publieke registratiepagina gastaccounts met beperkte rechten mag aanmaken terwijl normale zelfregistratie gesloten is. Uitschakelen deactiveert bestaande gastaccounts (met een duidelijke melding); weer inschakelen heractiveert precies die accounts.",
+      "guestRegOnState": "AAN — iedereen kan een gastaccount registreren. Gasten kunnen inloggen en gast-open formulieren invullen, meer niet.",
+      "guestRegOffState": "UIT — de registratiepagina weigert nieuwe accounts, en eerder aangemaakte gastaccounts zijn gedeactiveerd.",
+      "guestRegTurnOn": "Zelfregistratie voor gasten inschakelen",
+      "guestRegTurnOff": "Zelfregistratie voor gasten uitschakelen",
+      "guestSweptEnabled": "{n} gastaccount(s) geheractiveerd.",
+      "guestSweptDisabled": "{n} gastaccount(s) gedeactiveerd — zij zien bij het inloggen \"Guest access has been disabled by the administrator\"."
     },
     "apiDocs": {
       "title": "API-documentatie",

@@ -10,6 +10,10 @@ pub enum SystemRole {
     SuperAdmin,
     Admin,
     User,
+    /// Self-registered low-privilege tier (guest self-registration toggle):
+    /// may sign in and fill things client apps open to guests, but never
+    /// publishes, designs, or administers anything.
+    Guest,
 }
 
 impl SystemRole {
@@ -18,6 +22,7 @@ impl SystemRole {
             SystemRole::SuperAdmin => "super_admin",
             SystemRole::Admin => "admin",
             SystemRole::User => "user",
+            SystemRole::Guest => "guest",
         }
     }
 
@@ -28,6 +33,7 @@ impl SystemRole {
             "admin" => Some(SystemRole::Admin),
             // "publisher" was a legacy role; migrated to can_publish flag on User
             "user" | "publisher" => Some(SystemRole::User),
+            "guest" => Some(SystemRole::Guest),
             _ => None,
         }
     }
@@ -40,9 +46,10 @@ impl SystemRole {
     /// Returns the privilege level (higher = more privileged).
     pub fn level(&self) -> u8 {
         match self {
-            SystemRole::User => 0,
-            SystemRole::Admin => 1,
-            SystemRole::SuperAdmin => 2,
+            SystemRole::Guest => 0,
+            SystemRole::User => 1,
+            SystemRole::Admin => 2,
+            SystemRole::SuperAdmin => 3,
         }
     }
 }

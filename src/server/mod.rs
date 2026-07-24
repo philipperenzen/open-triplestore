@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod account_lifecycle_tests;
+#[cfg(test)]
+mod guest_registration_tests;
 pub mod content_negotiation;
 pub mod error;
 mod linked_data;
@@ -717,6 +719,11 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(llm_guard::admin_list_llm_requests),
         )
         .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
+        .route(
+            "/api/admin/settings/guest-registration",
+            get(handlers::admin_get_guest_registration)
+                .put(handlers::admin_set_guest_registration),
+        )
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());

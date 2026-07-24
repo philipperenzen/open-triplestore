@@ -64,6 +64,19 @@ fn extract_token(req: &Request) -> Option<String> {
     None
 }
 
+/// The 401 for a deactivated account. Guests disabled by the admin's
+/// guest-self-registration toggle get the specific message client apps
+/// surface verbatim; everyone else keeps the generic line. The token already
+/// proved the identity, so the specific message is not an enumeration oracle.
+fn deactivated_response(auth_db: &AuthDb, user_id: &str) -> Response {
+    use super::handlers::{GUEST_DISABLED_MESSAGE, GUEST_DISABLED_REASON};
+    if matches!(auth_db.deactivation_reason(user_id), Ok(Some(ref r)) if r == GUEST_DISABLED_REASON)
+    {
+        return (StatusCode::UNAUTHORIZED, GUEST_DISABLED_MESSAGE).into_response();
+    }
+    (StatusCode::UNAUTHORIZED, "User account is deactivated").into_response()
+}
+
 /// Resolve a bearer token to an AuthenticatedUser.
 /// Supports both JWT tokens and API tokens (prefixed with `ots_`).
 #[allow(clippy::result_large_err)]
@@ -99,7 +112,7 @@ fn resolve_token(
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found").into_response())?;
 
         if !user.is_active {
-            return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
+            return Err(deactivated_response(auth_db, &user.id));
         }
 
         // Update last_used_at (best effort, don't fail on this)
@@ -134,7 +147,7 @@ fn resolve_token(
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found").into_response())?;
 
         if !user.is_active {
-            return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
+            return Err(deactivated_response(auth_db, &claims.sub));
         }
 
         Ok(AuthenticatedUser {

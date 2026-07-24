@@ -948,6 +948,14 @@ impl AuthDb {
             );
             CREATE INDEX IF NOT EXISTS idx_llm_request_log_ts ON llm_request_log(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_llm_request_log_user ON llm_request_log(user_id, timestamp DESC);
+
+            -- Small runtime-changeable instance settings (admin toggles that must
+            -- not require an env change + restart, e.g. guest self-registration).
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
         ")?;
 
         // Additive column upgrades for databases created before the current schema.
@@ -956,6 +964,10 @@ impl AuthDb {
         let upgrades = [
             "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
             "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+            // Why an account was deactivated ('guest_disabled' = the admin turned
+            // guest self-registration off; such accounts auto-reactivate when it
+            // returns and get a specific sign-in message meanwhile).
+            "ALTER TABLE users ADD COLUMN deactivated_reason TEXT",
             "ALTER TABLE users ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE sparql_services ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE users ADD COLUMN avatar_key TEXT",
@@ -1627,6 +1639,79 @@ impl AuthDb {
         let conn = self.pool.get()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
         Ok(count)
+    }
+
+    // ─── App settings (runtime-changeable admin toggles) ──────────────────────
+
+    /// Read one instance setting; None when never set.
+    pub fn get_app_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.pool.get()?;
+        let v = conn
+            .query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?;
+        Ok(v)
+    }
+
+    /// Upsert one instance setting.
+    pub fn set_app_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            rusqlite::params![key, value, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Convenience: a boolean setting with a default.
+    pub fn app_setting_bool(&self, key: &str, default: bool) -> bool {
+        match self.get_app_setting(key) {
+            Ok(Some(v)) => matches!(v.as_str(), "true" | "1" | "yes" | "on"),
+            _ => default,
+        }
+    }
+
+    // ─── Guest lifecycle (guest self-registration toggle) ─────────────────────
+
+    /// Why the account is deactivated, if it is (see `deactivated_reason`).
+    pub fn deactivation_reason(&self, user_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.pool.get()?;
+        let v = conn
+            .query_row(
+                "SELECT deactivated_reason FROM users WHERE id = ?1",
+                [user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(v)
+    }
+
+    /// Bulk-deactivate every active guest account, stamping the reason.
+    /// Returns how many accounts were disabled.
+    pub fn deactivate_guests(&self, reason: &str) -> anyhow::Result<usize> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE users SET is_active = 0, deactivated_reason = ?1, updated_at = ?2
+             WHERE role = 'guest' AND is_active = 1",
+            rusqlite::params![reason, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(n)
+    }
+
+    /// Reactivate the guest accounts a previous toggle-off disabled (only those
+    /// carrying the matching reason — a guest an admin deactivated individually
+    /// stays deactivated). Returns how many accounts came back.
+    pub fn reactivate_guests(&self, reason: &str) -> anyhow::Result<usize> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "UPDATE users SET is_active = 1, deactivated_reason = NULL, updated_at = ?2
+             WHERE role = 'guest' AND is_active = 0 AND deactivated_reason = ?1",
+            rusqlite::params![reason, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(n)
     }
 
     // ─── Per-account login throttle (brute-force / credential-stuffing) ───────

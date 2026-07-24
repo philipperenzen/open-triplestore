@@ -21,6 +21,44 @@ use super::password;
 use super::{dataset_graph, secret, totp, user_graph, validate};
 use crate::server::{AppState, CookieConfig};
 
+/// Runtime admin toggle (app_settings key): allow public self-registration of
+/// low-privilege `guest` accounts while normal registration is closed. Default off.
+pub const GUEST_SELF_REGISTRATION_SETTING: &str = "guest_self_registration";
+/// `users.deactivated_reason` stamped when the toggle is switched OFF: these
+/// accounts auto-reactivate when it comes back on.
+pub const GUEST_DISABLED_REASON: &str = "guest_disabled";
+/// What a disabled guest is told at sign-in / introspection — client apps
+/// surface this text verbatim.
+pub const GUEST_DISABLED_MESSAGE: &str = "Guest access has been disabled by the administrator";
+
+/// How a public registration attempt is handled (see `register`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationDecision {
+    /// Normal open registration (or the very first, bootstrap account).
+    Open,
+    /// Normal registration closed, but the guest toggle admits `guest` accounts.
+    GuestOnly,
+    /// No public registration at all.
+    Closed,
+}
+
+/// Pure decision: `disabled` = OTS_DISABLE_REGISTRATION, `existing_users` =
+/// current account count (the first account always registers — bootstrap),
+/// `guest_toggle` = the runtime guest_self_registration setting.
+pub fn decide_registration(
+    disabled: bool,
+    existing_users: i64,
+    guest_toggle: bool,
+) -> RegistrationDecision {
+    if !disabled || existing_users == 0 {
+        return RegistrationDecision::Open;
+    }
+    if guest_toggle {
+        return RegistrationDecision::GuestOnly;
+    }
+    RegistrationDecision::Closed
+}
+
 /// Lifetime of email-verification and change-email links.
 pub(crate) const EMAIL_TOKEN_TTL_HOURS: i64 = 24;
 /// Lifetime of password-reset links.
@@ -600,20 +638,31 @@ pub async fn register(
     // so a fresh instance can be bootstrapped through the UI; thereafter registration
     // is closed. This prevents an attacker on an exposed fresh deployment from
     // racing to claim the first-user super_admin once the operator has locked it.
+    //
+    // Guest tier: with normal registration closed, the runtime-changeable admin
+    // toggle `guest_self_registration` (default OFF) may still open a low-privilege
+    // path — public registration then creates `guest` accounts (no publish/design/
+    // admin rights; client apps decide what guests may fill).
     let registration_disabled = std::env::var("OTS_DISABLE_REGISTRATION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if registration_disabled
-        && db
-            .count_users()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            > 0
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Self-registration is disabled".to_string(),
-        ));
-    }
+    let existing_users = db
+        .count_users()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let register_as_guest = match decide_registration(
+        registration_disabled,
+        existing_users,
+        db.app_setting_bool(GUEST_SELF_REGISTRATION_SETTING, false),
+    ) {
+        RegistrationDecision::Open => false,
+        RegistrationDecision::GuestOnly => true,
+        RegistrationDecision::Closed => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Self-registration is disabled".to_string(),
+            ))
+        }
+    };
 
     // Check if username already exists
     if db
@@ -636,9 +685,11 @@ pub async fn register(
     let hash = password::hash_password(&req.password)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // First user gets super_admin, all others get user
+    // First user gets super_admin; guest-path registrations get guest; all others user.
     let role = if db.count_users().unwrap_or(0) == 0 {
         SystemRole::SuperAdmin
+    } else if register_as_guest {
+        SystemRole::Guest
     } else {
         SystemRole::User
     };
@@ -836,6 +887,13 @@ pub async fn login(
     if !user.is_active {
         let _ = db.record_login_failure(&req.username);
         log_failure(&user.username, "account_deactivated", Some(user.id.clone()));
+        // The password above already checked out, so a specific message here is
+        // not an enumeration oracle (same reasoning as the verified-email gate).
+        // Guests disabled by the admin's toggle get told exactly that.
+        if matches!(db.deactivation_reason(&user.id), Ok(Some(ref r)) if r == GUEST_DISABLED_REASON)
+        {
+            return Err((StatusCode::UNAUTHORIZED, GUEST_DISABLED_MESSAGE.to_string()));
+        }
         return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
     }
 
@@ -1439,7 +1497,67 @@ pub async fn auth_features(
         "email_delivery": state.mailer.smtp_configured(),
         "require_verified_email": require_verified_email(),
         "registration_disabled": registration_disabled,
+        // With registration closed, the guest toggle may still open the
+        // low-privilege guest path — the register UI adapts its wording.
+        "guest_self_registration": db.app_setting_bool(GUEST_SELF_REGISTRATION_SETTING, false),
     })))
+}
+
+/// GET /api/admin/settings/guest-registration — the toggle + current guest counts.
+pub async fn admin_get_guest_registration(
+    State(db): State<Arc<AuthDb>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let enabled = db.app_setting_bool(GUEST_SELF_REGISTRATION_SETTING, false);
+    Ok(Json(serde_json::json!({ "enabled": enabled })))
+}
+
+#[derive(Deserialize)]
+pub struct GuestRegistrationRequest {
+    pub enabled: bool,
+}
+
+/// PUT /api/admin/settings/guest-registration — flip guest self-registration.
+///
+/// Turning it OFF bulk-deactivates every active guest account (stamped
+/// `guest_disabled`, so their sign-in shows [`GUEST_DISABLED_MESSAGE`]);
+/// turning it back ON reactivates exactly those accounts. Guests an admin
+/// deactivated individually are never touched by the sweep.
+pub async fn admin_set_guest_registration(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(db): State<Arc<AuthDb>>,
+    State(audit_log): State<Arc<AuditLogger>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<GuestRegistrationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    db.set_app_setting(
+        GUEST_SELF_REGISTRATION_SETTING,
+        if req.enabled { "true" } else { "false" },
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let swept = if req.enabled {
+        db.reactivate_guests(GUEST_DISABLED_REASON)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        db.deactivate_guests(GUEST_DISABLED_REASON)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
+    let evt = if req.enabled {
+        AuditEventType::UserActivated
+    } else {
+        AuditEventType::UserDeactivated
+    };
+    let mut b = AuditEventBuilder::new(evt, AuditOutcome::Success)
+        .actor_id(&current_user.user_id)
+        .resource("setting", GUEST_SELF_REGISTRATION_SETTING)
+        .details(serde_json::json!({ "enabled": req.enabled, "guests_swept": swept }));
+    b.ip_address = audit::client_ip(&headers, None);
+    b.user_agent = audit::user_agent(&headers);
+    b.request_id = audit::request_id_from_headers(&headers);
+    audit_log.log(b);
+
+    Ok(Json(serde_json::json!({ "enabled": req.enabled, "guests_swept": swept })))
 }
 
 /// POST /api/auth/verify-email — redeem an emailed confirmation link.
