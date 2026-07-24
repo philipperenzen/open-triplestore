@@ -62,7 +62,10 @@ swrl            = []
 geometry3d      = ["dep:parry3d-f64"]
 ## Certified constructive solid geometry (boolean union/intersection/difference
 ## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
-## `full`: it links the native libSFCGAL C library, which CI does not provide.
+## `full`: it links the native libSFCGAL C library (>= 2.0), which the Docker
+## image and the GitHub feature-list builds do not provide. Only the GitLab
+## `--all-features` job compiles it (on a trixie-based rust image — see
+## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
 saml            = ["dep:samael", "samael/xmlsec"]
