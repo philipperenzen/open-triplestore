@@ -39,6 +39,7 @@ fn selectivity(tp: &TriplePattern, bound: &std::collections::HashSet<String>) ->
     let s_bound = match &tp.subject {
         TermPattern::NamedNode(_) | TermPattern::BlankNode(_) | TermPattern::Literal(_) => true,
         TermPattern::Variable(v) => bound.contains(v.as_str()),
+        #[cfg(feature = "sparql-12")]
         TermPattern::Triple(_) => false,
     };
     let p_bound = match &tp.predicate {
@@ -46,7 +47,9 @@ fn selectivity(tp: &TriplePattern, bound: &std::collections::HashSet<String>) ->
         NamedNodePattern::Variable(v) => bound.contains(v.as_str()),
     };
     let o_bound = match &tp.object {
-        TermPattern::NamedNode(_) | TermPattern::BlankNode(_) | TermPattern::Triple(_) => true,
+        TermPattern::NamedNode(_) | TermPattern::BlankNode(_) => true,
+        #[cfg(feature = "sparql-12")]
+        TermPattern::Triple(_) => true,
         TermPattern::Variable(v) => bound.contains(v.as_str()),
         _ => false,
     };

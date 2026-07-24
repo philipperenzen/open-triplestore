@@ -173,6 +173,7 @@ fn query_objects(store: &TripleStore, sparql: &str) -> Vec<String> {
                         Term::NamedNode(n) => n.as_str().to_string(),
                         Term::BlankNode(b) => format!("_:{}", b.as_str()),
                         Term::Literal(l) => l.value().to_string(),
+                        #[cfg(feature = "rdf-12")]
                         Term::Triple(_) => continue,
                     };
                     results.push(s);
