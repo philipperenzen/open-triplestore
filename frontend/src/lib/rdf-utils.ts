@@ -1,9 +1,25 @@
-// In-memory store: namespace → prefix label (no longer fetched from prefix.cc
-// whose certificate has expired; COMMON_PREFIXES covers all well-known prefixes)
+// In-memory store: namespace → prefix label, filled from the platform's own
+// prefix service (bundled prefix.cc + LOV snapshot; no third-party calls).
 const _prefixCcStore: Record<string, string> = {};
+let _prefixLoadStarted = false;
 
-/** No-op kept for call-site compatibility. */
-export function loadPrefixCcPrefixes(): void {}
+/** Warm the namespace→prefix store from the internal prefix service
+ *  (best-effort, once per session; shortenIRI works without it via
+ *  COMMON_PREFIXES). */
+export function loadPrefixCcPrefixes(): void {
+  if (_prefixLoadStarted) return;
+  _prefixLoadStarted = true;
+  fetch('/api/prefixes/all?format=json')
+    .then((res) => (res.ok ? res.json() : null))
+    .then((map) => {
+      if (!map || typeof map !== 'object') return;
+      for (const [label, ns] of Object.entries(map)) {
+        if (typeof ns === 'string' && !(ns in _prefixCcStore)) _prefixCcStore[ns] = label;
+      }
+      _shortenCache.clear();
+    })
+    .catch(() => {});
+}
 
 // Common RDF namespace prefixes
 export const COMMON_PREFIXES = {
@@ -56,19 +72,27 @@ export function shortenIRI(iri: string, extraPrefixes: Record<string, string> = 
     const hit = _shortenCache.get(iri);
     if (hit !== undefined) return hit;
   }
-  // COMMON_PREFIXES wins over prefix.cc to keep stable well-known abbreviations
-  const allPrefixes = { ..._prefixCcStore, ...COMMON_PREFIXES, ...extraPrefixes };
-  let result = iri;
-  let matched = false;
-  for (const [ns, label] of Object.entries(allPrefixes)) {
-    if (iri.startsWith(ns)) {
-      const local = iri.slice(ns.length);
-      if (local && !local.includes('/') && !local.includes('#')) {
-        result = `${label}:${local}`;
-        matched = true;
-        break;
+  // Priority: caller extras > COMMON_PREFIXES > service-loaded store — checked
+  // sequentially to avoid allocating a merged object per call (the service
+  // store holds ~3.7k entries).
+  const tryMatch = (prefixMap) => {
+    for (const [ns, label] of Object.entries(prefixMap)) {
+      if (iri.startsWith(ns)) {
+        const local = iri.slice(ns.length);
+        if (local && !local.includes('/') && !local.includes('#')) {
+          return `${label}:${local}`;
+        }
       }
     }
+    return null;
+  };
+  let result = iri;
+  let matched = false;
+  const fromExtras = extraPrefixes && Object.keys(extraPrefixes).length ? tryMatch(extraPrefixes) : null;
+  const shortened = fromExtras ?? tryMatch(COMMON_PREFIXES) ?? tryMatch(_prefixCcStore);
+  if (shortened) {
+    result = shortened;
+    matched = true;
   }
   if (!matched) {
     // Fallback: derive a short prefix label from the last namespace segment so

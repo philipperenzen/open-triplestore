@@ -100,6 +100,7 @@
     builtin: $t('components.prefixSearch.sourceBuiltin'),
     'prefix.cc': 'prefix.cc',
     platform: $t('components.prefixSearch.sourcePlatform'),
+    lov: 'LOV',
   } as Record<PrefixSource, string>;
 
   // The vocabulary "kind" to show next to the description. `tr` (the $t store) is
@@ -285,6 +286,7 @@
   .ps-src-builtin { background: #dbeafe; color: #1d4ed8; }
   .ps-src-prefix-cc { background: #ede9fe; color: #6d28d9; }
   .ps-src-platform { background: #dcfce7; color: #15803d; }
+  .ps-src-lov { background: #ffedd5; color: #c2410c; }
   .ps-kind {
     font-size: 0.65rem;
     font-weight: 600;
@@ -352,6 +354,7 @@
   :global(:is([data-theme='dark'], .dark)) .ps-src-builtin { background: rgba(59, 130, 246, 0.2); color: #93c5fd; }
   :global(:is([data-theme='dark'], .dark)) .ps-src-prefix-cc { background: rgba(139, 92, 246, 0.2); color: #c4b5fd; }
   :global(:is([data-theme='dark'], .dark)) .ps-src-platform { background: rgba(16, 185, 129, 0.18); color: #6ee7b7; }
+  :global(:is([data-theme='dark'], .dark)) .ps-src-lov { background: rgba(249, 115, 22, 0.18); color: #fdba74; }
   :global(:is([data-theme='dark'], .dark)) .ps-ns { color: var(--ink-400); }
   :global(:is([data-theme='dark'], .dark)) .ps-about { color: var(--ink-500); }
   :global(:is([data-theme='dark'], .dark)) .ps-title { color: var(--ink-700); }

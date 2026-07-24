@@ -80,7 +80,8 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
-| **Prefix auto-resolution** | Unknown prefixes resolved on-the-fly via [prefix.cc](https://prefix.cc) with local caching |
+| **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: search 900+ vocabularies and their terms, CLARIAH-style vocabulary recommender, one-click offline install into the registry ([docs](docs/vocabulary-search.md)) |
+| **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
 | **HTTP protocols** | SPARQL Protocol + Graph Store HTTP Protocol (RFC 7230) + LDP 1.0 |
@@ -452,7 +453,9 @@ curl -X DELETE http://localhost:7878/api/admin/users/<user_id> \
 
 ## Automatic Prefix Resolution
 
-Write SPARQL without declaring prefixes — they resolve automatically via [prefix.cc](https://prefix.cc):
+Write SPARQL without declaring prefixes — they resolve against the built-in
+prefix service (a bundled snapshot of the full prefix.cc registry + the LOV
+catalog, ~3,700 mappings, plus every vocabulary registered on the instance):
 
 ```sparql
 SELECT ?name ?knows WHERE {
@@ -461,7 +464,11 @@ SELECT ?name ?knows WHERE {
 }
 ```
 
-Resolved mappings are cached in `{data-dir}/prefix_cache.json`.
+No network is involved; set `PREFIX_CC_FALLBACK=true` to additionally consult
+the live prefix.cc for labels the local tiers don't know (cached in
+`{data-dir}/prefix_cache.json`). Lookup API: `GET /api/prefixes?q=…`,
+`/api/prefixes/{label}`, `/api/prefixes/reverse?uri=…` — see
+[docs/vocabulary-search.md](docs/vocabulary-search.md).
 
 ---
 
@@ -785,7 +792,8 @@ open-triplestore
 │   ├── rml/            RDF Mapping Language executor
 │   │   └── sources/    CSV, JSON (JSONPath), XML (XPath) source adapters
 │   ├── geo/            GeoSPARQL function registry (GEOS bindings)
-│   ├── prefixes/       prefix.cc resolver
+│   ├── prefixes/       internal prefix service (bundled prefix.cc + LOV snapshot)
+│   ├── vocab_search/   vocabulary search, recommender & offline install (internal LOV)
 │   └── sparql/         Service description generator
 ├── frontend/
 │   ├── src/

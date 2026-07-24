@@ -62,6 +62,8 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "Assets", description = "File asset management (S3 / local storage)"),
         (name = "Import", description = "Source analysis and bulk data import"),
         (name = "Catalog", description = "DCAT catalogue of datasets, models and vocabularies"),
+        (name = "Vocabularies", description = "Internal vocabulary search (LOV mirror): catalog, term search, recommender, offline install"),
+        (name = "Prefixes", description = "Internal prefix service (bundled prefix.cc + LOV snapshot and platform registry)"),
         (name = "Models", description = "Model registry — OWL/RDFS ontologies and SKOS vocabularies — with versioning, branches and merging"),
         (name = "Search", description = "Full-text search index management"),
         (name = "Auth", description = "Registration, login, tokens, SSO and account management"),
@@ -1977,6 +1979,319 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 "DCAT catalogue restricted to public resources (no authentication).",
                 vec![],
                 vec![("200", "Catalogue JSON")],
+                false,
+            ),
+        )],
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Vocabulary search service (internal LOV) + prefix service
+    // ═══════════════════════════════════════════════════════════════════════
+    mount(
+        paths,
+        "/api/vocab/list",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "List vocabularies",
+                "Every vocabulary in the catalog: platform-registered entries first, then the bundled LOV catalog (~900 vocabularies).",
+                vec![],
+                vec![("200", "Catalog listing")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/info",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Vocabulary info",
+                "Full record for one vocabulary, looked up by prefix, ontology URI or namespace (LOV `vocabulary/info` semantics).",
+                vec![qp("vocab", true, "Prefix, ontology URI or namespace")],
+                vec![("200", "Vocabulary record"), ("404", "Unknown vocabulary")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/tags",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "List tags",
+                "All vocabulary tags with usage counts.",
+                vec![],
+                vec![("200", "Tag list")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/search",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Search vocabularies",
+                "Ranked vocabulary search over prefixes, titles, descriptions and tags, with tag/language filters.",
+                vec![
+                    qp("q", false, "Search text (empty lists alphabetically)"),
+                    qp("tag", false, "Comma-separated tag filters (ANDed)"),
+                    qp("lang", false, "Comma-separated language filters"),
+                    qp("page", false, "1-based page (default 1)"),
+                    qp("page_size", false, "Page size (default 15, max 100)"),
+                ],
+                vec![("200", "Search results")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/autocomplete",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Autocomplete vocabularies",
+                "Prefix typeahead over vocabulary prefixes and titles.",
+                vec![
+                    qp("q", true, "Typed prefix fragment"),
+                    qp("page_size", false, "Max results (default 10)"),
+                ],
+                vec![("200", "Candidates")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/status",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Service status",
+                "Catalog size, prefix dataset size, corpus availability and term-index build state.",
+                vec![],
+                vec![("200", "Status")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/terms/search",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Search terms",
+                "LOV-style term search across all vocabularies: BM25 text relevance blended with LOD-corpus reuse metrics and local usage. Requires the vocab-search feature (503 otherwise).",
+                vec![
+                    qp("q", false, "Search text (empty browses by popularity)"),
+                    qp("type", false, "Comma-separated: class,property,datatype,instance (default class,property)"),
+                    qp("vocab", false, "Restrict to one vocabulary prefix"),
+                    qp("tag", false, "Comma-separated tag filters"),
+                    qp("source", false, "platform | lov"),
+                    qp("page", false, "1-based page"),
+                    qp("page_size", false, "Page size (default 10, max 100)"),
+                ],
+                vec![
+                    ("200", "Term search envelope with aggregations"),
+                    ("503", "Term search engine unavailable"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/terms/autocomplete",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Autocomplete terms",
+                "Typeahead over prefixed names (foaf:Pe…) and local names, popularity-ranked.",
+                vec![
+                    qp("q", true, "Typed fragment"),
+                    qp("type", false, "Comma-separated term-type filter"),
+                    qp("page_size", false, "Max results (default 10)"),
+                ],
+                vec![("200", "Candidates"), ("503", "Engine unavailable")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/terms/suggest",
+        vec![(
+            M::Get,
+            o(
+                "Vocabularies",
+                "Suggest terms",
+                "\"Did you mean\" suggestions via fuzzy matching on labels and local names.",
+                vec![
+                    qp("q", true, "Possibly misspelled term"),
+                    qp("page_size", false, "Max suggestions (default 5)"),
+                ],
+                vec![("200", "Suggestions"), ("503", "Engine unavailable")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/recommend",
+        vec![(
+            M::Post,
+            o(
+                "Vocabularies",
+                "Recommend vocabularies",
+                "CLARIAH-style recommender: per-term ranked matches plus a minimal vocabulary set covering every search term (combiSQORE homogenization). Body: {terms:[{term,category}], preferred_vocabs?, per_term_limit?}.",
+                vec![],
+                vec![("200", "Recommendation"), ("503", "Engine unavailable")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/vocab/install",
+        vec![(
+            M::Post,
+            o(
+                "Vocabularies",
+                "Install vocabulary",
+                "Copy a vocabulary from the bundled LOV corpus into the model registry as a public entry (admin only, fully offline). Body: {vocab}.",
+                vec![],
+                vec![
+                    ("200", "Install outcome"),
+                    ("404", "Unknown vocabulary"),
+                    ("409", "Already installed"),
+                    ("503", "Corpus unavailable"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "Search prefixes",
+                "Ranked prefix search over the bundled prefix.cc + LOV snapshot (~3.7k prefixes) and platform-registered vocabularies.",
+                vec![
+                    qp("q", false, "Substring to match on labels/namespaces"),
+                    qp("limit", false, "Max results (default 25, max 200)"),
+                ],
+                vec![("200", "Ranked prefix candidates")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes/all",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "Export all prefixes",
+                "Bulk export of every known prefix in json, jsonld, ttl, sparql, csv or txt.",
+                vec![qp(
+                    "format",
+                    false,
+                    "json | jsonld | ttl | sparql | csv | txt",
+                )],
+                vec![("200", "Prefix export")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes/context.jsonld",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "JSON-LD context",
+                "A JSON-LD @context with every known prefix mapping.",
+                vec![],
+                vec![("200", "JSON-LD context")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes/reverse",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "Reverse lookup",
+                "Namespace (or term IRI) → prefix, longest-namespace matching.",
+                vec![qp("uri", true, "Namespace or term IRI")],
+                vec![("200", "Resolved prefix"), ("404", "No registered prefix")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes/expand",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "Expand CURIE",
+                "foaf:name → http://xmlns.com/foaf/0.1/name.",
+                vec![qp("curie", true, "CURIE to expand")],
+                vec![("200", "Expansion"), ("404", "Unknown prefix")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes/shrink",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "Shrink IRI",
+                "http://xmlns.com/foaf/0.1/name → foaf:name (longest known namespace wins).",
+                vec![qp("iri", true, "IRI to shrink")],
+                vec![("200", "CURIE"), ("404", "No known namespace")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/prefixes/:label",
+        vec![(
+            M::Get,
+            o(
+                "Prefixes",
+                "Look up prefix",
+                "Forward lookup for one prefix label, or comma-separated multi-lookup (prefix.cc ergonomics).",
+                vec![],
+                vec![("200", "Resolved prefix"), ("404", "Unknown prefix")],
                 false,
             ),
         )],

@@ -59,6 +59,14 @@ jobs:
           JWT_SECRET: e2e_jwt_secret_must_be_32_chars_xx
           # Reuse the binary built above instead of `cargo run` (faster startup).
           OTS_BACKEND_CMD: ../target/debug/open-triplestore --bind 127.0.0.1 --port 7878 --data-dir ./e2e-data --log-level warn
+          # Keep the boot seed chain short on the 2-core runner: skip the
+          # standard-vocabulary registry seed (55+ versions incl. the 66k-triple
+          # IMBOR vocabulaire — minutes in a debug build, and its store/SQLite
+          # writes contend with the tests' own imports) and the one-off LOV
+          # corpus download. No e2e spec depends on either; the demo datasets
+          # and saved queries the specs use are seeded regardless.
+          SEED_STANDARD_VOCABS: 'false'
+          VOCAB_CORPUS_URL: ''
         run: npm run e2e
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

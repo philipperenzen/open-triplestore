@@ -1,0 +1,187 @@
+# Asset Description Metadata Schema — ADMS is a profile of DCAT, used to
+# describe semantic assets (or just 'Assets'), defined as highly reusable
+# metadata (e.g.
+# Full vocabulary as published in the Linked Open Vocabularies (LOV) corpus
+# snapshot of 2025-12-18 (https://lov.linkeddata.es/ — dataset CC BY 4.0),
+# version v2015-07-22 (2015-07-22).
+# Source: http://www.w3.org/ns/adms  (ns http://www.w3.org/ns/adms#)
+@prefix adms: <http://www.w3.org/ns/adms#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix ns1: <http://purl.org/vocommons/voaf#> .
+@prefix ns2: <http://schema.org/> .
+@prefix ns3: <http://www.w3.org/2007/05/powder-s#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix vann: <http://purl.org/vocab/vann/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+adms:Asset a rdfs:Class ;
+    rdfs:label "Asset"@en ;
+    dcterms:identifier "adms:Asset" ;
+    rdfs:comment "An Asset is an abstract entity that reflects the intellectual content of the asset and represents those characteristics of the asset that are independent of its physical embodiment. This abstract entity combines the FRBR entities work (a distinct intellectual or artistic creation) and expression (the intellectual or artistic realization of a work). Assets can be versioned. Every time the intellectual content of an asset changes, the result is considered to be a new asset that can be linked to previous and next versions of the Asset. The physical embodiment of an Asset is called an Asset Distribution. A particular Asset may have zero or more Asset Distributions.."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:subClassOf dcat:Dataset .
+
+adms:AssetDistribution a rdfs:Class ;
+    rdfs:label "Asset Distribution"@en ;
+    dcterms:identifier "adms:AssetDistribution" ;
+    rdfs:comment "An Asset Distribution represents a particular physical embodiment of an Asset, which is an example of the FRBR entity manifestation (the physical embodiment of an expression of a work). An Asset Distribution is typically a downloadable computer file (but in principle it could also be a paper document) that implements the intellectual content of an Asset. A particular Asset Distribution is associated with one and only one Asset, while all Distributions of an Asset share the same intellectual content in different physical formats. Asset Distributions themselves are not versioned."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:subClassOf dcat:Distribution .
+
+adms:AssetRepository a rdfs:Class ;
+    rdfs:label "Asset Repository"@en ;
+    dcterms:identifier "adms:AssetRepository" ;
+    rdfs:comment "An Asset Repository is a system or service that provides facilities for storage and maintenance of descriptions of Assets and Asset Distributions, and functionality that allows users to search and access these descriptions. An Asset Repository will typically contain descriptions of several Assets and related Asset Distributions."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:subClassOf dcat:Catalog .
+
+adms:Identifier a rdfs:Class ;
+    rdfs:label "Identifier"@en ;
+    dcterms:identifier "adms:Identifier" ;
+    rdfs:comment "This class is based on the UN/CEFACT Identifier complex type defined in See Section 5.8 of Core Components Data Type Catalogue Version 3.1 (http://www.unece.org/fileadmin/DAM/cefact/codesfortrade/CCTS/CCTS-DTCatalogueVersion3p1.pdf) In RDF this is expressed using the following properties: - the content string should be provided using skos:notation, datatyped with the identifier scheme (inclduing the version number if appropriate); - use dcterms:creator to link to a class describing the agency that manages the identifier scheme or adms:schemaAgency to provide the name as a literal. Although not part of the ADMS conceptual model, it may be useful to provide further properties to the Identifier class such as dcterms:created to provide the date on which the identifier was issued."^^rdf:XMLLiteral ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> .
+
+<http://www.w3.org/ns/adms> a ns1:Vocabulary,
+        owl:Ontology ;
+    rdfs:label "Asset Description Metadata Schema (ADMS)"@en ;
+    dcterms:abstract "ADMS is a profile of DCAT, used to describe semantic assets (or just 'Assets'), defined as highly reusable metadata (e.g. xml schemata, generic data models) and reference data (e.g. code lists, taxonomies, dictionaries, vocabularies) that are used for eGovernment system development."@en ;
+    dcterms:creator [ ns2:affiliation [ foaf:homepage <http://ies.jrc.ec.europa.eu/DE> ;
+                    foaf:name "European Commission, Joint Research Centre " ] ;
+            rdfs:seeAlso <http://andrea-perego.name/foaf/#me> ;
+            foaf:homepage <http://andrea-perego.name/> ;
+            foaf:name "Andrea Perego" ],
+        [ ns2:affiliation <http://www.w3.org/data#W3C> ;
+            rdfs:seeAlso <http://philarcher.org/foaf.rdf#me> ;
+            foaf:homepage <http://www.w3.org/People/all#phila> ;
+            foaf:name "Phil Archer" ],
+        [ rdfs:seeAlso <http://makxdekkers.com/makxdekkers.rdf#me> ;
+            foaf:homepage <http://makxdekkers.com/> ;
+            foaf:name "Makx Dekkers" ] ;
+    dcterms:description """This is the RDF encoding of the Asset Description Metadata Schema, originally 
+    developed under the European Union's ISA Programme and further developed by the W3C Government Linked Data Working Group.
+    It re-uses terms from several other vocabularies, notably Dublin Core, with elements of SKOS, FOAF and more. """ ;
+    dcterms:modified "2013-05-24"^^xsd:date,
+        "2013-09-16"^^xsd:date,
+        "2013-12-21"^^xsd:date,
+        "2015-07-22"^^xsd:date ;
+    dcterms:title "Asset Description Metadata Schema (ADMS)"@en ;
+    vann:preferredNamespacePrefix "adms" ;
+    vann:preferredNamespaceUri "http://www.w3.org/ns/adms#" ;
+    ns1:specializes dcat: ;
+    rdfs:comment "This file specifies the set of RDF classes and properties used in ADMS"@en ;
+    ns3:describedby <http://www.w3.org/TR/vocab-adms> ;
+    foaf:maker [ foaf:homepage <http://www.w3.org/2011/gld/> ;
+            foaf:name "Government Linked Data WG, based on output from the ADMS Working Group" ] .
+
+adms:identifier a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "identifier"@en ;
+    dcterms:identifier "adms:identifier" ;
+    rdfs:comment "adms:identifier is used to link any resource to an instance of adms:Identifier which is its range. N.B. it is not appropriate to use dcterms:identifer to link to the Identifier class as its range is rdfs:Literal. ADMS uses this to provide any identifier for the Asset."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range adms:Identifier .
+
+adms:includedAsset a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "included asset"@en ;
+    dcterms:identifier "adms:includedAsset" ;
+    rdfs:comment "Links to an Asset that is contained in the Asset being described, e.g. when there are several vocabularies defined in a single document."@en ;
+    rdfs:domain adms:Asset ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range adms:Asset .
+
+adms:interoperabilityLevel a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "interoperability level"@en ;
+    dcterms:identifier "adms:interoperabilityLevel" ;
+    rdfs:comment "Links an Asset to its adms:InteroperabilityLevel. Since this is encoded using skos:Concept, that is the defined range for this property."@en ;
+    rdfs:domain adms:Asset ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range skos:Concept .
+
+adms:last a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "last"@en ;
+    dcterms:identifier "adms:last" ;
+    rdfs:comment "A link to the current or latest version of the Asset."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:subPropertyOf <http://www.w3.org/1999/xhtml/vocab#last> .
+
+adms:next a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "next"@en ;
+    dcterms:identifier "adms:next" ;
+    rdfs:comment "A link to the next version of the Asset."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:subPropertyOf <http://www.w3.org/1999/xhtml/vocab#next> .
+
+adms:prev a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "prev"@en ;
+    dcterms:identifier "adms:prev" ;
+    rdfs:comment "A link to the previous version of the Asset."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:subPropertyOf <http://www.w3.org/1999/xhtml/vocab#prev> .
+
+adms:representationTechnique a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "representation technique"@en ;
+    dcterms:identifier "adms:representationTechnique" ;
+    rdfs:comment "Links an adms:AssetDistribution to a skos:Concept that is its adms:RepresentationTechnique."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range skos:Concept .
+
+adms:sample a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "sample"@en ;
+    dcterms:identifier "adms:sample" ;
+    rdfs:comment "Links to a sample of an Asset (which is itself an Asset)."@en ;
+    rdfs:domain adms:Asset ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range adms:Asset .
+
+adms:schemeAgency a rdf:Property,
+        owl:DatatypeProperty ;
+    rdfs:label "scheme agency"@en ;
+    dcterms:identifier "adms:schemeAgency" ;
+    rdfs:comment "The name of the agency responsible for issuing the identifier"@en ;
+    rdfs:domain adms:Identifier ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range rdfs:Literal .
+
+adms:status a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "status"@en ;
+    dcterms:identifier "adms:status" ;
+    rdfs:comment "Links to the status of the Asset or Asset Distribution in the context of a particular workflow process. Since Status is defined using a skos:Concept, that is the defined range for this property."^^rdf:XMLLiteral ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range skos:Concept .
+
+adms:supportedSchema a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "supported schema"@en ;
+    dcterms:identifier "adms:supportedSchema" ;
+    rdfs:comment "A schema according to which the Asset Repository can provide data about its content, e.g. ADMS"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range adms:Asset .
+
+adms:translation a rdf:Property,
+        owl:ObjectProperty ;
+    rdfs:label "translation"@en ;
+    dcterms:identifier "adms:translation" ;
+    rdfs:comment "Links Assets that are translations of each other."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> .
+
+adms:versionNotes a rdf:Property,
+        owl:DatatypeProperty ;
+    rdfs:label "version info"@en ;
+    dcterms:identifier "adms:versionNotes" ;
+    rdfs:comment "A description of changes between this version and the previous version of the Asset."@en ;
+    rdfs:isDefinedBy <http://www.w3.org/TR/vocab-adms> ;
+    rdfs:range rdfs:Literal .
+
