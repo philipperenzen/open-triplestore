@@ -1,7 +1,7 @@
 use super::report::{Severity, ValidationResult};
 use super::shapes::*;
 use crate::store::TripleStore;
-use oxigraph::model::{GraphNameRef, Literal, NamedNodeRef, SubjectRef, Term};
+use oxigraph::model::{GraphNameRef, Literal, NamedNodeRef, NamedOrBlankNodeRef, Term};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -1114,15 +1114,18 @@ fn step(
                 .flatten()
             {
                 match q.subject {
-                    oxigraph::model::Subject::NamedNode(nn) => out.push(Term::NamedNode(nn)),
-                    oxigraph::model::Subject::BlankNode(bn) => out.push(Term::BlankNode(bn)),
-                    _ => {} // RDF-star subjects are out of scope here
+                    oxigraph::model::NamedOrBlankNode::NamedNode(nn) => {
+                        out.push(Term::NamedNode(nn))
+                    }
+                    oxigraph::model::NamedOrBlankNode::BlankNode(bn) => {
+                        out.push(Term::BlankNode(bn))
+                    }
                 }
             }
         } else {
-            let subj: SubjectRef<'_> = match from {
-                Term::NamedNode(nn) => SubjectRef::NamedNode(nn.as_ref()),
-                Term::BlankNode(bn) => SubjectRef::BlankNode(bn.as_ref()),
+            let subj: NamedOrBlankNodeRef<'_> = match from {
+                Term::NamedNode(nn) => NamedOrBlankNodeRef::NamedNode(nn.as_ref()),
+                Term::BlankNode(bn) => NamedOrBlankNodeRef::BlankNode(bn.as_ref()),
                 _ => return, // literals have no outgoing edges
             };
             for q in raw
@@ -1152,9 +1155,9 @@ fn subject_predicate_objects(
     focus: &Term,
     data_graphs: &[String],
 ) -> Vec<(String, Term)> {
-    let subj: SubjectRef<'_> = match focus {
-        Term::NamedNode(nn) => SubjectRef::NamedNode(nn.as_ref()),
-        Term::BlankNode(bn) => SubjectRef::BlankNode(bn.as_ref()),
+    let subj: NamedOrBlankNodeRef<'_> = match focus {
+        Term::NamedNode(nn) => NamedOrBlankNodeRef::NamedNode(nn.as_ref()),
+        Term::BlankNode(bn) => NamedOrBlankNodeRef::BlankNode(bn.as_ref()),
         _ => return Vec::new(),
     };
     let raw = store.store();

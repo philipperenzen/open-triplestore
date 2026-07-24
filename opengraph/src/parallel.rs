@@ -47,13 +47,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use oxigraph::sparql::{QueryOptions, QueryResults, QuerySolution};
+use oxigraph::sparql::{QueryResults, QuerySolution, SparqlEvaluator};
 use oxigraph::store::Store;
 use oxrdf::{BlankNode, GraphName, NamedNode, Quad, Term, Variable};
 use rayon::prelude::*;
 use spargebra::algebra::{AggregateExpression, AggregateFunction, Expression, GraphPattern};
 use spargebra::term::{TermPattern, TriplePattern};
-use spargebra::Query;
+use spargebra::{Query, SparqlParser};
 
 /// How a query's per-shard partial results combine into the global answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,19 +164,19 @@ impl ParallelStore {
     /// caller should fall back to single-store evaluation); `Err` only on a real
     /// evaluation error inside a shard.
     pub fn query(&self, sparql: &str) -> Result<Option<ParAnswer>, String> {
-        self.query_with_options(sparql, QueryOptions::default())
+        self.query_with_options(sparql, SparqlEvaluator::default())
     }
 
     /// Like [`Self::query`], but evaluates each shard with the caller-supplied
-    /// [`QueryOptions`] — so custom functions (GeoSPARQL, RDF 1.2, …) registered
+    /// [`SparqlEvaluator`] — so custom functions (GeoSPARQL, RDF 1.2, …) registered
     /// on the live store apply identically per shard, keeping the parallel result
     /// bit-for-bit equal to the single-store one. `options` is cloned per shard.
     pub fn query_with_options(
         &self,
         sparql: &str,
-        options: QueryOptions,
+        options: SparqlEvaluator,
     ) -> Result<Option<ParAnswer>, String> {
-        let query = match Query::parse(sparql, None) {
+        let query = match SparqlParser::new().parse_query(sparql) {
             Ok(q) => q,
             Err(_) => return Ok(None),
         };
@@ -216,7 +216,7 @@ impl ParallelStore {
         &self,
         orig: &Query,
         plan: &GroupAggPlan,
-        options: &QueryOptions,
+        options: &SparqlEvaluator,
     ) -> Result<Option<ParAnswer>, String> {
         let Some(partial_sparql) = build_partial_query(orig, plan) else {
             return Ok(None);
@@ -245,7 +245,7 @@ impl ParallelStore {
         &self,
         orig: &Query,
         plan: &CountDistinctPlan,
-        options: &QueryOptions,
+        options: &SparqlEvaluator,
     ) -> Result<Option<ParAnswer>, String> {
         let Some(partial_sparql) = build_count_distinct_partial(orig, plan) else {
             return Ok(None);
@@ -269,7 +269,8 @@ impl ParallelStore {
 /// with no store access. The live query path uses this to skip building (or
 /// consulting) the subject-sharded mirror for queries it cannot accelerate.
 pub fn is_decomposable(sparql: &str) -> bool {
-    Query::parse(sparql, None)
+    SparqlParser::new()
+        .parse_query(sparql)
         .ok()
         .map(|q| {
             plan(&q).is_some()
@@ -296,7 +297,7 @@ pub enum ParClass {
 
 /// Classify a query's parallel shape, or `None` if it is not decomposable.
 pub fn classify(sparql: &str) -> Option<ParClass> {
-    let query = Query::parse(sparql, None).ok()?;
+    let query = SparqlParser::new().parse_query(sparql).ok()?;
     // A mergeable grouped/global non-COUNT aggregate or a COUNT(DISTINCT) is an
     // order-insensitive scalar/set result.
     if plan_group_aggregate(&query).is_some() || plan_count_distinct(&query).is_some() {
@@ -322,7 +323,7 @@ pub fn classify(sparql: &str) -> Option<ParClass> {
 /// full copy is consulted, so this only defers the `SUM`/`AVG` shapes the shards do
 /// not decompose (global, computed-expression, or otherwise complex ones).
 pub fn has_sum_or_avg(sparql: &str) -> bool {
-    let Ok(query) = Query::parse(sparql, None) else {
+    let Ok(query) = SparqlParser::new().parse_query(sparql) else {
         return false;
     };
     let pattern = match &query {
@@ -390,10 +391,14 @@ fn run_shard(
     store: &Store,
     sparql: &str,
     merge: &Merge,
-    options: &QueryOptions,
+    options: &SparqlEvaluator,
 ) -> Result<ShardPartial, String> {
-    let results = store
-        .query_opt(sparql, options.clone())
+    let results = options
+        .clone()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?
+        .on_store(store)
+        .execute()
         .map_err(|e| e.to_string())?;
     let mismatch = || "parallel: result shape did not match the planned merge".to_string();
     match results {
@@ -715,14 +720,15 @@ fn plan_group_count(proj_vars: &[Variable], inner: &GraphPattern) -> Option<Merg
     for pv in proj_vars {
         if key_set.contains(pv.as_str()) {
             key_vars.push(pv.clone());
-        } else if let Some(internal) = alias.get(pv.as_str()) {
+        } else {
+            // A projected column that is neither a key nor a known aggregate
+            // alias is not decomposable (`?` yields None).
+            let internal = alias.get(pv.as_str())?;
             if count_internal.contains(internal) {
                 count_vars.push(pv.clone());
             } else {
                 return None; // aliases a non-COUNT aggregate
             }
-        } else {
-            return None; // a projected column that is neither key nor COUNT
         }
     }
     // All keys must be projected (so the merge can group on them), and there must
@@ -1094,10 +1100,14 @@ fn run_partial_shard(
     store: &Store,
     sparql: &str,
     proj: &[Variable],
-    options: &QueryOptions,
+    options: &SparqlEvaluator,
 ) -> Result<Vec<Vec<Option<Term>>>, String> {
-    match store
-        .query_opt(sparql, options.clone())
+    match options
+        .clone()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?
+        .on_store(store)
+        .execute()
         .map_err(|e| e.to_string())?
     {
         QueryResults::Solutions(sols) => collect_rows(sols, proj),
@@ -1162,7 +1172,13 @@ fn materialize_partials(rows: &[Vec<Option<Term>>], n_cols: usize) -> Result<Sto
 
 /// Run a final merge query over a materialised temp store and collect the result.
 fn run_temp_merge(store: &Store, sparql: &str) -> Result<ParAnswer, String> {
-    match store.query(sparql).map_err(|e| e.to_string())? {
+    match SparqlEvaluator::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?
+        .on_store(store)
+        .execute()
+        .map_err(|e| e.to_string())?
+    {
         QueryResults::Solutions(sols) => {
             let variables: Vec<Variable> = sols.variables().to_vec();
             let rows = collect_rows(sols, &variables)?;
@@ -1420,7 +1436,7 @@ fn rows_have_blank(rows: &[Vec<Option<Term>>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{GraphName, Literal, NamedNode, Quad, Subject, Term};
+    use oxrdf::{GraphName, Literal, NamedNode, NamedOrBlankNode, Quad, Term};
 
     fn iri(s: &str) -> NamedNode {
         NamedNode::new(s).unwrap()
@@ -1431,7 +1447,7 @@ mod tests {
         let ex = "http://example.org/";
         let mut quads = Vec::with_capacity(n * 3);
         for i in 0..n {
-            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            let s = NamedOrBlankNode::NamedNode(iri(&format!("{ex}p{i}")));
             quads.push(Quad::new(
                 s.clone(),
                 iri(&format!("{ex}name")),
@@ -1464,7 +1480,14 @@ mod tests {
         let mut loader = store.bulk_loader();
         loader.load_quads(quads.iter().cloned()).unwrap();
         loader.commit().unwrap();
-        normalise(store.query(sparql).unwrap())
+        normalise(
+            SparqlEvaluator::new()
+                .parse_query(sparql)
+                .unwrap()
+                .on_store(store)
+                .execute()
+                .unwrap(),
+        )
     }
 
     fn normalise(results: QueryResults) -> Vec<String> {
@@ -1662,7 +1685,7 @@ mod tests {
         let ex = "http://example.org/";
         let mut quads = Vec::new();
         for i in 0..300usize {
-            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            let s = NamedOrBlankNode::NamedNode(iri(&format!("{ex}p{i}")));
             quads.push(Quad::new(
                 s.clone(),
                 iri(&format!("{ex}type")),
@@ -1692,7 +1715,7 @@ mod tests {
         let ex = "http://example.org/";
         let mut quads = Vec::new();
         for i in 0..200usize {
-            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            let s = NamedOrBlankNode::NamedNode(iri(&format!("{ex}p{i}")));
             quads.push(Quad::new(
                 s.clone(),
                 iri(&format!("{ex}type")),
@@ -1723,7 +1746,7 @@ mod tests {
         let ex = "http://example.org/";
         let mut quads = Vec::new();
         for i in 0..200usize {
-            let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+            let s = NamedOrBlankNode::NamedNode(iri(&format!("{ex}p{i}")));
             quads.push(Quad::new(
                 s.clone(),
                 iri(&format!("{ex}type")),
@@ -1821,7 +1844,7 @@ mod tests {
         let mut quads = Vec::new();
         for i in 0..100usize {
             quads.push(Quad::new(
-                Subject::NamedNode(iri(&format!("{ex}p{i}"))),
+                NamedOrBlankNode::NamedNode(iri(&format!("{ex}p{i}"))),
                 iri(&format!("{ex}ref")),
                 Term::BlankNode(BlankNode::new_unchecked(format!("b{i}"))),
                 GraphName::DefaultGraph,

@@ -1,10 +1,10 @@
 use dashmap::DashMap;
 use opengraph::spargebra::algebra::{AggregateExpression, Expression, GraphPattern};
 use opengraph::spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
-use opengraph::spargebra::Query as SpargebraQuery;
+use opengraph::spargebra::{Query as SpargebraQuery, SparqlParser, Update as SpargebraUpdate};
 use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::*;
-use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator, Update};
+use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator};
 use oxigraph::store::Store;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -28,7 +28,7 @@ pub enum StoreError {
     #[error("Loader error: {0}")]
     Loader(#[from] oxigraph::store::LoaderError),
     #[error("SPARQL evaluation error: {0}")]
-    Evaluation(#[from] oxigraph::sparql::EvaluationError),
+    Evaluation(#[from] oxigraph::sparql::QueryEvaluationError),
     #[error("SPARQL update error: {0}")]
     Update(#[from] oxigraph::sparql::UpdateEvaluationError),
     #[error("SPARQL syntax error: {0}")]
@@ -441,8 +441,11 @@ impl TripleStore {
         {
             return Ok(full);
         }
-        let opts = self.query_options();
-        let results = self.store.query_opt(sparql, opts)?;
+        let results = self
+            .query_options()
+            .parse_query(sparql)?
+            .on_store(&self.store)
+            .execute()?;
         Ok(results)
     }
 
@@ -463,7 +466,7 @@ impl TripleStore {
         {
             return None;
         }
-        let parsed = SpargebraQuery::parse(sparql, None).ok()?;
+        let parsed = SparqlParser::new().parse_query(sparql).ok()?;
         let (pattern, dataset) = match &parsed {
             SpargebraQuery::Select {
                 pattern, dataset, ..
@@ -512,8 +515,10 @@ impl TripleStore {
         // scans. `None` ⇒ targets can't be bounded (variable graph, CLEAR/DROP/
         // CREATE/LOAD, or a parse miss) ⇒ conservative full rebuild.
         let targets = Self::static_update_targets(sparql);
-        let update = Update::parse(sparql, None)?;
-        self.store.update_opt(update, self.query_options())?;
+        self.query_options()
+            .parse_update(sparql)?
+            .on_store(&self.store)
+            .execute()?;
         match targets {
             Some(targets) => self
                 .graph_index
@@ -541,9 +546,9 @@ impl TripleStore {
     /// or a parse failure. Conservative by construction: when in doubt, rebuild.
     fn static_update_targets(sparql: &str) -> Option<Vec<Option<String>>> {
         use opengraph::spargebra::term::{GraphName, GraphNamePattern};
-        use opengraph::spargebra::{GraphUpdateOperation, Update as SpargebraUpdate};
+        use opengraph::spargebra::GraphUpdateOperation;
 
-        let parsed = SpargebraUpdate::parse(sparql, None).ok()?;
+        let parsed = SparqlParser::new().parse_update(sparql).ok()?;
         // Ground `GraphName` (DATA blocks): NamedNode or DefaultGraph, never a var.
         let ground = |g: &GraphName| match g {
             GraphName::NamedNode(nn) => Some(nn.as_str().to_string()),
@@ -605,8 +610,10 @@ impl TripleStore {
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
         debug!("Executing targeted update: {}", &sparql[..prefix_end]);
-        let update = Update::parse(sparql, None)?;
-        self.store.update_opt(update, self.query_options())?;
+        self.query_options()
+            .parse_update(sparql)?
+            .on_store(&self.store)
+            .execute()?;
         if full_rebuild || affected_iris.is_empty() {
             self.graph_index.rebuild(&self.store);
         } else {
@@ -630,9 +637,13 @@ impl TripleStore {
         statements: &[String],
     ) -> Result<Vec<Result<(), String>>, StoreError> {
         // Parse all upfront
-        let parsed: Vec<Result<Update, String>> = statements
+        let parsed: Vec<Result<SpargebraUpdate, String>> = statements
             .iter()
-            .map(|s| Update::parse(s, None).map_err(|e| e.to_string()))
+            .map(|s| {
+                SparqlParser::new()
+                    .parse_update(s)
+                    .map_err(|e| e.to_string())
+            })
             .collect();
 
         let opts = self.query_options();
@@ -640,7 +651,7 @@ impl TripleStore {
 
         for update in parsed {
             match update {
-                Ok(u) => match self.store.update_opt(u, opts.clone()) {
+                Ok(u) => match opts.clone().for_update(u).on_store(&self.store).execute() {
                     Ok(()) => results.push(Ok(())),
                     Err(e) => results.push(Err(e.to_string())),
                 },
@@ -926,8 +937,10 @@ impl TripleStore {
             .collect::<Vec<_>>()
             .join(" ; ");
 
-        let update = Update::parse(&sparql, None)?;
-        self.store.update_opt(update, self.query_options())?;
+        self.query_options()
+            .parse_update(&sparql)?
+            .on_store(&self.store)
+            .execute()?;
 
         // Remove from in-memory graph index.
         for iri in graph_iris {
@@ -1129,7 +1142,7 @@ impl TripleStore {
             Ok(p) => p,
             Err(_) => return Vec::new(),
         };
-        let subj_ref = SubjectRef::BlankNode(subject.as_ref());
+        let subj_ref = NamedOrBlankNodeRef::BlankNode(subject.as_ref());
         let collect = |graph: GraphNameRef<'_>| -> Vec<Term> {
             self.store
                 .quads_for_pattern(Some(subj_ref), Some(pred), None, Some(graph))
@@ -1160,10 +1173,10 @@ impl TripleStore {
         predicate: &str,
         graph: Option<&str>,
     ) -> Vec<Term> {
-        let subj: Subject = match subject.strip_prefix("_:") {
-            Some(label) => Subject::BlankNode(BlankNode::new_unchecked(label)),
+        let subj: NamedOrBlankNode = match subject.strip_prefix("_:") {
+            Some(label) => NamedOrBlankNode::BlankNode(BlankNode::new_unchecked(label)),
             None => match NamedNode::new(subject) {
-                Ok(nn) => Subject::NamedNode(nn),
+                Ok(nn) => NamedOrBlankNode::NamedNode(nn),
                 Err(_) => return Vec::new(),
             },
         };
@@ -1337,7 +1350,7 @@ mod tests {
         let mut set = std::collections::BTreeSet::new();
         for quad in store.store().iter() {
             let quad = quad.unwrap();
-            if let Subject::BlankNode(b) = &quad.subject {
+            if let NamedOrBlankNode::BlankNode(b) = &quad.subject {
                 set.insert(b.as_str().to_string());
             }
             if let Term::BlankNode(b) = &quad.object {

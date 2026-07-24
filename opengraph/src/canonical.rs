@@ -40,7 +40,7 @@
 //! * RDF-star triple terms are not traversed (OpenGraph does not enable the
 //!   `rdf-star` feature on `oxrdf`).
 
-use oxrdf::{BlankNode, GraphName, NamedNode, Quad, Subject, Term};
+use oxrdf::{BlankNode, GraphName, NamedNode, NamedOrBlankNode, Quad, Term};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -58,9 +58,9 @@ pub struct Canonicalized {
 
 // ── blank-node extraction ───────────────────────────────────────────────────
 
-fn subject_bnode(s: &Subject) -> Option<&str> {
+fn subject_bnode(s: &NamedOrBlankNode) -> Option<&str> {
     match s {
-        Subject::BlankNode(b) => Some(b.as_str()),
+        NamedOrBlankNode::BlankNode(b) => Some(b.as_str()),
         _ => None,
     }
 }
@@ -105,10 +105,8 @@ fn ser_named(n: &NamedNode) -> String {
 /// syntax only needs to be deterministic and injective for our own hashing.
 fn ser_quad(q: &Quad, bn: &dyn Fn(&str) -> String) -> String {
     let s = match &q.subject {
-        Subject::NamedNode(n) => ser_named(n),
-        Subject::BlankNode(b) => bn(b.as_str()),
-        // rdf-star triple subjects (feature off by default) — opaque placeholder.
-        _ => "<<triple>>".to_string(),
+        NamedOrBlankNode::NamedNode(n) => ser_named(n),
+        NamedOrBlankNode::BlankNode(b) => bn(b.as_str()),
     };
     let p = ser_named(&q.predicate);
     let o = match &q.object {
@@ -234,8 +232,8 @@ pub fn canonical_hashes(quads: &[Quad]) -> BTreeMap<String, String> {
 
 fn relabel_quad(q: &Quad, m: &BTreeMap<String, String>) -> Quad {
     let subject = match &q.subject {
-        Subject::BlankNode(b) => {
-            Subject::BlankNode(BlankNode::new_unchecked(m[b.as_str()].clone()))
+        NamedOrBlankNode::BlankNode(b) => {
+            NamedOrBlankNode::BlankNode(BlankNode::new_unchecked(m[b.as_str()].clone()))
         }
         other => other.clone(),
     };
@@ -319,11 +317,11 @@ mod tests {
         BlankNode::new_unchecked(s)
     }
     /// `<s> <p> <o>` (named object)
-    fn q_nn(s: Subject, p: &str, o: &str) -> Quad {
+    fn q_nn(s: NamedOrBlankNode, p: &str, o: &str) -> Quad {
         Quad::new(s, iri(p), Term::NamedNode(iri(o)), GraphName::DefaultGraph)
     }
     /// `<s> <p> "lit"`
-    fn q_lit(s: Subject, p: &str, lit: &str) -> Quad {
+    fn q_lit(s: NamedOrBlankNode, p: &str, lit: &str) -> Quad {
         Quad::new(
             s,
             iri(p),
@@ -343,7 +341,7 @@ mod tests {
     #[test]
     fn no_bnodes_returns_input_unchanged() {
         let quads = vec![q_nn(
-            Subject::NamedNode(iri("http://ex/a")),
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
             "http://ex/p",
             "http://ex/b",
         )];
@@ -357,12 +355,12 @@ mod tests {
         // <a> :p _:x . _:x :q "v"
         let quads = vec![
             Quad::new(
-                Subject::NamedNode(iri("http://ex/a")),
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
                 iri("http://ex/p"),
                 Term::BlankNode(bnode("x")),
                 GraphName::DefaultGraph,
             ),
-            q_lit(Subject::BlankNode(bnode("x")), "http://ex/q", "v"),
+            q_lit(NamedOrBlankNode::BlankNode(bnode("x")), "http://ex/q", "v"),
         ];
         let c = canonicalize(&quads);
         assert_eq!(c.mapping.len(), 1);
@@ -385,32 +383,48 @@ mod tests {
         // graph A: <a> :p _:b1 ; _:b1 :name "Alice" ; _:b1 :knows _:b2 ; _:b2 :name "Bob"
         let a = vec![
             Quad::new(
-                Subject::NamedNode(iri("http://ex/a")),
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
                 iri("http://ex/p"),
                 Term::BlankNode(bnode("b1")),
                 GraphName::DefaultGraph,
             ),
-            q_lit(Subject::BlankNode(bnode("b1")), "http://ex/name", "Alice"),
+            q_lit(
+                NamedOrBlankNode::BlankNode(bnode("b1")),
+                "http://ex/name",
+                "Alice",
+            ),
             Quad::new(
-                Subject::BlankNode(bnode("b1")),
+                NamedOrBlankNode::BlankNode(bnode("b1")),
                 iri("http://ex/knows"),
                 Term::BlankNode(bnode("b2")),
                 GraphName::DefaultGraph,
             ),
-            q_lit(Subject::BlankNode(bnode("b2")), "http://ex/name", "Bob"),
+            q_lit(
+                NamedOrBlankNode::BlankNode(bnode("b2")),
+                "http://ex/name",
+                "Bob",
+            ),
         ];
         // graph B: identical structure, different labels (zzz/aaa), reversed order
         let mut b = vec![
-            q_lit(Subject::BlankNode(bnode("aaa")), "http://ex/name", "Bob"),
+            q_lit(
+                NamedOrBlankNode::BlankNode(bnode("aaa")),
+                "http://ex/name",
+                "Bob",
+            ),
             Quad::new(
-                Subject::BlankNode(bnode("zzz")),
+                NamedOrBlankNode::BlankNode(bnode("zzz")),
                 iri("http://ex/knows"),
                 Term::BlankNode(bnode("aaa")),
                 GraphName::DefaultGraph,
             ),
-            q_lit(Subject::BlankNode(bnode("zzz")), "http://ex/name", "Alice"),
+            q_lit(
+                NamedOrBlankNode::BlankNode(bnode("zzz")),
+                "http://ex/name",
+                "Alice",
+            ),
             Quad::new(
-                Subject::NamedNode(iri("http://ex/a")),
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
                 iri("http://ex/p"),
                 Term::BlankNode(bnode("zzz")),
                 GraphName::DefaultGraph,
@@ -436,23 +450,23 @@ mod tests {
         // _:l1 first "x" ; rest _:l2 .  _:l2 first "x" ; rest _:l3 .  _:l3 first "x" ; rest nil .
         let make = |l1: &str, l2: &str, l3: &str| {
             vec![
-                q_lit(Subject::BlankNode(bnode(l1)), RDF_FIRST, "x"),
+                q_lit(NamedOrBlankNode::BlankNode(bnode(l1)), RDF_FIRST, "x"),
                 Quad::new(
-                    Subject::BlankNode(bnode(l1)),
+                    NamedOrBlankNode::BlankNode(bnode(l1)),
                     iri(RDF_REST),
                     Term::BlankNode(bnode(l2)),
                     GraphName::DefaultGraph,
                 ),
-                q_lit(Subject::BlankNode(bnode(l2)), RDF_FIRST, "x"),
+                q_lit(NamedOrBlankNode::BlankNode(bnode(l2)), RDF_FIRST, "x"),
                 Quad::new(
-                    Subject::BlankNode(bnode(l2)),
+                    NamedOrBlankNode::BlankNode(bnode(l2)),
                     iri(RDF_REST),
                     Term::BlankNode(bnode(l3)),
                     GraphName::DefaultGraph,
                 ),
-                q_lit(Subject::BlankNode(bnode(l3)), RDF_FIRST, "x"),
+                q_lit(NamedOrBlankNode::BlankNode(bnode(l3)), RDF_FIRST, "x"),
                 Quad::new(
-                    Subject::BlankNode(bnode(l3)),
+                    NamedOrBlankNode::BlankNode(bnode(l3)),
                     iri(RDF_REST),
                     Term::NamedNode(iri(RDF_NIL)),
                     GraphName::DefaultGraph,
@@ -478,7 +492,7 @@ mod tests {
     fn named_graph_blank_subject_is_handled() {
         // bnode appearing as the graph name as well as the subject
         let q = Quad::new(
-            Subject::BlankNode(bnode("g")),
+            NamedOrBlankNode::BlankNode(bnode("g")),
             iri("http://ex/p"),
             Term::Literal(Literal::new_simple_literal("v")),
             GraphName::BlankNode(bnode("g")),
@@ -493,7 +507,13 @@ mod tests {
     #[test]
     fn stable_relabel_is_collision_free_and_durable() {
         // _:x :p "v"
-        let make = |label: &str| vec![q_lit(Subject::BlankNode(bnode(label)), "http://ex/p", "v")];
+        let make = |label: &str| {
+            vec![q_lit(
+                NamedOrBlankNode::BlankNode(bnode(label)),
+                "http://ex/p",
+                "v",
+            )]
+        };
         // Same structure, different input labels → identical stable hash labels.
         let a = stable_relabel(&make("x"));
         let b = stable_relabel(&make("totally-different-label"));
@@ -509,7 +529,7 @@ mod tests {
 
         // Two *different* structures must NOT collide (unlike sequential c14n0).
         let other = stable_relabel(&vec![q_lit(
-            Subject::BlankNode(bnode("y")),
+            NamedOrBlankNode::BlankNode(bnode("y")),
             "http://ex/DIFFERENT",
             "v",
         )]);

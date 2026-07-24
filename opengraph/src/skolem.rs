@@ -18,7 +18,7 @@
 //! for standards-compliant blank-node output.
 
 use crate::canonical;
-use oxrdf::{BlankNode, GraphName, NamedNode, Quad, Subject, Term};
+use oxrdf::{BlankNode, GraphName, NamedNode, NamedOrBlankNode, Quad, Term};
 use std::collections::BTreeMap;
 
 /// Default base IRI under which Skolem IRIs are minted when the caller does not
@@ -58,7 +58,7 @@ pub fn skolemize(quads: &[Quad], base: &str) -> (Vec<Quad>, BTreeMap<String, Str
 
 fn skolemize_quad(q: &Quad, m: &BTreeMap<String, String>) -> Quad {
     let subject = match &q.subject {
-        Subject::BlankNode(b) => Subject::NamedNode(named(&m[b.as_str()])),
+        NamedOrBlankNode::BlankNode(b) => NamedOrBlankNode::NamedNode(named(&m[b.as_str()])),
         other => other.clone(),
     };
     let object = match &q.object {
@@ -92,8 +92,8 @@ fn de_iri(iri: &str, prefix: &str) -> Option<BlankNode> {
 
 fn deskolemize_quad(q: &Quad, prefix: &str) -> Quad {
     let subject = match &q.subject {
-        Subject::NamedNode(n) => match de_iri(n.as_str(), prefix) {
-            Some(b) => Subject::BlankNode(b),
+        NamedOrBlankNode::NamedNode(n) => match de_iri(n.as_str(), prefix) {
+            Some(b) => NamedOrBlankNode::BlankNode(b),
             None => q.subject.clone(),
         },
         other => other.clone(),
@@ -130,25 +130,25 @@ mod tests {
         // <a> :p _:x . _:x :name "Alice" . _:x :knows _:y . _:y :name "Bob"
         vec![
             Quad::new(
-                Subject::NamedNode(iri("http://ex/a")),
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
                 iri("http://ex/p"),
                 Term::BlankNode(bnode("x")),
                 GraphName::DefaultGraph,
             ),
             Quad::new(
-                Subject::BlankNode(bnode("x")),
+                NamedOrBlankNode::BlankNode(bnode("x")),
                 iri("http://ex/name"),
                 Term::Literal(Literal::new_simple_literal("Alice")),
                 GraphName::DefaultGraph,
             ),
             Quad::new(
-                Subject::BlankNode(bnode("x")),
+                NamedOrBlankNode::BlankNode(bnode("x")),
                 iri("http://ex/knows"),
                 Term::BlankNode(bnode("y")),
                 GraphName::DefaultGraph,
             ),
             Quad::new(
-                Subject::BlankNode(bnode("y")),
+                NamedOrBlankNode::BlankNode(bnode("y")),
                 iri("http://ex/name"),
                 Term::Literal(Literal::new_simple_literal("Bob")),
                 GraphName::DefaultGraph,
@@ -185,25 +185,25 @@ mod tests {
         // Same graph, different blank-node labels, reversed order.
         let mut b = vec![
             Quad::new(
-                Subject::BlankNode(bnode("q2")),
+                NamedOrBlankNode::BlankNode(bnode("q2")),
                 iri("http://ex/name"),
                 Term::Literal(Literal::new_simple_literal("Bob")),
                 GraphName::DefaultGraph,
             ),
             Quad::new(
-                Subject::BlankNode(bnode("q1")),
+                NamedOrBlankNode::BlankNode(bnode("q1")),
                 iri("http://ex/knows"),
                 Term::BlankNode(bnode("q2")),
                 GraphName::DefaultGraph,
             ),
             Quad::new(
-                Subject::BlankNode(bnode("q1")),
+                NamedOrBlankNode::BlankNode(bnode("q1")),
                 iri("http://ex/name"),
                 Term::Literal(Literal::new_simple_literal("Alice")),
                 GraphName::DefaultGraph,
             ),
             Quad::new(
-                Subject::NamedNode(iri("http://ex/a")),
+                NamedOrBlankNode::NamedNode(iri("http://ex/a")),
                 iri("http://ex/p"),
                 Term::BlankNode(bnode("q1")),
                 GraphName::DefaultGraph,
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn deskolemize_leaves_foreign_iris_untouched() {
         let quads = vec![Quad::new(
-            Subject::NamedNode(iri("http://ex/a")),
+            NamedOrBlankNode::NamedNode(iri("http://ex/a")),
             iri("http://ex/p"),
             Term::NamedNode(iri("http://ex/b")),
             GraphName::DefaultGraph,

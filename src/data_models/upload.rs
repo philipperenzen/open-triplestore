@@ -63,7 +63,7 @@ fn detect_ontology_subject(quads: &[Quad]) -> Option<NamedNode> {
         if quad.predicate.as_str() == RDF_TYPE {
             if let Term::NamedNode(obj) = &quad.object {
                 if obj.as_str() == OWL_ONTOLOGY {
-                    if let Subject::NamedNode(subj) = &quad.subject {
+                    if let NamedOrBlankNode::NamedNode(subj) = &quad.subject {
                         return Some(subj.clone());
                     }
                 }
@@ -201,7 +201,7 @@ pub fn load_parsed(
         let version_literal = Literal::new_simple_literal(version.as_str());
         // Insert into the default graph slot; it will be re-routed to base_graph below.
         quads.push(Quad::new(
-            Subject::NamedNode(subject_nn),
+            NamedOrBlankNode::NamedNode(subject_nn),
             version_info_pred,
             Term::Literal(version_literal),
             GraphName::DefaultGraph,

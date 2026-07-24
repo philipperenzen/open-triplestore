@@ -420,7 +420,7 @@ pub fn extract_lov_terms_from_reader<R: Read>(
             object,
             ..
         } = quad;
-        let oxigraph::model::Subject::NamedNode(s) = subject else {
+        let oxigraph::model::NamedOrBlankNode::NamedNode(s) = subject else {
             continue;
         };
         let acc = graphs
@@ -527,7 +527,7 @@ pub fn extract_platform_terms(
                 continue;
             };
             for quad in quads {
-                let oxigraph::model::Subject::NamedNode(s) = quad.subject else {
+                let oxigraph::model::NamedOrBlankNode::NamedNode(s) = quad.subject else {
                     continue;
                 };
                 let acc = subjects.entry(s.into_string()).or_default();

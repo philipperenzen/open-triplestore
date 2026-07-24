@@ -198,7 +198,7 @@ impl QueryOptimizer {
     /// Returns the rewritten SPARQL string.  If parsing fails (e.g. UPDATE
     /// statements), the original query is returned unchanged.
     pub fn reorder_bgp(sparql: &str) -> String {
-        let query = match Query::parse(sparql, None) {
+        let query = match spargebra::SparqlParser::new().parse_query(sparql) {
             Ok(q) => q,
             Err(_) => return sparql.to_string(),
         };

@@ -276,13 +276,18 @@ describe('filter expressions', () => {
       return;
     }
     const spec = (mod.featureFilter ? mod : (mod.default as Record<string, unknown>)) ?? mod;
-    const featureFilter = spec.featureFilter as (f: unknown) => {
+    // maplibre-gl 6 requires a `rootKey` locating the expression in the style
+    // JSON; the value is only used in error messages, so any layer path works.
+    const featureFilter = spec.featureFilter as (
+      f: unknown,
+      rootKey: string,
+    ) => {
       needGeometry: boolean;
       filter: (g: unknown, f: unknown, c: unknown) => boolean;
     };
 
     const geo = footprintsToMultiPolygon([footprintPolygon(TOWER_BOX, 96, BIG_BEN)])!;
-    const compiled = featureFilter(buildingSuppressionFilter(geo, 0.5));
+    const compiled = featureFilter(buildingSuppressionFilter(geo, 0.5), 'layers[0].filter');
     expect(compiled.needGeometry).toBe(true); // real geometry reaches the filter
 
     // Feature geometry arrives in tile-local units; mirror MapLibre's own

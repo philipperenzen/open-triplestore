@@ -212,12 +212,14 @@ impl ParallelMirror {
 
     /// Number of full (re)builds performed since construction. Diagnostics, and the
     /// hook the regression test uses to prove a write burst does not thrash rebuilds.
+    #[cfg(test)]
     pub fn build_count(&self) -> usize {
         self.inner.build_count.load(Ordering::Relaxed)
     }
 
     /// Number of `Store::len()` probes (full-store key scans) performed since
     /// construction. Reads must not drive this up — see [`Self::get_or_build`].
+    #[cfg(test)]
     pub fn len_probe_count(&self) -> usize {
         self.inner.len_probes.load(Ordering::Relaxed)
     }
@@ -375,7 +377,12 @@ impl ParallelMirror {
         }
         self.get_or_build(store)?; // ensures both copies are built (None if over cap)
         let full = self.inner.full.read().ok()?.clone()?;
-        full.query_opt(sparql, options()).ok()
+        options()
+            .parse_query(sparql)
+            .ok()?
+            .on_store(&full)
+            .execute()
+            .ok()
     }
 }
 

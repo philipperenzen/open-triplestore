@@ -673,9 +673,7 @@ ENDSEC;\nEND-ISO-10303-21;";
         // storey→beam containment.
         assert!(bot.contains("https://w3id.org/bot#hasBuilding"));
         assert!(bot.contains("https://w3id.org/bot#hasStorey"));
-        assert!(bot.contains(&format!(
-            "<http://ex.test/m/0AAAAAAAAAAAAAAAAAAAA4> <https://w3id.org/bot#containsElement> <http://ex.test/m/0AAAAAAAAAAAAAAAAAAAA5>"
-        )));
+        assert!(bot.contains(&"<http://ex.test/m/0AAAAAAAAAAAAAAAAAAAA4> <https://w3id.org/bot#containsElement> <http://ex.test/m/0AAAAAAAAAAAAAAAAAAAA5>".to_string()));
         // Beam: element type + ifcOWL class + label + guid + per-element IFC ref.
         assert!(bot.contains("https://w3id.org/bot#Element"));
         assert!(bot.contains("OWL#IfcBeam"));
