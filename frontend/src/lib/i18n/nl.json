@@ -1419,7 +1419,8 @@
       "verifyBody": "We hebben een bevestigingslink gestuurd naar {email}. Open die om je e-mailadres te verifiëren.",
       "verifyNoSmtpHint": "Deze server heeft geen mailserver geconfigureerd - de bevestigingslink staat in het serverlog.",
       "goToLogin": "Naar inloggen",
-      "continue": "Doorgaan"
+      "continue": "Doorgaan",
+      "guestModeNote": "Open registratie is hier beperkt tot gastaccounts: je kunt inloggen en invullen wat met gasten is gedeeld, maar niet publiceren of ontwerpen."
     },
     "settings": {
       "title": "Instellingen",
@@ -1791,7 +1792,7 @@
       "providerTypeSaml": "SAML 2.0",
       "clientId": "Client-ID",
       "clientIdPlaceholder": "Applicatie-(client-)ID",
-      "clientSecret": "Clientgeheim",
+      "clientSecret": "Client-secret",
       "clientSecretKeep": "(laat leeg om het bestaande te behouden)",
       "discoveryUrl": "Discovery-URL",
       "discoveryUrlHint": "(OIDC well-known-endpoint)",
@@ -1884,7 +1885,27 @@
       "revokeGraphTitle": "Deze graaftoestemming intrekken?",
       "revokeGraphMessage": "De principal verliest onmiddellijk toegang tot de graaf.",
       "removeLabelTitle": "Dit beveiligingslabel verwijderen?",
-      "removeLabelConfirm": "Label verwijderen"
+      "removeLabelConfirm": "Label verwijderen",
+      "tabRegistration": "Registratie",
+      "guestRegTitle": "Zelfregistratie voor gasten",
+      "guestRegHint": "Bepaal of de publieke registratiepagina gastaccounts met beperkte rechten mag aanmaken terwijl normale zelfregistratie gesloten is. Uitschakelen deactiveert bestaande gastaccounts (met een duidelijke melding); weer inschakelen heractiveert precies die accounts.",
+      "guestRegOnState": "AAN — iedereen kan een gastaccount registreren. Gasten kunnen inloggen en gast-open formulieren invullen, meer niet.",
+      "guestRegOffState": "UIT — de registratiepagina weigert nieuwe accounts, en eerder aangemaakte gastaccounts zijn gedeactiveerd.",
+      "guestRegTurnOn": "Zelfregistratie voor gasten inschakelen",
+      "guestRegTurnOff": "Zelfregistratie voor gasten uitschakelen",
+      "guestSweptEnabled": "{n} gastaccount(s) geheractiveerd.",
+      "guestSweptDisabled": "{n} gastaccount(s) gedeactiveerd — zij zien bij het inloggen \"Guest access has been disabled by the administrator\".",
+      "tabClients": "Aanmeld-apps",
+      "clientsHint": "Apps die hun gebruikers TEGEN deze store aanmelden (OIDC-provider): de OTL Viewer, het Validatieplatform en de Formulieren-app. Elke client heeft exacte redirect-URL's; publieke clients gebruiken PKCE, vertrouwelijke een secret. Clients kunnen ook via OAUTH_CLIENTS_JSON worden aangeleverd.",
+      "clientsEmpty": "Nog geen aanmeld-apps geregistreerd.",
+      "clientPublic": "Publieke client (PKCE)",
+      "clientConfidential": "Vertrouwelijke client",
+      "clientHasSecret": "secret ingesteld",
+      "newClient": "App registreren",
+      "clientName": "Weergavenaam",
+      "clientRedirects": "Redirect-URL's (één per regel)",
+      "clientPublicLabel": "Publieke client (browser-app, PKCE — geen secret)",
+      "saveClient": "App opslaan"
     },
     "apiDocs": {
       "title": "API-documentatie",
@@ -2793,6 +2814,17 @@
       "recommendAlternatives": "Alternatieven",
       "recommendNone": "geen match",
       "attribution": "Vocabulairemetadata en -inhoud van"
+    },
+    "oauthAuthorize": {
+      "missingParams": "Deze aanmeldlink is onvolledig (client_id of redirect_uri ontbreekt).",
+      "unsupportedResponseType": "Alleen de authorization-code-flow wordt ondersteund.",
+      "badRequestTitle": "Ongeldige aanmeldaanvraag",
+      "errorTitle": "Aanmelden mislukt",
+      "consentTitle": "{client} toestaan om je aan te melden?",
+      "consentBody": "{client} wil je account ({username}) op deze store gebruiken. De app ziet je gebruikersnaam, e-mail en lidmaatschappen.",
+      "approve": "Toestaan",
+      "deny": "Annuleren",
+      "redirecting": "Terug naar de app…"
     }
   },
   "toast": {

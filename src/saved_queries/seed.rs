@@ -157,6 +157,7 @@ fn build_bundle() -> Bundle {
         // Gating already happens in `seed_open_triplestore` before this bundle
         // is even built; recorded here too so the bundle is self-describing.
         opt_out_env: Some("SEED_STANDARDS_DEMO".to_string()),
+        prefixes: Default::default(),
         org: OrgSpec {
             slug: ORG_SLUG.to_string(),
             name: ORG_NAME.to_string(),

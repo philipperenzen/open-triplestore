@@ -74,6 +74,8 @@ test-utils      = []
 ## Template/example compile-time plugin (plugins/hello), mounted at /ext/hello.
 ## Off by default — the pattern every real plugin follows, see docs/plugins.md.
 plugin-hello    = ["dep:ots-plugin-hello"]
+## Suite accounts dashboard: users/orgs/entitlements + merged LLM usage at /ext/accounts-dashboard
+plugin-accounts-dashboard = ["dep:ots-plugin-accounts-dashboard"]
 ## Optional `age` X25519 backup encryption
 backup-encrypt  = ["dep:age"]
 ## Optional SMTP alerting (lettre itself is a core dependency — the auth
@@ -147,6 +149,8 @@ ipnet = "2"
 # LRU cache for property path memoisation (W4-22)
 lru = "0.16"
 jsonwebtoken = "9"
+# ES256 keypair generation for the OIDC provider (already jsonwebtoken's verifier backend).
+ring = "0.17"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -216,6 +220,7 @@ toml = "1"
 # are optional, enabled by their own `plugin-<name>` feature.
 ots-plugin-api = { path = "plugins/api" }
 ots-plugin-hello = { path = "plugins/hello", optional = true }
+ots-plugin-accounts-dashboard = { path = "plugins/accounts-dashboard", optional = true }
 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.

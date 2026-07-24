@@ -27,6 +27,33 @@ pub trait PluginStore: Send + Sync {
     fn update(&self, sparql: &str) -> Result<(), String>;
 }
 
+/// Account/identity capability for plugins, in the same JSON-string idiom as
+/// [`PluginStore`] (no dependency on the host crate's auth types). Every
+/// method takes the caller's raw bearer credential; the HOST enforces
+/// authentication/authorization inside the capability — a plugin can neither
+/// skip the checks nor see anything an equivalent API call wouldn't return.
+pub trait PluginAuth: Send + Sync {
+    /// Resolve a bearer credential (session JWT, `ots_` API token, or a
+    /// provider-issued access token) to its account, as JSON:
+    /// `{ "id", "username", "email", "role", "is_admin", "organisations":
+    /// [{"slug","name","role"}], "groups": [{"org_slug","id","name"}] }`.
+    /// `Err` = not a valid/active credential (message is safe to surface).
+    fn introspect_bearer(&self, bearer: &str) -> Result<String, String>;
+
+    /// Admin-gated: all accounts, as a JSON array of
+    /// `{ "id", "username", "email", "role", "is_active" }`.
+    fn users_json(&self, admin_bearer: &str) -> Result<String, String>;
+
+    /// Admin-gated: all organisations with their member/group counts, as a
+    /// JSON array of `{ "slug", "name", "members", "groups" }`.
+    fn organisations_json(&self, admin_bearer: &str) -> Result<String, String>;
+
+    /// Admin-gated: the instance's own LLM request-log aggregates, as
+    /// `{ "last_24h": { "by_status": {..}, "requests": n },
+    ///    "top_users_7d": [{"user","requests"}] }`.
+    fn llm_stats_json(&self, admin_bearer: &str) -> Result<String, String>;
+}
+
 /// Everything a plugin needs from the running instance. Cheap to clone (every
 /// field is `Arc`-backed) — used directly as the Axum state for plugin routes.
 #[derive(Clone)]
@@ -36,6 +63,27 @@ pub struct PluginContext {
     pub base_url: Arc<String>,
     /// SPARQL query/update capability against the shared store.
     pub store: Arc<dyn PluginStore>,
+    /// Account/identity capability (introspection + admin-gated overviews).
+    pub auth: Arc<dyn PluginAuth>,
+}
+
+/// A [`PluginAuth`] that rejects everything — for plugin unit tests that don't
+/// exercise authentication.
+pub struct NoAuth;
+
+impl PluginAuth for NoAuth {
+    fn introspect_bearer(&self, _bearer: &str) -> Result<String, String> {
+        Err("auth unavailable".to_string())
+    }
+    fn users_json(&self, _admin_bearer: &str) -> Result<String, String> {
+        Err("auth unavailable".to_string())
+    }
+    fn organisations_json(&self, _admin_bearer: &str) -> Result<String, String> {
+        Err("auth unavailable".to_string())
+    }
+    fn llm_stats_json(&self, _admin_bearer: &str) -> Result<String, String> {
+        Err("auth unavailable".to_string())
+    }
 }
 
 /// A compile-time Open Triplestore plugin.
@@ -98,6 +146,7 @@ mod tests {
         let ctx = PluginContext {
             base_url: Arc::new("http://localhost".to_string()),
             store: Arc::new(NullStore),
+            auth: Arc::new(NoAuth),
         };
         // Defaults must not panic and must produce an empty router.
         p.on_boot(&ctx);

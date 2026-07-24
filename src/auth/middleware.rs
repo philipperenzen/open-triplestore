@@ -64,6 +64,19 @@ fn extract_token(req: &Request) -> Option<String> {
     None
 }
 
+/// The 401 for a deactivated account. Guests disabled by the admin's
+/// guest-self-registration toggle get the specific message client apps
+/// surface verbatim; everyone else keeps the generic line. The token already
+/// proved the identity, so the specific message is not an enumeration oracle.
+fn deactivated_response(auth_db: &AuthDb, user_id: &str) -> Response {
+    use super::handlers::{GUEST_DISABLED_MESSAGE, GUEST_DISABLED_REASON};
+    if matches!(auth_db.deactivation_reason(user_id), Ok(Some(ref r)) if r == GUEST_DISABLED_REASON)
+    {
+        return (StatusCode::UNAUTHORIZED, GUEST_DISABLED_MESSAGE).into_response();
+    }
+    (StatusCode::UNAUTHORIZED, "User account is deactivated").into_response()
+}
+
 /// Resolve a bearer token to an AuthenticatedUser.
 /// Supports both JWT tokens and API tokens (prefixed with `ots_`).
 #[allow(clippy::result_large_err)]
@@ -99,7 +112,7 @@ fn resolve_token(
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found").into_response())?;
 
         if !user.is_active {
-            return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
+            return Err(deactivated_response(auth_db, &user.id));
         }
 
         // Update last_used_at (best effort, don't fail on this)
@@ -134,7 +147,7 @@ fn resolve_token(
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found").into_response())?;
 
         if !user.is_active {
-            return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
+            return Err(deactivated_response(auth_db, &claims.sub));
         }
 
         Ok(AuthenticatedUser {
@@ -190,26 +203,58 @@ async fn authenticate(
     jwt_config: &JwtConfig,
     auth_db: &Arc<AuthDb>,
     auth_ext: &AuthExt,
+    provider: &crate::server::OidcProviderState,
+    issuer: &str,
     token: &str,
 ) -> Result<AuthenticatedUser, Response> {
     let is_legacy_api_token = token.starts_with("ots_");
 
+    let has_fallback = auth_ext.oidc.is_some() || provider.0.is_some();
+    // The legacy path's error is the most specific one we have (e.g. the
+    // guest-disabled message for a deactivated account's still-valid session
+    // token) — keep it and only surface the generic error when NO path could
+    // say anything better.
+    let mut legacy_err: Option<Response> = None;
     if auth_ext.accept_legacy_tokens {
         match resolve_token(jwt_config, auth_db, token) {
             Ok(user) => return Ok(user),
-            // `ots_` tokens are never OIDC; if no OIDC verifier, surface the
-            // original error. Otherwise fall through and try OIDC.
-            Err(resp) if is_legacy_api_token || auth_ext.oidc.is_none() => return Err(resp),
-            Err(_) => {}
+            // `ots_` tokens are never OIDC; with no other verifier, surface the
+            // original error. Otherwise remember it and try the OIDC paths.
+            Err(resp) if is_legacy_api_token || !has_fallback => return Err(resp),
+            Err(resp) => legacy_err = Some(resp),
         }
     } else if is_legacy_api_token {
         return Err((StatusCode::UNAUTHORIZED, "Legacy tokens are disabled").into_response());
     }
 
+    // Our own OIDC-provider access tokens (ES256, issued at /oauth/token).
+    if let Some(keys) = provider.0.as_deref() {
+        if let Some(sub) = crate::auth::oidc_provider::provider_token_subject(
+            keys,
+            issuer.trim_end_matches('/'),
+            token,
+        ) {
+            let user = auth_db
+                .get_user_by_id(&sub)
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response())?
+                .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found").into_response())?;
+            if !user.is_active {
+                return Err(deactivated_response(auth_db, &user.id));
+            }
+            return Ok(AuthenticatedUser {
+                user_id: user.id,
+                role: user.role,
+                can_publish: user.can_publish,
+                write_access: true, // interactive OIDC sessions have write access
+            });
+        }
+    }
+
     if auth_ext.oidc.is_some() && !is_legacy_api_token {
         return resolve_oidc_token(auth_ext, auth_db, token).await;
     }
-    Err((StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response())
+    Err(legacy_err
+        .unwrap_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()))
 }
 
 /// Marker inserted into a `403` response's extensions by a guard that has
@@ -274,10 +319,13 @@ fn audit_forbidden(audit: &AuditLogger, ctx: &DenialContext, resp: &Response) {
 }
 
 /// Middleware that requires a valid JWT or API token. Returns 401 if missing or invalid.
+#[allow(clippy::too_many_arguments)] // axum substate extractors, one per capability
 pub async fn require_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
     State(auth_ext): State<Arc<AuthExt>>,
+    State(provider): State<crate::server::OidcProviderState>,
+    State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
     mut req: Request,
     next: Next,
@@ -285,7 +333,15 @@ pub async fn require_auth(
     let token = extract_token(&req)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing authorization token").into_response())?;
 
-    let user = authenticate(&jwt_config, &auth_db, &auth_ext, &token).await?;
+    let user = authenticate(
+        &jwt_config,
+        &auth_db,
+        &auth_ext,
+        &provider,
+        &base_url.0,
+        &token,
+    )
+    .await?;
     // M-8 (generalized): a read-scoped API token may not perform mutating requests.
     enforce_write_scope_for_mutation(&req, &user)?;
     req.extensions_mut().insert(user);
@@ -300,16 +356,28 @@ pub async fn require_auth(
 
 /// Middleware that optionally extracts auth. If present and valid, sets the
 /// authenticated user. If missing or invalid, continues without authentication.
+#[allow(clippy::too_many_arguments)] // axum substate extractors, one per capability
 pub async fn optional_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
     State(auth_ext): State<Arc<AuthExt>>,
+    State(provider): State<crate::server::OidcProviderState>,
+    State(base_url): State<crate::server::BaseUrl>,
     State(audit): State<Arc<AuditLogger>>,
     mut req: Request,
     next: Next,
 ) -> Response {
     if let Some(token) = extract_token(&req) {
-        if let Ok(user) = authenticate(&jwt_config, &auth_db, &auth_ext, &token).await {
+        if let Ok(user) = authenticate(
+            &jwt_config,
+            &auth_db,
+            &auth_ext,
+            &provider,
+            &base_url.0,
+            &token,
+        )
+        .await
+        {
             // M-8 (generalized): a read-scoped API token may not mutate, even on
             // optional-auth routes whose handlers self-gate on resource role.
             if let Err(resp) = enforce_write_scope_for_mutation(&req, &user) {

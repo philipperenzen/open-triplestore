@@ -13,9 +13,12 @@
 use std::sync::Arc;
 
 use axum::Router;
-use ots_plugin_api::{Plugin, PluginContext, PluginStore};
+use ots_plugin_api::{Plugin, PluginAuth, PluginContext, PluginStore};
 use serde::Serialize;
 
+use crate::auth::handlers::{GUEST_DISABLED_MESSAGE, GUEST_DISABLED_REASON};
+use crate::auth::jwt::{hash_token, verify_token};
+use crate::auth::models::User;
 use crate::server::content_negotiation::{serialize_results_to, ResultFormat};
 use crate::server::AppState;
 
@@ -32,11 +35,145 @@ impl PluginStore for AppState {
     }
 }
 
+/// Local (synchronous) credential resolution for the plugin capability:
+/// session JWTs, `ots_` API tokens and this store's own provider-issued
+/// access tokens. External-IdP tokens are NOT resolved here (that path is
+/// async network I/O) — a plugin dashboard is admin tooling on local
+/// credentials, not a resource server.
+fn resolve_local_user(state: &AppState, bearer: &str) -> Result<User, String> {
+    let db = &state.auth_db;
+    let user = if bearer.starts_with("ots_") {
+        let tok = db
+            .get_api_token_by_hash(&hash_token(bearer))
+            .map_err(|e| e.to_string())?
+            .ok_or("invalid API token")?;
+        if tok.revoked {
+            return Err("API token has been revoked".to_string());
+        }
+        if let Some(exp) = &tok.expires_at {
+            if *exp < chrono::Utc::now().to_rfc3339() {
+                return Err("API token has expired".to_string());
+            }
+        }
+        db.get_user_by_id(&tok.user_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("user not found")?
+    } else if let Ok(claims) = verify_token(&state.jwt_config, bearer) {
+        if claims.token_type != "access" {
+            return Err("expected an access token".to_string());
+        }
+        db.get_user_by_id(&claims.sub)
+            .map_err(|e| e.to_string())?
+            .ok_or("user not found")?
+    } else if let Some(keys) = state.oidc_provider.as_deref() {
+        let issuer = state.base_url.trim_end_matches('/');
+        let sub = crate::auth::oidc_provider::provider_token_subject(keys, issuer, bearer)
+            .ok_or("invalid or expired token")?;
+        db.get_user_by_id(&sub)
+            .map_err(|e| e.to_string())?
+            .ok_or("user not found")?
+    } else {
+        return Err("invalid or expired token".to_string());
+    };
+    if !user.is_active {
+        if matches!(db.deactivation_reason(&user.id), Ok(Some(ref r)) if r == GUEST_DISABLED_REASON)
+        {
+            return Err(GUEST_DISABLED_MESSAGE.to_string());
+        }
+        return Err("account is deactivated".to_string());
+    }
+    Ok(user)
+}
+
+fn require_local_admin(state: &AppState, bearer: &str) -> Result<User, String> {
+    let user = resolve_local_user(state, bearer)?;
+    if !user.role.is_admin() {
+        return Err("admin account required".to_string());
+    }
+    Ok(user)
+}
+
+impl PluginAuth for AppState {
+    fn introspect_bearer(&self, bearer: &str) -> Result<String, String> {
+        let user = resolve_local_user(self, bearer)?;
+        let orgs: Vec<serde_json::Value> = self
+            .auth_db
+            .list_user_membership_summaries(&user.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(slug, name, role)| {
+                serde_json::json!({ "slug": slug, "name": name, "role": role })
+            })
+            .collect();
+        let groups: Vec<serde_json::Value> = self
+            .auth_db
+            .list_user_group_summaries(&user.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(org_slug, id, name)| {
+                serde_json::json!({ "org_slug": org_slug, "id": id, "name": name })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "role": user.role.as_str(),
+            "is_admin": user.role.is_admin(),
+            "organisations": orgs,
+            "groups": groups,
+        })
+        .to_string())
+    }
+
+    fn users_json(&self, admin_bearer: &str) -> Result<String, String> {
+        require_local_admin(self, admin_bearer)?;
+        let users = self.auth_db.list_users().map_err(|e| e.to_string())?;
+        let out: Vec<serde_json::Value> = users
+            .into_iter()
+            .map(|u| {
+                serde_json::json!({
+                    "id": u.id, "username": u.username, "email": u.email,
+                    "role": u.role.as_str(), "is_active": u.is_active,
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(out).to_string())
+    }
+
+    fn organisations_json(&self, admin_bearer: &str) -> Result<String, String> {
+        require_local_admin(self, admin_bearer)?;
+        let orgs = self
+            .auth_db
+            .list_organisations()
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::with_capacity(orgs.len());
+        for o in orgs {
+            let members = self.auth_db.count_org_members(&o.id).unwrap_or(0);
+            let groups = self.auth_db.count_org_groups(&o.id).unwrap_or(0);
+            out.push(serde_json::json!({
+                "slug": o.slug, "name": o.name,
+                "members": members, "groups": groups,
+            }));
+        }
+        Ok(serde_json::Value::Array(out).to_string())
+    }
+
+    fn llm_stats_json(&self, admin_bearer: &str) -> Result<String, String> {
+        require_local_admin(self, admin_bearer)?;
+        self.auth_db
+            .llm_request_aggregates()
+            .map(|v| v.to_string())
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Build the [`PluginContext`] handed to every registered plugin.
 pub fn plugin_context(state: &AppState) -> PluginContext {
     PluginContext {
         base_url: state.base_url.clone(),
         store: Arc::new(state.clone()),
+        auth: Arc::new(state.clone()),
     }
 }
 
@@ -50,6 +187,10 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
     let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
     #[cfg(feature = "plugin-hello")]
     plugins.push(Arc::new(ots_plugin_hello::HelloPlugin));
+    #[cfg(feature = "plugin-accounts-dashboard")]
+    plugins.push(Arc::new(
+        ots_plugin_accounts_dashboard::AccountsDashboardPlugin,
+    ));
     plugins
 }
 

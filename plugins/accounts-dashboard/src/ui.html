@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accounts dashboard — Open Triplestore</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1c2333; --muted: #667; --line: #8884; --accent: #2f6fe0; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e6e9f2; --muted: #99a; } }
+  body { font: 15px/1.5 system-ui, sans-serif; color: var(--fg); max-width: 64rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--line); }
+  .muted { color: var(--muted); } .pill { border: 1px solid var(--line); border-radius: 999px; padding: 0 0.5rem; font-size: 0.8rem; }
+  input, button { font: inherit; padding: 0.45rem 0.7rem; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: inherit; }
+  button.primary { background: var(--accent); color: white; border-color: transparent; cursor: pointer; }
+  #login { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1.5rem 0; }
+  .err { color: #c0392b; }
+  .grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin-top: 0.75rem; }
+  .stat { border: 1px solid var(--line); border-radius: 10px; padding: 0.7rem 0.9rem; }
+  .stat b { font-size: 1.3rem; display: block; }
+</style>
+</head>
+<body>
+<h1>Accounts dashboard</h1>
+<p class="muted">Suite-wide account platform: accounts, organisations, per-app entitlements and LLM usage — served by the <code>accounts-dashboard</code> plugin, admin only.</p>
+
+<div id="login">
+  <input id="u" placeholder="admin username" autocomplete="username">
+  <input id="p" type="password" placeholder="password" autocomplete="current-password">
+  <button class="primary" onclick="signIn()">Sign in</button>
+  <span id="loginmsg" class="muted"></span>
+</div>
+
+<div id="content" hidden>
+  <div class="grid" id="stats"></div>
+
+  <h2>Accounts</h2>
+  <table id="users"><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody></tbody></table>
+
+  <h2>Organisations</h2>
+  <table id="orgs"><thead><tr><th>Slug</th><th>Name</th><th>Members</th><th>Teams</th></tr></thead><tbody></tbody></table>
+
+  <h2>Per-app entitlements</h2>
+  <p class="muted">Membership of these well-known teams unlocks the app (configured via <code>ACCOUNTS_DASHBOARD_APP_GROUPS</code>; admins always qualify).</p>
+  <table id="apps"><thead><tr><th>App capability</th><th>Unlocking team</th></tr></thead><tbody></tbody></table>
+
+  <h2>LLM usage</h2>
+  <div class="grid" id="llmstats"></div>
+  <h3 style="font-size:0.95rem">Top accounts (store assistant, 7 days)</h3>
+  <table id="llmstore"><thead><tr><th>Account</th><th>Requests</th></tr></thead><tbody></tbody></table>
+  <h3 style="font-size:0.95rem">Gateway ledger (suite-wide)</h3>
+  <p id="gwnote" class="muted"></p>
+  <table id="llmgw" hidden><thead><tr><th>Account</th><th>Requests</th><th>Prompt tokens</th><th>Completion tokens</th></tr></thead><tbody></tbody></table>
+</div>
+
+<script>
+let token = null;
+
+async function signIn() {
+  const msg = document.getElementById('loginmsg');
+  msg.textContent = 'signing in…'; msg.className = 'muted';
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: document.getElementById('u').value,
+                             password: document.getElementById('p').value }),
+    });
+    if (!r.ok) throw new Error(await r.text() || ('sign-in failed (' + r.status + ')'));
+    const body = await r.json();
+    if (body.mfa_required) throw new Error('this account uses 2FA — open the dashboard from a session signed in via the main UI API token instead');
+    token = body.access_token;
+    await load();
+  } catch (e) { msg.textContent = e.message; msg.className = 'err'; }
+}
+
+function cell(v) { const td = document.createElement('td'); td.textContent = v == null ? '—' : String(v); return td; }
+function row(tbl, vals) { const tr = document.createElement('tr'); vals.forEach(v => tr.appendChild(cell(v))); tbl.querySelector('tbody').appendChild(tr); }
+function stat(el, label, value) { const d = document.createElement('div'); d.className = 'stat'; d.innerHTML = '<b></b><span class="muted"></span>'; d.querySelector('b').textContent = value; d.querySelector('span').textContent = label; el.appendChild(d); }
+
+async function load() {
+  const r = await fetch('api/overview', { headers: { Authorization: 'Bearer ' + token } });
+  if (!r.ok) { throw new Error(await r.text() || ('overview failed (' + r.status + ')')); }
+  const o = await r.json();
+  document.getElementById('login').hidden = true;
+  document.getElementById('content').hidden = false;
+
+  const stats = document.getElementById('stats'); stats.innerHTML = '';
+  const active = o.users.filter(u => u.is_active).length;
+  const guests = o.users.filter(u => u.role === 'guest').length;
+  stat(stats, 'accounts', o.users.length);
+  stat(stats, 'active', active);
+  stat(stats, 'guests', guests);
+  stat(stats, 'organisations', o.organisations.length);
+
+  const users = document.getElementById('users'); users.querySelector('tbody').innerHTML = '';
+  o.users.forEach(u => row(users, [u.username, u.email, u.role, u.is_active ? 'active' : 'disabled']));
+
+  const orgs = document.getElementById('orgs'); orgs.querySelector('tbody').innerHTML = '';
+  o.organisations.forEach(g => row(orgs, [g.slug, g.name, g.members, g.groups]));
+
+  const apps = document.getElementById('apps'); apps.querySelector('tbody').innerHTML = '';
+  const groups = (o.entitlements && o.entitlements.app_groups) || [];
+  if (groups.length === 0) row(apps, ['(none configured)', '—']);
+  groups.forEach(g => row(apps, [g.app, g.group]));
+
+  const llmstats = document.getElementById('llmstats'); llmstats.innerHTML = '';
+  const store = o.llm.store || {};
+  stat(llmstats, 'store requests (24h)', (store.last_24h && store.last_24h.requests) || 0);
+  const llmstore = document.getElementById('llmstore'); llmstore.querySelector('tbody').innerHTML = '';
+  ((store.top_users_7d) || []).forEach(u => row(llmstore, [u.user, u.requests]));
+
+  const gw = o.llm.gateway || {};
+  const note = document.getElementById('gwnote');
+  const gwt = document.getElementById('llmgw');
+  if (!gw.configured) { note.textContent = 'No external gateway configured (ACCOUNTS_DASHBOARD_GATEWAY_USAGE_URL).'; }
+  else if (!gw.available) { note.textContent = 'Gateway ledger unavailable: ' + (gw.reason || 'unknown'); }
+  else {
+    const usage = gw.usage || {};
+    const totals = usage.totals || {};
+    note.textContent = 'Since ' + (usage.since || '—') + ' · ' + (totals.requests || 0) + ' requests · ' + (totals.total_tokens || 0) + ' tokens.';
+    gwt.hidden = false; gwt.querySelector('tbody').innerHTML = '';
+    (usage.groups || []).forEach(g => row(gwt, [g.key, g.requests, g.prompt_tokens, g.completion_tokens]));
+  }
+}
+</script>
+</body>
+</html>

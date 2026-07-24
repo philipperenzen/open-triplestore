@@ -21,6 +21,7 @@
   let verificationRequired = false;
   // Whether the server actually delivers email (vs logging it).
   let emailDelivery = null;
+  let guestMode = false;
 
   let usernameTouched = false;
   let emailTouched = false;
@@ -32,7 +33,13 @@
       const features = await getAuthFeatures();
       emailDelivery = !!features.email_delivery;
       if (features.registration_disabled) {
-        error = $t('pages.register.registrationDisabled');
+        if (features.guest_self_registration) {
+          // Normal registration is closed but the guest tier is open: the form
+          // works, the account will be a low-privilege guest.
+          guestMode = true;
+        } else {
+          error = $t('pages.register.registrationDisabled');
+        }
       }
     } catch {
       // Feature probe is cosmetic only.
@@ -108,6 +115,9 @@
   {#if step < 3}
     <h2>{$t('pages.register.heading')}</h2>
     <p class="register-sub">{$t('pages.register.subtitle')}</p>
+    {#if guestMode}
+      <p class="register-sub guest-note">{$t('pages.register.guestModeNote')}</p>
+    {/if}
 
     <ol class="steps" aria-label={$t('pages.register.stepsAria')}>
       <li class:active={step === 1} class:done={step > 1}>
