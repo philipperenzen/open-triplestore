@@ -19,6 +19,13 @@
    */
   export let shapeGraphId = '';
   export let height = 'calc(100vh - 320px)';
+  /**
+   * Binding target IRIs the shape graph is applied to (datasets / graphs),
+   * forwarded to the visual builder's per-shape "Used by" line. Supplied by the
+   * Shape Graph editor which already loads the graph's impact.
+   * @type {string[]}
+   */
+  export let usageTargets = [];
 
   let editorRef;
   let shapesContent = '';
@@ -227,6 +234,7 @@ PREFIX ex: <http://example.org/>
         turtle={shapesContent}
         {modelContext}
         {loading}
+        {usageTargets}
         onChange={(ttl) => (shapesContent = ttl)}
       />
     </div>
