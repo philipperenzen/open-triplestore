@@ -720,14 +720,15 @@ fn plan_group_count(proj_vars: &[Variable], inner: &GraphPattern) -> Option<Merg
     for pv in proj_vars {
         if key_set.contains(pv.as_str()) {
             key_vars.push(pv.clone());
-        } else if let Some(internal) = alias.get(pv.as_str()) {
+        } else {
+            // A projected column that is neither a key nor a known aggregate
+            // alias is not decomposable (`?` yields None).
+            let internal = alias.get(pv.as_str())?;
             if count_internal.contains(internal) {
                 count_vars.push(pv.clone());
             } else {
                 return None; // aliases a non-COUNT aggregate
             }
-        } else {
-            return None; // a projected column that is neither key nor COUNT
         }
     }
     // All keys must be projected (so the merge can group on them), and there must

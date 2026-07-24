@@ -742,10 +742,10 @@ pub fn insert_version(
     base_url: &str,
     record: &DataModelVersion,
 ) -> Result<(), crate::store::engine::StoreError> {
-    let ont_iri = format!("{}/data-model/{}", base_url, &record.data_model_id);
+    let ont_iri = format!("{}/data-model/{}", base_url, record.data_model_id);
     let ver_iri = format!(
         "{}/data-model/{}/version/{}",
-        base_url, &record.data_model_id, &record.version
+        base_url, record.data_model_id, record.version
     );
 
     let creator_triple = record
@@ -760,7 +760,7 @@ pub fn insert_version(
         .map(|v| {
             format!(
                 "    prov:wasDerivedFrom <{}/data-model/{}/version/{}> ;\n",
-                base_url, &record.data_model_id, v
+                base_url, record.data_model_id, v
             )
         })
         .unwrap_or_default();
