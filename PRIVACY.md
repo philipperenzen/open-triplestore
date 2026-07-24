@@ -132,7 +132,8 @@ you configure**. None of them send data to the project maintainers.
 
 | Feature | What it contacts | When | How to disable |
 |---|---|---|---|
-| **Prefix resolution** | `https://prefix.cc` (public service), to resolve undeclared SPARQL prefix labels. Results are cached locally. | Only when a query uses an unknown prefix not already cached. Sends the prefix **label** only (e.g. `foaf`), never your data. (`src/prefixes/`) | Declare all `PREFIX` clauses explicitly so no lookup is triggered, or block egress to `prefix.cc` at the network layer. Lookups fail soft. |
+| **Prefix resolution** | Nothing, by default: prefixes resolve against a **bundled snapshot** of the prefix.cc + LOV registries (~3.7k prefixes) plus this instance's own vocabularies (`src/prefixes/`). Only with the opt-in `PREFIX_CC_FALLBACK=true` does an unknown label fall through to `https://prefix.cc`, sending the prefix **label** only (e.g. `foaf`), never your data. | Fallback only: when explicitly enabled *and* a query uses a prefix unknown to every local tier. Results are cached locally. | Already off by default — leave `PREFIX_CC_FALLBACK` unset. Lookups fail soft. |
+| **LOV corpus download** | The pinned Linked Open Vocabularies corpus snapshot URL (`VOCAB_CORPUS_URL`, default an Internet Archive snapshot), fetched **once** and sha256-verified, to enable vocabulary term search and offline vocabulary installs. Docker images normally ship the corpus baked in, so no runtime call happens at all. (`src/vocab_search/`) | Only at first boot when the corpus file is not already present on disk. No instance data is sent. | Set `VOCAB_CORPUS_URL=""`. Vocabulary search then covers the vocabularies registered on this instance only. |
 | **AI / LLM assistance** | An **OpenAI-compatible LLM endpoint that you configure** (`LLM_GATEWAY_URL`) — e.g. OpenAI, OpenRouter, Azure, or a local Ollama/vLLM server. Used for natural-language→SPARQL, the SHACL assistant, and the grounded chat; optional "training feedback" signals are forwarded to that same endpoint. (`src/server/llm_sparql.rs`) | Only when a user invokes an AI feature. The prompt/context (which may include schema and query text) is sent to **your** endpoint. | **Leave `LLM_GATEWAY_URL` unset/unreachable** — the AI features then hide in the UI. If you use a hosted LLM, review *that provider's* privacy terms; prefer a local/self-hosted model to keep data on your infrastructure. |
 | **Identity providers (SSO)** | An **OIDC** and/or **SAML** provider that you configure (`src/auth/`, `OIDC_ISSUER`/`OIDC_AUDIENCE`, SAML metadata). | Only when SSO login is configured and used. Standard auth handshakes occur with that provider. | Leave OIDC/SAML unconfigured to use local password + API-key auth only. |
 | **OAuth login** | Your configured OAuth provider(s) (`src/auth/oauth.rs`). | Only when configured/used. | Leave unconfigured. |
@@ -152,6 +153,10 @@ expose the user's IP address to them:
   value is previewed (`frontend/src/components/GeoPreview.svelte`).
 - **OpenStreetMap tiles** (`tile.openstreetmap.org`) — map tiles, fetched **only**
   when a map is rendered.
+
+Prefix lookups from the browser (SPARQL editor autocomplete, prefix search)
+go to this instance's own `/api/prefixes` service — the UI no longer contacts
+`prefix.cc` directly.
 
 > **Operator note:** If your privacy posture requires it, you can self-host these
 > assets / fonts / map tiles, or disable the geo-preview, so that no third-party

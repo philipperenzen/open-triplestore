@@ -300,6 +300,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 62,
     },
     Builtin {
+        slug: "vocabulary-search",
+        title: "Vocabulary Search & Prefixes",
+        category: "Query & Search",
+        body: include_str!("../../docs/vocabulary-search.md"),
+        admin_only: false,
+        sort: 63,
+    },
+    Builtin {
         slug: "geosparql",
         title: "GeoSPARQL",
         category: "Query & Search",

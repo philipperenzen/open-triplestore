@@ -1,25 +1,37 @@
-//! Prefix registry with prefix.cc lookup and local JSON caching.
+//! Internal prefix registry with a bundled prefix.cc snapshot.
 //!
 //! # Design
 //!
 //! SPARQL queries frequently use well-known namespace prefixes like `foaf:`,
-//! `schema:`, or `owl:` without declaring them.  This module transparently
-//! resolves those prefixes via the public [prefix.cc](https://prefix.cc) service
-//! and stores the results in a local cache so subsequent queries never hit the
-//! network.
+//! `schema:`, or `owl:` without declaring them.  This module resolves those
+//! prefixes **locally**: a compile-time embedded snapshot of the full
+//! prefix.cc dataset merged with the LOV catalog prefixes (see [`dataset`]),
+//! overlaid with the prefixes of models/vocabularies registered on this
+//! instance.  The public prefix.cc service is only contacted when the
+//! operator explicitly opts in (`PREFIX_CC_FALLBACK=true`) and a label is
+//! unknown to every local tier — by default the platform makes no third-party
+//! calls for prefix resolution.
+//!
+//! ## Resolution order
+//!
+//! 1. **Platform** — prefixes derived from the model/vocabulary registry
+//!    (kept fresh by the registry seed and model mutations).
+//! 2. **Bundled dataset** — the prefix.cc + LOV snapshot (~3.7k prefixes).
+//! 3. **Local cache** — mappings confirmed earlier (persisted JSON).
+//! 4. **prefix.cc network fallback** — opt-in only.
 //!
 //! ## How auto-resolution works
 //!
 //! Before a SPARQL query reaches the store engine, [`find_undeclared_prefixes`]
-//! scans the query text for prefix usages that lack a matching `PREFIX` declaration.
-//! Each undeclared prefix is looked up in the registry (cache first, then
-//! prefix.cc), and any resolved prefix is prepended to the query as a standard
+//! scans the query text for prefix usages that lack a matching `PREFIX`
+//! declaration.  Each undeclared prefix is looked up in the registry and any
+//! resolved prefix is prepended to the query as a standard
 //! `PREFIX label: <IRI>` declaration.
 //!
 //! ## Security
 //!
 //! * **Label validation** — prefix labels are checked against
-//!   `[A-Za-z][A-Za-z0-9_-]*` (max 64 chars) before any network call,
+//!   `[A-Za-z][A-Za-z0-9_-]*` (max 64 chars) before any lookup,
 //!   preventing SSRF via crafted label strings injected into the URL.
 //! * **IRI validation** — only `http` and `https` IRIs are accepted from
 //!   prefix.cc responses; `file://`, `javascript:`, `data:`, etc. are rejected.
@@ -36,14 +48,19 @@
 //! * **rustls** — TLS uses the pure-Rust `rustls` backend so no system OpenSSL
 //!   is required in the Docker runtime image.
 
+pub mod dataset;
+pub mod routes;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
+
+pub use dataset::{PrefixDataset, PrefixSource};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -82,19 +99,38 @@ struct RuntimeState {
     not_found: HashSet<String>,
 }
 
+/// Registry-derived prefixes (models/vocabularies on this instance).
+#[derive(Default)]
+struct PlatformPrefixes {
+    by_label: HashMap<String, String>,
+    by_iri: HashMap<String, String>,
+}
+
+/// A resolved prefix with its provenance, as served by the HTTP API.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedPrefix {
+    pub prefix: String,
+    pub namespace: String,
+    pub source: PrefixSource,
+}
+
 // ─── PrefixRegistry ──────────────────────────────────────────────────────────
 
-/// Thread-safe prefix registry backed by prefix.cc with local JSON caching.
+/// Thread-safe, local-first prefix registry.
 ///
 /// # Thread safety
 ///
-/// `PrefixRegistry` is `Send + Sync`.  Internal state is protected by a
-/// [`std::sync::Mutex`] that is *never* held across `.await` points, so it is
-/// safe to use from an async context.
+/// `PrefixRegistry` is `Send + Sync`.  Internal state is protected by locks
+/// that are *never* held across `.await` points, so it is safe to use from an
+/// async context.
 pub struct PrefixRegistry {
     cache_path: PathBuf,
     client: reqwest::Client,
     state: Mutex<RuntimeState>,
+    dataset: PrefixDataset,
+    platform: RwLock<PlatformPrefixes>,
+    /// Contact live prefix.cc for unknown labels (PREFIX_CC_FALLBACK=true).
+    allow_network: bool,
 }
 
 impl PrefixRegistry {
@@ -109,10 +145,10 @@ impl PrefixRegistry {
 
     /// Open (or create) a prefix registry backed by `cache_path`.
     ///
-    /// If the file exists and is valid JSON it is loaded into memory.
-    /// If it does not exist an empty registry is created; the file will be
-    /// written when the first prefix is resolved.
-    pub fn open(cache_path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    /// Loads the bundled prefix dataset and, if the cache file exists and is
+    /// valid JSON, the persisted lookup cache.  `allow_network` enables the
+    /// live prefix.cc fallback for labels unknown to every local tier.
+    pub fn open(cache_path: impl AsRef<Path>, allow_network: bool) -> anyhow::Result<Self> {
         let cache_path = cache_path.as_ref().to_path_buf();
 
         let cache = if cache_path.exists() {
@@ -144,42 +180,292 @@ impl PrefixRegistry {
                 cache,
                 ..Default::default()
             }),
+            dataset: PrefixDataset::bundled(),
+            platform: RwLock::new(PlatformPrefixes::default()),
+            allow_network,
         })
     }
 
-    /// Create a no-op, purely in-memory registry with no backing file (for tests).
+    /// Create a no-op, purely in-memory registry with no backing file, no
+    /// bundled dataset and no network (for tests that expect lookups to fail).
     pub fn empty() -> Self {
         Self {
             cache_path: std::path::PathBuf::new(),
             client: reqwest::Client::new(),
             state: Mutex::new(RuntimeState::default()),
+            dataset: PrefixDataset::empty(),
+            platform: RwLock::new(PlatformPrefixes::default()),
+            allow_network: false,
         }
+    }
+
+    /// In-memory registry with the bundled dataset but no cache file and no
+    /// network — the standard constructor for tests exercising local lookups.
+    pub fn bundled_only() -> Self {
+        Self {
+            cache_path: std::path::PathBuf::new(),
+            client: reqwest::Client::new(),
+            state: Mutex::new(RuntimeState::default()),
+            dataset: PrefixDataset::bundled(),
+            platform: RwLock::new(PlatformPrefixes::default()),
+            allow_network: false,
+        }
+    }
+
+    /// Number of prefixes in the bundled dataset.
+    pub fn dataset_len(&self) -> usize {
+        self.dataset.len()
+    }
+
+    fn read_platform(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {
+        self.platform.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Replace the platform prefix overlay with `pairs` (label, namespace).
+    ///
+    /// Invalid labels/namespaces are dropped so downstream lookups never see
+    /// entries the SPARQL auto-resolver would reject anyway.
+    pub fn set_platform_prefixes(&self, pairs: impl IntoIterator<Item = (String, String)>) {
+        let mut by_label = HashMap::new();
+        let mut by_iri = HashMap::new();
+        for (label, iri) in pairs {
+            if !is_valid_label(&label) || !is_valid_iri(&iri) {
+                continue;
+            }
+            by_iri.entry(iri.clone()).or_insert_with(|| label.clone());
+            by_label.insert(label, iri);
+        }
+        let mut platform = self.platform.write().unwrap_or_else(|e| e.into_inner());
+        *platform = PlatformPrefixes { by_label, by_iri };
+    }
+
+    // ── Local resolution ─────────────────────────────────────────────────────
+
+    /// Resolve `label` from the local tiers only (platform → dataset → cache).
+    pub fn lookup_local(&self, label: &str) -> Option<ResolvedPrefix> {
+        if !is_valid_label(label) {
+            return None;
+        }
+        if let Some(iri) = self.read_platform().by_label.get(label) {
+            return Some(ResolvedPrefix {
+                prefix: label.to_string(),
+                namespace: iri.clone(),
+                source: PrefixSource::Platform,
+            });
+        }
+        if let Some(entry) = self.dataset.lookup(label) {
+            return Some(ResolvedPrefix {
+                prefix: entry.prefix.clone(),
+                namespace: entry.namespace.clone(),
+                source: entry.source,
+            });
+        }
+        let state = self.lock_state();
+        state.cache.by_label.get(label).map(|iri| ResolvedPrefix {
+            prefix: label.to_string(),
+            namespace: iri.clone(),
+            source: PrefixSource::Cache,
+        })
+    }
+
+    /// Resolve a namespace IRI from the local tiers only.
+    pub fn reverse_local(&self, iri: &str) -> Option<ResolvedPrefix> {
+        if !is_valid_iri(iri) {
+            return None;
+        }
+        if let Some(label) = self.read_platform().by_iri.get(iri) {
+            return Some(ResolvedPrefix {
+                prefix: label.clone(),
+                namespace: iri.to_string(),
+                source: PrefixSource::Platform,
+            });
+        }
+        if let Some(entry) = self.dataset.reverse(iri) {
+            return Some(ResolvedPrefix {
+                prefix: entry.prefix.clone(),
+                namespace: entry.namespace.clone(),
+                source: entry.source,
+            });
+        }
+        let state = self.lock_state();
+        state.cache.by_iri.get(iri).map(|label| ResolvedPrefix {
+            prefix: label.clone(),
+            namespace: iri.to_string(),
+            source: PrefixSource::Cache,
+        })
+    }
+
+    /// Ranked prefix search over platform + bundled entries.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<ResolvedPrefix> {
+        let q = query.trim().to_ascii_lowercase();
+        let mut out: Vec<ResolvedPrefix> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        {
+            let platform = self.read_platform();
+            let mut platform_hits: Vec<(&String, &String)> = platform
+                .by_label
+                .iter()
+                .filter(|(label, iri)| {
+                    q.is_empty()
+                        || label.to_ascii_lowercase().contains(&q)
+                        || iri.to_ascii_lowercase().contains(&q)
+                })
+                .collect();
+            platform_hits.sort_by(|a, b| a.0.cmp(b.0));
+            for (label, iri) in platform_hits.into_iter().take(limit) {
+                seen.insert(label.clone());
+                out.push(ResolvedPrefix {
+                    prefix: label.clone(),
+                    namespace: iri.clone(),
+                    source: PrefixSource::Platform,
+                });
+            }
+        }
+
+        for entry in self.dataset.search(&q, limit + out.len()) {
+            if out.len() >= limit {
+                break;
+            }
+            if seen.contains(&entry.prefix) {
+                continue;
+            }
+            out.push(ResolvedPrefix {
+                prefix: entry.prefix.clone(),
+                namespace: entry.namespace.clone(),
+                source: entry.source,
+            });
+        }
+        out
+    }
+
+    /// All known prefixes (platform overlay first, then the bundled dataset,
+    /// then cache-confirmed extras), deduplicated by label.
+    pub fn all_prefixes(&self) -> Vec<ResolvedPrefix> {
+        let mut out = Vec::with_capacity(self.dataset.len() + 16);
+        let mut seen: HashSet<String> = HashSet::new();
+        {
+            let platform = self.read_platform();
+            let mut labels: Vec<_> = platform.by_label.iter().collect();
+            labels.sort_by(|a, b| a.0.cmp(b.0));
+            for (label, iri) in labels {
+                seen.insert(label.clone());
+                out.push(ResolvedPrefix {
+                    prefix: label.clone(),
+                    namespace: iri.clone(),
+                    source: PrefixSource::Platform,
+                });
+            }
+        }
+        for entry in self.dataset.entries() {
+            if seen.insert(entry.prefix.clone()) {
+                out.push(ResolvedPrefix {
+                    prefix: entry.prefix.clone(),
+                    namespace: entry.namespace.clone(),
+                    source: entry.source,
+                });
+            }
+        }
+        {
+            let state = self.lock_state();
+            let mut cached: Vec<_> = state.cache.by_label.iter().collect();
+            cached.sort_by(|a, b| a.0.cmp(b.0));
+            for (label, iri) in cached {
+                if seen.insert(label.clone()) {
+                    out.push(ResolvedPrefix {
+                        prefix: label.clone(),
+                        namespace: iri.clone(),
+                        source: PrefixSource::Cache,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Expand a CURIE like `foaf:name` to a full IRI using local tiers.
+    pub fn expand_curie(&self, curie: &str) -> Option<String> {
+        let (label, local) = curie.split_once(':')?;
+        if local.contains(['<', '>', '"', ' ', '\n', '\t']) {
+            return None;
+        }
+        let resolved = self.lookup_local(label)?;
+        Some(format!("{}{}", resolved.namespace, local))
+    }
+
+    /// Shrink a full IRI to `prefix:localName` using the longest known
+    /// namespace (platform overlay wins over the bundled dataset).
+    pub fn shrink_iri(&self, iri: &str) -> Option<(ResolvedPrefix, String)> {
+        if !is_valid_iri(iri) {
+            return None;
+        }
+        let mut best: Option<(ResolvedPrefix, String)> = None;
+        {
+            let platform = self.read_platform();
+            for (ns, label) in platform.by_iri.iter() {
+                if iri.starts_with(ns.as_str()) && iri.len() > ns.len() {
+                    let better = match &best {
+                        Some((b, _)) => ns.len() > b.namespace.len(),
+                        None => true,
+                    };
+                    if better {
+                        best = Some((
+                            ResolvedPrefix {
+                                prefix: label.clone(),
+                                namespace: ns.clone(),
+                                source: PrefixSource::Platform,
+                            },
+                            iri[ns.len()..].to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some((entry, local)) = self.dataset.shrink(iri) {
+            let better = match &best {
+                Some((b, _)) => entry.namespace.len() > b.namespace.len(),
+                None => true,
+            };
+            if better {
+                best = Some((
+                    ResolvedPrefix {
+                        prefix: entry.prefix.clone(),
+                        namespace: entry.namespace.clone(),
+                        source: entry.source,
+                    },
+                    local,
+                ));
+            }
+        }
+        best
     }
 
     // ── Forward lookup ───────────────────────────────────────────────────────
 
     /// Return the namespace IRI for a prefix `label`.
     ///
-    /// Resolution order:
-    /// 1. In-memory cache
-    /// 2. `https://prefix.cc/{label}.file.json`
+    /// Resolution order: platform → bundled dataset → cache → live prefix.cc
+    /// (only when the registry was opened with `allow_network`).
     ///
-    /// Returns `None` when the label is invalid, unknown, or all network
-    /// attempts have failed.
+    /// Returns `None` when the label is invalid or unknown to every tier.
     pub async fn lookup_prefix(&self, label: &str) -> Option<String> {
-        // Security: validate label before any network call.
+        // Security: validate label before any lookup.
         if !is_valid_label(label) {
             debug!("Skipping invalid prefix label {:?}", label);
             return None;
         }
 
-        // Fast path: check in-memory cache.
+        if let Some(resolved) = self.lookup_local(label) {
+            return Some(resolved.namespace);
+        }
+
+        if !self.allow_network {
+            return None;
+        }
+
+        // Network fallback path (opt-in).
         {
             let state = self.lock_state();
-            if let Some(iri) = state.cache.by_label.get(label) {
-                debug!("Cache hit: prefix '{}' → {}", label, iri);
-                return Some(iri.clone());
-            }
             if state.not_found.contains(label) {
                 return None;
             }
@@ -189,7 +475,6 @@ impl PrefixRegistry {
             }
         } // mutex released before await
 
-        // Slow path: fetch from prefix.cc.
         let url = format!("https://prefix.cc/{}.file.json", label);
         debug!("Fetching prefix '{}' from {}", label, url);
 
@@ -272,26 +557,22 @@ impl PrefixRegistry {
 
     /// Return the prefix label for a namespace `iri`.
     ///
-    /// Resolution order:
-    /// 1. In-memory cache
-    /// 2. `https://prefix.cc/reverse?uri=<iri>&format=json`
-    ///
-    /// Returns `None` when the IRI is invalid, unknown, or the request fails.
+    /// Resolution order: platform → bundled dataset → cache → live prefix.cc
+    /// (only when opened with `allow_network`).
     pub async fn reverse_lookup(&self, iri: &str) -> Option<(String, String)> {
-        // Security: validate IRI before any network call.
+        // Security: validate IRI before any lookup.
         if !is_valid_iri(iri) {
             debug!("Skipping invalid IRI for reverse lookup: {:?}", iri);
             return None;
         }
 
-        // Fast path: check in-memory cache.
-        {
-            let state = self.lock_state();
-            if let Some(label) = state.cache.by_iri.get(iri) {
-                debug!("Cache hit: IRI '{}' → prefix '{}'", iri, label);
-                return Some((label.clone(), iri.to_string()));
-            }
-        } // mutex released before await
+        if let Some(resolved) = self.reverse_local(iri) {
+            return Some((resolved.prefix, resolved.namespace));
+        }
+
+        if !self.allow_network {
+            return None;
+        }
 
         // Build URL safely — query_pairs_mut percent-encodes the IRI, so it
         // can never be interpreted as part of the path or inject extra params.
@@ -364,6 +645,9 @@ impl PrefixRegistry {
     /// Writes to `{cache_path}.tmp`, sets `0o600` permissions on Unix, then
     /// renames to the real path to prevent partial/corrupt writes.
     fn persist_cache(&self) {
+        if self.cache_path.as_os_str().is_empty() {
+            return;
+        }
         // Serialize while holding the lock, then release before doing I/O.
         let json = {
             let state = self.lock_state();
@@ -643,6 +927,88 @@ mod tests {
         assert!(!is_valid_iri("data:text/plain,hello"));
         assert!(!is_valid_iri("not-a-url"));
         assert!(!is_valid_iri("ftp://example.com/")); // ftp not in ALLOWED_SCHEMES
+    }
+
+    // ── Local resolution tiers ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn bundled_lookup_without_network() {
+        let reg = PrefixRegistry::bundled_only();
+        assert_eq!(
+            reg.lookup_prefix("foaf").await.as_deref(),
+            Some("http://xmlns.com/foaf/0.1/")
+        );
+        assert_eq!(
+            reg.reverse_lookup("http://xmlns.com/foaf/0.1/")
+                .await
+                .map(|(l, _)| l)
+                .as_deref(),
+            Some("foaf")
+        );
+        // Unknown label: no network, so None.
+        assert!(reg.lookup_prefix("zzz-not-a-prefix").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_registry_resolves_nothing() {
+        let reg = PrefixRegistry::empty();
+        assert!(reg.lookup_prefix("foaf").await.is_none());
+    }
+
+    #[test]
+    fn platform_overlay_wins_over_dataset() {
+        let reg = PrefixRegistry::bundled_only();
+        reg.set_platform_prefixes([(
+            "foaf".to_string(),
+            "https://example.org/custom-foaf#".to_string(),
+        )]);
+        let hit = reg.lookup_local("foaf").expect("resolves");
+        assert_eq!(hit.namespace, "https://example.org/custom-foaf#");
+        assert_eq!(hit.source, PrefixSource::Platform);
+    }
+
+    #[test]
+    fn platform_overlay_rejects_invalid_entries() {
+        // Empty registry: only the platform overlay can answer, so a rejected
+        // entry resolving would be unambiguous (bundled_only() would mask it —
+        // prefix.cc knows an "ok" prefix).
+        let reg = PrefixRegistry::empty();
+        reg.set_platform_prefixes([
+            ("bad label".to_string(), "http://example.org/".to_string()),
+            ("ok".to_string(), "javascript:alert(1)".to_string()),
+            ("good".to_string(), "http://example.org/good#".to_string()),
+        ]);
+        assert!(reg.lookup_local("good").is_some());
+        assert!(reg.lookup_local("ok").is_none());
+        assert!(reg.lookup_local("bad label").is_none());
+    }
+
+    #[test]
+    fn expand_and_shrink_roundtrip() {
+        let reg = PrefixRegistry::bundled_only();
+        assert_eq!(
+            reg.expand_curie("foaf:name").as_deref(),
+            Some("http://xmlns.com/foaf/0.1/name")
+        );
+        let (resolved, local) = reg.shrink_iri("http://xmlns.com/foaf/0.1/name").unwrap();
+        assert_eq!(resolved.prefix, "foaf");
+        assert_eq!(local, "name");
+        assert!(reg.expand_curie("foaf:na me").is_none());
+        assert!(reg.expand_curie("nocolon").is_none());
+    }
+
+    #[test]
+    fn search_returns_ranked_hits() {
+        let reg = PrefixRegistry::bundled_only();
+        let hits = reg.search("foaf", 5);
+        assert_eq!(hits[0].prefix, "foaf");
+        // Platform entries surface ahead of bundled ones.
+        reg.set_platform_prefixes([(
+            "foafx".to_string(),
+            "https://example.org/foafx#".to_string(),
+        )]);
+        let hits = reg.search("foaf", 5);
+        assert_eq!(hits[0].source, PrefixSource::Platform);
     }
 
     // ── Prefix scanner ───────────────────────────────────────────────────────

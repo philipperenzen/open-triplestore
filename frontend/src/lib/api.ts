@@ -1471,3 +1471,124 @@ export const createTripleSecurityLabel = (data) =>
 export const deleteTripleSecurityLabel = (id) =>
   request('DELETE', `/api/admin/acl/triples/${id}`);
 
+
+// ─── Vocabulary search service (internal LOV) ────────────────────────────────
+// Backed by the platform's own vocabulary catalog (bundled LOV snapshot +
+// registered models/vocabularies) and term search engine — no external calls.
+
+export interface VocabCatalogEntry {
+  prefix: string;
+  uri: string;
+  nsp: string;
+  titles: { value: string; lang?: string | null }[];
+  descriptions: { value: string; lang?: string | null }[];
+  tags: string[];
+  homepage?: string | null;
+  issued?: string | null;
+  langs: string[];
+  creators: string[];
+  metrics: {
+    occurrences_in_datasets: number;
+    reused_by_datasets: number;
+    reused_by_vocabularies: number;
+    incoming_links: number;
+  };
+  versions: {
+    name?: string | null;
+    issued?: string | null;
+    class_count: number;
+    property_count: number;
+    datatype_count: number;
+    instance_count: number;
+  }[];
+  source: 'platform' | 'lov';
+  model_id?: string | null;
+  installable: boolean;
+}
+
+export interface VocabTermHit {
+  iri: string;
+  local_name: string;
+  prefixed: string;
+  ttype: string;
+  vocab: string;
+  labels: string;
+  secondary: string;
+  tags: string[];
+  source: string;
+  model_id: string;
+  score: number;
+}
+
+export const listVocabularies = () => request('GET', '/api/vocab/list');
+
+export const vocabInfo = (key: string) =>
+  request('GET', `/api/vocab/info?vocab=${encodeURIComponent(key)}`);
+
+export const vocabTags = () => request('GET', '/api/vocab/tags');
+
+export const vocabStatus = () => request('GET', '/api/vocab/status');
+
+export const searchVocabularies = (
+  q: string,
+  opts: { tag?: string; lang?: string; page?: number; pageSize?: number } = {},
+) => {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (opts.tag) params.set('tag', opts.tag);
+  if (opts.lang) params.set('lang', opts.lang);
+  if (opts.page) params.set('page', String(opts.page));
+  if (opts.pageSize) params.set('page_size', String(opts.pageSize));
+  return request('GET', `/api/vocab/search?${params.toString()}`);
+};
+
+export const searchVocabTerms = (
+  q: string,
+  opts: {
+    types?: string;
+    vocab?: string;
+    tag?: string;
+    source?: string;
+    page?: number;
+    pageSize?: number;
+  } = {},
+) => {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (opts.types) params.set('type', opts.types);
+  if (opts.vocab) params.set('vocab', opts.vocab);
+  if (opts.tag) params.set('tag', opts.tag);
+  if (opts.source) params.set('source', opts.source);
+  if (opts.page) params.set('page', String(opts.page));
+  if (opts.pageSize) params.set('page_size', String(opts.pageSize));
+  return request('GET', `/api/vocab/terms/search?${params.toString()}`);
+};
+
+export const autocompleteVocabTerms = (q: string, types?: string) => {
+  const params = new URLSearchParams({ q });
+  if (types) params.set('type', types);
+  return request('GET', `/api/vocab/terms/autocomplete?${params.toString()}`);
+};
+
+export const suggestVocabTerms = (q: string) =>
+  request('GET', `/api/vocab/terms/suggest?q=${encodeURIComponent(q)}`);
+
+export const recommendVocabularies = (body: {
+  terms: { term: string; category?: 'class' | 'property' | 'all' }[];
+  preferred_vocabs?: Record<string, number>;
+  per_term_limit?: number;
+}) => request('POST', '/api/vocab/recommend', body);
+
+export const installVocabulary = (vocab: string) =>
+  request('POST', '/api/vocab/install', { vocab });
+
+// ─── Prefix service (internal prefix.cc) ─────────────────────────────────────
+
+export const searchPrefixService = (q: string, limit = 25) =>
+  request('GET', `/api/prefixes?q=${encodeURIComponent(q)}&limit=${limit}`);
+
+export const expandCurie = (curie: string) =>
+  request('GET', `/api/prefixes/expand?curie=${encodeURIComponent(curie)}`);
+
+export const shrinkIri = (iri: string) =>
+  request('GET', `/api/prefixes/shrink?iri=${encodeURIComponent(iri)}`);
