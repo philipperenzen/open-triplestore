@@ -120,6 +120,10 @@ struct Inner {
     rebuild_quiet_ms: AtomicU64,
     /// Count of full (re)builds performed — diagnostics + regression guard.
     build_count: AtomicUsize,
+    /// Count of `Store::len()` probes. That call is a full-store key scan in
+    /// oxigraph, so it must run at most once per dirty→clean transition, never
+    /// once per read. Regression guard for the over-cap read path.
+    len_probes: AtomicUsize,
 }
 
 impl Inner {
@@ -189,6 +193,7 @@ impl ParallelMirror {
                 last_write_ms: AtomicU64::new(0),
                 rebuild_quiet_ms: AtomicU64::new(env_rebuild_quiet_ms()),
                 build_count: AtomicUsize::new(0),
+                len_probes: AtomicUsize::new(0),
             }),
         }
     }
@@ -207,8 +212,16 @@ impl ParallelMirror {
 
     /// Number of full (re)builds performed since construction. Diagnostics, and the
     /// hook the regression test uses to prove a write burst does not thrash rebuilds.
+    #[cfg(test)]
     pub fn build_count(&self) -> usize {
         self.inner.build_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of `Store::len()` probes (full-store key scans) performed since
+    /// construction. Reads must not drive this up — see [`Self::get_or_build`].
+    #[cfg(test)]
+    pub fn len_probe_count(&self) -> usize {
+        self.inner.len_probes.load(Ordering::Relaxed)
     }
 
     /// Override the rebuild quiet period (ms) — used by tests to drive the debounce
@@ -252,11 +265,16 @@ impl ParallelMirror {
     /// Get warm shards, (re)building from `store` if dirty, or `None` if the store
     /// is empty or larger than the cap.
     fn get_or_build(&self, store: &Store) -> Option<Arc<ParallelStore>> {
-        // Fast path: clean and present — no lock contention with other readers.
+        // Fast path: a CLEAN state is authoritative in both directions — `Some` is
+        // the warm mirror, and `None` means "deliberately off for this state" (empty
+        // store, or over the cap). Returning here on `None` is what keeps a
+        // permanently-over-cap store from re-deriving that verdict on every query:
+        // the old code fell through to `build_lock` + `store.len()`, and oxigraph
+        // implements `len()` as a key-by-key iteration of the gspo+dspo column
+        // families — a full-store scan (~0.3s at 3M triples) per read, serialized
+        // behind the build mutex. Only a write (`mark_dirty`) re-opens the question.
         if !self.inner.dirty.load(Ordering::Acquire) {
-            if let Some(ps) = self.inner.shards.read().ok()?.clone() {
-                return Some(ps);
-            }
+            return self.inner.shards.read().ok()?.clone();
         }
         // Debounce: while writes are still churning, decline (the persistent store
         // answers this query — correct, just unaccelerated) instead of paying for a
@@ -269,11 +287,18 @@ impl ParallelMirror {
         }
         // (Re)build under the build lock so concurrent queries build at most once.
         let _guard = self.inner.build_lock.lock().ok()?;
+        // Same authoritative re-check: a thread that queued behind a builder which
+        // then decided "over cap" must not run `store.len()` itself.
         if !self.inner.dirty.load(Ordering::Acquire) {
-            if let Some(ps) = self.inner.shards.read().ok()?.clone() {
-                return Some(ps);
-            }
+            return self.inner.shards.read().ok()?.clone();
         }
+        // Reached at most once per dirty→clean transition, immediately before a
+        // rebuild that iterates the whole store twice anyway — so this scan is free
+        // relative to the work it gates. It must stay `store.len()`: the graph-count
+        // index only records NamedNode graphs and is empty for an in-memory store, so
+        // substituting it would UNDERCOUNT and let an over-cap store build two RAM
+        // copies — an OOM, not a slow query.
+        self.inner.len_probes.fetch_add(1, Ordering::Relaxed);
         let total = store.len().unwrap_or(usize::MAX);
         if total == 0 || total > self.inner.max_triples {
             // Over the cap (or empty): keep the accelerator off for this state.
@@ -352,7 +377,12 @@ impl ParallelMirror {
         }
         self.get_or_build(store)?; // ensures both copies are built (None if over cap)
         let full = self.inner.full.read().ok()?.clone()?;
-        full.query_opt(sparql, options()).ok()
+        options()
+            .parse_query(sparql)
+            .ok()?
+            .on_store(&full)
+            .execute()
+            .ok()
     }
 }
 
@@ -536,6 +566,72 @@ mod tests {
             1,
             "clean mirror reused on every read, not rebuilt",
         );
+    }
+
+    /// The regression guard for the "everything is uniformly ~0.3s slow" tax. When
+    /// the store is over the cap the mirror stays off — that part is by design — but
+    /// the *decision* must be cached. `Store::len()` is a key-by-key scan of the
+    /// gspo+dspo column families in oxigraph, so re-deriving "over cap" on every read
+    /// put a full-store scan, serialized behind `build_lock`, in front of every query
+    /// in the application (measured ~0.29s per read at 3.17M triples, and a
+    /// 0.49/0.79/1.08/1.34/1.62/1.90s staircase for six concurrent readers).
+    #[test]
+    fn over_cap_probes_store_len_once_not_per_read() {
+        // cap of 10 with 200 quads in the store → permanently over cap.
+        let mirror = ParallelMirror::new(true, 2, 10);
+        mirror.set_rebuild_quiet_ms(0);
+        let store = store_with_quads(200);
+        let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+
+        for _ in 0..50 {
+            assert!(
+                mirror
+                    .try_full_query(&store, q, SparqlEvaluator::new)
+                    .is_none(),
+                "an over-cap store must decline and fall back to the persistent store",
+            );
+        }
+        assert_eq!(
+            mirror.build_count(),
+            0,
+            "over cap → never builds a RAM copy",
+        );
+        assert_eq!(
+            mirror.len_probe_count(),
+            1,
+            "the over-cap verdict must be derived ONCE and cached until the next \
+             write — re-probing put a full-store key scan in front of every read",
+        );
+
+        // A write re-opens the question exactly once, not once per subsequent read.
+        mirror.mark_dirty();
+        for _ in 0..20 {
+            assert!(mirror
+                .try_full_query(&store, q, SparqlEvaluator::new)
+                .is_none());
+        }
+        assert_eq!(
+            mirror.len_probe_count(),
+            2,
+            "one re-probe per write burst, not one per read",
+        );
+    }
+
+    /// An empty store is the other "clean but no mirror" state; it must cache its
+    /// verdict too, otherwise a fresh deployment pays the same per-read scan.
+    #[test]
+    fn empty_store_probes_store_len_once_not_per_read() {
+        let mirror = ParallelMirror::new(true, 2, 10_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        let store = store_with_quads(0);
+        let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
+
+        for _ in 0..25 {
+            assert!(mirror
+                .try_full_query(&store, q, SparqlEvaluator::new)
+                .is_none());
+        }
+        assert_eq!(mirror.len_probe_count(), 1, "empty verdict cached too");
     }
 
     /// The env escape hatch (`OTS_PARALLEL_QUERY_REBUILD_QUIET_MS=0`) restores the

@@ -299,6 +299,7 @@ fn term_str(t: Option<&oxigraph::model::Term>) -> Option<String> {
             }
         }
         oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
+        #[cfg(feature = "rdf-12")]
         oxigraph::model::Term::Triple(_) => "<< >>".to_string(),
     })
 }

@@ -565,12 +565,12 @@ enum TreeRoot<'a> {
 /// keep the legacy per-quad classification. Returns one [`GraphKind`] per
 /// quad, parallel to `quads`.
 pub fn classify_quad_roles(quads: &[Quad]) -> Vec<GraphKind> {
-    use oxigraph::model::Subject;
+    use oxigraph::model::NamedOrBlankNode;
     use std::collections::HashMap;
 
     // (1) Blank-node ownership: first quad in which the bnode appears as an
     // object wins (a serialised bnode has at most one such occurrence).
-    let mut owner: HashMap<&str, &Subject> = HashMap::new();
+    let mut owner: HashMap<&str, &NamedOrBlankNode> = HashMap::new();
     for q in quads {
         if let Term::BlankNode(b) = &q.object {
             owner.entry(b.as_str()).or_insert(&q.subject);
@@ -582,7 +582,7 @@ pub fn classify_quad_roles(quads: &[Quad]) -> Vec<GraphKind> {
     // collapse onto a stable member so resolution is deterministic.
     fn resolve<'a>(
         start: &'a str,
-        owner: &HashMap<&'a str, &'a Subject>,
+        owner: &HashMap<&'a str, &'a NamedOrBlankNode>,
         memo: &mut HashMap<&'a str, TreeRoot<'a>>,
     ) -> TreeRoot<'a> {
         if let Some(r) = memo.get(start) {
@@ -592,8 +592,8 @@ pub fn classify_quad_roles(quads: &[Quad]) -> Vec<GraphKind> {
         let mut cur = start;
         let root = loop {
             match owner.get(cur) {
-                Some(Subject::NamedNode(n)) => break TreeRoot::Iri(n.as_str()),
-                Some(Subject::BlankNode(b)) => {
+                Some(NamedOrBlankNode::NamedNode(n)) => break TreeRoot::Iri(n.as_str()),
+                Some(NamedOrBlankNode::BlankNode(b)) => {
                     let next = b.as_str();
                     if let Some(r) = memo.get(next) {
                         break *r;
@@ -618,9 +618,8 @@ pub fn classify_quad_roles(quads: &[Quad]) -> Vec<GraphKind> {
     let roots: Vec<Option<TreeRoot>> = quads
         .iter()
         .map(|q| match &q.subject {
-            Subject::NamedNode(n) => Some(TreeRoot::Iri(n.as_str())),
-            Subject::BlankNode(b) => Some(resolve(b.as_str(), &owner, &mut memo)),
-            _ => None,
+            NamedOrBlankNode::NamedNode(n) => Some(TreeRoot::Iri(n.as_str())),
+            NamedOrBlankNode::BlankNode(b) => Some(resolve(b.as_str(), &owner, &mut memo)),
         })
         .collect();
 

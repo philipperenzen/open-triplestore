@@ -82,7 +82,7 @@ impl SpatialIndex {
             .flatten()
         {
             let feature = match &quad.subject {
-                Subject::NamedNode(nn) => nn.as_str().to_string(),
+                NamedOrBlankNode::NamedNode(nn) => nn.as_str().to_string(),
                 _ => continue,
             };
             let geom = match &quad.object {
@@ -99,7 +99,7 @@ impl SpatialIndex {
             };
 
             let subject_iri = match &quad.subject {
-                Subject::NamedNode(nn) => nn.as_str().to_string(),
+                NamedOrBlankNode::NamedNode(nn) => nn.as_str().to_string(),
                 _ => continue,
             };
 

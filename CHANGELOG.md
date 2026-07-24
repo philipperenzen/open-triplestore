@@ -31,6 +31,93 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Security
 - None.
 
+## [0.5.0] — 2026-07-24
+
+### Added
+- **Outbound email in Docker Compose** (`--profile mail`): a bundled send-only
+  Postfix relay ([`boky/postfix`](https://github.com/bokysan/docker-postfix)) so
+  account mail (verification links, password resets, username reminders) is
+  actually delivered instead of only logged. The relay is reachable solely on the
+  compose network (no host port), persists its queue across restarts, and either
+  delivers directly to recipient MXes or routes through a smarthost
+  (`MAIL_RELAYHOST` + credentials). All account-email settings (`SMTP_*`,
+  `PUBLIC_BASE_URL`, `OTS_REQUIRE_VERIFIED_EMAIL`) are now wired through
+  `docker-compose.yml`, so setting them in `.env` is enough. See `.env.example`
+  and [`docs/auth.md`](docs/auth.md).
+- `SMTP_TLS` option for the account mailer: `none` | `starttls` | `implicit`.
+  `none` (plaintext) enables the hop to a relay on a trusted private network —
+  like the bundled compose relay; the legacy `SMTP_STARTTLS` switch still works
+  and the port-based default (465 ⇒ implicit TLS, else STARTTLS) is unchanged.
+- **Per-building selection in shared CityJSON blocks** (3D/map viewer): CityJSON
+  now carries per-`CityObject` identity (the analogue of an IFC `#GlobalId`), so
+  clicking one house in a LoD2 block selects *that* building — opening its
+  linked-data inspector when it maps to an RDF element (the authored
+  neighbourhood/zone buildings, wired via a `#objectId` model link in the seed),
+  or a BAG-id/attributes popup with an x-ray highlight for geometry-only houses
+  (the 3DBAG block). A `#objectId` fragment also isolates a single building in the
+  element modal's 3D tab.
+- **Walk / Fly walkthrough modes** for IFC buildings: the first-person view now
+  offers a true ground-bound **Walk** mode (eye-height, gravity, floor/stair
+  follow, Space to jump) alongside free-fly **Fly** (creative/"god") mode —
+  toggle in the header or with `F`. An **Explore inside** action in a building's
+  inspector opens the walkthrough directly (no longer only via the zoomed-in map
+  hint).
+- **Internal vocabulary search + prefix service** (LOV & prefix.cc replacement).
+  Public LOV is unreachable and prefix.cc's TLS certificate has expired, so both
+  are now first-class internal services integrated with the model/vocabulary
+  registry. A bundled prefix snapshot (3,695 prefix.cc + LOV mappings with a live
+  overlay of platform-registered vocabularies) resolves SPARQL auto-prefixing
+  fully offline (`/api/prefixes*`; live prefix.cc is opt-in via
+  `PREFIX_CC_FALLBACK`), and a Tantivy-backed vocabulary term search (the
+  `vocab-search` feature) indexes the bundled LOV corpus plus the platform's
+  registry vocabularies. Both degrade gracefully with no network access.
+- **Real per-building 3DBAG linked data** in the 3D/BIM demo: each 3DBAG `Pand`
+  is mapped to an addressable RDF element, so the neighbourhood block is real,
+  properly-georeferenced linked data end to end rather than a geometry-only
+  overlay.
+
+### Changed
+- **Dependencies.** Batched the outstanding Dependabot updates — `aes-gcm` 0.11,
+  `quick-xml` 0.41, `toml` 1, `zip` 3, `calamine` 0.36, `lru` 0.16,
+  `maplibre-gl` 6, `three` 0.185, and others — together with the breaking-API
+  migrations they require, and migrated the SPARQL engine off oxigraph 0.5's
+  deprecated `Store::query` / `Update` API onto the `SparqlEvaluator` interface.
+  CI clippy now runs with `-D warnings`, so warnings fail the build.
+
+### Deprecated
+- None.
+
+### Removed
+- None.
+
+### Fixed
+- Outgoing email now carries a proper RFC 5322 `Message-ID` (`<uuid@from-domain>`),
+  in the account mailer and in both `ALERT_SMTP_*` alerting senders. Gmail
+  rejects messages without a valid Message-ID outright (`550 5.7.1`), and SMTP
+  relays only repair the header for clients they consider local — which a
+  compose sibling container is not. The bundled relay additionally runs with
+  `always_add_missing_headers = yes` as a safety net for any submitter.
+- `BASE_URL` set in `.env` now actually reaches the compose container (it was
+  recommended in the production `.env` docs but never forwarded), so linked-data
+  IRIs, the WebAuthn/passkey relying party and emailed action links pick up the
+  deployment's public origin in Docker deployments.
+- **3D map viewer — duplicate CityJSON blocks.** A self-georeferenced CityJSON
+  file referenced from several elements (a zone *and* its buildings, or the same
+  3DBAG block linked from three demo graphs) was rendered once per reference at
+  the identical spot, z-fighting into a "duplicated" blur. Each file now renders
+  exactly once (a whole-file reference supersedes its object fragments).
+- **Big Ben (and other landmark models) colliding with the basemap building.** A
+  just-loaded model now suppresses the OSM 3D extrusion it stands on immediately
+  (previously only re-evaluated on the next map pan), and a tall, thin tower's
+  suppression footprint is floored at a real building size so its own OSM block no
+  longer pokes through the model.
+- **Ungrounded Dragon Bridge landmark.** Its STL is Z-up (deck height along Z) but
+  was unannotated, so it rendered tipped ~82 m onto its side; it now lies flat
+  (`ots:modelUpAxis "Z"`).
+
+### Security
+- None.
+
 ## [0.4.0] — 2026-07-17
 
 ### Added
@@ -415,7 +502,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4

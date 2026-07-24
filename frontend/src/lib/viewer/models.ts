@@ -6,7 +6,13 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { parseCityJSON, parseCityGML } from './cityjson';
+import { parseCityJSON, parseCityGML, type CityObject } from './cityjson';
+import { cityBaseUrl, cityObjectFragment } from './detect';
+// Shared with Model3D's re-render guard. It lives in refsSignature.ts (which
+// deliberately imports no 'three', so it stays out of the WebGL chunk and is
+// unit-testable on its own) — this module is the one that must follow, or the
+// cache key and the reload signature could drift apart.
+import { guidsSignature } from './refsSignature';
 
 export type { ModelFormat, ModelRef } from './detect';
 export { modelFormatFromUrl, modelRefOf } from './detect';
@@ -19,6 +25,9 @@ export interface ModelGeoData {
   realSize: { x: number; y: number; z: number };
   /** WGS84 anchor carried by the model itself (CityJSON/CityGML with a known CRS). */
   anchorLonLat: [number, number] | null;
+  /** Selectable CityObjects in a CityJSON/CityGML model (empty otherwise) — the
+   *  per-building metadata a pick resolves to (BAG id, function, storeys …). */
+  cityObjects: CityObject[];
 }
 
 /** Default mesh colour for formats without materials (STL), theme-aware. */
@@ -30,17 +39,6 @@ export function defaultMaterial(dark: boolean): THREE.Material {
 }
 
 const modelCache = new Map<string, Promise<THREE.Group>>();
-
-/** Order-independent digest of a guid set for cache keys (length + a 32-bit
- *  hash of the sorted ids) — keeps a 900-element storey from making a 20 KB key. */
-function digestGuids(guids: string[]): string {
-  let h = 5381;
-  for (const g of [...guids].sort()) {
-    for (let i = 0; i < g.length; i++) h = ((h * 33) ^ g.charCodeAt(i)) >>> 0;
-    h = (h ^ 0x2d) >>> 0; // separator so [ab,c] != [a,bc]
-  }
-  return h.toString(36);
-}
 
 /**
  * Load a model into a normalised group (unit-ish bounding box, sitting on the
@@ -63,13 +61,14 @@ export function loadModel(
   // A subtree (an IFC container's descendant leaf guids) must not collide in the
   // cache with the whole model or with another subtree of the same file: fold a
   // compact, order-independent digest of the guid set into the key.
-  const guidKey = opts.guids?.length ? `${opts.guids.length}~${digestGuids(opts.guids)}` : '-';
+  const guidKey = guidsSignature(opts.guids) || '-';
   const key = `${format}:${upAxis ?? '-'}:${guidKey}:${url}`;
   let p = modelCache.get(key);
   if (!p) {
     p = (async () => {
       const group = new THREE.Group();
       let anchorLonLat: [number, number] | null = null;
+      let cityObjects: CityObject[] = [];
       if (format === 'gltf') {
         const gltf = await new GLTFLoader().loadAsync(url);
         group.add(gltf.scene);
@@ -83,11 +82,19 @@ export function loadModel(
         const { loadIfcGroup } = await import('./ifc');
         group.add(await loadIfcGroup(url, { guids: opts.guids }));
       } else {
-        const res = await fetch(url);
+        // A `#objectId` fragment isolates one CityObject from a shared file (the
+        // CityJSON analogue of an IFC element fragment); the fetch drops it.
+        const frag = cityObjectFragment(url);
+        const only = frag ? new Set([frag]) : undefined;
+        const res = await fetch(cityBaseUrl(url));
         if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
-        const city = format === 'cityjson' ? parseCityJSON(await res.json()) : parseCityGML(await res.text());
+        const city =
+          format === 'cityjson'
+            ? parseCityJSON(await res.json(), { only })
+            : parseCityGML(await res.text(), { only });
         group.add(city.group);
         anchorLonLat = city.anchorLonLat;
+        cityObjects = city.objects;
       }
       // Annotated Z-up content rotates into the Y-up scene BEFORE measuring, so
       // realSize.y is the real-world height. IFC manages its own axes.
@@ -103,6 +110,7 @@ export function loadModel(
         format,
         realSize: { x: size.x, y: size.y, z: size.z },
         anchorLonLat,
+        cityObjects,
       };
       group.userData.geo = geo;
       normalise(group);

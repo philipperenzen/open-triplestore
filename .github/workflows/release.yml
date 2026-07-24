@@ -23,7 +23,7 @@ jobs:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Extract the CHANGELOG section for this tag. GITHUB_REF_NAME is e.g.
       # "v0.2.1"; strip the leading "v" to get the bare version used in the
@@ -62,7 +62,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           body_path: release_notes.md
           name: "Open Triplestore ${{ github.ref_name }}"
@@ -76,13 +76,13 @@ jobs:
     # Skip on forks: they lack the GHCR package and would fail the push.
     if: github.repository == 'philipperenzen/open-triplestore'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # NOTE: the very first push creates the GHCR package as *private*. A
       # maintainer must set its visibility to public once (Packages → settings)
       # for anonymous `docker pull` to work.
       - name: Log in to GHCR
-        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
+        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

@@ -1,9 +1,16 @@
-// prefix.cc-backed prefix lookup with localStorage cache.
-// Seeded from NAMESPACES so offline always works for common prefixes.
+// Internal prefix-service lookup with localStorage cache.
+// Seeded from NAMESPACES so offline always works for common prefixes; all
+// remote lookups go to this platform's own /api/prefixes service (a bundled
+// prefix.cc + LOV snapshot plus registered vocabularies) — the browser never
+// calls prefix.cc directly (the public service is unreliable: expired TLS,
+// long outages).
 
 import { NAMESPACES, VOCAB_INFO } from './vocabularies.js';
 
-const CACHE_KEY = 'prefixcc_cache_v1';
+// v2: entries now come from the internal /api/prefixes service (the old v1
+// cache held direct prefix.cc responses; a stale v1 entry could shadow a
+// platform-registered prefix, so the key is bumped).
+const CACHE_KEY = 'prefix_cache_v2';
 const NEG_TTL_MS = 1000 * 60 * 60 * 24; // 24h for misses
 
 interface CacheEntry {
@@ -40,14 +47,13 @@ export async function lookupPrefix(prefix: string): Promise<string | null> {
   if (hit && hit.iri) return hit.iri;
   if (hit && !hit.iri && Date.now() - hit.t < NEG_TTL_MS) return null;
   try {
-    const res = await fetch(`https://prefix.cc/${encodeURIComponent(prefix)}.file.json`);
+    const res = await fetch(`/api/prefixes/${encodeURIComponent(prefix)}`);
     if (!res.ok) throw new Error('not found');
     const data = await res.json();
-    const iri = data[prefix];
-    if (iri) {
-      c[prefix] = { iri, t: Date.now() };
+    if (data && data.namespace) {
+      c[prefix] = { iri: data.namespace, t: Date.now() };
       saveCache();
-      return iri;
+      return data.namespace;
     }
   } catch {}
   c[prefix] = { iri: null, t: Date.now() };
@@ -71,26 +77,30 @@ function reverseMap(): Record<string, string> {
 }
 
 /** Resolve a namespace IRI to its prefix label (e.g. the SKOS namespace → "skos"),
- *  using the cached prefix.cc / NAMESPACES data. Returns null if unknown. */
+ *  using the cached internal-service / NAMESPACES data. Returns null if unknown. */
 export function prefixForNamespace(ns: string): string | null {
   if (!ns) return null;
   return reverseMap()[ns] || null;
 }
 
-/** Kick off a prefix.cc reverse lookup for an unknown namespace (best-effort,
- *  cached). prefix.cc's reverse endpoint maps a URI back to its prefix. */
+/** Reverse-resolve an unknown namespace via the internal prefix service
+ *  (best-effort, cached). Falls back to longest-namespace matching on the
+ *  server, so term IRIs resolve too. */
 export async function lookupNamespacePrefix(ns: string): Promise<string | null> {
   const known = prefixForNamespace(ns);
   if (known) return known;
   try {
-    const res = await fetch(`https://prefix.cc/reverse?uri=${encodeURIComponent(ns)}&format=json`);
+    const res = await fetch(`/api/prefixes/reverse?uri=${encodeURIComponent(ns)}`);
     if (!res.ok) throw new Error('not found');
     const data = await res.json();
-    const prefix = Object.keys(data || {})[0];
-    if (prefix && data[prefix]) {
+    if (data && data.prefix && data.namespace) {
       const c = loadCache();
-      if (!c[prefix]) { c[prefix] = { iri: data[prefix], t: Date.now() }; saveCache(); reverse = null; }
-      return prefix;
+      if (!c[data.prefix]) {
+        c[data.prefix] = { iri: data.namespace, t: Date.now() };
+        saveCache();
+        reverse = null;
+      }
+      return data.prefix;
     }
   } catch {}
   return null;
@@ -119,13 +129,13 @@ export function extractUsedPrefixes(query: string): string[] {
 // ───────────────────────────────────────────────────────────────────────────
 // Unified prefix / vocabulary search
 //
-// Surfaces three kinds of prefix candidates from one query: the curated
-// built-ins (always available, no network), prefix.cc (the community registry,
-// best-effort over the network), and on-platform registered vocabularies
-// (passed in by the caller via `extra` so this module stays free of API deps).
+// Surfaces prefix candidates from one query: the curated built-ins (always
+// available, no network), the internal prefix service (bundled prefix.cc +
+// LOV snapshot and platform-registered vocabularies), and any candidates the
+// caller passes via `extra` (so this module stays free of API deps).
 // ───────────────────────────────────────────────────────────────────────────
 
-export type PrefixSource = 'builtin' | 'prefix.cc' | 'platform';
+export type PrefixSource = 'builtin' | 'prefix.cc' | 'platform' | 'lov';
 
 export interface PrefixCandidate {
   prefix: string;
@@ -179,18 +189,24 @@ function builtinMatches(q: string): PrefixCandidate[] {
   return out;
 }
 
+/** Map a server-side source tag onto the candidate source vocabulary. */
+function serverSource(source: string): PrefixSource {
+  if (source === 'platform') return 'platform';
+  if (source === 'lov') return 'lov';
+  return 'prefix.cc';
+}
+
 /**
  * Search for prefix/vocabulary candidates matching `query`.
  *
  * Always returns the matching built-ins synchronously-derivable from the local
- * tables, then (best-effort, swallowing failures) augments with a direct
- * prefix.cc resolution when the query looks like a bare prefix label. Any
- * `extra` candidates (e.g. on-platform vocabularies supplied by the caller) are
- * merged and ranked alongside the rest.
+ * tables, then (best-effort, swallowing failures) augments with ranked matches
+ * from the internal prefix service. Any `extra` candidates (e.g. on-platform
+ * vocabularies supplied by the caller) are merged and ranked alongside.
  *
  * De-duplicates by `prefix` (case-insensitive), preferring built-in > platform
- * > prefix.cc so a curated description always wins. Results are ranked by
- * relevance to `query`.
+ * > snapshot sources so a curated description always wins. Results are ranked
+ * by relevance to `query`.
  */
 export async function searchPrefixes(
   query: string,
@@ -211,20 +227,27 @@ export async function searchPrefixes(
     candidates.push(c);
   }
 
-  // prefix.cc direct label resolution — only when the query is a plausible bare
-  // prefix and we don't already have a built-in/platform hit for that exact label.
-  if (remote && q && BARE_PREFIX_RE.test(q)) {
-    const haveExact = candidates.some((c) => c.prefix.toLowerCase() === q);
-    if (!haveExact) {
-      try {
-        const ns = await lookupPrefix(q);
-        if (ns) candidates.push({ prefix: q, namespace: ns, source: 'prefix.cc' });
-      } catch { /* offline / not found — ignore */ }
-    }
+  // Internal prefix service: ranked substring search over ~3.7k prefixes
+  // (bundled prefix.cc + LOV) plus platform-registered vocabularies.
+  if (remote && q && (BARE_PREFIX_RE.test(q) || q.length >= 3)) {
+    try {
+      const res = await fetch(`/api/prefixes?q=${encodeURIComponent(q)}&limit=${limit}`);
+      if (res.ok) {
+        const data = await res.json();
+        for (const r of data?.results || []) {
+          if (!r?.prefix || !r?.namespace) continue;
+          candidates.push({
+            prefix: r.prefix,
+            namespace: r.namespace,
+            source: serverSource(r.source),
+          });
+        }
+      }
+    } catch { /* offline — built-ins still work */ }
   }
 
   // De-dupe by prefix, keeping the highest-priority source.
-  const priority: Record<PrefixSource, number> = { builtin: 3, platform: 2, 'prefix.cc': 1 };
+  const priority: Record<PrefixSource, number> = { builtin: 4, platform: 3, 'prefix.cc': 2, lov: 1 };
   const byPrefix = new Map<string, PrefixCandidate>();
   for (const c of candidates) {
     const key = c.prefix.toLowerCase();

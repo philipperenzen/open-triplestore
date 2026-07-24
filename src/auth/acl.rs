@@ -68,13 +68,7 @@ fn glob_segments(pat: &[&str], txt: &[&str]) -> bool {
             }
             false
         }
-        (Some(p), Some(t)) => {
-            if segment_matches(p, t) {
-                glob_segments(&pat[1..], &txt[1..])
-            } else {
-                false
-            }
-        }
+        (Some(p), Some(t)) if segment_matches(p, t) => glob_segments(&pat[1..], &txt[1..]),
         _ => false,
     }
 }
@@ -157,7 +151,7 @@ pub fn check_endpoint_acl(
 
     // deny beats allow at equal priority
     let mut sorted = matching;
-    sorted.sort_by(|a, b| b.priority.cmp(&a.priority));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
     for rule in &sorted {
         if rule.effect == "deny" {

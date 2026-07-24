@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import type { Mesh, MeshStandardMaterial } from 'three';
 import { epsgFromReference, toLonLat } from '../viewer/crs';
-import { parseCityJSON, parseCityGML } from '../viewer/cityjson';
-import { modelFormatFromUrl, modelRefOf, modelRefsOf, isGeometryPredicate, isIfcGuidPredicate } from '../viewer/detect';
+import { parseCityJSON, parseCityGML, cityObjectIdAt } from '../viewer/cityjson';
+import { modelFormatFromUrl, modelRefOf, modelRefsOf, isGeometryPredicate, isIfcGuidPredicate, cityObjectFragment, cityBaseUrl } from '../viewer/detect';
 import { elementsToGeoJSON, modelAnchor } from '../viewer/geometry';
 
 // Fixtures resolve relative to this test file (not process.cwd()) so the suite
@@ -69,13 +69,74 @@ describe('modelRefsOf', () => {
 describe('parseCityJSON (3DBAG excerpt)', () => {
   it('parses the bundled Schependomlaan 3DBAG block with real geometry near the site', () => {
     const model = parseCityJSON(bagSample);
-    // Semantics are stripped from the excerpt, so all 157 buildings merge into
-    // one mesh bucket — assert on the actual triangulated geometry instead.
-    const mesh = model.group.children[0] as Mesh;
-    expect(mesh.geometry.getAttribute('position').count).toBeGreaterThan(3000);
+    // The excerpt keeps its semantic surfaces (roof/wall/ground), so geometry
+    // buckets per surface type — assert on the total triangulated geometry.
+    const total = model.group.children.reduce(
+      (n, child) => n + (child as Mesh).geometry.getAttribute('position').count,
+      0
+    );
+    expect(total).toBeGreaterThan(3000);
+    // Roof/wall/ground buckets carry distinct semantic colours.
+    expect(model.group.children.length).toBeGreaterThan(1);
     const [lon, lat] = model.anchorLonLat!;
     expect(lon).toBeCloseTo(5.834, 1);
     expect(lat).toBeCloseTo(51.841, 1);
+  });
+});
+
+describe('CityJSON per-object picking + isolation', () => {
+  it('exposes each top-level CityObject with its attributes', () => {
+    const model = parseCityJSON(sample);
+    expect(model.objects.map((o) => o.id).sort()).toEqual(['demo-house', 'demo-warehouse']);
+    const house = model.objects.find((o) => o.id === 'demo-house')!;
+    expect(house.type).toBe('Building');
+    expect(house.attributes.function).toBe('residential');
+  });
+
+  it('records per-object vertex ranges a picked face resolves through', () => {
+    const model = parseCityJSON(sample);
+    for (const child of model.group.children) {
+      const ranges = ((child as Mesh).geometry.userData as { objectRanges?: unknown[] }).objectRanges;
+      expect(Array.isArray(ranges) && ranges.length > 0).toBe(true);
+    }
+    const mesh = model.group.children[0] as Mesh;
+    // The first triangle of the first bucket resolves to one of the buildings.
+    const id = cityObjectIdAt(mesh, 0);
+    expect(model.objects.some((o) => o.id === id)).toBe(true);
+    // A face beyond the geometry resolves to nothing (no false positives).
+    const faces = mesh.geometry.getAttribute('position').count / 3;
+    expect(cityObjectIdAt(mesh, faces + 100)).toBeNull();
+  });
+
+  it('isolates a single building with opts.only (the CityJSON `#objectId` path)', () => {
+    const full = parseCityJSON(sample);
+    const one = parseCityJSON(sample, { only: new Set(['demo-house']) });
+    expect(one.objects.map((o) => o.id)).toEqual(['demo-house']);
+    expect(one.objectCount).toBe(1);
+    expect(one.triangleCount).toBeGreaterThan(0);
+    expect(one.triangleCount).toBeLessThan(full.triangleCount);
+    // Every face of the isolated model belongs to the requested building.
+    const mesh = one.group.children[0] as Mesh;
+    expect(cityObjectIdAt(mesh, 0)).toBe('demo-house');
+  });
+
+  it('folds 3DBAG BuildingParts into their parent Building for picking', () => {
+    const model = parseCityJSON(bagSample);
+    // 77 root Buildings — the `…-0` LoD2.2 BuildingParts fold into their parents.
+    expect(model.objects.length).toBe(77);
+    const mesh = model.group.children[0] as Mesh;
+    const id = cityObjectIdAt(mesh, 0)!;
+    expect(id.startsWith('NL.IMBAG.Pand.')).toBe(true);
+    expect(id).not.toContain('-'); // a root Building id, never a `-0` part
+  });
+});
+
+describe('cityObjectFragment / cityBaseUrl', () => {
+  it('splits a CityJSON URL into base file and #objectId (the isolation key)', () => {
+    expect(cityObjectFragment('/samples/neighbourhood.city.json#nbh-house')).toBe('nbh-house');
+    expect(cityObjectFragment('/samples/neighbourhood.city.json')).toBeNull();
+    expect(cityBaseUrl('/samples/neighbourhood.city.json#nbh-house')).toBe('/samples/neighbourhood.city.json');
+    expect(cityBaseUrl('/samples/neighbourhood.city.json')).toBe('/samples/neighbourhood.city.json');
   });
 });
 

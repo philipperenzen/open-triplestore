@@ -300,6 +300,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 62,
     },
     Builtin {
+        slug: "vocabulary-search",
+        title: "Vocabulary Search & Prefixes",
+        category: "Query & Search",
+        body: include_str!("../../docs/vocabulary-search.md"),
+        admin_only: false,
+        sort: 63,
+    },
+    Builtin {
         slug: "geosparql",
         title: "GeoSPARQL",
         category: "Query & Search",
@@ -373,6 +381,14 @@ const BUILTINS: &[Builtin] = &[
         body: include_str!("../../docs/api-reference.md"),
         admin_only: false,
         sort: 112,
+    },
+    Builtin {
+        slug: "embedding",
+        title: "Embedding & Web Apps",
+        category: "API & Operations",
+        body: include_str!("../../docs/embedding.md"),
+        admin_only: false,
+        sort: 114,
     },
     Builtin {
         slug: "operations",

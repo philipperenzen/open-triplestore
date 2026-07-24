@@ -11,7 +11,7 @@
 
   import {
     Home as HomeIcon, Search as SearchIcon,
-    Upload, Database, Building2, BookOpen, HelpCircle,
+    Upload, Database, Building2, BookOpen, HelpCircle, Library,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity
@@ -58,6 +58,7 @@
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
   const lazyModelRegistry       = () => import('./pages/ModelRegistry.svelte');
+  const lazyVocabularySearch    = () => import('./pages/VocabularySearch.svelte');
   const lazyModelDetail         = () => import('./pages/ModelDetail.svelte');
   const lazyModelViewer         = () => import('./pages/ModelViewer.svelte');
   const lazyModelDiff           = () => import('./pages/ModelDiff.svelte');
@@ -98,6 +99,7 @@
         { to: '/datasets', labelKey: 'nav.datasets', icon: Database, match: (p) => p.startsWith('/datasets') },
         { to: '/organisations', labelKey: 'nav.organisations', icon: Building2, match: (p) => p.startsWith('/organisations') },
         { to: '/models', labelKey: 'nav.models', icon: BookOpen, match: (p) => p.startsWith('/models') },
+        { to: '/vocabularies', labelKey: 'nav.vocabularySearch', icon: Library, match: (p) => p.startsWith('/vocabularies') },
       ],
     },
     {
@@ -232,6 +234,7 @@
       ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
+      ['/vocabularies', 'pages.vocabularySearch.title', 'pages.vocabularySearch.detail'],
       ['/docs', 'pages.documentation.title', 'pages.documentation.detail'],
       ['/api-docs', 'pages.apiDocs.title', 'pages.apiDocs.detail'],
     ];
@@ -656,6 +659,9 @@
         </Route>
         <Route path="/models">
           <LazyPage loader={lazyModelRegistry} />
+        </Route>
+        <Route path="/vocabularies">
+          <LazyPage loader={lazyVocabularySearch} />
         </Route>
         <Route path="/models/:id/viewer/:versionId" let:params>
           <LazyPage loader={lazyModelViewer} id={params.id} versionId={params.versionId} />

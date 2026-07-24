@@ -21,6 +21,7 @@
   let searchQuery = '';
   let stats = null;
   let statsLoading = true;
+  let datasetsLoading = true;
   let datasets = [];
   let error = '';
 
@@ -52,6 +53,8 @@
       datasets = d || [];
     } catch (e) {
       error = e.message;
+    } finally {
+      datasetsLoading = false;
     }
   });
 
@@ -66,7 +69,9 @@
 
   $: topDatasets = datasets.slice(0, 5);
   $: recommendedActions = [
-    datasets.length === 0 ? { label: $t('pages.home.createFirstDataset'), href: '/datasets', detail: $t('pages.home.createFirstDatasetDetail') } : null,
+    // Only suggest "create your first dataset" once we KNOW the list is empty —
+    // otherwise it flashes on every load before the fetch resolves.
+    (!datasetsLoading && datasets.length === 0) ? { label: $t('pages.home.createFirstDataset'), href: '/datasets', detail: $t('pages.home.createFirstDatasetDetail') } : null,
     { label: $t('pages.home.importSourceData'), href: '/import', detail: $t('pages.home.importSourceDataDetail') },
     { label: $t('pages.home.inspectGraph'), href: '/browse?view=graph', detail: $t('pages.home.inspectGraphDetail') },
   ].filter(Boolean);
@@ -186,6 +191,18 @@
                 </div>
                 <span class="dataset-badge">{ds.visibility || 'public'}</span>
               </Link>
+            {/each}
+          </div>
+        {:else if datasetsLoading}
+          <!-- Skeleton rows: never flash "no datasets" before the first response. -->
+          <div class="dataset-list">
+            {#each Array(4) as _}
+              <div class="dataset-item" aria-hidden="true">
+                <div style="flex:1">
+                  <span class="skel" style="display:block;height:0.85rem;width:45%;border-radius:6px;margin-bottom:0.4rem;"></span>
+                  <span class="skel" style="display:block;height:0.7rem;width:75%;border-radius:6px;"></span>
+                </div>
+              </div>
             {/each}
           </div>
         {:else}

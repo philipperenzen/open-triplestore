@@ -94,15 +94,45 @@ COPY plugins/ plugins/
 # include_str!("../../docs/*.md") — so the docs/ tree must be present for the build.
 # (.dockerignore's `*.md` only excludes root-level markdown, not docs/.)
 COPY docs/ docs/
+# Reference seed bundles: not needed by the binary, but `cargo test` in this
+# stage exercises `examples/seed-bundles/` from CARGO_MANIFEST_DIR — without
+# the copy that test can only fail in-container.
+COPY examples/ examples/
 # Shared standard-vocabulary TTLs embedded by the backend (src/data_models/seed_vocab.rs)
 # via include_str!; needed at compile time here since the frontend tree isn't copied.
 COPY frontend/public/vocab/ frontend/public/vocab/
 # Bundled CityJSON sample neighbourhoods embedded by the demo seed
 # (src/saved_queries/seed.rs) via include_str! to lift into the 3D-Tiles pipeline.
 COPY frontend/public/samples/ frontend/public/samples/
+# Vendored vocabulary assets: the LOV catalog embedded by the backend
+# (src/vocab_search/catalog.rs) via include_bytes!.
+COPY assets/ assets/
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo build --profile ${CARGO_PROFILE} --features full
+
+# ─── Stage 2c: LOV corpus (best-effort, checksum-verified) ───
+# Bakes the full Linked Open Vocabularies N-Quads corpus (~18 MB) into the
+# image so vocabulary term search + offline vocabulary install work without
+# any runtime network access.  Best-effort: when the download fails the image
+# still builds — the server can fetch the corpus itself at boot
+# (VOCAB_CORPUS_URL) or an operator can mount one at /app/assets/vocab/.
+# Set --build-arg LOV_CORPUS_URL= (empty) to skip the bake entirely.
+FROM debian:bookworm-slim AS lovcorpus
+RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*
+ARG LOV_CORPUS_URL=https://web.archive.org/web/20251218081818id_/https://lov.linkeddata.es/lov.nq.gz
+ARG LOV_CORPUS_SHA256=7b5522b4f86d642d7e48df289f3d3330898e9aa021cc4d4ef0ad38f0f039c233
+RUN mkdir -p /corpus && \
+    if [ -n "$LOV_CORPUS_URL" ] \
+       && curl -fSL --retry 5 --retry-delay 5 --max-time 600 "$LOV_CORPUS_URL" -o /corpus/lov.nq.gz \
+       && echo "$LOV_CORPUS_SHA256  /corpus/lov.nq.gz" | sha256sum -c -; then \
+        echo "LOV corpus baked into image"; \
+    else \
+        echo "WARNING: LOV corpus not baked (download failed or disabled)." \
+             "Term search covers platform vocabularies only until the server" \
+             "downloads the corpus at boot (VOCAB_CORPUS_URL)."; \
+        rm -f /corpus/lov.nq.gz; \
+    fi
 
 # ─── Stage 3: Runtime ───
 FROM debian:bookworm-slim
@@ -126,6 +156,10 @@ COPY --from=builder /app/target/${CARGO_PROFILE}/open-triplestore /usr/local/bin
 
 # Copy frontend build
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
+
+# LOV corpus for vocabulary term search + offline installs (may be absent —
+# see the lovcorpus stage above; the server degrades gracefully without it).
+COPY --from=lovcorpus /corpus/ /app/assets/vocab/
 
 # Create non-root user
 RUN useradd -m -s /bin/bash triplestore

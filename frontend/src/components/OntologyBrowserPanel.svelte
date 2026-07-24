@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import { parseTurtle } from '../lib/ontology/loader.js';
+  import { fetchRetry429 } from '../lib/api.js';
   import OntologyModelViewer from './OntologyModelViewer.svelte';
   import GraphCanvas from './GraphCanvas.svelte';
   import ContextMenu from './ContextMenu.svelte';
@@ -27,17 +28,23 @@
   // ── Loaded local store (rawDataUrl path) ────────────────────────────────────
   let loadedStore: any = null;
   let storeLoaded = false;
+  // Whether the load has finished, successfully or not. Gate rendering on this
+  // rather than on `storeLoaded` so a failed fetch shows an error instead of an
+  // eternal spinner — and so the viewer is never mounted with a null store.
+  let storeSettled = false;
   let storeError = '';
   let storePromise: Promise<void> | null = null;
 
   function ensureStoreLoaded(): Promise<void> {
     if (storeLoaded) return Promise.resolve();
-    if (!rawDataUrl) return Promise.resolve();
+    if (!rawDataUrl) { storeSettled = true; return Promise.resolve(); }
     if (storePromise) return storePromise;
     storeError = '';
     storePromise = (async () => {
       try {
-        const resp = await fetch(rawDataUrl, { credentials: 'include' });
+        // fetchRetry429: /api/models data races the page's other queries against a
+        // per-IP rate limit, and a 429 here used to brick the panel permanently.
+        const resp = await fetchRetry429(rawDataUrl, { credentials: 'include' });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
         const turtle = await resp.text();
         const res = await parseTurtle(turtle);
@@ -45,9 +52,24 @@
         storeLoaded = true;
       } catch (e: any) {
         storeError = e?.message || $t('components.ontologyBrowserPanel.failedToLoadData');
+        // Drop the memoised promise so a retry is possible. Without this a single
+        // failure is cached forever and silently disables every mode of this panel.
+        storePromise = null;
+      } finally {
+        storeSettled = true;
       }
     })();
     return storePromise;
+  }
+
+  /** Discard the cached store and refetch — backs the viewer's Reload button. */
+  export function reloadStore(): Promise<void> {
+    storeLoaded = false;
+    storeSettled = false;
+    storePromise = null;
+    loadedStore = null;
+    storeError = '';
+    return ensureStoreLoaded();
   }
 
   function n3TermToBinding(term: any): any {
@@ -505,7 +527,24 @@
   <!-- Panel body -->
   <div class="ob-body">
     {#if activeMode === 'ontology'}
-      <OntologyModelViewer {graphIri} {subGraphs} {versionLabel} initialTab="classes" preloadedStore={loadedStore} />
+      <!-- Render three explicit states. Mounting the viewer with a null store made
+           it race its own (always-empty) SPARQL fallback against this fetch. -->
+      {#if rawDataUrl && storeError}
+        <div class="ob-store-error">
+          <span>{storeError}</span>
+          <button class="btn btn-sm" on:click={reloadStore}>{$t('system.retry')}</button>
+        </div>
+      {:else if rawDataUrl && !storeSettled}
+        <div class="ob-store-loading"><Loader2 size={16} class="animate-spin" /> {$t('system.loading')}</div>
+      {:else}
+        <OntologyModelViewer
+          {graphIri} {subGraphs} {versionLabel}
+          initialTab="classes"
+          preloadedStore={loadedStore}
+          allowSparqlFallback={!rawDataUrl}
+          on:reload={reloadStore}
+        />
+      {/if}
 
     {:else if activeMode === 'graph'}
       <div class="ob-graph-area">
@@ -715,6 +754,12 @@
   }
 
   .ob-body { min-height: 300px; }
+  .ob-store-loading, .ob-store-error {
+    display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+    padding: 2rem 1rem; font-size: 0.85rem; color: var(--ink-400, #94a3b8);
+  }
+  .ob-store-error { color: #b91c1c; }
+  :global(:is([data-theme="dark"], .dark)) .ob-store-error { color: #fca5a5; }
 
   .ob-loading, .ob-empty {
     display: flex; align-items: center; justify-content: center; gap: 0.5rem;

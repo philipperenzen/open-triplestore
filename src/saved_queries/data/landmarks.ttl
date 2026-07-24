@@ -42,7 +42,7 @@ lm:DragonBridge a bot:Element ;
         geo:asWKT "POINT(108.22666667 16.06111111)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/22/Dragon_Bridge_in_Da_Nang.stl"^^xsd:anyURI ;
-        ots:modelSizeMeters 666 ] .
+        ots:modelUpAxis "Z" ; ots:modelSizeMeters 666 ] .
 
 # ── Big Ben (Elizabeth Tower), London ──
 lm:BigBen a bot:Element ;

@@ -514,7 +514,7 @@ fn detect_graph_role(store: &TripleStore, graph_iri: &str) -> Option<GraphKind> 
 /// True if `subject_iri` appears as a subject in the named graph `graph_iri`.
 /// A cheap targeted lookup via the quad API (no full scan).
 fn graph_has_subject(store: &TripleStore, graph_iri: &str, subject_iri: &str) -> bool {
-    use oxigraph::model::{GraphNameRef, NamedNodeRef, SubjectRef};
+    use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNodeRef};
     let s = match NamedNodeRef::new(subject_iri) {
         Ok(n) => n,
         Err(_) => return false,
@@ -526,7 +526,7 @@ fn graph_has_subject(store: &TripleStore, graph_iri: &str, subject_iri: &str) ->
     store
         .store()
         .quads_for_pattern(
-            Some(SubjectRef::NamedNode(s)),
+            Some(NamedOrBlankNodeRef::NamedNode(s)),
             None,
             None,
             Some(GraphNameRef::NamedNode(g)),

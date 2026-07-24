@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     getDataset,
     updateDataset,
@@ -16,7 +16,7 @@
     deleteService,
     validateDataset,
     sparqlQuery,
-    datasetSparqlQuery,
+    browseTriples,
     uploadDatasetImage,
     getDatasetImageUrl,
     uploadDatasetBanner,
@@ -56,6 +56,7 @@
   import { Link, navigate } from '../lib/router/index.js';
   import { isAuthenticated, user } from '../lib/stores.js';
   import { graphResultsToElements, detectRdfFormat, normalizeGraphRole, graphRoleLabel } from '../lib/rdf-utils.js';
+  import { datasetContentKind } from '../lib/content-kind.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
   import { copyToClipboard } from '../lib/clipboard.js';
   // GraphCanvas (cytoscape) loads lazily once there are graph nodes to show
@@ -70,6 +71,7 @@
   import Avatar from '../components/Avatar.svelte';
   import AssetPreview from '../components/AssetPreview.svelte';
   import ContentKindWarning from '../components/ContentKindWarning.svelte';
+  import DatasetContentSummary from '../components/DatasetContentSummary.svelte';
   import DatasetMetadataDialog from '../components/DatasetMetadataDialog.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import BannerBackdrop from '../components/BannerBackdrop.svelte';
@@ -86,6 +88,14 @@
   let dataset = null;
   let graphs = [];
   let services = [];
+  // Content summary, derived cheaply from the browse facets (index-backed graph
+  // counts + one concurrent class/property aggregate) instead of the old
+  // COUNT(DISTINCT ?s) + 11× FILTER-NOT-EXISTS scan that took 30-60s and was
+  // therefore skipped on large datasets. Now it runs on every dataset, and both
+  // the always-on summary card and the mismatch warning read from it.
+  let contentSummary = null;
+  let contentSummaryLoading = true;
+  let contentSummaryAbort = null;
   let error = '';
   // Geo capability of the dataset — gates the map / 3D-viewer action tile so it
   // only appears when there is something to show (coordinates and/or 3D data).
@@ -750,15 +760,45 @@
     return null;
   }
 
-  onMount(async () => {
-    // fetchAccess depends on the loaded dataset (owner + can_manage), so run it after.
-    await Promise.all([fetchDataset(), fetchGraphs(), fetchServices(), fetchAssets(), fetchVersions()]);
-    await Promise.all([fetchAccess(), loadDataPreview(), loadEffectiveShapes(), loadValidationState()]);
+  onMount(() => {
+    // The linked-data preview and the content summary don't depend on the dataset
+    // metadata, so fire them IMMEDIATELY rather than behind the metadata batch —
+    // that gating is why the preview appeared late (or seemed absent) on first paint.
+    loadDataPreview();
+    loadContentSummary();
+    (async () => {
+      // fetchAccess depends on the loaded dataset (owner + can_manage), so run it after.
+      await Promise.all([fetchDataset(), fetchGraphs(), fetchServices(), fetchAssets(), fetchVersions()]);
+      await Promise.all([fetchAccess(), loadEffectiveShapes(), loadValidationState()]);
+    })();
   });
+  onDestroy(() => contentSummaryAbort?.abort());
+
+  async function loadContentSummary() {
+    contentSummaryLoading = true;
+    contentSummaryAbort?.abort();
+    contentSummaryAbort = new AbortController();
+    try {
+      contentSummary = await datasetContentKind(id, contentSummaryAbort.signal);
+    } catch {
+      contentSummary = null; // aborted or failed — just no summary card
+    } finally {
+      contentSummaryLoading = false;
+    }
+  }
 
   // Probe geo capability (independent of the dataset load) to gate the viewer tile.
   async function fetchGeoStats() {
     try { geoStats = await getGeoStats(id); } catch { geoStats = null; }
+    // The viewer tile is about to render — prefetch its code-split chunks
+    // (page + three.js + MapLibre) during idle time so clicking "3D viewer"
+    // opens instantly instead of first downloading a couple of MB of WebGL
+    // libraries. Best-effort: a failed prefetch just falls back to on-click load.
+    if (geoStats && (geoStats.has_coordinates || geoStats.has_3d)) {
+      const prefetch = () => import('../pages/DatasetViewer.svelte').catch(() => {});
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(prefetch, { timeout: 4000 });
+      else setTimeout(prefetch, 600);
+    }
   }
   fetchGeoStats();
 
@@ -1044,21 +1084,22 @@
     } catch (_) { /* ignore */ }
   }
 
+  // True once loadDataPreview has resolved at least once, so the card can show a
+  // proper empty state (rather than vanishing) when a dataset has no triples yet.
+  let previewLoaded = false;
   async function loadDataPreview() {
-    if (graphs.length === 0) return;
     loadingPreview = true;
     previewError = '';
     try {
-      // Use the dataset-scoped SPARQL service so results are not filtered by
-      // the accessible_graphs_cache (which may be stale right after upload).
-      const sparql = `SELECT ?s ?p ?o ?g WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 80`;
-      const firstSvcSlug = services[0]?.slug ?? null;
-      const res = (firstSvcSlug
-          ? await datasetSparqlQuery(id, firstSvcSlug, sparql).catch(() => null)
-          : null)
-        // Fall back to global SPARQL if the dataset service doesn't exist yet.
-        || await sparqlQuery(`SELECT ?s ?p ?o WHERE { VALUES ?g { ${graphs.slice(0, 8).map(g => `<${typeof g === 'string' ? g : g.graph_iri}>`).join(' ')} } GRAPH ?g { ?s ?p ?o } } LIMIT 80`);
-      const bindings = res?.results?.bindings || [];
+      // browseTriples scopes to the dataset's registered graphs SERVER-side
+      // (scope_dataset_graphs — ACL-checked, cached, on the blocking pool), so it
+      // needs neither the graph list nor a service and can run immediately on mount.
+      // It reads registered graphs directly, so it also sees freshly-uploaded data
+      // (which is what the old dataset-service branch was guarding). Returns
+      // {subject,predicate,object,graph}; remap to the {s,p,o,g} the graph builder
+      // and the sample table read.
+      const res = await browseTriples({ dataset_id: id, limit: '80' });
+      const bindings = (res?.triples || []).map(t => ({ s: t.subject, p: t.predicate, o: t.object, g: t.graph }));
       const { nodes, edges } = graphResultsToElements(bindings);
       graphNodes = nodes;
       graphEdges = edges;
@@ -1067,6 +1108,7 @@
       previewError = e.message;
     } finally {
       loadingPreview = false;
+      previewLoaded = true;
     }
   }
 
@@ -1446,21 +1488,24 @@
 </div>
 {/if}
 
-<!-- Content kind warning: flags ontology/model data inside a dataset -->
-{#if graphs.length > 0}
-  {#key graphs.map(g => graphIri(g)).join('|')}
-    <ContentKindWarning
-      graphs={graphs.map(g => graphIri(g))}
-      expected="dataset"
-      contextName={dataset?.name}
-      datasetId={id}
-      declaredRole={dataset?.graph_role ?? null}
-      onresolved={(e) => {
-        dataset = { ...dataset, graph_role: e.role };
-        if (e.role === 'shapes') onShapesRoleAssigned();
-      }}
-    />
-  {/key}
+<!-- Always-on content summary + (when it doesn't match the declared role) the
+     mismatch warning. Both read the SAME cheap facet-derived summary, so there is
+     no store scan and no size gate — it runs on datasets of any size. -->
+{#if contentSummaryLoading || (contentSummary && contentSummary.verdict !== 'empty')}
+  <DatasetContentSummary summary={contentSummary} loading={contentSummaryLoading && !contentSummary} />
+{/if}
+{#if contentSummary && contentSummary.verdict !== 'empty'}
+  <ContentKindWarning
+    expected="dataset"
+    contextName={dataset?.name}
+    datasetId={id}
+    declaredRole={dataset?.graph_role ?? null}
+    preloadedProbe={contentSummary}
+    onresolved={(e) => {
+      dataset = { ...dataset, graph_role: e.role };
+      if (e.role === 'shapes') onShapesRoleAssigned();
+    }}
+  />
 {/if}
 
 {#if shapesRoleNotice}
@@ -1542,7 +1587,9 @@
   </div>
 {/if}
 
-{#if loadingPreview || versionLoading || graphNodes.length > 0 || previewError || versionError}
+<!-- Preview card: shown from the first load attempt on (previewLoaded), so it
+     reserves its slot and shows a proper empty state instead of vanishing. -->
+{#if previewLoaded || loadingPreview || versionLoading || graphNodes.length > 0 || previewError || versionError}
   <div class="card">
     <div class="explore-head">
       <Network size={15} />
@@ -1552,6 +1599,8 @@
       <div class="preview-loading"><Loader2 size={18} class="animate-spin" /> {$i18nT('system.loading')}</div>
     {:else if previewError || versionError}
       <p class="error">{previewError || versionError}</p>
+    {:else if graphNodes.length === 0}
+      <div class="preview-empty">{$i18nT('pages.datasetDetail.previewEmpty')}</div>
     {:else}
       {#await graphCanvasMod then GC}
         {#if GC}
@@ -3081,6 +3130,18 @@
     padding: 2rem;
     color: var(--ink-500);
     font-size: 0.9rem;
+  }
+  /* Reserve roughly the graph's height so a data-less dataset shows a calm empty
+     state instead of the card collapsing (or a blank 400px canvas). */
+  .preview-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 160px;
+    padding: 2rem;
+    color: var(--ink-400, #94a3b8);
+    font-size: 0.88rem;
+    text-align: center;
   }
 
   .preview-error {

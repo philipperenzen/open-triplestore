@@ -7,8 +7,8 @@
 //! standard base64.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    AeadCore, Aes256Gcm, Key,
+    aead::{Aead, Generate, KeyInit},
+    Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use hkdf::Hkdf;
@@ -22,14 +22,14 @@ fn derive_key(jwt_secret: &str) -> Key<Aes256Gcm> {
     let mut okm = [0u8; 32];
     hk.expand(HKDF_INFO, &mut okm)
         .expect("HKDF expand failed (output too long)");
-    *Key::<Aes256Gcm>::from_slice(&okm)
+    Key::<Aes256Gcm>::try_from(okm.as_slice()).expect("HKDF OKM is exactly 32 bytes")
 }
 
 /// Encrypt `plaintext` and return a base64-encoded `nonce || ciphertext` blob.
 pub fn encrypt_secret(plaintext: &str, jwt_secret: &str) -> anyhow::Result<String> {
     let key = derive_key(jwt_secret);
     let cipher = Aes256Gcm::new(&key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|e| anyhow::anyhow!("AES-GCM encrypt error: {e}"))?;
@@ -50,11 +50,12 @@ pub fn decrypt_secret(encoded: &str, jwt_secret: &str) -> anyhow::Result<String>
     }
 
     let (nonce_bytes, ciphertext) = blob.split_at(12);
-    let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+    let nonce =
+        Nonce::try_from(nonce_bytes).map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
     let key = derive_key(jwt_secret);
     let cipher = Aes256Gcm::new(&key);
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("AES-GCM decrypt error: {e}"))?;
 
     String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("UTF-8 decode error: {e}"))
