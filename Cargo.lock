@@ -4135,6 +4135,7 @@ dependencies = [
  "oauth2",
  "opengraph",
  "openidconnect",
+ "ots-plugin-accounts-dashboard",
  "ots-plugin-api",
  "ots-plugin-hello",
  "oxigraph",
@@ -4287,6 +4288,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "ots-plugin-accounts-dashboard"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "http-body-util",
+ "ots-plugin-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

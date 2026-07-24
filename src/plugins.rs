@@ -143,7 +143,10 @@ impl PluginAuth for AppState {
 
     fn organisations_json(&self, admin_bearer: &str) -> Result<String, String> {
         require_local_admin(self, admin_bearer)?;
-        let orgs = self.auth_db.list_organisations().map_err(|e| e.to_string())?;
+        let orgs = self
+            .auth_db
+            .list_organisations()
+            .map_err(|e| e.to_string())?;
         let mut out = Vec::with_capacity(orgs.len());
         for o in orgs {
             let members = self.auth_db.count_org_members(&o.id).unwrap_or(0);
@@ -184,6 +187,10 @@ pub fn registered_plugins() -> Vec<Arc<dyn Plugin>> {
     let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
     #[cfg(feature = "plugin-hello")]
     plugins.push(Arc::new(ots_plugin_hello::HelloPlugin));
+    #[cfg(feature = "plugin-accounts-dashboard")]
+    plugins.push(Arc::new(
+        ots_plugin_accounts_dashboard::AccountsDashboardPlugin,
+    ));
     plugins
 }
 

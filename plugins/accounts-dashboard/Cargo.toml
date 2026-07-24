@@ -1,0 +1,20 @@
+[package]
+name = "ots-plugin-accounts-dashboard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Open Triplestore plugin: suite-wide accounts overview — users, organisations, per-app entitlements and merged LLM usage (store log + external gateway ledger)."
+
+[dependencies]
+ots-plugin-api = { path = "../api" }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

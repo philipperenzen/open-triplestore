@@ -1793,8 +1793,9 @@ impl AuthDb {
             let mut stmt = conn.prepare(
                 "SELECT status, COUNT(*) FROM llm_request_log WHERE timestamp >= ?1 GROUP BY status",
             )?;
-            let rows = stmt
-                .query_map([&day_ago], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            let rows = stmt.query_map([&day_ago], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
             for row in rows {
                 let (s, n) = row?;
                 total += n;

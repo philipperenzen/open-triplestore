@@ -154,3 +154,36 @@ Sign in with Apple is **not yet supported** by the generic OIDC integration: App
 ### Other IdPs (Keycloak, Auth0, Okta, …)
 
 Any IdP exposing a `.well-known/openid-configuration` works with the generic OIDC type; enterprise IdPs can also connect via SAML 2.0 (upload the IdP certificate, set the SSO URL, and exchange SP metadata from `/api/auth/saml/<slug>/metadata`).
+
+## Guest self-registration (admin toggle)
+
+With normal self-registration closed (`OTS_DISABLE_REGISTRATION=1`), an admin
+can still open a low-privilege path from **Security → Registration**: the
+public register page then creates accounts with the `guest` system role (no
+publish/design/admin rights — client apps decide what guests may fill, e.g.
+guest-open forms). The toggle is runtime-changeable (no restart):
+
+- **Off → guests disabled.** Every active guest account is bulk-deactivated
+  with the stored reason `guest_disabled`; their sign-in (and any still-valid
+  token, on introspection) answers with *"Guest access has been disabled by
+  the administrator"* — client apps surface that message verbatim. Guests an
+  admin deactivated individually are never touched by the sweep.
+- **On → exactly those guests return.** The sweep re-activates only accounts
+  carrying the `guest_disabled` reason.
+
+`GET /api/auth/features` exposes the toggle so register UIs adapt their
+wording; sweeps are audit-logged with the affected count.
+
+## Introspection for resource servers
+
+Companion services authorizing on this store's accounts get two additive
+surfaces (used by the OTL suite's validation platform and form service):
+
+- `GET /api/auth/me` includes `organisations: [{slug, name, role}]` and
+  `groups: [{org_slug, id, name}]` (groups have no slug; match on name/id).
+- `GET /api/datasets/:id/permissions/me` reports the caller's effective
+  `{role, read, write, manage}` on one dataset through the full ACL stack;
+  no access answers 404, indistinguishable from a nonexistent dataset.
+
+For signing users in *to those services* with this store as the identity
+provider, see [`oidc-provider.md`](oidc-provider.md).

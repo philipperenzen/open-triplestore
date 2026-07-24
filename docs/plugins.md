@@ -231,10 +231,24 @@ pub trait Plugin: Send + Sync + 'static {
 }
 ```
 
-`PluginContext` gives a plugin the instance's `base_url` and a `store: Arc<dyn
-PluginStore>` capability (`query_json` / `update` — SPARQL against the shared
-store, returning/accepting plain strings so the plugin crate needs no
-dependency on this project's internal store types either).
+`PluginContext` gives a plugin the instance's `base_url` and two capability
+objects, both in the same plain-strings idiom so the plugin crate needs no
+dependency on this project's internal types:
+
+- `store: Arc<dyn PluginStore>` — `query_json` / `update`, SPARQL against the
+  shared store.
+- `auth: Arc<dyn PluginAuth>` *(ots-plugin-api 0.2)* — accounts:
+  `introspect_bearer` resolves a caller's session JWT / `ots_` API token /
+  provider access token to a principal JSON (id, username, email, role,
+  org + group memberships), and three **admin-gated** overviews
+  (`users_json`, `organisations_json`, `llm_stats_json`) back account
+  dashboards. Authorization runs INSIDE the host implementation — a plugin
+  can neither skip the checks nor see more than the equivalent admin API
+  returns. `ots_plugin_api::NoAuth` is the inert stand-in for unit tests;
+  `plugins/hello`'s `GET /ext/hello/whoami` is the minimal example and
+  `plugins/accounts-dashboard` (feature `plugin-accounts-dashboard`) a full
+  consumer: a suite-wide accounts/entitlements/LLM-usage dashboard at
+  `/ext/accounts-dashboard/ui`.
 
 ### Writing a new plugin (cookiecutter flow)
 

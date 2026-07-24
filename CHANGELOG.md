@@ -14,10 +14,48 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- None.
+- **The store as an OIDC provider** (Unified Accounts): client apps sign
+  their users in against this store with authorization-code + PKCE —
+  discovery, `/oauth/jwks` (ES256), `/oauth/token` (rotating single-use
+  refresh tokens), `/oauth/userinfo`, an SPA-driven `/oauth/authorize` with
+  a remembered consent screen, an admin-managed client registry
+  (Security → *Sign-in apps*, `/api/admin/oauth-clients`) and a declarative
+  `OAUTH_CLIENTS_JSON` boot seed. Provider access tokens carry role and
+  org/group membership claims and are accepted by the auth middleware like
+  any first-class credential. See [`docs/oidc-provider.md`](docs/oidc-provider.md).
+- **Guest self-registration toggle** (admin, default off): with normal
+  registration closed, the public register page may create low-privilege
+  `guest` accounts. Turning the toggle off bulk-disables guest accounts with
+  a specific "guest access has been disabled by the administrator" sign-in
+  message; turning it back on re-enables exactly those accounts.
+- **Membership-aware introspection**: `GET /api/auth/me` now includes
+  `organisations` and `groups` arrays, and the new
+  `GET /api/datasets/:id/permissions/me` reports the caller's effective
+  `{read, write, manage}` on a dataset (404 for invisible datasets) — for
+  resource servers that authorize on ownership without re-deriving ACLs.
+- **Plugin accounts capability**: `ots-plugin-api` 0.2 adds
+  `PluginContext::auth` (`PluginAuth`: bearer introspection + admin-gated
+  users/organisations/LLM-stats overviews, enforced host-side), plus the new
+  `plugins/accounts-dashboard` crate (feature `plugin-accounts-dashboard`,
+  off by default): a suite-wide accounts/entitlements/LLM-usage dashboard at
+  `/ext/accounts-dashboard/ui`, merging the store's own AI-request log with
+  an external LLM gateway's usage ledger (fail-soft). The Docker image gained
+  a `CARGO_FEATURES` build arg to enable plugin features without patching.
+- **Seed-bundle `[prefixes]` table**: a bundle may declare
+  `prefix → namespace` mappings, seeded into the prefix registry's persisted
+  cache tier at boot (existing entries win) — so bundled datasets render
+  prefixed names out of the box.
 
 ### Changed
-- None.
+- Login accepts an internal-path `?next=` redirect (used by the OIDC
+  authorize flow); absolute URLs are ignored (no open redirect).
+
+### Fixed
+- The default-features build (`cargo check`/`cargo test` with no flags) broke
+  on a `text-search`-gated `AtomicBool` import used by an ungated field, and
+  on an ungated `Term::Triple` match arm in the SPARQL-functions conformance
+  test. Both are feature-gated correctly now; CI's explicit feature list had
+  masked them.
 
 ### Deprecated
 - None.
