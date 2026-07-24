@@ -26,6 +26,7 @@
   import ResetPassword from './pages/ResetPassword.svelte';
   import VerifyEmail from './pages/VerifyEmail.svelte';
   import OAuthCallback from './pages/OAuthCallback.svelte';
+  import OAuthAuthorize from './pages/OAuthAuthorize.svelte';
   import Settings from './pages/Settings.svelte';
   import Datasets from './pages/Datasets.svelte';
   import DatasetDetail from './pages/DatasetDetail.svelte';
@@ -578,6 +579,7 @@
         <Route path="/reset-password" component={ResetPassword} />
         <Route path="/verify-email" component={VerifyEmail} />
         <Route path="/oauth/callback" component={OAuthCallback} />
+        <Route path="/oauth/authorize" component={OAuthAuthorize} />
         <Route path="/browse">
           <LazyPage loader={lazyTripleBrowser} />
         </Route>

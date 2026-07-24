@@ -638,6 +638,35 @@ impl PrefixRegistry {
         Some((label, resolved_iri))
     }
 
+    /// Seed a validated `prefix → namespace` mapping into the cache (from a
+    /// seed bundle or other trusted config), persisting on change. Existing
+    /// entries always win — a learned or previously seeded mapping is never
+    /// clobbered. Returns whether the mapping was newly inserted.
+    pub fn insert_seeded(&self, label: &str, iri: &str) -> bool {
+        if !is_valid_label(label) || !is_valid_iri(iri) {
+            warn!("prefix seed rejected (invalid label or IRI): {label:?} → {iri:?}");
+            return false;
+        }
+        {
+            let mut state = self.lock_state();
+            if state.cache.by_label.contains_key(label) {
+                return false;
+            }
+            state
+                .cache
+                .by_label
+                .insert(label.to_string(), iri.to_string());
+            // Keep an existing reverse mapping for this namespace if present.
+            state
+                .cache
+                .by_iri
+                .entry(iri.to_string())
+                .or_insert_with(|| label.to_string());
+        }
+        self.persist_cache();
+        true
+    }
+
     // ── Cache persistence ────────────────────────────────────────────────────
 
     /// Write the cache to disk atomically.
