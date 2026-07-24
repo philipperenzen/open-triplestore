@@ -1641,6 +1641,51 @@ impl AuthDb {
         Ok(count)
     }
 
+    // ─── Membership summaries (for token introspection / resource servers) ────
+
+    /// `(org_slug, org_name, membership_role)` for every organisation the user
+    /// belongs to — the compact shape `GET /api/auth/me` exposes so resource
+    /// servers (validation platform, form service, LLM gateway) can authorize
+    /// on membership without extra round-trips.
+    pub fn list_user_membership_summaries(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT o.slug, o.name, m.role FROM org_memberships m
+             JOIN organisations o ON o.id = m.org_id
+             WHERE m.user_id = ?1 ORDER BY o.slug",
+        )?;
+        let rows = stmt
+            .query_map([user_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// `(org_slug, group_id, group_name)` for every group/team the user is in.
+    /// Groups have no slug of their own — clients match on name or id.
+    pub fn list_user_group_summaries(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT o.slug, g.id, g.name FROM group_memberships gm
+             JOIN groups g ON g.id = gm.group_id
+             JOIN organisations o ON o.id = g.org_id
+             WHERE gm.user_id = ?1 ORDER BY o.slug, g.name",
+        )?;
+        let rows = stmt
+            .query_map([user_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ─── App settings (runtime-changeable admin toggles) ──────────────────────
 
     /// Read one instance setting; None when never set.

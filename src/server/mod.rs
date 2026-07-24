@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod account_lifecycle_tests;
 #[cfg(test)]
+mod accounts_introspection_tests;
+#[cfg(test)]
 mod guest_registration_tests;
 pub mod content_negotiation;
 pub mod error;
@@ -809,6 +811,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(handlers::get_dataset)
                 .put(handlers::update_dataset)
                 .delete(handlers::delete_dataset),
+        )
+        .route(
+            "/api/datasets/:dataset_id/permissions/me",
+            get(handlers::dataset_permissions_me),
         )
         .route(
             "/api/datasets/:dataset_id/graphs",

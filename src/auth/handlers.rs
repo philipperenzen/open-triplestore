@@ -1339,7 +1339,31 @@ pub async fn me(
     resp.email_pending = db
         .pending_email_change(&current_user.user_id)
         .unwrap_or(None);
-    Ok(Json(resp))
+
+    // Memberships ride along (additively) so resource servers introspecting a
+    // token can authorize on org/team membership without extra round-trips.
+    // Failures degrade to empty arrays — /me must keep working.
+    let organisations: Vec<serde_json::Value> = db
+        .list_user_membership_summaries(&current_user.user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(slug, name, role)| serde_json::json!({ "slug": slug, "name": name, "role": role }))
+        .collect();
+    let groups: Vec<serde_json::Value> = db
+        .list_user_group_summaries(&current_user.user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(org_slug, id, name)| {
+            serde_json::json!({ "org_slug": org_slug, "id": id, "name": name })
+        })
+        .collect();
+    let mut body = serde_json::to_value(&resp)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("organisations".into(), serde_json::Value::Array(organisations));
+        obj.insert("groups".into(), serde_json::Value::Array(groups));
+    }
+    Ok(Json(body))
 }
 
 /// PUT /api/auth/me
@@ -3761,6 +3785,42 @@ pub async fn list_datasets(
 }
 
 /// GET /api/datasets/:dataset_id
+/// GET /api/datasets/:dataset_id/permissions/me — the caller's effective
+/// access on one dataset, evaluated through the full ACL stack (system role,
+/// ownership, org/group membership × visibility, grants, public readability).
+///
+/// For services that must answer "may this user write this dataset?"
+/// server-side — e.g. the validation platform's owner-gated runs — without
+/// re-deriving ACL logic. Anonymous callers get the public-visibility answer;
+/// an existing-but-invisible dataset answers 404 (not 403) so the endpoint
+/// cannot be used to probe private dataset ids.
+pub async fn dataset_permissions_me(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(db): State<Arc<AuthDb>>,
+    Path(dataset_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+
+    let user_id = user.as_ref().map(|u| u.user_id.as_str());
+    let role = db
+        .effective_dataset_role(user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some(role) = role else {
+        // No access at all: indistinguishable from a nonexistent dataset.
+        return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
+    };
+    Ok(Json(serde_json::json!({
+        "dataset_id": dataset.id,
+        "role": role.as_str(),
+        "read": role.can_read(),
+        "write": role.can_write(),
+        "manage": role.can_manage(),
+    })))
+}
+
 pub async fn get_dataset(
     user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
