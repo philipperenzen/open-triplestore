@@ -18,7 +18,7 @@
   import * as THREE from 'three';
   import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
   import { VRButton } from 'three/addons/webxr/VRButton.js';
-  import { X, Footprints, MousePointerClick } from 'lucide-svelte';
+  import { X, Footprints, Mouse, MousePointerClick } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { loadModel, realWorldMeters, NORMALISED_DIM } from '../../lib/viewer/models';
   import { ifcGuidAt, ifcProgress } from '../../lib/viewer/ifc';
@@ -41,18 +41,30 @@
   let loading = true;
   let error = '';
   let locked = false;
+  // Pointer lock is best-effort: browsers refuse it in plenty of real
+  // situations (the ~1.3 s cooldown after Esc, iframes without the permission,
+  // kiosk/headless setups). When the request errors, the walkthrough falls back
+  // to DRAG-look — hold the left button and move the mouse to look around —
+  // instead of a dead "Click to walk in" button that appears to do nothing.
+  let dragLook = false;
+  let dragging = false;
+  let dragMoved = 0; // px travelled while dragging (a real drag isn't a pick)
+  const DRAG_EULER = new THREE.Euler(0, 0, 0, 'YXZ');
   let hoverLabel = '';
   let picked = null; // { label, type, guid, id }
   let wtNeedsRender = true; // draw a frame while paused (render-on-demand)
 
   // Movement mode: 'walk' = first-person, bound by gravity to the floors/stairs
-  // (Space jumps) — the natural way to inspect an interior; 'fly' = free/creative
-  // "god" mode (Space/Q–E move vertically). Toggle with the header buttons or `F`.
+  // (Space jumps, Ctrl crouches) — the natural way to inspect an interior;
+  // 'fly' = free/creative "god" mode (Space/E up, Ctrl/Q/C down). Toggle with
+  // the header buttons or `F`.
   let mode = 'walk';
   let vy = 0; // vertical velocity (m/s) in walk mode
   let grounded = false;
   let groundRay = null; // downward raycaster for the floor under the camera
-  const EYE_HEIGHT = 1.7; // metres — camera height above the floor when grounded
+  const EYE_HEIGHT = 1.7; // metres — camera height above the floor when standing
+  const EYE_CROUCH = 1.05; // metres — eye height while Ctrl is held in walk mode
+  let eyeNow = EYE_HEIGHT; // eased toward the target so crouching doesn't snap
   const GRAVITY = 18; // m/s²
   const JUMP_SPEED = 4.6; // m/s
   const DOWN = new THREE.Vector3(0, -1, 0);
@@ -122,7 +134,7 @@
     applySelection(picked?.guid || null);
   }
 
-  const move = { f: false, b: false, l: false, r: false, up: false, down: false, fast: false };
+  const move = { f: false, b: false, l: false, r: false, up: false, down: false, fast: false, crouch: false };
   let prevT = 0;
   let lastPickT = 0; // throttle the crosshair raycast against the merged building
   const CENTER = new THREE.Vector2(0, 0);
@@ -153,13 +165,16 @@
    *  obstacle now just holds the current level (pass-through stays possible);
    *  stairs (risers ≪ MAX_STEP) and deliberate jumps still land normally. */
   function applyWalkGravity(dt) {
+    // Ease the eye height toward standing/crouched (Ctrl) so it doesn't snap.
+    const eyeTargetH = move.crouch ? EYE_CROUCH : EYE_HEIGHT;
+    eyeNow += (eyeTargetH - eyeNow) * Math.min(1, 12 * dt);
     const floorY = floorUnder(camera.position);
     if (!Number.isFinite(floorY)) {
       vy = 0;
       grounded = false;
       return;
     }
-    const rise = floorY - (camera.position.y - EYE_HEIGHT);
+    const rise = floorY - (camera.position.y - eyeNow);
     if (rise > MAX_STEP) {
       vy = 0;
       grounded = false;
@@ -167,8 +182,8 @@
     }
     vy -= GRAVITY * dt;
     camera.position.y += vy * dt;
-    const eyeTarget = floorY + EYE_HEIGHT;
-    if (camera.position.y <= eyeTarget) {
+    const eyeTarget = floorY + eyeNow;
+    if (camera.position.y <= eyeTarget || (grounded && move.crouch)) {
       camera.position.y = eyeTarget;
       vy = 0;
       grounded = true;
@@ -220,15 +235,28 @@
         }
         break;
       case 'KeyE': move.up = down; break;
-      // Two descend keys: Q (existing) plus C — reachable with the left hand on
+      // Descend keys: Q (existing) plus C — reachable with the left hand on
       // WASD, and layout-independent enough for AZERTY users where Q sits under A.
       case 'KeyQ': case 'KeyC': move.down = down; break;
+      // Ctrl: crouch in walk mode, descend in fly mode (the FPS convention).
+      case 'ControlLeft': case 'ControlRight':
+        move.crouch = down;
+        move.down = down;
+        break;
       case 'ShiftLeft': case 'ShiftRight': move.fast = down; break;
       case 'KeyF': // toggle walk ↔ fly
         if (down) setMode(mode === 'walk' ? 'fly' : 'walk');
         break;
       case 'KeyX': // toggle x-ray around the selected element
         if (down) toggleXray();
+        break;
+      case 'Escape':
+        // Native pointer lock pauses via the browser's own Esc; the drag-look
+        // fallback has no such hook, so pause it here.
+        if (down && dragLook && locked) {
+          locked = false;
+          wtNeedsRender = true;
+        }
         break;
       default: hit = false;
     }
@@ -237,10 +265,60 @@
   const kd = (e) => onKey(e, true);
   const ku = (e) => onKey(e, false);
 
+  /** Enter the first-person view: real pointer lock when the browser grants it,
+   *  the drag-look fallback when it doesn't (see `dragLook`). */
+  function enterWalk() {
+    if (!controls) return;
+    if (dragLook) {
+      locked = true;
+      wtNeedsRender = true;
+      return;
+    }
+    try {
+      controls.lock();
+    } catch {
+      enableDragFallback();
+    }
+  }
+
+  function enableDragFallback() {
+    dragLook = true;
+    locked = true;
+    wtNeedsRender = true;
+  }
+
+  // Drag-to-look handlers (fallback mode only): hold the left button and move.
+  function onPointerDown(e) {
+    if (!dragLook || !locked || e.button !== 0) return;
+    dragging = true;
+    dragMoved = 0;
+    canvasEl?.setPointerCapture?.(e.pointerId);
+  }
+  function onPointerMove(e) {
+    if (!dragging || !camera) return;
+    const dx = e.movementX ?? 0;
+    const dy = e.movementY ?? 0;
+    dragMoved += Math.abs(dx) + Math.abs(dy);
+    DRAG_EULER.setFromQuaternion(camera.quaternion);
+    DRAG_EULER.y -= dx * 0.0025;
+    DRAG_EULER.x -= dy * 0.0025;
+    DRAG_EULER.x = Math.max(-1.55, Math.min(1.55, DRAG_EULER.x));
+    camera.quaternion.setFromEuler(DRAG_EULER);
+    wtNeedsRender = true;
+  }
+  function onPointerUp() {
+    dragging = false;
+  }
+
   function onCanvasClick() {
     if (!controls) return;
     if (!locked) {
-      controls.lock();
+      enterWalk();
+      return;
+    }
+    // A drag that just ended is looking around, not a pick.
+    if (dragLook && dragMoved > 5) {
+      dragMoved = 0;
       return;
     }
     const p = pickAhead();
@@ -295,6 +373,9 @@
         locked = false;
         wtNeedsRender = true; // draw the final paused frame once
       });
+      // A refused pointer lock (Esc-cooldown, iframe policy, kiosk browsers)
+      // used to leave a dead "Click to walk in" button — fall back to drag-look.
+      document.addEventListener('pointerlockerror', enableDragFallback);
 
       try {
         const cached = await loadModel(url, format, { upAxis });
@@ -401,6 +482,7 @@
       ro?.disconnect();
       window.removeEventListener('keydown', kd);
       window.removeEventListener('keyup', ku);
+      document.removeEventListener('pointerlockerror', enableDragFallback);
     };
   });
 
@@ -439,7 +521,15 @@
 </script>
 
 <div class="walk" bind:this={wrapEl} class:dark>
-  <canvas bind:this={canvasEl} on:click={onCanvasClick} aria-label="3D walkthrough"></canvas>
+  <canvas
+    bind:this={canvasEl}
+    on:click={onCanvasClick}
+    on:pointerdown={onPointerDown}
+    on:pointermove={onPointerMove}
+    on:pointerup={onPointerUp}
+    on:pointercancel={onPointerUp}
+    aria-label="3D walkthrough"
+  ></canvas>
 
   <!-- Centre reticle + what it's aimed at -->
   {#if !loading && !error}
@@ -497,9 +587,35 @@
   {:else if error}
     <div class="wt-overlay"><p class="err">{error}</p></div>
   {:else if !locked}
-    <button class="wt-enter" on:click={() => controls?.lock()}>
-      <MousePointerClick size={18} /> {$i18nT('viewer.walkClickToEnter')}
-      <small>{mode === 'walk' ? $i18nT('viewer.walkControlsWalk') : $i18nT('viewer.walkControls')}</small>
+    <button class="wt-enter" on:click={enterWalk}>
+      <span class="wt-enter-title"><MousePointerClick size={18} /> {$i18nT('viewer.walkClickToEnter')}</span>
+      <!-- Keycap cheat-sheet: the controls at a glance, before you're inside. -->
+      <span class="wt-keys" aria-hidden="true">
+        <span class="wt-keygroup">
+          <span class="wasd">
+            <kbd class="k">W</kbd>
+            <span class="wasd-row"><kbd class="k">A</kbd><kbd class="k">S</kbd><kbd class="k">D</kbd></span>
+          </span>
+          <small>{$i18nT('viewer.keyMove')}</small>
+        </span>
+        <span class="wt-keygroup">
+          <span class="mouse-ico"><Mouse size={34} /></span>
+          <small>{dragLook ? $i18nT('viewer.keyLookDrag') : $i18nT('viewer.keyLook')}</small>
+        </span>
+        <span class="wt-keygroup">
+          <kbd class="k space">Space</kbd>
+          <small>{mode === 'walk' ? $i18nT('viewer.keyJump') : $i18nT('viewer.keyUp')}</small>
+        </span>
+        <span class="wt-keygroup">
+          <kbd class="k wide">Ctrl</kbd>
+          <small>{mode === 'walk' ? $i18nT('viewer.keyCrouch') : $i18nT('viewer.keyDown')}</small>
+        </span>
+        <span class="wt-keygroup">
+          <kbd class="k wide">Shift</kbd>
+          <small>{$i18nT('viewer.keyRun')}</small>
+        </span>
+      </span>
+      <small>{$i18nT('viewer.walkMoreKeys')}</small>
     </button>
   {/if}
 
@@ -718,6 +834,71 @@
   }
   .wt-enter:hover {
     border-color: #ff8a2a;
+  }
+  .wt-enter-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  /* Keycap cheat-sheet on the enter overlay. */
+  .wt-keys {
+    display: flex;
+    align-items: flex-end;
+    gap: 22px;
+    margin: 14px 4px 6px;
+  }
+  .wt-keygroup {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+  }
+  .wt-keygroup small {
+    font-weight: 500;
+    font-size: 0.68rem;
+    color: #9fb2c6;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .wasd {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+  .wasd-row {
+    display: flex;
+    gap: 4px;
+  }
+  kbd.k {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 7px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-bottom-width: 2.5px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #eef4fb;
+    font-family: inherit;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+  kbd.k.space {
+    min-width: 84px;
+  }
+  kbd.k.wide {
+    min-width: 46px;
+  }
+  .mouse-ico {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 60px;
+    color: #cdd9e6;
   }
   .wt-info {
     position: absolute;
