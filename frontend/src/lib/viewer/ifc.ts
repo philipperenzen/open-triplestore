@@ -9,11 +9,36 @@
 // "selected" overlay). Every viewer links a picked atom back to its linked-data
 // IRI (the viewer feed exposes the same GlobalId as `ifc_guid`).
 //
+// Parsing runs in a Web Worker (`ifcWorker.ts`) so the fetch + WASM parse +
+// merge + BVH build never freeze the page; the worker transfers the merged
+// typed arrays back zero-copy and this module only assembles three.js objects.
+// The in-thread `parseIfcOnMainThread` path is kept as a fallback for
+// environments without module workers. The worker also prebuilds a
+// three-mesh-bvh bounds tree per merged geometry: raycasts against a merged
+// building test EVERY triangle without one, which made the walkthrough's
+// crosshair pick and map clicks O(building) — with the BVH they are O(log n).
+//
 // The wasm binary is served as a static file from /wasm/web-ifc.wasm (copied
 // from node_modules — Vite's hashed asset names would break web-ifc's
 // path-based loader).
 
 import * as THREE from 'three';
+import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
+import { writable } from 'svelte/store';
+
+// Route every mesh raycast through three-mesh-bvh: meshes whose geometry has a
+// `boundsTree` use the BVH; all others fall through to three's stock raycast.
+// Prototype-level so clones (every viewer clones the cached master) keep it.
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+/** Live parse progress of the IFC currently loading (null when idle):
+ *  `{ url, phase: 'fetch'|'parse', loaded, total }` — total is 0 when unknown. */
+export const ifcProgress = writable<{
+  url: string;
+  phase: 'fetch' | 'parse';
+  loaded: number;
+  total: number;
+} | null>(null);
 
 /** One element's run of triangles within a merged geometry's index buffer. */
 export interface GuidRange {
@@ -122,10 +147,118 @@ interface Piece {
   guid: string;
 }
 
+/** The one place IFC surface materials are made — worker + fallback paths agree.
+ *  Transparent surfaces (glass) don't write depth: with depthWrite on, whichever
+ *  pane rendered first blanked the geometry behind it, the classic "milky
+ *  windows" artifact that made buildings look wrong. */
+export function ifcSurfaceMaterial(r: number, g: number, b: number, a: number): THREE.Material {
+  const transparent = a < 0.999;
+  return new THREE.MeshStandardMaterial({
+    color: new THREE.Color(r, g, b),
+    opacity: a,
+    transparent,
+    depthWrite: !transparent,
+    roughness: 0.8,
+    metalness: 0.05,
+    side: THREE.DoubleSide,
+  });
+}
+
+/** Assemble the worker's transferred buckets into the merged master group. */
+function assembleParsed(msg: {
+  buckets: Array<{
+    color: [number, number, number, number];
+    pos: Float32Array;
+    nrm: Float32Array;
+    idx: Uint32Array;
+    ranges: GuidRange[];
+    bvh: { roots: ArrayBuffer[]; index: unknown; indirectBuffer: unknown } | null;
+  }>;
+  guids: string[];
+}): ParsedIfc {
+  const master = new THREE.Group();
+  for (const b of msg.buckets) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(b.pos, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(b.nrm, 3));
+    g.setIndex(new THREE.BufferAttribute(b.idx, 1));
+    (g.userData as { guidRanges?: GuidRange[] }).guidRanges = b.ranges;
+    if (b.bvh) {
+      try {
+        (g as unknown as { boundsTree: MeshBVH }).boundsTree = MeshBVH.deserialize(b.bvh, g, {
+          setIndex: false, // indirect build — the index was never modified
+        });
+      } catch {
+        /* no BVH → raycasts fall back to plain three.js */
+      }
+    }
+    const [r, gc, bc, a] = b.color;
+    const m = new THREE.Mesh(g, ifcSurfaceMaterial(r, gc, bc, a));
+    m.matrixAutoUpdate = false; // identity, transforms baked into vertices
+    master.add(m);
+  }
+  master.updateMatrixWorld(true);
+  return { master, guids: new Set(msg.guids) };
+}
+
+/** Parse in the dedicated worker; one worker per file, terminated when done so
+ *  the WASM heap (hundreds of MB for a big model) is released immediately. */
+function parseIfcInWorker(url: string): Promise<ParsedIfc> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./ifcWorker.ts', import.meta.url), { type: 'module' });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const finish = () => {
+      worker.terminate();
+      ifcProgress.set(null);
+    };
+    worker.onerror = (e) => {
+      finish();
+      reject(new Error(e.message || 'IFC worker failed'));
+    };
+    worker.onmessage = (ev) => {
+      const msg = ev.data || {};
+      if (msg.type === 'progress') {
+        ifcProgress.set({ url, phase: msg.phase, loaded: msg.loaded, total: msg.total });
+      } else if (msg.type === 'error') {
+        finish();
+        reject(new Error(msg.message));
+      } else if (msg.type === 'done') {
+        try {
+          resolve(assembleParsed(msg));
+        } catch (e) {
+          reject(e);
+        } finally {
+          finish();
+        }
+      }
+    };
+    worker.postMessage({ url });
+  });
+}
+
 async function parseIfc(url: string): Promise<ParsedIfc> {
   let p = parseCache.get(url);
   if (!p) {
-    p = (async () => {
+    p = parseIfcInWorker(url).catch((e) => {
+      // eslint-disable-next-line no-console
+      console.warn('IFC worker unavailable — parsing on the main thread', e);
+      return parseIfcOnMainThread(url);
+    });
+    parseCache.set(url, p);
+    p.catch(() => parseCache.delete(url));
+  }
+  return p;
+}
+
+/** In-thread fallback parse (identical output, no BVH; freezes the UI while it
+ *  runs, so it is only used when the worker cannot start). */
+async function parseIfcOnMainThread(url: string): Promise<ParsedIfc> {
+  return (async () => {
       const [api, res] = await Promise.all([engine(), fetch(url)]);
       if (!res.ok) throw new Error(`IFC fetch failed: ${res.status}`);
       const buffer = new Uint8Array(await res.arrayBuffer());
@@ -145,13 +278,7 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
           let b = buckets.get(key);
           if (!b) {
             b = {
-              material: new THREE.MeshStandardMaterial({
-                color: new THREE.Color(c.x, c.y, c.z),
-                opacity: c.w,
-                transparent: c.w < 0.999,
-                roughness: 0.85,
-                side: THREE.DoubleSide,
-              }),
+              material: ifcSurfaceMaterial(c.x, c.y, c.z, c.w),
               pieces: [],
               verts: 0,
               inds: 0,
@@ -259,10 +386,6 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
         api.CloseModel(modelID);
       }
     })();
-    parseCache.set(url, p);
-    p.catch(() => parseCache.delete(url));
-  }
-  return p;
 }
 
 /**

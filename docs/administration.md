@@ -295,6 +295,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `BACKUP_ENCRYPT_KEY_PATH` | `data/backup_key.age` | Path to the backup encryption key (auto-generated if absent) |
 | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
+| `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
 | `ALERT_WEBHOOK_URL` / `ALERT_SMTP_*` | *(unset — alerting off)* | Optional webhook / SMTP alerting (requires the `alerting` build feature) |
 
 ### Recommended production `.env`
@@ -306,6 +307,14 @@ SECURE_COOKIES=true
 BASE_URL=https://www.example.com
 MINIO_ROOT_USER=triplestore
 MINIO_ROOT_PASSWORD=<strong password>
+
+# Outbound account email via the bundled Postfix relay (full options: .env.example)
+COMPOSE_PROFILES=mail
+SMTP_HOST=mail
+SMTP_TLS=none
+SMTP_FROM=Open Triplestore <no-reply@example.com>
+MAIL_SENDER_DOMAINS=example.com
+MAIL_HOSTNAME=mail.example.com
 ```
 
 Pass to Docker Compose:

@@ -49,7 +49,11 @@ fn parse_xml(source_data: &str, iterator: &str) -> Result<Vec<Row>, String> {
                 if let (Some(ref mut row), Some(ref field)) =
                     (current_row.as_mut(), current_field.as_ref())
                 {
-                    let text = e.unescape().map(|t| t.to_string()).unwrap_or_default();
+                    let text = e
+                        .decode()
+                        .ok()
+                        .and_then(|s| quick_xml::escape::unescape(&s).ok().map(|u| u.into_owned()))
+                        .unwrap_or_default();
                     if !text.is_empty() {
                         row.insert(field.to_string(), text);
                     }

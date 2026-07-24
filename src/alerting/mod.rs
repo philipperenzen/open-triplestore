@@ -163,7 +163,7 @@ impl AlertManager {
         let mailer = builder.build();
         let mut delivered = false;
         for addr in to {
-            let from_mbox = match from.parse() {
+            let from_mbox: lettre::message::Mailbox = match from.parse() {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!("notify: bad SMTP from address: {e}");
@@ -177,10 +177,13 @@ impl AlertManager {
                     continue;
                 }
             };
+            // Receivers like Gmail reject mail without a valid Message-ID.
+            let message_id = crate::email::rfc5322_message_id(from_mbox.email.domain());
             let msg = Message::builder()
                 .from(from_mbox)
                 .to(to_mbox)
                 .subject(subject)
+                .message_id(Some(message_id))
                 .header(ContentType::TEXT_PLAIN)
                 .body(body.to_string());
             match msg {
@@ -222,13 +225,17 @@ impl AlertManager {
             serde_json::to_string_pretty(&alert.context).unwrap_or_default(),
         );
         for to in &self.cfg.smtp_to {
+            let from_mbox: lettre::message::Mailbox = from.parse()?;
+            // Receivers like Gmail reject mail without a valid Message-ID.
+            let message_id = crate::email::rfc5322_message_id(from_mbox.email.domain());
             let email = Message::builder()
-                .from(from.parse()?)
+                .from(from_mbox)
                 .to(to.parse()?)
                 .subject(format!(
                     "[triplestore][{:?}] {}",
                     alert.severity, alert.kind
                 ))
+                .message_id(Some(message_id))
                 .header(ContentType::TEXT_PLAIN)
                 .body(body.clone())?;
             mailer.send(email).await?;

@@ -33,7 +33,9 @@ use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
 use oxigraph::model::Term;
-use oxigraph::sparql::{EvaluationError, QueryResults, QuerySolution, QuerySolutionIter, Variable};
+use oxigraph::sparql::{
+    QueryEvaluationError, QueryResults, QuerySolution, QuerySolutionIter, Variable,
+};
 
 const DEFAULT_MAX_ENTRIES: usize = 1024;
 const DEFAULT_MAX_ROWS: usize = 10_000;
@@ -156,7 +158,7 @@ impl QueryCache {
                 let vars: Arc<[Variable]> = Arc::from(sols.variables().to_vec());
                 // Pull up to max_rows+1 rows (so overflow is detectable) while
                 // preserving any mid-stream error.
-                let mut buf: Vec<Result<Vec<Option<Term>>, EvaluationError>> = Vec::new();
+                let mut buf: Vec<Result<Vec<Option<Term>>, QueryEvaluationError>> = Vec::new();
                 let mut exhausted = false;
                 let mut errored = false;
                 loop {

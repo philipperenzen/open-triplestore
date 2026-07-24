@@ -22,15 +22,46 @@ export interface CityModel {
   sizeMeters: { x: number; y: number; z: number };
   objectCount: number;
   triangleCount: number;
+  /** One entry per top-level CityObject that contributed geometry — the metadata
+   *  a picked building resolves to (BAG id, function, storeys …). */
+  objects: CityObject[];
+}
+
+/** A top-level CityObject (Building, Bridge, …) — a *selectable* entity in a
+ *  multi-object CityJSON block. Nested parts (BuildingPart) fold into their root. */
+export interface CityObject {
+  /** CityObject key (the root; a BuildingPart resolves to its parent Building). */
+  id: string;
+  /** Display label — `identificatie` attribute where present, else the id. */
+  label: string;
+  /** CityObject `type` (e.g. "Building"). */
+  type: string | null;
+  /** The object's CityJSON `attributes` (function, storeysAboveGround, …). */
+  attributes: Record<string, unknown>;
+}
+
+/** One CityObject's run of vertices within a merged (non-indexed) geometry — the
+ *  CityJSON analogue of an IFC {@link import('./ifc').GuidRange}, in *vertex*
+ *  units (each triangle = 3 consecutive vertices), so a raycast `faceIndex`
+ *  resolves the picked building via {@link cityObjectIdAt}. */
+export interface CityObjectRange {
+  /** First vertex index of the run. */
+  start: number;
+  /** Number of vertices in the run (3 per triangle). */
+  count: number;
+  /** The (root) CityObject id that owns these triangles. */
+  objectId: string;
 }
 
 type V3 = [number, number, number];
 
-/** One polygon (outer ring + holes) in source coordinates, with its semantics. */
+/** One polygon (outer ring + holes) in source coordinates, with its semantics
+ *  and the (root) CityObject it belongs to (for per-building picking). */
 interface SemPolygon {
   rings: V3[][];
   semantic: string | null;
   objectType: string | null;
+  objectId: string | null;
 }
 
 /** Keep a hostile/huge file from freezing the tab. */
@@ -133,7 +164,7 @@ function triangulate(rings: V3[][]): V3[] {
 function buildCityModel(
   polygons: SemPolygon[],
   convert: ((xy: [number, number]) => [number, number]) | null,
-  objectCount: number
+  objects: CityObject[]
 ): CityModel {
   if (!polygons.length) throw new Error('no surface geometry found');
 
@@ -166,8 +197,17 @@ function buildCityModel(
     return [p[0] - centre[0], p[2] - minH, -(p[1] - centre[1])];
   };
 
-  // Triangulate into one position buffer per colour.
-  const buckets = new Map<number, number[]>();
+  // Triangulate into one position buffer per colour, recording — per colour
+  // bucket — the contiguous vertex run each CityObject owns (`ranges`), so a
+  // pick on the merged mesh resolves the specific building. Polygons arrive
+  // grouped by CityObject (parseCityJSON iterates objects in order), so a
+  // bucket's runs stay object-grouped and index-sorted.
+  interface Bucket {
+    positions: number[];
+    ranges: CityObjectRange[];
+  }
+  const buckets = new Map<number, Bucket>();
+  const contributed = new Set<string>();
   let triangleCount = 0;
   for (const poly of polygons) {
     if (triangleCount >= MAX_TRIANGLES) break;
@@ -175,17 +215,31 @@ function buildCityModel(
     if (!tris.length) continue;
     const color = colorFor(poly.semantic, poly.objectType);
     let bucket = buckets.get(color);
-    if (!bucket) buckets.set(color, (bucket = []));
-    for (const p of tris) bucket.push(p[0], p[1], p[2]);
+    if (!bucket) buckets.set(color, (bucket = { positions: [], ranges: [] }));
+    const startV = bucket.positions.length / 3; // vertex index before this poly
+    for (const p of tris) bucket.positions.push(p[0], p[1], p[2]);
+    if (poly.objectId) {
+      contributed.add(poly.objectId);
+      const last = bucket.ranges[bucket.ranges.length - 1];
+      // Same object as the previous run in this bucket → extend it; else a new run.
+      if (last && last.objectId === poly.objectId && last.start + last.count === startV) {
+        last.count += tris.length;
+      } else {
+        bucket.ranges.push({ start: startV, count: tris.length, objectId: poly.objectId });
+      }
+    }
     triangleCount += tris.length / 3;
   }
   if (!buckets.size) throw new Error('no triangulatable surfaces');
 
   const group = new THREE.Group();
-  for (const [color, positions] of buckets) {
+  for (const [color, bucket] of buckets) {
     const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(bucket.positions, 3));
     geom.computeVertexNormals(); // non-indexed → per-face normals (flat look)
+    if (bucket.ranges.length) {
+      (geom.userData as { objectRanges?: CityObjectRange[] }).objectRanges = bucket.ranges;
+    }
     const mat = new THREE.MeshStandardMaterial({
       color,
       roughness: 0.85,
@@ -197,12 +251,15 @@ function buildCityModel(
 
   const box = new THREE.Box3().setFromObject(group);
   const size = box.getSize(new THREE.Vector3());
+  // Only objects that actually produced triangles are selectable.
+  const contributors = objects.filter((o) => contributed.has(o.id));
   return {
     group,
     anchorLonLat,
     sizeMeters: { x: size.x, y: size.y, z: size.z },
-    objectCount,
+    objectCount: contributors.length || objects.length,
     triangleCount: Math.round(triangleCount),
+    objects: contributors,
   };
 }
 
@@ -224,14 +281,21 @@ const lodOf = (g: CityJsonGeometry): number => {
 /**
  * Parse a CityJSON document (1.0 – 2.0) into a [CityModel]. Throws with a
  * readable message when the document is not CityJSON or has no usable surfaces.
+ *
+ * `opts.only` isolates a subset of top-level CityObjects (by root id) — the
+ * CityJSON analogue of an IFC `#GlobalId` fragment: one building's element (or a
+ * zone's whole block) can be shown without the rest of a shared file.
  */
-export function parseCityJSON(doc: unknown): CityModel {
+export function parseCityJSON(doc: unknown, opts: { only?: Set<string> } = {}): CityModel {
   const cj = doc as {
     type?: string;
     transform?: { scale?: number[]; translate?: number[] };
     vertices?: number[][];
     metadata?: { referenceSystem?: string };
-    CityObjects?: Record<string, { type?: string; geometry?: CityJsonGeometry[] }>;
+    CityObjects?: Record<
+      string,
+      { type?: string; geometry?: CityJsonGeometry[]; parents?: string[]; attributes?: Record<string, unknown> }
+    >;
   };
   if (!cj || cj.type !== 'CityJSON') throw new Error('not a CityJSON document');
   const [sx, sy, sz] = cj.transform?.scale ?? [1, 1, 1];
@@ -245,17 +309,52 @@ export function parseCityJSON(doc: unknown): CityModel {
   const epsg = epsgFromReference(cj.metadata?.referenceSystem);
   const convert = epsg != null ? toLonLat(epsg) : null;
 
+  // Resolve a CityObject to its ROOT (a BuildingPart with LoD2.2 geometry folds
+  // into its parent Building, which carries the `identificatie`), so a pick on a
+  // part selects the whole building. Metadata is taken from the root object.
+  const cos = cj.CityObjects ?? {};
+  const only = opts.only;
+  const rootOf = (key: string): string => {
+    let cur = key;
+    const seen = new Set<string>([cur]);
+    for (;;) {
+      const p = cos[cur]?.parents?.[0];
+      if (!p || !cos[p] || seen.has(p)) break;
+      seen.add(p);
+      cur = p;
+    }
+    return cur;
+  };
+  const objectMeta = new Map<string, CityObject>();
+  const rootMeta = (rootKey: string): CityObject => {
+    let m = objectMeta.get(rootKey);
+    if (!m) {
+      const o = cos[rootKey];
+      const attributes = (o?.attributes as Record<string, unknown>) ?? {};
+      const ident = attributes.identificatie;
+      m = {
+        id: rootKey,
+        label: typeof ident === 'string' && ident ? ident : rootKey,
+        type: o?.type ?? null,
+        attributes,
+      };
+      objectMeta.set(rootKey, m);
+    }
+    return m;
+  };
+
   const polygons: SemPolygon[] = [];
-  let objectCount = 0;
   const ringPoints = (ring: unknown): V3[] =>
     (Array.isArray(ring) ? ring : [])
       .map((i) => vertices[i as number])
       .filter((p): p is V3 => Array.isArray(p));
 
-  for (const obj of Object.values(cj.CityObjects ?? {})) {
+  for (const [key, obj] of Object.entries(cos)) {
     const geoms = obj.geometry ?? [];
     if (!geoms.length) continue;
-    objectCount += 1;
+    const root = rootOf(key);
+    if (only && !only.has(root)) continue; // isolating a subset — skip the rest
+    rootMeta(root);
     // Highest LoD only — LoD1 + LoD2 of the same building would z-fight.
     const best = Math.max(...geoms.map(lodOf));
     for (const geom of geoms.filter((g) => lodOf(g) === best)) {
@@ -303,13 +402,13 @@ export function parseCityJSON(doc: unknown): CityModel {
       for (const srf of surfaces) {
         const rings = srf.rings.map(ringPoints).filter((r) => r.length >= 3);
         if (rings.length) {
-          polygons.push({ rings, semantic: srf.semantic, objectType: obj.type ?? null });
+          polygons.push({ rings, semantic: srf.semantic, objectType: obj.type ?? null, objectId: root });
         }
       }
     }
   }
 
-  return buildCityModel(polygons, convert, objectCount);
+  return buildCityModel(polygons, convert, [...objectMeta.values()]);
 }
 
 // ── CityGML (best effort) ────────────────────────────────────────────────────
@@ -323,9 +422,27 @@ const OBJECT_TAGS = new Set(OBJECT_COLORS.map(([prefix]) => prefix));
  * the CRS from the first `srsName`. Covers the LoD1/LoD2 building exports that
  * are common in open city data; exotic profiles may parse partially.
  */
-export function parseCityGML(xmlText: string): CityModel {
+export function parseCityGML(xmlText: string, opts: { only?: Set<string> } = {}): CityModel {
   const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
   if (doc.getElementsByTagName('parsererror').length) throw new Error('invalid XML');
+
+  // A stable per-object id: the element's gml:id where present, else a synthetic
+  // counter — so a CityGML block still supports per-object picking + isolation.
+  let synthCount = 0;
+  const objIds = new Map<Element, string>();
+  const gmlIdOf = (el: Element): string => {
+    let id = objIds.get(el);
+    if (id) return id;
+    for (const a of Array.from(el.attributes)) {
+      if (a.localName === 'id' && a.value) {
+        id = a.value;
+        break;
+      }
+    }
+    id = id || `object-${synthCount++}`;
+    objIds.set(el, id);
+    return id;
+  };
 
   const srsEl = doc.querySelector('[srsName]');
   const epsg = epsgFromReference(srsEl?.getAttribute('srsName'));
@@ -380,7 +497,8 @@ export function parseCityGML(xmlText: string): CityModel {
   };
 
   const collected: (SemPolygon & { lod: number })[] = [];
-  const objects = new Set<Element>();
+  const objectMeta = new Map<string, CityObject>();
+  const only = opts.only;
   for (const poly of polys) {
     const exterior = poly.getElementsByTagNameNS('*', 'exterior')[0] ?? poly;
     const outer = parseRing(exterior);
@@ -391,8 +509,14 @@ export function parseCityGML(xmlText: string): CityModel {
     const { semantic, objectType, lod } = classify(poly);
     let n: Element | null = poly;
     while (n && !OBJECT_TAGS.has(n.localName)) n = n.parentElement;
-    if (n) objects.add(n);
-    collected.push({ rings: [outer, ...holes], semantic, objectType, lod });
+    const objectId = n ? gmlIdOf(n) : null;
+    if (objectId) {
+      if (only && !only.has(objectId)) continue; // isolating a subset
+      if (!objectMeta.has(objectId)) {
+        objectMeta.set(objectId, { id: objectId, label: objectId, type: objectType, attributes: {} });
+      }
+    }
+    collected.push({ rings: [outer, ...holes], semantic, objectType, objectId, lod });
   }
   if (!collected.length) throw new Error('no usable polygons');
 
@@ -418,5 +542,85 @@ export function parseCityGML(xmlText: string): CityModel {
   }
   if (epsg != null && !convert) convert = null; // unsupported EPSG → local metres
 
-  return buildCityModel(filtered, convert, Math.max(objects.size, 1));
+  return buildCityModel(filtered, convert, [...objectMeta.values()]);
+}
+
+// ── Per-object picking + isolation (the CityJSON counterpart of ifc.ts) ───────
+
+/** Resolve the (root) CityObject id at a raycast hit: the merged mesh's geometry
+ *  carries `objectRanges` in vertex order, so the picked triangle (`faceIndex`)
+ *  maps to a building via binary search. Null when the hit owns no object range. */
+export function cityObjectIdAt(mesh: unknown, faceIndex: number | null | undefined): string | null {
+  const ranges: CityObjectRange[] | undefined = (mesh as { geometry?: { userData?: { objectRanges?: CityObjectRange[] } } })
+    ?.geometry?.userData?.objectRanges;
+  if (!ranges || faceIndex == null) return null;
+  const off = faceIndex * 3; // first vertex index of the picked (non-indexed) triangle
+  let lo = 0;
+  let hi = ranges.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid].start <= off) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (ans < 0) return null;
+  const r = ranges[ans];
+  return off < r.start + r.count ? r.objectId : null;
+}
+
+/** Does a group of (possibly merged) CityJSON meshes own any triangle of `wanted`? */
+export function groupHasCityObject(group: THREE.Object3D, wanted: Set<string>): boolean {
+  let found = false;
+  group.traverse((n) => {
+    if (found || !(n as THREE.Mesh).isMesh) return;
+    const ranges: CityObjectRange[] | undefined = (n as THREE.Mesh).geometry?.userData?.objectRanges;
+    if (ranges) {
+      for (const r of ranges) {
+        if (wanted.has(r.objectId)) {
+          found = true;
+          return;
+        }
+      }
+    }
+  });
+  return found;
+}
+
+/**
+ * Build a group containing ONLY the triangles of `wanted` CityObjects, extracted
+ * from a group of merged (non-indexed) CityJSON meshes — the map's x-ray
+ * "selected building" overlay. Positions/normals are copied per matching vertex
+ * run; the source materials are reused (the caller re-skins the clone).
+ */
+export function subCityGeometryForObjects(group: THREE.Object3D, wanted: Set<string>): THREE.Group {
+  const out = new THREE.Group();
+  group.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const geom = mesh.geometry as THREE.BufferGeometry;
+    const ranges: CityObjectRange[] | undefined = geom?.userData?.objectRanges;
+    if (!ranges) return;
+    const keep = ranges.filter((r) => wanted.has(r.objectId));
+    if (!keep.length) return;
+    const srcPos = geom.attributes.position.array as ArrayLike<number>;
+    const srcNrm = (geom.attributes.normal?.array as ArrayLike<number>) || null;
+    const pos: number[] = [];
+    const nrm: number[] = [];
+    for (const r of keep) {
+      for (let v = r.start; v < r.start + r.count; v++) {
+        pos.push(srcPos[v * 3], srcPos[v * 3 + 1], srcPos[v * 3 + 2]);
+        if (srcNrm) nrm.push(srcNrm[v * 3], srcNrm[v * 3 + 1], srcNrm[v * 3 + 2]);
+      }
+    }
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    if (nrm.length) sg.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    else sg.computeVertexNormals();
+    out.add(new THREE.Mesh(sg, mesh.material));
+  });
+  return out;
 }

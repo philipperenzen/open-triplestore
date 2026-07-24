@@ -757,7 +757,8 @@ async fn finalize_sparql(state: &AppState, sparql: String) -> String {
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
 fn validate_sparql(sparql: &str) -> Result<(), String> {
-    spargebra::Query::parse(sparql, None)
+    spargebra::SparqlParser::new()
+        .parse_query(sparql)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

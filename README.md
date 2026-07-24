@@ -31,7 +31,7 @@
 
 ---
 
-> **Status:** current release **`0.4.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
+> **Status:** current release **`0.5.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
 **Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
@@ -80,7 +80,8 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **RML mapping** | [RDF Mapping Language](https://rml.io/specs/rml/) — CSV, JSON (JSONPath), XML (XPath) → RDF with template expansion |
 | **OpenAPI docs** | Interactive Swagger UI at `/api-docs/` with JWT Bearer auth; machine-readable spec at `/api-docs/openapi.json` |
 | **AI assistant** *(optional)* | Natural-language → SPARQL, a grounded knowledge-graph chat, and a SHACL drafting assistant — run the **bundled local model** (`docker compose --profile llm up`, GPU-accelerated on NVIDIA) or **bring your own** OpenAI-compatible API (OpenAI, vLLM, Azure, …) via `LLM_GATEWAY_URL`; off by default, hidden until reachable ([docs](docs/api-services.md), [chat](docs/spark.md)) |
-| **Prefix auto-resolution** | Unknown prefixes resolved on-the-fly via [prefix.cc](https://prefix.cc) with local caching |
+| **Vocabulary search** | Internal [LOV](https://lov.linkeddata.es/) mirror: search 900+ vocabularies and their terms, CLARIAH-style vocabulary recommender, one-click offline install into the registry ([docs](docs/vocabulary-search.md)) |
+| **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
 | **HTTP protocols** | SPARQL Protocol + Graph Store HTTP Protocol (RFC 7230) + LDP 1.0 |
@@ -154,6 +155,19 @@ docker compose --profile llm-vllm up -d   # then set in .env:
 # LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
 ```
 
+**Optional — outbound email.** Account mail (verification links, password resets) is written to the server log until SMTP is configured. The stack bundles a send-only Postfix relay; enable it and point the store at it in `.env`:
+
+```bash
+docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
+# SMTP_HOST=mail
+# SMTP_TLS=none
+# SMTP_FROM=Open Triplestore <no-reply@example.org>
+# MAIL_SENDER_DOMAINS=example.org
+# BASE_URL=https://your-public-origin
+```
+
+Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
+
 ### Native (requires Rust 1.88+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
@@ -195,7 +209,7 @@ Options:
 
 ```bash
 curl http://localhost:7878/health
-# {"status":"ok","version":"0.4.0"}
+# {"status":"ok","version":"0.5.0"}
 ```
 
 > On **Windows PowerShell**, run `curl.exe http://localhost:7878/health` — the bare
@@ -439,7 +453,9 @@ curl -X DELETE http://localhost:7878/api/admin/users/<user_id> \
 
 ## Automatic Prefix Resolution
 
-Write SPARQL without declaring prefixes — they resolve automatically via [prefix.cc](https://prefix.cc):
+Write SPARQL without declaring prefixes — they resolve against the built-in
+prefix service (a bundled snapshot of the full prefix.cc registry + the LOV
+catalog, ~3,700 mappings, plus every vocabulary registered on the instance):
 
 ```sparql
 SELECT ?name ?knows WHERE {
@@ -448,7 +464,11 @@ SELECT ?name ?knows WHERE {
 }
 ```
 
-Resolved mappings are cached in `{data-dir}/prefix_cache.json`.
+No network is involved; set `PREFIX_CC_FALLBACK=true` to additionally consult
+the live prefix.cc for labels the local tiers don't know (cached in
+`{data-dir}/prefix_cache.json`). Lookup API: `GET /api/prefixes?q=…`,
+`/api/prefixes/{label}`, `/api/prefixes/reverse?uri=…` — see
+[docs/vocabulary-search.md](docs/vocabulary-search.md).
 
 ---
 
@@ -772,7 +792,8 @@ open-triplestore
 │   ├── rml/            RDF Mapping Language executor
 │   │   └── sources/    CSV, JSON (JSONPath), XML (XPath) source adapters
 │   ├── geo/            GeoSPARQL function registry (GEOS bindings)
-│   ├── prefixes/       prefix.cc resolver
+│   ├── prefixes/       internal prefix service (bundled prefix.cc + LOV snapshot)
+│   ├── vocab_search/   vocabulary search, recommender & offline install (internal LOV)
 │   └── sparql/         Service description generator
 ├── frontend/
 │   ├── src/

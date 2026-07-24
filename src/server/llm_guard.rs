@@ -620,7 +620,7 @@ mod tests {
             assert!(check_rate(key).is_ok());
         }
         let retry = check_rate(key).expect_err("over budget must be rejected");
-        assert!(retry >= 1 && retry <= 61);
+        assert!((1..=61).contains(&retry));
     }
 
     #[test]

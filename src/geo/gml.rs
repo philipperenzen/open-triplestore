@@ -45,12 +45,16 @@ enum G {
 /// (e.g. `<gml:Point srsName="http://www.opengis.net/def/crs/EPSG/0/28992">`).
 pub fn gml_srs_name(gml: &str) -> Option<String> {
     let mut reader = Reader::from_str(gml);
+    let decoder = reader.decoder();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 for attr in e.attributes().flatten() {
                     if attr.key.local_name().as_ref() == b"srsName" {
-                        if let Ok(v) = attr.unescape_value() {
+                        if let Ok(v) = attr.decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Explicit1_0,
+                            decoder,
+                        ) {
                             return Some(v.to_string());
                         }
                     }
@@ -82,23 +86,28 @@ pub fn gml_to_wkt(gml: &str) -> Option<String> {
 fn tokenize(gml: &str) -> Vec<Ev> {
     let mut reader = Reader::from_str(gml);
     reader.config_mut().trim_text(true);
+    let decoder = reader.decoder();
     let mut out = Vec::new();
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => out.push(Ev::Start(
                 local_name(e.local_name().as_ref()),
-                srs_dimension(&e),
+                srs_dimension(&e, decoder),
             )),
             Ok(Event::Empty(e)) => {
                 out.push(Ev::Start(
                     local_name(e.local_name().as_ref()),
-                    srs_dimension(&e),
+                    srs_dimension(&e, decoder),
                 ));
                 out.push(Ev::End);
             }
             Ok(Event::End(_)) => out.push(Ev::End),
             Ok(Event::Text(e)) => {
-                if let Ok(t) = e.unescape() {
+                if let Ok(t) = e.decode().map_err(|_| ()).and_then(|s| {
+                    quick_xml::escape::unescape(&s)
+                        .map(|u| u.into_owned())
+                        .map_err(|_| ())
+                }) {
                     let s = t.trim();
                     if !s.is_empty() {
                         out.push(Ev::Text(s.to_string()));
@@ -119,11 +128,11 @@ fn local_name(b: &[u8]) -> String {
 
 /// `srsDimension` attribute of an element, if present; unparseable → `Some(0)`
 /// (an invalid dimension, so the geometry is rejected downstream).
-fn srs_dimension(e: &quick_xml::events::BytesStart) -> Option<usize> {
+fn srs_dimension(e: &quick_xml::events::BytesStart, decoder: quick_xml::Decoder) -> Option<usize> {
     for attr in e.attributes().flatten() {
         if attr.key.local_name().as_ref() == b"srsDimension" {
             let dim = attr
-                .unescape_value()
+                .decoded_and_normalized_value(quick_xml::XmlVersion::Explicit1_0, decoder)
                 .ok()
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(0);

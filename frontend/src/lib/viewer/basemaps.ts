@@ -264,23 +264,60 @@ export function styleFor(kind: BasemapKind, dark: boolean): StyleSpecification |
 
 export const BUILDINGS_LAYER_ID = 'ots-3d-buildings';
 
+/** The OpenMapTiles vector layer every basemap draws its buildings from. */
+export const OSM_BUILDING_SOURCE_LAYER = 'building';
+
 /**
- * Add an OSM fill-extrusion layer over the style's OpenMapTiles `building`
- * source-layer (no-op on raster styles). Inserted below the first symbol layer
- * so labels stay readable.
+ * Every layer in the active style that draws OSM buildings — flat fills as well
+ * as extrusions, whoever added them.
+ *
+ * Enumerating by `source-layer` rather than by a hardcoded id matters twice
+ * over: the hosted Liberty style draws buildings from layers we do not own
+ * (`building`, `building-3d`), and it is free to rename or add them at any time.
+ * Anything that hides or filters "the basemap buildings" has to cover all of
+ * them, or a grey block keeps standing through a model.
  */
-export function add3dBuildings(map: MlMap, dark: boolean): void {
-  if (map.getLayer(BUILDINGS_LAYER_ID)) return;
+export function buildingLayerIds(map: MlMap): string[] {
+  const layers = map.getStyle()?.layers ?? [];
+  return layers
+    .filter(
+      (l) =>
+        (l as { 'source-layer'?: string })['source-layer'] === OSM_BUILDING_SOURCE_LAYER &&
+        (l.type === 'fill' || l.type === 'fill-extrusion'),
+    )
+    .map((l) => l.id);
+}
+
+/**
+ * Make sure the style has an OSM fill-extrusion building layer, and return its
+ * id (null on raster styles, which have no vector buildings at all).
+ *
+ * A style that already ships one is ADOPTED rather than duplicated: Liberty's
+ * own `building-3d` and a second `ots-3d-buildings` over the same geometry
+ * z-fought with each other, and the layer toggle only ever reached ours. Our
+ * layer is added only when the style has none — the custom dark style, which
+ * deliberately stops its flat `building` fill where the extrusions take over.
+ */
+export function add3dBuildings(map: MlMap, dark: boolean): string | null {
   const style = map.getStyle();
+  if (!style) return null;
+  const layers = style.layers ?? [];
+  const existing = layers.find(
+    (l) =>
+      l.type === 'fill-extrusion' &&
+      (l as { 'source-layer'?: string })['source-layer'] === OSM_BUILDING_SOURCE_LAYER,
+  );
+  if (existing) return existing.id;
   const sourceId = Object.keys(style.sources ?? {}).find((id) => style.sources[id].type === 'vector');
-  if (!sourceId) return;
-  const firstSymbol = style.layers.find((l) => l.type === 'symbol')?.id;
+  if (!sourceId) return null;
+  // Below the first symbol layer so labels stay readable.
+  const firstSymbol = layers.find((l) => l.type === 'symbol')?.id;
   map.addLayer(
     {
       id: BUILDINGS_LAYER_ID,
       type: 'fill-extrusion',
       source: sourceId,
-      'source-layer': 'building',
+      'source-layer': OSM_BUILDING_SOURCE_LAYER,
       minzoom: 14.5,
       paint: {
         'fill-extrusion-color': dark ? '#243245' : '#d8d3c8',
@@ -291,6 +328,7 @@ export function add3dBuildings(map: MlMap, dark: boolean): void {
     },
     firstSymbol
   );
+  return BUILDINGS_LAYER_ID;
 }
 
 /** Raster tile sources for the lightweight Leaflet previews (GeoPreview),
@@ -301,5 +339,10 @@ export function leafletTiles(dark: boolean): { url: string; attribution: string 
         url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
         attribution: '&copy; OpenStreetMap &copy; CARTO',
       }
-    : { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', attribution: '&copy; OpenStreetMap' };
+    : {
+        // Carto Voyager, not tile.openstreetmap.org — the OSM tile policy 403s
+        // app/localhost traffic, which broke the light preview basemap.
+        url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        attribution: '&copy; OpenStreetMap &copy; CARTO',
+      };
 }

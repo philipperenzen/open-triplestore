@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "open-triplestore"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.88"
 description = "A modern, high-performance RDF triple store with SPARQL 1.1/1.2 and GeoSPARQL support"
@@ -44,6 +44,10 @@ owl2-rl         = ["rdfs-entailment"]
 owl2-dl         = ["owl2-rl"]
 ## SPARQL + Tantivy full-text search (text:search magic property)
 text-search     = ["dep:tantivy"]
+## Vocabulary term search engine + recommender (LOV replacement) — Tantivy
+## index over the bundled LOV corpus and platform registry vocabularies.
+## The vocabulary catalog, prefix service and offline install work without it.
+vocab-search    = ["dep:tantivy"]
 ## Linked Data Platform HTTP layer
 ldp             = []
 ## ShEx (Shape Expressions) validation
@@ -58,7 +62,10 @@ swrl            = []
 geometry3d      = ["dep:parry3d-f64"]
 ## Certified constructive solid geometry (boolean union/intersection/difference
 ## and certified `volumeExact`) via the `sfcgal` crate. Off by default and NOT in
-## `full`: it links the native libSFCGAL C library, which CI does not provide.
+## `full`: it links the native libSFCGAL C library (>= 2.0), which the Docker
+## image and the GitHub feature-list builds do not provide. Only the GitLab
+## `--all-features` job compiles it (on a trixie-based rust image — see
+## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
 ## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
 saml            = ["dep:samael", "samael/xmlsec"]
@@ -82,7 +89,7 @@ asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
 ## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
@@ -138,7 +145,7 @@ r2d2_sqlite = { version = "0.24", features = ["bundled"] }
 ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
-lru = "0.12"
+lru = "0.16"
 jsonwebtoken = "9"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v5"] }
@@ -199,10 +206,10 @@ sfcgal = { version = "0.8", optional = true }
 
 # RML mapping sources
 csv = "1"
-quick-xml = "0.37"
+quick-xml = "0.41"
 
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
-toml = "0.8"
+toml = "1"
 
 # Compile-time plugin architecture (src/plugins.rs). The API crate is always
 # present (the registry/mount code needs its types); individual plugin crates
@@ -217,8 +224,8 @@ infer = "0.16"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
 lopdf = { version = "0.44", optional = true }
 kamadak-exif = { version = "0.5", optional = true }
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
-calamine = { version = "0.26", optional = true }
+zip = { version = "3", default-features = false, features = ["deflate"], optional = true }
+calamine = { version = "0.36", optional = true }
 mp4 = { version = "0.14", optional = true }
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "isomp4"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
@@ -234,7 +241,7 @@ openidconnect = { version = "4", default-features = false, features = ["reqwest"
 oauth2 = "5"
 
 # Credential encryption (AES-256-GCM for stored OAuth client secrets)
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 
 # In-memory concurrent cache (OAuth PKCE sessions)

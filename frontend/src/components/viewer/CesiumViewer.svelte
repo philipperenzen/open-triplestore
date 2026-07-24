@@ -41,6 +41,9 @@
   // component's own lightweight SPARQL panel — so switching to 3D Tiles
   // sacrifices no features. A "full screen" button opens the standalone page.
   export let embedded = false;
+  /** Show the "open full screen" in-app navigation button (embedded mode).
+   *  Iframe embeds turn this off — there is no SPA router to navigate. */
+  export let expand = true;
   /** Currently-selected element id (from the parent) to highlight in the scene. */
   export let selected = '';
 
@@ -56,6 +59,11 @@
   const ESRI_IMAGERY =
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
   const ESRI_CREDIT = 'Esri, Maxar, Earthstar Geographics, and the GIS User Community';
+  // Streets base: Carto Voyager (keyless, usage-policy friendly). NOT
+  // tile.openstreetmap.org — the OSM tile policy 403s app/localhost traffic,
+  // which rendered the whole globe as "broken 3D Tiles" for users.
+  const CARTO_STREETS = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
+  const CARTO_CREDIT = '© OpenStreetMap contributors © CARTO';
 
   let containerEl;
   let viewer = null;
@@ -150,10 +158,15 @@
               maximumLevel: 19,
               credit: ESRI_CREDIT,
             })
-          : new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' });
+          : new Cesium.UrlTemplateImageryProvider({
+              url: CARTO_STREETS,
+              subdomains: ['a', 'b', 'c', 'd'],
+              maximumLevel: 19,
+              credit: CARTO_CREDIT,
+            });
       layers.addImageryProvider(provider);
-      // If tiles fail to load (network/provider outage), drop back to OSM streets
-      // once so the demo never silently shows a blank base.
+      // If satellite tiles fail (network/provider outage), drop back to the
+      // streets base once so the demo never silently shows a blank globe.
       if (provider.errorEvent) {
         provider.errorEvent.addEventListener(() => {
           if (baseLayer !== 'streets') {
@@ -428,7 +441,7 @@
        recovery otherwise once the user orbits away from a small tileset. -->
   {#if !loading && !error}
     <div class="cam-controls">
-      {#if embedded}
+      {#if embedded && expand}
         <button class="cam-btn" title="Open full screen" aria-label="Open full screen" on:click={openFullScreen}>
           <Maximize2 size={15} />
         </button>

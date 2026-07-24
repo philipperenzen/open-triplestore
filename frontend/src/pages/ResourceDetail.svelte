@@ -416,6 +416,9 @@
   // -------- derived views (de-duplicated) --------
   $: outgoing = dedupeBy(data?.outgoing || [], r => `${termKey(r.p)}${termKey(r.o)}`);
   $: incoming = dedupeBy(data?.incoming || [], r => `${termKey(r.s)}${termKey(r.p)}`);
+  // A high-in-degree hub is capped server-side at 500 rows; show "500+" rather than
+  // implying the truncated set is the true count.
+  $: incomingLabel = data?.incoming_truncated ? `${incoming.length}+` : `${incoming.length}`;
 
   // Blank-node closure: id → [{p, o}]. Lets values that are blank nodes (e.g. a
   // geometry behind geo:hasGeometry) expand inline instead of dead-ending.
@@ -729,26 +732,28 @@
       </div>
     {/if}
 
-    <!-- Summary stats -->
+    <!-- Summary stats. While the fetch is in flight `data` is null, so these
+         counts are all 0 — printing "0 properties / 0 linked from …" directly above
+         a "Loading resource…" body reads as broken. Show a shimmer until it lands. -->
     <div class="stat-row">
-      <button class="stat" class:stat-clickable={outgoing.length > 0} on:click={() => outgoing.length && (activeTab = 'properties')}>
+      <button class="stat" class:stat-clickable={!loading && outgoing.length > 0} on:click={() => outgoing.length && (activeTab = 'properties')}>
         <ArrowRight size={14} />
-        <span class="stat-num">{outgoing.length}</span>
+        {#if loading}<span class="skel stat-skel"></span>{:else}<span class="stat-num">{outgoing.length}</span>{/if}
         <span class="stat-label">{$i18nT('pages.resource.properties')}</span>
       </button>
-      <button class="stat" class:stat-clickable={incoming.length > 0} on:click={() => incoming.length && (activeTab = 'linkedFrom')}>
+      <button class="stat" class:stat-clickable={!loading && incoming.length > 0} on:click={() => incoming.length && (activeTab = 'linkedFrom')}>
         <ArrowDownLeft size={14} />
-        <span class="stat-num">{incoming.length}</span>
+        {#if loading}<span class="skel stat-skel"></span>{:else}<span class="stat-num">{incomingLabel}</span>{/if}
         <span class="stat-label">{$i18nT('pages.resource.linkedFrom')}</span>
       </button>
-      <button class="stat" class:stat-clickable={types.length > 0} on:click={() => types.length && reveal('types')}>
+      <button class="stat" class:stat-clickable={!loading && types.length > 0} on:click={() => types.length && reveal('types')}>
         <Tag size={14} />
-        <span class="stat-num">{types.length}</span>
+        {#if loading}<span class="skel stat-skel"></span>{:else}<span class="stat-num">{types.length}</span>{/if}
         <span class="stat-label">{$i18nT('pages.resource.types')}</span>
       </button>
-      <button class="stat" class:stat-clickable={definitions.length > 0} on:click={() => definitions.length && reveal('definitions')}>
+      <button class="stat" class:stat-clickable={!loading && definitions.length > 0} on:click={() => definitions.length && reveal('definitions')}>
         <BookOpen size={14} />
-        <span class="stat-num">{definitions.length}</span>
+        {#if loading}<span class="skel stat-skel"></span>{:else}<span class="stat-num">{definitions.length}</span>{/if}
         <span class="stat-label">{$i18nT('pages.resource.definitions')}</span>
       </button>
     </div>
@@ -1274,6 +1279,9 @@
   .stat-clickable:hover { background: #eef4ff; border-color: var(--brand-300, #90caf9); }
   .stat-clickable:active { transform: translateY(1px); }
   .stat-num { font-weight: 700; color: var(--ink-900, #111); font-variant-numeric: tabular-nums; }
+  /* Placeholder for a stat count while the resource is still loading, sized like a
+     1-2 digit number so the row does not resize when the real value arrives. */
+  .stat-skel { display: inline-block; width: 1.4rem; height: 0.9rem; border-radius: 5px; vertical-align: middle; }
   .stat-label { color: #888; }
 
   .tabs { display: flex; gap: 0.25rem; padding: 0.3rem; border-radius: 14px; background: rgba(255,255,255,0.7); border: 1px solid var(--line-soft); width: fit-content; max-width: 100%; flex-wrap: wrap; }

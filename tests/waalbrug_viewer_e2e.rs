@@ -217,13 +217,9 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     let elements = j["elements"].as_array().expect("elements");
-    assert_eq!(
-        elements.len(),
-        6,
-        "collection root + 5 landmarks (the synthetic CityJSON block moved to the 3DBAG context graph): {j}"
-    );
-    // Orientation annotations flow through: the two Z-up scans carry it, the
-    // Y-up models stay unannotated (no rotation).
+    assert_eq!(elements.len(), 6, "collection root + 5 landmarks: {j}");
+    // Orientation annotations flow through: the Z-up STL landmarks carry it (their
+    // vertical extent is along Z), the Y-up torii stays unannotated (no rotation).
     let up = |name: &str| {
         elements
             .iter()
@@ -233,8 +229,10 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     assert_eq!(up("BigBen").as_deref(), Some("Z"));
     assert_eq!(up("EmpireStateBuilding").as_deref(), Some("Z"));
     assert_eq!(up("WhiteHouse").as_deref(), Some("Z"));
+    // Dragon Bridge's STL is Z-up (deck height along Z); without this it rendered
+    // tipped ~82 m onto its side instead of lying flat on the map.
+    assert_eq!(up("DragonBridge").as_deref(), Some("Z"));
     assert_eq!(up("SannoShrine"), None);
-    assert_eq!(up("DragonBridge"), None);
 
     let bridge = elements
         .iter()
@@ -255,10 +253,16 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     );
 }
 
-/// The 3DBAG context graph (real Schependomlaan city block) exposes its
-/// bundled, site-relative CityJSON through the same feed.
+/// The per-building 3DBAG layer (the graph `seed_bag_buildings` generates from
+/// the bundled excerpt) serves every REAL BAG pand through the feed: the zone
+/// renders the shared CityJSON once, each building carries a `#objectId`
+/// fragment reference for picking plus a reprojected footprint polygon, and the
+/// registry attributes and owl:sameAs links ride along on the element's RDF.
 #[tokio::test]
-async fn viewer_feed_serves_3dbag_context_block() {
+async fn viewer_feed_serves_per_building_3dbag_layer() {
+    use open_triplestore::imports::cityjson::{
+        convert_cityjson_viewer_buildings, CityJsonViewerOptions,
+    };
     let (state, token) = admin_state();
     state
         .auth_db
@@ -276,13 +280,27 @@ async fn viewer_feed_serves_3dbag_context_block() {
         .auth_db
         .add_dataset_graph("ctx", "urn:ctx:data")
         .unwrap();
+    let doc: serde_json::Value = serde_json::from_str(include_str!(
+        "../frontend/public/samples/schependomlaan-3dbag.city.json"
+    ))
+    .expect("bundled excerpt parses");
+    let (nt, stats) = convert_cityjson_viewer_buildings(
+        &doc,
+        &CityJsonViewerOptions {
+            inst_base: "https://opentriplestore.org/demo/viewer-3d-demo/".to_string(),
+            file_url: "/samples/schependomlaan-3dbag.city.json".to_string(),
+            zone_label: "Schependomlaan block".to_string(),
+            zone_comment: "test".to_string(),
+            license: Some("https://creativecommons.org/licenses/by/4.0/".to_string()),
+            attribution: Some("© 3DBAG by tudelft3d and 3DGI".to_string()),
+            source: Some("https://docs.3dbag.nl/en/copyright/".to_string()),
+        },
+    )
+    .expect("viewer conversion succeeds");
+    assert!(stats.objects > 50, "a real block of buildings: {stats:?}");
     state
         .store
-        .load_str(
-            include_str!("../src/saved_queries/data/schependomlaan-context.ttl"),
-            RdfFormat::Turtle,
-            Some("urn:ctx:data"),
-        )
+        .load_str(&nt, RdfFormat::NTriples, Some("urn:ctx:data"))
         .unwrap();
 
     let resp = test_app(state)
@@ -292,33 +310,80 @@ async fn viewer_feed_serves_3dbag_context_block() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp.into_body()).await;
     let elements = j["elements"].as_array().expect("elements");
-    let block = elements
+
+    // The zone holds the ONE whole-file render reference.
+    let zone = elements
         .iter()
-        .find(|e| {
-            e["id"]
-                .as_str()
-                .unwrap_or("")
-                .ends_with("SchependomlaanBlock")
-        })
-        .expect("3DBAG context block in feed");
-    let files = block["files"].as_array().expect("files");
+        .find(|e| e["id"].as_str().unwrap_or("").ends_with("/bag/zone"))
+        .expect("zone element in feed");
+    let files = zone["files"].as_array().expect("zone files");
     assert!(
         files.iter().any(|f| f[0].as_str() == Some("Cityjson")
             && f[1].as_str() == Some("/samples/schependomlaan-3dbag.city.json")),
-        "CityJSON reference present: {files:?}"
+        "whole-file CityJSON reference on the zone: {files:?}"
     );
-    let wkt = block["wkt4326"].as_str().expect("wkt4326");
-    assert!(wkt.contains("5.83"), "anchored near Nijmegen: {wkt}");
+
+    // Every building is an individually addressable element under the zone,
+    // with a fragment ref into the shared file and a real footprint polygon.
+    let buildings: Vec<_> = elements
+        .iter()
+        .filter(|e| {
+            e["id"]
+                .as_str()
+                .unwrap_or("")
+                .contains("/bag/NL.IMBAG.Pand.")
+        })
+        .collect();
+    assert!(
+        buildings.len() > 50,
+        "per-building elements in feed: {}",
+        buildings.len()
+    );
+    let b = buildings
+        .iter()
+        .find(|e| e["wkt4326"].as_str().is_some())
+        .expect("a building with a footprint");
+    assert_eq!(
+        b["parent"].as_str().map(|p| p.ends_with("/bag/zone")),
+        Some(true),
+        "buildings hang off the zone: {:?}",
+        b["parent"]
+    );
+    let wkt = b["wkt4326"].as_str().unwrap();
+    assert!(
+        wkt.starts_with("POLYGON((5.83"),
+        "CRS84 footprint near Nijmegen: {wkt}"
+    );
+    let bfiles = b["files"].as_array().expect("building files");
+    assert!(
+        bfiles.iter().any(|f| f[0].as_str() == Some("Cityjson")
+            && f[1]
+                .as_str()
+                .unwrap_or("")
+                .contains(".city.json#NL.IMBAG.Pand.")),
+        "per-building #objectId fragment ref: {bfiles:?}"
+    );
+    // Labels carry the registry number + year built.
+    assert!(
+        buildings.iter().any(|e| {
+            e["label"]
+                .as_str()
+                .map(|l| l.starts_with("Pand ") && l.contains('('))
+                .unwrap_or(false)
+        }),
+        "labels like 'Pand 0268… (1920)'"
+    );
 }
 
 /// Drift guard: the seed copies under src/saved_queries/data/ must stay
 /// byte-identical to the canonical fixtures (below their 2-line SEED COPY header).
 #[test]
 fn seed_copies_match_canonical_fixtures() {
-    for (seed, fixture) in [(
-        include_str!("../src/saved_queries/data/landmarks.ttl"),
-        include_str!("fixtures/landmarks/landmarks.ttl"),
-    )] {
+    {
+        let (seed, fixture) = (
+            include_str!("../src/saved_queries/data/landmarks.ttl"),
+            include_str!("fixtures/landmarks/landmarks.ttl"),
+        );
         let body: String = seed.lines().skip(2).collect::<Vec<_>>().join("\n");
         let canon: String = fixture.lines().collect::<Vec<_>>().join("\n");
         assert_eq!(

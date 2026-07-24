@@ -11,7 +11,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
 use opengraph::oxigraph::store::Store;
 use opengraph::oxrdf::vocab::xsd;
-use opengraph::oxrdf::{GraphName, Literal, NamedNode, Quad, Subject, Term};
+use opengraph::oxrdf::{GraphName, Literal, NamedNode, NamedOrBlankNode, Quad, Term};
 use opengraph::parallel::ParallelStore;
 
 fn iri(s: &str) -> NamedNode {
@@ -23,7 +23,7 @@ fn persons(n: usize) -> Vec<Quad> {
     let ex = "http://example.org/";
     let mut q = Vec::with_capacity(n * 3);
     for i in 0..n {
-        let s = Subject::NamedNode(iri(&format!("{ex}p{i}")));
+        let s = NamedOrBlankNode::NamedNode(iri(&format!("{ex}p{i}")));
         q.push(Quad::new(
             s.clone(),
             iri(&format!("{ex}name")),

@@ -32,6 +32,11 @@
   };
   let showInfo = false;
   let error = '';
+  // True only until the FIRST list load resolves. A page must never assert "you
+  // have no datasets" before it has heard back — that empty state flashed before
+  // the (~5ms) fetch landed, then swapped in the real rows. Not reset on the
+  // refetch after create/delete, so the table doesn't blink.
+  let loading = true;
   let showCreate = false;
   let newName = '';
   let newDescription = '';
@@ -60,6 +65,8 @@
       datasets = await listDatasets();
     } catch (e) {
       error = e.message;
+    } finally {
+      loading = false;
     }
   }
 
@@ -165,7 +172,7 @@
   <PageHeader
     icon={Database}
     title={$t('pages.datasets.title')}
-    count="{datasets.length} {datasets.length === 1 ? $t('pages.datasets.datasetSingular') : $t('pages.datasets.datasetPlural')}"
+    count={loading ? null : `${datasets.length} ${datasets.length === 1 ? $t('pages.datasets.datasetSingular') : $t('pages.datasets.datasetPlural')}`}
   >
     <div slot="actions">
       <button class="info-btn" on:click={() => showInfo = !showInfo} aria-expanded={showInfo}>
@@ -217,7 +224,7 @@
         <button class="filter-clear" on:click={() => search = ''} aria-label={$t('system.clear')}><X size={12} /></button>
       {/if}
     </div>
-    <span class="filter-count">{$t('pages.datasets.countOf', { values: { shown: filtered.length, total: datasets.length } })}</span>
+    {#if !loading}<span class="filter-count">{$t('pages.datasets.countOf', { values: { shown: filtered.length, total: datasets.length } })}</span>{/if}
   </div>
 
   <!-- Role filter tabs -->
@@ -331,7 +338,11 @@
           </td>
         </tr>
       {/each}
-      {#if filtered.length === 0}
+      {#if loading}
+        {#each Array(4) as _}
+          <tr><td colspan={$isAuthenticated ? 8 : 7}><span class="skel" style="display:block;height:1.1rem;border-radius:6px;"></span></td></tr>
+        {/each}
+      {:else if filtered.length === 0}
         <tr><td colspan={$isAuthenticated ? 8 : 7}>{datasets.length === 0 ? $t('pages.datasets.noDatasets') : $t('pages.datasets.noMatch')}</td></tr>
       {/if}
     </tbody>

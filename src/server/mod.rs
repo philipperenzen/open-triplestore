@@ -271,6 +271,18 @@ pub struct AppState {
     /// Set to `true` after any write; triggers lazy Tantivy reindex before next search.
     #[cfg(feature = "text-search")]
     pub text_dirty: Arc<AtomicBool>,
+    /// Vocabulary catalog (bundled LOV metadata + public registry overlay).
+    pub vocab_catalog: Arc<crate::vocab_search::catalog::VocabCatalog>,
+    /// Set after model/vocabulary registry mutations; vocab routes rebuild
+    /// their registry-derived state (catalog overlay, platform prefixes,
+    /// platform term index) before serving.
+    pub vocab_registry_dirty: Arc<AtomicBool>,
+    /// Location of the LOV corpus file once found/downloaded (offline install
+    /// + term indexing source).
+    pub vocab_corpus: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
+    /// Vocabulary term search engine (vocab-search feature).
+    #[cfg(feature = "vocab-search")]
+    pub vocab_engine: Option<Arc<crate::vocab_search::index::VocabSearchEngine>>,
 }
 
 /// Construct a minimal `AppState` for tests (unit and integration).
@@ -307,6 +319,11 @@ impl AppState {
             text_index: None,
             #[cfg(feature = "text-search")]
             text_dirty: Arc::new(AtomicBool::new(false)),
+            vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
+            vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
+            vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+            #[cfg(feature = "vocab-search")]
+            vocab_engine: None,
         }
     }
 }
@@ -319,6 +336,14 @@ impl AppState {
     #[inline]
     pub fn mark_text_dirty(&self) {
         self.text_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Mark registry-derived vocabulary state (catalog overlay, platform
+    /// prefixes, platform term index) stale after a model/vocabulary
+    /// registry mutation.  Vocab routes rebuild lazily before serving.
+    #[inline]
+    pub fn mark_vocab_registry_dirty(&self) {
+        self.vocab_registry_dirty.store(true, Ordering::Relaxed);
     }
 
     /// Rebuild the Tantivy index if it has been marked dirty since the last sync.
@@ -441,6 +466,21 @@ async fn ldp_options_capabilities(
 /// Per-IP rate limiting is applied to three groups of endpoints, each with its own
 /// quota: the auth endpoints (brute-force protection), the SPARQL / Graph Store
 /// endpoints, and bulk import. See the individual configs below.
+/// Response-side middleware for the data-model write router: any successful
+/// registry mutation invalidates the vocabulary service's registry-derived
+/// state (rebuilt lazily by the next vocab request).
+async fn mark_vocab_dirty_after_success(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let resp = next.run(req).await;
+    if resp.status().is_success() {
+        state.mark_vocab_registry_dirty();
+    }
+    resp
+}
+
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
     // NOTE: `per_second(n)` in tower_governor is misleadingly named — it sets the
     // replenish *period* to n seconds (one token every n seconds), NOT n tokens per
@@ -972,6 +1012,32 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         })
         .with_state(state.clone());
 
+    // Internal prefix service (bundled prefix.cc/LOV snapshot + platform
+    // registry) — anonymous, in-memory, rate-limited like every public
+    // anonymous surface.
+    let prefix_service_routes = crate::prefixes::routes::prefix_routes()
+        .route_layer(GovernorLayer {
+            config: sparql_rate_conf.clone(),
+        })
+        .with_state(state.clone());
+
+    // Vocabulary search service (catalog + term search + recommender).
+    // optional_auth so owners also see their private registry entries in the
+    // catalog; the shared term index and prefix overlay stay public-only.
+    let vocab_service_routes = crate::vocab_search::routes::vocab_public_routes()
+        .route_layer(GovernorLayer {
+            config: sparql_rate_conf.clone(),
+        })
+        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .with_state(state.clone());
+
+    // Vocabulary install (copies a vocabulary from the bundled LOV corpus
+    // into the model registry) — admin only.
+    let vocab_service_admin_routes = crate::vocab_search::routes::vocab_admin_routes()
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     // SHACL Studio: shape graphs (Library), pipelines, runs, model-context, derive.
     let studio_auth = crate::shacl_studio::routes::studio_auth_routes()
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
@@ -1113,11 +1179,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
-    // Data-model registry — write routes
+    // Data-model registry — write routes.  Every successful mutation marks
+    // the registry-derived vocabulary state (catalog overlay, platform
+    // prefixes, term index) stale via the outermost layer below.
     let data_model_write = Router::new()
         .merge(data_model_auth_routes())
         .route_layer(middleware::from_fn(require_publisher))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            mark_vocab_dirty_after_success,
+        ))
         .with_state(state.clone());
 
     // Dataset versioning — public read routes (visibility scoped via optional_auth)
@@ -1291,6 +1363,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(dataset_version_write)
         .merge(saved_query_read)
         .merge(saved_query_write)
+        .merge(prefix_service_routes)
+        .merge(vocab_service_routes)
+        .merge(vocab_service_admin_routes)
         .merge(
             Router::new()
                 .merge(catalog_routes())
@@ -1511,6 +1586,75 @@ fn handle_request_panic(err: Box<dyn std::any::Any + Send + 'static>) -> axum::r
         .expect("static 500 response is always valid")
 }
 
+/// Path-aware framing policy, applied OUTSIDE the whole router (API routes,
+/// their security-header layers, and the static SPA fallback):
+///
+///  - `/embed/*` pages exist to be iframed by third-party sites, so they get
+///    `Content-Security-Policy: frame-ancestors <EMBED_FRAME_ANCESTORS>`
+///    (default `*`) and no `X-Frame-Options`. Operators can restrict embedding
+///    to specific hosts (`EMBED_FRAME_ANCESTORS="https://example.com"`) or
+///    disable it (`"'none'"`).
+///  - Every other response that carries NO CSP — which is exactly the static
+///    SPA files, since they are served by the fallback service that the
+///    security-header layers in [`build_router`] do not wrap — gets the
+///    anti-clickjacking pair the API already has. This closes the gap where
+///    the app shell itself was frameable while the API was not.
+///
+/// API responses already carry the strict CSP from [`build_router`]; those are
+/// left untouched (except under `/embed`, a path no API route uses).
+async fn frame_policy_headers(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    static EMBED_ANCESTORS: std::sync::OnceLock<Option<HeaderValue>> = std::sync::OnceLock::new();
+    let ancestors = EMBED_ANCESTORS.get_or_init(|| {
+        let v = std::env::var("EMBED_FRAME_ANCESTORS").unwrap_or_else(|_| "*".to_string());
+        let v = v.trim().to_string();
+        if v.is_empty() || v == "'none'" || v == "none" {
+            None // embedding disabled — /embed falls through to the default policy
+        } else {
+            HeaderValue::from_str(&format!("frame-ancestors {v}")).ok()
+        }
+    });
+
+    let is_embed = req.uri().path().starts_with("/embed");
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    // The SPA document can also leave through content-negotiating API routes
+    // (`/` and `/sparql` serve index.html to browsers — see `spa_shell_response`).
+    // Those picked up the strict API CSP (`connect-src 'self'`, …) from the
+    // inner layers, which blocks the viewer's external basemap tiles and the
+    // Cesium CDN for the whole SPA session — the "map never loads" failure in
+    // production. The marker tells us to re-stamp them with the SPA policy.
+    let spa_shell = headers.remove("x-ots-spa-shell").is_some();
+    match ancestors {
+        Some(allow) if is_embed => {
+            headers.insert(
+                HeaderName::from_static("content-security-policy"),
+                allow.clone(),
+            );
+            headers.remove("x-frame-options");
+        }
+        _ => {
+            if spa_shell || !headers.contains_key("content-security-policy") {
+                headers.insert(
+                    HeaderName::from_static("content-security-policy"),
+                    HeaderValue::from_static("frame-ancestors 'self'"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-frame-options"),
+                    HeaderValue::from_static("SAMEORIGIN"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-content-type-options"),
+                    HeaderValue::from_static("nosniff"),
+                );
+            }
+        }
+    }
+    resp
+}
+
 /// Start the HTTP server.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -1539,7 +1683,12 @@ pub async fn run(
     discovery: bool,
     registry_url: String,
     registry_token: String,
+    // Data directory — vocab corpus cache + term index live under it.
+    data_dir: std::path::PathBuf,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
+    #[cfg(feature = "vocab-search")] vocab_engine: Option<
+        Arc<crate::vocab_search::index::VocabSearchEngine>,
+    >,
 ) -> anyhow::Result<()> {
     let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
 
@@ -1650,6 +1799,14 @@ pub async fn run(
         text_index,
         #[cfg(feature = "text-search")]
         text_dirty: Arc::new(AtomicBool::new(false)),
+        vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
+        // Start dirty: persisted registry entries from earlier boots become
+        // visible on the first vocab request even before the boot seed chain
+        // finishes its own refresh.
+        vocab_registry_dirty: Arc::new(AtomicBool::new(true)),
+        vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
+        #[cfg(feature = "vocab-search")]
+        vocab_engine,
     };
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
@@ -1702,7 +1859,7 @@ pub async fn run(
         // still starts serving immediately.
         let seed_state = state.clone();
         let base = state.base_url.to_string();
-        tokio::task::spawn_blocking(move || {
+        let seed_handle = tokio::task::spawn_blocking(move || {
             let store = &seed_state.store;
             let auth = &seed_state.auth_db;
             // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
@@ -1756,6 +1913,18 @@ pub async fn run(
                 tracing::warn!("docs seed failed: {e}");
             }
         });
+        // 7. Vocabulary search boot (corpus discovery + LOV term index +
+        //    catalog/prefix platform overlay) — sequenced after the seed
+        //    chain so the registry it reads is fully populated; runs in the
+        //    background and never blocks serving.
+        {
+            let vocab_state = state.clone();
+            let vocab_data_dir = data_dir.clone();
+            tokio::spawn(async move {
+                let _ = seed_handle.await;
+                crate::vocab_search::boot_vocab_search(vocab_state, vocab_data_dir).await;
+            });
+        }
         crate::shacl_studio::scheduler::spawn_scheduler(
             state.store.clone(),
             state.auth_db.clone(),
@@ -1793,6 +1962,10 @@ pub async fn run(
     } else if !serve_frontend {
         info!("Web UI disabled (SERVE_FRONTEND=false); serving API only");
     }
+    // Outermost, path-aware framing policy: /embed/* is iframable (that is its
+    // purpose), everything else that carries no CSP (the static SPA) gets the
+    // anti-clickjacking headers. See `frame_policy_headers`.
+    let app = app.layer(middleware::from_fn(frame_policy_headers));
 
     // Use into_make_service_with_connect_info so TCP peer IP is available to rate limiter.
     let requested_port = addr.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());

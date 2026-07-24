@@ -1162,6 +1162,7 @@ fn execute_select_single(
                         oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
                         oxigraph::model::Term::Literal(lit) => lit.value().to_string(),
                         oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
+                        #[cfg(feature = "rdf-12")]
                         oxigraph::model::Term::Triple(t) => t.to_string(),
                     })
                 })
@@ -1417,6 +1418,7 @@ fn term_to_lexical(term: &oxigraph::model::Term) -> String {
         oxigraph::model::Term::NamedNode(nn) => nn.as_str().to_string(),
         oxigraph::model::Term::Literal(lit) => lit.value().to_string(),
         oxigraph::model::Term::BlankNode(bn) => format!("_:{}", bn.as_str()),
+        #[cfg(feature = "rdf-12")]
         oxigraph::model::Term::Triple(t) => t.to_string(),
     }
 }

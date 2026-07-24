@@ -32,6 +32,15 @@
   let open = false;
   let activeIdx = -1;
   let pos = { left: 0, top: 0, width: 0, placement: 'bottom' };
+  // True while the pointer is over the portalled popup. The popup lives at <body>,
+  // so an ancestor's `mouseleave` fires as soon as the pointer travels toward it —
+  // consumers that collapse on mouseleave need to know the widget is still in use.
+  let popupHovered = false;
+
+  /** Whether the widget is actively in use (menu open, hovered, or focused). */
+  export function isBusy() {
+    return open || popupHovered || (typeof document !== 'undefined' && document.activeElement === inputEl);
+  }
 
   $: norm = (suggestions || []).map((s) =>
     s !== null && typeof s === 'object' ? { value: s.value, label: s.label ?? String(s.value), hint: s.hint } : { value: s, label: String(s), hint: undefined },
@@ -65,6 +74,7 @@
   function closeMenu() {
     open = false;
     activeIdx = -1;
+    popupHovered = false;
     window.removeEventListener('scroll', reposition, true);
     window.removeEventListener('resize', reposition);
   }
@@ -80,6 +90,10 @@
     value = opt.value;
     dispatch('input', value);
     dispatch('change', value);
+    // `submit` is an ADDITIVE event meaning "the user committed this value on
+    // purpose" — unlike `change`, which also fires on every blur. Consumers that
+    // act destructively or move a camera should listen to this, not to `change`.
+    dispatch('submit', { value, committed: true });
     closeMenu();
     inputEl?.focus();
   }
@@ -87,15 +101,22 @@
   function onKeydown(e) {
     if (disabled) return;
     if (!open && (e.key === 'ArrowDown') && matches.length) { openMenu(); return; }
-    if (!open) { if (e.key === 'Enter') dispatch('change', value); return; }
+    if (!open) {
+      if (e.key === 'Enter') { dispatch('change', value); dispatch('submit', { value, committed: false, shift: e.shiftKey }); }
+      return;
+    }
     switch (e.key) {
       case 'ArrowDown': e.preventDefault(); activeIdx = Math.min(activeIdx + 1, matches.length - 1); scrollActiveIntoView(); break;
       case 'ArrowUp': e.preventDefault(); activeIdx = Math.max(activeIdx - 1, -1); scrollActiveIntoView(); break;
       case 'Enter':
         if (activeIdx >= 0 && matches[activeIdx]) { e.preventDefault(); pick(matches[activeIdx]); }
-        else { closeMenu(); dispatch('change', value); }
+        else {
+          closeMenu();
+          dispatch('change', value);
+          dispatch('submit', { value, committed: false, shift: e.shiftKey });
+        }
         break;
-      case 'Escape': e.preventDefault(); closeMenu(); break;
+      case 'Escape': e.preventDefault(); closeMenu(); dispatch('cancel'); break;
       case 'Tab': closeMenu(); break;
     }
   }
@@ -108,6 +129,9 @@
   function onBlur(_e) {
     // Fire change like a native input/datalist does on commit.
     dispatch('change', value);
+    // Svelte does not forward DOM events through a component `on:` directive, so
+    // consumers writing `on:blur` on <Combobox> got nothing. Dispatch it explicitly.
+    dispatch('blur');
   }
 
   function onWindowPointer(e) {
@@ -154,6 +178,8 @@
   <ul
     bind:this={listEl}
     use:portal
+    on:pointerenter={() => (popupHovered = true)}
+    on:pointerleave={() => (popupHovered = false)}
     class="cb-popup"
     role="listbox"
     style="left:{pos.left}px; {pos.placement === 'bottom' ? `top:${pos.top}px` : `bottom:${window.innerHeight - pos.top}px`}; min-width:{pos.width}px;"

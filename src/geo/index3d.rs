@@ -134,7 +134,7 @@ impl SpatialIndex3D {
     /// footprints are skipped (they belong to the 2D index). The 3D AABBs are then
     /// bulk-loaded into the R*-tree.
     pub fn rebuild(&self, store: &oxigraph::store::Store) {
-        use oxigraph::model::{NamedNodeRef, Subject, Term};
+        use oxigraph::model::{NamedNodeRef, NamedOrBlankNode, Term};
 
         let wkt_pred = NamedNodeRef::new_unchecked(GEO_AS_WKT);
         let mut entries: Vec<AabbEntry> = Vec::new();
@@ -147,7 +147,7 @@ impl SpatialIndex3D {
 
             // The geometry-node subject IRI is the index key (matches the 2D index).
             let subject_iri = match &quad.subject {
-                Subject::NamedNode(nn) => nn.as_str().to_string(),
+                NamedOrBlankNode::NamedNode(nn) => nn.as_str().to_string(),
                 _ => continue,
             };
 

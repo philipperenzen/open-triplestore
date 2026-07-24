@@ -415,15 +415,56 @@ pub fn services_for(dataset_slug: &str) -> Vec<CreateSavedQueryRequest> {
                  } GROUP BY ?building ?label ORDER BY DESC(?storeys) ?label",
             ),
             svc(
-                "Building map anchors",
+                "Building locations & footprints",
                 "building-footprints",
-                "GeoSPARQL — the CRS84 POINT map anchor of every building in the neighbourhood.",
+                "GeoSPARQL — every building's CRS84 map geometry: POINT anchors for the IFC models, real POLYGON footprints for the BAG panden.",
                 "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
                  PREFIX geo:  <http://www.opengis.net/ont/geosparql#>\n\
                  SELECT ?building ?label ?wkt WHERE { \
                    ?building a <https://w3id.org/bot#Building> ; geo:hasGeometry/geo:asWKT ?wkt . \
-                   FILTER(STRSTARTS(STR(?wkt), \"POINT\")) \
+                   FILTER(STRSTARTS(STR(?wkt), \"POINT\") || STRSTARTS(STR(?wkt), \"POLYGON\")) \
                    OPTIONAL { ?building rdfs:label ?label } \
+                 } ORDER BY ?label",
+            ),
+            // Real-BAG queries — the per-building 3DBAG layer with registry facts.
+            svc(
+                "Real buildings by year built",
+                "buildings-by-year",
+                "BAG registry — every real pand in the block with its construction year, status and roof type (bag:oorspronkelijkbouwjaar).",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX bag:  <https://data.3dbag.nl/def/>\n\
+                 SELECT ?pand ?label ?year ?status ?roofType WHERE { \
+                   ?pand bag:oorspronkelijkbouwjaar ?year . \
+                   OPTIONAL { ?pand rdfs:label ?label } \
+                   OPTIONAL { ?pand bag:status ?status } \
+                   OPTIONAL { ?pand bag:b3_dak_type ?roofType } \
+                 } ORDER BY ?year ?label",
+            ),
+            svc(
+                "Tallest real buildings",
+                "buildings-by-height",
+                "3DBAG metrics — roof height above sea level, ground level, LoD2.2 volume and floor count per real building, tallest first.",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX bag:  <https://data.3dbag.nl/def/>\n\
+                 SELECT ?pand ?label ?roofMax ?ground ?volume ?floors WHERE { \
+                   ?pand bag:b3_h_dak_max ?roofMax . \
+                   OPTIONAL { ?pand rdfs:label ?label } \
+                   OPTIONAL { ?pand bag:b3_h_maaiveld ?ground } \
+                   OPTIONAL { ?pand bag:b3_volume_lod22 ?volume } \
+                   OPTIONAL { ?pand bag:b3_bouwlagen ?floors } \
+                 } ORDER BY DESC(?roofMax) LIMIT 25",
+            ),
+            svc(
+                "Links into the national registry",
+                "registry-links",
+                "Linked data — each real building's owl:sameAs into the dereferenceable BAG registry (bag.basisregistraties.overheid.nl) and its 3DBAG API document.",
+                "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
+                 PREFIX owl:  <http://www.w3.org/2002/07/owl#>\n\
+                 SELECT ?building ?label ?registryUri ?apiDoc WHERE { \
+                   ?building owl:sameAs ?registryUri . \
+                   OPTIONAL { ?building rdfs:label ?label } \
+                   OPTIONAL { ?building rdfs:seeAlso ?apiDoc } \
+                   FILTER(CONTAINS(STR(?registryUri), \"basisregistraties.overheid.nl\")) \
                  } ORDER BY ?label",
             ),
             svc(
@@ -526,34 +567,32 @@ static DATASETS: &[DatasetSpec] = &[
     DatasetSpec {
         slug: "viewer-3d-demo",
         name: "3D, Map & BIM Demo",
-        description: "Geometry-rich linked data for the map and 3D viewers: three open IFC \
-                      buildings — the Schependomlaan house project (Nijmegen, the canonical open \
-                      Dutch BIM dataset, CC BY 4.0), the KIT FZK-Haus and the buildingSMART Duplex \
+        description: "Real linked building data for the map and 3D viewers. Four real, openly \
+                      licensed IFC models — the Schependomlaan housing project (Nijmegen, the \
+                      canonical open Dutch BIM dataset, CC BY 4.0), the KIT FZK-Haus, the KIT \
+                      Smiley West student housing (Karlsruhe) and the buildingSMART Duplex \
                       Apartment — are downloaded on first boot, stored as downloadable assets and \
                       transformed to linked data (BOT topology, property sets and a full ifcOWL \
-                      lift), so storeys, walls and beams are individually selectable; a \
-                      neighbourhood of authored LoD2 CityJSON buildings (a townhouse, corner shop, \
-                      apartment block and office; the townhouse fully BOT-decomposed); the \
-                      surrounding real city block from 3DBAG (LoD2.2 CityJSON, © 3DBAG by tudelft3d \
-                      and 3DGI, CC BY 4.0); and real Wikidata landmarks (CC0) whose open 3D models \
-                      live on Wikimedia Commons. Worked examples cover every supported geo \
-                      feature and format: mixed GeoSPARQL geometry types (point/line/polygon) for \
-                      the 2D map, native WKT-Z volumetric solids (POLYHEDRALSURFACE Z) for the 3D \
-                      engine, a second LoD2 CityJSON zone, a SOSA/SSN digital-twin sensor layer, \
-                      and an OTL/IMBOR asset-management alignment. Served per element by the \
-                      /api/datasets/:id/viewer-feed endpoint, reprojected to WGS84/Web Mercator.",
+                      lift), so storeys, spaces, walls and beams are individually selectable; each \
+                      stands at its real-world site from the file's own IfcSite georeference \
+                      (KIT Campus North, Karlsruhe, Chicago) or, for Schependomlaan, its actual \
+                      street in Nijmegen. \
+                      The real city block around the Schependomlaan site comes from 3DBAG (LoD2.2 \
+                      CityJSON, © 3DBAG by tudelft3d and 3DGI, CC BY 4.0): every one of its ~77 \
+                      buildings is a live BAG pand carrying its registry attributes (year built, \
+                      status, roof type and heights, volume, floor count), linked to the national \
+                      BAG registry with owl:sameAs — pick any building on the map or in 3D to see \
+                      its data. Real Wikidata landmarks (CC0) with open 3D models from Wikimedia \
+                      Commons, mixed GeoSPARQL feature types, native WKT-Z volumetric solids for \
+                      the 3D engine, a SOSA/SSN digital-twin sensor layer on the real buildings, \
+                      and an OTL/IMBOR asset-management alignment complete the picture. Served \
+                      per element by /api/datasets/:id/viewer-feed, reprojected to WGS84.",
         graphs: &[
             GraphSpec { suffix: "landmarks", role: GraphKind::Instances, fmt: Fmt::Turtle, data: LANDMARKS_TTL },
-            GraphSpec { suffix: "context", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SCHEPENDOM_CONTEXT_TTL },
             GraphSpec { suffix: "geo-features", role: GraphKind::Instances, fmt: Fmt::Turtle, data: GEO_FEATURES_TTL },
             GraphSpec { suffix: "volumes-3d", role: GraphKind::Instances, fmt: Fmt::Turtle, data: VOLUMES_3D_TTL },
-            GraphSpec { suffix: "zones", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ZONES_3DBAG_TTL },
             GraphSpec { suffix: "sensors", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SENSORS_SOSA_TTL },
             GraphSpec { suffix: "assets", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ASSETS_OTL_TTL },
-            // Merged-in "Buildings & BIM": authored LoD2 CityJSON buildings + a
-            // fully BOT-decomposed townhouse — the lightweight, reliable
-            // counterpart to the per-element IFC, in the SAME unified dataset.
-            GraphSpec { suffix: "buildings", role: GraphKind::Instances, fmt: Fmt::Turtle, data: BUILDINGS_BIM_TTL },
         ],
     },
 ];
@@ -563,22 +602,16 @@ static DATASETS: &[DatasetSpec] = &[
 /// the Docker image build only ships src/, and a drift-guard test in
 /// tests/waalbrug_viewer_e2e.rs keeps them byte-identical below their header.
 const LANDMARKS_TTL: &str = include_str!("data/landmarks.ttl");
-/// Real 3DBAG city-block context around the Schependomlaan site (CC BY 4.0).
-const SCHEPENDOM_CONTEXT_TTL: &str = include_str!("data/schependomlaan-context.ttl");
 /// Mixed GeoSPARQL geometry types (POINT/LINESTRING/POLYGON) for the 2D map.
 const GEO_FEATURES_TTL: &str = include_str!("data/geo-features.ttl");
 /// Native WKT-Z volumetric solids (POLYHEDRALSURFACE Z) for the 3D engine/viewer.
 const VOLUMES_3D_TTL: &str = include_str!("data/volumes-3d.ttl");
-/// A second 3DBAG-style zone with several LoD2 CityJSON building elements.
-const ZONES_3DBAG_TTL: &str = include_str!("data/zones-3dbag.ttl");
-/// SOSA/SSN digital-twin layer: sensors + observations on the demo features.
+/// SOSA/SSN digital-twin layer: sensors + observations on the REAL demo
+/// buildings (BAG panden + the extruded worked-example solids).
 const SENSORS_SOSA_TTL: &str = include_str!("data/sensors-sosa.ttl");
-/// OTL/IMBOR-style asset-management alignment (third-party vocab not bundled).
+/// OTL/IMBOR-style asset-management alignment (third-party vocab not bundled),
+/// aligned with a real BAG pand.
 const ASSETS_OTL_TTL: &str = include_str!("data/assets-otl.ttl");
-/// Buildings & BIM neighbourhood: LoD2 CityJSON + 3DBAG + WKT-Z solids, with a
-/// fully BOT-decomposed townhouse (storeys → spaces → elements) for the
-/// structure tab. The lightweight, reliable alternative to the per-element IFC.
-const BUILDINGS_BIM_TTL: &str = include_str!("data/buildings-bim.ttl");
 
 /// OWL/RDFS data model for the `ots:` terms the codebase uses. All terms live in
 /// the single `…/ns#` namespace: Standard, AuthMethod, conformance, plus the

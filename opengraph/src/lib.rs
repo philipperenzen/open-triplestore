@@ -24,12 +24,12 @@
 //!
 //! ```
 //! use opengraph::{canonical, skolem};
-//! # use oxrdf::{Quad, Subject, Term, GraphName, NamedNode, BlankNode, Literal};
+//! # use oxrdf::{Quad, NamedOrBlankNode, Term, GraphName, NamedNode, BlankNode, Literal};
 //! # fn iri(s:&str)->NamedNode{NamedNode::new(s).unwrap()}
 //! # let quads = vec![
-//! #   Quad::new(Subject::NamedNode(iri("http://ex/a")), iri("http://ex/p"),
+//! #   Quad::new(NamedOrBlankNode::NamedNode(iri("http://ex/a")), iri("http://ex/p"),
 //! #             Term::BlankNode(BlankNode::new_unchecked("x")), GraphName::DefaultGraph),
-//! #   Quad::new(Subject::BlankNode(BlankNode::new_unchecked("x")), iri("http://ex/v"),
+//! #   Quad::new(NamedOrBlankNode::BlankNode(BlankNode::new_unchecked("x")), iri("http://ex/v"),
 //! #             Term::Literal(Literal::new_simple_literal("1")), GraphName::DefaultGraph),
 //! # ];
 //! // Stable canonical labels (c14n0, c14n1, …):

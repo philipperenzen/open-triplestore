@@ -4653,6 +4653,10 @@ pub async fn update_dataset_role(
                     tracing::warn!(
                         "failed to promote dataset {dataset_id} into the {role_str} registry: {e}"
                     );
+                } else {
+                    // The registry changed outside the data-model write router,
+                    // so the vocabulary service must refresh its overlays.
+                    state.mark_vocab_registry_dirty();
                 }
             }
         }

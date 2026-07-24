@@ -22,6 +22,7 @@ pub mod rdf;
 pub mod step;
 
 /// Options for one conversion run.
+#[derive(Default)]
 pub struct ConvertOptions {
     /// Base IRI for minted instances; rooted entities get `{base}{GlobalId}`,
     /// unrooted ones `{base}i{stepId}`. Must end with `/` or `#`.
@@ -36,6 +37,19 @@ pub struct ConvertOptions {
     pub anchor_wkt: Option<String>,
     /// Also produce the full ifcOWL-style lift (large!).
     pub include_ifcowl: bool,
+    /// Friendly display label for the ROOT spatial element (the IfcSite, or the
+    /// building when the file has no site). Exporters routinely leave "Site" /
+    /// "Default" / "Gelaende" there, which then headlines the whole model in
+    /// every viewer tree. Overrides the root's `rdfs:label` only (the authored
+    /// name is preserved as `props:ifcName`); all other elements keep their
+    /// file-authored names.
+    pub root_label: Option<String>,
+    /// Provenance stamped on the root element: where the model came from
+    /// (`dct:source`), its license (`dct:license`) and the attribution line
+    /// (`dct:rightsHolder`). All optional.
+    pub provenance_source: Option<String>,
+    pub license: Option<String>,
+    pub attribution: Option<String>,
 }
 
 /// Counters reported after a conversion.

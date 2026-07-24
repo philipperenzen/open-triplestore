@@ -34,7 +34,7 @@ jobs:
     name: Rust (build, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reclaim ~25 GB of preinstalled tooling the Rust build doesn't need, so the
       # `--features full,test-utils,backup-encrypt,alerting` build of all test binaries doesn't run the disk out.
@@ -69,7 +69,7 @@ jobs:
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
       - name: Clippy
-        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello
+        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
 
       - name: Build
         run: cargo build --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
@@ -102,7 +102,7 @@ jobs:
     name: Plugin crates (standalone, default features)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -117,7 +117,7 @@ jobs:
       # features" guarantee — the "backend" job separately exercises plugin-hello
       # wired INTO the main crate via the `plugin-hello` feature.
       - name: Clippy (plugin crates)
-        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello --all-targets
+        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello --all-targets -- -D warnings
 
       - name: Build & test (plugin crates)
         run: cargo test -p ots-plugin-api -p ots-plugin-hello --locked
@@ -126,7 +126,7 @@ jobs:
     name: Conformance suites
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reclaim ~25 GB of preinstalled tooling so the `--features full,test-utils,backup-encrypt,alerting` conformance
       # test binaries don't run the disk out (see the backend job).
@@ -159,9 +159,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           cache: npm
@@ -183,15 +183,15 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Rust advisories, license, and ban checks (config in deny.toml).
       - name: cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories bans sources licenses
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
 
@@ -205,7 +205,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: gitleaks
         run: |
           VER=8.18.4

@@ -69,6 +69,30 @@ export default [
     },
   },
   {
+    // Leaflet must be reached through the wrapper that pins its default marker
+    // icons to bundler-resolved URLs. A bare `import L from 'leaflet'` leaves
+    // Leaflet guessing where its images live; under Vite that guess collapses to
+    // an empty path and every marker renders as a broken image — and only in a
+    // BUILT app, so the dev server never shows it. The wrapper itself is the one
+    // place allowed to do the real import.
+    files: ['**/*.js', '**/*.ts', '**/*.svelte'],
+    ignores: ['src/lib/viewer/leafletIcons.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'leaflet',
+              message:
+                "Import the wrapper instead (lib/viewer/leafletIcons): a bare 'leaflet' import breaks the default marker icons in production builds.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // Test files run under Node / Vitest — allow Node globals (e.g. `process`).
     files: [
       '**/*.test.js',

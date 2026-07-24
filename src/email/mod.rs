@@ -10,8 +10,12 @@
 //! - `SMTP_HOST` — SMTP relay host. Unset → log-only backend.
 //! - `SMTP_PORT` — relay port (default 587).
 //! - `SMTP_USERNAME` / `SMTP_PASSWORD` — optional credentials.
-//! - `SMTP_STARTTLS` — `1`/`true` forces STARTTLS, `0`/`false` forces
-//!   implicit TLS; default: implicit TLS on port 465, STARTTLS otherwise.
+//! - `SMTP_TLS` — transport security: `none` (plaintext — only for a relay on a
+//!   trusted private network, e.g. the bundled compose `mail` service),
+//!   `starttls`, or `implicit` (TLS-wrapped/SMTPS). Default: implicit TLS on
+//!   port 465, STARTTLS otherwise.
+//! - `SMTP_STARTTLS` — legacy switch: `1`/`true` forces STARTTLS, `0`/`false`
+//!   forces implicit TLS. Ignored when `SMTP_TLS` is set.
 //! - `SMTP_FROM` — From mailbox (default `Open Triplestore <no-reply@localhost>`).
 //! - `PUBLIC_BASE_URL` — base URL minted into email links (default: the
 //!   server's linked-data base URL).
@@ -24,13 +28,53 @@ use std::sync::Arc;
 /// How long (seconds) an email send may take before it is abandoned.
 const SEND_TIMEOUT_SECS: u64 = 30;
 
+/// SMTP transport security for the relay hop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SmtpTls {
+    /// Plaintext SMTP — only sane towards a relay on a trusted private network
+    /// (e.g. the bundled compose `mail` service; nothing there is published on
+    /// a host interface).
+    None,
+    /// Plain connection upgraded via STARTTLS (typical on port 587).
+    StartTls,
+    /// TLS-wrapped from the first byte (SMTPS, typical on port 465).
+    Implicit,
+}
+
+/// Resolve the transport security mode: explicit `SMTP_TLS` wins, then the
+/// legacy `SMTP_STARTTLS` flag, then the port convention (465 ⇒ implicit TLS,
+/// anything else ⇒ STARTTLS).
+fn resolve_tls(port: u16, tls: Option<&str>, starttls: Option<&str>) -> SmtpTls {
+    if let Some(v) = tls {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" | "plain" => return SmtpTls::None,
+            "starttls" => return SmtpTls::StartTls,
+            "implicit" | "tls" | "smtps" => return SmtpTls::Implicit,
+            other => tracing::warn!(
+                "email: unrecognized SMTP_TLS value {other:?} (expected none|starttls|implicit) — falling back"
+            ),
+        }
+    }
+    match starttls {
+        Some("1") | Some("true") | Some("TRUE") => SmtpTls::StartTls,
+        Some("0") | Some("false") | Some("FALSE") => SmtpTls::Implicit,
+        _ => {
+            if port == 465 {
+                SmtpTls::Implicit
+            } else {
+                SmtpTls::StartTls
+            }
+        }
+    }
+}
+
 enum Backend {
     Smtp {
         host: String,
         port: u16,
         username: Option<String>,
         password: Option<String>,
-        starttls: bool,
+        tls: SmtpTls,
     },
     /// No SMTP configured — log every message instead of delivering it.
     Log,
@@ -41,6 +85,18 @@ pub struct Mailer {
     from: String,
     /// Public base URL used to mint action links (no trailing slash).
     link_base: String,
+}
+
+/// A fresh RFC 5322 `Message-ID` (`<uuid@domain>`) for an outgoing message.
+/// Large receivers (Gmail: 550 5.7.1) reject mail without a valid Message-ID
+/// outright, and SMTP relays only repair the header for clients they consider
+/// local — which a sibling container is not — so the app must stamp its own.
+pub(crate) fn rfc5322_message_id(from_domain: &str) -> String {
+    let domain = match from_domain.trim() {
+        "" => "localhost",
+        d => d,
+    };
+    format!("<{}@{}>", uuid::Uuid::new_v4(), domain)
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -63,17 +119,17 @@ impl Mailer {
                 let port: u16 = env_opt("SMTP_PORT")
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(587);
-                let starttls = match env_opt("SMTP_STARTTLS").as_deref() {
-                    Some("1") | Some("true") | Some("TRUE") => true,
-                    Some("0") | Some("false") | Some("FALSE") => false,
-                    _ => port != 465,
-                };
+                let tls = resolve_tls(
+                    port,
+                    env_opt("SMTP_TLS").as_deref(),
+                    env_opt("SMTP_STARTTLS").as_deref(),
+                );
                 Backend::Smtp {
                     host,
                     port,
                     username: env_opt("SMTP_USERNAME"),
                     password: env_opt("SMTP_PASSWORD"),
-                    starttls,
+                    tls,
                 }
             }
             None => Backend::Log,
@@ -106,6 +162,31 @@ impl Mailer {
         &self.link_base
     }
 
+    /// Build one RFC 5322-complete plain-text message (From/To/Subject/Date/
+    /// Message-ID). Errors are descriptive strings for the caller to log.
+    fn build_message(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<lettre::Message, String> {
+        use lettre::message::{header::ContentType, Mailbox};
+        let from_mbox: Mailbox = self
+            .from
+            .parse()
+            .map_err(|e| format!("bad SMTP_FROM address: {e}"))?;
+        let to_mbox: Mailbox = to.parse().map_err(|e| format!("invalid recipient: {e}"))?;
+        let message_id = rfc5322_message_id(from_mbox.email.domain());
+        lettre::Message::builder()
+            .from(from_mbox)
+            .to(to_mbox)
+            .subject(subject)
+            .message_id(Some(message_id))
+            .header(ContentType::TEXT_PLAIN)
+            .body(body.to_string())
+            .map_err(|e| format!("build message failed: {e}"))
+    }
+
     /// Deliver one plain-text message. Best-effort: failures are logged, never
     /// propagated (account flows must not 500 because a relay hiccupped).
     pub async fn send(&self, to: &str, subject: &str, body: &str) -> bool {
@@ -122,16 +203,15 @@ impl Mailer {
                 port,
                 username,
                 password,
-                starttls,
+                tls,
             } => {
-                use lettre::{
-                    message::header::ContentType, AsyncSmtpTransport, AsyncTransport, Message,
-                    Tokio1Executor,
-                };
-                let builder = if *starttls {
-                    AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-                } else {
-                    AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+                use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+                let builder = match tls {
+                    SmtpTls::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host),
+                    SmtpTls::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host),
+                    SmtpTls::None => Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(
+                        host,
+                    )),
                 };
                 let builder = match builder {
                     Ok(b) => b.port(*port),
@@ -148,30 +228,10 @@ impl Mailer {
                 } else {
                     builder
                 };
-                let from_mbox = match self.from.parse() {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!("email: bad SMTP_FROM address: {e}");
-                        return false;
-                    }
-                };
-                let to_mbox = match to.parse() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!("email: invalid recipient: {e}");
-                        return false;
-                    }
-                };
-                let msg = match Message::builder()
-                    .from(from_mbox)
-                    .to(to_mbox)
-                    .subject(subject)
-                    .header(ContentType::TEXT_PLAIN)
-                    .body(body.to_string())
-                {
+                let msg = match self.build_message(to, subject, body) {
                     Ok(m) => m,
                     Err(e) => {
-                        tracing::warn!("email: build message failed: {e}");
+                        tracing::warn!("email: {e}");
                         return false;
                     }
                 };
@@ -267,6 +327,69 @@ impl Mailer {
                  {link}\n\n\
                  The link is valid for 24 hours. If you did not request this, you can ignore this message — your account email is unchanged.\n"
             ),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smtp_tls_explicit_mode_wins() {
+        assert_eq!(resolve_tls(587, Some("none"), None), SmtpTls::None);
+        assert_eq!(resolve_tls(465, Some("NONE"), Some("1")), SmtpTls::None);
+        assert_eq!(resolve_tls(25, Some(" starttls "), None), SmtpTls::StartTls);
+        assert_eq!(resolve_tls(587, Some("implicit"), None), SmtpTls::Implicit);
+        assert_eq!(
+            resolve_tls(587, Some("smtps"), Some("1")),
+            SmtpTls::Implicit
+        );
+    }
+
+    #[test]
+    fn smtp_tls_legacy_starttls_flag() {
+        assert_eq!(resolve_tls(587, None, Some("0")), SmtpTls::Implicit);
+        assert_eq!(resolve_tls(465, None, Some("1")), SmtpTls::StartTls);
+        assert_eq!(resolve_tls(587, None, Some("false")), SmtpTls::Implicit);
+    }
+
+    #[test]
+    fn message_id_shape_and_uniqueness() {
+        let a = rfc5322_message_id("example.org");
+        let b = rfc5322_message_id("example.org");
+        assert!(a.starts_with('<') && a.ends_with("@example.org>"), "{a}");
+        assert_ne!(a, b, "each message must get a fresh id");
+        assert!(rfc5322_message_id("  ").ends_with("@localhost>"));
+    }
+
+    #[test]
+    fn built_message_has_message_id_and_date() {
+        let mailer = Mailer::log_only("http://localhost");
+        let msg = mailer
+            .build_message("user@example.com", "Subject", "Body")
+            .expect("message builds");
+        let raw = String::from_utf8(msg.formatted()).expect("utf8");
+        // Gmail rejects mail without a valid Message-ID (550 5.7.1); the id
+        // domain follows the From mailbox (default no-reply@localhost).
+        assert!(
+            raw.contains("Message-ID: <"),
+            "missing Message-ID in:\n{raw}"
+        );
+        assert!(raw.contains("@localhost>"), "id domain should follow From");
+        assert!(raw.contains("Date: "), "missing Date in:\n{raw}");
+    }
+
+    #[test]
+    fn smtp_tls_port_default() {
+        assert_eq!(resolve_tls(465, None, None), SmtpTls::Implicit);
+        assert_eq!(resolve_tls(587, None, None), SmtpTls::StartTls);
+        assert_eq!(resolve_tls(25, None, None), SmtpTls::StartTls);
+        // Unrecognized SMTP_TLS falls through to the legacy flag / port default.
+        assert_eq!(resolve_tls(465, Some("bogus"), None), SmtpTls::Implicit);
+        assert_eq!(
+            resolve_tls(587, Some("bogus"), Some("0")),
+            SmtpTls::Implicit
         );
     }
 }

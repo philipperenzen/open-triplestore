@@ -126,8 +126,14 @@ export async function fetchRetry429(
   return res;
 }
 
-async function request(method, path, body = null) {
+// `init.signal` is optional and defaulted, so no existing call site changes: it
+// exists so callers that can be superseded mid-flight (the dataset viewer's
+// inspector windows switch resource on every click) can cancel the request
+// instead of merely ignoring its answer. The same `opts` object is reused by the
+// 429-retry and 401-refresh retries below, so the abort applies to those too.
+async function request(method, path, body = null, init: { signal?: AbortSignal } = {}) {
   const opts: RequestInit = { method, headers: authHeaders(), credentials: 'include' };
+  if (init.signal) opts.signal = init.signal;
   if (body) opts.body = JSON.stringify(body);
   let res = await fetch(`${API_BASE}${path}`, opts);
 
@@ -562,21 +568,26 @@ export const browseSuggest = (
   }).toString();
   return request('GET', `/api/browse/suggest?${qs}`);
 };
-export const browseTriples = (params) => {
+// `init` carries optional fetch options — in practice `{ signal }`, so a superseded
+// page/count fetch can release its socket. Aborting does NOT stop the server-side
+// work (it is already running in a blocking task); it only frees the client.
+export const browseTriples = (params, init: RequestInit = {}) => {
   const qs = new URLSearchParams(params).toString();
-  return request('GET', `/api/browse/triples?${qs}`);
+  return request('GET', `/api/browse/triples?${qs}`, null, init);
 };
 // `opts` may be a bare graph IRI (back-compat) or an object carrying the same
 // scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
 // Scope lets the graph view expand a resource within the active browse scope
 // (dataset/org + version pins) instead of the broad accessible set.
-export const browseResource = (iri, opts = {}) => {
+// `init.signal` cancels an in-flight lookup — the viewer's inspector windows
+// switch resource faster than the endpoint (three SPARQL queries) can answer.
+export const browseResource = (iri, opts = {}, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams({ iri });
   const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
   for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
     if (o[k]) qs.set(k, o[k]);
   }
-  return request('GET', `/api/browse/resource?${qs.toString()}`);
+  return request('GET', `/api/browse/resource?${qs.toString()}`, null, init);
 };
 export const browseStats = () => request('GET', '/api/browse/stats');
 // Viewer feed: per-element geometry (reprojected to EPSG:4326/3857) + 3D-file
@@ -589,7 +600,8 @@ export const browseStats = () => request('GET', '/api/browse/stats');
 export const getViewerFeed = (datasetId, root = null, opts: { located?: boolean } = {}) => {
   const params = new URLSearchParams();
   if (root) params.set('root', root);
-  // 'true' (not '1') — the backend parses this as a bool; '1' is a 400.
+  // The backend parses this tolerantly (true|1|yes|on all work); 'true' is the
+  // canonical spelling we send.
   if (opts.located) params.set('located', 'true');
   const qs = params.toString() ? `?${params.toString()}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
@@ -615,9 +627,9 @@ export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
 // org_id, versions, graph). The chip `filters` JSON may also be passed through.
-export const browseFacets = (params) => {
+export const browseFacets = (params, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams(params).toString();
-  return request('GET', `/api/browse/facets?${qs}`);
+  return request('GET', `/api/browse/facets?${qs}`, null, init);
 };
 
 // SPARQL
@@ -635,7 +647,7 @@ function isGraphQuery(query) {
   return /\b(CONSTRUCT|DESCRIBE)\b/i.test(stripped);
 }
 
-async function executeSparql(url, query) {
+async function executeSparql(url, query, init: RequestInit = {}) {
   const token = getAccessToken();
   const graphQ = isGraphQuery(query);
   const headers = {
@@ -645,7 +657,9 @@ async function executeSparql(url, query) {
   if (token) headers['Authorization'] = `Bearer ${token}`;
   // /sparql is rate-limited per IP; retry 429s with the server-suggested delay
   // so legitimate UI query bursts never surface "Too Many Requests" errors.
-  const res = await fetchRetry429(url, { method: 'POST', headers, body: query });
+  // `init` carries an optional `{ signal }` so a caller can abort a long probe
+  // (e.g. the content-kind scan) when it unmounts.
+  const res = await fetchRetry429(url, { method: 'POST', headers, body: query, ...init });
   if (!res.ok) {
     const msg = await extractErrorMessage(res);
     const err = new ApiError(msg);
@@ -659,8 +673,8 @@ async function executeSparql(url, query) {
   return res.json();
 }
 
-export const sparqlQuery = (query) =>
-  executeSparql(`${API_BASE}/sparql`, query);
+export const sparqlQuery = (query, init: RequestInit = {}) =>
+  executeSparql(`${API_BASE}/sparql`, query, init);
 
 /** Query a dataset service, optionally scoped to a version snapshot. A version
  *  of '', 'live', 'latest' or 'current' means live data. */
@@ -1457,3 +1471,124 @@ export const createTripleSecurityLabel = (data) =>
 export const deleteTripleSecurityLabel = (id) =>
   request('DELETE', `/api/admin/acl/triples/${id}`);
 
+
+// ─── Vocabulary search service (internal LOV) ────────────────────────────────
+// Backed by the platform's own vocabulary catalog (bundled LOV snapshot +
+// registered models/vocabularies) and term search engine — no external calls.
+
+export interface VocabCatalogEntry {
+  prefix: string;
+  uri: string;
+  nsp: string;
+  titles: { value: string; lang?: string | null }[];
+  descriptions: { value: string; lang?: string | null }[];
+  tags: string[];
+  homepage?: string | null;
+  issued?: string | null;
+  langs: string[];
+  creators: string[];
+  metrics: {
+    occurrences_in_datasets: number;
+    reused_by_datasets: number;
+    reused_by_vocabularies: number;
+    incoming_links: number;
+  };
+  versions: {
+    name?: string | null;
+    issued?: string | null;
+    class_count: number;
+    property_count: number;
+    datatype_count: number;
+    instance_count: number;
+  }[];
+  source: 'platform' | 'lov';
+  model_id?: string | null;
+  installable: boolean;
+}
+
+export interface VocabTermHit {
+  iri: string;
+  local_name: string;
+  prefixed: string;
+  ttype: string;
+  vocab: string;
+  labels: string;
+  secondary: string;
+  tags: string[];
+  source: string;
+  model_id: string;
+  score: number;
+}
+
+export const listVocabularies = () => request('GET', '/api/vocab/list');
+
+export const vocabInfo = (key: string) =>
+  request('GET', `/api/vocab/info?vocab=${encodeURIComponent(key)}`);
+
+export const vocabTags = () => request('GET', '/api/vocab/tags');
+
+export const vocabStatus = () => request('GET', '/api/vocab/status');
+
+export const searchVocabularies = (
+  q: string,
+  opts: { tag?: string; lang?: string; page?: number; pageSize?: number } = {},
+) => {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (opts.tag) params.set('tag', opts.tag);
+  if (opts.lang) params.set('lang', opts.lang);
+  if (opts.page) params.set('page', String(opts.page));
+  if (opts.pageSize) params.set('page_size', String(opts.pageSize));
+  return request('GET', `/api/vocab/search?${params.toString()}`);
+};
+
+export const searchVocabTerms = (
+  q: string,
+  opts: {
+    types?: string;
+    vocab?: string;
+    tag?: string;
+    source?: string;
+    page?: number;
+    pageSize?: number;
+  } = {},
+) => {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (opts.types) params.set('type', opts.types);
+  if (opts.vocab) params.set('vocab', opts.vocab);
+  if (opts.tag) params.set('tag', opts.tag);
+  if (opts.source) params.set('source', opts.source);
+  if (opts.page) params.set('page', String(opts.page));
+  if (opts.pageSize) params.set('page_size', String(opts.pageSize));
+  return request('GET', `/api/vocab/terms/search?${params.toString()}`);
+};
+
+export const autocompleteVocabTerms = (q: string, types?: string) => {
+  const params = new URLSearchParams({ q });
+  if (types) params.set('type', types);
+  return request('GET', `/api/vocab/terms/autocomplete?${params.toString()}`);
+};
+
+export const suggestVocabTerms = (q: string) =>
+  request('GET', `/api/vocab/terms/suggest?q=${encodeURIComponent(q)}`);
+
+export const recommendVocabularies = (body: {
+  terms: { term: string; category?: 'class' | 'property' | 'all' }[];
+  preferred_vocabs?: Record<string, number>;
+  per_term_limit?: number;
+}) => request('POST', '/api/vocab/recommend', body);
+
+export const installVocabulary = (vocab: string) =>
+  request('POST', '/api/vocab/install', { vocab });
+
+// ─── Prefix service (internal prefix.cc) ─────────────────────────────────────
+
+export const searchPrefixService = (q: string, limit = 25) =>
+  request('GET', `/api/prefixes?q=${encodeURIComponent(q)}&limit=${limit}`);
+
+export const expandCurie = (curie: string) =>
+  request('GET', `/api/prefixes/expand?curie=${encodeURIComponent(curie)}`);
+
+export const shrinkIri = (iri: string) =>
+  request('GET', `/api/prefixes/shrink?iri=${encodeURIComponent(iri)}`);
