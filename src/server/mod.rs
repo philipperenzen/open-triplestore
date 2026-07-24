@@ -19,7 +19,9 @@ mod security_tests;
 
 #[cfg(feature = "text-search")]
 use crate::text_search::TextIndex;
-#[cfg(feature = "text-search")]
+// AtomicBool/Ordering back BOTH the text-search dirty flag (feature-gated) and
+// the always-present vocab-registry dirty flag — the import must be unconditional
+// or a default-features build fails to name the `vocab_registry_dirty` field type.
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::auth::acl_handlers;
