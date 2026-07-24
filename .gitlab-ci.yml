@@ -8,11 +8,15 @@
 # licenses), an npm production-dependency audit, a gitleaks secret scan, the
 # performance-regression gate, and a tag-driven release. Commands and versions
 # track the GitHub jobs, with two intentional differences: (1) the GitLab perf
-# jobs install python3, which the rust image lacks but the GitHub ubuntu-latest
-# runner already ships (see the perf job below); and (2) the rust job here keeps
+# jobs install python3 explicitly, which the GitHub ubuntu-latest runner already
+# ships (see the perf job below); and (2) the rust job here keeps
 # `--all-features`, so — since ci.yml switched to an explicit feature list — this
 # is the only CI that actually compiles the `sfcgal3d` feature (hence the extra
-# libsfcgal-dev native dep in before_script).
+# libsfcgal-dev native dep in before_script). That feature is also why every
+# rust job runs on a *trixie*-based image: the `sfcgal`/`sfcgal-sys` crates
+# (0.8.x/0.9.x) need native SFCGAL >= 2.0 at build time, and Debian bookworm
+# only packages libsfcgal 1.4.1 (its headers lack the 2.x API, so the sfcgal
+# crate fails with E0432 unresolved imports); trixie ships 2.0.0.
 
 stages:
   - check
@@ -33,9 +37,17 @@ variables:
 # security-regression suites (which ci.yml surfaces as separate jobs).
 rust:
   stage: test
-  image: rust:1.88-bookworm
+  # trixie, not bookworm: `--all-features` pulls in sfcgal-sys, which needs
+  # native SFCGAL >= 2.0 (bookworm's libsfcgal-dev 1.4.1 is too old — see the
+  # header note). And 1.91, not 1.88: the lockfile pins wide 1.5 / safe_arch
+  # 1.0 (MSRV rustc 1.89), so 1.88 can no longer build it; 1.91 matches the
+  # Dockerfile builder stage. The other rust jobs use the same image so the
+  # shared cache below never mixes distros, and the "-trixie" in the key
+  # retires the bookworm-era caches (their -sys build-script probes point at
+  # the old distro's system libs) instead of inheriting them.
+  image: rust:1.91-trixie
   cache:
-    key: "rust-$CI_COMMIT_REF_SLUG"
+    key: "rust-trixie-$CI_COMMIT_REF_SLUG"
     paths:
       - .cargo/registry/
       - .cargo/git/
@@ -43,8 +55,9 @@ rust:
   before_script:
     # GEOS for GeoSPARQL; SFCGAL for the `sfcgal3d` feature (pulled in by
     # `--all-features` below — sfcgal-sys is a `-sys` crate that needs the native
-    # SFCGAL headers at build time); the rest match the GitHub backend job
-    # (SAML/xmlsec, TLS). Without libsfcgal-dev the `--all-features` build fails.
+    # SFCGAL >= 2.0 headers at build time, hence the trixie image); the rest
+    # match the GitHub backend job (SAML/xmlsec, TLS). Without libsfcgal-dev the
+    # `--all-features` build fails.
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
     - rustup component add rustfmt clippy
@@ -61,9 +74,10 @@ rust:
 # controls runtime.
 perf:
   stage: perf
-  image: rust:1.88-bookworm
+  # Same trixie image as the rust job (shared cache key — see the note there).
+  image: rust:1.91-trixie
   cache:
-    key: "rust-$CI_COMMIT_REF_SLUG"
+    key: "rust-trixie-$CI_COMMIT_REF_SLUG"
     paths:
       - .cargo/registry/
       - .cargo/git/
@@ -73,10 +87,12 @@ perf:
     - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
     - if: '$CI_COMMIT_BRANCH =~ /^release\//'
   before_script:
-    # GEOS + the usual native deps, matching the GitHub backend job, PLUS python3:
-    # the rust:1.88-bookworm image has no python3, whereas the GitHub
-    # ubuntu-latest runner does. This added `python3` is the one intentional
-    # GitHub/GitLab difference (the perf script is invoked the same way on both).
+    # GEOS + the usual native deps, matching the GitHub backend job, PLUS
+    # python3, which the GitHub ubuntu-latest runner already ships. The
+    # rust:1.91-trixie image happens to include python3 today, but we install it
+    # explicitly rather than depend on the base image's incidental contents.
+    # This added `python3` is the one intentional GitHub/GitLab difference (the
+    # perf script is invoked the same way on both).
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
   script:
@@ -90,19 +106,20 @@ perf:
 # the canonical source that opens the baseline-refresh PR.
 perf-baseline:
   stage: perf
-  image: rust:1.88-bookworm
+  # Same trixie image as the rust job (shared cache key — see the note there).
+  image: rust:1.91-trixie
   rules:
     - if: '$CI_COMMIT_TAG'
     - if: '$CI_PIPELINE_SOURCE == "web"'
       when: manual
   cache:
-    key: "rust-$CI_COMMIT_REF_SLUG"
+    key: "rust-trixie-$CI_COMMIT_REF_SLUG"
     paths:
       - .cargo/registry/
       - .cargo/git/
       - target/
   before_script:
-    # Same native deps as the perf job, plus python3 (absent from the rust image).
+    # Same native deps as the perf job, plus python3 (see the perf job note).
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
   script:
@@ -132,7 +149,8 @@ frontend:
 # ── Supply-chain audit: cargo-deny (advisories, bans, sources, licenses) ──────
 cargo-deny:
   stage: audit
-  image: rust:1.88-bookworm
+  # Same trixie image as the other rust jobs (one image to pull per runner).
+  image: rust:1.91-trixie
   cache:
     key: "deny-$CI_COMMIT_REF_SLUG"
     paths:
@@ -169,7 +187,7 @@ secret-scan:
 # from the pipeline view when wanted. ─────────────────────────────────────────
 e2e:
   stage: test
-  image: rust:1.88-bookworm
+  image: rust:1.91-trixie
   when: manual
   allow_failure: true
   variables:
