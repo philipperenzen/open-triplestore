@@ -14,6 +14,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- None.
+
+### Changed
+- None.
+
+### Deprecated
+- None.
+
+### Removed
+- None.
+
+### Fixed
+- None.
+
+### Security
+- None.
+
+## [0.5.0] — 2026-07-24
+
+### Added
 - **Outbound email in Docker Compose** (`--profile mail`): a bundled send-only
   Postfix relay ([`boky/postfix`](https://github.com/bokysan/docker-postfix)) so
   account mail (verification links, password resets, username reminders) is
@@ -42,9 +62,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   toggle in the header or with `F`. An **Explore inside** action in a building's
   inspector opens the walkthrough directly (no longer only via the zoomed-in map
   hint).
+- **Internal vocabulary search + prefix service** (LOV & prefix.cc replacement).
+  Public LOV is unreachable and prefix.cc's TLS certificate has expired, so both
+  are now first-class internal services integrated with the model/vocabulary
+  registry. A bundled prefix snapshot (3,695 prefix.cc + LOV mappings with a live
+  overlay of platform-registered vocabularies) resolves SPARQL auto-prefixing
+  fully offline (`/api/prefixes*`; live prefix.cc is opt-in via
+  `PREFIX_CC_FALLBACK`), and a Tantivy-backed vocabulary term search (the
+  `vocab-search` feature) indexes the bundled LOV corpus plus the platform's
+  registry vocabularies. Both degrade gracefully with no network access.
+- **Real per-building 3DBAG linked data** in the 3D/BIM demo: each 3DBAG `Pand`
+  is mapped to an addressable RDF element, so the neighbourhood block is real,
+  properly-georeferenced linked data end to end rather than a geometry-only
+  overlay.
 
 ### Changed
-- None.
+- **Dependencies.** Batched the outstanding Dependabot updates — `aes-gcm` 0.11,
+  `quick-xml` 0.41, `toml` 1, `zip` 3, `calamine` 0.36, `lru` 0.16,
+  `maplibre-gl` 6, `three` 0.185, and others — together with the breaking-API
+  migrations they require, and migrated the SPARQL engine off oxigraph 0.5's
+  deprecated `Store::query` / `Update` API onto the `SparqlEvaluator` interface.
+  CI clippy now runs with `-D warnings`, so warnings fail the build.
 
 ### Deprecated
 - None.
@@ -464,7 +502,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.3...v0.2.4

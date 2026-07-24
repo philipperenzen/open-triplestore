@@ -8,7 +8,7 @@ resolver = "2"
 
 [package]
 name = "open-triplestore"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.88"
 description = "A modern, high-performance RDF triple store with SPARQL 1.1/1.2 and GeoSPARQL support"
