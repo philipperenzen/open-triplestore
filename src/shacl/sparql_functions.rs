@@ -153,6 +153,7 @@ fn lexical(t: &OxTerm) -> String {
         OxTerm::NamedNode(nn) => nn.as_str().to_string(),
         OxTerm::Literal(l) => l.value().to_string(),
         OxTerm::BlankNode(b) => format!("_:{}", b.as_str()),
+        #[cfg(feature = "rdf-12")]
         OxTerm::Triple(t) => t.to_string(),
     }
 }

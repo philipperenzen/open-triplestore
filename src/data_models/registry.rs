@@ -26,6 +26,7 @@ fn var_str(row: &[Option<Term>], idx: usize) -> Option<String> {
         Term::NamedNode(nn) => nn.as_str().to_string(),
         Term::Literal(lit) => lit.value().to_string(),
         Term::BlankNode(bn) => bn.as_str().to_string(),
+        #[cfg(feature = "rdf-12")]
         Term::Triple(_) => String::new(),
     })
 }
