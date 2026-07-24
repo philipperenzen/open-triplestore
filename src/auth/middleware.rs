@@ -319,6 +319,7 @@ fn audit_forbidden(audit: &AuditLogger, ctx: &DenialContext, resp: &Response) {
 }
 
 /// Middleware that requires a valid JWT or API token. Returns 401 if missing or invalid.
+#[allow(clippy::too_many_arguments)] // axum substate extractors, one per capability
 pub async fn require_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
@@ -355,6 +356,7 @@ pub async fn require_auth(
 
 /// Middleware that optionally extracts auth. If present and valid, sets the
 /// authenticated user. If missing or invalid, continues without authentication.
+#[allow(clippy::too_many_arguments)] // axum substate extractors, one per capability
 pub async fn optional_auth(
     State(jwt_config): State<Arc<JwtConfig>>,
     State(auth_db): State<Arc<AuthDb>>,
