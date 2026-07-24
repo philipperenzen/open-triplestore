@@ -1792,7 +1792,7 @@
       "providerTypeSaml": "SAML 2.0",
       "clientId": "Client-ID",
       "clientIdPlaceholder": "Applicatie-(client-)ID",
-      "clientSecret": "Clientgeheim",
+      "clientSecret": "Client-secret",
       "clientSecretKeep": "(laat leeg om het bestaande te behouden)",
       "discoveryUrl": "Discovery-URL",
       "discoveryUrlHint": "(OIDC well-known-endpoint)",
@@ -1894,7 +1894,18 @@
       "guestRegTurnOn": "Zelfregistratie voor gasten inschakelen",
       "guestRegTurnOff": "Zelfregistratie voor gasten uitschakelen",
       "guestSweptEnabled": "{n} gastaccount(s) geheractiveerd.",
-      "guestSweptDisabled": "{n} gastaccount(s) gedeactiveerd — zij zien bij het inloggen \"Guest access has been disabled by the administrator\"."
+      "guestSweptDisabled": "{n} gastaccount(s) gedeactiveerd — zij zien bij het inloggen \"Guest access has been disabled by the administrator\".",
+      "tabClients": "Aanmeld-apps",
+      "clientsHint": "Apps die hun gebruikers TEGEN deze store aanmelden (OIDC-provider): de OTL Viewer, het Validatieplatform en de Formulieren-app. Elke client heeft exacte redirect-URL's; publieke clients gebruiken PKCE, vertrouwelijke een secret. Clients kunnen ook via OAUTH_CLIENTS_JSON worden aangeleverd.",
+      "clientsEmpty": "Nog geen aanmeld-apps geregistreerd.",
+      "clientPublic": "Publieke client (PKCE)",
+      "clientConfidential": "Vertrouwelijke client",
+      "clientHasSecret": "secret ingesteld",
+      "newClient": "App registreren",
+      "clientName": "Weergavenaam",
+      "clientRedirects": "Redirect-URL's (één per regel)",
+      "clientPublicLabel": "Publieke client (browser-app, PKCE — geen secret)",
+      "saveClient": "App opslaan"
     },
     "apiDocs": {
       "title": "API-documentatie",
@@ -2803,6 +2814,17 @@
       "recommendAlternatives": "Alternatieven",
       "recommendNone": "geen match",
       "attribution": "Vocabulairemetadata en -inhoud van"
+    },
+    "oauthAuthorize": {
+      "missingParams": "Deze aanmeldlink is onvolledig (client_id of redirect_uri ontbreekt).",
+      "unsupportedResponseType": "Alleen de authorization-code-flow wordt ondersteund.",
+      "badRequestTitle": "Ongeldige aanmeldaanvraag",
+      "errorTitle": "Aanmelden mislukt",
+      "consentTitle": "{client} toestaan om je aan te melden?",
+      "consentBody": "{client} wil je account ({username}) op deze store gebruiken. De app ziet je gebruikersnaam, e-mail en lidmaatschappen.",
+      "approve": "Toestaan",
+      "deny": "Annuleren",
+      "redirecting": "Terug naar de app…"
     }
   },
   "toast": {

@@ -2,14 +2,16 @@
 mod account_lifecycle_tests;
 #[cfg(test)]
 mod accounts_introspection_tests;
-#[cfg(test)]
-mod guest_registration_tests;
 pub mod content_negotiation;
 pub mod error;
+#[cfg(test)]
+mod guest_registration_tests;
 mod linked_data;
 pub mod llm_guard;
 pub mod llm_history;
 pub mod llm_sparql;
+#[cfg(test)]
+mod oidc_provider_tests;
 pub mod openapi;
 #[cfg(test)]
 mod passkey_tests;
@@ -257,6 +259,10 @@ pub struct AppState {
     pub passkey_sessions: crate::auth::passkey::PasskeySessions,
     /// OIDC resource-server config (env-driven): JWT verification + legacy-token flag.
     pub auth_ext: Arc<crate::auth::oidc_rs::AuthExt>,
+    /// This store's own OIDC-provider signing keys (Unified Accounts). None
+    /// only when key load/generation failed at boot — provider endpoints then
+    /// answer 503 while everything else keeps working.
+    pub oidc_provider: Option<Arc<crate::auth::oidc_provider::ProviderKeys>>,
     /// M-1/W4-21: SPARQL query and update timeout in seconds.
     pub query_timeout_secs: u64,
     /// Write-path timeout in seconds for GSP PUT/POST/DELETE and data-model/dataset
@@ -301,6 +307,10 @@ impl AppState {
         use crate::storage::ObjectStore;
         let auth_db = Arc::new(AuthDb::in_memory().unwrap());
         let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
+        let oidc_provider =
+            crate::auth::oidc_provider::ProviderKeys::load_or_generate(&auth_db, "test-secret")
+                .ok()
+                .map(Arc::new);
         AppState {
             store,
             prefix_registry: Arc::new(PrefixRegistry::empty()),
@@ -316,6 +326,7 @@ impl AppState {
             oauth_sessions: crate::auth::oauth::new_session_store(),
             passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
+            oidc_provider,
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,
@@ -429,6 +440,17 @@ impl axum::extract::FromRef<AppState> for Arc<JwtConfig> {
 impl axum::extract::FromRef<AppState> for Arc<crate::auth::oidc_rs::AuthExt> {
     fn from_ref(state: &AppState) -> Self {
         state.auth_ext.clone()
+    }
+}
+
+/// The provider keys as an extractable substate (Option: 503s when key init
+/// failed). Newtype because of the orphan rule (like [`BaseUrl`]).
+#[derive(Clone)]
+pub struct OidcProviderState(pub Option<Arc<crate::auth::oidc_provider::ProviderKeys>>);
+
+impl axum::extract::FromRef<AppState> for OidcProviderState {
+    fn from_ref(state: &AppState) -> Self {
+        OidcProviderState(state.oidc_provider.clone())
     }
 }
 
@@ -614,6 +636,35 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         })
         .with_state(state.clone());
 
+    // ── This store as an OIDC PROVIDER (Unified Accounts) ────────────────────
+    // Public protocol surface. Discovery + JWKS are static reads; the token
+    // endpoint mints credentials from single-use codes/refresh tokens, so it
+    // shares the auth brute-force limiter (code/verifier guessing).
+    let oidc_provider_public_routes = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(crate::auth::oidc_provider::discovery),
+        )
+        .route("/oauth/jwks", get(crate::auth::oidc_provider::jwks))
+        .route("/oauth/userinfo", get(crate::auth::oidc_provider::userinfo))
+        .route("/oauth/token", post(crate::auth::oidc_provider::token))
+        .route_layer(GovernorLayer {
+            config: auth_rate_conf.clone(),
+        })
+        .with_state(state.clone());
+    // Code minting happens on the signed-in session (the /oauth/authorize SPA
+    // route drives it) — auth required, same strict limiter.
+    let oidc_provider_authorize_routes = Router::new()
+        .route(
+            "/api/oauth/authorize",
+            post(crate::auth::oidc_provider::authorize),
+        )
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .route_layer(GovernorLayer {
+            config: auth_rate_conf.clone(),
+        })
+        .with_state(state.clone());
+
     // Sensitive protected auth routes: require auth AND the brute-force limiter.
     // These are the high-value mutations a hijacked session could abuse —
     // password changes, API-token minting/revocation and account destruction —
@@ -723,8 +774,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route("/api/admin/llm/stats", get(llm_guard::admin_llm_stats))
         .route(
             "/api/admin/settings/guest-registration",
-            get(handlers::admin_get_guest_registration)
-                .put(handlers::admin_set_guest_registration),
+            get(handlers::admin_get_guest_registration).put(handlers::admin_set_guest_registration),
+        )
+        .route(
+            "/api/admin/oauth-clients",
+            get(crate::auth::oidc_provider::admin_list_clients)
+                .post(crate::auth::oidc_provider::admin_upsert_client),
+        )
+        .route(
+            "/api/admin/oauth-clients/:client_id",
+            delete(crate::auth::oidc_provider::admin_delete_client),
         )
         .route_layer(middleware::from_fn(require_admin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
@@ -1339,6 +1398,8 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let mut router = Router::new()
         .merge(docs_routes)
         .merge(auth_public_routes)
+        .merge(oidc_provider_public_routes)
+        .merge(oidc_provider_authorize_routes)
         .merge(auth_sensitive_routes)
         .merge(auth_protected_routes)
         .merge(admin_routes)
@@ -1790,6 +1851,9 @@ pub async fn run(
         );
     }
 
+    // Declarative OIDC-client seed for infra-as-code deployments (idempotent).
+    crate::auth::oidc_provider::seed_clients_from_env(&auth_db, &jwt_config.secret);
+
     // Hold a flush handle for graceful shutdown — `store` is moved into AppState below.
     let shutdown_store = store.clone();
     let state = AppState {
@@ -1805,6 +1869,18 @@ pub async fn run(
         oauth_sessions: crate::auth::oauth::new_session_store(),
         passkey_sessions: crate::auth::passkey::new_session_store(),
         auth_ext,
+        // OIDC-provider keys: generated once, persisted encrypted. Fail-soft —
+        // a broken key store 503s the provider endpoints, nothing else.
+        oidc_provider: match crate::auth::oidc_provider::ProviderKeys::load_or_generate(
+            &auth_db,
+            &jwt_config.secret,
+        ) {
+            Ok(k) => Some(Arc::new(k)),
+            Err(e) => {
+                tracing::warn!("OIDC provider keys unavailable: {e}");
+                None
+            }
+        },
         query_timeout_secs,
         write_timeout_secs,
         secure_cookies,

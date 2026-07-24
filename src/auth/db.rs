@@ -238,6 +238,20 @@ fn parse_run_row(r: RunRow) -> anyhow::Result<ShaclValidationRun> {
 /// Column order: id(0), name(1), slug(2), description(3), created_at(4), image_key(5),
 ///   homepage(6), identifier(7), contact_name(8), contact_email(9), contact_url(10), org_type(11),
 ///   parent_org_id(12), banner_key(13).
+fn map_oidc_client_row(row: &rusqlite::Row) -> rusqlite::Result<OidcClient> {
+    let redirect_uris_json: String = row.get(2)?;
+    let secret_enc: Option<String> = row.get(4)?;
+    Ok(OidcClient {
+        client_id: row.get(0)?,
+        name: row.get(1)?,
+        redirect_uris: serde_json::from_str(&redirect_uris_json).unwrap_or_default(),
+        public: row.get::<_, i64>(3)? != 0,
+        has_secret: secret_enc.is_some(),
+        secret_enc,
+        created_at: row.get(5)?,
+    })
+}
+
 fn map_org_row(row: &rusqlite::Row) -> rusqlite::Result<Organisation> {
     Ok(Organisation {
         id: row.get(0)?,
@@ -956,6 +970,58 @@ impl AuthDb {
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            -- ── OIDC provider (this store as the suite's identity provider) ──
+            -- Registered relying-party clients (SPAs and services signing users
+            -- in AGAINST this store; distinct from oauth_providers = upstream
+            -- IdPs this store signs users in WITH).
+            CREATE TABLE IF NOT EXISTS oauth_clients (
+                client_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                redirect_uris TEXT NOT NULL,          -- JSON array, exact-match allowlist
+                public INTEGER NOT NULL DEFAULT 1,    -- 1 = PKCE-only SPA, 0 = confidential
+                secret_enc TEXT,                      -- AES-GCM blob (confidential only)
+                created_at TEXT NOT NULL
+            );
+            -- Single-use authorization codes (stored hashed; 10-minute lifetime).
+            CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+                code_hash TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                redirect_uri TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                nonce TEXT,
+                code_challenge TEXT NOT NULL,         -- PKCE S256 challenge
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0
+            );
+            -- Rotating refresh tokens for provider clients (hashed; single-use).
+            CREATE TABLE IF NOT EXISTS oauth_client_refresh_tokens (
+                token_hash TEXT PRIMARY KEY,
+                client_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            -- Remembered per-user consent (client_id x scope), so the consent
+            -- screen shows once per client unless the scope grows.
+            CREATE TABLE IF NOT EXISTS oauth_consents (
+                user_id TEXT NOT NULL,
+                client_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                granted_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, client_id)
+            );
+            -- The provider's signing keypair(s). The private key is AES-GCM
+            -- encrypted with the HKDF-derived key (see auth::secret); the JWK
+            -- column is the PUBLIC key as served by /oauth/jwks.
+            CREATE TABLE IF NOT EXISTS oauth_signing_keys (
+                kid TEXT PRIMARY KEY,
+                alg TEXT NOT NULL,
+                pkcs8_enc TEXT NOT NULL,
+                public_jwk TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
         ")?;
 
         // Additive column upgrades for databases created before the current schema.
@@ -1659,7 +1725,11 @@ impl AuthDb {
         )?;
         let rows = stmt
             .query_map([user_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -1680,10 +1750,267 @@ impl AuthDb {
         )?;
         let rows = stmt
             .query_map([user_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    // ─── OIDC provider: clients, codes, refresh tokens, consents, keys ────────
+
+    /// Create or update a relying-party client. `redirect_uris` is stored as a
+    /// JSON array (exact-match allowlist); `secret_enc` is the AES-GCM blob for
+    /// confidential clients (None clears none — pass through what you have).
+    pub fn upsert_oauth_client(
+        &self,
+        client_id: &str,
+        name: &str,
+        redirect_uris: &[String],
+        public: bool,
+        secret_enc: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO oauth_clients (client_id, name, redirect_uris, public, secret_enc, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(client_id) DO UPDATE SET
+               name = excluded.name,
+               redirect_uris = excluded.redirect_uris,
+               public = excluded.public,
+               secret_enc = COALESCE(excluded.secret_enc, oauth_clients.secret_enc)",
+            params![
+                client_id,
+                name,
+                serde_json::to_string(redirect_uris)?,
+                public as i64,
+                secret_enc,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_oauth_client(&self, client_id: &str) -> anyhow::Result<Option<OidcClient>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT client_id, name, redirect_uris, public, secret_enc, created_at
+             FROM oauth_clients WHERE client_id = ?1",
+            [client_id],
+            map_oidc_client_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_oauth_clients(&self) -> anyhow::Result<Vec<OidcClient>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT client_id, name, redirect_uris, public, secret_enc, created_at
+             FROM oauth_clients ORDER BY client_id",
+        )?;
+        let rows = stmt
+            .query_map([], map_oidc_client_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_oauth_client(&self, client_id: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "DELETE FROM oauth_clients WHERE client_id = ?1",
+            [client_id],
+        )?;
+        conn.execute(
+            "DELETE FROM oauth_client_refresh_tokens WHERE client_id = ?1",
+            [client_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_oauth_code(
+        &self,
+        code_hash: &str,
+        client_id: &str,
+        user_id: &str,
+        redirect_uri: &str,
+        scope: &str,
+        nonce: Option<&str>,
+        code_challenge: &str,
+        expires_at: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO oauth_auth_codes
+               (code_hash, client_id, user_id, redirect_uri, scope, nonce, code_challenge, expires_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![code_hash, client_id, user_id, redirect_uri, scope, nonce, code_challenge, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically consume an authorization code: returns its row only the FIRST
+    /// time, and only while unexpired. (Single-use is enforced by the UPDATE's
+    /// used=0 guard, so two racing exchanges can't both win.)
+    pub fn consume_oauth_code(&self, code_hash: &str) -> anyhow::Result<Option<OidcAuthCode>> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE oauth_auth_codes SET used = 1
+             WHERE code_hash = ?1 AND used = 0 AND expires_at > ?2",
+            params![code_hash, now],
+        )?;
+        if n == 0 {
+            return Ok(None);
+        }
+        conn.query_row(
+            "SELECT client_id, user_id, redirect_uri, scope, nonce, code_challenge
+             FROM oauth_auth_codes WHERE code_hash = ?1",
+            [code_hash],
+            |r| {
+                Ok(OidcAuthCode {
+                    client_id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    redirect_uri: r.get(2)?,
+                    scope: r.get(3)?,
+                    nonce: r.get(4)?,
+                    code_challenge: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn insert_client_refresh_token(
+        &self,
+        token_hash: &str,
+        client_id: &str,
+        user_id: &str,
+        scope: &str,
+        expires_at: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO oauth_client_refresh_tokens (token_hash, client_id, user_id, scope, expires_at)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![token_hash, client_id, user_id, scope, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically take (delete + return) a refresh token — rotation makes every
+    /// refresh single-use; a replayed old token simply finds nothing.
+    pub fn take_client_refresh_token(
+        &self,
+        token_hash: &str,
+    ) -> anyhow::Result<Option<(String, String, String, String)>> {
+        let conn = self.pool.get()?;
+        let row = conn
+            .query_row(
+                "SELECT client_id, user_id, scope, expires_at
+                 FROM oauth_client_refresh_tokens WHERE token_hash = ?1",
+                [token_hash],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if row.is_some() {
+            conn.execute(
+                "DELETE FROM oauth_client_refresh_tokens WHERE token_hash = ?1",
+                [token_hash],
+            )?;
+        }
+        Ok(row)
+    }
+
+    /// Has the user already consented to this client for (at least) `scope`?
+    pub fn has_oauth_consent(&self, user_id: &str, client_id: &str, scope: &str) -> bool {
+        let granted: Option<String> = (|| {
+            let conn = self.pool.get().ok()?;
+            conn.query_row(
+                "SELECT scope FROM oauth_consents WHERE user_id = ?1 AND client_id = ?2",
+                params![user_id, client_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()?
+        })();
+        match granted {
+            Some(g) => {
+                let have: std::collections::HashSet<&str> = g.split_whitespace().collect();
+                scope.split_whitespace().all(|s| have.contains(s))
+            }
+            None => false,
+        }
+    }
+
+    pub fn record_oauth_consent(
+        &self,
+        user_id: &str,
+        client_id: &str,
+        scope: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO oauth_consents (user_id, client_id, scope, granted_at)
+             VALUES (?1,?2,?3,?4)
+             ON CONFLICT(user_id, client_id) DO UPDATE SET
+               scope = excluded.scope, granted_at = excluded.granted_at",
+            params![user_id, client_id, scope, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_signing_key(&self) -> anyhow::Result<Option<(String, String, String, String)>> {
+        let conn = self.pool.get()?;
+        conn.query_row(
+            "SELECT kid, alg, pkcs8_enc, public_jwk FROM oauth_signing_keys
+             ORDER BY created_at DESC LIMIT 1",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn insert_signing_key(
+        &self,
+        kid: &str,
+        alg: &str,
+        pkcs8_enc: &str,
+        public_jwk: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "INSERT INTO oauth_signing_keys (kid, alg, pkcs8_enc, public_jwk, created_at)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                kid,
+                alg,
+                pkcs8_enc,
+                public_jwk,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
     }
 
     // ─── App settings (runtime-changeable admin toggles) ──────────────────────
@@ -1692,9 +2019,11 @@ impl AuthDb {
     pub fn get_app_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
         let conn = self.pool.get()?;
         let v = conn
-            .query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |r| r.get::<_, String>(0),
+            )
             .optional()?;
         Ok(v)
     }

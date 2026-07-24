@@ -57,13 +57,22 @@ mod tests {
             .auth_db
             .create_organisation("org-1", "Org A", "org-a", None, None)
             .unwrap();
-        st.auth_db.add_org_member(&uid, &org.id, Role::Member).unwrap();
-        let group = st.auth_db.create_group("grp-1", &org.id, "Team 1", None).unwrap();
-        st.auth_db.add_group_member(&uid, &group.id, Role::Member).unwrap();
+        st.auth_db
+            .add_org_member(&uid, &org.id, Role::Member)
+            .unwrap();
+        let group = st
+            .auth_db
+            .create_group("grp-1", &org.id, "Team 1", None)
+            .unwrap();
+        st.auth_db
+            .add_group_member(&uid, &group.id, Role::Member)
+            .unwrap();
 
         let (s, body) = get_json(&st, "/api/auth/me", Some(&tok)).await;
         assert_eq!(s, StatusCode::OK, "{body}");
-        let orgs = body["organisations"].as_array().expect("organisations array");
+        let orgs = body["organisations"]
+            .as_array()
+            .expect("organisations array");
         assert_eq!(orgs.len(), 1, "{body}");
         assert_eq!(orgs[0]["slug"], "org-a");
         assert_eq!(orgs[0]["role"], "member");
@@ -117,30 +126,43 @@ mod tests {
             .unwrap();
 
         // Owner: full control of their private dataset.
-        let (s, body) =
-            get_json(&st, &format!("/api/datasets/{}/permissions/me", private.id), Some(&owner_tok))
-                .await;
+        let (s, body) = get_json(
+            &st,
+            &format!("/api/datasets/{}/permissions/me", private.id),
+            Some(&owner_tok),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK, "{body}");
         assert_eq!(body["read"], true);
         assert_eq!(body["write"], true);
         assert_eq!(body["manage"], true);
 
         // Unrelated user: the private dataset is indistinguishable from absent.
-        let (s, _) =
-            get_json(&st, &format!("/api/datasets/{}/permissions/me", private.id), Some(&other_tok))
-                .await;
+        let (s, _) = get_json(
+            &st,
+            &format!("/api/datasets/{}/permissions/me", private.id),
+            Some(&other_tok),
+        )
+        .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
 
         // System admin bypass: full access without any grant.
-        let (s, body) =
-            get_json(&st, &format!("/api/datasets/{}/permissions/me", private.id), Some(&admin_tok))
-                .await;
+        let (s, body) = get_json(
+            &st,
+            &format!("/api/datasets/{}/permissions/me", private.id),
+            Some(&admin_tok),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(body["manage"], true);
 
         // Public dataset, anonymous: readable, never writable.
-        let (s, body) =
-            get_json(&st, &format!("/api/datasets/{}/permissions/me", public.id), None).await;
+        let (s, body) = get_json(
+            &st,
+            &format!("/api/datasets/{}/permissions/me", public.id),
+            None,
+        )
+        .await;
         assert_eq!(s, StatusCode::OK, "{body}");
         assert_eq!(body["read"], true);
         assert_eq!(body["write"], false);

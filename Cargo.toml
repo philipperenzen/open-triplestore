@@ -147,6 +147,8 @@ ipnet = "2"
 # LRU cache for property path memoisation (W4-22)
 lru = "0.16"
 jsonwebtoken = "9"
+# ES256 keypair generation for the OIDC provider (already jsonwebtoken's verifier backend).
+ring = "0.17"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }

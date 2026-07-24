@@ -1792,7 +1792,7 @@
       "providerTypeSaml": "SAML 2.0",
       "clientId": "Client ID",
       "clientIdPlaceholder": "Application (client) ID",
-      "clientSecret": "Client Secret",
+      "clientSecret": "Client secret",
       "clientSecretKeep": "(leave blank to keep existing)",
       "discoveryUrl": "Discovery URL",
       "discoveryUrlHint": "(OIDC well-known endpoint)",
@@ -1894,7 +1894,18 @@
       "guestRegTurnOn": "Enable guest self-registration",
       "guestRegTurnOff": "Disable guest self-registration",
       "guestSweptEnabled": "Re-enabled {n} guest account(s).",
-      "guestSweptDisabled": "Disabled {n} guest account(s) — they'll see \"Guest access has been disabled by the administrator\" at sign-in."
+      "guestSweptDisabled": "Disabled {n} guest account(s) — they'll see \"Guest access has been disabled by the administrator\" at sign-in.",
+      "tabClients": "Sign-in apps",
+      "clientsHint": "Apps that sign their users in AGAINST this store (OIDC provider): the OTL Viewer, Validation platform and Form app. Each client lists its exact redirect URLs; public clients use PKCE, confidential ones a secret. Clients can also be seeded via OAUTH_CLIENTS_JSON.",
+      "clientsEmpty": "No sign-in apps registered yet.",
+      "clientPublic": "Public client (PKCE)",
+      "clientConfidential": "Confidential client",
+      "clientHasSecret": "secret configured",
+      "newClient": "Register app",
+      "clientName": "Display name",
+      "clientRedirects": "Redirect URLs (one per line)",
+      "clientPublicLabel": "Public client (browser app, PKCE — no secret)",
+      "saveClient": "Save app"
     },
     "apiDocs": {
       "title": "API documentation",
@@ -2803,6 +2814,17 @@
       "recommendAlternatives": "Alternatives",
       "recommendNone": "no match",
       "attribution": "Vocabulary metadata and contents from"
+    },
+    "oauthAuthorize": {
+      "missingParams": "This sign-in link is incomplete (missing client_id or redirect_uri).",
+      "unsupportedResponseType": "Only the authorization-code flow is supported.",
+      "badRequestTitle": "Invalid sign-in request",
+      "errorTitle": "Sign-in failed",
+      "consentTitle": "Allow {client} to sign you in?",
+      "consentBody": "{client} wants to use your account ({username}) on this store. It will see your username, email and memberships.",
+      "approve": "Allow",
+      "deny": "Cancel",
+      "redirecting": "Returning to the app…"
     }
   },
   "toast": {

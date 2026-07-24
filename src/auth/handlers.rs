@@ -1360,7 +1360,10 @@ pub async fn me(
     let mut body = serde_json::to_value(&resp)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(obj) = body.as_object_mut() {
-        obj.insert("organisations".into(), serde_json::Value::Array(organisations));
+        obj.insert(
+            "organisations".into(),
+            serde_json::Value::Array(organisations),
+        );
         obj.insert("groups".into(), serde_json::Value::Array(groups));
     }
     Ok(Json(body))
@@ -1581,7 +1584,9 @@ pub async fn admin_set_guest_registration(
     b.request_id = audit::request_id_from_headers(&headers);
     audit_log.log(b);
 
-    Ok(Json(serde_json::json!({ "enabled": req.enabled, "guests_swept": swept })))
+    Ok(Json(
+        serde_json::json!({ "enabled": req.enabled, "guests_swept": swept }),
+    ))
 }
 
 /// POST /api/auth/verify-email — redeem an emailed confirmation link.

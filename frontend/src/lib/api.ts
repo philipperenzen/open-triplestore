@@ -833,6 +833,18 @@ export const adminLlmRequests = (opts: { limit?: number; offset?: number; status
 export const adminLlmStats = () =>
   request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
 
+// ─── OIDC provider (this store as the suite's identity provider) ─────────────
+// decision: 'check' → { client_name, scope, requires_consent };
+// decision: 'approve' → { redirect_to } (single-use code minted).
+export const oauthAuthorize = (body) =>
+  request('POST', '/api/oauth/authorize', body);
+export const adminListOauthClients = () =>
+  request('GET', '/api/admin/oauth-clients');
+export const adminUpsertOauthClient = (body) =>
+  request('POST', '/api/admin/oauth-clients', body);
+export const adminDeleteOauthClient = (clientId) =>
+  request('DELETE', `/api/admin/oauth-clients/${encodeURIComponent(clientId)}`);
+
 // ─── Admin: instance settings (admin only; server enforces) ──────────────────
 export const adminGetGuestRegistration = () =>
   request('GET', '/api/admin/settings/guest-registration'); // { enabled }

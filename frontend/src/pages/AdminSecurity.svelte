@@ -14,6 +14,7 @@
     listTripleSecurityLabels, createTripleSecurityLabel, deleteTripleSecurityLabel,
     browseGraphs, adminListUsers, listOrganisations,
     adminGetGuestRegistration, adminSetGuestRegistration,
+    adminListOauthClients, adminUpsertOauthClient, adminDeleteOauthClient,
   } from '../lib/api.js';
 
   // ── Tab state ────────────────────────────────────────────────────────────────
@@ -38,6 +39,46 @@
       alert(e.message);
     }
     guestRegBusy = false;
+  }
+
+  // ── OIDC relying-party clients (apps signing in against this store) ─────────
+  let oidcClients = null;      // null = not loaded
+  let clientForm = { client_id: '', name: '', redirect_uris: '', public: true, secret: '' };
+  let clientBusy = false;
+  let clientError = '';
+
+  async function loadOidcClients() {
+    try { oidcClients = await adminListOauthClients(); } catch (e) { alert(e.message); }
+  }
+
+  async function saveOidcClient() {
+    clientBusy = true;
+    clientError = '';
+    try {
+      const uris = clientForm.redirect_uris.split(/[\n,\s]+/).map((u) => u.trim()).filter(Boolean);
+      const body = {
+        client_id: clientForm.client_id.trim(),
+        name: clientForm.name.trim() || clientForm.client_id.trim(),
+        redirect_uris: uris,
+        public: clientForm.public,
+      };
+      if (!clientForm.public && clientForm.secret.trim()) body.secret = clientForm.secret.trim();
+      await adminUpsertOauthClient(body);
+      clientForm = { client_id: '', name: '', redirect_uris: '', public: true, secret: '' };
+      await loadOidcClients();
+    } catch (e) {
+      clientError = e.message;
+    }
+    clientBusy = false;
+  }
+
+  async function removeOidcClient(id) {
+    try {
+      await adminDeleteOauthClient(id);
+      await loadOidcClients();
+    } catch (e) {
+      alert(e.message);
+    }
   }
 
   // ── OAuth Providers ───────────────────────────────────────────────────────────
@@ -299,6 +340,7 @@
     showGraphForm = false;
     showTripleForm = false;
     if (tab === 'registration' && guestReg === null) loadGuestReg();
+    if (tab === 'clients' && oidcClients === null) loadOidcClients();
   }
 </script>
 
@@ -330,7 +372,76 @@
       on:click={() => switchTab('registration')}>
       <UserPlus size={15} /> {$t('pages.adminSecurity.tabRegistration')}
     </button>
+    <button class="tab" class:active={activeTab === 'clients'} role="tab"
+      on:click={() => switchTab('clients')}>
+      <Shield size={15} /> {$t('pages.adminSecurity.tabClients')}
+    </button>
   </div>
+
+  <!-- ── OIDC clients (apps signing users in against this store) ── -->
+  {#if activeTab === 'clients'}
+    <section class="tab-panel">
+      <div class="panel-header">
+        <p class="hint">{$t('pages.adminSecurity.clientsHint')}</p>
+      </div>
+      {#if oidcClients === null}
+        <p class="hint"><Loader2 size={14} class="spin" /> {$t('common.loading')}</p>
+      {:else}
+        {#if oidcClients.length === 0}
+          <p class="hint">{$t('pages.adminSecurity.clientsEmpty')}</p>
+        {/if}
+        {#each oidcClients as c (c.client_id)}
+          <div class="form-card">
+            <div class="panel-header">
+              <h3>{c.name} <code>{c.client_id}</code></h3>
+              <button class="btn btn-sm btn-danger" on:click={() => removeOidcClient(c.client_id)}>
+                <Trash2 size={14} /> {$t('common.delete')}
+              </button>
+            </div>
+            <p class="hint">
+              {c.public ? $t('pages.adminSecurity.clientPublic') : $t('pages.adminSecurity.clientConfidential')}
+              {#if c.has_secret}· {$t('pages.adminSecurity.clientHasSecret')}{/if}
+            </p>
+            <p class="hint">{c.redirect_uris.join(' · ')}</p>
+          </div>
+        {/each}
+        <div class="form-card">
+          <h3>{$t('pages.adminSecurity.newClient')}</h3>
+          {#if clientError}<p class="error">{clientError}</p>{/if}
+          <div class="form-grid">
+            <label>
+              <span>{$t('pages.adminSecurity.clientId')}</span>
+              <input bind:value={clientForm.client_id} placeholder="otl-viewer" />
+            </label>
+            <label>
+              <span>{$t('pages.adminSecurity.clientName')}</span>
+              <input bind:value={clientForm.name} placeholder="OTL Viewer" />
+            </label>
+          </div>
+          <label>
+            <span>{$t('pages.adminSecurity.clientRedirects')}</span>
+            <textarea rows="2" bind:value={clientForm.redirect_uris}
+              placeholder="http://localhost:5190/auth/callback"></textarea>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" bind:checked={clientForm.public} />
+            <span>{$t('pages.adminSecurity.clientPublicLabel')}</span>
+          </label>
+          {#if !clientForm.public}
+            <label>
+              <span>{$t('pages.adminSecurity.clientSecret')}</span>
+              <input type="password" bind:value={clientForm.secret} autocomplete="new-password" />
+            </label>
+          {/if}
+          <button class="btn btn-sm" disabled={clientBusy || !clientForm.client_id.trim() || !clientForm.redirect_uris.trim()}
+            on:click={() => void saveOidcClient()}>
+            {#if clientBusy}<Loader2 size={14} class="spin" />{/if}
+            {$t('pages.adminSecurity.saveClient')}
+          </button>
+        </div>
+      {/if}
+    </section>
+  {/if}
 
   <!-- ── Registration (guest self-registration toggle) ── -->
   {#if activeTab === 'registration'}

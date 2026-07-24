@@ -207,7 +207,10 @@ mod tests {
         let (s, _) = send(&st, Method::GET, "/api/auth/me", Some(&guest_tok), None).await;
         assert_eq!(s, StatusCode::OK);
         let inactive = st.auth_db.get_user_by_id(&guest2).unwrap().unwrap();
-        assert!(!inactive.is_active, "individually-disabled guest must stay disabled");
+        assert!(
+            !inactive.is_active,
+            "individually-disabled guest must stay disabled"
+        );
     }
 
     #[tokio::test]

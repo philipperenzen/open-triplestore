@@ -785,6 +785,37 @@ pub struct TripleSecurityLabel {
 
 // ─── OAuth / SSO Provider ─────────────────────────────────────────────────────
 
+/// A relying-party client of THIS store's OIDC provider (the suite apps that
+/// sign users in against the store). Distinct from [`OauthProvider`] — the
+/// upstream IdPs this store can sign users in WITH.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcClient {
+    pub client_id: String,
+    pub name: String,
+    /// Exact-match redirect allowlist.
+    pub redirect_uris: Vec<String>,
+    /// true = public SPA (PKCE only, no secret); false = confidential.
+    pub public: bool,
+    /// Whether a client secret is configured (the secret itself never leaves
+    /// the server).
+    pub has_secret: bool,
+    /// AES-GCM blob of the confidential client's secret (never serialized).
+    #[serde(skip)]
+    pub secret_enc: Option<String>,
+    pub created_at: String,
+}
+
+/// A consumed authorization-code row (the exchangeable state of one sign-in).
+#[derive(Debug, Clone)]
+pub struct OidcAuthCode {
+    pub client_id: String,
+    pub user_id: String,
+    pub redirect_uri: String,
+    pub scope: String,
+    pub nonce: Option<String>,
+    pub code_challenge: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct OauthProvider {
     pub id: String,

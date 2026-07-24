@@ -4147,6 +4147,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "reqwest",
+ "ring",
  "rstar 0.13.0",
  "rusqlite",
  "samael",
