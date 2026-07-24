@@ -63,6 +63,10 @@ struct ManifestDoc {
     organisation: OrgDoc,
     #[serde(default)]
     datasets: Vec<DatasetDoc>,
+    /// `[prefixes]` table: prefix label → namespace IRI, seeded into the
+    /// server's prefix registry (label/IRI validation happens at apply time).
+    #[serde(default)]
+    prefixes: std::collections::HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -221,6 +225,7 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
             description: doc.organisation.description,
         },
         datasets,
+        prefixes: doc.prefixes,
     })
 }
 
