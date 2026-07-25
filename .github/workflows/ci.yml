@@ -109,7 +109,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      # Plugin crates (plugins/api, plugins/hello — see docs/plugins.md) are
+      # Plugin crates (plugins/api, plugins/hello, plugins/accounts-dashboard —
+      # see docs/plugins.md) are
       # deliberately independent of the main crate (no dependency on it — see
       # ots-plugin-api's crate docs for why), so they get their own lightweight
       # job: no GEOS/SFCGAL/libxmlsec system deps, no giant feature matrix. This
@@ -117,10 +118,10 @@ jobs:
       # features" guarantee — the "backend" job separately exercises plugin-hello
       # wired INTO the main crate via the `plugin-hello` feature.
       - name: Clippy (plugin crates)
-        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello --all-targets -- -D warnings
+        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard --all-targets -- -D warnings
 
       - name: Build & test (plugin crates)
-        run: cargo test -p ots-plugin-api -p ots-plugin-hello --locked
+        run: cargo test -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard --locked
 
   conformance:
     name: Conformance suites

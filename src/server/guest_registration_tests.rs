@@ -11,8 +11,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use axum::body::Body;
     use axum::http::{header, Method, Request, StatusCode};
     use http_body_util::BodyExt as _;

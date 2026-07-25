@@ -23,13 +23,7 @@ mod tests {
     fn state_with_client() -> AppState {
         let st = AppState::test_default_with_store(crate::store::TripleStore::in_memory().unwrap());
         st.auth_db
-            .upsert_oauth_client(
-                "web-app",
-                "Web App",
-                &[REDIRECT.to_string()],
-                true,
-                None,
-            )
+            .upsert_oauth_client("web-app", "Web App", &[REDIRECT.to_string()], true, None)
             .unwrap();
         st
     }
@@ -369,8 +363,7 @@ mod tests {
         .await;
         let refresh1 = body["refresh_token"].as_str().unwrap().to_string();
 
-        let form =
-            format!("grant_type=refresh_token&refresh_token={refresh1}&client_id=web-app");
+        let form = format!("grant_type=refresh_token&refresh_token={refresh1}&client_id=web-app");
         let (s, body) = send(
             &st,
             Method::POST,
