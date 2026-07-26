@@ -4,7 +4,7 @@
     listDatasets, validateDataset, updateDatasetShacl, getDataset, getOrganisation,
     listAccessibleShapeGraphs, listOrganisations,
     getLatestValidationRun, getValidationHistory, getValidationRun, listLatestValidationRuns,
-    listPublicUsers,
+    listPublicUsers, getGeoStats,
   } from '../lib/api.js';
   import { t } from 'svelte-i18n';
   import { Check, X as XIcon, AlertTriangle, Loader2, Play, ShieldCheck, FileWarning, Info, PlayCircle, Database, Lock, History, FileCode, Clock } from 'lucide-svelte';
@@ -194,6 +194,21 @@
   $: selectedDs = datasets.find(d => d.id === selectedDataset);
   $: activeResult = selectedDataset ? datasetStatus[selectedDataset]?.result : null;
   $: activeStatus = selectedDataset ? datasetStatus[selectedDataset] : null;
+
+  // Whether the selected dataset has a map/3D viewer, so failing issues can offer
+  // a "Show in 3D" jump into DatasetViewer. Probed once per dataset (cheap).
+  let geoCap = {}; // datasetId -> boolean
+  async function ensureGeoCap(dsId) {
+    if (!dsId || dsId in geoCap) return;
+    geoCap[dsId] = false;
+    try {
+      const gs = await getGeoStats(dsId);
+      geoCap[dsId] = !!(gs?.has_coordinates || gs?.has_3d);
+      geoCap = geoCap;
+    } catch { /* viewer affordance simply stays hidden */ }
+  }
+  $: if (selectedDataset) ensureGeoCap(selectedDataset);
+  $: viewerEnabled = !!geoCap[selectedDataset];
 
   // dataset-shape-graphs now also lists datasets whose shapes come from Studio
   // bindings or shapes-role graphs (shapes_graph_iri may be null for those), so
@@ -394,7 +409,7 @@
               {/if}
             </div>
             {#if !activeResult.conforms}
-              <IssueResults results={activeResult.results} datasetName={selectedDs.name} />
+              <IssueResults results={activeResult.results} datasetName={selectedDs.name} datasetId={selectedDataset} {viewerEnabled} />
             {/if}
           {:else}
             <div class="placeholder">
