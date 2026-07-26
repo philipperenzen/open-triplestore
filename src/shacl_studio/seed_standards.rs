@@ -328,6 +328,78 @@ bot:ElementShape a sh:NodeShape ;
 "#,
     },
     StdEntry {
+        key: "ifc",
+        name: "IFC building model (BOT + ifcOWL)",
+        demo_path: "viewer-3d-demo/building-fzk",
+        run_inference: false,
+        ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix bot: <https://w3id.org/bot#> .
+@prefix props: <https://w3id.org/props#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+# Every BIM element lifted from an IFC file should keep a human-readable label,
+# exactly one stable IFC GlobalId, and reference its sub-elements by IRI so the
+# BOT topology stays navigable. A failing element can be opened straight in the
+# 3D viewer via its GlobalId.
+bot:IfcElementShape a sh:NodeShape ;
+   sh:targetClass bot:Element ;
+   sh:property [ sh:path rdfs:label ; sh:minCount 1 ;
+                 sh:message "Every IFC element should keep a human-readable rdfs:label." ] ;
+   sh:property [ sh:path props:ifcGuid ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:Literal ;
+                 sh:message "Every IFC element must carry exactly one IFC GlobalId (props:ifcGuid)." ] ;
+   sh:property [ sh:path bot:hasSubElement ; sh:nodeKind sh:IRI ;
+                 sh:message "bot:hasSubElement must reference a named (IRI) element." ] .
+"#,
+    },
+    StdEntry {
+        key: "geo3d",
+        name: "Geo & 3D data validation",
+        demo_path: "viewer-3d-demo/validation-3d",
+        run_inference: false,
+        ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+# (1) Every spatial feature must carry at least one geometry. (2) Any volumetric
+# POLYHEDRALSURFACE Z solid must have at least four faces to bound a closed volume
+# — reported against the OWNING feature (not the anonymous geometry node) so the
+# failing element can be opened and highlighted in the 3D viewer.
+geo:FeatureGeometryShape a sh:NodeShape ;
+   sh:targetClass geo:Feature ;
+   sh:property [ sh:path geo:hasGeometry ; sh:minCount 1 ;
+                 sh:message "Every spatial feature must carry at least one geometry." ] ;
+   sh:sparql [
+       a sh:SPARQLConstraint ;
+       sh:message "A POLYHEDRALSURFACE Z should have at least four faces to bound a closed solid." ;
+       sh:select """
+         SELECT $this ?value WHERE {
+           $this <http://www.opengis.net/ont/geosparql#hasGeometry> ?g .
+           ?g <http://www.opengis.net/ont/geosparql#asWKT> ?value .
+           FILTER(CONTAINS(UCASE(STR(?value)), \"POLYHEDRALSURFACE Z\"))
+           BIND((STRLEN(STR(?value)) - STRLEN(REPLACE(STR(?value), \"\\\\(\\\\(\", \"\"))) / 2 AS ?faces)
+           FILTER(?faces < 4)
+         }
+       """ ;
+   ] .
+"#,
+    },
+    StdEntry {
+        key: "file3d",
+        name: "3D file distribution metadata",
+        demo_path: "viewer-3d-demo/validation-3d",
+        run_inference: false,
+        ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dct: <http://purl.org/dc/terms/> .
+# A published 3D-model file distribution (glTF/GLB, IFC, CityJSON, …) must declare
+# its format/media type and a resolvable download URL, so a viewer knows what the
+# file is and where to load it from.
+dcat:Model3dDistributionShape a sh:NodeShape ;
+   sh:targetClass dcat:Distribution ;
+   sh:property [ sh:path dct:format ; sh:minCount 1 ;
+                 sh:message "A 3D file distribution must declare a dct:format (e.g. model/gltf-binary, application/x-step)." ] ;
+   sh:property [ sh:path dcat:downloadURL ; sh:minCount 1 ; sh:nodeKind sh:IRI ;
+                 sh:message "A 3D file distribution must declare a dcat:downloadURL." ] .
+"#,
+    },
+    StdEntry {
         key: "shaclcore",
         name: "SHACL Core",
         demo_path: "validation/shacl-data",

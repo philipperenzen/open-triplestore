@@ -28,9 +28,18 @@
     FileCode,
     SlidersHorizontal,
     Box,
+    Type,
+    Hash,
+    Calendar,
+    Link2,
+    ListChecks,
+    Database,
+    HelpCircle,
+    ChevronDown,
   } from 'lucide-svelte';
   import Select from './Select.svelte';
   import Combobox from './Combobox.svelte';
+  import { Link } from '../lib/router/index.js';
   import { t as i18nT } from 'svelte-i18n';
 
   /** Turtle source (two-way: parent binds shapesContent here). */
@@ -40,6 +49,13 @@
   /** Called with regenerated Turtle whenever the model is edited. */
   export let onChange = (_ttl) => {};
   export let loading = false;
+  /**
+   * Binding target IRIs the containing shape graph is applied to (datasets /
+   * named graphs) — surfaced per shape as a "Used by" line so authors can see
+   * where a shape actually runs. Empty in standalone / dataset-shapes mode.
+   * @type {string[]}
+   */
+  export let usageTargets = [];
 
   const XSD = 'http://www.w3.org/2001/XMLSchema#';
   const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
@@ -197,8 +213,24 @@
     shape.targets.splice(i, 1);
     touch();
   }
-  function addProperty(shape) {
-    shape.properties = [...shape.properties, { _id: ++_seq, _vt: 'literal', path: '', c: { datatype: XSD + 'string' } }];
+  // Quick-start property templates — the common shapes an author reaches for,
+  // so adding a property is a one-click choice with sensible constraints rather
+  // than an empty string field. `make()` returns the constraint object `c`.
+  const PROPERTY_TEMPLATES = [
+    { id: 'text', icon: Type, _vt: 'literal', make: () => ({ datatype: XSD + 'string' }) },
+    { id: 'requiredText', icon: Type, _vt: 'literal', make: () => ({ datatype: XSD + 'string', minCount: 1 }) },
+    { id: 'number', icon: Hash, _vt: 'literal', make: () => ({ datatype: XSD + 'integer' }) },
+    { id: 'date', icon: Calendar, _vt: 'literal', make: () => ({ datatype: XSD + 'date' }) },
+    { id: 'relation', icon: Link2, _vt: 'class', make: () => ({ class: '', nodeKind: SH + 'IRI' }) },
+    { id: 'enumeration', icon: ListChecks, _vt: 'any', make: () => ({ in: [] }) },
+  ];
+
+  function addProperty(shape, tpl) {
+    const t = tpl || PROPERTY_TEMPLATES[0];
+    shape.properties = [
+      ...shape.properties,
+      { _id: ++_seq, _vt: t._vt, path: '', c: t.make() },
+    ];
     touch();
   }
   function removeProperty(shape, i) {
@@ -209,6 +241,34 @@
   let expanded = {}; // property _id → advanced section open
   function toggleAdvanced(id) {
     expanded = { ...expanded, [id]: !expanded[id] };
+  }
+
+  // Which shape's "add property" menu is open (by _id), and whether the
+  // relation-types legend is expanded.
+  let addMenuFor = null;
+  let showHelp = false;
+
+  // ── Per-shape "Used by" ────────────────────────────────────────────────────
+  // Bindings are graph-wide, so every shape shares the applied-to set; we still
+  // render it per shape so the answer to "where does THIS shape run?" is local.
+  function shortIriTail(iri) {
+    const m = String(iri).match(/[^#/]+$/);
+    return m ? m[0] : String(iri);
+  }
+  function parseUsageTarget(iri) {
+    const s = String(iri);
+    const g = s.match(/\/dataset\/([^/]+)\/graphs\/(.+)$/);
+    if (g) return { datasetId: g[1], label: `${g[1]} / ${g[2]}` };
+    const d = s.match(/\/dataset\/([^/]+)$/);
+    if (d) return { datasetId: d[1], label: d[1] };
+    return { datasetId: null, label: shortIriTail(s) };
+  }
+  // Live instance count for a class target in the current dataset scope (only
+  // available in dataset mode, where modelContext carries per-class counts).
+  function classCountOf(iri) {
+    if (!iri || !modelContext) return null;
+    const hit = (modelContext.classes || []).find((c) => c.iri === iri);
+    return hit && hit.count != null ? hit.count : null;
   }
 
   const STD_SEVERITIES = [SEVERITY_VIOLATION, SEVERITY_WARNING, SEVERITY_INFO];
@@ -332,7 +392,8 @@
   }
 </script>
 
-<div class="builder">
+<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+<div class="builder" on:click={() => (addMenuFor = null)}>
   {#if loading}
     <div class="state"><FileCode size={20} /> {$i18nT('system.loading')}</div>
   {:else if model.parseError}
@@ -346,6 +407,46 @@
         <Lock size={14} />
         <!-- eslint-disable-next-line svelte/no-at-html-tags -- trusted static i18n string -->
         <span>{@html $i18nT('components.shapeBuilder.preservedBanner')}</span>
+      </div>
+    {/if}
+
+    <!-- Relation / value / target legend — plain-language help, collapsed by default. -->
+    {#if editable}
+      <div class="legend">
+        <button class="legend-toggle" class:open={showHelp} on:click={() => (showHelp = !showHelp)} aria-expanded={showHelp}>
+          <HelpCircle size={13} /> {$i18nT('components.shapeBuilder.helpToggle')}
+          <ChevronDown size={13} class="legend-chev" />
+        </button>
+        {#if showHelp}
+          <div class="legend-body">
+            <div class="legend-col">
+              <h5>{$i18nT('components.shapeBuilder.helpTargetsTitle')}</h5>
+              <dl>
+                <dt>sh:targetClass</dt><dd>{$i18nT('components.shapeBuilder.helpTargetClass')}</dd>
+                <dt>sh:targetNode</dt><dd>{$i18nT('components.shapeBuilder.helpTargetNode')}</dd>
+                <dt>sh:targetSubjectsOf</dt><dd>{$i18nT('components.shapeBuilder.helpTargetSubjectsOf')}</dd>
+                <dt>sh:targetObjectsOf</dt><dd>{$i18nT('components.shapeBuilder.helpTargetObjectsOf')}</dd>
+              </dl>
+            </div>
+            <div class="legend-col">
+              <h5>{$i18nT('components.shapeBuilder.helpValuesTitle')}</h5>
+              <dl>
+                <dt>{$i18nT('components.shapeBuilder.valueLiteral')}</dt><dd>{$i18nT('components.shapeBuilder.helpValueLiteral')}</dd>
+                <dt>{$i18nT('components.shapeBuilder.valueClass')}</dt><dd>{$i18nT('components.shapeBuilder.helpValueClass')}</dd>
+                <dt>IRI</dt><dd>{$i18nT('components.shapeBuilder.helpValueIri')}</dd>
+                <dt>{$i18nT('components.shapeBuilder.valueBlankNode')}</dt><dd>{$i18nT('components.shapeBuilder.helpValueBlank')}</dd>
+              </dl>
+            </div>
+            <div class="legend-col">
+              <h5>{$i18nT('components.shapeBuilder.helpRelationsTitle')}</h5>
+              <dl>
+                <dt>sh:node</dt><dd>{$i18nT('components.shapeBuilder.helpRelationNode')}</dd>
+                <dt>sh:qualifiedValueShape</dt><dd>{$i18nT('components.shapeBuilder.helpRelationQualified')}</dd>
+                <dt>sh:class</dt><dd>{$i18nT('components.shapeBuilder.helpRelationClass')}</dd>
+              </dl>
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -421,6 +522,10 @@
                     on:change={(e) => { tgt.value = expand(e.detail); touch(); }}
                   />
                   <button class="icon-btn" on:click={() => removeTarget(shape, ti)} title={$i18nT('components.shapeBuilder.removeTarget')}><Trash2 size={12} /></button>
+                  {#if tgt.kind === 'class'}
+                    {@const n = classCountOf(tgt.value)}
+                    {#if n != null}<span class="count-chip" title={$i18nT('components.shapeBuilder.matchingInstancesTitle')}>{$i18nT('components.shapeBuilder.matchingInstances', { values: { count: n } })}</span>{/if}
+                  {/if}
                 </div>
               {/each}
             {:else}
@@ -438,6 +543,22 @@
               <button class="btn btn-xs btn-ghost add-target" on:click={() => addTarget(shape)}><Plus size={11} /> {$i18nT('components.shapeBuilder.target')}</button>
             {/if}
           </div>
+
+          <!-- Used by — the datasets/graphs the shape graph (and thus this shape) runs against. -->
+          {#if usageTargets.length}
+            <div class="usage">
+              <span class="usage-label"><Link2 size={11} /> {$i18nT('components.shapeBuilder.usedByLabel')}</span>
+              {#each usageTargets.slice(0, 8) as u}
+                {@const ut = parseUsageTarget(u)}
+                {#if ut.datasetId}
+                  <Link to={`/datasets/${ut.datasetId}`} class="usage-link" title={u}><Database size={10} /> {ut.label}</Link>
+                {:else}
+                  <span class="usage-chip" title={u}>{ut.label}</span>
+                {/if}
+              {/each}
+              {#if usageTargets.length > 8}<span class="usage-chip">+{usageTargets.length - 8}</span>{/if}
+            </div>
+          {/if}
         </header>
 
         <!-- Properties -->
@@ -498,6 +619,7 @@
                     {:else if p._vt === 'class'}
                       <Combobox class="sb-grow" suggestions={classSuggestions} value={disp(p.c.class)} placeholder="ex:SomeClass" on:change={(e) => setIri(p.c, 'class', e.detail)} title={$i18nT('components.shapeBuilder.requiredClassTitle')} />
                     {/if}
+                    <span class="ctl-hint" title={$i18nT(`components.shapeBuilder.vtHint.${p._vt}`)}>{$i18nT(`components.shapeBuilder.vtHint.${p._vt}`)}</span>
                   </div>
                   <div class="ctl-group">
                     <span class="ctl-label">{$i18nT('components.shapeBuilder.cardinalityGroupLabel')}</span>
@@ -518,6 +640,7 @@
 
               {#if editable && expanded[p._id]}
                 <div class="adv">
+                  <div class="adv-section-label">{$i18nT('components.shapeBuilder.advSectionCardinalityRange')}</div>
                   <div class="adv-grid">
                     <label>{$i18nT('components.shapeBuilder.minCount')}<input type="number" min="0" value={p.c.minCount ?? ''} on:change={(e) => setNum(p.c, 'minCount', e.currentTarget.value)} /></label>
                     <label>{$i18nT('components.shapeBuilder.maxCount')}<input type="number" min="0" value={p.c.maxCount ?? ''} on:change={(e) => setNum(p.c, 'maxCount', e.currentTarget.value)} /></label>
@@ -538,6 +661,7 @@
                     <label class="wide">{$i18nT('components.shapeBuilder.nodeShapeLabel')}<Combobox suggestions={classSuggestions} value={disp(p.c.node)} placeholder="ex:AddressShape" on:change={(e) => setIri(p.c, 'node', e.detail)} /></label>
                   </div>
 
+                  <div class="adv-section-label">{$i18nT('components.shapeBuilder.advSectionStringEnum')}</div>
                   <div class="adv-grid">
                     <label class="wide">{$i18nT('components.shapeBuilder.allowedValues')}
                       <input value={(p.c.in || []).map((it) => (it.type === 'iri' ? disp(it.value) : `"${it.value}"`)).join(' ')}
@@ -551,6 +675,7 @@
                     <label class="check-wide"><input type="checkbox" checked={!!p.c.uniqueLang} on:change={(e) => { if (e.currentTarget.checked) p.c.uniqueLang = true; else delete p.c.uniqueLang; touch(); }} /> {$i18nT('components.shapeBuilder.uniqueLanguage')}</label>
                   </div>
 
+                  <div class="adv-section-label">{$i18nT('components.shapeBuilder.advSectionMetadata')}</div>
                   <div class="adv-grid">
                     <label class="wide">{$i18nT('components.shapeBuilder.labelName')}<input value={p.name ?? ''} on:change={(e) => setStr(p, 'name', e.currentTarget.value)} /></label>
                     <label>{$i18nT('components.shapeBuilder.severity')}
@@ -572,7 +697,28 @@
           {/each}
           {#if editable}
             <div class="props-foot">
-              <button class="btn btn-sm btn-ghost" on:click={() => addProperty(shape)}><Plus size={13} /> {$i18nT('components.shapeBuilder.property')}</button>
+              {#if shape.properties.length === 0}
+                <span class="props-empty">{$i18nT('components.shapeBuilder.noPropertiesHint')}</span>
+              {/if}
+              <div class="add-prop">
+                <button class="btn btn-sm add-prop-btn" class:active={addMenuFor === shape._id} on:click|stopPropagation={() => (addMenuFor = addMenuFor === shape._id ? null : shape._id)}>
+                  <Plus size={13} /> {$i18nT('components.shapeBuilder.property')} <ChevronDown size={12} />
+                </button>
+                {#if addMenuFor === shape._id}
+                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+                  <div class="add-prop-menu" on:click|stopPropagation>
+                    <div class="add-prop-title">{$i18nT('components.shapeBuilder.addPropertyTitle')}</div>
+                    {#each PROPERTY_TEMPLATES as tpl}
+                      {@const Icon = tpl.icon}
+                      <button class="add-prop-item" on:click={() => { addProperty(shape, tpl); addMenuFor = null; }}>
+                        <Icon size={14} />
+                        <span class="add-prop-name">{$i18nT(`components.shapeBuilder.tpl.${tpl.id}`)}</span>
+                        <span class="add-prop-what">{$i18nT(`components.shapeBuilder.tplWhat.${tpl.id}`)}</span>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
             </div>
           {/if}
         </div>
@@ -673,6 +819,44 @@
   .chip-adv { background: #fee2e2; color: #991b1b; }
   .chip-closed { background: #f1f5f9; color: #475569; }
 
+  /* ── Relation/value/target legend ── */
+  .legend { border: 1px solid var(--line-soft); border-radius: 10px; background: var(--bg-soft); overflow: hidden; }
+  .legend-toggle { display: inline-flex; align-items: center; gap: 0.35rem; width: 100%; padding: 0.45rem 0.7rem; background: transparent; border: none; cursor: pointer; font-size: 0.78rem; font-weight: 600; color: var(--ink-600); }
+  .legend-toggle:hover { color: var(--ink-800); }
+  :global(.builder .legend-chev) { margin-left: auto; transition: transform 0.15s; }
+  .legend-toggle.open :global(.legend-chev) { transform: rotate(180deg); }
+  .legend-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem 1.25rem; padding: 0.4rem 0.85rem 0.85rem; border-top: 1px solid var(--line-soft); }
+  .legend-col h5 { margin: 0 0 0.35rem; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-400); }
+  .legend-col dl { margin: 0; display: grid; grid-template-columns: auto; gap: 0.3rem; }
+  .legend-col dt { font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; font-weight: 700; color: var(--brand-700); }
+  .legend-col dd { margin: 0 0 0.25rem; font-size: 0.74rem; line-height: 1.35; color: var(--ink-600); }
+
+  /* ── Per-shape "Used by" ── */
+  .usage { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.15rem; }
+  .usage-label { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-400); }
+  :global(.builder .usage-link) { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; text-decoration: none; }
+  :global(.builder .usage-link:hover) { border-color: #15803d; text-decoration: underline; }
+  .usage-chip { font-size: 0.72rem; font-weight: 500; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; }
+  .count-chip { font-size: 0.68rem; font-weight: 600; color: #0e7490; background: #ecfeff; border: 1px solid #a5f3fc; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+
+  /* ── Value-type hint ── */
+  .ctl-hint { font-size: 0.68rem; color: var(--ink-400); font-style: italic; max-width: 15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── Advanced section headings ── */
+  .adv-section-label { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-400); margin: 0.1rem 0 0.1rem; }
+  .adv-section-label:not(:first-child) { margin-top: 0.35rem; }
+
+  /* ── Add-property template menu ── */
+  .props-empty { font-size: 0.76rem; color: var(--ink-400); margin-right: 0.5rem; }
+  .add-prop { position: relative; display: inline-block; }
+  .add-prop-btn { display: inline-flex; align-items: center; gap: 0.3rem; }
+  .add-prop-menu { position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 40; width: 320px; max-width: 88vw; background: var(--bg-strong); border: 1px solid var(--line-soft); border-radius: 10px; box-shadow: 0 12px 30px rgba(15,23,42,0.18); padding: 0.35rem; }
+  .add-prop-title { font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-400); padding: 0.35rem 0.45rem 0.25rem; }
+  .add-prop-item { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 0.5rem; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 0.4rem 0.5rem; cursor: pointer; color: var(--ink-800); }
+  .add-prop-item:hover { background: var(--bg-accent-soft, #f0fdfa); border-color: var(--brand-300, #7ED6D0); }
+  .add-prop-name { font-size: 0.82rem; font-weight: 600; }
+  .add-prop-what { grid-column: 2; font-size: 0.72rem; color: var(--ink-500); line-height: 1.3; }
+
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */
   :global(:is([data-theme="dark"], .dark)) .state-warn { color: #fcd34d; }
   :global(:is([data-theme="dark"], .dark)) .banner { background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.35); color: #fcd34d; }
@@ -699,4 +883,12 @@
   :global(:is([data-theme="dark"], .dark)) .chip-sev-warning { background: rgba(245,158,11,0.18); color: #fcd34d; }
   :global(:is([data-theme="dark"], .dark)) .chip-sev-info { background: rgba(59,130,246,0.2); color: #93c5fd; }
   :global(:is([data-theme="dark"], .dark)) .chip-adv { background: rgba(239,68,68,0.18); color: #fca5a5; }
+  :global(:is([data-theme="dark"], .dark)) .legend { background: var(--bg-soft); }
+  :global(:is([data-theme="dark"], .dark)) .legend-col dt { color: var(--brand-700); }
+  :global(:is([data-theme="dark"], .dark)) .usage-chip,
+  :global(:is([data-theme="dark"], .dark) .builder .usage-link) { background: rgba(34,197,94,0.18); border-color: rgba(34,197,94,0.4); color: #86efac; }
+  :global(:is([data-theme="dark"], .dark)) .count-chip { background: rgba(34,211,238,0.14); border-color: rgba(34,211,238,0.35); color: #67e8f9; }
+  :global(:is([data-theme="dark"], .dark)) .add-prop-menu { background: var(--bg-strong); }
+  :global(:is([data-theme="dark"], .dark)) .add-prop-item { color: var(--ink-800); }
+  :global(:is([data-theme="dark"], .dark)) .add-prop-item:hover { background: var(--bg-accent-soft); border-color: var(--brand-300); }
 </style>

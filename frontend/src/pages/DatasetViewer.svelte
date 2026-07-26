@@ -236,6 +236,28 @@
   // multi-thousand-element building); phase 2 fetches the full feed (the
   // structure tree + every sub-element) in the background and swaps it in.
   let fullLoaded = false;
+
+  // Deep-link: `/datasets/:id/viewer?focus=<iri>` opens and frames a specific
+  // element — e.g. the "Show in 3D" action on a SHACL validation issue jumps
+  // straight to the offending building part. Applied once (as soon as the
+  // element appears in the feed); an unresolved IRI just leaves the viewer as-is.
+  let _focusIri = '';
+  let _focusApplied = false;
+  try {
+    _focusIri = new URLSearchParams(window.location.search).get('focus') || '';
+  } catch {
+    _focusIri = '';
+  }
+  function tryApplyFocus() {
+    if (!_focusIri || _focusApplied) return;
+    const el = elements.find((e) => e.id === _focusIri || e.ifc_guid === _focusIri);
+    if (!el) return;
+    _focusApplied = true;
+    open(el.id);
+    // Fly to it once the map component has had a chance to mount/initialise.
+    setTimeout(() => showOnMap(el.id), 400);
+  }
+
   async function load() {
     loading = true;
     error = '';
@@ -243,6 +265,7 @@
     try {
       const fast = await getViewerFeed(id, null, { located: true });
       elements = fast?.elements || [];
+      tryApplyFocus();
     } catch {
       /* fall through — the full feed below is the source of truth */
     }
@@ -259,6 +282,7 @@
       if (full?.elements) {
         treeInit = false; // re-seed the auto-expansion over the full hierarchy
         elements = full.elements;
+        tryApplyFocus(); // element may only appear in the full (non-located) feed
       }
     } catch (e) {
       if (!elements.length) error = e?.message || 'failed';

@@ -72,7 +72,7 @@
         {/if}
       </div>
     </Link>
-    <Link to="/datasets" class="kpi">
+    <Link to="/validation" class="kpi">
       <div class="kpi-icon kpi-icon-data"><Database size={20} /></div>
       <div class="kpi-body">
         <div class="kpi-value">{datasets.length}</div>

@@ -6,7 +6,7 @@
   import {
     listPipelines, listLatestPipelineRuns, getPipelineRun, runPipeline,
     listDatasets, listLatestValidationRuns, getLatestValidationRun, validateDataset,
-    myDatasetUsage,
+    myDatasetUsage, getGeoStats,
   } from '../lib/api.js';
   import { ShieldCheck, Check, X as XIcon, AlertTriangle, Clock, Workflow, Database, Loader2, ChevronRight, Play, RotateCw, FlaskConical, FileWarning, Info } from 'lucide-svelte';
   import { Link, navigate } from '../lib/router/index.js';
@@ -25,6 +25,26 @@
   let selected = null;              // { kind: 'pipeline'|'dataset', id, name, run, test? }
   let selectedReport = null;
   let selectedLoading = false;
+
+  // The dataset behind the selected report (a dataset target directly, or a
+  // single-dataset pipeline), so failing issues can offer a "Show in 3D" jump.
+  $: selectedDatasetId = selected
+    ? (selected.kind === 'dataset'
+        ? selected.id
+        : (selected.datasetIds && selected.datasetIds.length === 1 ? selected.datasetIds[0] : ''))
+    : '';
+  let geoCap = {}; // datasetId -> boolean (has a map/3D viewer)
+  async function ensureGeoCap(dsId) {
+    if (!dsId || dsId in geoCap) return;
+    geoCap[dsId] = false;
+    try {
+      const gs = await getGeoStats(dsId);
+      geoCap[dsId] = !!(gs?.has_coordinates || gs?.has_3d);
+      geoCap = geoCap;
+    } catch { /* affordance stays hidden */ }
+  }
+  $: if (selectedDatasetId) ensureGeoCap(selectedDatasetId);
+  $: viewerEnabled = !!geoCap[selectedDatasetId];
 
   // Active KPI filter: null | 'passed' | 'failed' | 'violations' | 'never'.
   let filter = null;
@@ -361,7 +381,7 @@
         {:else if selectedReport && selectedReport.conforms}
           <div class="report-ok"><Check size={20} /> <div><strong>{$i18nT('pages.shaclResults.dataConforms')}</strong><br><small>{$i18nT('pages.shaclResults.noIssuesForShapes')}</small></div></div>
         {:else if selectedReport && (selectedReport.results || []).length}
-          <IssueResults results={selectedReport.results} datasetName={selected.name} />
+          <IssueResults results={selectedReport.results} datasetName={selected.name} datasetId={selectedDatasetId} {viewerEnabled} />
         {:else}
           <div class="placeholder"><Info /> <p>{$i18nT('pages.shaclResults.noReportPayload')}</p></div>
         {/if}

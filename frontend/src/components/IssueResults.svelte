@@ -1,6 +1,6 @@
 <script>
   import { shortenIRI, downloadFile } from '../lib/rdf-utils.js';
-  import { Download, ClipboardCopy, Search, Filter, ChevronRight, ChevronDown, Info } from 'lucide-svelte';
+  import { Download, ClipboardCopy, Search, Filter, ChevronRight, ChevronDown, Info, Boxes } from 'lucide-svelte';
   import { toastSuccess, toastError } from '../lib/toast.ts';
   import { t } from 'svelte-i18n';
   import Select from './Select.svelte';
@@ -8,6 +8,13 @@
 
   export let results = [];
   export let datasetName = '';
+  /**
+   * When set (and the dataset has a map/3D viewer), each issue gets a
+   * "Show in 3D" action that opens the offending element in the dataset viewer,
+   * focused and highlighted. Left empty for non-spatial datasets.
+   */
+  export let datasetId = '';
+  export let viewerEnabled = false;
 
   const PAGE = 200; // items rendered per group before "show more"
 
@@ -191,6 +198,11 @@
                   <span class="sev-badge sev-{s}">{r.severity}</span>
                   <a class="focus-link" href={`/resource?iri=${encodeURIComponent(r.focus_node)}`} title={r.focus_node}>{shortenIRI(r.focus_node)}</a>
                   {#if r.path}<span class="issue-sep">·</span><span class="issue-path" title={r.path}>{shortenIRI(r.path)}</span>{/if}
+                  {#if viewerEnabled && datasetId && r.focus_node}
+                    <a class="show3d-link" href={`/datasets/${datasetId}/viewer?focus=${encodeURIComponent(r.focus_node)}`} target="_blank" rel="noopener" title={$t('components.issueResults.showIn3dTitle')}>
+                      <Boxes size={12} /> {$t('components.issueResults.showIn3d')}
+                    </a>
+                  {/if}
                 </div>
                 <div class="issue-message">{r.message}</div>
                 <div class="issue-foot">
@@ -257,6 +269,8 @@
   .sev-badge.sev-info { background: #dbeafe; color: #1e40af; }
   .focus-link { font-weight: 600; color: #2F7A8C; text-decoration: none; font-family: 'IBM Plex Mono', monospace; font-size: 0.82rem; }
   .focus-link:hover { text-decoration: underline; }
+  .show3d-link { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600; color: #0e7490; background: #ecfeff; border: 1px solid #a5f3fc; padding: 1px 8px; border-radius: 999px; text-decoration: none; }
+  .show3d-link:hover { border-color: #22d3ee; background: #cffafe; }
   .issue-sep { color: #cbd5e1; }
   .issue-path { font-family: 'IBM Plex Mono', monospace; color: #7c3aed; font-size: 0.8rem; }
   .issue-message { color: #334155; font-size: 0.9rem; line-height: 1.4; }
@@ -288,6 +302,8 @@
   :global(:is([data-theme="dark"], .dark)) .sev-badge.sev-info { background: rgba(59,130,246,0.2); color: #93c5fd; }
   :global(:is([data-theme="dark"], .dark)) .focus-link,
   :global(:is([data-theme="dark"], .dark)) .show-more { color: var(--brand-700); }
+  :global(:is([data-theme="dark"], .dark)) .show3d-link { color: #67e8f9; background: rgba(34,211,238,0.14); border-color: rgba(34,211,238,0.35); }
+  :global(:is([data-theme="dark"], .dark)) .show3d-link:hover { background: rgba(34,211,238,0.22); border-color: rgba(34,211,238,0.55); }
   :global(:is([data-theme="dark"], .dark)) .show-more:hover { background: var(--brand-100); border-color: var(--brand-300); }
   :global(:is([data-theme="dark"], .dark)) .issue-sep { color: var(--ink-400); }
   :global(:is([data-theme="dark"], .dark)) .issue-path { color: #c4b5fd; }

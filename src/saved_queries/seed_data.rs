@@ -591,6 +591,7 @@ static DATASETS: &[DatasetSpec] = &[
             GraphSpec { suffix: "landmarks", role: GraphKind::Instances, fmt: Fmt::Turtle, data: LANDMARKS_TTL },
             GraphSpec { suffix: "geo-features", role: GraphKind::Instances, fmt: Fmt::Turtle, data: GEO_FEATURES_TTL },
             GraphSpec { suffix: "volumes-3d", role: GraphKind::Instances, fmt: Fmt::Turtle, data: VOLUMES_3D_TTL },
+            GraphSpec { suffix: "validation-3d", role: GraphKind::Instances, fmt: Fmt::Turtle, data: VALIDATION_3D_TTL },
             GraphSpec { suffix: "sensors", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SENSORS_SOSA_TTL },
             GraphSpec { suffix: "assets", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ASSETS_OTL_TTL },
         ],
@@ -606,6 +607,10 @@ const LANDMARKS_TTL: &str = include_str!("data/landmarks.ttl");
 const GEO_FEATURES_TTL: &str = include_str!("data/geo-features.ttl");
 /// Native WKT-Z volumetric solids (POLYHEDRALSURFACE Z) for the 3D engine/viewer.
 const VOLUMES_3D_TTL: &str = include_str!("data/volumes-3d.ttl");
+/// Deliberately mixed valid/invalid 3D features + 3D-file distributions, so the
+/// built-in "Geo & 3D data" and "3D file" example pipelines always surface a
+/// clickable failure (the "Show in 3D" demo).
+const VALIDATION_3D_TTL: &str = include_str!("data/validation-3d.ttl");
 /// SOSA/SSN digital-twin layer: sensors + observations on the REAL demo
 /// buildings (BAG panden + the extruded worked-example solids).
 const SENSORS_SOSA_TTL: &str = include_str!("data/sensors-sosa.ttl");
