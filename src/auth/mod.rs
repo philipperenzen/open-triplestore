@@ -20,6 +20,7 @@ pub mod middleware;
 pub mod models;
 pub mod oauth;
 pub mod oauth_handlers;
+pub mod oidc_provider;
 pub mod oidc_rs;
 pub mod org_graph;
 pub mod passkey;
