@@ -307,7 +307,7 @@
 
     <div class="card editor-host">
       {#key editorReloadToken}
-        <ShapesEditor shapeGraphId={id} height="calc(100vh - 360px)" />
+        <ShapesEditor shapeGraphId={id} usageTargets={impact} height="calc(100vh - 360px)" />
       {/key}
     </div>
 

@@ -50,6 +50,10 @@ mod tests {
     fn test_state() -> AppState {
         let auth_db = Arc::new(AuthDb::in_memory().unwrap());
         let audit = Arc::new(crate::auth::audit::AuditLogger::new(auth_db.pool()));
+        let oidc_provider =
+            crate::auth::oidc_provider::ProviderKeys::load_or_generate(&auth_db, "test-secret")
+                .ok()
+                .map(Arc::new);
         AppState {
             store: TripleStore::in_memory().unwrap(),
             prefix_registry: Arc::new(PrefixRegistry::empty()),
@@ -63,6 +67,7 @@ mod tests {
             oauth_sessions: crate::auth::oauth::new_session_store(),
             passkey_sessions: crate::auth::passkey::new_session_store(),
             auth_ext: Arc::new(crate::auth::oidc_rs::AuthExt::disabled()),
+            oidc_provider,
             query_timeout_secs: 30,
             write_timeout_secs: 120,
             secure_cookies: false,

@@ -4135,6 +4135,7 @@ dependencies = [
  "oauth2",
  "opengraph",
  "openidconnect",
+ "ots-plugin-accounts-dashboard",
  "ots-plugin-api",
  "ots-plugin-hello",
  "oxigraph",
@@ -4147,6 +4148,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "reqwest",
+ "ring",
  "rstar 0.13.0",
  "rusqlite",
  "samael",
@@ -4289,8 +4291,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "ots-plugin-api"
+name = "ots-plugin-accounts-dashboard"
 version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "http-body-util",
+ "ots-plugin-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "ots-plugin-api"
+version = "0.2.0"
 dependencies = [
  "axum 0.7.9",
 ]

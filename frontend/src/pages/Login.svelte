@@ -32,7 +32,15 @@
 
   function finishLogin(res) {
     setTokens(res.access_token, res.refresh_token);
-    return refreshUser().then(() => navigate('/', { replace: true }));
+    // ?next= carries the in-app path to return to (e.g. the OIDC authorize
+    // page mid-SSO). Internal paths only — never an absolute URL, so a crafted
+    // link can't turn the login page into an open redirect.
+    let next = '/';
+    try {
+      const p = new URLSearchParams(window.location.search).get('next') || '/';
+      if (p.startsWith('/') && !p.startsWith('//')) next = p;
+    } catch { /* keep '/' */ }
+    return refreshUser().then(() => navigate(next, { replace: true }));
   }
 
   async function handleLogin() {

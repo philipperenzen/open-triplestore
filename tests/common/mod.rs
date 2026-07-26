@@ -49,6 +49,9 @@ pub fn test_state() -> AppState {
         oauth_sessions: new_session_store(),
         passkey_sessions: open_triplestore::auth::passkey::new_session_store(),
         auth_ext: Arc::new(open_triplestore::auth::oidc_rs::AuthExt::disabled()),
+        // This harness does not exercise the OIDC provider; None is the
+        // documented degradation (provider endpoints 503, rest unaffected).
+        oidc_provider: None,
         query_timeout_secs: 30,
         write_timeout_secs: 120,
         secure_cookies: false,
