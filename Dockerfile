@@ -18,6 +18,10 @@
 # fully optimised, for production and CI. `release-dev` is thin LTO + 16 codegen
 # units: it links far faster at a small runtime cost, for quick local iteration.
 ARG CARGO_PROFILE=release
+# Cargo feature set for the image. Default 'full'; a downstream deployment can
+# additionally enable compile-time plugins, e.g.
+#   --build-arg CARGO_FEATURES="full,plugin-accounts-dashboard"
+ARG CARGO_FEATURES=full
 
 # ─── Stage 1: Frontend ───
 FROM node:20-slim AS frontend
@@ -65,6 +69,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 2b: cook dependencies (cached unless recipe.json changes), then build.
 FROM chef AS builder
 ARG CARGO_PROFILE
+ARG CARGO_FEATURES
 # Cap cargo's parallelism (and therefore the number of concurrent -O3 C++ compiles
 # in heavy build scripts like oxrocksdb-sys/RocksDB). The default job count = #CPUs,
 # which on a 24-core host fans out enough simultaneous cc1plus processes to spike
@@ -109,7 +114,7 @@ COPY frontend/public/samples/ frontend/public/samples/
 COPY assets/ assets/
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
-    cargo build --profile ${CARGO_PROFILE} --features full
+    cargo build --profile ${CARGO_PROFILE} --features "${CARGO_FEATURES}"
 
 # ─── Stage 2c: LOV corpus (best-effort, checksum-verified) ───
 # Bakes the full Linked Open Vocabularies N-Quads corpus (~18 MB) into the
