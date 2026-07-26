@@ -109,6 +109,10 @@ pub struct Bundle {
     pub opt_out_env: Option<String>,
     pub org: OrgSpec,
     pub datasets: Vec<BundleDataset>,
+    /// `prefix → namespace IRI` mappings seeded into the server's prefix
+    /// registry (served by `GET /api/prefixes`; auto-declared in SPARQL
+    /// queries). Existing registry entries always win.
+    pub prefixes: std::collections::HashMap<String, String>,
 }
 
 impl Bundle {
@@ -156,6 +160,8 @@ pub struct SeedReport {
     pub graphs_loaded: usize,
     /// Saved-query services created by this run.
     pub services_created: usize,
+    /// Prefix mappings newly seeded into the prefix registry.
+    pub prefixes_seeded: usize,
 }
 
 /// Execute one bundle against the store + identity DB. Idempotent and
@@ -164,6 +170,14 @@ pub struct SeedReport {
 /// ([`Bundle::is_disabled`]).
 pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedReport> {
     let mut report = SeedReport::default();
+
+    // Prefixes first — independent of dataset/graph state, idempotent (existing
+    // registry entries win), so they seed even when everything else pre-exists.
+    for (label, iri) in &bundle.prefixes {
+        if state.prefix_registry.insert_seeded(label, iri) {
+            report.prefixes_seeded += 1;
+        }
+    }
 
     // Owner of owner-attributed content (saved-query services, org membership):
     // a super_admin (preferred) or any active admin. Everything PUBLIC — the org,
@@ -426,14 +440,15 @@ pub fn load_seed_dir(state: &AppState, dir: &Path) {
         }
         match apply_bundle(state, &bundle) {
             Ok(r) => tracing::info!(
-                "seed bundle '{}': org {} ({}), {} dataset(s) created, {} graph(s) registered, {} payload(s) loaded, {} service(s)",
+                "seed bundle '{}': org {} ({}), {} dataset(s) created, {} graph(s) registered, {} payload(s) loaded, {} service(s), {} prefix(es)",
                 bundle.id,
                 r.org_id,
                 if r.org_created { "created" } else { "existing" },
                 r.datasets_created.len(),
                 r.graphs_registered,
                 r.graphs_loaded,
-                r.services_created
+                r.services_created,
+                r.prefixes_seeded
             ),
             Err(e) => tracing::warn!("seed bundle '{}' failed (fail-soft): {e:#}", bundle.id),
         }
@@ -488,6 +503,10 @@ mod tests {
                     note: None,
                 }],
             }],
+            prefixes: std::collections::HashMap::from([(
+                "ex".to_string(),
+                format!("https://example.org/{id}/ns#"),
+            )]),
         }
     }
 
