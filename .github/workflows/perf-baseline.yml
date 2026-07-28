@@ -28,7 +28,10 @@ jobs:
   perf-baseline:
     name: Refresh performance baseline
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The full suite plus build has historically taken ~42 min; the two gated-subset
+    # passes below add roughly another 15, which would have run straight into the
+    # previous 60-minute cap.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
