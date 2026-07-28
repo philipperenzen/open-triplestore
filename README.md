@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/philipperenzen/open-triplestore/actions/workflows/ci.yml"><img src="https://github.com/philipperenzen/open-triplestore/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0%20%2B%20Commons%20Clause-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/rust-1.94.1%2B-orange" alt="Rust 1.94.1+">
   <img src="https://img.shields.io/badge/SPARQL-1.1%20%2F%201.2-8A2BE2" alt="SPARQL 1.1 / 1.2">
   <img src="https://img.shields.io/badge/GeoSPARQL-1.1-2F7A8C" alt="GeoSPARQL 1.1">
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
@@ -168,7 +168,7 @@ docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
 
 Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
 
-### Native (requires Rust 1.88+)
+### Native (requires Rust 1.94.1+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
 **libxmlsec1** for the `saml` feature in `--features full`. On Debian/Ubuntu:

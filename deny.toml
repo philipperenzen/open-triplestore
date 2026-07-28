@@ -4,16 +4,14 @@
 [advisories]
 version = 2
 # RustSec advisory IDs ignored with justification. Revisit as upstream patches land.
+# Keep this list free of entries that no longer match anything in the graph — a stale
+# ID is reported as `advisory-not-detected` on every run, which buries real findings.
 ignore = [
     # Unmaintained transitive crates — no patched release exists; pulled in via build
     # macros / TLS helpers. No exploit path in this project; listed for tracking.
-    "RUSTSEC-2024-0384",  # instant — unmaintained (transitive)
     "RUSTSEC-2024-0370",  # proc-macro-error — unmaintained (build-time derive macros)
-    "RUSTSEC-2025-0134",  # rustls-pemfile — unmaintained (transitive TLS helper)
-    "RUSTSEC-2024-0436",  # paste — unmaintained (transitive proc-macro, via 3D/geo deps)
     # Unsoundness advisories in transitive crates; this project does not exercise the
     # unsound code paths.
-    "RUSTSEC-2026-0002",  # `IterMut` Stacked-Borrows unsoundness (transitive)
     "RUSTSEC-2026-0097",  # rand — unsound only with a custom rng logger (not used here)
     # Vulnerabilities reached only through OPTIONAL features that are OFF by default
     # (`saml` via samael, `alerting` via lettre, and their TLS/crypto stack). Tracked
