@@ -392,7 +392,8 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="builder" on:click={() => (addMenuFor = null)}>
   {#if loading}
     <div class="state"><FileCode size={20} /> {$i18nT('system.loading')}</div>
@@ -705,7 +706,8 @@
                   <Plus size={13} /> {$i18nT('components.shapeBuilder.property')} <ChevronDown size={12} />
                 </button>
                 {#if addMenuFor === shape._id}
-                  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
                   <div class="add-prop-menu" on:click|stopPropagation>
                     <div class="add-prop-title">{$i18nT('components.shapeBuilder.addPropertyTitle')}</div>
                     {#each PROPERTY_TEMPLATES as tpl}
