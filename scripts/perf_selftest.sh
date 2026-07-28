@@ -75,5 +75,34 @@ else
   echo "FAIL: update output malformed"; fails=$((fails + 1))
 fi
 
+# 5. `compare` — the PR gate's mode: a change against its merge base, both
+#    measured here. Two passes a side, and the FASTEST median per benchmark wins,
+#    so a single slow pass on either side must not swing the verdict.
+cmp_root="$(mktemp -d)"; trap 'rm -rf "$empty" "$cmp_root"; rm -f "$out_json"' EXIT
+for side in base-1 base-2 head-1 head-2; do mkdir -p "$cmp_root/$side/b/new"; done
+write_median() { printf '{"median":{"point_estimate":%s}}' "$2" > "$cmp_root/$1/b/new/estimates.json"; }
+cmp_base="$(mktemp)"; trap 'rm -rf "$empty" "$cmp_root"; rm -f "$out_json" "$cmp_base"' EXIT
+printf '{"schema_version":1,"default_tolerance_ratio":1.10,"tolerances":{},"benchmarks":{}}' > "$cmp_base"
+
+# Base 1000 ns (one pass polluted to 1400), change 1050 ns (one pass to 1500):
+# fastest-of-two gives 1050/1000 = 1.05, inside +10%.
+write_median base-1 1000.0; write_median base-2 1400.0
+write_median head-1 1050.0; write_median head-2 1500.0
+expect_exit 0 "compare: fastest-of-two ignores a polluted pass on each side" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$cmp_base"
+
+# Same base, change genuinely 30% slower in BOTH passes -> regression.
+write_median head-1 1300.0; write_median head-2 1300.0
+expect_exit 1 "compare: real regression on both passes fails" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$cmp_base"
+
+# A missing side is an operational error, never a silent pass.
+expect_exit 2 "compare: empty 'after' side" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --after "$empty" --baseline "$cmp_base"
+
 echo "===================================="
 if [ "$fails" -eq 0 ]; then echo "ALL PERF SELF-TESTS PASSED"; else echo "$fails PERF SELF-TEST(S) FAILED"; exit 1; fi
