@@ -96,14 +96,36 @@ perf:
     # perf script is invoked the same way on both).
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
+  variables:
+    # Both revisions get benched, so the base commit has to be in the clone.
+    GIT_DEPTH: "0"
   script:
-    # Two passes, fastest median per benchmark wins — whole-process interference on a
-    # shared runner can only make a benchmark look slower, and it moves the numbers
-    # by more than the tolerance (see .github/workflows/perf.yml for the measurements).
+    # Bench the merge base and this change back-to-back on the same runner, two
+    # passes each (fastest median per benchmark wins), then compare the two. The
+    # committed baseline is measured on a different runner instance, so comparing
+    # against it puts the runner's own speed in the ratio — see the long note on
+    # the bench steps in .github/workflows/perf.yml for the measurements.
+    - BASE="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-$CI_COMMIT_BEFORE_SHA}"
+    - HEAD="$(git rev-parse HEAD)"
+    - |
+      if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+        echo "No usable base commit ('$BASE') — nothing to compare against, skipping."; exit 0
+      fi
+    # base, change, base, change — alternating, not two-and-two: a runner drifts
+    # over the hour this takes, so consecutive halves are not comparable.
+    - git checkout --detach "$BASE"
     - cargo bench --bench performance --features full -- 'query|path|geosparql'
-    - mv target/criterion target/criterion-pass1
+    - mv target/criterion target/criterion-base-1
+    - git checkout --detach "$HEAD"
     - cargo bench --bench performance --features full -- 'query|path|geosparql'
-    - python3 scripts/perf_regression.py check --criterion-dir target/criterion-pass1 --criterion-dir target/criterion --baseline benches/perf_baseline.json --github-summary
+    - mv target/criterion target/criterion-head-1
+    - git checkout --detach "$BASE"
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - mv target/criterion target/criterion-base-2
+    - git checkout --detach "$HEAD"
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - mv target/criterion target/criterion-head-2
+    - python3 scripts/perf_regression.py compare --before target/criterion-base-1 --before target/criterion-base-2 --after target/criterion-head-1 --after target/criterion-head-2 --baseline benches/perf_baseline.json --github-summary
 
 # ── Performance baseline refresh (mirrors .github/workflows/perf-baseline.yml) ─
 # Full Criterion suite → regenerated baseline as a CI artifact. Runs on `v*`

@@ -48,17 +48,102 @@ baseline. The HTML report includes interactive plots.
 
 To stop silent performance regressions from landing, the repo ships an
 automated gate built on a small checker,
-[`scripts/perf_regression.py`](../scripts/perf_regression.py), plus a committed
-baseline at [`benches/perf_baseline.json`](../benches/perf_baseline.json). It
-runs in two places:
+[`scripts/perf_regression.py`](../scripts/perf_regression.py). It runs in two
+places:
 
 - **CI (authoritative).** [`.github/workflows/perf.yml`](../.github/workflows/perf.yml)
-  is the PR/push gate. It builds natively on Linux, runs a representative
-  *subset* of the suite, then fails the job if any benchmark regressed past its
-  tolerance. (A mirrored GitLab gate is kept in sync — see *Gotchas*.)
+  is the PR/push gate. It builds natively on Linux and benches a representative
+  *subset* of the suite **twice for the change and twice for its merge base**,
+  then fails the job if any benchmark regressed past its tolerance. (A mirrored
+  GitLab gate is kept in sync — see *Gotchas*.)
 - **Local pre-push hook (opt-in).** `make install-hooks` installs a pre-push
-  hook that runs the same checker before you push, so you catch regressions
-  before CI does.
+  hook that checks against the committed baseline before you push. Useful as a
+  smoke test; CI is what decides.
+
+### Why the gate compares against the merge base
+
+The obvious design — compare each run against a committed baseline — does not
+work on shared CI runners, and it is worth being explicit about why, because the
+failure mode is subtle and it wasted real time here.
+
+A stored baseline is measured on **some other runner instance**, days or weeks
+earlier. The gate is a ratio test, so that machine's speed relative to today's is
+in the ratio, indistinguishable from a code change. Measured on this repo, across
+five gate runs of code with **no runtime change at all**:
+
+| | |
+|---|---|
+| median spread (max/min per benchmark) | **1.133** |
+| p90 | **1.337** |
+| max | **1.441** |
+| benchmarks that could exceed a +10 % bar on noise alone | **50 of 68** |
+
+Even the +25 % bar this started with left 8 of 68 able to trip at random, which
+is why perf failures here were routinely spurious. Repeated passes help — noise is
+one-directional, so the fastest of N is nearer the truth — but they cannot remove
+a *systematic* difference between two machines.
+
+Benching **both revisions in the same job** does remove it: a slow VM makes the
+base slow too, and the ratio holds.
+
+The passes **alternate** — base, change, base, change — rather than running two
+and two. A runner drifts over the hour this job takes, so consecutive halves are
+not comparable: benching the base first measured `query_simple_lookup/100000` at
+52.1 ms against 75.8 ms for the change, then 68.6 ms against 73.8 ms on the next
+run of the very same commits. Alternating gives each side one early and one late
+sample, so the drift lands on both.
+
+That is what `perf_regression.py compare` does, with `--before` / `--after` given
+once per pass:
+
+```bash
+python3 scripts/perf_regression.py compare \
+  --before target/criterion-base-1 --before target/criterion-base-2 \
+  --after  target/criterion-head-1 --after  target/criterion-head-2 \
+  --baseline benches/perf_baseline.json
+```
+
+The cost is that the job builds and benches twice — roughly double the wall clock.
+That buys a bar tight enough to be worth having.
+
+Measured on the first run of this design — a PR that changes **no runtime code**,
+so every number below is residual noise:
+
+| | stored baseline | merge base |
+|---|---|---|
+| median | — | **+0.5 %** |
+| p90 | 1.337 | **+2.7 %** |
+| benchmarks over 10 % | **50 of 68** | **1 of 68** |
+| `query_count_star/10000` (136 ns, O(1) index lookup) | +11.3 % | **+3.3 %** |
+
+The default tolerance is `default_tolerance_ratio` = **1.10** (+10 % before the
+gate trips). Tune per benchmark or per prefix in the `tolerances` map; precedence
+is an exact key, then the **longest matching prefix key ending in `/`**, then the
+default:
+
+```jsonc
+{
+  "default_tolerance_ratio": 1.10,
+  "tolerances": {
+    "concurrent/": 1.5,                 // genuinely variable; not in the gated subset
+    "query_group_concat/10000": 1.35,   // measured +25.5 % on unchanged code
+    "query_simple_lookup/100000": 1.15  // heaviest benchmark; measured +7.5 %
+  }
+}
+```
+
+Only two benchmarks needed an exception. `query_group_concat/10000` is the one
+that resisted every attempt to measure it tightly — 2.7 µs, allocation-heavy, and
+it read +25.5 % with nothing changed. `query_simple_lookup/100000` is the heaviest
+in the subset at ~69 ms and memory-bandwidth bound, so it gets a little headroom
+over its measured +7.5 %.
+
+Add an entry only with measurements behind it — the same table above, from a run
+with no runtime change — rather than nudging a number until CI goes green. If
+exceptions start accumulating, a third pass per side is the better lever.
+
+Benchmarks present on one side but not the other are **soft warnings**, not
+failures, so adding or removing a benchmark does not break the gate.
 
 ### The committed baseline
 
@@ -69,51 +154,11 @@ plus its provenance in a `generator` block (runner name, CPU, timestamp). It
 lives under `benches/` rather than next to the Criterion output because
 `target/` is gitignored.
 
-The checker compares each fresh run against the baseline and flags any
-benchmark whose median exceeds `baseline × tolerance`. The default tolerance is
-`default_tolerance_ratio` = **1.10** (i.e. +10 % is allowed before the gate
-trips).
-
-That bar is only usable because of two things the gate does to earn it.
-
-**It measures the same way the baseline does** — see *Subset (PR gate) vs full
-suite*. The gate is a **ratio** test, so any systematic difference between how the
-baseline and the run were produced is spent before a real regression gets any of
-the budget.
-
-**It runs the subset twice and keeps the fastest median per benchmark.**
-Criterion's median already absorbs per-sample noise, but not interference that
-lasts the whole process: a noisy neighbour on a shared runner slows every sample
-equally and drags the median with it. Measured on this repo, two runs of the
-*same commit* against the *same* baseline moved a benchmark's ratio by up to **26
-percentage points**, and **11 of 68** benchmarks moved by more than 10 — enough,
-on its own, to fail a +10 % gate at random. Interference can only ever make a
-benchmark look slower, so the quieter of two runs is the one nearer the true cost.
-Pass `--criterion-dir` once per run; `perf_regression.py` takes the minimum.
-
-The per-benchmark `tolerances` map handles whatever still swings after that:
-loosen the few benchmarks that genuinely need it rather than the default for all
-of them.
-
-Tolerances can be tuned per benchmark or per prefix in the `tolerances` map.
-Precedence is: an exact per-benchmark key, then the **longest matching prefix
-key ending in `/`**, then `default_tolerance_ratio`. For example, the
-concurrency benchmarks are the noisiest, so loosen the whole group at once:
-
-```jsonc
-{
-  "default_tolerance_ratio": 1.10,
-  "tolerances": {
-    "concurrent/": 1.5,                 // whole group: allow +50 %
-    "query_simple_lookup/100000": 1.15  // one noisy benchmark: allow +15 %
-  }
-}
-```
-
-Benchmarks present in the run but missing from the baseline (and vice-versa)
-are **soft warnings**, not failures — so the gate stays green before the
-baseline is first populated, and when the PR gate runs only a subset of the
-suite.
+Since the gate moved to merge-base comparison the baseline is no longer what a PR
+is graded against. It still earns its place twice over: it holds the `tolerances`
+map the gate reads, and its absolute numbers are the tracked record of where
+performance actually is over time — which a pure A/B gate cannot tell you, since
+a series of individually-tolerable changes can drift a long way.
 
 ### Subset (PR gate) vs full suite
 
