@@ -239,7 +239,8 @@
 
     <!-- Rendered markdown is sanitized in renderMarkdown() (DOMPurify). Click is
          delegated to route in-app links; keyboard users still get native <a>s. -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <article class="docs-article" bind:this={contentEl} on:click={onContentClick}>
       <!-- eslint-disable-next-line svelte/no-at-html-tags -->
       {@html rendered.html}

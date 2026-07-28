@@ -70,7 +70,7 @@ is licensed under those same terms.
 This is a Cargo workspace: the Rust backend at the repo root and the `opengraph`
 engine in [`opengraph/`](opengraph), plus a Svelte frontend in [`frontend/`](frontend).
 
-### Backend (Rust 1.88+)
+### Backend (Rust 1.94.1+)
 
 System libraries (Debian/Ubuntu names; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 for the exact list): `libgeos-dev` (GeoSPARQL), and `libxmlsec1-dev` if you build the

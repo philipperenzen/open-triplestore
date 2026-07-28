@@ -36,7 +36,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ─── Stage 2: Builder (cargo-chef for reliable dependency-layer caching) ───
-FROM rust:1.91-bookworm AS chef
+FROM rust:1.94-bookworm AS chef
 # lld: faster linker (matched by .cargo/config.toml). GEOS for GeoSPARQL.
 # libxml2/xmlsec1/openssl: required by the `saml` feature (samael + xmlsec).
 RUN apt-get update && apt-get install -y \
