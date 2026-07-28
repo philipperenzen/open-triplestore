@@ -71,10 +71,31 @@ jobs:
 
       # Subset run: the name filter (query/path/geosparql) selects the fast,
       # representative benchmarks. Sample sizes live in benches/performance.rs.
-      - name: Run benchmark subset
+      #
+      # Run TWICE, and let the checker take the fastest median per benchmark (see
+      # `collect_medians`). Criterion's median already absorbs per-sample noise, but
+      # not interference that lasts the whole process — a noisy neighbour on a shared
+      # runner slows every sample equally and drags the median with it. Measured on
+      # this repo: two runs of the same commit against the same baseline moved a
+      # benchmark's ratio by up to 26 percentage points, and 11 of 68 benchmarks
+      # moved by more than 10. Interference can only make a benchmark look slower, so
+      # the quieter of two runs is the one nearer the truth.
+      - name: Run benchmark subset (pass 1)
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+
+      # Criterion overwrites new/estimates.json on the next run, so pass 1 has to be
+      # taken out of the way before pass 2 starts.
+      - name: Set pass 1 aside
+        run: mv target/criterion target/criterion-pass1
+
+      - name: Run benchmark subset (pass 2)
         run: cargo bench --bench performance --features full -- 'query|path|geosparql'
 
       # ubuntu-latest ships python3. Compares the fresh Criterion estimates
       # against the committed baseline; non-zero exit fails the gate.
       - name: Check for performance regressions
-        run: python3 scripts/perf_regression.py check --criterion-dir target/criterion --baseline benches/perf_baseline.json --github-summary
+        run: |
+          python3 scripts/perf_regression.py check \
+            --criterion-dir target/criterion-pass1 \
+            --criterion-dir target/criterion \
+            --baseline benches/perf_baseline.json --github-summary
