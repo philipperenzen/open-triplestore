@@ -66,24 +66,46 @@ DEFAULT_TOLERANCE = 1.10
 
 # ─────────────────────────── Criterion parsing ───────────────────────────
 
-def collect_medians(criterion_dir):
-    """Return {bench_id: median_ns} parsed from <criterion_dir>/**/new/estimates.json."""
-    pattern = os.path.join(criterion_dir, "**", "new", "estimates.json")
+def collect_medians(criterion_dirs):
+    """Return {bench_id: median_ns} parsed from <dir>/**/new/estimates.json.
+
+    Takes a *list* of Criterion output dirs — one per repeat of the same benchmark
+    run — and keeps the FASTEST median per benchmark.
+
+    Criterion's median is already robust to noise *within* one process: it discards
+    nothing, but the outliers it reports are spread across many samples. What it
+    cannot see is interference that lasts the whole process — a noisy neighbour on
+    a shared CI runner slows every sample equally, so the median moves with it. That
+    is the dominant error term here: two runs of the *same commit* against the *same*
+    baseline moved a benchmark's ratio by up to 26 percentage points, and 11 of 68
+    benchmarks moved by more than 10.
+
+    Interference can only ever make a benchmark look slower, never faster, so the
+    minimum across repeats is the estimator that discards it: whichever run happened
+    to get the quietest machine is the one closest to the true cost. Pass a single
+    dir for the old single-run behaviour.
+    """
     medians = {}
-    for path in sorted(glob.glob(pattern, recursive=True)):
-        # bench_id is the path between criterion_dir and the trailing /new/estimates.json.
-        # The `new` dir is always the immediate parent of estimates.json, so dropping the
-        # last two path components yields the id and is robust to group names like "new".
-        bench_dir = os.path.dirname(os.path.dirname(path))
-        bench_id = os.path.relpath(bench_dir, criterion_dir).replace(os.sep, "/")
-        if bench_id in (".", ""):
-            continue
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            medians[bench_id] = float(data["median"]["point_estimate"])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            print(f"warning: skipping unreadable estimates file {path}: {exc}", file=sys.stderr)
+    for criterion_dir in criterion_dirs:
+        pattern = os.path.join(criterion_dir, "**", "new", "estimates.json")
+        for path in sorted(glob.glob(pattern, recursive=True)):
+            # bench_id is the path between criterion_dir and the trailing
+            # /new/estimates.json. The `new` dir is always the immediate parent of
+            # estimates.json, so dropping the last two path components yields the id
+            # and is robust to group names like "new".
+            bench_dir = os.path.dirname(os.path.dirname(path))
+            bench_id = os.path.relpath(bench_dir, criterion_dir).replace(os.sep, "/")
+            if bench_id in (".", ""):
+                continue
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                median = float(data["median"]["point_estimate"])
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                print(f"warning: skipping unreadable estimates file {path}: {exc}", file=sys.stderr)
+                continue
+            previous = medians.get(bench_id)
+            medians[bench_id] = median if previous is None else min(previous, median)
     return medians
 
 
@@ -187,10 +209,11 @@ def cmd_check(args):
     baseline = load_baseline(args.baseline)
     if baseline is None:
         return 2
-    runs = collect_medians(args.criterion_dir)
+    runs = collect_medians(args.criterion_dirs or ["target/criterion"])
     if not runs:
         print(
-            f"error: no Criterion results under {args.criterion_dir} (no **/new/estimates.json). "
+            f"error: no Criterion results under {args.criterion_dirs or ['target/criterion']} "
+            "(no **/new/estimates.json). "
             "Did the benchmark run? Refusing to pass vacuously.",
             file=sys.stderr,
         )
@@ -259,9 +282,10 @@ def cmd_check(args):
 
 
 def cmd_update(args):
-    runs = collect_medians(args.criterion_dir)
+    runs = collect_medians(args.criterion_dirs or ["target/criterion"])
     if not runs:
-        print(f"error: no Criterion results under {args.criterion_dir}; nothing to write.",
+        print(f"error: no Criterion results under {args.criterion_dirs or ['target/criterion']}; "
+              "nothing to write.",
               file=sys.stderr)
         return 2
 
@@ -312,7 +336,11 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command")
 
     chk = sub.add_parser("check", help="compare a benchmark run against the baseline (default)")
-    chk.add_argument("--criterion-dir", default="target/criterion")
+    chk.add_argument("--criterion-dir", action="append", dest="criterion_dirs",
+                     metavar="DIR",
+                     help="Criterion output dir; repeat once per benchmark repeat "
+                          "(the fastest median per benchmark wins). "
+                          "Default: target/criterion")
     chk.add_argument("--baseline", default="benches/perf_baseline.json")
     chk.add_argument("--tolerance", type=float, default=None,
                      help="override default_tolerance_ratio (env: OTS_PERF_TOLERANCE)")
@@ -326,7 +354,11 @@ def main(argv=None):
     chk.set_defaults(func=cmd_check)
 
     upd = sub.add_parser("update", help="(re)generate the baseline from a fresh run")
-    upd.add_argument("--criterion-dir", default="target/criterion")
+    upd.add_argument("--criterion-dir", action="append", dest="criterion_dirs",
+                     metavar="DIR",
+                     help="Criterion output dir; repeat once per benchmark repeat "
+                          "(the fastest median per benchmark wins). "
+                          "Default: target/criterion")
     upd.add_argument("--out", default="benches/perf_baseline.json")
     upd.add_argument("--runner", default=None, help="provenance: where this ran")
     upd.add_argument("--cpu", default=None, help="provenance: CPU (auto-detected on Linux)")

@@ -74,13 +74,26 @@ benchmark whose median exceeds `baseline × tolerance`. The default tolerance is
 `default_tolerance_ratio` = **1.10** (i.e. +10 % is allowed before the gate
 trips).
 
-That bar is only usable because the baseline is captured the same way the gate
-measures — see *Subset (PR gate) vs full suite*. The gate is a **ratio** test, so
-any systematic difference between how the baseline and the run were produced is
-spent before a real regression gets any of the budget. Shared CI runners are
-still noisy on top of that, which is what the per-benchmark `tolerances` map is
-for: loosen the few benchmarks that genuinely swing, rather than loosening the
-default for all of them.
+That bar is only usable because of two things the gate does to earn it.
+
+**It measures the same way the baseline does** — see *Subset (PR gate) vs full
+suite*. The gate is a **ratio** test, so any systematic difference between how the
+baseline and the run were produced is spent before a real regression gets any of
+the budget.
+
+**It runs the subset twice and keeps the fastest median per benchmark.**
+Criterion's median already absorbs per-sample noise, but not interference that
+lasts the whole process: a noisy neighbour on a shared runner slows every sample
+equally and drags the median with it. Measured on this repo, two runs of the
+*same commit* against the *same* baseline moved a benchmark's ratio by up to **26
+percentage points**, and **11 of 68** benchmarks moved by more than 10 — enough,
+on its own, to fail a +10 % gate at random. Interference can only ever make a
+benchmark look slower, so the quieter of two runs is the one nearer the true cost.
+Pass `--criterion-dir` once per run; `perf_regression.py` takes the minimum.
+
+The per-benchmark `tolerances` map handles whatever still swings after that:
+loosen the few benchmarks that genuinely need it rather than the default for all
+of them.
 
 Tolerances can be tuned per benchmark or per prefix in the `tolerances` map.
 Precedence is: an exact per-benchmark key, then the **longest matching prefix
