@@ -91,9 +91,19 @@ on its own, to fail a +10 % gate at random. Interference can only ever make a
 benchmark look slower, so the quieter of two runs is the one nearer the true cost.
 Pass `--criterion-dir` once per run; `perf_regression.py` takes the minimum.
 
-The per-benchmark `tolerances` map handles whatever still swings after that:
-loosen the few benchmarks that genuinely need it rather than the default for all
-of them.
+The per-benchmark `tolerances` map handles whatever still swings after that, and
+its entries are **derived from measurement, not guessed**. Across four gate runs of
+functionally identical code, 13 of the 68 gated benchmarks had a max/min spread
+above 1.10 — the heavy `/10000` and `/100000` sizes, plus the sub-microsecond ones
+where a fixed overhead is a large fraction of the total. Each of those carries a
+tolerance of `measured spread + 0.05`, rounded up to the nearest 0.05. The other
+55 sit on the +10 % default.
+
+Re-derive them the same way when the evidence changes — four runs' `| bench |
+baseline | this run |` tables, spread per benchmark — rather than nudging a number
+until CI goes green. The next lever, if the exceptions creep upward, is a third
+pass rather than looser tolerances: the spread above was measured mostly under the
+old single-pass gate, so it is a pessimistic bound on what two passes achieve.
 
 Tolerances can be tuned per benchmark or per prefix in the `tolerances` map.
 Precedence is: an exact per-benchmark key, then the **longest matching prefix
