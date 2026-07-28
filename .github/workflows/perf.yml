@@ -96,7 +96,7 @@ jobs:
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           fi
 
-      # Bench the BASE, then this change, back-to-back on this one machine.
+      # Bench the base and this change ALTERNATELY, on this one machine.
       #
       # This gate used to compare against benches/perf_baseline.json — numbers taken
       # on a different runner instance, days or weeks earlier — so the runner's own
@@ -106,43 +106,49 @@ jobs:
       # that. Benching both sides here cancels it: a slow VM makes both sides slow,
       # and the ratio holds.
       #
-      # Two passes each, fastest median per benchmark (see `collect_medians`), to
-      # absorb the drift between the two halves of the job. Criterion overwrites
-      # new/estimates.json on the next run, so each pass is moved aside.
-      - name: Check out the merge base
-        if: steps.base.outputs.sha != ''
-        run: git checkout --detach ${{ steps.base.outputs.sha }}
+      # base, change, base, change — NOT base, base, change, change. A runner drifts
+      # over the hour this job takes, so consecutive halves are not comparable: the
+      # first attempt at this ran the base first and measured
+      # `query_simple_lookup/100000` at 52.1 ms against 75.8 ms for the change, then
+      # 68.6 ms against 73.8 ms on the next run of the very same commits. Alternating
+      # gives each side one early and one late sample, so the drift lands on both.
+      #
+      # Fastest median per benchmark wins within each side (see `collect_medians`),
+      # which is what makes the pairing work: each side keeps its quietest sample.
+      # Criterion overwrites new/estimates.json each run, so every pass is moved
+      # aside. The four checkouts cost four rebuilds of the local crate rather than
+      # two — the dependency graph is unchanged, so only this crate and the bench
+      # binary are rebuilt.
       - name: Bench the merge base (pass 1)
         if: steps.base.outputs.sha != ''
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
-      - name: Set base pass 1 aside
-        if: steps.base.outputs.sha != ''
-        run: mv target/criterion target/criterion-base-1
-      - name: Bench the merge base (pass 2)
-        if: steps.base.outputs.sha != ''
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
-      - name: Set base pass 2 aside
-        if: steps.base.outputs.sha != ''
-        run: mv target/criterion target/criterion-base-2
+        run: |
+          git checkout --detach ${{ steps.base.outputs.sha }}
+          cargo bench --bench performance --features full -- 'query|path|geosparql'
+          mv target/criterion target/criterion-base-1
 
-      # Back to the change — so the comparison, the tolerances and the script are
-      # this revision's. That is what lets a PR adjust its own tolerances in the
-      # same commit that needs them.
-      - name: Check out this change
-        if: steps.base.outputs.sha != ''
-        run: git checkout --detach ${{ steps.base.outputs.head }}
       - name: Bench this change (pass 1)
         if: steps.base.outputs.sha != ''
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
-      - name: Set change pass 1 aside
+        run: |
+          git checkout --detach ${{ steps.base.outputs.head }}
+          cargo bench --bench performance --features full -- 'query|path|geosparql'
+          mv target/criterion target/criterion-head-1
+
+      - name: Bench the merge base (pass 2)
         if: steps.base.outputs.sha != ''
-        run: mv target/criterion target/criterion-head-1
+        run: |
+          git checkout --detach ${{ steps.base.outputs.sha }}
+          cargo bench --bench performance --features full -- 'query|path|geosparql'
+          mv target/criterion target/criterion-base-2
+
+      # Ends on the change, so the comparison, the tolerances and the script below
+      # are this revision's. That is what lets a PR adjust its own tolerances in the
+      # same commit that needs them.
       - name: Bench this change (pass 2)
         if: steps.base.outputs.sha != ''
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
-      - name: Set change pass 2 aside
-        if: steps.base.outputs.sha != ''
-        run: mv target/criterion target/criterion-head-2
+        run: |
+          git checkout --detach ${{ steps.base.outputs.head }}
+          cargo bench --bench performance --features full -- 'query|path|geosparql'
+          mv target/criterion target/criterion-head-2
 
       # ubuntu-latest ships python3. Tolerances still come from the committed
       # baseline; only its measured numbers go unused here. Non-zero exit fails.

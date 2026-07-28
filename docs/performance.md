@@ -84,8 +84,17 @@ one-directional, so the fastest of N is nearer the truth — but they cannot rem
 a *systematic* difference between two machines.
 
 Benching **both revisions in the same job** does remove it: a slow VM makes the
-base slow too, and the ratio holds. That is what `perf_regression.py compare`
-does, with `--before` / `--after` given once per pass:
+base slow too, and the ratio holds.
+
+The passes **alternate** — base, change, base, change — rather than running two
+and two. A runner drifts over the hour this job takes, so consecutive halves are
+not comparable: benching the base first measured `query_simple_lookup/100000` at
+52.1 ms against 75.8 ms for the change, then 68.6 ms against 73.8 ms on the next
+run of the very same commits. Alternating gives each side one early and one late
+sample, so the drift lands on both.
+
+That is what `perf_regression.py compare` does, with `--before` / `--after` given
+once per pass:
 
 ```bash
 python3 scripts/perf_regression.py compare \
