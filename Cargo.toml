@@ -10,7 +10,10 @@ resolver = "2"
 name = "open-triplestore"
 version = "0.5.0"
 edition = "2021"
-rust-version = "1.88"
+# Floor set by the AWS SDK stack: aws-credential-types 1.3.0 / aws-smithy-runtime
+# 1.12 and friends declare `rust-version = "1.94.1"`. Bump the `rust:<ver>` images
+# in Dockerfile and .gitlab-ci.yml in lockstep with this.
+rust-version = "1.94.1"
 description = "A modern, high-performance RDF triple store with SPARQL 1.1/1.2 and GeoSPARQL support"
 authors = ["Philippe Renzen <philipperenzen@gmail.com>"]
 license-file = "LICENSE"
@@ -174,10 +177,29 @@ flate2 = "1"
 age = { version = "0.10", optional = true }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 
-# S3 object storage
-aws-sdk-s3 = "1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+# S3 object storage.
+#
+# `default-features = false` is deliberate. The SDK's default feature set turns on
+# `default-https-client`, which hard-wires rustls to *aws-lc-rs*. That would (a) add
+# a CMake + C/asm native build (aws-lc-sys) to every cold build, and (b) put a second
+# rustls crypto provider in the tree next to the `ring` one that reqwest, lettre and
+# openidconnect already use — with both enabled, rustls can no longer pick a
+# process-default provider from crate features and panics at runtime in any consumer
+# that relies on that. So we drop the bundled client and hand the SDK an explicit
+# ring-backed one built from `aws-smithy-http-client` (see `storage::https_client`).
+#
+# `behavior-version-latest` is not needed as a feature: `storage` calls the
+# equivalent `Config::builder().behavior_version_latest()` at construction.
+#
+# `aws-config` used to sit here too. Nothing has ever imported it (no `aws_config::`
+# anywhere since the initial release — the S3 client is built from explicit
+# credentials, not the ambient provider chain), and its default features dragged in
+# aws-sdk-sso / -ssooidc / -sts and the aws-lc client for nothing. Dropped rather
+# than carried at a feature set nobody validated; add it back deliberately, with the
+# features you actually need, if the provider chain is ever wanted.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "rt-tokio"] }
 aws-credential-types = "1"
+aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
 
 # Async utilities
 tokio-util = { version = "0.7", features = ["io"] }

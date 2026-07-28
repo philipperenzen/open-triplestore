@@ -1,9 +1,30 @@
-use aws_sdk_s3::config::{Credentials, Region};
+use aws_credential_types::Credentials;
+use aws_sdk_s3::config::{Region, SharedHttpClient};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
+use aws_smithy_http_client::tls::{rustls_provider::CryptoMode, Provider as TlsProvider};
 use bytes::Bytes;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use tracing::info;
+
+/// The HTTPS client handed to every S3 client, built once per process.
+///
+/// We build it ourselves instead of taking the SDK's bundled one because the
+/// bundled client pins rustls to aws-lc-rs, which would drag a native CMake/C
+/// build into the tree and leave rustls with two crypto providers to choose
+/// between (see the `aws-sdk-s3` note in Cargo.toml). `ring` is the provider the
+/// rest of the binary already uses.
+fn https_client() -> SharedHttpClient {
+    static CLIENT: OnceLock<SharedHttpClient> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            aws_smithy_http_client::Builder::new()
+                .tls_provider(TlsProvider::Rustls(CryptoMode::Ring))
+                .build_https()
+        })
+        .clone()
+}
 
 /// Join an object key onto the local storage root, refusing any key that would
 /// escape it (path traversal, absolute path, parent refs, NUL, Windows paths).
@@ -70,6 +91,7 @@ impl ObjectStore {
         let creds = Credentials::new(access_key, secret_key, None, None, "env");
         let config = aws_sdk_s3::Config::builder()
             .behavior_version_latest()
+            .http_client(https_client())
             .endpoint_url(endpoint)
             .region(Region::new(region.to_string()))
             .credentials_provider(creds)
@@ -112,6 +134,7 @@ impl ObjectStore {
     pub fn noop() -> Self {
         let config = aws_sdk_s3::Config::builder()
             .behavior_version_latest()
+            .http_client(https_client())
             .region(Region::new("us-east-1"))
             .build();
         Self {
