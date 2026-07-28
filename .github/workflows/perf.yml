@@ -1,11 +1,16 @@
 # Performance-regression GATE (authoritative).
 #
 # Runs a fast subset of the Criterion benchmark suite on every PR (and on pushes
-# to main/release/**) and compares it against the committed baseline at
-# benches/perf_baseline.json via scripts/perf_regression.py. The script exits 0
-# (within tolerance), 1 (regression — fails the job), or 2 (baseline/usage
-# error). This is the canonical perf check; the baseline itself is refreshed only
-# by perf-baseline.yml (never from PR runs) so PRs can't drift the reference.
+# to main/release/**) for BOTH the change and its merge base, back-to-back on the
+# same runner, and compares the two via scripts/perf_regression.py. The script
+# exits 0 (within tolerance), 1 (regression — fails the job), or 2 (usage error).
+#
+# It compares against the merge base rather than the committed baseline because
+# the baseline is measured on a different runner instance, so the runner's own
+# speed lands in the ratio — see the long note on the bench steps below for the
+# numbers. benches/perf_baseline.json still supplies the tolerances, and
+# perf-baseline.yml still refreshes its absolute numbers for tracking; they are
+# just no longer what a PR is graded against.
 #
 # Path filters keep docs-only PRs from paying the (slow, native) build+bench cost.
 # Caveat: if this job is later promoted to a *required* status check, GitHub
@@ -59,6 +64,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Both revisions are benched in this job, so the base commit has to be in
+          # the clone.
+          fetch-depth: 0
 
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
@@ -69,33 +78,78 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      # Subset run: the name filter (query/path/geosparql) selects the fast,
-      # representative benchmarks. Sample sizes live in benches/performance.rs.
-      #
-      # Run TWICE, and let the checker take the fastest median per benchmark (see
-      # `collect_medians`). Criterion's median already absorbs per-sample noise, but
-      # not interference that lasts the whole process — a noisy neighbour on a shared
-      # runner slows every sample equally and drags the median with it. Measured on
-      # this repo: two runs of the same commit against the same baseline moved a
-      # benchmark's ratio by up to 26 percentage points, and 11 of 68 benchmarks
-      # moved by more than 10. Interference can only make a benchmark look slower, so
-      # the quieter of two runs is the one nearer the truth.
-      - name: Run benchmark subset (pass 1)
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
-
-      # Criterion overwrites new/estimates.json on the next run, so pass 1 has to be
-      # taken out of the way before pass 2 starts.
-      - name: Set pass 1 aside
-        run: mv target/criterion target/criterion-pass1
-
-      - name: Run benchmark subset (pass 2)
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
-
-      # ubuntu-latest ships python3. Compares the fresh Criterion estimates
-      # against the committed baseline; non-zero exit fails the gate.
-      - name: Check for performance regressions
+      # What this change is measured against: the PR's base commit, or the commit a
+      # push moved off. `github.event.before` is all-zeros for a newly created
+      # branch, and a force-push can leave a sha that is no longer fetchable — both
+      # are reported as "no base" and skip the comparison rather than fail it.
+      - name: Resolve the merge base
+        id: base
         run: |
-          python3 scripts/perf_regression.py check \
-            --criterion-dir target/criterion-pass1 \
-            --criterion-dir target/criterion \
+          sha='${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}'
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -z "$sha" ] || [ "$sha" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+            echo "::notice::No usable base commit ('$sha') — nothing to compare against, skipping."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Comparing against $sha"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Bench the BASE, then this change, back-to-back on this one machine.
+      #
+      # This gate used to compare against benches/perf_baseline.json — numbers taken
+      # on a different runner instance, days or weeks earlier — so the runner's own
+      # speed landed straight in the ratio. Measured on this repo, five gate runs of
+      # unchanged code spread by a median of 1.133 and a max of 1.441, and 50 of 68
+      # benchmarks could exceed a +10% bar on noise alone. No tolerance table fixes
+      # that. Benching both sides here cancels it: a slow VM makes both sides slow,
+      # and the ratio holds.
+      #
+      # Two passes each, fastest median per benchmark (see `collect_medians`), to
+      # absorb the drift between the two halves of the job. Criterion overwrites
+      # new/estimates.json on the next run, so each pass is moved aside.
+      - name: Check out the merge base
+        if: steps.base.outputs.sha != ''
+        run: git checkout --detach ${{ steps.base.outputs.sha }}
+      - name: Bench the merge base (pass 1)
+        if: steps.base.outputs.sha != ''
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+      - name: Set base pass 1 aside
+        if: steps.base.outputs.sha != ''
+        run: mv target/criterion target/criterion-base-1
+      - name: Bench the merge base (pass 2)
+        if: steps.base.outputs.sha != ''
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+      - name: Set base pass 2 aside
+        if: steps.base.outputs.sha != ''
+        run: mv target/criterion target/criterion-base-2
+
+      # Back to the change — so the comparison, the tolerances and the script are
+      # this revision's. That is what lets a PR adjust its own tolerances in the
+      # same commit that needs them.
+      - name: Check out this change
+        if: steps.base.outputs.sha != ''
+        run: git checkout --detach ${{ steps.base.outputs.head }}
+      - name: Bench this change (pass 1)
+        if: steps.base.outputs.sha != ''
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+      - name: Set change pass 1 aside
+        if: steps.base.outputs.sha != ''
+        run: mv target/criterion target/criterion-head-1
+      - name: Bench this change (pass 2)
+        if: steps.base.outputs.sha != ''
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+      - name: Set change pass 2 aside
+        if: steps.base.outputs.sha != ''
+        run: mv target/criterion target/criterion-head-2
+
+      # ubuntu-latest ships python3. Tolerances still come from the committed
+      # baseline; only its measured numbers go unused here. Non-zero exit fails.
+      - name: Check for performance regressions
+        if: steps.base.outputs.sha != ''
+        run: |
+          python3 scripts/perf_regression.py compare \
+            --before target/criterion-base-1 --before target/criterion-base-2 \
+            --after  target/criterion-head-1 --after  target/criterion-head-2 \
             --baseline benches/perf_baseline.json --github-summary

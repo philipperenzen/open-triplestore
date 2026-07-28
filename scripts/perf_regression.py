@@ -281,6 +281,96 @@ def cmd_check(args):
     return 1 if regressions else 0
 
 
+def cmd_compare(args):
+    """Gate a change against its own merge base, both measured in the same job.
+
+    `check` compares against the committed baseline, which was recorded on some
+    *other* runner instance days or weeks earlier — so runner speed lands directly
+    in the ratio. Measured on this repo, five gate runs of unchanged code spread by
+    a median of 1.133 and a max of 1.441, and 50 of 68 benchmarks could exceed a
+    +10% bar on noise alone. No tolerance table fixes that; the comparison itself
+    has to change.
+
+    Benching both revisions back-to-back on the same machine cancels the runner:
+    a slow VM makes *both* sides slow, and the ratio holds. What is left is the
+    drift between the two halves of one job, which the repeated passes (`--before`
+    / `--after` given once per pass, fastest median wins) absorb.
+
+    Tolerances still come from the baseline file, so the `tolerances` map and
+    `default_tolerance_ratio` keep working and stay in one place.
+    """
+    baseline = load_baseline(args.baseline)
+    if baseline is None:
+        return 2
+    before = collect_medians(args.before)
+    after = collect_medians(args.after)
+    for label, got, dirs in (("before", before, args.before), ("after", after, args.after)):
+        if not got:
+            print(
+                f"error: no Criterion results for the '{label}' side under {dirs} "
+                "(no **/new/estimates.json). Refusing to pass vacuously.",
+                file=sys.stderr,
+            )
+            return 2
+
+    override = args.tolerance
+    if override is None and os.environ.get("OTS_PERF_TOLERANCE"):
+        try:
+            override = float(os.environ["OTS_PERF_TOLERANCE"])
+        except ValueError:
+            print("warning: ignoring non-numeric OTS_PERF_TOLERANCE", file=sys.stderr)
+
+    rows, regressions, improvements, warnings = [], 0, 0, 0
+    for bench_id in sorted(set(before) | set(after)):
+        base_ns, run_ns = before.get(bench_id), after.get(bench_id)
+        if run_ns is not None and base_ns is not None and base_ns > 0:
+            tol = resolve_tolerance(bench_id, baseline, override, args.force_tolerance)
+            ratio = run_ns / base_ns
+            if ratio > tol:
+                status, regressions = f"REGRESSION (>{tol:.2f}x)", regressions + 1
+            elif ratio < IMPROVED_RATIO:
+                status, improvements = "IMPROVED", improvements + 1
+            else:
+                status = "ok"
+            rows.append({"id": bench_id, "baseline": base_ns, "run": run_ns,
+                         "ratio": ratio, "status": status})
+        elif run_ns is not None:
+            warnings += 1
+            rows.append({"id": bench_id, "baseline": None, "run": run_ns, "ratio": None,
+                         "status": "WARN: only on this change (new benchmark)"})
+        else:
+            warnings += 1
+            rows.append({"id": bench_id, "baseline": base_ns, "run": None, "ratio": None,
+                         "status": "WARN: only on the merge base (benchmark removed)"})
+
+    rows.sort(key=lambda r: (r["ratio"] is None, -(r["ratio"] or 0)))
+    compared = sum(1 for r in rows if r["ratio"] is not None)
+    summary = (
+        f"**{compared}** benchmarks compared against the merge base · "
+        f"**{regressions}** regressions · **{improvements}** improved · "
+        f"**{warnings}** warnings"
+    )
+    report = render_markdown(rows, summary).replace(
+        "| Benchmark | baseline | this run |", "| Benchmark | merge base | this change |"
+    )
+    print(report)
+
+    if args.github_summary and os.environ.get("GITHUB_STEP_SUMMARY"):
+        try:
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+                fh.write("## Performance vs merge base\n\n" + report + "\n")
+        except OSError as exc:
+            print(f"warning: could not write GITHUB_STEP_SUMMARY: {exc}", file=sys.stderr)
+
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as fh:
+            json.dump({"summary": {"compared": compared, "regressions": regressions,
+                                   "improved": improvements, "warnings": warnings},
+                       "rows": rows}, fh, indent=2)
+
+    return 1 if regressions else 0
+
+
 def cmd_update(args):
     runs = collect_medians(args.criterion_dirs or ["target/criterion"])
     if not runs:
@@ -352,6 +442,23 @@ def main(argv=None):
                      help="treat 'benchmark not in baseline' as an error")
     chk.add_argument("--json-out", default=None, help="also dump a machine-readable result")
     chk.set_defaults(func=cmd_check)
+
+    cmp_ = sub.add_parser("compare",
+                          help="gate a change against its merge base, both measured in one job")
+    cmp_.add_argument("--before", action="append", default=[], metavar="DIR",
+                      help="Criterion output dir for the merge base; repeat once per pass")
+    cmp_.add_argument("--after", action="append", default=[], metavar="DIR",
+                      help="Criterion output dir for the change; repeat once per pass")
+    cmp_.add_argument("--baseline", default="benches/perf_baseline.json",
+                      help="read tolerances from here (its measured numbers are not used)")
+    cmp_.add_argument("--tolerance", type=float, default=None,
+                      help="override default_tolerance_ratio (env: OTS_PERF_TOLERANCE)")
+    cmp_.add_argument("--force-tolerance", action="store_true",
+                      help="make --tolerance override per-bench/prefix entries too")
+    cmp_.add_argument("--github-summary", action="store_true",
+                      help="also append the table to $GITHUB_STEP_SUMMARY")
+    cmp_.add_argument("--json-out", default=None, help="also dump a machine-readable result")
+    cmp_.set_defaults(func=cmd_compare)
 
     upd = sub.add_parser("update", help="(re)generate the baseline from a fresh run")
     upd.add_argument("--criterion-dir", action="append", dest="criterion_dirs",
