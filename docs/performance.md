@@ -97,6 +97,16 @@ python3 scripts/perf_regression.py compare \
 The cost is that the job builds and benches twice — roughly double the wall clock.
 That buys a bar tight enough to be worth having.
 
+Measured on the first run of this design — a PR that changes **no runtime code**,
+so every number below is residual noise:
+
+| | stored baseline | merge base |
+|---|---|---|
+| median | — | **+0.5 %** |
+| p90 | 1.337 | **+2.7 %** |
+| benchmarks over 10 % | **50 of 68** | **1 of 68** |
+| `query_count_star/10000` (136 ns, O(1) index lookup) | +11.3 % | **+3.3 %** |
+
 The default tolerance is `default_tolerance_ratio` = **1.10** (+10 % before the
 gate trips). Tune per benchmark or per prefix in the `tolerances` map; precedence
 is an exact key, then the **longest matching prefix key ending in `/`**, then the
@@ -106,14 +116,22 @@ default:
 {
   "default_tolerance_ratio": 1.10,
   "tolerances": {
-    "concurrent/": 1.5   // whole group: genuinely variable, and not in the gated subset
+    "concurrent/": 1.5,                 // genuinely variable; not in the gated subset
+    "query_group_concat/10000": 1.35,   // measured +25.5 % on unchanged code
+    "query_simple_lookup/100000": 1.15  // heaviest benchmark; measured +7.5 %
   }
 }
 ```
 
-Add an entry only with measurements behind it — spread across several runs of
-unchanged code — rather than nudging a number until CI goes green. If exceptions
-start accumulating, a third pass per side is the better lever.
+Only two benchmarks needed an exception. `query_group_concat/10000` is the one
+that resisted every attempt to measure it tightly — 2.7 µs, allocation-heavy, and
+it read +25.5 % with nothing changed. `query_simple_lookup/100000` is the heaviest
+in the subset at ~69 ms and memory-bandwidth bound, so it gets a little headroom
+over its measured +7.5 %.
+
+Add an entry only with measurements behind it — the same table above, from a run
+with no runtime change — rather than nudging a number until CI goes green. If
+exceptions start accumulating, a third pass per side is the better lever.
 
 Benchmarks present on one side but not the other are **soft warnings**, not
 failures, so adding or removing a benchmark does not break the gate.
