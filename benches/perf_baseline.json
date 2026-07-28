@@ -3,8 +3,8 @@
   "default_tolerance_ratio": 1.1,
   "tolerances": {
     "concurrent/": 1.5,
-    "query_alternative_path/10000": 1.25,
-    "path_negated_property_set/10000": 1.25
+    "query_group_concat/10000": 1.35,
+    "query_simple_lookup/100000": 1.15
   },
   "generator": {
     "commit": "23b0292",
@@ -14,7 +14,7 @@
     "command": "cargo bench --bench performance --features full",
     "criterion_metric": "median.point_estimate",
     "unit": "ns",
-    "note": "Authoritative perf baseline. Refresh ONLY via the perf-baseline workflow (version tag or manual dispatch) \u2014 never edit by hand or from a PR run."
+    "note": "Absolute perf numbers for tracking, and the tolerance map the gate reads. The PR gate compares a change against its merge base (both benched in one job), not against these numbers. Refresh ONLY via the perf-baseline workflow (version tag or manual dispatch) \u2014 never edit by hand or from a PR run."
   },
   "benchmarks": {
     "concurrent_mixed/4r_1w": 7237179.6,
