@@ -156,7 +156,7 @@
 {/if}
 
 {#if showModal}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="ck-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeModal(); }}>
     <div class="ck-modal">
       <div class="ck-modal-head">

@@ -333,7 +333,7 @@
               <div class="run-time">
                 {#if t.run}<Clock size={10} /> {relativeTime(ranAtOf(t))}{/if}
               </div>
-              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
               <div class="run-actions" on:click|stopPropagation>
                 {#if t.runnable}
                   <button class="act" title={$i18nT('pages.shaclResults.testRunTooltip')} on:click={() => testRun(t)} disabled={!!busyKey}>
