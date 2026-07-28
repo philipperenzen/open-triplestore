@@ -97,8 +97,13 @@ perf:
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
   script:
+    # Two passes, fastest median per benchmark wins — whole-process interference on a
+    # shared runner can only make a benchmark look slower, and it moves the numbers
+    # by more than the tolerance (see .github/workflows/perf.yml for the measurements).
     - cargo bench --bench performance --features full -- 'query|path|geosparql'
-    - python3 scripts/perf_regression.py check --criterion-dir target/criterion --baseline benches/perf_baseline.json --github-summary
+    - mv target/criterion target/criterion-pass1
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - python3 scripts/perf_regression.py check --criterion-dir target/criterion-pass1 --criterion-dir target/criterion --baseline benches/perf_baseline.json --github-summary
 
 # ── Performance baseline refresh (mirrors .github/workflows/perf-baseline.yml) ─
 # Full Criterion suite → regenerated baseline as a CI artifact. Runs on `v*`
@@ -124,8 +129,14 @@ perf-baseline:
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
   script:
+    # Full suite, then a second pass over exactly the subset the gate runs, so the
+    # gated benchmarks are baselined under gate conditions rather than full-suite
+    # ones (see the same two steps in .github/workflows/perf-baseline.yml for why).
     - cargo bench --bench performance --features full
-    - python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --runner "gitlab-ci/$CI_RUNNER_DESCRIPTION" --keep-tolerances
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cp -r target/criterion target/criterion-pass1
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - python3 scripts/perf_regression.py update --criterion-dir target/criterion-pass1 --criterion-dir target/criterion --out benches/perf_baseline.json --runner "gitlab-ci/$CI_RUNNER_DESCRIPTION" --keep-tolerances
   artifacts:
     paths:
       - benches/perf_baseline.json
