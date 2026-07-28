@@ -177,7 +177,8 @@ PREFIX ex: <http://example.org/>
           <Plus size={14} /> {$t('pages.shaclShapes.constraint')}
         </button>
         {#if paletteOpen}
-          <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div class="palette" on:click|stopPropagation>
             <div class="palette-head">
               <div class="input-icon"><Search size={13} /><input placeholder={$t('pages.shaclShapes.searchConstraints')} bind:value={paletteSearch} use:autofocus /></div>
@@ -226,7 +227,8 @@ PREFIX ex: <http://example.org/>
   {#if error}<p class="error">{error}</p>{/if}
 
   <div class="editor-grid" class:has-ai={aiOpen}>
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="content" on:click={() => (paletteOpen = false)} style="--editor-h:{height}">
     <!-- Visual builder -->
     <div class="cards" class:hidden={view !== 'visual'}>
