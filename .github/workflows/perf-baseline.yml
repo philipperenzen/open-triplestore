@@ -28,7 +28,10 @@ jobs:
   perf-baseline:
     name: Refresh performance baseline
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The full suite plus build has historically taken ~42 min; the two gated-subset
+    # passes below add roughly another 15, which would have run straight into the
+    # previous 60-minute cap.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -46,10 +49,44 @@ jobs:
       - name: Run full benchmark suite
         run: cargo bench --bench performance --features full
 
+      # Then re-measure exactly what the PR gate measures, the way it measures it.
+      #
+      # The gate (perf.yml) runs only the 'query|path|geosparql' subset, in its own
+      # process. A benchmark's timing is not independent of what ran before it in the
+      # same process — allocator arenas, page-cache and CPU state are all warmer after
+      # the insert/update groups — so a number captured in a full-suite run is not the
+      # number the gate will produce for the same code. That gap is a constant offset
+      # applied to every gated benchmark, and it was large enough to matter: the gate
+      # is a ratio test, and a few percent of systematic bias eats a meaningful slice
+      # of the tolerance before real regressions get any.
+      #
+      # These runs overwrite new/estimates.json for the gated benchmarks only, so
+      # `update` below records gate-condition numbers for those and full-suite
+      # numbers for the rest (which nothing compares against — the gate WARNs on
+      # benchmarks it did not measure).
+      #
+      # Twice, and both dirs handed to `update`, for the same reason the gate runs
+      # twice: the fastest median per benchmark is the one least polluted by
+      # whole-process interference. Baseline and gate must use the same estimator, or
+      # the difference between them is itself a systematic offset.
+      - name: Re-measure the gated subset under gate conditions (pass 1)
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+
+      - name: Set pass 1 aside
+        run: cp -r target/criterion target/criterion-pass1
+
+      - name: Re-measure the gated subset under gate conditions (pass 2)
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+
       # --keep-tolerances preserves the per-benchmark tolerances already in the
       # committed baseline; only the measured numbers are refreshed.
       - name: Regenerate baseline
-        run: python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --runner "github-actions/${{ runner.os }}" --keep-tolerances
+        run: |
+          python3 scripts/perf_regression.py update \
+            --criterion-dir target/criterion-pass1 \
+            --criterion-dir target/criterion \
+            --out benches/perf_baseline.json \
+            --runner "github-actions/${{ runner.os }}" --keep-tolerances
 
       - name: Upload baseline artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -58,7 +95,14 @@ jobs:
           path: benches/perf_baseline.json
           retention-days: 90
 
+      # Only from `develop` or a release tag. `create-pull-request` builds its branch
+      # from the checked-out ref, so a dispatch off a feature branch would push that
+      # whole branch to `chore/perf-baseline-refresh` and turn the standing
+      # baseline-refresh PR into a copy of it. Dispatching elsewhere is legitimate —
+      # it is how you measure a baseline for a change to the benchmarking itself —
+      # and still leaves the artifact above to pick up by hand.
       - name: Open baseline-refresh PR
+        if: github.ref == 'refs/heads/develop' || github.ref_type == 'tag'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           branch: chore/perf-baseline-refresh
