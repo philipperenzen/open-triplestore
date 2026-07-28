@@ -39,13 +39,14 @@ rust:
   stage: test
   # trixie, not bookworm: `--all-features` pulls in sfcgal-sys, which needs
   # native SFCGAL >= 2.0 (bookworm's libsfcgal-dev 1.4.1 is too old — see the
-  # header note). And 1.91, not 1.88: the lockfile pins wide 1.5 / safe_arch
-  # 1.0 (MSRV rustc 1.89), so 1.88 can no longer build it; 1.91 matches the
-  # Dockerfile builder stage. The other rust jobs use the same image so the
-  # shared cache below never mixes distros, and the "-trixie" in the key
-  # retires the bookworm-era caches (their -sys build-script probes point at
-  # the old distro's system libs) instead of inheriting them.
-  image: rust:1.91-trixie
+  # header note). And 1.94, not 1.91: the AWS SDK stack (aws-credential-types
+  # 1.3.0, aws-smithy-runtime 1.12) declares `rust-version = "1.94.1"`, which is
+  # the package's `rust-version` too; 1.94 matches the Dockerfile builder stage.
+  # The other rust jobs use the same image so the shared cache below never mixes
+  # distros, and the "-trixie" in the key retires the bookworm-era caches (their
+  # -sys build-script probes point at the old distro's system libs) instead of
+  # inheriting them.
+  image: rust:1.94-trixie
   cache:
     key: "rust-trixie-$CI_COMMIT_REF_SLUG"
     paths:
@@ -75,7 +76,7 @@ rust:
 perf:
   stage: perf
   # Same trixie image as the rust job (shared cache key — see the note there).
-  image: rust:1.91-trixie
+  image: rust:1.94-trixie
   cache:
     key: "rust-trixie-$CI_COMMIT_REF_SLUG"
     paths:
@@ -89,7 +90,7 @@ perf:
   before_script:
     # GEOS + the usual native deps, matching the GitHub backend job, PLUS
     # python3, which the GitHub ubuntu-latest runner already ships. The
-    # rust:1.91-trixie image happens to include python3 today, but we install it
+    # rust:1.94-trixie image happens to include python3 today, but we install it
     # explicitly rather than depend on the base image's incidental contents.
     # This added `python3` is the one intentional GitHub/GitLab difference (the
     # perf script is invoked the same way on both).
@@ -112,7 +113,7 @@ perf:
 perf-baseline:
   stage: perf
   # Same trixie image as the rust job (shared cache key — see the note there).
-  image: rust:1.91-trixie
+  image: rust:1.94-trixie
   rules:
     - if: '$CI_COMMIT_TAG'
     - if: '$CI_PIPELINE_SOURCE == "web"'
@@ -161,7 +162,7 @@ frontend:
 cargo-deny:
   stage: audit
   # Same trixie image as the other rust jobs (one image to pull per runner).
-  image: rust:1.91-trixie
+  image: rust:1.94-trixie
   cache:
     key: "deny-$CI_COMMIT_REF_SLUG"
     paths:
@@ -198,7 +199,7 @@ secret-scan:
 # from the pipeline view when wanted. ─────────────────────────────────────────
 e2e:
   stage: test
-  image: rust:1.91-trixie
+  image: rust:1.94-trixie
   when: manual
   allow_failure: true
   variables:
