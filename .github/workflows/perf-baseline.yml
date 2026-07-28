@@ -46,6 +46,24 @@ jobs:
       - name: Run full benchmark suite
         run: cargo bench --bench performance --features full
 
+      # Then re-measure exactly what the PR gate measures, the way it measures it.
+      #
+      # The gate (perf.yml) runs only the 'query|path|geosparql' subset, in its own
+      # process. A benchmark's timing is not independent of what ran before it in the
+      # same process — allocator arenas, page-cache and CPU state are all warmer after
+      # the insert/update groups — so a number captured in a full-suite run is not the
+      # number the gate will produce for the same code. That gap is a constant offset
+      # applied to every gated benchmark, and it was large enough to matter: the gate
+      # is a ratio test, and a few percent of systematic bias eats a meaningful slice
+      # of the tolerance before real regressions get any.
+      #
+      # This second run overwrites new/estimates.json for the gated benchmarks only,
+      # so `update` below records gate-condition numbers for those and full-suite
+      # numbers for the rest (which nothing compares against — the gate WARNs on
+      # benchmarks it did not measure).
+      - name: Re-measure the gated subset under gate conditions
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+
       # --keep-tolerances preserves the per-benchmark tolerances already in the
       # committed baseline; only the measured numbers are refreshed.
       - name: Regenerate baseline

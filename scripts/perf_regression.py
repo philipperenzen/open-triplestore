@@ -24,7 +24,7 @@ Baseline file (benches/perf_baseline.json)
 ------------------------------------------
   {
     "schema_version": 1,
-    "default_tolerance_ratio": 1.25,      # fail when run/baseline > this (here: +25%)
+    "default_tolerance_ratio": 1.10,      # fail when run/baseline > this (here: +10%)
     "tolerances": { "concurrent/": 1.5, "query/join/10000": 1.4 },
     "generator": { ...provenance metadata, never used in the pass/fail math... },
     "benchmarks": { "query/simple_lookup/1000": 275000.0, ... }   # id -> median nanoseconds
@@ -33,7 +33,7 @@ Baseline file (benches/perf_baseline.json)
 Tolerance precedence for a benchmark id (highest first):
   1. exact key in `tolerances`              (unless --force-tolerance is given)
   2. longest matching prefix key ending in "/" in `tolerances`
-  3. --tolerance / OTS_PERF_TOLERANCE override, else `default_tolerance_ratio` (default 1.25)
+  3. --tolerance / OTS_PERF_TOLERANCE override, else `default_tolerance_ratio` (default 1.10)
 With --force-tolerance, the CLI/env override beats per-bench and prefix entries too.
 
 Statuses & exit codes
@@ -59,6 +59,9 @@ from datetime import datetime, timezone
 
 SCHEMA_VERSION = 1
 IMPROVED_RATIO = 0.80
+# Fallback when a baseline omits `default_tolerance_ratio`. The committed baseline
+# sets it explicitly; this only covers a hand-rolled or bootstrap file.
+DEFAULT_TOLERANCE = 1.10
 
 
 # ─────────────────────────── Criterion parsing ───────────────────────────
@@ -106,7 +109,7 @@ def load_baseline(path):
         return None
     baseline.setdefault("benchmarks", {})
     baseline.setdefault("tolerances", {})
-    baseline.setdefault("default_tolerance_ratio", 1.25)
+    baseline.setdefault("default_tolerance_ratio", DEFAULT_TOLERANCE)
     return baseline
 
 
@@ -126,7 +129,7 @@ def resolve_tolerance(bench_id, baseline, override, force):
         return float(tols[best_key])
     if override is not None:
         return override
-    return float(baseline.get("default_tolerance_ratio", 1.25))
+    return float(baseline.get("default_tolerance_ratio", DEFAULT_TOLERANCE))
 
 
 # ─────────────────────────── Provenance metadata (update) ───────────────────────────
@@ -270,7 +273,7 @@ def cmd_update(args):
 
     baseline = {
         "schema_version": SCHEMA_VERSION,
-        "default_tolerance_ratio": existing.get("default_tolerance_ratio", 1.25),
+        "default_tolerance_ratio": existing.get("default_tolerance_ratio", DEFAULT_TOLERANCE),
         "tolerances": existing.get("tolerances", {"concurrent/": 1.5}),
         "generator": {
             "commit": git_short_commit() or "unknown",

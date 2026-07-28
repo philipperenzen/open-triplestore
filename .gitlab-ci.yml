@@ -123,7 +123,11 @@ perf-baseline:
     - apt-get update -qq
     - apt-get install -y -qq libgeos-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld python3
   script:
+    # Full suite, then a second pass over exactly the subset the gate runs, so the
+    # gated benchmarks are baselined under gate conditions rather than full-suite
+    # ones (see the same two steps in .github/workflows/perf-baseline.yml for why).
     - cargo bench --bench performance --features full
+    - cargo bench --bench performance --features full -- 'query|path|geosparql'
     - python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --runner "gitlab-ci/$CI_RUNNER_DESCRIPTION" --keep-tolerances
   artifacts:
     paths:

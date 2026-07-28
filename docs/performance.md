@@ -71,10 +71,16 @@ lives under `benches/` rather than next to the Criterion output because
 
 The checker compares each fresh run against the baseline and flags any
 benchmark whose median exceeds `baseline × tolerance`. The default tolerance is
-`default_tolerance_ratio` = **1.25** (i.e. +25 % is allowed before the gate
-trips). The bar is deliberately generous because the gate runs on **shared CI
-runners**, whose timings are noisy — a tighter bar would produce false failures
-on unrelated PRs.
+`default_tolerance_ratio` = **1.10** (i.e. +10 % is allowed before the gate
+trips).
+
+That bar is only usable because the baseline is captured the same way the gate
+measures — see *Subset (PR gate) vs full suite*. The gate is a **ratio** test, so
+any systematic difference between how the baseline and the run were produced is
+spent before a real regression gets any of the budget. Shared CI runners are
+still noisy on top of that, which is what the per-benchmark `tolerances` map is
+for: loosen the few benchmarks that genuinely swing, rather than loosening the
+default for all of them.
 
 Tolerances can be tuned per benchmark or per prefix in the `tolerances` map.
 Precedence is: an exact per-benchmark key, then the **longest matching prefix
@@ -83,10 +89,10 @@ concurrency benchmarks are the noisiest, so loosen the whole group at once:
 
 ```jsonc
 {
-  "default_tolerance_ratio": 1.25,
+  "default_tolerance_ratio": 1.10,
   "tolerances": {
-    "concurrent/": 1.6,                 // whole group: allow +60 %
-    "query/simple_lookup/100000": 1.15  // one hot path: tighten to +15 %
+    "concurrent/": 1.5,                 // whole group: allow +50 %
+    "query_simple_lookup/100000": 1.15  // one noisy benchmark: allow +15 %
   }
 }
 ```
@@ -105,7 +111,16 @@ cargo bench --bench performance --features full -- 'query|path|geosparql'
 ```
 
 The full suite runs only on tags / manual dispatch (see *Refreshing the
-baseline*). Two reasons for the split:
+baseline*) — and that job then runs the subset above a **second** time, so the
+gated benchmarks are baselined under the same conditions the gate will reproduce.
+A benchmark's timing is not independent of what ran before it in the same process
+(allocator arenas, page cache and CPU state are all warmer after the insert and
+update groups), so a full-suite number is not the number the gate produces for
+the same code. Left uncorrected that is a constant offset on every gated
+benchmark, and with a +10 % bar it would consume much of the budget before any
+real regression could.
+
+Two reasons for the split:
 
 - **Why a subset on PRs.** The full suite is slow, and every extra benchmark on
   a shared runner adds variance — a representative subset gives a fast, stable
@@ -126,11 +141,18 @@ The committed baseline starts as a placeholder with an empty `benchmarks` map
    ([`.github/workflows/perf-baseline.yml`](../.github/workflows/perf-baseline.yml))
    and **Run** it on the `develop` branch — or push a `v*` tag, which triggers
    the same job.
-2. It runs the **full** suite natively on Linux, runs
-   `perf_regression.py update`, uploads the baseline as an artifact, and opens a
-   PR to `develop` with the refreshed `benches/perf_baseline.json`.
+2. It runs the **full** suite natively on Linux, re-runs the gated subset under
+   gate conditions, runs `perf_regression.py update`, uploads the baseline as an
+   artifact, and opens a PR to `develop` with the refreshed
+   `benches/perf_baseline.json`.
 3. Review that PR — check the `generator` provenance (runner / CPU / timestamp)
    matches the controlled runner — and merge.
+
+Refresh from the branch the gate will run against, and refresh **after** any
+performance work has landed, not before. A tag build measures the release commit;
+if `develop` has moved on since, the baseline describes code the gate is no longer
+running, and every benchmark that changed in between reads as a regression in the
+refresh PR itself.
 
 The baseline is **never** refreshed from PR runs (anti-drift: a slow PR can't
 quietly raise the bar). Because absolute timings are **hardware-specific**, only
