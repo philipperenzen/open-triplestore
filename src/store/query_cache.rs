@@ -55,18 +55,29 @@ impl Cached {
         match self {
             Cached::Boolean(b) => QueryResults::Boolean(*b),
             Cached::Solutions { vars, rows } => {
-                // oxigraph 0.5: `QuerySolutionIter` yields `QuerySolution` (not raw
-                // `Vec<Option<Term>>`), built from the (variables, values) pair. The
-                // iterator owns its cloned data, so the result is `'static`.
-                let vars = vars.clone();
-                let rows = rows.clone();
-                let row_vars = vars.clone();
-                let iter = (0..rows.len())
-                    .map(move |i| Ok(QuerySolution::from((row_vars.clone(), rows[i].clone()))));
-                QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
+                QueryResults::Solutions(replay(vars.clone(), rows.clone()))
             }
         }
     }
+}
+
+/// Re-emit stored value rows as an owned, `'static` result stream.
+///
+/// This is the cache-*hit* path — the hot one, since a hit is the whole point — so
+/// it does the minimum: clone the row and pair it with the shared variable list.
+/// oxigraph 0.5's `QuerySolutionIter` yields `QuerySolution` (not raw value rows),
+/// hence the rebuild; owning its data is what makes the result `'static` and lets
+/// the cache keep its copy. Rows are stored already in `vars` order (`put` does that
+/// once, on the way in), so nothing here needs to inspect variables.
+fn replay(vars: Arc<[Variable]>, rows: Arc<[Vec<Option<Term>>]>) -> QuerySolutionIter<'static> {
+    let row_vars = Arc::clone(&vars);
+    let iter = (0..rows.len()).map(move |i| {
+        Ok(QuerySolution::from((
+            Arc::clone(&row_vars),
+            rows[i].clone(),
+        )))
+    });
+    QuerySolutionIter::new(vars, iter)
 }
 
 /// The cache, shared (`Arc`) inside `TripleStore`.
@@ -156,11 +167,18 @@ impl QueryCache {
             }
             QueryResults::Solutions(mut sols) => {
                 let vars: Arc<[Variable]> = Arc::from(sols.variables().to_vec());
-                // Pull up to max_rows+1 rows (so overflow is detectable) while
+                // Pull up to max_rows+1 solutions (so overflow is detectable) while
                 // preserving any mid-stream error.
-                let mut buf: Vec<Result<Vec<Option<Term>>, QueryEvaluationError>> = Vec::new();
+                //
+                // Buffer the `QuerySolution`s the engine hands us, untouched, and
+                // decompose them into value rows only if it turns out we can cache
+                // them. This used to decompose on the way in, before knowing — so a
+                // result over the cap paid a deep copy of every term in its first
+                // max_rows+1 rows, only to rebuild the very solutions it had just
+                // taken apart. A 100k-row scan did that 10001 times for nothing.
+                let mut buf: Vec<QuerySolution> = Vec::new();
                 let mut exhausted = false;
-                let mut errored = false;
+                let mut error: Option<QueryEvaluationError> = None;
                 loop {
                     match sols.next() {
                         None => {
@@ -168,23 +186,22 @@ impl QueryCache {
                             break;
                         }
                         Some(Ok(sol)) => {
-                            buf.push(Ok(vars.iter().map(|v| sol.get(v).cloned()).collect()));
+                            buf.push(sol);
                             if buf.len() > self.inner.max_rows {
                                 break; // over the cap
                             }
                         }
                         Some(Err(e)) => {
-                            buf.push(Err(e));
-                            errored = true;
+                            error = Some(e);
                             break;
                         }
                     }
                 }
 
-                if exhausted && !errored && buf.len() <= self.inner.max_rows {
-                    // Small, complete, error-free → cache it and reconstruct.
+                if exhausted && error.is_none() && buf.len() <= self.inner.max_rows {
+                    // Small, complete, error-free → decompose once, cache, replay.
                     let rows: Arc<[Vec<Option<Term>>]> =
-                        buf.into_iter().map(|r| r.unwrap_or_default()).collect();
+                        buf.iter().map(|sol| row_values(sol, &vars)).collect();
                     self.store(
                         sparql,
                         gen,
@@ -193,20 +210,18 @@ impl QueryCache {
                             rows: rows.clone(),
                         },
                     );
-                    let row_vars = vars.clone();
-                    let iter = (0..rows.len())
-                        .map(move |i| Ok(QuerySolution::from((row_vars.clone(), rows[i].clone()))));
-                    QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
+                    QueryResults::Solutions(replay(vars, rows))
                 } else {
-                    // Over the cap or errored → don't cache; stream the buffered prefix
-                    // chained with the rest of the live iterator. oxigraph 0.5's live
-                    // `sols` already yield `QuerySolution`s, so only the buffered raw
-                    // value rows need rebuilding into solutions.
-                    let head_vars = vars.clone();
-                    let head = buf
+                    // Over the cap or errored → don't cache; stream the buffered
+                    // solutions unchanged, then the error (if any), then the rest of
+                    // the live iterator. Nothing is rebuilt: oxigraph 0.5's `sols`
+                    // already yields owned `QuerySolution`s, so the buffered prefix
+                    // passes straight through.
+                    let iter = buf
                         .into_iter()
-                        .map(move |r| r.map(|row| QuerySolution::from((head_vars.clone(), row))));
-                    let iter = head.chain(sols);
+                        .map(Ok)
+                        .chain(error.into_iter().map(Err))
+                        .chain(sols);
                     QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
                 }
             }
@@ -219,6 +234,29 @@ impl QueryCache {
         if let Ok(mut cache) = self.inner.cache.lock() {
             cache.put(sparql.to_string(), (gen, value));
         }
+    }
+}
+
+/// A solution's values in `vars` order — the once-per-result decomposition `put`
+/// does before caching, never the per-hit path (see `replay`).
+///
+/// A `QuerySolution` carries its own ordered variable list, and the evaluator builds
+/// every solution in a result against the same list `QuerySolutionIter::variables()`
+/// reports — so `sol.values()` is normally already in `vars` order and copying the
+/// slice is all that is needed. `QuerySolutionIter::new` does not *enforce* that, so
+/// the orders are compared rather than assumed, and anything else falls back to a
+/// per-variable lookup.
+///
+/// The comparison costs less than the lookup it replaces: `QuerySolution::get`
+/// resolves a `&Variable` by scanning the solution's variable list and comparing
+/// variable names, so the lookup form is `vars.len()` scans of up to `vars.len()`
+/// name comparisons per row — quadratic in the projection width — against one linear
+/// slice comparison here.
+fn row_values(sol: &QuerySolution, vars: &Arc<[Variable]>) -> Vec<Option<Term>> {
+    if sol.variables() == &vars[..] {
+        sol.values().to_vec()
+    } else {
+        vars.iter().map(|v| sol.get(v).cloned()).collect()
     }
 }
 

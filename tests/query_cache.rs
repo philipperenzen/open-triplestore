@@ -6,7 +6,7 @@
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
 use oxigraph::model::Term;
-use oxigraph::sparql::QueryResults;
+use oxigraph::sparql::{QueryResults, Variable};
 
 const EX: &str = "http://example.org/";
 
@@ -140,6 +140,74 @@ fn distinct_query_strings_keyed_independently() {
     // Re-query (now cached) — must still be each graph's own count, no collision.
     assert_eq!(count(&s, q1), 2);
     assert_eq!(count(&s, q2), 3);
+}
+
+/// Multi-variable rows, with an unbound column, must come back identical whether
+/// they went through the caching path or the over-cap streaming path — same values,
+/// same variable order, unbound stays unbound.
+///
+/// This is the property `put` leans on when it copies a solution's value slice
+/// wholesale instead of looking each variable up by name: the copy is only valid
+/// while the solution's variable order matches the iterator's. Both paths are
+/// checked against the same expectation, and both are checked twice so the second
+/// call exercises the cache *hit* (under the cap) and the recompute (over it).
+#[test]
+fn row_values_survive_both_the_cached_and_the_over_cap_path() {
+    // ?opt is bound for s0 only, so every other row carries an unbound column.
+    let mut ttl = String::new();
+    for i in 0..5 {
+        ttl.push_str(&format!("<{EX}s{i}> <{EX}p> \"{i}\" .\n"));
+    }
+    ttl.push_str(&format!("<{EX}s0> <{EX}q> \"opt\" .\n"));
+    let q = format!(
+        "SELECT ?s ?o ?opt WHERE {{ ?s <{EX}p> ?o . OPTIONAL {{ ?s <{EX}q> ?opt }} }} ORDER BY ?s"
+    );
+
+    let expected: Vec<Vec<Option<String>>> = (0..5)
+        .map(|i| {
+            vec![
+                Some(format!("{EX}s{i}")),
+                Some(i.to_string()),
+                (i == 0).then(|| "opt".to_string()),
+            ]
+        })
+        .collect();
+
+    // cap 100 → cached; cap 2 → over the cap on every call.
+    for max_rows in [100, 2] {
+        let s = store(max_rows);
+        s.load_str(&ttl, RdfFormat::Turtle, None).unwrap();
+        for pass in 1..=2 {
+            let QueryResults::Solutions(sols) = s.query(&q).unwrap() else {
+                panic!("expected solutions");
+            };
+            assert_eq!(
+                sols.variables(),
+                &[
+                    Variable::new("s").unwrap(),
+                    Variable::new("o").unwrap(),
+                    Variable::new("opt").unwrap()
+                ],
+                "cap {max_rows}, pass {pass}: variable order"
+            );
+            let got: Vec<Vec<Option<String>>> = sols
+                .map(|sol| {
+                    sol.unwrap()
+                        .values()
+                        .iter()
+                        .map(|t| {
+                            t.as_ref().map(|t| match t {
+                                Term::NamedNode(n) => n.as_str().to_string(),
+                                Term::Literal(l) => l.value().to_string(),
+                                other => panic!("unexpected term {other:?}"),
+                            })
+                        })
+                        .collect()
+                })
+                .collect();
+            assert_eq!(got, expected, "cap {max_rows}, pass {pass}: rows");
+        }
+    }
 }
 
 #[test]

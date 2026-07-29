@@ -104,5 +104,39 @@ expect_exit 1 "compare: real regression on both passes fails" -- \
 expect_exit 2 "compare: empty 'after' side" -- \
   "$PY" "$script" compare --before "$cmp_root/base-1" --after "$empty" --baseline "$cmp_base"
 
+# 6. The small-benchmark floor. Under `small_benchmark_ns` a percentage bar carries
+#    no information — 79 ns plus one scheduling hiccup is +19% — so those fall back
+#    to `small_benchmark_tolerance` instead of the default.
+small_base="$(mktemp)"
+trap 'rm -rf "$empty" "$cmp_root"; rm -f "$out_json" "$cmp_base" "$small_base"' EXIT
+printf '{"schema_version":1,"default_tolerance_ratio":1.10,"small_benchmark_ns":1000,"small_benchmark_tolerance":1.35,"tolerances":{},"benchmarks":{}}' > "$small_base"
+
+# 79 ns -> 94 ns is +19%: over the 1.10 default, under the 1.35 floor.
+write_median base-1 79.0; write_median base-2 79.0
+write_median head-1 94.0; write_median head-2 94.0
+expect_exit 0 "small-benchmark floor: +19% on a 79 ns benchmark is tolerated" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$small_base"
+
+# Same +19%, but at 5 µs the floor does not apply and the default bites.
+write_median base-1 5000.0; write_median base-2 5000.0
+write_median head-1 5950.0; write_median head-2 5950.0
+expect_exit 1 "small-benchmark floor: the same +19% at 5 µs still fails" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$small_base"
+
+# The floor is a fallback, not an override: an explicit entry still wins.
+write_median base-1 79.0; write_median base-2 79.0
+write_median head-1 94.0; write_median head-2 94.0
+tight_base="$(mktemp)"
+trap 'rm -rf "$empty" "$cmp_root"; rm -f "$out_json" "$cmp_base" "$small_base" "$tight_base"' EXIT
+printf '{"schema_version":1,"default_tolerance_ratio":1.10,"small_benchmark_ns":1000,"small_benchmark_tolerance":1.35,"tolerances":{"b":1.05},"benchmarks":{}}' > "$tight_base"
+expect_exit 1 "small-benchmark floor: an explicit tolerances entry still wins" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$tight_base"
+
 echo "===================================="
 if [ "$fails" -eq 0 ]; then echo "ALL PERF SELF-TESTS PASSED"; else echo "$fails PERF SELF-TEST(S) FAILED"; exit 1; fi
