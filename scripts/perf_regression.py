@@ -415,8 +415,7 @@ def cmd_update(args):
             "command": "cargo bench --bench performance --features full",
             "criterion_metric": "median.point_estimate",
             "unit": "ns",
-            "note": ("Authoritative perf baseline. Refresh ONLY via the perf-baseline workflow "
-                     "(version tag or manual dispatch) — never edit by hand or from a PR run."),
+            "note": "Absolute perf numbers for tracking, and the tolerance map the gate reads. The PR gate compares a change against its merge base (both benched in one job), not against these numbers \u2014 runner hardware changes under a stored baseline (this file moved ~33% when the runner went from EPYC 7763 to Xeon 6973P-C). Refresh ONLY via the perf-baseline workflow (version tag or manual dispatch) \u2014 never edit by hand or from a PR run.",
         },
         "benchmarks": {k: round(v, 1) for k, v in sorted(runs.items())},
     }
