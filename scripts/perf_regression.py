@@ -33,7 +33,8 @@ Baseline file (benches/perf_baseline.json)
 Tolerance precedence for a benchmark id (highest first):
   1. exact key in `tolerances`              (unless --force-tolerance is given)
   2. longest matching prefix key ending in "/" in `tolerances`
-  3. --tolerance / OTS_PERF_TOLERANCE override, else `default_tolerance_ratio` (default 1.10)
+  3. `small_benchmark_tolerance` when the reference side is under `small_benchmark_ns`
+  4. --tolerance / OTS_PERF_TOLERANCE override, else `default_tolerance_ratio` (default 1.10)
 With --force-tolerance, the CLI/env override beats per-bench and prefix entries too.
 
 Statuses & exit codes
@@ -62,6 +63,10 @@ IMPROVED_RATIO = 0.80
 # Fallback when a baseline omits `default_tolerance_ratio`. The committed baseline
 # sets it explicitly; this only covers a hand-rolled or bootstrap file.
 DEFAULT_TOLERANCE = 1.10
+# Below this many nanoseconds a percentage bar stops carrying information — see
+# `resolve_tolerance`. Both are overridable per baseline file.
+SMALL_BENCHMARK_NS = 1000.0
+SMALL_BENCHMARK_TOLERANCE = 1.35
 
 
 # ─────────────────────────── Criterion parsing ───────────────────────────
@@ -135,8 +140,16 @@ def load_baseline(path):
     return baseline
 
 
-def resolve_tolerance(bench_id, baseline, override, force):
-    """Tolerance ratio for one benchmark id (see module docstring for precedence)."""
+def resolve_tolerance(bench_id, baseline, override, force, reference_ns=None):
+    """Tolerance ratio for one benchmark id (see module docstring for precedence).
+
+    `reference_ns` is what the benchmark took on the side being compared against.
+    Below `small_benchmark_ns` the default does not apply, because a percentage bar
+    stops meaning anything down there: `geosparql_sf_contains/50` runs in 79 ns, so
+    a single scheduling hiccup worth 15 ns reads as +19%. Naming such benchmarks
+    one at a time in `tolerances` only ever catches the one that happened to trip
+    last — the floor covers the class.
+    """
     if force and override is not None:
         return override
     tols = baseline.get("tolerances", {})
@@ -149,6 +162,9 @@ def resolve_tolerance(bench_id, baseline, override, force):
                 best_key = key
     if best_key is not None:
         return float(tols[best_key])
+    small_ns = baseline.get("small_benchmark_ns")
+    if small_ns and reference_ns is not None and reference_ns < float(small_ns):
+        return float(baseline.get("small_benchmark_tolerance", SMALL_BENCHMARK_TOLERANCE))
     if override is not None:
         return override
     return float(baseline.get("default_tolerance_ratio", DEFAULT_TOLERANCE))
@@ -232,7 +248,8 @@ def cmd_check(args):
         run_ns = runs.get(bench_id)
         base_ns = base_benches.get(bench_id)
         if run_ns is not None and base_ns is not None and base_ns > 0:
-            tol = resolve_tolerance(bench_id, baseline, override, args.force_tolerance)
+            tol = resolve_tolerance(bench_id, baseline, override, args.force_tolerance,
+                                    reference_ns=base_ns)
             ratio = run_ns / base_ns
             if ratio > tol:
                 status, regressions = f"REGRESSION (>{tol:.2f}x)", regressions + 1
@@ -324,7 +341,8 @@ def cmd_compare(args):
     for bench_id in sorted(set(before) | set(after)):
         base_ns, run_ns = before.get(bench_id), after.get(bench_id)
         if run_ns is not None and base_ns is not None and base_ns > 0:
-            tol = resolve_tolerance(bench_id, baseline, override, args.force_tolerance)
+            tol = resolve_tolerance(bench_id, baseline, override, args.force_tolerance,
+                                    reference_ns=base_ns)
             ratio = run_ns / base_ns
             if ratio > tol:
                 status, regressions = f"REGRESSION (>{tol:.2f}x)", regressions + 1

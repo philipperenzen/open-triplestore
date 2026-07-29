@@ -6,6 +6,8 @@
     "query_group_concat/": 1.35,
     "query_simple_lookup/100000": 1.45
   },
+  "small_benchmark_ns": 1000,
+  "small_benchmark_tolerance": 1.35,
   "generator": {
     "commit": "23b0292",
     "generated_at": "2026-07-28T16:52:39Z",
