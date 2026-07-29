@@ -128,9 +128,19 @@ default:
     "concurrent/": 1.5,                 // genuinely variable; not in the gated subset
     "query_group_concat/": 1.35,        // both sizes; allocation-heavy, measured +25.5 %
     "query_simple_lookup/100000": 1.45  // bimodal on this runner; see below
-  }
+  },
+  "small_benchmark_ns": 1000,           // below 1 µs, a percentage bar means nothing
+  "small_benchmark_tolerance": 1.35
 }
 ```
+
+**The small-benchmark floor.** Below `small_benchmark_ns` the default does not
+apply. `geosparql_sf_contains/50` runs in **79 ns**, so one scheduling hiccup worth
+15 ns reads as +19 % — no amount of repetition fixes that, because the quantity
+being measured is smaller than the noise floor of measuring it. Naming such
+benchmarks one at a time in `tolerances` only ever catches whichever tripped last;
+the floor covers the class. It is a *fallback*, so an explicit `tolerances` entry
+still wins if you want a particular small benchmark held tighter.
 
 Two benchmarks need an exception, and only two.
 
