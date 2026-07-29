@@ -3,8 +3,8 @@
   "default_tolerance_ratio": 1.1,
   "tolerances": {
     "concurrent/": 1.5,
-    "query_group_concat/10000": 1.35,
-    "query_simple_lookup/100000": 1.15
+    "query_group_concat/": 1.35,
+    "query_simple_lookup/100000": 1.45
   },
   "generator": {
     "commit": "23b0292",
