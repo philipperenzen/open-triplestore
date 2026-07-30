@@ -935,6 +935,7 @@ mod tests {
             role: SystemRole::User,
             can_publish: false,
             write_access: write,
+            can_mint_api_tokens: true,
         }
     }
 
