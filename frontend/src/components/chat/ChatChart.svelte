@@ -55,6 +55,34 @@
     s = String(s ?? '');
     return s.length > max ? `${s.slice(0, max - 1)}…` : s;
   }
+
+  // IRI-aware display label. Charting per-graph/per-entity results hands this
+  // component full IRIs, and truncating those from the FRONT renders dozens of
+  // identical "https://opentri…" ticks — the shared prefix is exactly the part
+  // that carries no information. Show the tail segments instead, adding one
+  // more segment whenever two labels would otherwise collide.
+  $: displayByLabel = (() => {
+    const unwrap = (s) => String(s ?? '').replace(/^[<"']+|[>"']+$/g, '');
+    const isIri = (s) => /^(https?:\/\/|urn:)/i.test(unwrap(s));
+    const segs = (s) => unwrap(s).split(/[/#:]+/).filter(Boolean);
+    const tail = (s, n) => segs(s).slice(-n).join('/');
+    const m = new Map();
+    let depth = 1;
+    for (; depth <= 4; depth++) {
+      m.clear();
+      const seen = new Map();
+      let collision = false;
+      for (const l of labels) {
+        const d = isIri(l) ? tail(l, depth) : String(l ?? '');
+        if (seen.has(d) && seen.get(d) !== l) collision = true;
+        seen.set(d, l);
+        m.set(l, d);
+      }
+      if (!collision) break;
+    }
+    return m;
+  })();
+  const display = (l) => displayByLabel.get(l) ?? String(l ?? '');
   function valueAt(s, label) {
     return s.data.find((d) => d.label === label);
   }
@@ -103,7 +131,7 @@
       </svg>
       <ul class="pie-legend">
         {#each slices as s}
-          <li><span class="dot" style="background:{s.color}"></span><span class="pl-label" title={s.label}>{short(s.label, 24)}</span><span class="pl-val">{fmt(s.value)} · {s.pct}%</span></li>
+          <li><span class="dot" style="background:{s.color}"></span><span class="pl-label" title={s.label}>{short(display(s.label), 24)}</span><span class="pl-val">{fmt(s.value)} · {s.pct}%</span></li>
         {/each}
       </ul>
     </div>
@@ -158,7 +186,7 @@
         {#each labels as label, i}
           {@const cx = spec.type === 'bar' ? groupX(i) + groupW / 2 - 2 : lineX(i)}
           <text x={cx} y={PAD_T + PLOT_H + 14} class="xlab" text-anchor={label.length > 8 ? 'end' : 'middle'} transform={label.length > 8 ? `rotate(-30 ${cx} ${PAD_T + PLOT_H + 14})` : ''}>
-            {short(label)}<title>{label}</title>
+            {short(display(label), 18)}<title>{label}</title>
           </text>
         {/each}
         {#if spec.xLabel}<text x={PAD_L + plotW / 2} y={height - 4} class="axis-label" text-anchor="middle">{spec.xLabel}</text>{/if}

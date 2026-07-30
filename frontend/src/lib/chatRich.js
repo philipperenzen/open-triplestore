@@ -40,7 +40,8 @@ const MAX_3D_MODELS = 8;
  *   | {kind:'model3d', models} | {kind:'file', file}
  *   | {kind:'broken', label, error, raw}
  */
-export function parseChatBlocks(source) {
+export function parseChatBlocks(source, opts = {}) {
+  const queryRows = opts.queryRows ?? null;
   const lines = String(source ?? '').split('\n');
   const segments = [];
   let md = [];
@@ -68,7 +69,7 @@ export function parseChatBlocks(source) {
       }
     }
     const body = lines.slice(i + 1, close === -1 ? lines.length : close).join('\n');
-    const seg = specialSegment(lang, body);
+    const seg = specialSegment(lang, body, queryRows);
     if (seg) {
       flushMd();
       segments.push(seg);
@@ -84,7 +85,7 @@ export function parseChatBlocks(source) {
 }
 
 /** Map one fenced block to a widget segment, or null to leave it as markdown. */
-function specialSegment(lang, body) {
+function specialSegment(lang, body, queryRows = null) {
   const code = body.trim();
   if (!code) return null;
   const kind = lang || sniffLang(code);
@@ -99,14 +100,14 @@ function specialSegment(lang, body) {
       return ep ? { kind: 'api', ...ep } : null;
     }
     case 'chart': {
-      const r = parseChartSpec(code);
+      const r = parseChartSpec(code, queryRows);
       return r.error
         ? { kind: 'broken', label: 'chart', error: r.error, raw: code }
         : { kind: 'chart', spec: r.spec };
     }
     case 'map':
     case 'geo': {
-      const r = parseMapSpec(code);
+      const r = parseMapSpec(code, queryRows);
       return r.error
         ? { kind: 'broken', label: 'map', error: r.error, raw: code }
         : { kind: 'map', features: r.features, models: r.models };
@@ -285,17 +286,74 @@ function normPoints(arr) {
     .slice(0, MAX_CHART_POINTS);
 }
 
+/** Column index by (case-insensitive) name, tolerating a leading '?'. */
+function colIndex(columns, name) {
+  if (!name) return -1;
+  const want = String(name).replace(/^\?/, '').toLowerCase();
+  return (columns || []).findIndex((c) => String(c).replace(/^\?/, '').toLowerCase() === want);
+}
+
+/** First column whose cells are predominantly numeric. */
+function firstNumericColumn(columns, rows) {
+  for (let i = 0; i < (columns || []).length; i++) {
+    let num = 0;
+    let seen = 0;
+    for (const r of rows.slice(0, 20)) {
+      const v = r[i];
+      if (v == null || v === '') continue;
+      seen += 1;
+      if (Number.isFinite(Number(v))) num += 1;
+    }
+    if (seen && num === seen) return i;
+  }
+  return -1;
+}
+
+/**
+ * Bind a `"source":"query"` chart to the executed rows: x = the named label
+ * column (default: first non-numeric), y = the named value column (default:
+ * first numeric). Sorted descending and capped so a 40-graph result stays a
+ * readable chart.
+ */
+function chartFromQueryRows(raw, queryRows) {
+  const columns = queryRows?.columns || [];
+  const rows = queryRows?.rows || [];
+  if (!columns.length || !rows.length) {
+    return { error: 'source:"query" but no query rows were produced this turn' };
+  }
+  let yi = colIndex(columns, raw.y ?? raw.value);
+  if (yi < 0) yi = firstNumericColumn(columns, rows);
+  if (yi < 0) return { error: 'source:"query": no numeric column for y' };
+  let xi = colIndex(columns, raw.x ?? raw.label);
+  if (xi < 0) xi = columns.findIndex((_, i) => i !== yi);
+  if (xi < 0) return { error: 'source:"query": no label column for x' };
+  const data = rows
+    .map((r) => ({ label: String(r[xi] ?? ''), value: Number(r[yi]) }))
+    .filter((d) => d.label && Number.isFinite(d.value))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, MAX_CHART_POINTS);
+  if (!data.length) return { error: 'source:"query": rows yielded no plottable points' };
+  return { series: [{ name: '', data }] };
+}
+
 /**
  * Parse + validate a ```chart spec.
  * @returns {{spec?: {type, title, xLabel, yLabel, series: Array<{name, data}>}, error?: string}}
  */
-export function parseChartSpec(text) {
+export function parseChartSpec(text, queryRows = null) {
   const raw = lenientJsonParse(text);
   if (raw === undefined) return { error: 'invalid JSON' };
   if (!raw || typeof raw !== 'object') return { error: 'not an object' };
   const type = ['bar', 'line', 'pie'].includes(raw.type) ? raw.type : 'bar';
   let series;
-  if (Array.isArray(raw.series)) {
+  if (raw.source === 'query' || raw.data === 'query') {
+    // Data comes from the turn's executed SPARQL rows — the numbers users see
+    // are the numbers the store returned, not the model's transcription of
+    // them (a 7B model reliably corrupts digits when copying 30+ values).
+    const bound = chartFromQueryRows(raw, queryRows);
+    if (bound.error) return bound;
+    series = bound.series;
+  } else if (Array.isArray(raw.series)) {
     series = raw.series
       .map((s) => ({ name: str(s?.name), data: normPoints(s?.data) }))
       .filter((s) => s.data.length);
@@ -352,12 +410,39 @@ function normMapModels(arr) {
  * only (models: []).
  * @returns {{features?: Array<{label, iri, wkt}>, models?: Array<{label, url, format, wkt}>, error?: string}}
  */
-export function parseMapSpec(text) {
+export function parseMapSpec(text, queryRows = null) {
   const t = String(text ?? '').trim();
   let features = [];
   let models = [];
   if (t.startsWith('{') || t.startsWith('[')) {
     const raw = lenientJsonParse(t);
+    if (raw && typeof raw === 'object' && (raw.source === 'query' || raw.features === 'query')) {
+      const columns = queryRows?.columns || [];
+      const rows = queryRows?.rows || [];
+      if (!columns.length || !rows.length) {
+        return { error: 'source:"query" but no query rows were produced this turn' };
+      }
+      let wi = colIndex(columns, raw.wkt);
+      if (wi < 0) {
+        wi = columns.findIndex((_, i) =>
+          rows.slice(0, 10).some((r) => parseWktGeometry(String(r[i] ?? ''))),
+        );
+      }
+      if (wi < 0) return { error: 'source:"query": no WKT column found' };
+      let li = colIndex(columns, raw.label);
+      if (li < 0) li = columns.findIndex((_, i) => i !== wi);
+      const ii = colIndex(columns, raw.iri);
+      const feats = rows
+        .map((r) => ({
+          label: String((li >= 0 ? r[li] : '') ?? ''),
+          iri: String((ii >= 0 ? r[ii] : '') ?? ''),
+          wkt: String(r[wi] ?? ''),
+        }))
+        .filter((f) => parseWktGeometry(f.wkt))
+        .slice(0, MAX_MAP_FEATURES);
+      if (!feats.length) return { error: 'source:"query": rows yielded no mappable WKT' };
+      return { features: feats, models: [] };
+    }
     if (raw === undefined) return { error: 'invalid JSON' };
     const arr = Array.isArray(raw) ? raw : raw?.features;
     models = Array.isArray(raw) ? [] : normMapModels(raw?.models);

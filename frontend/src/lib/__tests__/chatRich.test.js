@@ -406,3 +406,59 @@ describe('sniffLang', () => {
     expect(sniffLang('just some text')).toBe('');
   });
 });
+
+describe('query-sourced widgets', () => {
+  const runs = {
+    columns: ['g', 'n'],
+    rows: [
+      ['https://ex.org/demo/building', '48111'],
+      ['https://ex.org/demo/landmarks', '63'],
+      ['https://ex.org/demo/sensors', '95'],
+    ],
+  };
+
+  it('binds a chart to the executed rows instead of retyped numbers', () => {
+    const r = parseChartSpec('{"type":"bar","title":"T","source":"query","x":"g","y":"n"}', runs);
+    expect(r.error).toBeUndefined();
+    const data = r.spec.series[0].data;
+    expect(data.map((d) => d.value)).toEqual([48111, 95, 63]); // sorted desc
+    expect(data[0].label).toBe('https://ex.org/demo/building');
+  });
+
+  it('auto-detects label and numeric columns when x/y are omitted', () => {
+    const r = parseChartSpec('{"type":"bar","source":"query"}', runs);
+    expect(r.error).toBeUndefined();
+    expect(r.spec.series[0].data[0].value).toBe(48111);
+  });
+
+  it('fails loudly when no rows exist to bind', () => {
+    const r = parseChartSpec('{"type":"bar","source":"query"}', null);
+    expect(r.error).toMatch(/no query rows/);
+  });
+
+  it('binds a map to WKT-bearing rows', () => {
+    const geo = {
+      columns: ['landmark', 'name', 'loc'],
+      rows: [
+        ['https://ex.org/BigBen', 'Big Ben', 'POINT(-0.12457 51.50067)'],
+        ['https://ex.org/White', 'White House', 'POINT(-77.0366 38.8977)'],
+      ],
+    };
+    const r = parseMapSpec('{"source":"query","wkt":"loc","label":"name","iri":"landmark"}', geo);
+    expect(r.error).toBeUndefined();
+    expect(r.features).toHaveLength(2);
+    expect(r.features[0]).toEqual({
+      label: 'Big Ben',
+      iri: 'https://ex.org/BigBen',
+      wkt: 'POINT(-0.12457 51.50067)',
+    });
+  });
+
+  it('parseChatBlocks threads rows through to the widget parsers', () => {
+    const md = 'Here:\n```chart\n{"type":"bar","source":"query"}\n```\n';
+    const seg = parseChatBlocks(md, { queryRows: runs }).find((x) => x.kind === 'chart');
+    expect(seg).toBeTruthy();
+    expect(seg.spec.series[0].data).toHaveLength(3);
+  });
+});
+

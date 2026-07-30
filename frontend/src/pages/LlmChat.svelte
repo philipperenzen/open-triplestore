@@ -605,6 +605,7 @@
             <div class="bubble-text">
               <ChatRichMessage
                 content={msg.content}
+                queries={msg.queries}
                 on:runApi={(e) => attachRun(msg, e.detail)}
                 on:openInSparql={(e) => openInSparql(e.detail)}
               />

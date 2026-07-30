@@ -836,7 +836,13 @@ memory: if you have not retrieved them this turn, query first.\n\
 Query efficiently: fetch everything you need in as FEW rounds as possible (select labels and values \
 together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows come back; use LIMIT 50 \
 for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
-build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\n\
+build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\
+Aggregate correctly: `COUNT(*)` counts rows; `COUNT(?v)` counts only rows where ?v is BOUND, so \
+counting a variable that never appears in the pattern silently yields 0 for every group. The \
+canonical per-graph triple count is: \
+`SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g ORDER BY DESC(?n)`. \
+Sanity-check aggregates before presenting them: an all-zero result almost always means a wrong \
+variable, not empty graphs — re-query, don't chart it.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -845,11 +851,20 @@ workspace. Use it whenever you show a query.\n\
 - ```api — a runnable API call; first line is `GET <path>`, for example:\n\
 ```api\nGET /api/datasets/<dataset-id>/api-services/<slug>/run?param=value\n```\n\
 Use one whenever you mention an API service (inline code like `GET /api/...` becomes clickable too).\n\
-- ```chart — a JSON spec rendered as a chart: \
-{\"type\":\"bar\",\"title\":\"…\",\"yLabel\":\"…\",\"data\":[{\"label\":\"A\",\"value\":12.5}]} with type bar, line or pie; \
+- ```chart — a JSON spec rendered as a chart. To chart RESULTS OF YOUR QUERY, always use the \
+row-bound form: {\"type\":\"bar\",\"title\":\"…\",\"source\":\"query\",\"x\":\"<label var>\",\"y\":\"<numeric var>\"} \
+— the platform fills the data from the rows your last successful SPARQL returned, exactly; NEVER retype \
+retrieved numbers into inline data (transcription corrupts them). Inline data is ONLY for a handful of \
+hand-stated values: {\"type\":\"bar\",\"data\":[{\"label\":\"A\",\"value\":12.5}]}; \
 multi-series: {\"type\":\"line\",\"series\":[{\"name\":\"2024\",\"data\":[{\"label\":\"Jan\",\"value\":3}]}]}. \
-Only chart numbers you actually retrieved — never invent values. Keep it under 40 points.\n\
-- ```map — a JSON spec rendered as an interactive map: \
+Only chart numbers you actually retrieved — never invent values. Keep charts readable: at most \
+~15 bars/points (chart the top N by value and say what was cut), and use SHORT labels — an entity's \
+name, or an IRI's distinguishing tail segments (e.g. `viewer-3d-demo/building`), never a full IRI.\n\
+- ```map — a JSON spec rendered as an interactive map. For query results use the row-bound form: \
+{\"source\":\"query\",\"wkt\":\"<wkt var>\",\"label\":\"<label var>\",\"iri\":\"<iri var>\"} — the \
+platform builds the features from your rows. The source:\"query\" forms (chart and map) are ONLY \
+valid after a successful `SPARQL:` round THIS turn — with no query they render an error card. \
+Inline form for hand-stated features: \
 {\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
 WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
@@ -1421,6 +1436,9 @@ async fn run_chat_turn(
                 })
                 .await;
                 let table = render_rows_for_llm(&qr);
+                // Read these BEFORE qr.rows moves into the trail below.
+                let rows_empty = qr.rows.is_empty();
+                let all_zero = all_numeric_cells_zero(&qr.rows);
                 runs.push(ChatQueryRun {
                     sparql: query,
                     ok: true,
@@ -1430,12 +1448,28 @@ async fn run_chat_turn(
                     truncated: qr.truncated,
                 });
                 if remaining > 0 {
+                    // Steer self-repair on the two degenerate shapes a small
+                    // model reliably falls into: an empty result from guessed
+                    // vocabulary, and an aggregate of an unbound variable
+                    // (every group counts 0).
+                    let hint = if rows_empty {
+                        "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
+                         the graph. Re-read the Graph vocabulary section and build the pattern \
+                         ONLY from those exact class/property IRIs (and use COUNT(*), never \
+                         COUNT of a variable that is not bound in the pattern)."
+                    } else if all_zero {
+                        "\nHINT: every numeric value is 0 — that almost always means the \
+                         aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
+                         variable that is bound in the pattern, then retry."
+                    } else {
+                        ""
+                    };
                     format!(
-                        "Query results:\n{table}\nIf you still need different data, reply with \
+                        "Query results:\n{table}{hint}\nIf you still need different data, reply with \
                          `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
                          write the final answer to my previous question in clear natural language, \
                          using the presentation widgets (chart/map/card/api/csv/markdown table) \
-                         where they help."
+                         where they help; chart/map query results with the source:\"query\" form."
                     )
                 } else {
                     format!(
@@ -1465,7 +1499,13 @@ async fn run_chat_turn(
                 });
                 if remaining > 0 {
                     format!(
-                        "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
+                        "That query failed to run: {emsg}\n\
+                         HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
+                         inside GROUP BY; every projected variable must be bound in the pattern; \
+                         build patterns ONLY from the Graph vocabulary section's IRIs; and the \
+                         `SPARQL:` line must contain the query alone, no prose before or after. \
+                         Do NOT resend the same query unchanged.\n\
+                         Reply with `SPARQL:` and a corrected \
                          query ({remaining} more allowed this turn), or answer without querying — \
                          you may include the corrected query as a ```sparql block for the user to \
                          run themselves."
@@ -1665,6 +1705,23 @@ fn prioritise_graphs_for_conversation(
     priority
 }
 
+/// Do the rows contain at least one numeric cell, with every numeric cell 0?
+/// The signature shape of `COUNT(?unbound)` — 0 for every group.
+fn all_numeric_cells_zero(rows: &[Vec<String>]) -> bool {
+    let mut saw_numeric = false;
+    for row in rows {
+        for cell in row {
+            if let Ok(v) = cell.trim().parse::<f64>() {
+                saw_numeric = true;
+                if v != 0.0 {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_numeric
+}
+
 fn chat_accessible_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
@@ -1777,9 +1834,16 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
     }
 
     if !graphs.is_empty() {
-        ctx.push_str("\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`)\n");
+        ctx.push_str(
+            "\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`; \
+             the number after each graph is its CURRENT triple count — cite or \
+             chart these directly, no query needed for sizes)\n",
+        );
         for g in graphs.iter().take(MAX_GRAPHS_IN_CONTEXT) {
-            ctx.push_str(&format!("- <{g}>\n"));
+            match state.store.graph_count_cached(Some(g)) {
+                Some(n) => ctx.push_str(&format!("- <{g}> — {n} triples\n")),
+                None => ctx.push_str(&format!("- <{g}>\n")),
+            }
         }
         if graphs.len() > MAX_GRAPHS_IN_CONTEXT {
             ctx.push_str(&format!(
