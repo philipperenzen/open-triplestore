@@ -298,7 +298,10 @@
                   <span class="vs-badge vs-type-{hit.ttype}">{$t(`pages.vocabularySearch.type_${hit.ttype}`)}</span>
                   <span class="vs-badge vs-src-{hit.source}">{hit.source === 'platform' ? $t('pages.vocabularySearch.sourcePlatform') : 'LOV'}</span>
                   <span class="vs-score" title={$t('pages.vocabularySearch.scoreTitle')}>
-                    <span class="vs-score-bar" style={`width:${Math.round(Math.min(1, hit.score) * 100)}%`}></span>
+                    <span class="vs-score-meter" aria-hidden="true">
+                      <span class="vs-score-bar" style={`width:${Math.round(Math.min(1, hit.score) * 100)}%`}></span>
+                    </span>
+                    <span class="vs-score-num">{Math.round(Math.min(1, hit.score) * 100)}</span>
                   </span>
                 </div>
                 {#if firstLine(hit.labels)}
@@ -387,7 +390,7 @@
       {:else if vocabResult}
         <p class="vs-count">{$t('pages.vocabularySearch.vocabCount', { values: { n: vocabResult.total_results } })}</p>
         <div class="vs-cards">
-          {#each vocabResult.results || [] as entry (entry.prefix + entry.nsp)}
+          {#each vocabResult.results || [] as entry, i (`${entry.prefix}|${entry.nsp}|${i}`)}
             <article class="vs-card">
               <div class="vs-card-head">
                 <code class="vs-prefixed">{entry.prefix}</code>
@@ -445,6 +448,11 @@
   {:else}
     <section class="vs-panel">
       <p class="vs-rec-intro"><Info size={14} /> {$t('pages.vocabularySearch.recommendIntro')}</p>
+      <p class="vs-rec-api">
+        {$t('pages.vocabularySearch.recommendApiHint')}
+        <code>POST /api/vocab/recommend {'{'}"terms": ["bridge", "deck height"]{'}'}</code>
+        <a href="/api-docs" target="_blank" rel="noopener noreferrer">{$t('pages.vocabularySearch.recommendApiDocs')}</a>
+      </p>
       <textarea
         class="vs-rec-input"
         rows="4"
@@ -526,7 +534,7 @@
   .vs-tabs button.active { color: var(--accent, #0d9488); border-bottom-color: var(--accent, #0d9488); font-weight: 600; }
 
   .vs-searchbar { position: relative; display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0; }
-  .vs-searchbar input { flex: 1; padding: 0.55rem 0.75rem 0.55rem 2.1rem; border: 1px solid var(--border, #cbd5e1); border-radius: 8px; font-size: 0.9rem; background: var(--bg-input, #fff); color: inherit; }
+  .vs-searchbar input { flex: 1; padding: 0.55rem 0.75rem 0.55rem 2.1rem; border-radius: 8px; font-size: 0.9rem; }
   :global(.vs-search-icon) { position: absolute; left: 0.7rem; color: var(--text-muted, #94a3b8); }
   :global(.vs-spin) { animation: vs-rot 0.9s linear infinite; }
   @keyframes vs-rot { to { transform: rotate(360deg); } }
@@ -555,8 +563,13 @@
   .vs-type-instance { background: #f1f5f9; color: #475569; }
   .vs-src-platform { background: #dcfce7; color: #15803d; display: inline-flex; align-items: center; gap: 0.2rem; }
   .vs-src-lov { background: #ffedd5; color: #c2410c; }
-  .vs-score { flex: 0 0 70px; margin-left: auto; height: 5px; border-radius: 3px; background: var(--border, #e2e8f0); overflow: hidden; }
-  .vs-score-bar { display: block; height: 100%; background: var(--accent, #0d9488); }
+  /* Relevance = meter + number. The number is what makes two results
+     comparable; theme tokens keep it legible in dark mode (the old bare bar
+     had no text at all and its track vanished against dark surfaces). */
+  .vs-score { margin-left: auto; display: inline-flex; align-items: center; gap: 0.4rem; }
+  .vs-score-meter { flex: 0 0 56px; height: 5px; border-radius: 3px; background: var(--line-strong, #cbd5e1); overflow: hidden; }
+  .vs-score-bar { display: block; height: 100%; background: var(--brand-600, #0d9488); }
+  .vs-score-num { font-size: 0.7rem; font-variant-numeric: tabular-nums; color: var(--ink-500, #64748b); min-width: 2ch; text-align: right; }
   .vs-hit-label { font-size: 0.85rem; font-weight: 500; margin-top: 0.25rem; }
   .vs-hit-desc { font-size: 0.8rem; color: var(--text-muted, #64748b); margin: 0.2rem 0 0.3rem; }
   .vs-hit-foot { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
@@ -591,10 +604,13 @@
   .vs-pager button { border: 1px solid var(--border, #cbd5e1); background: none; border-radius: 6px; padding: 0.15rem 0.6rem; cursor: pointer; color: inherit; }
   .vs-pager button:disabled { opacity: 0.4; cursor: default; }
 
+  .vs-rec-api { display: flex; align-items: center; flex-wrap: wrap; gap: 0.45rem; font-size: 0.75rem; color: var(--ink-500, #64748b); margin: 0 0 0.6rem; }
+  .vs-rec-api code { background: var(--bg-soft, #f1f5f9); border: 1px solid var(--line-strong, #e2e8f0); border-radius: 6px; padding: 0.1rem 0.4rem; }
+  .vs-rec-api a { color: var(--brand-600, #0d9488); }
   .vs-rec-intro { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--text-muted, #64748b); }
-  .vs-rec-input { width: 100%; border: 1px solid var(--border, #cbd5e1); border-radius: 8px; padding: 0.6rem 0.8rem; font-size: 0.88rem; font-family: inherit; background: var(--bg-input, #fff); color: inherit; resize: vertical; }
+  .vs-rec-input { width: 100%; border-radius: 8px; padding: 0.6rem 0.8rem; font-size: 0.88rem; font-family: inherit; resize: vertical; }
   .vs-rec-controls { display: flex; gap: 0.5rem; margin: 0.5rem 0 1rem; align-items: center; }
-  .vs-rec-controls select { padding: 0.35rem 0.5rem; border: 1px solid var(--border, #cbd5e1); border-radius: 7px; font-size: 0.82rem; background: var(--bg-input, #fff); color: inherit; }
+  .vs-rec-controls select { width: auto; padding: 0.35rem 0.5rem; border-radius: 7px; font-size: 0.82rem; }
   .vs-rec-run { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.4rem 0.9rem; border-radius: 7px; border: none; background: var(--accent, #0d9488); color: #fff; font-size: 0.85rem; cursor: pointer; }
   .vs-rec-run:disabled { opacity: 0.5; cursor: default; }
   .vs-rec-result h3 { font-size: 0.9rem; margin: 0.5rem 0 0.4rem; }

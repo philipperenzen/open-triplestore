@@ -2819,7 +2819,9 @@
       "recommendBest": "Best match in set",
       "recommendAlternatives": "Alternatives",
       "recommendNone": "no match",
-      "attribution": "Vocabulary metadata and contents from"
+      "attribution": "Vocabulary metadata and contents from",
+      "recommendApiHint": "Also available as an API:",
+      "recommendApiDocs": "API docs"
     },
     "oauthAuthorize": {
       "missingParams": "This sign-in link is incomplete (missing client_id or redirect_uri).",

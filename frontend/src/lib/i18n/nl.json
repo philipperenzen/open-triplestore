@@ -2819,7 +2819,9 @@
       "recommendBest": "Beste match in set",
       "recommendAlternatives": "Alternatieven",
       "recommendNone": "geen match",
-      "attribution": "Vocabulairemetadata en -inhoud van"
+      "attribution": "Vocabulairemetadata en -inhoud van",
+      "recommendApiHint": "Ook beschikbaar als API:",
+      "recommendApiDocs": "API-documentatie"
     },
     "oauthAuthorize": {
       "missingParams": "Deze aanmeldlink is onvolledig (client_id of redirect_uri ontbreekt).",
