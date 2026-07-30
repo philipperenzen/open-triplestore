@@ -4524,6 +4524,16 @@ pub(crate) fn insert_asset_triples(
     } else {
         String::new()
     };
+    // File-manager folder ("docs/reports"); root-level assets carry no triple.
+    let folder_triple = if asset.folder.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n        <{}folder> \"{}\" ;",
+            ASSET_NS,
+            sparql_escape(&asset.folder)
+        )
+    };
 
     // Kind typing: an extra rdf:type (schema.org class, always) + a coarse DCMI Type.
     // Full IRIs (not prefixed) because schema:3DModel is not a legal prefixed name.
@@ -4635,7 +4645,7 @@ PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
 INSERT DATA {{
   GRAPH <{graph}> {{
     <{iri}> a dcat:Distribution{type_clause} ;
-        dct:title "{title}" ;{desc}{modified}{dcmi}
+        dct:title "{title}" ;{desc}{modified}{folder}{dcmi}
         dcat:mediaType <{media_iri}> ;
         dcat:byteSize {size} ;
         dct:created "{created}"^^xsd:dateTime ;
@@ -4649,6 +4659,7 @@ INSERT DATA {{
         title = title_escaped,
         desc = desc_triple,
         modified = modified_triple,
+        folder = folder_triple,
         dcmi = dcmi_triple,
         media_iri = media_iri,
         size = asset.size_bytes,
@@ -4740,15 +4751,37 @@ pub async fn upload_asset(
         ));
     }
 
-    if let Some(mut field) = multipart
-        .next_field()
-        .await
-        // e.status() maps a body-limit overflow to 413 (an oversized single frame trips the
-        // transport limit here, before the per-chunk accumulator below runs); other parse
-        // failures keep their 400.
-        .map_err(|e| (e.status(), e.to_string()))?
-    {
-        let _filename = field.name().unwrap_or("file").to_string();
+    // Parse the multipart body: an optional `folder` text field (the file-manager
+    // destination) plus the file part, in either order. The first file part wins;
+    // extra file parts are skipped (one asset per request, like before).
+    let mut folder_raw: Option<String> = None;
+    let mut file_part: Option<(String, String, Bytes)> = None; // (name, declared type, bytes)
+    loop {
+        let field = multipart
+            .next_field()
+            .await
+            // e.status() maps a body-limit overflow to 413 (an oversized single frame trips the
+            // transport limit here, before the per-chunk accumulator below runs); other parse
+            // failures keep their 400.
+            .map_err(|e| (e.status(), e.to_string()))?;
+        let Some(mut field) = field else { break };
+
+        // A text part named "folder" carries the destination path.
+        if field.file_name().is_none() && field.name() == Some("folder") {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| (e.status(), e.to_string()))?;
+            if text.len() > 4096 {
+                return Err((StatusCode::BAD_REQUEST, "folder path too long".to_string()));
+            }
+            folder_raw = Some(text);
+            continue;
+        }
+        if file_part.is_some() {
+            continue; // drain and ignore any extra parts
+        }
+
         // SECURITY: sanitize the client-supplied filename to a bare basename before it is used
         // in the storage key or persisted — prevents path traversal (e.g. "../../etc/passwd")
         // on the local-filesystem object store.
@@ -4782,8 +4815,13 @@ pub async fn upload_asset(
                 Err(e) => return Err((e.status(), format!("Multipart read error: {e}"))),
             }
         }
-        let data = Bytes::from(buf);
+        file_part = Some((file_name, declared_type, Bytes::from(buf)));
+    }
 
+    let folder = crate::assets::sanitize_folder_path(folder_raw.as_deref().unwrap_or(""))
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    if let Some((file_name, declared_type, data)) = file_part {
         // Malware scan (ClamAV INSTREAM) on the fully-buffered bytes, BEFORE anything
         // is persisted. Disabled unless `CLAMAV_ADDR` is set, in which case an empty
         // address ⇒ `Skipped`. Only an explicit `Infected` verdict blocks the upload
@@ -4858,8 +4896,15 @@ pub async fn upload_asset(
                 size,
                 &current_user.user_id,
                 false,
+                &folder,
             )
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        // Make the destination folder (and its ancestors) explicit so it survives
+        // the asset later moving out or being deleted.
+        if let Err(e) = state.auth_db.create_asset_folder(&dataset_id, &folder) {
+            tracing::warn!("Failed to record asset folder '{}': {}", folder, e);
+        }
 
         let graph = assets_graph_iri(&state.base_url, &dataset_id);
         if let Err(e) = insert_asset_triples(&state, &asset, &dataset_id, kind, &asset_meta) {
@@ -4929,6 +4974,7 @@ async fn store_thumbnail(
             size,
             user_id,
             false,
+            "",
         )
         .map_err(|e| e.to_string())?;
     // Type the thumbnail node (schema:ImageObject + dimensions), then link parent → thumb.
@@ -5245,21 +5291,73 @@ pub async fn patch_asset_metadata(
         ));
     }
 
-    let title: Option<&str> = body
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let description: Option<&str> = body
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+    // Field semantics: a key that is ABSENT keeps the stored value; a key that is
+    // present-but-empty/null clears (title/description) or moves to the root
+    // (folder). This lets the file manager PATCH just {folder} without wiping the
+    // title a metadata dialog set earlier.
+    let title: Option<&str> = if body.get("title").is_some() {
+        body.get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    } else {
+        asset.title.as_deref()
+    };
+    let description: Option<&str> = if body.get("description").is_some() {
+        body.get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+    } else {
+        asset.description.as_deref()
+    };
 
-    let updated = state
+    // Rename (filename) and move (folder) — validated exactly like an upload.
+    let new_filename: Option<String> = match body.get("filename") {
+        Some(v) => {
+            let raw = v.as_str().map(str::trim).unwrap_or("");
+            if raw.is_empty() {
+                return Err((StatusCode::BAD_REQUEST, "filename cannot be empty".into()));
+            }
+            let cleaned = crate::assets::sanitize_filename(raw);
+            if cleaned == "unnamed" && raw != "unnamed" {
+                return Err((StatusCode::BAD_REQUEST, "invalid filename".into()));
+            }
+            Some(cleaned)
+        }
+        None => None,
+    };
+    let new_folder: Option<String> = match body.get("folder") {
+        Some(serde_json::Value::Null) => Some(String::new()), // null ⇒ move to root
+        Some(v) => {
+            let raw = v.as_str().ok_or((
+                StatusCode::BAD_REQUEST,
+                "folder must be a string or null".to_string(),
+            ))?;
+            Some(
+                crate::assets::sanitize_folder_path(raw)
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
+            )
+        }
+        None => None,
+    };
+
+    let mut updated = state
         .auth_db
         .update_asset_metadata(&asset_id, title, description)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if new_filename.is_some() || new_folder.is_some() {
+        updated = state
+            .auth_db
+            .update_asset_location(&asset_id, new_filename.as_deref(), new_folder.as_deref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(folder) = &new_folder {
+            if let Err(e) = state.auth_db.create_asset_folder(&dataset_id, folder) {
+                tracing::warn!("Failed to record asset folder '{}': {}", folder, e);
+            }
+        }
+    }
 
     // Rebuild DCAT triples: delete existing, re-insert with new metadata
     let graph = assets_graph_iri(&state.base_url, &dataset_id);
@@ -5523,6 +5621,291 @@ fn insert_u64(map: &mut serde_json::Map<String, serde_json::Value>, key: &str, v
     if let Some(n) = v {
         map.insert(key.to_string(), serde_json::Value::Number(n.into()));
     }
+}
+
+// ─── Asset folder handlers ───────────────────────────────────────────────────
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct AssetFolderEntry {
+    /// Normalized relative path ("docs/reports").
+    pub path: String,
+    /// Number of assets directly inside this folder (not descendants).
+    pub asset_count: usize,
+    /// Total bytes of the assets directly inside this folder.
+    pub total_bytes: i64,
+}
+
+/// GET /api/datasets/:dataset_id/folders — every folder of the dataset's file
+/// manager: explicitly-created ones plus those implied by asset paths (including
+/// all ancestors), with direct-content counts. Optional auth, like the asset
+/// list: dataset visibility decides.
+pub async fn list_asset_folders(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    let user_id = user.as_deref().map(|u| u.user_id.as_str());
+    if !state
+        .auth_db
+        .can_access_dataset(user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
+    }
+
+    let mut paths: std::collections::BTreeSet<String> = state
+        .auth_db
+        .list_asset_folders(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .into_iter()
+        .collect();
+
+    let assets = state
+        .auth_db
+        .list_dataset_assets(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut direct_count: std::collections::HashMap<String, (usize, i64)> =
+        std::collections::HashMap::new();
+    for asset in &assets {
+        // Implicit folders: the asset's folder and every ancestor prefix.
+        if !asset.folder.is_empty() {
+            let mut prefix = String::new();
+            for seg in asset.folder.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(seg);
+                paths.insert(prefix.clone());
+            }
+        }
+        let entry = direct_count.entry(asset.folder.clone()).or_default();
+        entry.0 += 1;
+        entry.1 += asset.size_bytes;
+    }
+
+    let folders: Vec<AssetFolderEntry> = paths
+        .into_iter()
+        .map(|path| {
+            let (asset_count, total_bytes) = direct_count.get(&path).copied().unwrap_or((0, 0));
+            AssetFolderEntry {
+                path,
+                asset_count,
+                total_bytes,
+            }
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "folders": folders })))
+}
+
+/// POST /api/datasets/:dataset_id/folders — create an (empty) folder.
+pub async fn create_asset_folder(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    if !state
+        .auth_db
+        .can_write_dataset(&current_user.user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+
+    let raw = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let path =
+        crate::assets::sanitize_folder_path(raw).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "folder path cannot be empty".to_string(),
+        ));
+    }
+    state
+        .auth_db
+        .create_asset_folder(&dataset_id, &path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "path": path })),
+    ))
+}
+
+/// PATCH /api/datasets/:dataset_id/folders — rename/move a folder subtree
+/// (`{"from": "docs", "to": "archive/docs"}`). Every asset under `from` moves
+/// with it, and each moved asset's RDF folder literal is rewritten.
+pub async fn rename_asset_folder(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    if !state
+        .auth_db
+        .can_write_dataset(&current_user.user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+
+    let from = crate::assets::sanitize_folder_path(
+        body.get("from").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let to =
+        crate::assets::sanitize_folder_path(body.get("to").and_then(|v| v.as_str()).unwrap_or(""))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if from.is_empty() || to.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "'from' and 'to' folder paths are required".to_string(),
+        ));
+    }
+    if to == from || to.starts_with(&format!("{}/", from)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cannot move a folder into itself".to_string(),
+        ));
+    }
+
+    let moved = state
+        .auth_db
+        .rename_asset_folder(&dataset_id, &from, &to)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Keep the RDF authority in sync: rewrite each moved asset's folder literal.
+    let graph = assets_graph_iri(&state.base_url, &dataset_id);
+    let ns_folder = format!("{}folder", ASSET_NS);
+    for id in &moved {
+        if let Ok(Some(asset)) = state.auth_db.get_asset(id) {
+            let iri = asset_iri(&state.base_url, &dataset_id, id);
+            let update = format!(
+                "DELETE WHERE {{ GRAPH <{g}> {{ <{iri}> <{p}> ?f . }} }} ;\n\
+                 INSERT DATA {{ GRAPH <{g}> {{ <{iri}> <{p}> \"{v}\" . }} }}",
+                g = graph,
+                iri = iri,
+                p = ns_folder,
+                v = sparql_escape(&asset.folder),
+            );
+            if let Err(e) =
+                state
+                    .store
+                    .update_targeted(&update, std::slice::from_ref(&graph), false)
+            {
+                tracing::warn!("folder triple rewrite failed for asset {}: {}", id, e);
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "from": from,
+        "to": to,
+        "moved_assets": moved.len(),
+    })))
+}
+
+/// DELETE /api/datasets/:dataset_id/folders?path=…&recursive=true — delete a
+/// folder. A folder that still contains assets (at any depth) is refused with
+/// 409 unless `recursive=true`, which deletes the contained assets too (object
+/// store, database rows and RDF).
+pub async fn delete_asset_folder(
+    Extension(current_user): Extension<AuthenticatedUser>,
+    State(state): State<AppState>,
+    Path(dataset_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let dataset = state
+        .auth_db
+        .get_dataset(&dataset_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Dataset not found".to_string()))?;
+    if !state
+        .auth_db
+        .can_write_dataset(&current_user.user_id, &dataset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
+    }
+
+    let path =
+        crate::assets::sanitize_folder_path(params.get("path").map(String::as_str).unwrap_or(""))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "folder path is required".to_string(),
+        ));
+    }
+    let recursive = params
+        .get("recursive")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    let contained = state
+        .auth_db
+        .list_assets_under_folder(&dataset_id, &path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !contained.is_empty() && !recursive {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "folder contains {} file(s); pass recursive=true to delete them too",
+                contained.len()
+            ),
+        ));
+    }
+
+    let graph = assets_graph_iri(&state.base_url, &dataset_id);
+    for asset in &contained {
+        if let Err(e) = state.object_store.delete(&asset.s3_key).await {
+            tracing::warn!("object delete failed for asset {}: {}", asset.id, e);
+        }
+        state
+            .auth_db
+            .delete_asset(&asset.id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let iri = asset_iri(&state.base_url, &dataset_id, &asset.id);
+        if let Err(e) = remove_dcat_triples(&state, &iri, &graph) {
+            tracing::warn!("DCAT remove failed for asset {}: {}", asset.id, e);
+        }
+    }
+
+    state
+        .auth_db
+        .delete_asset_folder(&dataset_id, &path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Mirror single-asset delete: an empty file manager unregisters its graph.
+    match state.auth_db.list_dataset_assets(&dataset_id) {
+        Ok(remaining) if remaining.is_empty() => {
+            if let Err(e) = state.auth_db.remove_dataset_graph(&dataset_id, &graph) {
+                tracing::warn!(
+                    "Failed to unregister assets graph for dataset {}: {}",
+                    dataset_id,
+                    e
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /datasets/:dataset_id/assets/:asset_id — linked data endpoint with content negotiation.
@@ -7578,6 +7961,7 @@ mod asset_etag_tests {
             title: None,
             description: None,
             public: true,
+            folder: String::new(),
         }
     }
 

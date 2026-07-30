@@ -5683,6 +5683,384 @@ mod visibility_leaks {
         );
     }
 
+    // ── File manager: folders ─────────────────────────────────────────────────
+
+    /// Admin state with a real (temp-dir) object store and one private dataset
+    /// `ds_f` owned by the admin.
+    fn file_manager_state(tmp: &str) -> (open_triplestore::server::AppState, String) {
+        let (mut state, token) = admin_state();
+        state.object_store = std::sync::Arc::new(
+            open_triplestore::storage::ObjectStore::local(std::env::temp_dir().join(tmp)).unwrap(),
+        );
+        state
+            .auth_db
+            .create_dataset(
+                "ds_f",
+                "Files",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        (state, token)
+    }
+
+    async fn upload_named(
+        state: &open_triplestore::server::AppState,
+        token: &str,
+        dataset: &str,
+        filename: &str,
+        folder: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let boundary = "BNDfm";
+        let mut parts: Vec<(&str, &str, Option<&str>, &[u8])> = Vec::new();
+        if let Some(f) = folder {
+            parts.push(("folder", "text/plain", None, f.as_bytes()));
+        }
+        parts.push(("file", "text/plain", Some(filename), b"hello folders"));
+        let body = multipart_body(boundary, &parts);
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/datasets/{dataset}/assets"))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let json = body_json(resp.into_body()).await;
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn asset_upload_into_folder_and_folder_listing() {
+        let (state, token) = file_manager_state("ots_fm_upload");
+        let (status, created) =
+            upload_named(&state, &token, "ds_f", "report.txt", Some("docs/reports")).await;
+        assert_eq!(status, StatusCode::CREATED, "upload failed: {created}");
+        assert_eq!(created["folder"], "docs/reports");
+
+        // The asset list carries the folder.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/datasets/ds_f/assets")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list = body_json(resp.into_body()).await;
+        assert_eq!(list[0]["folder"], "docs/reports");
+
+        // GET /folders: the leaf AND its implied ancestor, with direct counts.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/datasets/ds_f/folders")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let folders = body_json(resp.into_body()).await;
+        let arr = folders["folders"].as_array().expect("folders array");
+        let paths: Vec<&str> = arr.iter().filter_map(|f| f["path"].as_str()).collect();
+        assert!(paths.contains(&"docs"), "ancestor implied: {paths:?}");
+        assert!(paths.contains(&"docs/reports"));
+        let leaf = arr.iter().find(|f| f["path"] == "docs/reports").unwrap();
+        assert_eq!(leaf["asset_count"], 1);
+        let parent = arr.iter().find(|f| f["path"] == "docs").unwrap();
+        assert_eq!(parent["asset_count"], 0, "direct count only");
+    }
+
+    #[tokio::test]
+    async fn asset_move_and_rename_via_patch_preserves_metadata() {
+        let (state, token) = file_manager_state("ots_fm_patch");
+        let (_, created) = upload_named(&state, &token, "ds_f", "plan.txt", None).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Set a title first (the metadata dialog's shape: title + description).
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri(format!("/api/datasets/ds_f/assets/{id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(r#"{"title":"Floor plan"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let title_status = resp.status();
+        let title_body = body_text(resp.into_body()).await;
+        assert_eq!(
+            title_status,
+            StatusCode::OK,
+            "title PATCH failed: {title_body}"
+        );
+
+        // Move + rename WITHOUT sending title — it must survive.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri(format!("/api/datasets/ds_f/assets/{id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        r#"{"folder":"drawings/2026","filename":"plan-v2.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp.into_body()).await;
+        assert_eq!(updated["folder"], "drawings/2026");
+        assert_eq!(updated["filename"], "plan-v2.txt");
+        assert_eq!(updated["title"], "Floor plan", "absent key keeps value");
+
+        // folder: null moves back to the root.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri(format!("/api/datasets/ds_f/assets/{id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(r#"{"folder":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp.into_body()).await;
+        assert_eq!(updated["folder"], "");
+    }
+
+    #[tokio::test]
+    async fn folder_create_rename_delete_flow() {
+        let (state, token) = file_manager_state("ots_fm_flow");
+        let (_, created) = upload_named(&state, &token, "ds_f", "spec.txt", Some("x/y")).await;
+        let asset_id = created["id"].as_str().unwrap().to_string();
+
+        // Explicit empty folder.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/datasets/ds_f/folders")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(r#"{"path":"empty/dir"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Rename x → z: the asset under x/y must follow.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/datasets/ds_f/folders")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(r#"{"from":"x","to":"z"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let moved = body_json(resp.into_body()).await;
+        assert_eq!(moved["moved_assets"], 1);
+        let asset = state.auth_db.get_asset(&asset_id).unwrap().unwrap();
+        assert_eq!(asset.folder, "z/y");
+
+        // Moving a folder into itself is rejected.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/datasets/ds_f/folders")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(r#"{"from":"z","to":"z/sub"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Non-recursive delete of a non-empty folder → 409.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/datasets/ds_f/folders?path=z")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(state.auth_db.get_asset(&asset_id).unwrap().is_some());
+
+        // Recursive delete removes folder AND contained assets.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/datasets/ds_f/folders?path=z&recursive=true")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(state.auth_db.get_asset(&asset_id).unwrap().is_none());
+        let folders = state.auth_db.list_asset_folders("ds_f").unwrap();
+        assert!(!folders.iter().any(|p| p == "z" || p.starts_with("z/")));
+        assert!(
+            folders.iter().any(|p| p == "empty/dir"),
+            "unrelated folder kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_paths_reject_traversal() {
+        let (state, token) = file_manager_state("ots_fm_traversal");
+        let (status, _) = upload_named(&state, &token, "ds_f", "evil.txt", Some("../../etc")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "upload traversal folder");
+
+        for body in [r#"{"path":"a/../b"}"#, r#"{"path":".hidden"}"#] {
+            let resp = test_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/datasets/ds_f/folders")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn folder_mutations_require_write_access() {
+        let (state, _token) = file_manager_state("ots_fm_authz");
+        state
+            .auth_db
+            .create_user("u_eve", "eve", "e@t.com", "h", SystemRole::User)
+            .unwrap();
+        let eve = mint_token("u_eve", "eve", "user");
+
+        for (method, uri, body) in [
+            (
+                Method::POST,
+                "/api/datasets/ds_f/folders",
+                r#"{"path":"a"}"#,
+            ),
+            (
+                Method::PATCH,
+                "/api/datasets/ds_f/folders",
+                r#"{"from":"a","to":"b"}"#,
+            ),
+        ] {
+            let resp = test_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {eve}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} as non-writer"
+            );
+        }
+
+        // Anonymous DELETE lacks a session entirely → 401 from require_auth.
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/datasets/ds_f/folders?path=a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn public_dataset_files_listable_anonymously() {
+        let (state, token) = file_manager_state("ots_fm_anon");
+        state
+            .auth_db
+            .create_dataset(
+                "ds_pub",
+                "Open files",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let (status, _) = upload_named(&state, &token, "ds_pub", "open.txt", Some("docs")).await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Anonymous: the PUBLIC dataset's list + folders are readable…
+        for uri in [
+            "/api/datasets/ds_pub/assets",
+            "/api/datasets/ds_pub/folders",
+        ] {
+            let resp = test_app(state.clone())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "anon GET {uri}");
+        }
+        // …while the PRIVATE dataset's are not (404: existence is hidden).
+        for uri in ["/api/datasets/ds_f/assets", "/api/datasets/ds_f/folders"] {
+            let resp = test_app(state.clone())
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "anon GET {uri}");
+        }
+    }
+
     // ── Write leaks: organisation creation ────────────────────────────────────
 
     #[tokio::test]

@@ -86,6 +86,7 @@ pub async fn import_ifc_bytes(
                 size,
                 user_id,
                 public_asset,
+                "",
             )
             .map_err(|e| format!("asset record failed: {e}"))?;
         if let Err(e) =
