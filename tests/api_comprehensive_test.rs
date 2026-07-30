@@ -5683,6 +5683,296 @@ mod visibility_leaks {
         );
     }
 
+    // ── Asset visibility: Asset.public gates anonymity ────────────────────────
+    //
+    // A public dataset grants anonymous callers a Viewer role, so dataset-level
+    // checks alone cannot express "this file needs a login". The list filters
+    // to public assets for logged-out callers; download/metadata reject them.
+
+    fn seed_asset(
+        state: &open_triplestore::server::AppState,
+        id: &str,
+        ds: &str,
+        name: &str,
+        public: bool,
+    ) {
+        state
+            .auth_db
+            .create_asset(
+                id,
+                ds,
+                name,
+                "application/octet-stream",
+                &format!("datasets/{ds}/{id}/{name}"),
+                3,
+                "adm",
+                public,
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn anonymous_asset_list_shows_only_public_assets() {
+        let (state, token) = admin_state();
+        state
+            .auth_db
+            .create_dataset(
+                "ds_pub",
+                "Pub",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        seed_asset(&state, "as_open", "ds_pub", "open.stl", true);
+        seed_asset(&state, "as_held", "ds_pub", "held.ifc", false);
+
+        let app = test_app(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/datasets/ds_pub/assets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "anonymous asset listing of a public dataset must work"
+        );
+        let json = body_json(resp.into_body()).await;
+        // AssetResponse #[serde(flatten)]s the asset fields into the top level.
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["filename"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["open.stl"], "anonymous sees public assets only");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/datasets/ds_pub/assets")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp.into_body()).await;
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            2,
+            "authenticated members see all assets"
+        );
+    }
+
+    #[tokio::test]
+    async fn anonymous_asset_list_on_private_dataset_is_404() {
+        let (state, _token) = admin_state();
+        state
+            .auth_db
+            .create_dataset(
+                "ds_priv",
+                "Priv",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/datasets/ds_priv/assets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn anonymous_download_respects_asset_public() {
+        let (mut state, token) = admin_state();
+        let dir = std::env::temp_dir().join("ots_asset_vis_test");
+        state.object_store =
+            std::sync::Arc::new(open_triplestore::storage::ObjectStore::local(dir).unwrap());
+        state
+            .auth_db
+            .create_dataset(
+                "ds_pub",
+                "Pub",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        seed_asset(&state, "as_open", "ds_pub", "open.stl", true);
+        seed_asset(&state, "as_held", "ds_pub", "held.ifc", false);
+        for a in ["as_open/open.stl", "as_held/held.ifc"] {
+            state
+                .object_store
+                .upload(
+                    &format!("datasets/ds_pub/{a}"),
+                    bytes::Bytes::from_static(b"abc"),
+                    "application/octet-stream",
+                )
+                .await
+                .unwrap();
+        }
+
+        let app = test_app(state);
+        let get = |uri: String, auth: Option<String>| {
+            let mut b = Request::builder().uri(uri);
+            if let Some(t) = auth {
+                b = b.header(header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            b.body(Body::empty()).unwrap()
+        };
+
+        let resp = app
+            .clone()
+            .oneshot(get(
+                "/api/datasets/ds_pub/assets/as_open/download".into(),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "anonymous download of a public asset must work"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(get(
+                "/api/datasets/ds_pub/assets/as_held/download".into(),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a non-public asset must not be anonymously downloadable"
+        );
+
+        let resp = app
+            .oneshot(get(
+                "/api/datasets/ds_pub/assets/as_held/download".into(),
+                Some(token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "authenticated members download non-public assets"
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_upload_inherits_dataset_visibility() {
+        let (mut state, token) = admin_state();
+        let dir = std::env::temp_dir().join("ots_asset_inherit_test");
+        state.object_store =
+            std::sync::Arc::new(open_triplestore::storage::ObjectStore::local(dir).unwrap());
+        for (id, vis) in [
+            ("ds_pub", Visibility::Public),
+            ("ds_priv", Visibility::Private),
+        ] {
+            state
+                .auth_db
+                .create_dataset(id, id, None, OwnerType::User, "adm", vis, None)
+                .unwrap();
+        }
+
+        let app = test_app(state);
+        for (ds, expect_public) in [("ds_pub", true), ("ds_priv", false)] {
+            let boundary = "BNDvis";
+            let body = multipart_body(
+                boundary,
+                &[("file", "application/octet-stream", Some("m.stl"), b"solid")],
+            );
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(format!("/api/datasets/{ds}/assets"))
+                        .header(
+                            header::CONTENT_TYPE,
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "upload to {ds}");
+            let json = body_json(resp.into_body()).await;
+            assert_eq!(
+                json["public"].as_bool(),
+                Some(expect_public),
+                "asset uploaded to {ds} must default public={expect_public}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn anonymous_asset_upload_is_401() {
+        let (state, _token) = admin_state();
+        state
+            .auth_db
+            .create_dataset(
+                "ds_pub",
+                "Pub",
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        let boundary = "BNDanon";
+        let body = multipart_body(
+            boundary,
+            &[("file", "application/octet-stream", Some("m.stl"), b"solid")],
+        );
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/datasets/ds_pub/assets")
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "anonymous upload must be rejected before touching storage"
+        );
+    }
+
     // ── Write leaks: organisation creation ────────────────────────────────────
 
     #[tokio::test]

@@ -897,7 +897,8 @@
         "shapes": "Shapes",
         "entailment": "Entailment",
         "system": "System"
-      }
+      },
+      "emptyCta": "Create your first dataset"
     },
     "datasetDetail": {
       "openSparql": "Open SPARQL editor",
@@ -1124,7 +1125,27 @@
       "viewer3d": "3D & map viewer",
       "viewer3dDesc": "Inspect parts on the map and in 3D, with their linked data",
       "viewerMap": "Map viewer",
-      "viewerMapDesc": "See located features on an interactive map, with their linked data"
+      "viewerMapDesc": "See located features on an interactive map, with their linked data",
+      "filesTitle": "Files",
+      "filesSummary": "{count, plural, one {# file} other {# files}} · {size}",
+      "filesSignInTitle": "Sign in to see files",
+      "filesSignInHint": "The files in this dataset are only available to signed-in members.",
+      "filesErrorTitle": "Couldn't load files",
+      "filesRetry": "Try again",
+      "filesEmptyTitle": "No files yet",
+      "filesEmptyHint": "Upload source files (IFC, STL, CityJSON, images, …) to publish them alongside the graphs.",
+      "filesEmptyHintReader": "This dataset has no downloadable files.",
+      "visRestricted": "Restricted",
+      "viewIn3d": "View in 3D",
+      "open3dViewer": "Open 3D viewer",
+      "statTriples": "Triples",
+      "statGraphs": "Graphs",
+      "statFiles": "Files",
+      "statVersions": "Versions",
+      "stat3d": "3D elements",
+      "historyTitle": "Versions & history",
+      "openValidationStudio": "Open Validation studio",
+      "moreActions": "More actions"
     },
     "validation": {
       "title": "SHACL Validation",
@@ -1249,7 +1270,8 @@
       "bulkDeleteMessage": "This will permanently delete {count} organisation, all datasets they own, and all associated graphs. This cannot be undone.",
       "bulkDeleteMessagePlural": "This will permanently delete {count} organisations, all datasets they own, and all associated graphs. This cannot be undone.",
       "bulkDeleteConfirmLabel": "Delete {count} organisation",
-      "bulkDeleteConfirmLabelPlural": "Delete {count} organisations"
+      "bulkDeleteConfirmLabelPlural": "Delete {count} organisations",
+      "bulkDeleteFailed": "Could not delete: {names}"
     },
     "orgDetail": {
       "openSparql": "Open SPARQL editor",
@@ -1371,7 +1393,17 @@
       "teamHintViewer": "Viewers get read-only access to datasets shared with this team.",
       "everyoneInTeam": "Everyone is already in this team.",
       "noPeopleToAdd": "No people available to add.",
-      "done": "Done"
+      "done": "Done",
+      "statDatasets": "Datasets",
+      "statMembers": "Members",
+      "statGroups": "Groups",
+      "statSubUnits": "Sub-units",
+      "chip3d": "3D content",
+      "noDatasetsTitle": "No datasets yet",
+      "updatedDate": "Updated {date}",
+      "everyoneIsMember": "Everyone is already a member.",
+      "confirmRemoveMemberTitle": "Remove member",
+      "confirmRemoveMemberMsg": "Remove {name} from this organisation? Their dataset access via this organisation ends immediately."
     },
     "login": {
       "title": "Sign in",

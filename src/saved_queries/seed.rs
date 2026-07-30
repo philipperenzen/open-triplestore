@@ -203,6 +203,7 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
     // install) the asset is skipped and the FOG file reference points at the
     // source URL — the linked data + decomposition are present either way.
     seed_ifc_buildings(state, report.owner_id.as_deref().unwrap_or(""));
+    seed_stl_landmarks(state, report.owner_id.as_deref().unwrap_or(""));
 
     // Lift the bundled real 3DBAG block into the store as volumetric WKT-Z, so
     // the 3D-Tiles pipeline (`/3dtiles`) and the 3D R*-tree index have a real
@@ -402,6 +403,105 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
 /// a BOT topology graph + a full ifcOWL lift, every storey, wall and beam
 /// individually addressable. Each building skips instantly when its graph already
 /// has data; a failed download just retries on the next boot.
+/// The demo landmarks' STL models. The viewer streams them straight from
+/// Wikimedia Commons (fog:asStl in landmarks.ttl — leave that alone), but the
+/// files must ALSO exist as first-class dataset assets so the dataset page's
+/// Files section lists them and the platform itself can serve a copy. Stable
+/// ids keep this idempotent across reseeds.
+const STL_LANDMARKS: &[(&str, &str, &str)] = &[
+    (
+        "demo-stl-dragon-bridge",
+        "Dragon_Bridge_in_Da_Nang.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/2/22/Dragon_Bridge_in_Da_Nang.stl",
+    ),
+    (
+        "demo-stl-big-ben",
+        "Big_Ben.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl",
+    ),
+    (
+        "demo-stl-white-house",
+        "White_House.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl",
+    ),
+    (
+        "demo-stl-empire-state",
+        "Empire_State_Building_(simplified).stl",
+        "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl",
+    ),
+    (
+        "demo-stl-sanno-shrine",
+        "Nagasaki_torii_shrine.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/1/1d/Nagasaki_torii_shrine.stl",
+    ),
+];
+
+fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
+    const DS: &str = "viewer-3d-demo";
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    // Same network kill-switch as the IFC demo (tests set SEED_IFC_URL="").
+    if std::env::var("SEED_IFC_URL").ok().as_deref().map(str::trim) == Some("") {
+        return;
+    }
+    for (id, filename, url) in STL_LANDMARKS.iter() {
+        if matches!(state.auth_db.get_asset(id), Ok(Some(_))) {
+            continue; // already seeded
+        }
+        tracing::info!("seed: downloading landmark STL {filename} ({url})");
+        let downloaded = block_on_anywhere(async {
+            // Wikimedia's robot policy 403s requests without a descriptive
+            // User-Agent — reqwest's default is not accepted.
+            let client = reqwest::Client::builder()
+                .user_agent("open-triplestore-seed/1.0 (https://opentriplestore.org; demo content bootstrap)")
+                .timeout(std::time::Duration::from_secs(600))
+                .build()?;
+            let bytes = client
+                .get(*url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            anyhow::Ok(bytes)
+        })
+        .and_then(|r| r);
+        let bytes = match downloaded {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    "landmark STL {filename} skipped (download failed, retries next boot): {e}"
+                );
+                continue;
+            }
+        };
+        let size = bytes.len() as i64;
+        let s3_key = format!("datasets/{DS}/{id}/{filename}");
+        let storage = state.object_store.clone();
+        let key = s3_key.clone();
+        if let Err(e) =
+            block_on_anywhere(async move { storage.upload(&key, bytes, "model/stl").await })
+        {
+            tracing::warn!("landmark STL {filename} upload failed: {e}");
+            continue;
+        }
+        match state.auth_db.create_asset(
+            id,
+            DS,
+            filename,
+            "model/stl",
+            &s3_key,
+            size,
+            owner_id,
+            true,
+        ) {
+            Ok(_) => tracing::info!("seed: landmark STL asset {filename} registered"),
+            Err(e) => tracing::warn!("landmark STL {filename} asset record failed: {e}"),
+        }
+    }
+}
+
 fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     const DS: &str = "viewer-3d-demo";
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
@@ -608,6 +708,14 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v13: refreshes the demo dataset's own name/description from the current
+// seed spec (set at CREATE time only, so old installs still narrated the
+// withdrawn Schependomlaan IFC as a bundled downloadable asset).
+// v12: purges ALL of the demo dataset's assets on refresh (the reseed
+// recreates the current set). Every prior version bump re-imported the IFC
+// buildings without removing the previous rounds' asset rows, so live installs
+// had piled up duplicate Duplex.ifc/FZK-Haus.ifc/… entries. Also seeds the five
+// landmark STLs as first-class dataset assets (stable ids, idempotent).
 // v11: purges the Schependomlaan.ifc ASSET. v10 swapped the graphs but assets
 // are only ever added, so the withdrawn 47 MB file stayed stored and publicly
 // downloadable — defeating the point of the swap.
@@ -629,7 +737,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 11;
+const DEMO_CONTENT_VERSION: u32 = 13;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -697,24 +805,46 @@ fn refresh_demo_content(state: &AppState) {
         let _ = state.auth_db.remove_dataset_graph(DS, &graph);
     }
     state.auth_db.invalidate_accessible_graphs_cache();
-    // Withdrawn demo assets: files the demo no longer ships must also stop
-    // being stored/served (the Schependomlaan model's upstream grant is
-    // academic-use — see the v10/v11 notes above).
-    const STALE_ASSETS: &[&str] = &["Schependomlaan.ifc"];
-    if let Ok(assets) = state.auth_db.list_dataset_assets(DS) {
-        for a in assets {
-            if !STALE_ASSETS.contains(&a.filename.as_str()) {
-                continue;
+    // Refresh the demo dataset's own metadata too: name/description are set at
+    // CREATE time only, so installs from before a rework kept narrating content
+    // the demo no longer ships (e.g. the withdrawn Schependomlaan IFC).
+    if let Ok(Some(ds)) = state.auth_db.get_dataset(DS) {
+        if let Some(spec) = seed_data::datasets().iter().find(|d| d.slug == DS) {
+            if ds.name != spec.name || ds.description.as_deref() != Some(spec.description) {
+                if let Err(e) = state.auth_db.update_dataset(
+                    DS,
+                    spec.name,
+                    Some(spec.description),
+                    ds.visibility,
+                ) {
+                    tracing::warn!("demo refresh: could not update dataset metadata: {e}");
+                } else {
+                    tracing::info!(
+                        "demo refresh: dataset name/description updated to current seed"
+                    );
+                }
             }
+        }
+    }
+    // Purge ALL of the demo dataset's assets: the seeders recreate the current
+    // set this boot, and anything not recreated is by definition withdrawn
+    // (Schependomlaan's academic-use IFC) or a duplicate from an earlier
+    // reseed (every version bump re-imported the IFC buildings into fresh
+    // asset rows without removing the previous ones).
+    if let Ok(assets) = state.auth_db.list_dataset_assets(DS) {
+        let n = assets.len();
+        for a in assets {
             let storage = state.object_store.clone();
             let key = a.s3_key.clone();
             // Best-effort object delete on the blocking-safe path; the DB row
             // goes regardless so the asset stops being listed/served.
             let _ = block_on_anywhere(async move { storage.delete(&key).await });
-            match state.auth_db.delete_asset(&a.id) {
-                Ok(()) => tracing::info!("demo refresh: purged withdrawn asset {}", a.filename),
-                Err(e) => tracing::warn!("demo refresh: could not purge {}: {e}", a.filename),
+            if let Err(e) = state.auth_db.delete_asset(&a.id) {
+                tracing::warn!("demo refresh: could not purge {}: {e}", a.filename);
             }
+        }
+        if n > 0 {
+            tracing::info!("demo refresh: purged {n} demo assets before reseed");
         }
     }
     tracing::info!(

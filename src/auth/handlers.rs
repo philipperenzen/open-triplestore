@@ -2834,7 +2834,7 @@ pub async fn self_purge(
 /// when no valid token was provided.  Used by handlers that sit behind
 /// `optional_auth` middleware but still require authentication for their
 /// specific HTTP method (e.g. POST on a path whose GET is public).
-fn require_user(
+pub(crate) fn require_user(
     user: Option<Extension<AuthenticatedUser>>,
 ) -> Result<AuthenticatedUser, (StatusCode, String)> {
     user.map(|Extension(u)| u).ok_or_else(|| {
