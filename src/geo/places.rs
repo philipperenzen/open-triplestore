@@ -196,10 +196,7 @@ pub fn place_from_authority(iri: &str) -> Option<Vec<Place>> {
 /// vocabulary is unambiguous, and on the local name for the ifcOWL lift (whose
 /// namespace carries an IFC-version segment).
 fn level_of_predicate(predicate: &str) -> Option<PlaceLevel> {
-    let local = predicate
-        .rsplit(|c| c == '#' || c == '/')
-        .next()
-        .unwrap_or(predicate);
+    let local = predicate.rsplit(['#', '/']).next().unwrap_or(predicate);
     match local {
         "addressCountry" | "country" | "Country" => Some(PlaceLevel::Country),
         "addressRegion" | "region" | "Region" => Some(PlaceLevel::Region),

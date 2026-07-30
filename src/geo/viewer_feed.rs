@@ -549,10 +549,8 @@ fn relativise_self_url(url: &str, base_url: &str) -> Option<String> {
     let rest = url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))?;
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => return None,
-    };
+    let slash = rest.find('/')?;
+    let (authority, path) = (&rest[..slash], &rest[slash..]);
     let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
     if LOOPBACK_HOSTS.contains(&host) && path.starts_with("/api/datasets/") {
         return Some(path.to_string());
