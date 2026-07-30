@@ -16,6 +16,7 @@ data/
 .git/
 .gitignore
 .gitattributes
+.claude/
 *.md
 test-data/
 scripts/
