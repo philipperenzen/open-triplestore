@@ -165,7 +165,7 @@ sha2 = "0.11"
 hex = "0.4"
 # TOTP two-factor codes (RFC 6238: HMAC-SHA1). Left on the digest 0.10 family;
 # self-consistent with each other and independent of the sha2/hkdf path above.
-hmac = "0.12"
+hmac = "0.13"
 sha1 = "0.10"
 # WebAuthn / FIDO2 passkey login. In-progress challenge state stays in memory
 # (no danger-allow-state-serialisation), only finished credentials are stored.
