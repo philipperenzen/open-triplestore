@@ -485,7 +485,12 @@ export function parseModel3dSpec(text) {
     .map((m) => {
       if (!m || typeof m !== 'object') return null;
       const url = str(m.url ?? m.href);
-      const format = safeModelFormat(url);
+      // Asset download routes carry no file extension, so the spec may state
+      // the format explicitly; the URL still passes the scheme allowlist.
+      const KNOWN = ['gltf', 'stl', 'cityjson', 'citygml', 'ifc'];
+      const declared = KNOWN.includes(str(m.format).toLowerCase()) ? str(m.format).toLowerCase() : null;
+      const format =
+        safeModelFormat(url) ?? (declared && safeExternalUrl(url) !== undefined ? declared : null);
       return format ? { label: str(m.label ?? m.name), url, format } : null;
     })
     .filter(Boolean)

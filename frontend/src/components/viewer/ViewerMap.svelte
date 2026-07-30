@@ -22,9 +22,11 @@
   import { isDark } from '../../lib/theme.js';
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf, modelRefsOf, cityBaseUrl, cityObjectFragment } from '../../lib/viewer/detect';
-  import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
+  import { loadModel, realWorldMeters, defaultMaterial, normalise, NORMALISED_DIM } from '../../lib/viewer/models';
   import { ifcGuidAt, groupHasGuid, ifcProgress } from '../../lib/viewer/ifc';
   import { cityObjectIdAt, groupHasCityObject } from '../../lib/viewer/cityjson';
+  import { parseWktZ, wktZCentroid, wktZToLocalTriangles } from '../../lib/viewer/wktz';
+  import { lonLatToLocalMeters } from '../../lib/viewer/crs';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import {
     styleFor,
@@ -257,6 +259,62 @@
     sun.position.set(0.6, 1, 0.8);
     scene.add(hemi, sun, holder);
     return scene;
+  }
+
+  /**
+   * Stand an element's volumetric WKT (`wkt3d`) on the map as real geometry.
+   * The demo's extruded WKT-Z solids only ever rendered in the Cesium 3D-Tiles
+   * view; the map showed just their anchor dots. The feed now ships the solid
+   * in 4326 with metre heights, so it renders here exactly like a loaded
+   * model: same entry contract (modelGroup/scene/mercMatrix/meters), so the
+   * fit, theming, suppression and click paths need no special cases.
+   */
+  function attachVolumetric(entry, el) {
+    const geom = parseWktZ(el.wkt3d);
+    if (!geom) return;
+    const anchor = wktZCentroid(geom);
+    const positions = wktZToLocalTriangles(geom, anchor, lonLatToLocalMeters);
+    if (!positions.length) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, defaultMaterial(dark));
+    mesh.userData.stl = true; // themeMaterials() re-skins default-material meshes
+    const model = new THREE.Group();
+    model.add(mesh);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const meters = Math.max(size.x, size.y, size.z) || 10;
+    model.userData.geo = {
+      format: 'wktz',
+      realSize: { x: size.x, y: size.y, z: size.z },
+      anchorLonLat: anchor,
+      cityObjects: [],
+    };
+    normalise(model);
+    const groundClip = [new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)];
+    model.traverse((n) => {
+      if (n.isMesh && n.material) n.material.clippingPlanes = groundClip;
+    });
+    const nbox = new THREE.Box3().setFromObject(model);
+    const radius = Math.max(nbox.max.x - nbox.min.x, nbox.max.z - nbox.min.z) * 0.62;
+    const holder = new THREE.Group();
+    holder.add(model, makeShadowDisc(radius));
+    entry.modelGroup = model;
+    entry.box = nbox;
+    entry.scene = buildEntryScene(holder);
+    entry.meters = meters;
+    entry.anchorUsed = anchor;
+    entry.footprint = null;
+    entry.isIfc = false;
+    entry.isCity = false;
+    entry.cityObjectById = new Map();
+    entry.mercMatrix = mercMatrixFor(anchor, meters, null);
+    themeMaterials();
+    highlightModels();
+    scheduleBuildingSuppression();
+    maybeAutoFitModels();
+    map?.triggerRepaint();
   }
 
   async function attachModel(entry, el) {
@@ -1152,6 +1210,9 @@
         continue;
       }
       if (anchor) attachModel(entry, el);
+      // Volumetric WKT stands as its own geometry; a file-backed model (if the
+      // element somehow had both) takes precedence via the async attach above.
+      if (el.wkt3d && !modelRefOf(el)) attachVolumetric(entry, el);
     }
     if (import.meta.env.DEV) window.__otsViewerEntries = entries; // dev: re-point after reassign
     ensureOverlays();

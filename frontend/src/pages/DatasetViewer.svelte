@@ -162,6 +162,7 @@
   // (POLYHEDRALSURFACE / TIN / SOLID / Z) — gates the Cesium viewer entry point.
   $: has3dContent =
     elements.some((e) => modelRefOf(e)) ||
+    elements.some((e) => !!e.wkt3d) ||
     elements.some((e) => /POLYHEDRALSURFACE|\bTIN\b|\bSOLID\b| Z[ (]/i.test(e.wkt4326 || ''));
 
   const hasModel = (el) => !!modelRefOf(el);

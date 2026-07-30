@@ -826,8 +826,12 @@ that is not listed.\n\n\
 If answering needs the actual contents of the graphs (counts, specific values, relationships, geometries), \
 reply with EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named \
 graphs, and nothing else. This is not optional: when the user asks how many, which, when, where or what \
-value, and you have not run a query THIS turn, your first reply MUST be such a `SPARQL:` line — the \
-dataset descriptions in the platform context are prose summaries, never a substitute for querying. The system runs it read-only under the user's permissions and gives you the \
+value, and you have not run a query THIS turn, your first reply MUST be such a `SPARQL:` line — \
+UNLESS the PLATFORM CONTEXT already answers it outright. The context's INVENTORIES are authoritative, \
+not summaries: the datasets list, the named graphs WITH their triple counts, the Files/assets list \
+(that IS the complete list of files — \"show me the IFC files\" is answered from it directly, never \
+by querying), and the API services. Query the graphs for their CONTENTS; read the context for what \
+exists on the platform. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
 write the final answer. Result cells may be truncated (they then end with …).\n\
 Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
@@ -842,7 +846,12 @@ counting a variable that never appears in the pattern silently yields 0 for ever
 canonical per-graph triple count is: \
 `SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g ORDER BY DESC(?n)`. \
 Sanity-check aggregates before presenting them: an all-zero result almost always means a wrong \
-variable, not empty graphs — re-query, don't chart it.\n\n\
+variable, not empty graphs — re-query, don't chart it.\n\
+Worked patterns — adapt the IRIs from the Graph vocabulary section, never invent them:\n\
+count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE {{ \
+GRAPH <g> {{ ?b a <Class> ; <yearPredicate> ?year }} }}`\n\
+mappable rows: `SELECT ?el ?label ?wkt WHERE {{ GRAPH <g> {{ ?el rdfs:label ?label ; \
+geo:hasGeometry/geo:asWKT ?wkt }} }} LIMIT 50` — then present with a source:\"query\" map.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -870,7 +879,9 @@ WKT must be WGS84 with longitude before latitude. Prefer points or centroids; sk
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
 real 3D geometry on the basemap.\n\
-- ```model3d — an interactive 3D viewer: {\"models\":[{\"label\":\"…\",\"url\":\"https://…/model.glb\"}]}. \
+- ```model3d — an interactive 3D viewer: {\"models\":[{\"label\":\"…\",\"url\":\"https://…/model.glb\"}]}; \
+asset download paths carry no file extension, so give those an explicit format: \
+{\"models\":[{\"label\":\"…\",\"url\":\"/api/datasets/<id>/assets/<id>/download\",\"format\":\"ifc\"}]}. \
 Use file URLs you actually retrieved from the graphs (omg:hasGeometry / fog:as… file references — \
 glTF, STL, IFC, CityJSON) or asset download paths from the platform context — never invent URLs.\n\
 - ```card — an entity info card: {\"title\":\"…\",\"subtitle\":\"…\",\"iri\":\"http://…\",\"image\":\"https://…\",\
@@ -1823,6 +1834,47 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
             services.push(line);
         }
     }
+    // Files/assets: "show me the IFC files" is a platform question — the
+    // originals are first-class dataset assets with download routes, not
+    // something to reconstruct from graph patterns (the model was querying a
+    // guessed graph name for fog: references and concluding no files exist).
+    const MAX_ASSETS_IN_CONTEXT: usize = 40;
+    let mut asset_lines: Vec<String> = Vec::new();
+    'assets: for d in &datasets {
+        let Ok(assets) = state.auth_db.list_dataset_assets(&d.id) else {
+            continue;
+        };
+        for a in assets {
+            // Only PUBLIC assets ever ride into a prompt: the DB listing has no
+            // ACL of its own, and a private file's name in an anonymous
+            // caller's context would be a disclosure even if the download
+            // route would 401.
+            if !a.public {
+                continue;
+            }
+            if asset_lines.len() >= MAX_ASSETS_IN_CONTEXT {
+                asset_lines.push("- …and more.".to_string());
+                break 'assets;
+            }
+            let mb = (a.size_bytes as f64) / 1_048_576.0;
+            asset_lines.push(format!(
+                "- \"{}\" ({mb:.1} MB) in dataset \"{}\": GET /api/datasets/{}/assets/{}/download",
+                a.filename, d.name, d.id, a.id
+            ));
+        }
+    }
+    if !asset_lines.is_empty() {
+        ctx.push_str(
+            "\n## Files / assets (downloadable originals — cite these directly or with a \
+             ```file widget; for 3D files use a ```model3d widget with an explicit \
+             \"format\" since the download path has no extension)\n",
+        );
+        for l in &asset_lines {
+            ctx.push_str(l);
+            ctx.push('\n');
+        }
+    }
+
     if services.is_empty() {
         ctx.push_str("\n## API Services\n(none accessible)\n");
     } else {
@@ -1866,13 +1918,8 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
 
 /// How many graphs get a vocabulary block (the first N, sorted — deterministic).
 const VOCAB_GRAPH_LIMIT: usize = 12;
-const VOCAB_CLASS_LIMIT: usize = 6;
-const VOCAB_PRED_LIMIT: usize = 12;
-/// Row caps for the sampling scans — a hard bound on work per graph, whatever
-/// its size. Sampling can miss rare vocabulary; the retrieval loop still
-/// recovers via its normal feedback rounds.
-const VOCAB_CLASS_SCAN_ROWS: usize = 2000;
-const VOCAB_PRED_SCAN_ROWS: usize = 4000;
+const VOCAB_CLASS_LIMIT: usize = 8;
+const VOCAB_PRED_LIMIT: usize = 20;
 /// How long a sampled summary stays fresh. Vocabulary changes rarely; five
 /// minutes keeps chat turns from re-scanning while still tracking imports.
 const VOCAB_TTL: Duration = Duration::from_secs(300);
@@ -1949,17 +1996,27 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String]) -> String {
 /// Sample one graph's vocabulary into a summary block, or `None` when the graph
 /// yields nothing usable (empty, or unreadable).
 fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
+    // Frequency-ordered on purpose. The first cut took the first-N DISTINCT
+    // IRIs in storage order — arbitrary — and on a graph with more predicates
+    // than the cap it dropped exactly the ones questions hinge on (the BAG
+    // graph's `oorspronkelijkbouwjaar` construction year lost its slot to
+    // one-off provenance triples; the model then guessed a wall-area predicate
+    // for "oldest building" and every query returned nothing). Ordering by
+    // count puts the graph's real data model first and pushes one-off metadata
+    // (dct:license on a root node) to the tail, which the cap then trims. The
+    // GROUP BY runs against the in-memory mirror and is guarded by the
+    // sampling time budget; results cache for VOCAB_TTL as before.
     let classes = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} LIMIT {VOCAB_CLASS_SCAN_ROWS}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_CLASS_LIMIT}"
         ),
         VOCAB_CLASS_LIMIT,
     );
     let predicates = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} LIMIT {VOCAB_PRED_SCAN_ROWS}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_PRED_LIMIT}"
         ),
         VOCAB_PRED_LIMIT,
     );

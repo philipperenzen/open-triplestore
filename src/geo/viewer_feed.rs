@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
-use super::crs::{reproject_wkt, Crs};
+use super::crs::{reproject_wkt, transform_xy, Crs};
 use super::datatypes::{extract_crs, extract_wkt};
 use super::gml::{gml_srs_name, gml_to_wkt};
 
@@ -59,6 +59,13 @@ pub struct ViewerElement {
     pub heading: Option<f64>,
     /// Geometry as WKT in EPSG:4326, `(x y) = (lon lat)` — feeds map layers.
     pub wkt4326: Option<String>,
+    /// VOLUMETRIC geometry (`POLYHEDRALSURFACE Z` / `TIN Z` / `SOLID`) in
+    /// EPSG:4326 with heights preserved in metres — the 3D shape the map
+    /// viewer extrudes as real geometry. Kept separate from `wkt4326`: an
+    /// element usually carries BOTH an anchor point (the map dot) and the
+    /// solid, and the 2-D reprojector cannot represent Z types at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wkt3d: Option<String>,
     /// Administrative place path, broad → narrow (country → region → city),
     /// inferred from the RDF by [`super::places`]. Empty when the data states
     /// nothing we can read — the viewer groups those under "Ungrouped" rather
@@ -320,10 +327,20 @@ pub fn build_viewer_feed_opts(
                 entry.files.push((format, url));
             }
         }
-        if entry.wkt4326.is_none() {
-            if let Some(wkt_lit) = sol.get("wkt").map(term_value) {
+        if let Some(wkt_lit) = sol.get("wkt").map(term_value) {
+            // Volumetric literals get their own slot — they'd otherwise be
+            // silently dropped (the 2-D `geo`-crate round-trip cannot parse a
+            // Z type), and whichever geometry the solution order surfaced
+            // first would win the element's only slot.
+            if is_volumetric_wkt(&wkt_lit) {
+                if entry.wkt3d.is_none() {
+                    entry.wkt3d = reproject_volumetric(&wkt_lit);
+                }
+            } else if entry.wkt4326.is_none() {
                 apply_wkt(entry, &wkt_lit);
-            } else if let Some(gml_lit) = sol.get("gml").map(term_value) {
+            }
+        } else if entry.wkt4326.is_none() {
+            if let Some(gml_lit) = sol.get("gml").map(term_value) {
                 apply_gml(entry, &gml_lit);
             }
         }
@@ -340,6 +357,94 @@ pub fn build_viewer_feed_opts(
         }
     }
     elements.into_values().collect()
+}
+
+/// Does this WKT literal describe a volumetric (Z) geometry the 2-D pipeline
+/// cannot represent?
+fn is_volumetric_wkt(literal_value: &str) -> bool {
+    let upper = literal_value.to_ascii_uppercase();
+    upper.contains("POLYHEDRALSURFACE") || upper.contains("TIN") || upper.contains("SOLID")
+}
+
+/// Reproject a volumetric WKT literal to EPSG:4326, preserving Z.
+///
+/// The 2-D path round-trips the `geo` crate, which has no polyhedral types —
+/// so this walks the text instead: every `x y z` coordinate triple is
+/// transformed in place ([`transform_xy`] on x/y, z kept verbatim as metres)
+/// and all structure (type token, parentheses, commas) passes through
+/// untouched. Any malformed coordinate fails the WHOLE literal closed (None)
+/// rather than emitting a half-transformed shape.
+fn reproject_volumetric(literal_value: &str) -> Option<String> {
+    let source_uri = extract_crs(literal_value);
+    let source = match source_uri {
+        Some(uri) => Crs::from_uri(uri)?,
+        None => Crs::Wgs84,
+    };
+    let body = extract_wkt(literal_value);
+    if matches!(source, Crs::Wgs84) {
+        return Some(body.trim().to_string());
+    }
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut num = String::new();
+    let mut triple: Vec<f64> = Vec::with_capacity(3);
+    let flush_triple = |triple: &mut Vec<f64>, out: &mut String| -> bool {
+        match triple.len() {
+            0 => true,
+            3 => {
+                let (x, y) = match transform_xy(source, Crs::Wgs84, triple[0], triple[1]) {
+                    Some(xy) => xy,
+                    None => return false,
+                };
+                out.push_str(&format!("{x} {y} {z}", z = triple[2]));
+                triple.clear();
+                true
+            }
+            _ => false, // 1- or 2-component coordinate in a Z geometry — malformed
+        }
+    };
+    for ch in body.trim().chars() {
+        // A number STARTS with a digit, '-' or '.'; 'e'/'E'/'+' only CONTINUE
+        // one — otherwise the E's of "POLYHEDRALSURFACE" would be swallowed
+        // as scientific notation.
+        let starts = num.is_empty() && (ch.is_ascii_digit() || ch == '-' || ch == '.');
+        let continues = !num.is_empty()
+            && (ch.is_ascii_digit()
+                || ch == '.'
+                || ch == 'e'
+                || ch == 'E'
+                || ch == '+'
+                || ch == '-');
+        if starts || continues {
+            num.push(ch);
+            continue;
+        }
+        if !num.is_empty() {
+            triple.push(num.parse().ok()?);
+            num.clear();
+        }
+        match ch {
+            ' ' | '\t' | '\n' => {
+                // separator inside a coordinate — nothing to emit yet
+                if triple.is_empty() {
+                    out.push(' ');
+                }
+            }
+            ',' | ')' => {
+                if !flush_triple(&mut triple, &mut out) {
+                    return None;
+                }
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    if !num.is_empty() {
+        triple.push(num.parse().ok()?);
+    }
+    if !flush_triple(&mut triple, &mut out) {
+        return None;
+    }
+    Some(out)
 }
 
 /// Fill the reprojected geometry fields from a (possibly CRS-prefixed) WKT literal value.
@@ -778,6 +883,78 @@ mod tests {
         assert_eq!(located.len(), 1, "located feed stays tiny: {located:?}");
         assert_eq!(located[0].id, "http://example.org/Site");
         assert!(located[0].wkt4326.is_some(), "Site keeps its coordinate");
+    }
+
+    #[test]
+    fn volumetric_wkt_reprojects_with_z_preserved() {
+        // A face of the demo's Block A: RD New (EPSG:7415) metres, closed ring.
+        let lit = "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z                    (((185660 427940 0,185660 427960 0,185672 427960 0,185672 427940 0,185660 427940 0)),                   ((185660 427940 9,185672 427940 9,185672 427960 9,185660 427960 9,185660 427940 9)))";
+        let out = reproject_volumetric(lit).expect("reprojects");
+        assert!(out.starts_with("POLYHEDRALSURFACE Z"), "{out}");
+        // Structure intact: parenthesis/comma counts match the source body.
+        let body = lit.split("7415> ").nth(1).unwrap();
+        assert_eq!(out.matches('(').count(), body.matches('(').count());
+        assert_eq!(out.matches(')').count(), body.matches(')').count());
+        assert_eq!(out.matches(',').count(), body.matches(',').count());
+        // Coordinates landed in Nijmegen, heights untouched.
+        assert!(
+            out.contains(" 0,") || out.contains(" 0)"),
+            "z=0 kept: {out}"
+        );
+        assert!(
+            out.contains(" 9,") || out.contains(" 9)"),
+            "z=9 kept: {out}"
+        );
+        let lon: f64 = out
+            .split(['(', ','])
+            .find(|t| t.trim().starts_with('5'))
+            .and_then(|t| t.trim().split(' ').next())
+            .and_then(|t| t.parse().ok())
+            .expect("a longitude");
+        assert!(
+            (5.82..5.85).contains(&lon),
+            "RD easting became a Nijmegen lon: {lon}"
+        );
+        assert!(out.contains("51.8"), "latitude in range: {out}");
+        // Already-4326 literals pass through unchanged.
+        let plain =
+            "POLYHEDRALSURFACE Z (((5.83 51.84 0,5.831 51.84 0,5.831 51.841 0,5.83 51.84 0)))";
+        assert_eq!(reproject_volumetric(plain).as_deref(), Some(plain));
+        // Malformed (2-component coordinate in a Z type) fails closed.
+        assert_eq!(
+            reproject_volumetric(
+                "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((1 2,3 4)))"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn feed_carries_point_and_volumetric_geometry_separately() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                r##"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+                    @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                    @prefix ex: <http://example.org/> .
+                    ex:Block a ex:Solid ; rdfs:label "Block" ;
+                      geo:hasGeometry [ geo:asWKT "POINT(5.832 51.839)"^^geo:wktLiteral ] ;
+                      geo:hasGeometry [ geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185660 427940 0,185660 427960 0,185672 427960 0,185660 427940 0)))"^^geo:wktLiteral ] .
+                "##,
+                oxigraph::io::RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+        let els = build_viewer_feed(&store, &[], None);
+        let block = els.iter().find(|e| e.id.ends_with("Block")).expect("Block");
+        assert!(
+            block.wkt4326.as_deref().unwrap_or("").starts_with("POINT"),
+            "{:?}",
+            block.wkt4326
+        );
+        let w3 = block.wkt3d.as_deref().expect("volumetric slot filled");
+        assert!(w3.starts_with("POLYHEDRALSURFACE Z"), "{w3}");
+        assert!(w3.contains("51.8"), "reprojected: {w3}");
     }
 
     #[test]

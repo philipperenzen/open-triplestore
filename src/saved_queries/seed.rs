@@ -608,6 +608,9 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
+// v11: purges the Schependomlaan.ifc ASSET. v10 swapped the graphs but assets
+// are only ever added, so the withdrawn 47 MB file stayed stored and publicly
+// downloadable — defeating the point of the swap.
 // v10: the headline IFC is now the Esplanades project (Tallinn) — CC BY 4.0
 // from the copyright holder — replacing the Schependomlaan design model, whose
 // upstream README limits the grant to "scientific and academic purposes". The
@@ -626,7 +629,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 10;
+const DEMO_CONTENT_VERSION: u32 = 11;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -694,6 +697,26 @@ fn refresh_demo_content(state: &AppState) {
         let _ = state.auth_db.remove_dataset_graph(DS, &graph);
     }
     state.auth_db.invalidate_accessible_graphs_cache();
+    // Withdrawn demo assets: files the demo no longer ships must also stop
+    // being stored/served (the Schependomlaan model's upstream grant is
+    // academic-use — see the v10/v11 notes above).
+    const STALE_ASSETS: &[&str] = &["Schependomlaan.ifc"];
+    if let Ok(assets) = state.auth_db.list_dataset_assets(DS) {
+        for a in assets {
+            if !STALE_ASSETS.contains(&a.filename.as_str()) {
+                continue;
+            }
+            let storage = state.object_store.clone();
+            let key = a.s3_key.clone();
+            // Best-effort object delete on the blocking-safe path; the DB row
+            // goes regardless so the asset stops being listed/served.
+            let _ = block_on_anywhere(async move { storage.delete(&key).await });
+            match state.auth_db.delete_asset(&a.id) {
+                Ok(()) => tracing::info!("demo refresh: purged withdrawn asset {}", a.filename),
+                Err(e) => tracing::warn!("demo refresh: could not purge {}: {e}", a.filename),
+            }
+        }
+    }
     tracing::info!(
         "demo content refreshed to v{DEMO_CONTENT_VERSION} (was v{recorded}): {wiped} stale graphs wiped, reseeding"
     );
