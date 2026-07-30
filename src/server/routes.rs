@@ -7432,11 +7432,25 @@ pub async fn viewer_feed(
         q.located.as_deref().map(str::trim),
         Some("true" | "1" | "yes" | "on")
     );
-    let elements = crate::geo::viewer_feed::build_viewer_feed_opts(
+    let mut elements = crate::geo::viewer_feed::build_viewer_feed_opts(
         &state.store,
         &data_graphs,
         q.root.as_deref(),
         located,
+    );
+    // Hand the browser origin-relative URLs for models this deployment serves
+    // itself, so they resolve against the host the user actually opened — a
+    // LAN IP, a reverse-proxy hostname — and not the origin baked in at seed
+    // time (which is `localhost` on a default install, and therefore dead for
+    // every device except this one).
+    crate::geo::viewer_feed::relativise_self_urls(&mut elements, &state.base_url);
+    // Administrative place path (country → region → city) for the viewer's
+    // "Group by location" lens, inferred from the RDF only.
+    crate::geo::viewer_feed::resolve_places(
+        &state.store,
+        &data_graphs,
+        &mut elements,
+        &state.base_url,
     );
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,

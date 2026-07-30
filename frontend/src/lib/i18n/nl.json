@@ -537,7 +537,13 @@
       "memoryEnabled": "Geheugen gebruiken in chats",
       "memorySave": "Opslaan",
       "memorySaved": "Opgeslagen",
-      "close": "Sluiten"
+      "close": "Sluiten",
+      "copyMessage": "Bericht kopiëren",
+      "copyChat": "Chat kopiëren",
+      "guestLimit": "Gasten kunnen {anon} AI-verzoeken per minuut sturen; ingelogde gebruikers {user}.",
+      "aboutRateLimit": "Limiet",
+      "aboutRateLimitValue": "{n} verzoeken/min voor jou",
+      "aboutRateLimitSignIn": "(log in voor {n}/min)"
     },
     "sparql": {
       "title": "SPARQL-werkruimte",
@@ -3785,6 +3791,14 @@
     "search": "Zoek onderdelen…",
     "located": "Op de kaart",
     "noLocation": "Geen locatie",
+    "groupBy": {
+      "label": "Groeperen op",
+      "structure": "Structuur",
+      "location": "Locatie",
+      "format": "Bestandsformaat",
+      "type": "Type"
+    },
+    "ungrouped": "Niet gegroepeerd",
     "expandAll": "Alles uitvouwen",
     "collapseAll": "Alles invouwen",
     "expand": "Uitvouwen",

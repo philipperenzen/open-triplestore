@@ -12,6 +12,10 @@
   // maplibre-gl 6 dropped its `default` export in favour of named exports.
   import * as maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
+  // …and moved its worker out of the bundle; without this the basemap silently
+  // never loads. See lib/viewer/maplibreWorker.ts.
+  import { configureMapLibreWorker } from '../../lib/viewer/maplibreWorker';
+  configureMapLibreWorker();
   import * as THREE from 'three';
   import { t as i18nT } from 'svelte-i18n';
   import { Map as MapIcon, Satellite, Crosshair, Maximize } from 'lucide-svelte';
@@ -32,7 +36,6 @@
     buildingIdFilter,
     buildingSuppressionFilter,
     combineFilters,
-    footprintPolygon,
     footprintsFromLocalPoints,
     footprintsToMultiPolygon,
     polygonsIntersect,
@@ -185,13 +188,27 @@
   });
 
   /** Model-local (y-up metres, normalised) → mercator placement matrix. */
-  function mercMatrixFor(lonLat, meters) {
+  /**
+   * Place a normalised model at `lonLat`, sized to `meters` and turned to face
+   * its real-world bearing.
+   *
+   * The matrix maps the Y-up scene into Mercator: scene +X → east, scene +Z →
+   * south (Mercator Y grows southward), scene +Y → altitude. So an unrotated
+   * model's local +X lands due east, i.e. bearing 90°. `heading` is the bearing
+   * that +X should actually point along, and the extra Y-rotation (applied to
+   * the model FIRST, hence last in the chain) turns it there: solving
+   * atan2(cosθ, sinθ) = heading gives θ = 90° − heading, which is 0 for the
+   * default 90° and so leaves every unannotated model exactly where it was.
+   */
+  function mercMatrixFor(lonLat, meters, heading) {
     const merc = maplibregl.MercatorCoordinate.fromLngLat({ lng: lonLat[0], lat: lonLat[1] }, 0);
     const s = merc.meterInMercatorCoordinateUnits() * (meters / NORMALISED_DIM);
+    const bearing = typeof heading === 'number' && Number.isFinite(heading) ? heading : 90;
     return new THREE.Matrix4()
       .makeTranslation(merc.x, merc.y, merc.z)
       .multiply(new THREE.Matrix4().makeScale(s, -s, s))
-      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
+      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(90 - bearing)));
   }
 
   let shadowTexture = null;
@@ -283,7 +300,8 @@
       // x-ray + info); cache the metadata by object id for hover/popup.
       entry.isCity = ref.format === 'cityjson' || ref.format === 'citygml';
       entry.cityObjectById = new Map((cached.userData.geo?.cityObjects || []).map((o) => [o.id, o]));
-      entry.mercMatrix = mercMatrixFor(anchor, meters);
+      entry.heading = ref.heading; // the footprint pass must turn with the model
+      entry.mercMatrix = mercMatrixFor(anchor, meters, ref.heading);
       themeMaterials();
       highlightModels();
       updateWalkSuggest(); // a building may have loaded while already zoomed in
@@ -293,7 +311,12 @@
       // until the next pan.
       scheduleBuildingSuppression();
       map?.triggerRepaint();
-    } catch {
+    } catch (err) {
+      // The chip only counts failures; without this the *reason* (404, CORS, a
+      // web-ifc parse abort) is invisible — a silent `catch {}` made "8 model(s)
+      // failed to load" undiagnosable from the browser alone.
+      // eslint-disable-next-line no-console
+      console.warn(`[viewer] model failed: ${ref.format} ${ref.url}`, err);
       modelsFailed += 1; // model failed to load — the vector dot remains
     } finally {
       modelsLoading -= 1;
@@ -785,9 +808,15 @@
    *  on style.load — layer objects are recreated by setStyle. */
   let baseFilters = new Map();
   let suppressTimer = 0;
-  /** 'geometry' uses MapLibre's `distance` expression (evaluated in the tile
-   *  worker, viewport-independent); 'ids' is the fallback below. Latched once. */
-  let suppressionMode = 'geometry';
+  /** 'ids' hides whole buildings by feature id; 'geometry' uses MapLibre's
+   *  `distance` expression. Ids is the DEFAULT on purpose: the distance filter
+   *  is evaluated per tile, and a building that straddles a tile boundary is
+   *  two fragments — the fragment inside the footprint vanished while its
+   *  other half kept rendering, so buildings at the footprint's edge appeared
+   *  sliced in half. An id filter hides the building in every tile it spans.
+   *  The geometry mode is kept as the fallback for tile sources whose features
+   *  carry no ids (the id filter cannot address those at all). */
+  let suppressionMode = 'ids';
   /** Bumped when a building source finishes loading tiles — only the id fallback
    *  depends on which tiles are present. */
   let sourceGen = 0;
@@ -832,17 +861,34 @@
     if (!anchor || !e.modelGroup || !e.box) return [];
     if (e.footprint) return e.footprint;
     const meters = e.meters || 30;
-    const pts = sampleModelXZ(e);
-    e.footprint = pts.length
-      ? footprintsFromLocalPoints(pts, meters, anchor, { normalisedDim: NORMALISED_DIM })
-      : // No readable geometry (a placeholder, an exotic loader) — fall back to
-        // the bounding box, padded, which is what the old code approximated.
-        [
-          footprintPolygon(e.box, meters, anchor, {
-            normalisedDim: NORMALISED_DIM,
-            padMeters: SUPPRESSION_BUFFER_M,
-          }),
-        ];
+    // The placement matrix turns a headed model about Y before it lands on the
+    // map (see mercMatrixFor); the footprint must turn WITH it or the hidden
+    // basemap blocks sit rotated away from where the model actually stands.
+    const theta = THREE.MathUtils.degToRad(
+      90 - (typeof e.heading === 'number' && Number.isFinite(e.heading) ? e.heading : 90),
+    );
+    const cos = Math.cos(theta);
+    const sin = Math.sin(theta);
+    const turn = ([x, z]) => [x * cos + z * sin, -x * sin + z * cos];
+    let pts = sampleModelXZ(e);
+    if (!pts.length) {
+      // No readable geometry (a placeholder, an exotic loader) — fall back to
+      // the bounding-box corners; the hull pass below closes them into the box
+      // the old footprintPolygon fallback approximated.
+      const { min, max } = e.box;
+      pts = [
+        [min.x, min.z],
+        [max.x, min.z],
+        [max.x, max.z],
+        [min.x, max.z],
+      ];
+    }
+    // The 0.5 m tolerance (SUPPRESSION_BUFFER_M) is applied by the *filters*,
+    // not baked into the rings: the distance filter takes it as its threshold,
+    // and the id fallback's intersection test needs no buffer to catch overlap.
+    e.footprint = footprintsFromLocalPoints(pts.map(turn), meters, anchor, {
+      normalisedDim: NORMALISED_DIM,
+    });
     return e.footprint;
   }
 
@@ -896,6 +942,7 @@
   function applyIdSuppression(multi) {
     const rings = multi ? multi.coordinates.map((c) => c[0]) : [];
     const ids = new Set();
+    let idless = 0;
     if (rings.length) {
       const sources = new Set();
       for (const id of buildingLayerIds(map)) {
@@ -910,7 +957,10 @@
           continue;
         }
         for (const f of feats) {
-          if (f.id === undefined || f.id === null) continue;
+          if (f.id === undefined || f.id === null) {
+            idless += 1;
+            continue;
+          }
           const g = f.geometry;
           const polys =
             g?.type === 'Polygon' ? [g.coordinates] : g?.type === 'MultiPolygon' ? g.coordinates : [];
@@ -924,6 +974,14 @@
       }
     }
     applyFilterToBuildingLayers(buildingIdFilter([...ids]));
+    return { hidden: ids.size, idless };
+  }
+
+  /** Give every building layer its own filter back (rebuilds, empty model set). */
+  function resetBuildingSuppression() {
+    lastSuppressionKey = '';
+    if (!map || !styleReady) return;
+    applyFilterToBuildingLayers(null);
   }
 
   function applyBuildingSuppression() {
@@ -946,17 +1004,24 @@
     if (key === lastSuppressionKey) return;
     lastSuppressionKey = key;
     if (suppressionMode === 'ids') {
-      applyIdSuppression(multi);
+      const { hidden, idless } = applyIdSuppression(multi);
+      // A source whose features carry no ids can't be addressed this way at
+      // all — switch to the geometry filter (one-way; the modes never
+      // ping-pong because 'geometry' below only ever falls back to 'ids' when
+      // the id path was never tried, i.e. suppressionMode started there).
+      if (multi && hidden === 0 && idless > 0) {
+        suppressionMode = 'geometry';
+        lastSuppressionKey = '';
+        applyBuildingSuppression();
+      }
       return;
     }
     const res = applyFilterToBuildingLayers(buildingSuppressionFilter(multi, SUPPRESSION_BUFFER_M));
     if (res === 'retry') {
       lastSuppressionKey = ''; // transient — let the next trigger try again
-    } else if (res === 'unsupported') {
-      suppressionMode = 'ids';
-      lastSuppressionKey = '';
-      applyIdSuppression(multi);
     }
+    // NOTE: no 'unsupported' → 'ids' latch here any more — ids IS the primary
+    // mode now, so reaching this branch means ids already proved unusable.
   }
 
   /** Coalesce suppression passes: several models finishing within a frame of
@@ -1038,6 +1103,13 @@
     entries = new Map();
     citySel = null;
     hideCityPopup();
+    // Give the basemap its blocks back for the whole rebuild window. The feed
+    // loads in two phases, and phase 2 tears every entry down and re-parses the
+    // models (the 3DBAG block alone is ~77 buildings, the IFC tens of MB). The
+    // previous pass's filter would otherwise keep the neighbourhood's basemap
+    // buildings hidden for those seconds with nothing standing in for them —
+    // an empty city block that reads as "the map lost my buildings".
+    resetBuildingSuppression();
     // Which base CityJSON/CityGML files carry a WHOLE-file (no-fragment) reference:
     // those render the entire block once; every `#objectId` fragment ref for the
     // same file then only maps a pick back to its element (no second render).

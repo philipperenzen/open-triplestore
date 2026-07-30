@@ -50,8 +50,31 @@ pub struct ViewerElement {
     /// lets the map scale a unit-less STL (a landmark) to true size instead of
     /// guessing. `None` when the model's own units are already trustworthy.
     pub size_meters: Option<f64>,
+    /// Compass bearing, degrees clockwise from true north, that the model's
+    /// local +X axis points along (`ots:modelHeading`). Absent means 90 — due
+    /// east — which is where an unrotated model's +X lands on the map. Without
+    /// it a model can only ever sit axis-aligned, so anything not built on a
+    /// north-south grid (a bridge across a river, a tower on the Manhattan
+    /// grid) renders visibly askew against the basemap.
+    pub heading: Option<f64>,
     /// Geometry as WKT in EPSG:4326, `(x y) = (lon lat)` — feeds map layers.
     pub wkt4326: Option<String>,
+    /// Administrative place path, broad → narrow (country → region → city),
+    /// inferred from the RDF by [`super::places`]. Empty when the data states
+    /// nothing we can read — the viewer groups those under "Ungrouped" rather
+    /// than inventing a location.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub place: Vec<PlaceRef>,
+}
+
+/// One place in a [`ViewerElement`]'s hierarchy, as the viewer sees it.
+#[derive(Debug, Clone, Serialize, ToSchema, Default, PartialEq, Eq)]
+pub struct PlaceRef {
+    /// Minted (or public) IRI of the place entity.
+    pub id: String,
+    pub label: String,
+    /// `country` | `region` | `city`.
+    pub level: String,
 }
 
 const FOG_AS: &str = "https://w3id.org/fog#as";
@@ -220,7 +243,7 @@ pub fn build_viewer_feed_opts(
         PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
         PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
         PREFIX omg:  <https://w3id.org/omg#>
-        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guid ?up ?msize
+        SELECT ?el ?parent ?label ?type ?wkt ?gml ?fp ?file ?guid ?up ?msize ?mhead
         {from}
         WHERE {{
             {selection}
@@ -232,7 +255,8 @@ pub fn build_viewer_feed_opts(
             OPTIONAL {{ ?el omg:hasGeometry ?og . ?og ?fp ?file .
                         FILTER(STRSTARTS(STR(?fp), "{FOG_AS}"))
                         OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelUpAxis> ?up }}
-                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelSizeMeters> ?msize }} }}
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelSizeMeters> ?msize }}
+                        OPTIONAL {{ ?og <https://opentriplestore.org/ns#modelHeading> ?mhead }} }}
             OPTIONAL {{ ?el <https://w3id.org/props#ifcGuid> ?guid }}
         }}
         "#
@@ -273,6 +297,15 @@ pub fn build_viewer_feed_opts(
                 .map(term_value)
                 .and_then(|s| s.parse::<f64>().ok())
                 .filter(|m| m.is_finite() && *m > 0.0);
+        }
+        if entry.heading.is_none() {
+            entry.heading = sol
+                .get("mhead")
+                .map(term_value)
+                .and_then(|s| s.parse::<f64>().ok())
+                // A non-finite bearing would propagate NaN into the placement
+                // matrix and blank the model; drop it and keep the default.
+                .filter(|h| h.is_finite());
         }
         if let (Some(fp), Some(file)) = (sol.get("fp").map(term_str), sol.get("file")) {
             let format = fp.trim_start_matches(FOG_AS).to_string();
@@ -346,6 +379,201 @@ fn apply_gml(el: &mut ViewerElement, gml_value: &str) {
     };
     el.source_crs = Some(source_uri.unwrap_or_else(|| Crs::Wgs84.to_uri().to_string()));
     el.wkt4326 = reproject_wkt(&wkt_body, source, Crs::Wgs84);
+}
+
+/// Fill in each element's administrative place path (country → region → city)
+/// by inferring it from the RDF — see [`super::places`] for the rules.
+///
+/// One query collects every place signal over the dataset's graphs: explicit
+/// address statements, and `owl:sameAs` links to authorities we can read. A
+/// signal found on an element's *ancestor* (the Site or Building of a BOT
+/// hierarchy) propagates down to its descendants, because a wall is in the same
+/// city as the building that contains it — that inheritance is what makes the
+/// grouping useful on a BIM dataset, where only the root ever carries an address.
+pub fn resolve_places(
+    store: &TripleStore,
+    data_graphs: &[String],
+    elements: &mut [ViewerElement],
+    base_url: &str,
+) {
+    use super::places::{best_path, place_from_authority, place_from_statements, place_iri};
+
+    if elements.is_empty() {
+        return;
+    }
+    let from: String = data_graphs
+        .iter()
+        .map(|g| format!("FROM <{g}> "))
+        .collect::<Vec<_>>()
+        .join("");
+    // Address-ish statements and sameAs targets, for every subject at once. The
+    // FILTERs keep this to the handful of predicates places.rs can read rather
+    // than dragging back the whole dataset.
+    let query = format!(
+        r#"
+        SELECT ?s ?p ?o {from} WHERE {{
+          {{ ?s ?p ?o .
+             FILTER(?p IN (<https://schema.org/addressCountry>, <https://schema.org/addressRegion>,
+                           <https://schema.org/addressLocality>, <http://schema.org/addressCountry>,
+                           <http://schema.org/addressRegion>, <http://schema.org/addressLocality>))
+             FILTER(isLiteral(?o)) }}
+          UNION
+          {{ ?s <https://schema.org/address> ?a . ?a ?p ?o . FILTER(isLiteral(?o)) }}
+          UNION
+          {{ ?s ?p ?o . FILTER(isLiteral(?o))
+             FILTER(STRENDS(STR(?p), "Country") || STRENDS(STR(?p), "Region") || STRENDS(STR(?p), "Town")) }}
+          UNION
+          {{ ?s <http://www.w3.org/2002/07/owl#sameAs> ?o . BIND(<http://www.w3.org/2002/07/owl#sameAs> AS ?p) }}
+        }}
+        "#
+    );
+    let mut statements: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut authorities: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) {
+        for sol in solutions.flatten() {
+            let (Some(s), Some(p), Some(o)) = (sol.get("s"), sol.get("p"), sol.get("o")) else {
+                continue;
+            };
+            let (s, p) = (term_str(s), term_str(p));
+            if p == "http://www.w3.org/2002/07/owl#sameAs" {
+                authorities.entry(s).or_default().push(term_str(o));
+            } else {
+                statements.entry(s).or_default().push((p, term_value(o)));
+            }
+        }
+    }
+    if statements.is_empty() && authorities.is_empty() {
+        return;
+    }
+
+    // Direct resolution per element id.
+    let mut direct: BTreeMap<String, Vec<super::places::Place>> = BTreeMap::new();
+    for el in elements.iter() {
+        let mut candidates = Vec::new();
+        if let Some(st) = statements.get(&el.id) {
+            candidates.push(place_from_statements(
+                st.iter().map(|(p, o)| (p.as_str(), o.as_str())),
+            ));
+        }
+        for iri in authorities.get(&el.id).into_iter().flatten() {
+            if let Some(path) = place_from_authority(iri) {
+                candidates.push(path);
+            }
+        }
+        let path = best_path(candidates);
+        if !path.is_empty() {
+            direct.insert(el.id.clone(), path);
+        }
+    }
+    if direct.is_empty() {
+        return;
+    }
+
+    // Inherit down the containment chain: walk each element's ancestors until
+    // one has a resolved place. `parent` links form a forest, but a malformed
+    // dataset could still contain a cycle — the visited set bounds the walk.
+    let parent: BTreeMap<&str, &str> = elements
+        .iter()
+        .filter_map(|e| e.parent.as_deref().map(|p| (e.id.as_str(), p)))
+        .collect();
+    let resolved: Vec<Option<Vec<super::places::Place>>> = elements
+        .iter()
+        .map(|el| {
+            let mut cur = el.id.as_str();
+            let mut seen = std::collections::BTreeSet::new();
+            loop {
+                if let Some(path) = direct.get(cur) {
+                    return Some(path.clone());
+                }
+                if !seen.insert(cur) {
+                    return None; // cycle
+                }
+                match parent.get(cur) {
+                    Some(p) => cur = p,
+                    None => return None,
+                }
+            }
+        })
+        .collect();
+
+    for (el, path) in elements.iter_mut().zip(resolved) {
+        let Some(path) = path else { continue };
+        el.place = (0..path.len())
+            .map(|depth| PlaceRef {
+                id: path[depth]
+                    .same_as
+                    .clone()
+                    .unwrap_or_else(|| place_iri(base_url, &path[..=depth])),
+                label: path[depth].label.clone(),
+                level: path[depth].level.slug().to_string(),
+            })
+            .collect();
+    }
+}
+
+/// Loopback hosts: an asset URL pointing at one of these can never be fetched by
+/// a browser on another machine — it resolves to *that* device's own loopback.
+const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "[::1]", "::1"];
+
+/// Rewrite a model/file URL that points at THIS deployment into an
+/// origin-relative path, so the browser resolves it against whatever host it
+/// actually reached the server on.
+///
+/// Model file URLs are stored as absolute IRIs (correct linked data — the
+/// importer stamps `base_url` into the RDF at import time). But a *browser*
+/// must not be handed that absolute origin: the value baked in at seed time is
+/// whatever `BASE_URL` was then, so a store seeded with the default
+/// `http://localhost:7878` serves `http://localhost:7878/api/…/download` to a
+/// phone on the LAN, where `localhost` is the phone. That is the "3D models
+/// fail to load from another device" bug. Two cases are rewritten:
+///
+///   1. the URL starts with the configured `base_url` — this deployment,
+///      whatever host the operator configured; and
+///   2. its origin is loopback *and* its path is one of our own API routes —
+///      data seeded under an earlier/default `BASE_URL`, which no remote client
+///      could ever fetch anyway.
+///
+/// Anything else (a genuinely external `https://raw.githubusercontent.com/…`
+/// model, an already-relative `/samples/…` path) is returned unchanged. The
+/// RDF in the store is untouched — this only shapes the viewer feed's JSON.
+fn relativise_self_url(url: &str, base_url: &str) -> Option<String> {
+    let base = base_url.trim_end_matches('/');
+    if !base.is_empty() {
+        if let Some(rest) = url.strip_prefix(base) {
+            if rest.starts_with('/') {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    // Case 2: loopback origin on one of our own routes.
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => return None,
+    };
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    if LOOPBACK_HOSTS.contains(&host) && path.starts_with("/api/datasets/") {
+        return Some(path.to_string());
+    }
+    None
+}
+
+/// Apply [`relativise_self_url`] to every model reference in a built feed.
+pub fn relativise_self_urls(elements: &mut [ViewerElement], base_url: &str) {
+    for el in elements.iter_mut() {
+        for url in el
+            .gltf_url
+            .iter_mut()
+            .chain(el.ifc_url.iter_mut())
+            .chain(el.files.iter_mut().map(|(_, u)| u))
+        {
+            if let Some(rel) = relativise_self_url(url, base_url) {
+                *url = rel;
+            }
+        }
+    }
 }
 
 fn term_str(t: &oxigraph::model::Term) -> String {
@@ -552,5 +780,86 @@ mod tests {
         assert_eq!(located.len(), 1, "located feed stays tiny: {located:?}");
         assert_eq!(located[0].id, "http://example.org/Site");
         assert!(located[0].wkt4326.is_some(), "Site keeps its coordinate");
+    }
+
+    #[test]
+    fn self_hosted_model_urls_become_origin_relative() {
+        let base = "https://data.example.org";
+        // 1. This deployment's configured base URL → relative.
+        assert_eq!(
+            relativise_self_url(
+                "https://data.example.org/api/datasets/d/assets/a1/download",
+                base
+            )
+            .as_deref(),
+            Some("/api/datasets/d/assets/a1/download")
+        );
+        // A trailing slash on the configured base must not eat the leading one.
+        assert_eq!(
+            relativise_self_url(
+                "https://data.example.org/api/datasets/d/assets/a1/download",
+                "https://data.example.org/"
+            )
+            .as_deref(),
+            Some("/api/datasets/d/assets/a1/download")
+        );
+        // 2. Loopback origin on our own route (data seeded under a default
+        //    BASE_URL) → relative, even though it doesn't match `base`.
+        for url in [
+            "http://localhost:7878/api/datasets/d/assets/a1/download",
+            "http://127.0.0.1:7878/api/datasets/d/assets/a1/download",
+            "http://[::1]:7878/api/datasets/d/assets/a1/download",
+        ] {
+            assert_eq!(
+                relativise_self_url(url, base).as_deref(),
+                Some("/api/datasets/d/assets/a1/download"),
+                "loopback asset URL must be relativised: {url}"
+            );
+        }
+        // Genuinely external models are left alone.
+        for url in [
+            "https://raw.githubusercontent.com/o/r/master/model.ifc",
+            "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl",
+            // A loopback URL that is NOT one of our asset routes stays put.
+            "http://localhost:9000/bucket/model.glb",
+            // Prefix match must be on a path boundary, not a string prefix.
+            "https://data.example.org.evil.test/api/datasets/d/assets/a1/download",
+        ] {
+            assert_eq!(
+                relativise_self_url(url, base),
+                None,
+                "external URL must be untouched: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn relativise_rewrites_every_model_reference_of_an_element() {
+        let mut els = vec![ViewerElement {
+            id: "http://example.org/A".into(),
+            gltf_url: Some("http://localhost:7878/api/datasets/d/assets/g/download".into()),
+            ifc_url: Some("http://localhost:7878/api/datasets/d/assets/i/download#GUID".into()),
+            files: vec![
+                (
+                    "Gltf_v2.0-glb".into(),
+                    "http://localhost:7878/api/datasets/d/assets/g/download".into(),
+                ),
+                ("Stl".into(), "https://upload.wikimedia.org/big.stl".into()),
+            ],
+            ..Default::default()
+        }];
+        relativise_self_urls(&mut els, "https://data.example.org");
+        let el = &els[0];
+        assert_eq!(
+            el.gltf_url.as_deref(),
+            Some("/api/datasets/d/assets/g/download")
+        );
+        // The `#GlobalId` fragment that isolates one element must survive.
+        assert_eq!(
+            el.ifc_url.as_deref(),
+            Some("/api/datasets/d/assets/i/download#GUID")
+        );
+        assert_eq!(el.files[0].1, "/api/datasets/d/assets/g/download");
+        assert_eq!(el.files[1].1, "https://upload.wikimedia.org/big.stl");
     }
 }

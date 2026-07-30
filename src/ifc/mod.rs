@@ -37,6 +37,9 @@ pub struct ConvertOptions {
     pub anchor_wkt: Option<String>,
     /// Also produce the full ifcOWL-style lift (large!).
     pub include_ifcowl: bool,
+    /// Authored `ots:modelHeading` (degrees clockwise from north for the model's
+    /// +X axis), stamped on every element file-link node when set.
+    pub model_heading: Option<f64>,
     /// Friendly display label for the ROOT spatial element (the IfcSite, or the
     /// building when the file has no site). Exporters routinely leave "Site" /
     /// "Default" / "Gelaende" there, which then headlines the whole model in

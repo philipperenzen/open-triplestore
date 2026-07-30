@@ -297,6 +297,10 @@ struct IfcBuildingSeed {
     source_page: &'static str,
     license: &'static str,
     attribution: &'static str,
+    /// Authored map bearing for the model's +X axis (`ots:modelHeading`),
+    /// measured against the real site — see the Schependomlaan entry. `None`
+    /// keeps the viewer default (+X due east).
+    heading: Option<f64>,
 }
 
 /// The demo IFC buildings — all REAL, openly licensed models, each standing at
@@ -320,6 +324,7 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         source_page: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
         license: "https://creativecommons.org/licenses/by/4.0/",
         attribution: "Institute for Automation and Applied Informatics (IAI) / KIT",
+        heading: None,
     },
     IfcBuildingSeed {
         name: "Duplex.ifc",
@@ -332,6 +337,7 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         source_page: "https://github.com/MadsHolten/BOT-Duplex-house",
         license: "https://creativecommons.org/licenses/by/4.0/",
         attribution: "buildingSMART alliance / NIBS Common BIM Files",
+        heading: None,
     },
     IfcBuildingSeed {
         name: "Smiley-West.ifc",
@@ -344,6 +350,7 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         source_page: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
         license: "https://creativecommons.org/licenses/by/4.0/",
         attribution: "Institute for Automation and Applied Informatics (IAI) / KIT",
+        heading: None,
     },
     IfcBuildingSeed {
         name: "Schependomlaan.ifc",
@@ -357,6 +364,11 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         source_page: "https://github.com/openBIMstandards/DataSetSchependomlaan",
         license: "https://creativecommons.org/licenses/by/4.0/",
         attribution: "openBIMstandards / Hendriks Bouw en Ontwikkeling",
+        // Measured, not eyeballed: 80% of the model's horizontal wall length
+        // lies exactly on its local 0/90 grid (web-ifc edge histogram), and the
+        // real Schependomlaan carriageway bears 68.2° (OSM). Turning +X to
+        // 68.2° puts the block's grid parallel to its street.
+        heading: Some(68.2),
     },
 ];
 
@@ -438,6 +450,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
                 source: Some(b.source_page.to_string()),
                 license: Some(b.license.to_string()),
                 attribution: Some(b.attribution.to_string()),
+                heading: b.heading,
             },
         ))
         .and_then(|r| r.map_err(anyhow::Error::msg));
@@ -564,7 +577,27 @@ fn seed_bag_buildings(state: &AppState) {
 /// dataset union — the "duplicate models" bug); friendly IFC root labels.
 /// v3: IFC buildings stand at their REAL site (the file's own IfcSite georef,
 /// with the fixed negative-DMS parsing) instead of an authored Nijmegen cluster.
-const DEMO_CONTENT_VERSION: u32 = 3;
+// v4: the landmark models gained `ots:modelHeading` (real bearings measured from
+// OpenStreetMap footprints) and the Dragon Bridge lost its incorrect
+// `ots:modelUpAxis "Z"` — the STL is Y-up, and the declaration was laying the
+// bridge on its side.
+// v5: those headings are explicitly `^^xsd:double`, matching what the IFC
+// importer emits from TrueNorth, so the feed parses one datatype.
+// v9: the Schependomlaan IFC lift gains an authored ots:modelHeading (68.2°,
+// the real street bearing) so the block stands parallel to its street.
+// v8: geo-features + volumes-3d re-authored against real geometry — the street
+// alignment and park polygon now come from OpenStreetMap instead of round-number
+// placeholders, and the WKT-Z demo solids are rotated onto the real street grid.
+// v7: drops the IfcGeometricRepresentationContext.TrueNorth rotation from the
+// IFC lift (see src/ifc/rdf.rs) — web-ifc already resolves object placements, so
+// stamping it double-rotated every building. Re-seed to clear the stored
+// ots:modelHeading triples from the v4-v6 IFC graphs.
+// v6: adds "landmarks" to STALE_SUFFIXES. It was never in the list, so the
+// bundle engine (which only back-fills graphs it finds EMPTY) had left every
+// existing store on whatever landmarks.ttl shipped when its volume was first
+// created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
+// stayed on its side and no bearing ever appeared.
+const DEMO_CONTENT_VERSION: u32 = 9;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -604,6 +637,8 @@ fn refresh_demo_content(state: &AppState) {
         "tiles3d-neighbourhood",
         "tiles3d-zone2",
         // re-authored bundled graphs (the bundle engine refills them this boot)
+        "landmarks",
+        "geo-features",
         "volumes-3d",
         "sensors",
         "assets",

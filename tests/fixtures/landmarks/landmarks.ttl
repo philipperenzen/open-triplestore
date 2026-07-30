@@ -9,6 +9,16 @@
 # STL units are arbitrary, so each model carries ots:modelSizeMeters — its real
 # largest real-world extent (tower height / bridge length, metres) — so the map
 # scales it to true size instead of guessing (Big Ben 96 m, Empire State 381 m…).
+# ots:modelHeading is an xsd:double (the IFC importer emits the same type from
+# IfcGeometricRepresentationContext.TrueNorth, and the feed parses one datatype).
+# It is the compass bearing (degrees clockwise from true north) the
+# model's local +X axis points along, measured from the real footprint in
+# OpenStreetMap. Without it every model is dropped with +X due east, which leaves
+# e.g. the Empire State Building 29° off the Manhattan grid. Default is 90.
+# ots:modelUpAxis is declared ONLY where a file really is Z-up: an STL's up axis
+# is the one whose coordinate range starts at exactly 0 (the model rests on the
+# ground plane). The Dragon Bridge is Y-up — it was wrongly declared "Z", which
+# rotated it a quarter-turn about its own long axis and laid it on its side.
 # Modelled with the same standards layering as the Waalbrug example:
 # GeoSPARQL geometry (CRS84 lon/lat, exactly as Wikidata returns P625),
 # OMG/FOG file references, BOT containment from a demo collection root,
@@ -40,7 +50,7 @@ lm:DragonBridge a bot:Element ;
         geo:asWKT "POINT(108.22666667 16.06111111)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/22/Dragon_Bridge_in_Da_Nang.stl"^^xsd:anyURI ;
-        ots:modelUpAxis "Z" ; ots:modelSizeMeters 666 ] .
+        ots:modelSizeMeters 666 ; ots:modelHeading "88.1"^^xsd:double ] .
 
 # ── Big Ben (Elizabeth Tower), London ──
 lm:BigBen a bot:Element ;
@@ -50,7 +60,7 @@ lm:BigBen a bot:Element ;
         geo:asWKT "POINT(-0.12457 51.50067)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl"^^xsd:anyURI ;
-        ots:modelUpAxis "Z" ; ots:modelSizeMeters 96 ] .
+        ots:modelUpAxis "Z" ; ots:modelSizeMeters 96 ; ots:modelHeading "96.4"^^xsd:double ] .
 
 # ── White House, Washington D.C. ──
 lm:WhiteHouse a bot:Element ;
@@ -60,7 +70,7 @@ lm:WhiteHouse a bot:Element ;
         geo:asWKT "POINT(-77.036666666 38.897777777)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl"^^xsd:anyURI ;
-        ots:modelUpAxis "Z" ; ots:modelSizeMeters 52 ] .
+        ots:modelUpAxis "Z" ; ots:modelSizeMeters 52 ; ots:modelHeading "93.6"^^xsd:double ] .
 
 # ── Empire State Building, New York ──
 lm:EmpireStateBuilding a bot:Element ;
@@ -70,7 +80,7 @@ lm:EmpireStateBuilding a bot:Element ;
         geo:asWKT "POINT(-73.985555555 40.748333333)"^^geo:wktLiteral ] ;
     omg:hasGeometry [ a omg:Geometry ;
         fog:asStl "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl"^^xsd:anyURI ;
-        ots:modelUpAxis "Z" ; ots:modelSizeMeters 381 ] .
+        ots:modelUpAxis "Z" ; ots:modelSizeMeters 381 ; ots:modelHeading "119.1"^^xsd:double ] .
 
 # ── Sannō Shrine one-legged torii, Nagasaki ──
 lm:SannoShrine a bot:Element ;

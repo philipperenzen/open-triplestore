@@ -10,6 +10,7 @@
   import { navigate } from '../lib/router/index.js';
   import { isAuthenticated } from '../lib/stores.js';
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
+  import { copyToClipboard } from '../lib/clipboard.ts';
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
   import CsvPreview from '../components/chat/CsvPreview.svelte';
@@ -17,7 +18,7 @@
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
-    Plus, Pencil, Trash2, Info, NotebookPen, X, MessageSquare,
+    Plus, Pencil, Trash2, Info, NotebookPen, X, MessageSquare, Copy,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
@@ -28,6 +29,24 @@
   let input = '';
   let loading = false;
   let llmStatus = null;
+  // Per-message copy feedback: the index whose button just fired, cleared after
+  // a beat so the check mark reads as an acknowledgement, not a state.
+  let copiedIdx = null;
+  let copiedAll = false;
+  async function copyMessage(msg, i) {
+    await copyToClipboard(msg.content || '');
+    copiedIdx = i;
+    setTimeout(() => { if (copiedIdx === i) copiedIdx = null; }, 1600);
+  }
+  async function copyConversation() {
+    const text = messages
+      .filter((m) => m.content)
+      .map((m) => (m.role === 'assistant' ? 'Spark:\n' : 'You:\n') + m.content)
+      .join('\n\n---\n\n');
+    await copyToClipboard(text);
+    copiedAll = true;
+    setTimeout(() => { copiedAll = false; }, 1600);
+  }
   let scrollEl;
   let runSeq = 0;
   let abortCtl = null;
@@ -486,6 +505,9 @@
       <Info size={14} />
     </button>
     {#if messages.length}
+      <button class="head-btn" on:click={copyConversation} aria-label={$t('pages.llmChat.copyChat')} title={$t('pages.llmChat.copyChat')}>
+        {#if copiedAll}<Check size={14} />{:else}<Copy size={14} />{/if}
+      </button>
       <button class="btn-clear" on:click={clearChat}>{$t('pages.llmChat.clearChat')}</button>
     {/if}
     {#if aboutOpen}
@@ -499,6 +521,16 @@
         {/if}
         {#if llmStatus?.gateway}
           <p class="about-row"><span>{$t('pages.llmChat.aboutGateway')}</span> {llmStatus.gateway}</p>
+          {#if (llmStatus.caller === 'guest' ? llmStatus.rate_limit_anon_per_min : llmStatus.rate_limit_per_min) > 0}
+            <p class="about-row"><span>{$t('pages.llmChat.aboutRateLimit')}</span>
+              {$t('pages.llmChat.aboutRateLimitValue', { values: {
+                n: llmStatus.caller === 'guest' ? llmStatus.rate_limit_anon_per_min : llmStatus.rate_limit_per_min,
+              } })}
+              {#if llmStatus.caller === 'guest' && llmStatus.rate_limit_per_min > llmStatus.rate_limit_anon_per_min}
+                {$t('pages.llmChat.aboutRateLimitSignIn', { values: { n: llmStatus.rate_limit_per_min } })}
+              {/if}
+            </p>
+          {/if}
         {/if}
         <p class="about-title">{$t('pages.llmChat.aboutGroundingTitle')}</p>
         <p class="about-text">{$t('pages.llmChat.aboutGroundingText')}</p>
@@ -527,7 +559,12 @@
           {/each}
         </div>
         {#if !$isAuthenticated}
-          <p class="anon-note">{$t('pages.llmChat.guestNote')}</p>
+          <p class="anon-note">
+            {$t('pages.llmChat.guestNote')}
+            {#if llmStatus?.rate_limit_anon_per_min > 0}
+              {$t('pages.llmChat.guestLimit', { values: { anon: llmStatus.rate_limit_anon_per_min, user: llmStatus.rate_limit_per_min } })}
+            {/if}
+          </p>
         {/if}
       </div>
     {/if}
@@ -582,6 +619,11 @@
             <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             <div class="bubble-text">{@html renderRich(msg.content)}</div>
+            {#if msg.role === 'user'}
+              <button class="msg-copy" on:click={() => copyMessage(msg, i)} aria-label={$t('pages.llmChat.copyMessage')} title={$t('pages.llmChat.copyMessage')}>
+                {#if copiedIdx === i}<Check size={12} />{:else}<Copy size={12} />{/if}
+              </button>
+            {/if}
           {/if}
 
           {#if msg.runs?.length}
@@ -634,6 +676,9 @@
 
           {#if msg.role === 'assistant' && !msg.isError && !msg.streaming}
             <div class="feedback">
+              <button class="thumb" on:click={() => copyMessage(msg, i)} aria-label={$t('pages.llmChat.copyMessage')} title={$t('pages.llmChat.copyMessage')}>
+                {#if copiedIdx === i}<Check size={13} />{:else}<Copy size={13} />{/if}
+              </button>
               <span class="feedback-label">{$t('pages.llmChat.helpful')}</span>
               <button class="thumb" class:up={msg.reviewed === 'up'} on:click={() => review(msg, i, 'up')} aria-label={$t('pages.llmChat.helpfulYes')}><ThumbsUp size={13} /></button>
               <button class="thumb" class:down={msg.reviewed === 'down'} on:click={() => review(msg, i, 'down')} aria-label={$t('pages.llmChat.helpfulNo')}><ThumbsDown size={13} /></button>
@@ -895,6 +940,24 @@
   .example:active:not(:disabled) { transform: translateY(1px); }
   .example:disabled { opacity: 0.5; cursor: not-allowed; }
   .anon-note { font-size: 0.78rem; color: var(--ink-400); margin-top: 1rem; }
+  /* Copy affordance on user bubbles: quiet until the bubble is hovered. */
+  .msg-copy {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: inline-flex;
+    padding: 3px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    opacity: 0;
+    cursor: pointer;
+    transition: opacity 0.12s ease;
+  }
+  .bubble { position: relative; }
+  .bubble:hover .msg-copy, .msg-copy:focus-visible { opacity: 0.75; }
+  .msg-copy:hover { opacity: 1; }
 
   .row { display: flex; margin: 0.5rem 0; }
   .row.user { justify-content: flex-end; }

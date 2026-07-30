@@ -201,6 +201,18 @@ function assembleParsed(msg: {
   return { master, guids: new Set(msg.guids) };
 }
 
+/**
+ * The worker could not be *started* (no module-worker support, a blocked
+ * bundle, a CSP that forbids worker scripts). Only this warrants re-running the
+ * parse on the main thread — see [`parseIfc`].
+ */
+class IfcWorkerUnavailable extends Error {
+  constructor(readonly cause: unknown) {
+    super(`IFC worker unavailable: ${cause instanceof Error ? cause.message : cause}`);
+    this.name = 'IfcWorkerUnavailable';
+  }
+}
+
 /** Parse in the dedicated worker; one worker per file, terminated when done so
  *  the WASM heap (hundreds of MB for a big model) is released immediately. */
 function parseIfcInWorker(url: string): Promise<ParsedIfc> {
@@ -209,23 +221,33 @@ function parseIfcInWorker(url: string): Promise<ParsedIfc> {
     try {
       worker = new Worker(new URL('./ifcWorker.ts', import.meta.url), { type: 'module' });
     } catch (e) {
-      reject(e);
+      reject(new IfcWorkerUnavailable(e));
       return;
     }
     const finish = () => {
       worker.terminate();
       ifcProgress.set(null);
     };
+    // Did the worker ever get going? `onerror` covers BOTH "the script never
+    // loaded" and "it threw while running", and those need opposite treatment:
+    // the first is retryable on the main thread, the second is not (the retry
+    // would just repeat the same failing work — and block the UI doing it).
+    // Any message at all proves the script is running.
+    let started = false;
     worker.onerror = (e) => {
       finish();
-      reject(new Error(e.message || 'IFC worker failed'));
+      const message = e.message || 'IFC worker failed';
+      reject(started ? new Error(message) : new IfcWorkerUnavailable(new Error(message)));
     };
     worker.onmessage = (ev) => {
+      started = true;
       const msg = ev.data || {};
       if (msg.type === 'progress') {
         ifcProgress.set({ url, phase: msg.phase, loaded: msg.loaded, total: msg.total });
       } else if (msg.type === 'error') {
         finish();
+        // A running worker reporting its own failure (fetch 404/CORS, corrupt
+        // STEP, out of memory). Surface it — never re-run on the main thread.
         reject(new Error(msg.message));
       } else if (msg.type === 'done') {
         try {
@@ -245,6 +267,13 @@ async function parseIfc(url: string): Promise<ParsedIfc> {
   let p = parseCache.get(url);
   if (!p) {
     p = parseIfcInWorker(url).catch((e) => {
+      // ONLY a worker that never started falls back. Retrying a genuine failure
+      // (a 404/CORS fetch, a corrupt file) on the main thread cannot succeed —
+      // it just runs the same doomed work with the UI thread held hostage: on a
+      // multi-model dataset that is several ten-MB parses back to back, which
+      // reads as "the whole viewer is frozen — the basemap never draws and
+      // nothing is clickable", not as "one model failed".
+      if (!(e instanceof IfcWorkerUnavailable)) throw e;
       // eslint-disable-next-line no-console
       console.warn('IFC worker unavailable — parsing on the main thread', e);
       return parseIfcOnMainThread(url);

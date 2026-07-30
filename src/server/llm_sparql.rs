@@ -584,15 +584,33 @@ pub struct LlmHealth {
     /// The endpoint's payload when reachable (e.g. the `/v1/models` list, or a
     /// gateway's own `/health` detail).
     detail: Option<Value>,
+    /// AI requests per minute for signed-in users (0 = unlimited).
+    rate_limit_per_min: u32,
+    /// AI requests per minute for guests, keyed by IP (0 = unlimited).
+    rate_limit_anon_per_min: u32,
+    /// The budget that applies to THIS caller: "user" or "guest".
+    caller: &'static str,
 }
 
 /// GET /api/llm/health — is an LLM endpoint reachable from this server?
 /// Lets the UI show AI availability alongside its other service health. Probes the
 /// OpenAI-standard `/v1/models` first (works for OpenAI, Ollama, LM Studio, vLLM, …),
 /// then falls back to a gateway `/health` for servers that expose one.
-async fn llm_health(State(_state): State<AppState>) -> Json<LlmHealth> {
+async fn llm_health(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(_state): State<AppState>,
+) -> Json<LlmHealth> {
     let gateway = gateway_base();
     let base = gateway.trim_end_matches('/');
+    let cfg = llm_guard::config();
+    let limits = |reachable: bool, detail: Option<Value>| LlmHealth {
+        gateway: gateway.clone(),
+        reachable,
+        detail,
+        rate_limit_per_min: cfg.rate_per_min,
+        rate_limit_anon_per_min: cfg.rate_per_min_anon,
+        caller: if user.is_some() { "user" } else { "guest" },
+    };
     let client = http();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
@@ -604,19 +622,11 @@ async fn llm_health(State(_state): State<AppState>) -> Json<LlmHealth> {
         if let Ok(resp) = rb.send().await {
             if resp.status().is_success() {
                 let detail = resp.json::<Value>().await.ok();
-                return Json(LlmHealth {
-                    gateway,
-                    reachable: true,
-                    detail,
-                });
+                return Json(limits(true, detail));
             }
         }
     }
-    Json(LlmHealth {
-        gateway,
-        reachable: false,
-        detail: None,
-    })
+    Json(limits(false, None))
 }
 
 #[derive(Deserialize)]
@@ -815,7 +825,9 @@ that is not listed.\n\n\
 # RETRIEVING DATA\n\
 If answering needs the actual contents of the graphs (counts, specific values, relationships, geometries), \
 reply with EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named \
-graphs, and nothing else. The system runs it read-only under the user's permissions and gives you the \
+graphs, and nothing else. This is not optional: when the user asks how many, which, when, where or what \
+value, and you have not run a query THIS turn, your first reply MUST be such a `SPARQL:` line — the \
+dataset descriptions in the platform context are prose summaries, never a substitute for querying. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
 write the final answer. Result cells may be truncated (they then end with …).\n\
 Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
@@ -853,7 +865,10 @@ glTF, STL, IFC, CityJSON) or asset download paths from the platform context — 
 {\"label\":\"…\",\"url\":\"…\",\"filename\":\"report.pdf\"}. Use it when the answer points at a \
 downloadable file (dataset assets, model files, attachments) whose URL you retrieved.\n\
 - ```turtle / ```json / ```xml — syntax-highlighted data snippets (not runnable). Small markdown tables \
-also render well.\n\n\
+also render well.\n\
+- Entity links: link the key entities you name to their detail page as \
+`[label](/resource?iri=<percent-encoded IRI>)` — it opens the platform's resource inspector with the \
+full RDF, geometry and 3D view. Use these in prose and in table cells whenever a result row has an IRI.\n\n\
 Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
 locations → map, a single entity → card, 3D shapes (buildings, bridges, BIM elements) → model3d, or \
 map with models when georeferenced, files → file, raw listings → markdown table or csv, \"how do I \
@@ -1063,16 +1078,27 @@ fn guard_gate<'a>(
     };
 
     // Per-principal budget: a user id when logged in, the client IP otherwise.
-    let rate_key = match user {
-        Some(u) => u.user_id.clone(),
-        None => format!("ip:{}", ip.unwrap_or("unknown")),
+    // Guests get the (tighter) anonymous budget — they share the same GPU with
+    // no account to attribute the cost to.
+    let cfg = llm_guard::config();
+    let (rate_key, per_min) = match user {
+        Some(u) => (u.user_id.clone(), cfg.rate_per_min),
+        None => (
+            format!("ip:{}", ip.unwrap_or("unknown")),
+            cfg.rate_per_min_anon,
+        ),
     };
-    if let Err(retry_after_secs) = llm_guard::check_rate(&rate_key) {
+    if let Err(retry_after_secs) = llm_guard::check_rate_with(&rate_key, per_min) {
+        let message = if user.is_some() {
+            format!("Too many AI requests — the signed-in budget is {per_min}/min. Try again in a moment.")
+        } else {
+            format!("Too many AI requests — guests get {per_min}/min. Sign in for a higher budget, or try again in a moment.")
+        };
         return Err(blocked(
             "rate_limited".into(),
             AppError::RateLimited {
                 retry_after_secs,
-                message: "Too many AI requests — try again in a moment".into(),
+                message,
             },
         ));
     }
@@ -1311,6 +1337,9 @@ async fn run_chat_turn(
     let mut graph_list: Vec<String> = graphs.iter().cloned().collect();
     graph_list.sort();
     let user_id = user.map(|u| u.user_id.as_str());
+    // Mentioned datasets' graphs first — the vocab sampler and the prompt's
+    // graph list both truncate by position (see prioritise_graphs_for_conversation).
+    let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
     let context = build_platform_context(&state, user_id, &graph_list);
     let vocab = graph_vocab_context(&state, &graph_list).await;
     // The user's saved memory rides at the END of the system prompt: everything
@@ -1565,6 +1594,77 @@ fn fallback_answer(runs: &[ChatQueryRun]) -> String {
 /// The named graphs `user` may read — the same scope the normal SPARQL endpoint
 /// applies. Mirrors `execute_query`: accessible-dataset graphs, plus named-graph
 /// ACL grants, plus (for admins) every registered graph.
+/// Reorder the caller's graph scope so the graphs the CONVERSATION is about come
+/// first. Everything downstream truncates by position — the vocabulary sampler
+/// grounds only the first [`VOCAB_GRAPH_LIMIT`] graphs and the prompt lists only
+/// the first [`MAX_GRAPHS_IN_CONTEXT`] — and on an instance with hundreds of
+/// graphs an alphabetical order puts whatever sorts first in those windows, not
+/// what the user asked about. That is why Spark used to invent vocabulary for a
+/// dataset the user named explicitly: its graphs were in scope but never got a
+/// vocabulary block, so the model guessed predicates and every query came back
+/// empty. Signals, in priority order:
+///
+///   1. a dataset whose id or name appears in the conversation → all its graphs;
+///   2. a graph IRI pasted verbatim into the conversation.
+///
+/// The remainder keeps its sorted order, so with no signal at all this is the
+/// identity and the prompt stays stable (prompt-cache friendly: the order is a
+/// pure function of the conversation text).
+fn prioritise_graphs_for_conversation(
+    state: &AppState,
+    user_id: Option<&str>,
+    messages: &[ChatMessage],
+    graphs: Vec<String>,
+) -> Vec<String> {
+    let text: String = messages
+        .iter()
+        .rev()
+        .take(6)
+        .filter(|m| m.role != "assistant")
+        .map(|m| m.content.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return graphs;
+    }
+    let in_scope: HashSet<&String> = graphs.iter().collect();
+    let mut priority: Vec<String> = Vec::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    let push = |g: String, priority: &mut Vec<String>, taken: &mut HashSet<String>| {
+        if taken.insert(g.clone()) {
+            priority.push(g);
+        }
+    };
+    if let Ok(datasets) = state.auth_db.list_accessible_datasets(user_id) {
+        for d in &datasets {
+            let id = d.id.to_lowercase();
+            let name = d.name.to_lowercase();
+            // Short names ("test", "demo") would match half of any sentence.
+            let mentioned = text.contains(&id) || (name.len() >= 4 && text.contains(name.as_str()));
+            if !mentioned {
+                continue;
+            }
+            if let Ok(gs) = state.auth_db.list_dataset_graphs(&d.id) {
+                for g in gs {
+                    if in_scope.contains(&g) {
+                        push(g, &mut priority, &mut taken);
+                    }
+                }
+            }
+        }
+    }
+    for g in &graphs {
+        if text.contains(&g.to_lowercase()) {
+            push(g.clone(), &mut priority, &mut taken);
+        }
+    }
+    if priority.is_empty() {
+        return graphs;
+    }
+    priority.extend(graphs.into_iter().filter(|g| !taken.contains(g)));
+    priority
+}
+
 fn chat_accessible_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
@@ -1701,7 +1801,7 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
 // and put it in the prompt so the first query usually hits.
 
 /// How many graphs get a vocabulary block (the first N, sorted — deterministic).
-const VOCAB_GRAPH_LIMIT: usize = 8;
+const VOCAB_GRAPH_LIMIT: usize = 12;
 const VOCAB_CLASS_LIMIT: usize = 6;
 const VOCAB_PRED_LIMIT: usize = 12;
 /// Row caps for the sampling scans — a hard bound on work per graph, whatever

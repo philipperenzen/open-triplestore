@@ -537,7 +537,13 @@
       "memoryEnabled": "Use memory in chats",
       "memorySave": "Save",
       "memorySaved": "Saved",
-      "close": "Close"
+      "close": "Close",
+      "copyMessage": "Copy message",
+      "copyChat": "Copy chat",
+      "guestLimit": "Guests can send {anon} AI requests per minute; signed-in users get {user}.",
+      "aboutRateLimit": "Rate limit",
+      "aboutRateLimitValue": "{n} requests/min for you",
+      "aboutRateLimitSignIn": "(sign in for {n}/min)"
     },
     "sparql": {
       "title": "SPARQL workspace",
@@ -3785,6 +3791,14 @@
     "search": "Search elements…",
     "located": "On the map",
     "noLocation": "No location",
+    "groupBy": {
+      "label": "Group by",
+      "structure": "Structure",
+      "location": "Location",
+      "format": "File format",
+      "type": "Type"
+    },
+    "ungrouped": "Ungrouped",
     "expandAll": "Expand all",
     "collapseAll": "Collapse all",
     "expand": "Expand",

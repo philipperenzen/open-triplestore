@@ -122,6 +122,12 @@ export interface ModelRef {
   format: ModelFormat;
   /** Source up-axis from the element's `ots:modelUpAxis` annotation ('Z' rotates into Y-up scenes). */
   upAxis?: string | null;
+  /**
+   * Compass bearing (degrees clockwise from true north) of the model's local +X
+   * axis, from `ots:modelHeading`. `null` means the default 90 — due east —
+   * which is where an unrotated model's +X lands on the map.
+   */
+  heading?: number | null;
 }
 
 /** Preference when an element offers several formats. */
@@ -137,6 +143,7 @@ export function modelRefOf(el: {
   ifc_url?: string | null;
   files?: [string, string][];
   up_axis?: string | null;
+  heading?: number | null;
 }): ModelRef | null {
   return modelRefsOf(el)[0] ?? null;
 }
@@ -151,6 +158,7 @@ export function modelRefsOf(el: {
   ifc_url?: string | null;
   files?: [string, string][];
   up_axis?: string | null;
+  heading?: number | null;
 }): ModelRef[] {
   const found = new Map<ModelFormat, string>();
   if (el.gltf_url) found.set('gltf', el.gltf_url);
@@ -164,7 +172,14 @@ export function modelRefsOf(el: {
   const out: ModelRef[] = [];
   for (const format of FORMAT_ORDER) {
     const url = found.get(format);
-    if (url) out.push({ url, format, upAxis: el.up_axis ?? null });
+    if (url) {
+      out.push({
+        url,
+        format,
+        upAxis: el.up_axis ?? null,
+        heading: typeof el.heading === 'number' && Number.isFinite(el.heading) ? el.heading : null,
+      });
+    }
   }
   return out;
 }
