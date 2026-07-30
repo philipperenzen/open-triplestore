@@ -70,10 +70,12 @@
     { key: 'ntriples', label: 'N-Triples' },
   ];
   $: ifcUrl = (elements.find((e) => e.ifc_url)?.ifc_url || '').split('#')[0];
+  // Static HTML (MapLibre's attribution control renders it as such): 3DBAG's
+  // terms ask digital media to link their copyright page, not just name them.
   $: mapAttribution = elements.some((e) =>
     (e.files || []).some(([, url]) => /3dbag/i.test(url || ''))
   )
-    ? '© 3DBAG by tudelft3d and 3DGI (CC BY 4.0)'
+    ? '© <a href="https://docs.3dbag.nl/en/copyright/" target="_blank" rel="noopener noreferrer">3DBAG</a> by tudelft3d and 3DGI (CC BY 4.0)'
     : '';
 
   // Several movable inspector WINDOWS can be open at once, each holding a group

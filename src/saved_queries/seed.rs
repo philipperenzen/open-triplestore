@@ -196,7 +196,7 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         seed_dataset_branding(state, slug, slug, true, true);
     }
 
-    // The Schependomlaan IFC (layered Dutch BIM demo: BOT topology + full ifcOWL
+    // The headline IFC building (layered BIM demo: BOT topology + full ifcOWL
     // lift, every storey/wall/beam individually addressable) loads on first boot
     // so the public demo shows the IFC decomposition immediately. With an admin
     // owner it is also stored as a downloadable asset; without one (brand-new
@@ -263,11 +263,18 @@ fn block_on_anywhere<T: Send>(
     })
 }
 
-/// Default source of the Schependomlaan design-model IFC — the canonical open
-/// Dutch BIM dataset (Nijmegen; CC BY 4.0, openBIMstandards/TU Eindhoven),
-/// mirrored on GitHub. Override with `SEED_IFC_URL`; disable the whole demo
+/// Default source of the headline IFC building — the Esplanades project
+/// (Maleva 18, Tallinn: the municipal seniors' home, a real 2021 project by
+/// Esplan for Tallinna Linnavaraamet), published by buildingSMART's community
+/// sample repository under CC BY 4.0 **from the copyright holder itself**.
+/// It replaces the Schependomlaan design model: that repository's LICENSE.MD
+/// says CC BY 4.0 but its README records the actual grant as "for scientific
+/// and academic purposes", a restriction this open-source demo cannot carry
+/// (and GitHub classifies the repo NOASSERTION). The URL is the Git-LFS media
+/// host — `raw.githubusercontent.com` serves a 133-byte LFS pointer for this
+/// file, not the model. Override with `SEED_IFC_URL`; disable the whole demo
 /// seed with `SEED_STANDARDS_DEMO=false`.
-const SCHEPENDOMLAAN_IFC_URL: &str = "https://raw.githubusercontent.com/jakob-beetz/DataSetSchependomlaan/master/Design%20model%20IFC/IFC%20Schependomlaan.ifc";
+const HEADLINE_IFC_URL: &str = "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/main/IFC%202.3.0.1%20(IFC%202x3)/Esplanades/1807_EP_AR_v18.ifc";
 
 /// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
 /// once (first boot), stored as a public asset, and lifted to BOT + ifcOWL in its
@@ -283,8 +290,8 @@ struct IfcBuildingSeed {
     url: &'static str,
     /// `POINT(lon lat)` map anchor override. `None` trusts the file's own
     /// IfcSite georeference (the conversion falls back to it); `Some(..)` is for
-    /// files whose georef is a known exporter default — e.g. the Schependomlaan
-    /// model carries the RD false origin (Amersfoort) instead of its real site.
+    /// files whose georef is an exporter default or too coarse to trust — e.g.
+    /// the Esplanades model rounds to whole arc-minutes, ~5 km off its site.
     anchor: Option<&'static str>,
     /// Distinct BOT graph suffix per building so they don't collide.
     graph_suffix: &'static str,
@@ -298,20 +305,22 @@ struct IfcBuildingSeed {
     license: &'static str,
     attribution: &'static str,
     /// Authored map bearing for the model's +X axis (`ots:modelHeading`),
-    /// measured against the real site — see the Schependomlaan entry. `None`
-    /// keeps the viewer default (+X due east).
+    /// measured against the real site (web-ifc wall-grid histogram vs the OSM
+    /// footprint — see the Esplanades entry, whose measurement showed the
+    /// export already aligned). `None` keeps the viewer default (+X due east).
     heading: Option<f64>,
 }
 
-/// The demo IFC buildings — all REAL, openly licensed models, each standing at
-/// its real-world site: FZK-Haus on the KIT Campus North, Smiley West in
-/// Karlsruhe, the Duplex Apartment at its nominal Chicago location (all three
-/// from their own IfcSite georeference), and Schependomlaan on its actual
-/// street in Nijmegen (authored anchor — the file's georef is the RD-origin
-/// default). The smaller files come FIRST so rich IFC buildings appear within
-/// seconds of first boot; the 49 MB Schependomlaan (which honours
-/// `SEED_IFC_URL`) imports last so it doesn't hold the others up. All carry
-/// full BOT topology, property sets and an ifcOWL lift.
+/// The demo IFC buildings — all REAL models with redistribution-clean terms,
+/// each standing at its real-world site: FZK-Haus on the KIT Campus North and
+/// Smiley West in Karlsruhe (their own IfcSite georeferences), the Duplex
+/// Apartment at its nominal Chicago location (the file's Revit-default
+/// georef, kept as the demo site — the real building's location was never
+/// published), and Esplanades at Maleva 18, Tallinn (authored anchor — the
+/// file's georef rounds to whole arc-minutes). The smaller files come FIRST
+/// so rich IFC buildings appear within seconds of first boot; the headline
+/// Esplanades (which honours `SEED_IFC_URL`) imports last. All carry full BOT
+/// topology, property sets and an ifcOWL lift.
 const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
         name: "FZK-Haus.ifc",
@@ -322,21 +331,32 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         label: "FZK-Haus",
         display_label: "FZK-Haus (KIT research residence, IFC4)",
         source_page: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
-        license: "https://creativecommons.org/licenses/by/4.0/",
+        // KIT's terms are their own "for unrestricted use" statement (with a
+        // requested citation), NOT Creative Commons — the licence link points
+        // at the page that states the grant.
+        license: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
         attribution: "Institute for Automation and Applied Informatics (IAI) / KIT",
         heading: None,
     },
     IfcBuildingSeed {
         name: "Duplex.ifc",
-        url: "https://raw.githubusercontent.com/MadsHolten/BOT-Duplex-house/master/Model%20files/IFC/Duplex.ifc",
-        // Real georef in the file: (41 52 27 840000), (-87 -38 -21 -839999) — Chicago.
+        // buildingSMART's own republication, CC BY 4.0 with a mandated credit
+        // line (the previous mirror repo carried no licence at all). Git-LFS:
+        // raw.githubusercontent serves a pointer; the media host has the model.
+        url: "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/main/IFC%202.3.0.1%20(IFC%202x3)/Duplex%20Apartment/Duplex_A_20110907.ifc",
+        // The file's georef (41 52 27 …, -87 -38 -21 …) is Revit's default
+        // location (Chicago), NOT a survey — bSI says the model was first
+        // published in Germany and the real building's site was never
+        // published. The nominal Chicago placement is kept as the demo site;
+        // it is a location for the demo map, not a provenance claim.
         anchor: None,
         graph_suffix: "building-duplex",
         label: "Duplex Apartment",
-        display_label: "Duplex Apartment (buildingSMART Common BIM Files)",
-        source_page: "https://github.com/MadsHolten/BOT-Duplex-house",
+        display_label: "Duplex Apartment (buildingSMART test files)",
+        source_page: "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/main/IFC%202.3.0.1%20(IFC%202x3)/Duplex%20Apartment",
         license: "https://creativecommons.org/licenses/by/4.0/",
-        attribution: "buildingSMART alliance / NIBS Common BIM Files",
+        // The exact credit the CC BY grant requests.
+        attribution: "BSI (2020) \"Duplex Apartment Test Files\", buildingSMART International",
         heading: None,
     },
     IfcBuildingSeed {
@@ -348,27 +368,32 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         label: "Smiley West",
         display_label: "Smiley West (Karlsruhe student housing, IFC4)",
         source_page: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
-        license: "https://creativecommons.org/licenses/by/4.0/",
+        // Same KIT unrestricted-use terms as FZK-Haus above.
+        license: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
         attribution: "Institute for Automation and Applied Informatics (IAI) / KIT",
         heading: None,
     },
     IfcBuildingSeed {
-        name: "Schependomlaan.ifc",
-        url: SCHEPENDOMLAAN_IFC_URL,
-        // The file's georef is the RD false origin (Amersfoort) — an ArchiCAD
-        // default, not the site. Anchor on the real Schependomlaan street.
-        anchor: Some("POINT(5.83668 51.84156)"),
+        name: "Esplanades.ifc",
+        url: HEADLINE_IFC_URL,
+        // The file's own georef is rounded to whole arc-minutes — (59 26 0 0),
+        // (24 45 0 0) ≈ 5 km from the site. Anchor on the real building: the
+        // OSM footprint centroid of the Seenioride maja at Maleva 18 (way
+        // 885614092), which Nominatim resolves for the project's address.
+        anchor: Some("POINT(24.67861 59.46050)"),
         graph_suffix: "building",
-        label: "Schependomlaan",
-        display_label: "Schependomlaan housing project (Nijmegen, IFC2x3)",
-        source_page: "https://github.com/openBIMstandards/DataSetSchependomlaan",
+        label: "Esplanades",
+        display_label: "Esplanades — Maleva 18 seniors' home (Tallinn, IFC2x3)",
+        source_page: "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/main/IFC%202.3.0.1%20(IFC%202x3)/Esplanades",
         license: "https://creativecommons.org/licenses/by/4.0/",
-        attribution: "openBIMstandards / Hendriks Bouw en Ontwikkeling",
-        // Measured, not eyeballed: 80% of the model's horizontal wall length
-        // lies exactly on its local 0/90 grid (web-ifc edge histogram), and the
-        // real Schependomlaan carriageway bears 68.2° (OSM). Turning +X to
-        // 68.2° puts the block's grid parallel to its street.
-        heading: Some(68.2),
+        attribution: "© Esplan (esplan.ee), published under CC BY 4.0",
+        // None on purpose — and measured, like every orientation here: the
+        // export carries its survey rotation baked into the model axes. Its
+        // dominant wall grid sits at 29°/119° (web-ifc edge histogram, 73% of
+        // wall length) with the long axis rendering at ~119°, and the real
+        // footprint's principal axis is 119.2° (OSM way 885614092). Rotating
+        // it would UN-align it.
+        heading: None,
     },
 ];
 
@@ -384,7 +409,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     }
     // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
     // tests, which must never reach out to the network). A custom value overrides
-    // only the first (Schependomlaan) building.
+    // only the headline (Esplanades) building.
     let env_url = std::env::var("SEED_IFC_URL").ok();
     if env_url.as_deref().map(str::trim) == Some("") {
         tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
@@ -400,10 +425,10 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
         {
             continue; // already seeded
         }
-        // SEED_IFC_URL overrides only the Schependomlaan source (the headline
-        // building), regardless of its position in the list.
+        // SEED_IFC_URL overrides only the headline building's source,
+        // regardless of its position in the list.
         let url = match env_url.as_deref() {
-            Some(u) if b.label == "Schependomlaan" && !u.trim().is_empty() => u.to_string(),
+            Some(u) if b.label == "Esplanades" && !u.trim().is_empty() => u.to_string(),
             _ => b.url.to_string(),
         };
         tracing::info!(
@@ -583,8 +608,12 @@ fn seed_bag_buildings(state: &AppState) {
 // bridge on its side.
 // v5: those headings are explicitly `^^xsd:double`, matching what the IFC
 // importer emits from TrueNorth, so the feed parses one datatype.
-// v9: the Schependomlaan IFC lift gains an authored ots:modelHeading (68.2°,
-// the real street bearing) so the block stands parallel to its street.
+// v10: the headline IFC is now the Esplanades project (Tallinn) — CC BY 4.0
+// from the copyright holder — replacing the Schependomlaan design model, whose
+// upstream README limits the grant to "scientific and academic purposes". The
+// building graphs, sensors and dataset description all change with it.
+// v9: the (now removed) Schependomlaan lift briefly carried an authored
+// ots:modelHeading of 68.2°.
 // v8: geo-features + volumes-3d re-authored against real geometry — the street
 // alignment and park polygon now come from OpenStreetMap instead of round-number
 // placeholders, and the WKT-Z demo solids are rotated onto the real street grid.
@@ -597,7 +626,7 @@ fn seed_bag_buildings(state: &AppState) {
 // existing store on whatever landmarks.ttl shipped when its volume was first
 // created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
 // stayed on its side and no bearing ever appeared.
-const DEMO_CONTENT_VERSION: u32 = 9;
+const DEMO_CONTENT_VERSION: u32 = 10;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
