@@ -58,6 +58,16 @@ interface ParsedIfc {
   guids: Set<string>;
 }
 
+/** Stamp the file's own elevation-0 (from web-ifc's coordination matrix) on the
+ *  group so placement can rest the building on its real ground line — resting
+ *  on the bbox MINIMUM instead floats the ground floor by the depth of
+ *  whatever lies below grade (foundations, basement, modelled terrain). */
+function stampGroundY(master: THREE.Group, groundY: unknown): void {
+  if (typeof groundY === 'number' && Number.isFinite(groundY)) {
+    master.userData.ifcGroundY = groundY;
+  }
+}
+
 let enginePromise: Promise<any> | null = null;
 
 async function engine(): Promise<any> {
@@ -175,8 +185,10 @@ function assembleParsed(msg: {
     bvh: { roots: ArrayBuffer[]; index: unknown; indirectBuffer: unknown } | null;
   }>;
   guids: string[];
+  groundY?: number | null;
 }): ParsedIfc {
   const master = new THREE.Group();
+  stampGroundY(master, msg.groundY);
   for (const b of msg.buckets) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(b.pos, 3));
@@ -292,6 +304,7 @@ async function parseIfcOnMainThread(url: string): Promise<ParsedIfc> {
       if (!res.ok) throw new Error(`IFC fetch failed: ${res.status}`);
       const buffer = new Uint8Array(await res.arrayBuffer());
       const modelID = api.OpenModel(buffer, { COORDINATE_TO_ORIGIN: true });
+      const coord = api.GetCoordinationMatrix(modelID);
       try {
         const guids = new Set<string>();
         const guidByExpress = new Map<number, string>();
@@ -410,6 +423,7 @@ async function parseIfcOnMainThread(url: string): Promise<ParsedIfc> {
           b.pieces.length = 0;
         }
         master.updateMatrixWorld(true);
+        stampGroundY(master, Array.isArray(coord) ? coord[13] : null);
         return { master, guids };
       } finally {
         api.CloseModel(modelID);

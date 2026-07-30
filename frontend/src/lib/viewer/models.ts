@@ -113,7 +113,12 @@ export function loadModel(
         cityObjects,
       };
       group.userData.geo = geo;
-      normalise(group);
+      // IFC: the parse records the file's own elevation-0 (see ifc.ts). Resting
+      // the bbox MINIMUM on the ground instead floats the ground floor by the
+      // depth of the foundations/basement below grade — the "floating house".
+      const groundY =
+        format === 'ifc' ? (group.children[0]?.userData?.ifcGroundY as number | undefined) : undefined;
+      normalise(group, { groundY });
       return group;
     })();
     modelCache.set(key, p);
@@ -125,17 +130,35 @@ export function loadModel(
 /** The box size normalise() scales a model's largest dimension to. */
 export const NORMALISED_DIM = 1.6;
 
-/** Scale + centre `object3d` into a ~1.6-unit box resting on the ground plane. */
-export function normalise(object3d: THREE.Object3D): void {
+/**
+ * Scale + centre `object3d` into a ~1.6-unit box standing on the ground plane.
+ *
+ * `groundY` (source units) is the model's own ground line — for IFC, the
+ * file's elevation-0 from the coordination matrix. When it is plausible (at or
+ * above the bbox floor, within the lower 35% of the model — i.e. a basement,
+ * not a mis-georeferenced file) the model rests on THAT line, so below-grade
+ * geometry sits below y=0 instead of lifting the whole building.
+ */
+export function normalise(object3d: THREE.Object3D, opts: { groundY?: number } = {}): void {
   const box = new THREE.Box3().setFromObject(object3d);
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
-  object3d.scale.setScalar(NORMALISED_DIM / maxDim);
+  const s = NORMALISED_DIM / maxDim;
+  object3d.scale.setScalar(s);
   const scaled = new THREE.Box3().setFromObject(object3d);
   const centre = scaled.getCenter(new THREE.Vector3());
   object3d.position.x -= centre.x;
   object3d.position.z -= centre.z;
-  object3d.position.y -= scaled.min.y;
+  let rest = scaled.min.y;
+  const g = opts.groundY;
+  if (typeof g === 'number' && Number.isFinite(g)) {
+    const gs = g * s; // source units → the scaled space `scaled` is measured in
+    const height = scaled.max.y - scaled.min.y;
+    if (gs >= scaled.min.y - 1e-9 && gs <= scaled.min.y + height * 0.35) {
+      rest = gs;
+    }
+  }
+  object3d.position.y -= rest;
 }
 
 /**

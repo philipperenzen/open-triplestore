@@ -152,6 +152,10 @@
     onAdd(m, gl) {
       renderer = new THREE.WebGLRenderer({ canvas: m.getCanvas(), context: gl, antialias: true });
       renderer.autoClear = false;
+      // Models can now carry below-grade geometry (basements sit below their
+      // file's ground line) — clip it against the basemap plane, or foundations
+      // ghost through the streets (map tiles write no depth for the ground).
+      renderer.localClippingEnabled = true;
       // Filmic tone mapping for the standing models (same studio look as the
       // modal viewer / walkthrough) — only affects our own draw calls.
       applyStudioLook(renderer);
@@ -266,10 +270,15 @@
       const cached = await loadModel(ref.url, ref.format, { upAxis: ref.upAxis });
       if (entries.get(el.id) !== entry) return; // rebuilt meanwhile
       const model = cached.clone(true);
-      // Clone materials so per-entry theming/highlighting never mutates the cache.
+      // Clone materials so per-entry theming/highlighting never mutates the
+      // cache, and clip everything below the basemap plane (see onAdd).
+      const groundClip = [new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)];
       model.traverse((n) => {
         if (n.isMesh && n.material) {
           n.material = Array.isArray(n.material) ? n.material.map((m) => m.clone()) : n.material.clone();
+          for (const mat of Array.isArray(n.material) ? n.material : [n.material]) {
+            mat.clippingPlanes = groundClip;
+          }
           if (ref.format === 'stl') n.userData.stl = true;
         }
       });
@@ -808,15 +817,17 @@
    *  on style.load — layer objects are recreated by setStyle. */
   let baseFilters = new Map();
   let suppressTimer = 0;
-  /** 'ids' hides whole buildings by feature id; 'geometry' uses MapLibre's
-   *  `distance` expression. Ids is the DEFAULT on purpose: the distance filter
-   *  is evaluated per tile, and a building that straddles a tile boundary is
-   *  two fragments — the fragment inside the footprint vanished while its
-   *  other half kept rendering, so buildings at the footprint's edge appeared
-   *  sliced in half. An id filter hides the building in every tile it spans.
-   *  The geometry mode is kept as the fallback for tile sources whose features
-   *  carry no ids (the id filter cannot address those at all). */
-  let suppressionMode = 'ids';
+  /** 'geometry' uses MapLibre's `distance` expression (evaluated in the tile
+   *  worker, viewport-independent); 'ids' is the fallback for engines that
+   *  reject `distance`. Geometry is the primary mode ON PURPOSE, measured both
+   *  ways: an id filter looked attractive because the distance filter is
+   *  evaluated per tile fragment (a building straddling a tile boundary can
+   *  render sliced at the footprint's edge) — but planetiler feature ids are
+   *  NOT stable across zoom levels, so an id set collected at one zoom hides
+   *  unrelated buildings at other zooms: whole blocks far from any model
+   *  vanished and reappeared as the camera zoomed and tilted. A rare sliver at
+   *  a footprint edge beats city-wide flicker. */
+  let suppressionMode = 'geometry';
   /** Bumped when a building source finishes loading tiles — only the id fallback
    *  depends on which tiles are present. */
   let sourceGen = 0;
@@ -1004,24 +1015,17 @@
     if (key === lastSuppressionKey) return;
     lastSuppressionKey = key;
     if (suppressionMode === 'ids') {
-      const { hidden, idless } = applyIdSuppression(multi);
-      // A source whose features carry no ids can't be addressed this way at
-      // all — switch to the geometry filter (one-way; the modes never
-      // ping-pong because 'geometry' below only ever falls back to 'ids' when
-      // the id path was never tried, i.e. suppressionMode started there).
-      if (multi && hidden === 0 && idless > 0) {
-        suppressionMode = 'geometry';
-        lastSuppressionKey = '';
-        applyBuildingSuppression();
-      }
+      applyIdSuppression(multi);
       return;
     }
     const res = applyFilterToBuildingLayers(buildingSuppressionFilter(multi, SUPPRESSION_BUFFER_M));
     if (res === 'retry') {
       lastSuppressionKey = ''; // transient — let the next trigger try again
+    } else if (res === 'unsupported') {
+      suppressionMode = 'ids';
+      lastSuppressionKey = '';
+      applyBuildingSuppression();
     }
-    // NOTE: no 'unsupported' → 'ids' latch here any more — ids IS the primary
-    // mode now, so reaching this branch means ids already proved unusable.
   }
 
   /** Coalesce suppression passes: several models finishing within a frame of
