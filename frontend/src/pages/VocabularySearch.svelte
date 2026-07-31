@@ -450,6 +450,9 @@
       <p class="vs-rec-intro"><Info size={14} /> {$t('pages.vocabularySearch.recommendIntro')}</p>
       <p class="vs-rec-api">
         {$t('pages.vocabularySearch.recommendApiHint')}
+        <!-- A bare `{` would open a Svelte expression here, so `{'{'}` is the escape,
+             not a redundant mustache. -->
+        <!-- eslint-disable-next-line svelte/no-useless-mustaches -->
         <code>POST /api/vocab/recommend {'{'}"terms": ["bridge", "deck height"]{'}'}</code>
         <a href="/api-docs" target="_blank" rel="noopener noreferrer">{$t('pages.vocabularySearch.recommendApiDocs')}</a>
       </p>

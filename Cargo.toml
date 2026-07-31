@@ -114,7 +114,7 @@ opengraph = { path = "opengraph" }
 axum = { version = "0.7", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "fs", "set-header", "compression-gzip", "compression-br", "timeout", "catch-panic"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "fs", "set-header", "compression-gzip", "compression-br", "timeout", "catch-panic"] }
 tower_governor = { version = "0.4", features = ["axum"] }
 
 # GeoSPARQL spatial operations
@@ -163,10 +163,14 @@ chrono = { version = "0.4", features = ["serde"] }
 # `LowerHex` — hex-encode digests via the `hex` crate instead of `{:x}`.
 sha2 = "0.11"
 hex = "0.4"
-# TOTP two-factor codes (RFC 6238: HMAC-SHA1). Left on the digest 0.10 family;
-# self-consistent with each other and independent of the sha2/hkdf path above.
-hmac = "0.12"
-sha1 = "0.10"
+# TOTP two-factor codes (RFC 6238: HMAC-SHA1). `hmac` 0.13 moved onto the
+# `digest` 0.11 trait family, so `sha1` has to ride along at 0.11 for
+# `Hmac::<Sha1>` to type-check — only usable in lockstep. This also puts TOTP on
+# the same digest generation as `sha2`/`hkdf` above. A second, older `hmac` 0.12
+# stays in the tree via third-party crates (age, aws-sigv4, openidconnect); that
+# copy is theirs and does not touch our code.
+hmac = "0.13"
+sha1 = "0.11"
 # WebAuthn / FIDO2 passkey login. In-progress challenge state stays in memory
 # (no danger-allow-state-serialisation), only finished credentials are stored.
 # conditional-ui enables the discoverable-credential login flow (no username).
@@ -174,7 +178,7 @@ webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
 rand = "0.8"
 base64 = "0.22"
 flate2 = "1"
-age = { version = "0.10", optional = true }
+age = { version = "0.12", optional = true }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 
 # S3 object storage.

@@ -298,8 +298,11 @@ impl BackupManager {
                 .trim()
                 .parse()
                 .map_err(|e: &str| anyhow::anyhow!("invalid age recipient: {}", e))?;
-            let encryptor = age::Encryptor::with_recipients(vec![Box::new(recipient)])
-                .ok_or_else(|| anyhow::anyhow!("age encryptor init failed"))?;
+            // age 0.12 takes an iterator of `&dyn Recipient` (was a boxed Vec) and
+            // reports recipient problems as `Err` rather than `None`.
+            let encryptor =
+                age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+                    .map_err(|e| anyhow::anyhow!("age encryptor init failed: {e}"))?;
             let mut out = Vec::new();
             let mut writer = encryptor.wrap_output(&mut out)?;
             writer.write_all(data)?;
@@ -690,5 +693,52 @@ mod tests {
         }
 
         assert_eq!(mgr.list().unwrap().len(), 2, "retention should cap at 2");
+    }
+
+    /// Encrypted backups are decrypted out-of-band (there is no in-process
+    /// restore path for `.age` files), so nothing else in the suite proves the
+    /// write side actually produces a readable age file. This pins that, and
+    /// with it the `age` API surface — which has changed shape across releases.
+    #[cfg(feature = "backup-encrypt")]
+    #[test]
+    fn maybe_encrypt_round_trips_through_age() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+
+        // The key file holds the public half, exactly as init_backup_encryption writes it.
+        let identity = age::x25519::Identity::generate();
+        let key_path = dir.path().join("backup-recipient.txt");
+        fs::write(&key_path, identity.to_public().to_string()).unwrap();
+
+        let mgr = BackupManager::new(
+            dir.path().join("backups"),
+            sqlite_path,
+            TripleStore::in_memory().unwrap(),
+            audit,
+            7,
+            true,
+            Some(key_path),
+        )
+        .unwrap();
+
+        let plaintext = b"@prefix ex: <http://example.org/> . ex:a ex:b ex:c .";
+        let ciphertext = mgr.maybe_encrypt(plaintext).unwrap();
+        assert!(
+            ciphertext.starts_with(b"age-encryption.org/"),
+            "output should carry the age file header"
+        );
+
+        let mut decrypted = Vec::new();
+        age::Decryptor::new_buffered(&ciphertext[..])
+            .unwrap()
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
+            .unwrap()
+            .read_to_end(&mut decrypted)
+            .unwrap();
+        assert_eq!(decrypted, plaintext, "round-trip must return the plaintext");
     }
 }
