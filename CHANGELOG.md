@@ -14,6 +14,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- None.
+
+### Changed
+- None.
+
+### Deprecated
+- None.
+
+### Removed
+- None.
+
+### Fixed
+- None.
+
+### Security
+- None.
+
+## [0.6.0] — 2026-07-31
+
+### Added
 - **The store as an OIDC provider** (Unified Accounts): client apps sign
   their users in against this store with authorization-code + PKCE —
   discovery, `/oauth/jwks` (ES256), `/oauth/token` (rotating single-use
@@ -23,16 +43,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `OAUTH_CLIENTS_JSON` boot seed. Provider access tokens carry role and
   org/group membership claims and are accepted by the auth middleware like
   any first-class credential. See [`docs/oidc-provider.md`](docs/oidc-provider.md).
+- **Dataset file manager**: files and assets are managed like a real file
+  system rather than a flat list — folders per dataset, a full file-browser UI
+  replacing the dataset page's asset list, a new top-level **Files** page, and a
+  reusable browser modal/picker. Folders are database rows (`assets.folder` plus
+  an `asset_folders` table for explicitly created empty ones), so moves and
+  renames never touch storage keys — bytes and ETags stay stable. The
+  `/api/datasets/:id/folders` API creates, renames (subtree, rewriting contained
+  assets' RDF folder literals) and deletes folders, with traversal-, depth- and
+  length-checked path sanitising, and public datasets stay browsable logged-out.
 - **Guest self-registration toggle** (admin, default off): with normal
   registration closed, the public register page may create low-privilege
   `guest` accounts. Turning the toggle off bulk-disables guest accounts with
   a specific "guest access has been disabled by the administrator" sign-in
   message; turning it back on re-enables exactly those accounts.
+- **Configurable guest capabilities and OIDC token authority**: both principals
+  carried more authority than their names implied, and the right limit differs
+  per deployment, so both become policy with a conservative default (new
+  `auth::policy` module, documented in `.env.example`).
+  `OTS_GUEST_CAPABILITIES` selects from `write` / `create_datasets` /
+  `api_tokens` / `publish` / `all` and defaults to read-only, applied as a clamp
+  on every authentication path.
 - **Membership-aware introspection**: `GET /api/auth/me` now includes
   `organisations` and `groups` arrays, and the new
   `GET /api/datasets/:id/permissions/me` reports the caller's effective
   `{read, write, manage}` on a dataset (404 for invisible datasets) — for
   resource servers that authorize on ownership without re-deriving ACLs.
+- **SHACL for 3D and BIM**: three built-in example shape graphs and pipelines
+  wired to the 3D/Map/BIM demo — `ifc` (IFC building elements: labels, exactly
+  one `props:ifcGuid`, IRI sub-element links), `geo3d` (every `geo:Feature`
+  carries a geometry; a `POLYHEDRALSURFACE Z` solid has ≥4 faces) and `file3d`
+  (3D distributions declare `dct:format` + `dcat:downloadURL`) — plus a
+  `validation-3d.ttl` demo graph carrying deliberate failures so the examples
+  always surface a real violation. Validation issues are now openable in 3D:
+  `IssueResults` gains a **Show in 3D** action and `DatasetViewer` honours
+  `?focus=<iri>`, framing and highlighting the element by IRI or IFC GlobalId.
 - **Plugin accounts capability**: `ots-plugin-api` 0.2 adds
   `PluginContext::auth` (`PluginAuth`: bearer introspection + admin-gated
   users/organisations/LLM-stats overviews, enforced host-side), plus the new
@@ -49,13 +94,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - Login accepts an internal-path `?next=` redirect (used by the OIDC
   authorize flow); absolute URLs are ignored (no open redirect).
-
-### Fixed
-- The default-features build (`cargo check`/`cargo test` with no flags) broke
-  on a `text-search`-gated `AtomicBool` import used by an ungated field, and
-  on an ungated `Term::Triple` match arm in the SPARQL-functions conformance
-  test. Both are feature-gated correctly now; CI's explicit feature list had
-  masked them.
+- **The performance gate now compares a change against its own merge base**,
+  both benched in the same job, instead of against the stored baseline — runner
+  hardware drift no longer reads as a regression. It fails at +10 %, with a
+  small-benchmark floor below 1 µs (where a percentage bar is meaningless) and
+  per-benchmark tolerances for the three benchmarks measured to be bimodal on
+  these runners. See [`docs/performance.md`](docs/performance.md).
+- **Dependencies**: a coordinated aws-sdk/aws-smithy bump, and a batch of 19
+  further updates including `age` 0.12, `hmac` 0.13 (with `sha1` 0.11 in
+  lockstep — the digest 0.11 trait family), `tower-http` 0.7, `geos` 11.1 and
+  `eslint-plugin-svelte` 3. `jsdom` 30 and TypeScript 7 are deliberately held:
+  the former requires a Node baseline past this project's Node 20, and
+  typescript-eslint does not yet support the latter.
 
 ### Deprecated
 - None.
@@ -64,10 +114,53 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
-- None.
+- **3D models were unreachable from any device but the host**: the viewer feed
+  baked the origin into model URLs at seed time, so a default install served
+  `http://localhost:7878/…` to every client. Self-hosted URLs are now rewritten
+  origin-relative in the feed JSON; the RDF and external URLs are untouched.
+- **A failed model load froze the tab**: a worker-side fetch/parse failure fell
+  back to re-parsing tens of megabytes of IFC on the main thread. The fallback
+  now fires only when the worker cannot start.
+- **Blank basemap under MapLibre 6**, which moved its worker out of the bundle
+  and resolved it at runtime — Vite never emitted the file, the SPA fallback
+  served `index.html`, and the worker died silently.
+- **Buildings sliced in half by basemap suppression**: suppression now hides
+  whole buildings by feature id rather than by a `distance` filter evaluated per
+  tile fragment, and resets across entry rebuilds. Model orientation is now
+  measured rather than guessed — `ots:modelHeading` flows RDF → feed → placement
+  matrix, with landmark bearings taken from real OSM footprints.
+- **The query cache deep-copied results it then discarded**: `QueryCache::put`
+  decomposed every solution into a row vector *while* pulling, before it could
+  know whether the result fit under the cap. Every SELECT over the 10 000-row
+  cap paid ~10 001 throwaway row allocations and the matching term clones for
+  nothing. Solutions are now buffered untouched and decomposed only in the
+  branch that actually caches; variable lookup also stops being quadratic in
+  projection width.
+- **Seeded prefixes now outrank the bundled snapshot**, so a bundle's own
+  `[prefixes]` mappings are not shadowed by stale snapshot entries.
+- The default-features build (`cargo check`/`cargo test` with no flags) broke
+  on a `text-search`-gated `AtomicBool` import used by an ungated field, and
+  on an ungated `Term::Triple` match arm in the SPARQL-functions conformance
+  test. Both are feature-gated correctly now; CI's explicit feature list had
+  masked them.
 
 ### Security
-- None.
+- **SPARQL injection through version strings** (`insert_version` and
+  `get_version`): a caller-supplied version containing a quote, backslash,
+  angle bracket or newline could close the literal and continue the query, and
+  was reachable from seven upload/seed/pipeline paths. All sinks now validate
+  through `data_models::version_iri::validate_version`; the two HTTP boundaries
+  reject with `400` rather than `500`.
+- **Refresh-token rotation was not atomic**: `take_client_refresh_token` ran a
+  `SELECT` followed by a separate `DELETE` whose affected-row count it
+  discarded, so two concurrent `grant_type=refresh_token` requests could both
+  observe the row and both be issued a fresh token pair — making a stolen
+  refresh token replayable inside that window and defeating the single-use
+  guarantee rotation exists to provide.
+- **Guests were unconstrained**: `SystemRole::Guest` was stored but no predicate
+  consulted it, so a self-registered guest could create datasets, write graph
+  data, publish and mint API tokens like a full user. Guest authority is now
+  clamped on every authentication path and defaults to read-only.
 
 ## [0.5.0] — 2026-07-24
 
@@ -540,7 +633,8 @@ First public, source-available release of **Open Triplestore**.
 ### Notes
 - Licensed under **AGPL-3.0 + Commons Clause** (source-available). See [`LICENSE`](LICENSE).
 
-[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/philipperenzen/open-triplestore/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/philipperenzen/open-triplestore/compare/v0.2.4...v0.3.0
