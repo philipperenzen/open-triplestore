@@ -18,7 +18,7 @@
   import {
     listAssets, listAssetFolders, uploadAsset, deleteAsset, moveAsset,
     createAssetFolder, renameAssetFolder, deleteAssetFolder,
-    updateAssetVisibility, updateAssetMetadata, fetchAssetContent,
+    updateAssetVisibility, updateAssetMetadata,
   } from '../../lib/api.js';
   import {
     fileKind, KIND_GROUPS, ALL_GROUPS, normalizePath, parentOf, nameOf, joinPath,
@@ -34,7 +34,7 @@
     Folder, FolderOpen, FolderPlus, FolderInput, HardDrive, Upload, Download,
     Trash2, Pencil, Eye, Link as LinkIcon, Clipboard, Lock, Globe, LayoutGrid,
     List as ListIcon, Search, ChevronRight, ChevronDown, X as XIcon, Check,
-    CheckCheck, Loader2, MoreHorizontal, ArrowUpDown, RefreshCw, FileText,
+    CheckCheck, Loader2, MoreHorizontal, ArrowUpDown, RefreshCw, FileText, CloudOff,
   } from 'lucide-svelte';
 
   export let datasetId;
@@ -52,6 +52,8 @@
   let loading = true;
   let error = '';
   let loadedFor = null;
+  /** 'loading' | 'ready' | 'auth' | 'error' — 'auth' means "sign in to see these". */
+  let state = 'loading';
 
   // ── View state ────────────────────────────────────────────────────────────
   let path = normalizePath(initialPath);
@@ -117,14 +119,21 @@
         }
       }
       if (path && !known.has(path)) path = '';
+      state = 'ready';
     } catch (e) {
-      error = e?.message || $t('components.fileBrowser.loadFailed');
+      // 401/403 is "sign in to see these files", not a failure — a logged-out
+      // visitor on a members-only dataset gets an invitation, not an error box.
+      state = e?.status === 401 || e?.status === 403 ? 'auth' : 'error';
+      if (state === 'error') error = e?.message || $t('components.fileBrowser.loadFailed');
       assets = [];
       folderPaths = [];
     } finally {
       loading = false;
     }
   }
+
+  // Report the list + load state upward (dataset page KPI pill, host chrome).
+  $: dispatch('changed', { assets: visibleAssets(assets), state });
 
   // ── Derivations ───────────────────────────────────────────────────────────
   $: thumbIndex = thumbnailIndex(assets);
@@ -329,20 +338,21 @@
     return asset.iri || `${window.location.origin}/datasets/${datasetId}/assets/${asset.id}`;
   }
 
-  async function downloadFile(asset) {
-    try {
-      const res = await fetchAssetContent(datasetId, asset.id);
-      if (!res.ok) { error = $t('components.fileBrowser.downloadFailed', { values: { status: res.status } }); return; }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = asset.filename;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-    } catch (e) {
-      error = e?.message || $t('components.fileBrowser.downloadFailedPlain');
-    }
+  // Plain anchor target: the optional-auth /download route streams with ETag
+  // caching and works for anonymous visitors — no blob round-trip through memory
+  // (a 50 MB IFC would otherwise be buffered twice).
+  function downloadUrl(asset) {
+    return `/api/datasets/${datasetId}/assets/${asset.id}/download`;
+  }
+
+  function downloadFile(asset) {
+    const a = document.createElement('a');
+    a.href = downloadUrl(asset);
+    a.download = asset.filename;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
   async function copyIri(asset) {
@@ -797,6 +807,19 @@
     <div class="fb-content">
       {#if loading}
         <div class="fb-state"><Loader2 size={20} class="animate-spin" /> {$t('system.loading')}</div>
+      {:else if state === 'auth'}
+        <div class="fb-state fb-empty-state">
+          <Lock size={34} />
+          <p class="fb-empty-title">{$t('components.fileBrowser.signInTitle')}</p>
+          <p class="fb-empty-sub">{$t('components.fileBrowser.signInHint')}</p>
+          <a class="btn btn-sm" href="/login">{$t('nav.signIn')}</a>
+        </div>
+      {:else if state === 'error'}
+        <div class="fb-state fb-empty-state">
+          <CloudOff size={34} />
+          <p class="fb-empty-title">{$t('components.fileBrowser.loadFailed')}</p>
+          <button class="btn btn-sm btn-ghost" on:click={load}>{$t('system.retry')}</button>
+        </div>
       {:else if isEmptyDataset}
         <div class="fb-state fb-empty-state">
           <FolderOpen size={40} />
@@ -985,7 +1008,7 @@
                 <td class="fb-col-actions">
                   <span class="fb-row-actions">
                     <button class="fb-icon-btn" on:click|stopPropagation={() => previewAsset = asset} title={$t('components.fileBrowser.preview')}><Eye size={13} /></button>
-                    <button class="fb-icon-btn" on:click|stopPropagation={() => downloadFile(asset)} title={$t('components.fileBrowser.download')}><Download size={13} /></button>
+                    <a class="fb-icon-btn" href={downloadUrl(asset)} download={asset.filename} on:click|stopPropagation title={$t('components.fileBrowser.download')}><Download size={13} /></a>
                     <button class="fb-icon-btn" on:click|stopPropagation={() => copyIri(asset)} title={$t('components.fileBrowser.copyIri')}>
                       {#if copiedId === asset.id}<CheckCheck size={13} />{:else}<LinkIcon size={13} />{/if}
                     </button>

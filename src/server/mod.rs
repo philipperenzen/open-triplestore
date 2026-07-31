@@ -942,7 +942,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let asset_routes = Router::new()
         .route(
             "/api/datasets/:dataset_id/assets",
-            post(routes::upload_asset),
+            get(routes::list_assets).post(routes::upload_asset),
         )
         .route(
             "/api/datasets/:dataset_id/assets/:asset_id",
@@ -954,27 +954,22 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/visibility",
             put(routes::update_asset_visibility),
         )
-        // File-manager folder mutations (create / rename-move / delete).
+        // File-manager folders: listing is read-only (same anonymous reach as the
+        // asset list), the rest create / rename-move / delete.
         .route(
             "/api/datasets/:dataset_id/folders",
-            post(routes::create_asset_folder)
+            get(routes::list_asset_folders)
+                .post(routes::create_asset_folder)
                 .patch(routes::rename_asset_folder)
                 .delete(routes::delete_asset_folder),
         )
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .layer(DefaultBodyLimit::max(routes::ASSET_MAX_BYTES + 1024 * 1024))
-        .with_state(state.clone());
-
-    // Read-only file-manager listing — optional auth so a PUBLIC dataset's files
-    // are browsable anonymously (dataset visibility decides, exactly like its
-    // graphs/viewer-feed; the handlers run can_access_dataset themselves).
-    let asset_read_routes = Router::new()
-        .route("/api/datasets/:dataset_id/assets", get(routes::list_assets))
-        .route(
-            "/api/datasets/:dataset_id/folders",
-            get(routes::list_asset_folders),
-        )
+        // optional_auth (not require_auth): a public dataset's asset LIST must be
+        // reachable anonymously — the dataset page's Files section is primary UI
+        // for logged-out visitors, exactly like its graphs/viewer-feed. Write
+        // handlers demand a user themselves via require_user(); per-asset
+        // visibility (Asset.public) is enforced in the handlers.
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
+        .layer(DefaultBodyLimit::max(routes::ASSET_MAX_BYTES + 1024 * 1024))
         .with_state(state.clone());
 
     // Dataset SPARQL service endpoint (optional auth for access control).
@@ -1436,7 +1431,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(dataset_mixed_routes)
         .merge(dataset_protected_routes)
         .merge(asset_routes)
-        .merge(asset_read_routes)
         .merge(dataset_sparql_routes)
         .merge(shacl_routes)
         .merge(shaclc_routes)

@@ -18,10 +18,16 @@
   import CsvPreview from './CsvPreview.svelte';
 
   export let content = '';
+  /** The turn's executed SPARQL runs (LlmChat's msg.queries) — the LAST
+   *  successful one backs `"source":"query"` chart/map widgets. */
+  export let queries = null;
 
   const dispatch = createEventDispatcher();
 
-  $: segments = parseChatBlocks(content);
+  $: lastRun = (queries || []).filter((q) => q && q.ok !== false && q.rows?.length).at(-1) || null;
+  $: segments = parseChatBlocks(content, {
+    queryRows: lastRun ? { columns: lastRun.columns || [], rows: lastRun.rows || [] } : null,
+  });
 
   function mdHtml(src) {
     return decorateApiLinks(renderMarkdown(src, { breaks: true }).html);

@@ -584,15 +584,33 @@ pub struct LlmHealth {
     /// The endpoint's payload when reachable (e.g. the `/v1/models` list, or a
     /// gateway's own `/health` detail).
     detail: Option<Value>,
+    /// AI requests per minute for signed-in users (0 = unlimited).
+    rate_limit_per_min: u32,
+    /// AI requests per minute for guests, keyed by IP (0 = unlimited).
+    rate_limit_anon_per_min: u32,
+    /// The budget that applies to THIS caller: "user" or "guest".
+    caller: &'static str,
 }
 
 /// GET /api/llm/health — is an LLM endpoint reachable from this server?
 /// Lets the UI show AI availability alongside its other service health. Probes the
 /// OpenAI-standard `/v1/models` first (works for OpenAI, Ollama, LM Studio, vLLM, …),
 /// then falls back to a gateway `/health` for servers that expose one.
-async fn llm_health(State(_state): State<AppState>) -> Json<LlmHealth> {
+async fn llm_health(
+    user: Option<Extension<AuthenticatedUser>>,
+    State(_state): State<AppState>,
+) -> Json<LlmHealth> {
     let gateway = gateway_base();
     let base = gateway.trim_end_matches('/');
+    let cfg = llm_guard::config();
+    let limits = |reachable: bool, detail: Option<Value>| LlmHealth {
+        gateway: gateway.clone(),
+        reachable,
+        detail,
+        rate_limit_per_min: cfg.rate_per_min,
+        rate_limit_anon_per_min: cfg.rate_per_min_anon,
+        caller: if user.is_some() { "user" } else { "guest" },
+    };
     let client = http();
     for path in ["/v1/models", "/health"] {
         let mut rb = client
@@ -604,19 +622,11 @@ async fn llm_health(State(_state): State<AppState>) -> Json<LlmHealth> {
         if let Ok(resp) = rb.send().await {
             if resp.status().is_success() {
                 let detail = resp.json::<Value>().await.ok();
-                return Json(LlmHealth {
-                    gateway,
-                    reachable: true,
-                    detail,
-                });
+                return Json(limits(true, detail));
             }
         }
     }
-    Json(LlmHealth {
-        gateway,
-        reachable: false,
-        detail: None,
-    })
+    Json(limits(false, None))
 }
 
 #[derive(Deserialize)]
@@ -815,7 +825,13 @@ that is not listed.\n\n\
 # RETRIEVING DATA\n\
 If answering needs the actual contents of the graphs (counts, specific values, relationships, geometries), \
 reply with EXACTLY one line: `SPARQL:` followed by a single valid SPARQL query against the listed named \
-graphs, and nothing else. The system runs it read-only under the user's permissions and gives you the \
+graphs, and nothing else. This is not optional: when the user asks how many, which, when, where or what \
+value, and you have not run a query THIS turn, your first reply MUST be such a `SPARQL:` line — \
+UNLESS the PLATFORM CONTEXT already answers it outright. The context's INVENTORIES are authoritative, \
+not summaries: the datasets list, the named graphs WITH their triple counts, the Files/assets list \
+(that IS the complete list of files — \"show me the IFC files\" is answered from it directly, never \
+by querying), and the API services. Query the graphs for their CONTENTS; read the context for what \
+exists on the platform. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
 write the final answer. Result cells may be truncated (they then end with …).\n\
 Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
@@ -824,7 +840,18 @@ memory: if you have not retrieved them this turn, query first.\n\
 Query efficiently: fetch everything you need in as FEW rounds as possible (select labels and values \
 together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows come back; use LIMIT 50 \
 for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
-build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\n\
+build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\
+Aggregate correctly: `COUNT(*)` counts rows; `COUNT(?v)` counts only rows where ?v is BOUND, so \
+counting a variable that never appears in the pattern silently yields 0 for every group. The \
+canonical per-graph triple count is: \
+`SELECT ?g (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g ORDER BY DESC(?n)`. \
+Sanity-check aggregates before presenting them: an all-zero result almost always means a wrong \
+variable, not empty graphs — re-query, don't chart it.\n\
+Worked patterns — adapt the IRIs from the Graph vocabulary section, never invent them:\n\
+count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE {{ \
+GRAPH <g> {{ ?b a <Class> ; <yearPredicate> ?year }} }}`\n\
+mappable rows: `SELECT ?el ?label ?wkt WHERE {{ GRAPH <g> {{ ?el rdfs:label ?label ; \
+geo:hasGeometry/geo:asWKT ?wkt }} }} LIMIT 50` — then present with a source:\"query\" map.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -833,17 +860,28 @@ workspace. Use it whenever you show a query.\n\
 - ```api — a runnable API call; first line is `GET <path>`, for example:\n\
 ```api\nGET /api/datasets/<dataset-id>/api-services/<slug>/run?param=value\n```\n\
 Use one whenever you mention an API service (inline code like `GET /api/...` becomes clickable too).\n\
-- ```chart — a JSON spec rendered as a chart: \
-{\"type\":\"bar\",\"title\":\"…\",\"yLabel\":\"…\",\"data\":[{\"label\":\"A\",\"value\":12.5}]} with type bar, line or pie; \
+- ```chart — a JSON spec rendered as a chart. To chart RESULTS OF YOUR QUERY, always use the \
+row-bound form: {\"type\":\"bar\",\"title\":\"…\",\"source\":\"query\",\"x\":\"<label var>\",\"y\":\"<numeric var>\"} \
+— the platform fills the data from the rows your last successful SPARQL returned, exactly; NEVER retype \
+retrieved numbers into inline data (transcription corrupts them). Inline data is ONLY for a handful of \
+hand-stated values: {\"type\":\"bar\",\"data\":[{\"label\":\"A\",\"value\":12.5}]}; \
 multi-series: {\"type\":\"line\",\"series\":[{\"name\":\"2024\",\"data\":[{\"label\":\"Jan\",\"value\":3}]}]}. \
-Only chart numbers you actually retrieved — never invent values. Keep it under 40 points.\n\
-- ```map — a JSON spec rendered as an interactive map: \
+Only chart numbers you actually retrieved — never invent values. Keep charts readable: at most \
+~15 bars/points (chart the top N by value and say what was cut), and use SHORT labels — an entity's \
+name, or an IRI's distinguishing tail segments (e.g. `viewer-3d-demo/building`), never a full IRI.\n\
+- ```map — a JSON spec rendered as an interactive map. For query results use the row-bound form: \
+{\"source\":\"query\",\"wkt\":\"<wkt var>\",\"label\":\"<label var>\",\"iri\":\"<iri var>\"} — the \
+platform builds the features from your rows. The source:\"query\" forms (chart and map) are ONLY \
+valid after a successful `SPARQL:` round THIS turn — with no query they render an error card. \
+Inline form for hand-stated features: \
 {\"features\":[{\"label\":\"Waalbrug\",\"wkt\":\"POINT(5.8645 51.8519)\",\"iri\":\"http://…\"}]}. \
 WKT must be WGS84 with longitude before latitude. Prefer points or centroids; skip geometries whose WKT \
 was truncated. When elements have 3D model files, add \"models\":[{\"label\":\"…\",\"url\":\"…\",\
 \"wkt\":\"POINT(lon lat)\"}] to place those models on the map at their anchor — the map then renders \
 real 3D geometry on the basemap.\n\
-- ```model3d — an interactive 3D viewer: {\"models\":[{\"label\":\"…\",\"url\":\"https://…/model.glb\"}]}. \
+- ```model3d — an interactive 3D viewer: {\"models\":[{\"label\":\"…\",\"url\":\"https://…/model.glb\"}]}; \
+asset download paths carry no file extension, so give those an explicit format: \
+{\"models\":[{\"label\":\"…\",\"url\":\"/api/datasets/<id>/assets/<id>/download\",\"format\":\"ifc\"}]}. \
 Use file URLs you actually retrieved from the graphs (omg:hasGeometry / fog:as… file references — \
 glTF, STL, IFC, CityJSON) or asset download paths from the platform context — never invent URLs.\n\
 - ```card — an entity info card: {\"title\":\"…\",\"subtitle\":\"…\",\"iri\":\"http://…\",\"image\":\"https://…\",\
@@ -853,7 +891,10 @@ glTF, STL, IFC, CityJSON) or asset download paths from the platform context — 
 {\"label\":\"…\",\"url\":\"…\",\"filename\":\"report.pdf\"}. Use it when the answer points at a \
 downloadable file (dataset assets, model files, attachments) whose URL you retrieved.\n\
 - ```turtle / ```json / ```xml — syntax-highlighted data snippets (not runnable). Small markdown tables \
-also render well.\n\n\
+also render well.\n\
+- Entity links: link the key entities you name to their detail page as \
+`[label](/resource?iri=<percent-encoded IRI>)` — it opens the platform's resource inspector with the \
+full RDF, geometry and 3D view. Use these in prose and in table cells whenever a result row has an IRI.\n\n\
 Pick at most a couple of widgets per answer, chosen for the question: trends or comparisons → chart, \
 locations → map, a single entity → card, 3D shapes (buildings, bridges, BIM elements) → model3d, or \
 map with models when georeferenced, files → file, raw listings → markdown table or csv, \"how do I \
@@ -1063,16 +1104,27 @@ fn guard_gate<'a>(
     };
 
     // Per-principal budget: a user id when logged in, the client IP otherwise.
-    let rate_key = match user {
-        Some(u) => u.user_id.clone(),
-        None => format!("ip:{}", ip.unwrap_or("unknown")),
+    // Guests get the (tighter) anonymous budget — they share the same GPU with
+    // no account to attribute the cost to.
+    let cfg = llm_guard::config();
+    let (rate_key, per_min) = match user {
+        Some(u) => (u.user_id.clone(), cfg.rate_per_min),
+        None => (
+            format!("ip:{}", ip.unwrap_or("unknown")),
+            cfg.rate_per_min_anon,
+        ),
     };
-    if let Err(retry_after_secs) = llm_guard::check_rate(&rate_key) {
+    if let Err(retry_after_secs) = llm_guard::check_rate_with(&rate_key, per_min) {
+        let message = if user.is_some() {
+            format!("Too many AI requests — the signed-in budget is {per_min}/min. Try again in a moment.")
+        } else {
+            format!("Too many AI requests — guests get {per_min}/min. Sign in for a higher budget, or try again in a moment.")
+        };
         return Err(blocked(
             "rate_limited".into(),
             AppError::RateLimited {
                 retry_after_secs,
-                message: "Too many AI requests — try again in a moment".into(),
+                message,
             },
         ));
     }
@@ -1311,6 +1363,9 @@ async fn run_chat_turn(
     let mut graph_list: Vec<String> = graphs.iter().cloned().collect();
     graph_list.sort();
     let user_id = user.map(|u| u.user_id.as_str());
+    // Mentioned datasets' graphs first — the vocab sampler and the prompt's
+    // graph list both truncate by position (see prioritise_graphs_for_conversation).
+    let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
     let context = build_platform_context(&state, user_id, &graph_list);
     let vocab = graph_vocab_context(&state, &graph_list).await;
     // The user's saved memory rides at the END of the system prompt: everything
@@ -1392,6 +1447,9 @@ async fn run_chat_turn(
                 })
                 .await;
                 let table = render_rows_for_llm(&qr);
+                // Read these BEFORE qr.rows moves into the trail below.
+                let rows_empty = qr.rows.is_empty();
+                let all_zero = all_numeric_cells_zero(&qr.rows);
                 runs.push(ChatQueryRun {
                     sparql: query,
                     ok: true,
@@ -1401,12 +1459,28 @@ async fn run_chat_turn(
                     truncated: qr.truncated,
                 });
                 if remaining > 0 {
+                    // Steer self-repair on the two degenerate shapes a small
+                    // model reliably falls into: an empty result from guessed
+                    // vocabulary, and an aggregate of an unbound variable
+                    // (every group counts 0).
+                    let hint = if rows_empty {
+                        "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
+                         the graph. Re-read the Graph vocabulary section and build the pattern \
+                         ONLY from those exact class/property IRIs (and use COUNT(*), never \
+                         COUNT of a variable that is not bound in the pattern)."
+                    } else if all_zero {
+                        "\nHINT: every numeric value is 0 — that almost always means the \
+                         aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
+                         variable that is bound in the pattern, then retry."
+                    } else {
+                        ""
+                    };
                     format!(
-                        "Query results:\n{table}\nIf you still need different data, reply with \
+                        "Query results:\n{table}{hint}\nIf you still need different data, reply with \
                          `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
                          write the final answer to my previous question in clear natural language, \
                          using the presentation widgets (chart/map/card/api/csv/markdown table) \
-                         where they help."
+                         where they help; chart/map query results with the source:\"query\" form."
                     )
                 } else {
                     format!(
@@ -1436,7 +1510,13 @@ async fn run_chat_turn(
                 });
                 if remaining > 0 {
                     format!(
-                        "That query failed to run: {emsg}\nReply with `SPARQL:` and a corrected \
+                        "That query failed to run: {emsg}\n\
+                         HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
+                         inside GROUP BY; every projected variable must be bound in the pattern; \
+                         build patterns ONLY from the Graph vocabulary section's IRIs; and the \
+                         `SPARQL:` line must contain the query alone, no prose before or after. \
+                         Do NOT resend the same query unchanged.\n\
+                         Reply with `SPARQL:` and a corrected \
                          query ({remaining} more allowed this turn), or answer without querying — \
                          you may include the corrected query as a ```sparql block for the user to \
                          run themselves."
@@ -1565,6 +1645,94 @@ fn fallback_answer(runs: &[ChatQueryRun]) -> String {
 /// The named graphs `user` may read — the same scope the normal SPARQL endpoint
 /// applies. Mirrors `execute_query`: accessible-dataset graphs, plus named-graph
 /// ACL grants, plus (for admins) every registered graph.
+/// Reorder the caller's graph scope so the graphs the CONVERSATION is about come
+/// first. Everything downstream truncates by position — the vocabulary sampler
+/// grounds only the first [`VOCAB_GRAPH_LIMIT`] graphs and the prompt lists only
+/// the first [`MAX_GRAPHS_IN_CONTEXT`] — and on an instance with hundreds of
+/// graphs an alphabetical order puts whatever sorts first in those windows, not
+/// what the user asked about. That is why Spark used to invent vocabulary for a
+/// dataset the user named explicitly: its graphs were in scope but never got a
+/// vocabulary block, so the model guessed predicates and every query came back
+/// empty. Signals, in priority order:
+///
+///   1. a dataset whose id or name appears in the conversation → all its graphs;
+///   2. a graph IRI pasted verbatim into the conversation.
+///
+/// The remainder keeps its sorted order, so with no signal at all this is the
+/// identity and the prompt stays stable (prompt-cache friendly: the order is a
+/// pure function of the conversation text).
+fn prioritise_graphs_for_conversation(
+    state: &AppState,
+    user_id: Option<&str>,
+    messages: &[ChatMessage],
+    graphs: Vec<String>,
+) -> Vec<String> {
+    let text: String = messages
+        .iter()
+        .rev()
+        .take(6)
+        .filter(|m| m.role != "assistant")
+        .map(|m| m.content.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return graphs;
+    }
+    let in_scope: HashSet<&String> = graphs.iter().collect();
+    let mut priority: Vec<String> = Vec::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    let push = |g: String, priority: &mut Vec<String>, taken: &mut HashSet<String>| {
+        if taken.insert(g.clone()) {
+            priority.push(g);
+        }
+    };
+    if let Ok(datasets) = state.auth_db.list_accessible_datasets(user_id) {
+        for d in &datasets {
+            let id = d.id.to_lowercase();
+            let name = d.name.to_lowercase();
+            // Short names ("test", "demo") would match half of any sentence.
+            let mentioned = text.contains(&id) || (name.len() >= 4 && text.contains(name.as_str()));
+            if !mentioned {
+                continue;
+            }
+            if let Ok(gs) = state.auth_db.list_dataset_graphs(&d.id) {
+                for g in gs {
+                    if in_scope.contains(&g) {
+                        push(g, &mut priority, &mut taken);
+                    }
+                }
+            }
+        }
+    }
+    for g in &graphs {
+        if text.contains(&g.to_lowercase()) {
+            push(g.clone(), &mut priority, &mut taken);
+        }
+    }
+    if priority.is_empty() {
+        return graphs;
+    }
+    priority.extend(graphs.into_iter().filter(|g| !taken.contains(g)));
+    priority
+}
+
+/// Do the rows contain at least one numeric cell, with every numeric cell 0?
+/// The signature shape of `COUNT(?unbound)` — 0 for every group.
+fn all_numeric_cells_zero(rows: &[Vec<String>]) -> bool {
+    let mut saw_numeric = false;
+    for row in rows {
+        for cell in row {
+            if let Ok(v) = cell.trim().parse::<f64>() {
+                saw_numeric = true;
+                if v != 0.0 {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_numeric
+}
+
 fn chat_accessible_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
@@ -1666,6 +1834,47 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
             services.push(line);
         }
     }
+    // Files/assets: "show me the IFC files" is a platform question — the
+    // originals are first-class dataset assets with download routes, not
+    // something to reconstruct from graph patterns (the model was querying a
+    // guessed graph name for fog: references and concluding no files exist).
+    const MAX_ASSETS_IN_CONTEXT: usize = 40;
+    let mut asset_lines: Vec<String> = Vec::new();
+    'assets: for d in &datasets {
+        let Ok(assets) = state.auth_db.list_dataset_assets(&d.id) else {
+            continue;
+        };
+        for a in assets {
+            // Only PUBLIC assets ever ride into a prompt: the DB listing has no
+            // ACL of its own, and a private file's name in an anonymous
+            // caller's context would be a disclosure even if the download
+            // route would 401.
+            if !a.public {
+                continue;
+            }
+            if asset_lines.len() >= MAX_ASSETS_IN_CONTEXT {
+                asset_lines.push("- …and more.".to_string());
+                break 'assets;
+            }
+            let mb = (a.size_bytes as f64) / 1_048_576.0;
+            asset_lines.push(format!(
+                "- \"{}\" ({mb:.1} MB) in dataset \"{}\": GET /api/datasets/{}/assets/{}/download",
+                a.filename, d.name, d.id, a.id
+            ));
+        }
+    }
+    if !asset_lines.is_empty() {
+        ctx.push_str(
+            "\n## Files / assets (downloadable originals — cite these directly or with a \
+             ```file widget; for 3D files use a ```model3d widget with an explicit \
+             \"format\" since the download path has no extension)\n",
+        );
+        for l in &asset_lines {
+            ctx.push_str(l);
+            ctx.push('\n');
+        }
+    }
+
     if services.is_empty() {
         ctx.push_str("\n## API Services\n(none accessible)\n");
     } else {
@@ -1677,9 +1886,16 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
     }
 
     if !graphs.is_empty() {
-        ctx.push_str("\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`)\n");
+        ctx.push_str(
+            "\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`; \
+             the number after each graph is its CURRENT triple count — cite or \
+             chart these directly, no query needed for sizes)\n",
+        );
         for g in graphs.iter().take(MAX_GRAPHS_IN_CONTEXT) {
-            ctx.push_str(&format!("- <{g}>\n"));
+            match state.store.graph_count_cached(Some(g)) {
+                Some(n) => ctx.push_str(&format!("- <{g}> — {n} triples\n")),
+                None => ctx.push_str(&format!("- <{g}>\n")),
+            }
         }
         if graphs.len() > MAX_GRAPHS_IN_CONTEXT {
             ctx.push_str(&format!(
@@ -1701,14 +1917,9 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
 // and put it in the prompt so the first query usually hits.
 
 /// How many graphs get a vocabulary block (the first N, sorted — deterministic).
-const VOCAB_GRAPH_LIMIT: usize = 8;
-const VOCAB_CLASS_LIMIT: usize = 6;
-const VOCAB_PRED_LIMIT: usize = 12;
-/// Row caps for the sampling scans — a hard bound on work per graph, whatever
-/// its size. Sampling can miss rare vocabulary; the retrieval loop still
-/// recovers via its normal feedback rounds.
-const VOCAB_CLASS_SCAN_ROWS: usize = 2000;
-const VOCAB_PRED_SCAN_ROWS: usize = 4000;
+const VOCAB_GRAPH_LIMIT: usize = 12;
+const VOCAB_CLASS_LIMIT: usize = 8;
+const VOCAB_PRED_LIMIT: usize = 20;
 /// How long a sampled summary stays fresh. Vocabulary changes rarely; five
 /// minutes keeps chat turns from re-scanning while still tracking imports.
 const VOCAB_TTL: Duration = Duration::from_secs(300);
@@ -1785,17 +1996,27 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String]) -> String {
 /// Sample one graph's vocabulary into a summary block, or `None` when the graph
 /// yields nothing usable (empty, or unreadable).
 fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
+    // Frequency-ordered on purpose. The first cut took the first-N DISTINCT
+    // IRIs in storage order — arbitrary — and on a graph with more predicates
+    // than the cap it dropped exactly the ones questions hinge on (the BAG
+    // graph's `oorspronkelijkbouwjaar` construction year lost its slot to
+    // one-off provenance triples; the model then guessed a wall-area predicate
+    // for "oldest building" and every query returned nothing). Ordering by
+    // count puts the graph's real data model first and pushes one-off metadata
+    // (dct:license on a root node) to the tail, which the cap then trims. The
+    // GROUP BY runs against the in-memory mirror and is guarded by the
+    // sampling time budget; results cache for VOCAB_TTL as before.
     let classes = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} LIMIT {VOCAB_CLASS_SCAN_ROWS}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_CLASS_LIMIT}"
         ),
         VOCAB_CLASS_LIMIT,
     );
     let predicates = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} LIMIT {VOCAB_PRED_SCAN_ROWS}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_PRED_LIMIT}"
         ),
         VOCAB_PRED_LIMIT,
     );

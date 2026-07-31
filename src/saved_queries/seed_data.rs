@@ -567,16 +567,17 @@ static DATASETS: &[DatasetSpec] = &[
     DatasetSpec {
         slug: "viewer-3d-demo",
         name: "3D, Map & BIM Demo",
-        description: "Real linked building data for the map and 3D viewers. Four real, openly \
-                      licensed IFC models — the Schependomlaan housing project (Nijmegen, the \
-                      canonical open Dutch BIM dataset, CC BY 4.0), the KIT FZK-Haus, the KIT \
-                      Smiley West student housing (Karlsruhe) and the buildingSMART Duplex \
-                      Apartment — are downloaded on first boot, stored as downloadable assets and \
-                      transformed to linked data (BOT topology, property sets and a full ifcOWL \
-                      lift), so storeys, spaces, walls and beams are individually selectable; each \
-                      stands at its real-world site from the file's own IfcSite georeference \
-                      (KIT Campus North, Karlsruhe, Chicago) or, for Schependomlaan, its actual \
-                      street in Nijmegen. \
+        description: "Real linked building data for the map and 3D viewers. Four real IFC \
+                      models with redistribution-clean terms — the Esplanades project (the \
+                      Maleva 18 seniors' home in Tallinn, CC BY 4.0 by Esplan via buildingSMART's \
+                      community samples), the KIT FZK-Haus and Smiley West (KIT unrestricted-use \
+                      terms) and the buildingSMART Duplex Apartment (CC BY 4.0) — are downloaded \
+                      on first boot, stored as downloadable assets and transformed to linked data \
+                      (BOT topology, property sets and a full ifcOWL lift), so storeys, spaces, \
+                      walls and beams are individually selectable; each stands at its real-world \
+                      site from the file's own IfcSite georeference (KIT Campus North, Karlsruhe, \
+                      the Duplex's nominal Chicago site) or, for Esplanades, an authored anchor \
+                      on the real Maleva 18 footprint. \
                       The real city block around the Schependomlaan site comes from 3DBAG (LoD2.2 \
                       CityJSON, © 3DBAG by tudelft3d and 3DGI, CC BY 4.0): every one of its ~77 \
                       buildings is a live BAG pand carrying its registry attributes (year built, \

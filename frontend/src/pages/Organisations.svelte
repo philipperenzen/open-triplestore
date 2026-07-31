@@ -1,8 +1,8 @@
 <script>
   import { onMount } from 'svelte';
-  import { listOrganisations, createOrganisation, deleteOrganisation, isLoggedIn } from '../lib/api.js';
-  import { isAdmin } from '../lib/stores.js';
-  import { Link } from '../lib/router/index.js';
+  import { listOrganisations, createOrganisation, deleteOrganisation } from '../lib/api.js';
+  import { isAdmin, isAuthenticated } from '../lib/stores.js';
+  import { Link, navigate } from '../lib/router/index.js';
   import { t } from 'svelte-i18n';
   import { Plus, Trash2, X, Search, Building2, Info, ChevronDown, Users } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -11,6 +11,9 @@
   import PageHeader from '../components/PageHeader.svelte';
 
   let orgs = [];
+  // True only until the FIRST list load resolves — never assert "0 organisations"
+  // before the fetch has answered (same rule as the Datasets page).
+  let loading = true;
   let search = '';
   let showInfo = false;
   let error = '';
@@ -31,6 +34,8 @@
       orgs = await listOrganisations();
     } catch (e) {
       error = e.message;
+    } finally {
+      loading = false;
     }
   }
 
@@ -98,9 +103,12 @@
   async function bulkDeleteOrgs() {
     bulkDeleting = true;
     const toDelete = [...selected];
+    const failed = [];
     for (const id of toDelete) {
-      try { await deleteOrganisation(id); } catch {}
+      try { await deleteOrganisation(id); }
+      catch { failed.push(orgs.find(o => o.id === id)?.name || id); }
     }
+    if (failed.length) error = $t('pages.organisations.bulkDeleteFailed', { values: { names: failed.join(', ') } });
     confirmBulkDelete = false;
     bulkDeleting = false;
     clearSelection();
@@ -117,7 +125,7 @@
   <PageHeader
     icon={Building2}
     title={$t('pages.organisations.title')}
-    count="{orgs.length} {orgs.length === 1 ? $t('pages.organisations.orgSingular') : $t('pages.organisations.orgPlural')}"
+    count={loading ? null : `${orgs.length} ${orgs.length === 1 ? $t('pages.organisations.orgSingular') : $t('pages.organisations.orgPlural')}`}
   >
     <div slot="actions">
       <button class="info-btn" on:click={() => showInfo = !showInfo} aria-expanded={showInfo}>
@@ -125,7 +133,7 @@
         {$t('pages.organisations.about')}
         <ChevronDown size={13} class="transition-transform {showInfo ? 'rotate-180' : ''}" />
       </button>
-      {#if isLoggedIn()}
+      {#if $isAuthenticated}
         <button class="btn" on:click={() => showCreate = true}>
           <Plus size={14} /> {$t('pages.organisations.newOrg')}
         </button>
@@ -169,14 +177,14 @@
         <button class="filter-clear" on:click={() => search = ''} aria-label={$t('system.clear')}><X size={12} /></button>
       {/if}
     </div>
-    <span class="filter-count">{$t('pages.organisations.filterCount', { values: { shown: filtered.length, total: orgs.length } })}</span>
+    {#if !loading}<span class="filter-count">{$t('pages.organisations.filterCount', { values: { shown: filtered.length, total: orgs.length } })}</span>{/if}
   </div>
 
   <div class="card overflow-x-auto">
   <table>
     <thead>
       <tr>
-        {#if isLoggedIn()}
+        {#if $isAdmin}
         <th class="th-check">
           <input
             type="checkbox"
@@ -195,8 +203,12 @@
     <tbody>
       {#each filtered as org}
         {@const isSelected = selected.has(org.id)}
-        <tr class:row-selected={isSelected}>
-          {#if isLoggedIn()}
+        <tr
+          class="org-row"
+          class:row-selected={isSelected}
+          on:click={(e) => { if (!e.target.closest('button') && !e.target.closest('a') && !e.target.closest('input[type="checkbox"]')) navigate(`/organisations/${org.id}`); }}
+        >
+          {#if $isAdmin}
           <td class="td-check" on:click|stopPropagation>
             <input
               type="checkbox"
@@ -221,8 +233,12 @@
           </td>
         </tr>
       {/each}
-      {#if filtered.length === 0}
-        <tr><td colspan={isLoggedIn() ? 4 : 3}>{orgs.length === 0 ? $t('pages.organisations.noOrgs') : $t('pages.organisations.noMatch')}</td></tr>
+      {#if loading}
+        {#each Array(4) as _}
+          <tr><td colspan={$isAdmin ? 4 : 3}><span class="skel" style="display:block;height:1.1rem;border-radius:6px;"></span></td></tr>
+        {/each}
+      {:else if filtered.length === 0}
+        <tr><td colspan={$isAdmin ? 4 : 3}>{orgs.length === 0 ? $t('pages.organisations.noOrgs') : $t('pages.organisations.noMatch')}</td></tr>
       {/if}
     </tbody>
   </table>
@@ -404,6 +420,8 @@
     accent-color: var(--brand-500, #0d9488);
   }
   .row-selected { background: #f0fdfa !important; }
+
+  .org-row { cursor: pointer; }
 
   /* Actions cell */
   .td-actions {

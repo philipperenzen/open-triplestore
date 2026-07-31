@@ -47,10 +47,37 @@ impl RecommendCategory {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RecommendTermInput")]
 pub struct RecommendTerm {
     pub term: String,
-    #[serde(default)]
     pub category: RecommendCategory,
+}
+
+/// Wire form of a request term: either the full object or, for the common
+/// case, just the search string — `{"terms": ["bridge", "deck height"]}` reads
+/// the way people naturally write it, instead of 422-ing them into
+/// `{"terms": [{"term": "bridge"}]}`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RecommendTermInput {
+    Plain(String),
+    Full {
+        term: String,
+        #[serde(default)]
+        category: RecommendCategory,
+    },
+}
+
+impl From<RecommendTermInput> for RecommendTerm {
+    fn from(input: RecommendTermInput) -> Self {
+        match input {
+            RecommendTermInput::Plain(term) => RecommendTerm {
+                term,
+                category: RecommendCategory::default(),
+            },
+            RecommendTermInput::Full { term, category } => RecommendTerm { term, category },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

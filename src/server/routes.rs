@@ -4725,11 +4725,12 @@ pub const ASSET_MAX_BYTES: usize = 50 * 1024 * 1024;
 
 /// POST /api/datasets/:dataset_id/assets — upload an asset
 pub async fn upload_asset(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -4885,6 +4886,14 @@ pub async fn upload_asset(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // New uploads inherit the dataset's visibility (matching bulk import):
+        // a file added to a public dataset is expected to work for anonymous
+        // visitors — e.g. as a 3D model reference — without a manual per-asset
+        // toggle. The visibility route still lets managers opt one out.
+        let default_public = {
+            use crate::auth::models::Visibility;
+            dataset.visibility == Visibility::Public
+        };
         let asset = state
             .auth_db
             .create_asset(
@@ -4895,7 +4904,7 @@ pub async fn upload_asset(
                 &s3_key,
                 size,
                 &current_user.user_id,
-                false,
+                default_public,
                 &folder,
             )
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4931,6 +4940,7 @@ pub async fn upload_asset(
                 &iri,
                 png,
                 &current_user.user_id,
+                asset.public,
             )
             .await
             {
@@ -4953,6 +4963,7 @@ async fn store_thumbnail(
     parent_iri: &str,
     png: Vec<u8>,
     user_id: &str,
+    public: bool,
 ) -> Result<(), String> {
     let thumb_id = uuid::Uuid::new_v4().to_string();
     let filename = format!("{}-thumb.png", parent_id);
@@ -4973,7 +4984,9 @@ async fn store_thumbnail(
             &s3_key,
             size,
             user_id,
-            false,
+            public,
+            // Thumbnails are derived siblings, never browsable rows of their own:
+            // they stay at the root and the file browser hides them.
             "",
         )
         .map_err(|e| e.to_string())?;
@@ -5021,6 +5034,10 @@ pub async fn list_assets(
         return Err((StatusCode::NOT_FOUND, "Dataset not found".to_string()));
     }
 
+    // Asset.public gates anonymity, not membership: logged-out callers (only
+    // reachable here on a public dataset) see the public files; any
+    // authenticated caller with dataset access sees them all.
+    let anonymous = user_id.is_none();
     let assets = state
         .auth_db
         .list_dataset_assets(&dataset_id)
@@ -5029,6 +5046,7 @@ pub async fn list_assets(
     let base_url = state.base_url.clone();
     let response: Vec<AssetResponse> = assets
         .into_iter()
+        .filter(|asset| !anonymous || asset.public)
         .map(|asset| {
             let iri = asset_iri(&base_url, &dataset_id, &asset.id);
             AssetResponse { asset, iri }
@@ -5039,11 +5057,12 @@ pub async fn list_assets(
 
 /// GET /api/datasets/:dataset_id/assets/:asset_id — download an asset
 pub async fn download_asset(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, String)> {
+    let current_user = crate::auth::handlers::require_user(user)?;
     serve_asset(
         &state,
         Some(&current_user.user_id),
@@ -5120,6 +5139,16 @@ async fn serve_asset(
         ));
     }
 
+    // Asset.public gates anonymity (a public dataset grants anonymous callers a
+    // Viewer role, so the dataset check above cannot express "this file needs a
+    // login"). Same rule as asset_metadata / linked_data_asset.
+    if user_id.is_none() && !asset.public {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        ));
+    }
+
     // Conditional request: asset bytes are immutable per id (a re-upload mints a
     // new id + s3_key), so a matching ETag can answer 304 without touching the
     // object store. This is what stops the viewer re-downloading a 50 MB IFC on
@@ -5192,10 +5221,11 @@ async fn serve_asset(
 
 /// DELETE /api/datasets/:dataset_id/assets/:asset_id — delete an asset
 pub async fn delete_asset(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -5259,11 +5289,12 @@ pub async fn delete_asset(
 
 /// PATCH /api/datasets/:dataset_id/assets/:asset_id — update asset metadata (title, description)
 pub async fn patch_asset_metadata(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -5386,11 +5417,12 @@ pub async fn patch_asset_metadata(
 
 /// PUT /api/datasets/:dataset_id/assets/:asset_id/visibility — set asset public/private
 pub async fn update_asset_visibility(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path((dataset_id, asset_id)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -5485,12 +5517,18 @@ pub async fn asset_metadata(
     use crate::auth::models::Visibility;
     let publicly_available = asset.public && dataset.visibility == Visibility::Public;
     if !publicly_available {
+        // A public dataset grants anonymous callers a Viewer role, so the
+        // dataset check alone would let logged-out callers through — the
+        // non-public asset must additionally see a real login.
         let user_id = user.as_ref().map(|u| u.0.user_id.as_str());
-        if !state
-            .auth_db
-            .can_access_dataset(user_id, &dataset)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
+        let authorised = match user_id {
+            None => false,
+            Some(_) => state
+                .auth_db
+                .can_access_dataset(user_id, &dataset)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        };
+        if !authorised {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Authentication required".to_string(),
@@ -5705,11 +5743,14 @@ pub async fn list_asset_folders(
 
 /// POST /api/datasets/:dataset_id/folders — create an (empty) folder.
 pub async fn create_asset_folder(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // optional_auth on the router (public datasets list anonymously) — a
+    // mutation must still demand a session before the write-access check.
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -5746,11 +5787,14 @@ pub async fn create_asset_folder(
 /// (`{"from": "docs", "to": "archive/docs"}`). Every asset under `from` moves
 /// with it, and each moved asset's RDF folder literal is rewritten.
 pub async fn rename_asset_folder(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // optional_auth on the router (public datasets list anonymously) — a
+    // mutation must still demand a session before the write-access check.
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -5825,11 +5869,14 @@ pub async fn rename_asset_folder(
 /// 409 unless `recursive=true`, which deletes the contained assets too (object
 /// store, database rows and RDF).
 pub async fn delete_asset_folder(
-    Extension(current_user): Extension<AuthenticatedUser>,
+    user: Option<Extension<AuthenticatedUser>>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // optional_auth on the router (public datasets list anonymously) — a
+    // mutation must still demand a session before the write-access check.
+    let current_user = crate::auth::handlers::require_user(user)?;
     let dataset = state
         .auth_db
         .get_dataset(&dataset_id)
@@ -5939,17 +5986,22 @@ pub async fn linked_data_asset(
         ));
     }
 
-    // Access control: public assets on public datasets need no auth.
-    // All other cases require the caller to be able to access the dataset.
+    // Access control: public assets on public datasets need no auth. All other
+    // cases require a LOGGED-IN caller who can access the dataset (a public
+    // dataset grants anonymous callers a Viewer role, so the dataset check
+    // alone cannot express "this file needs a login").
     use crate::auth::models::Visibility;
     let publicly_available = asset.public && dataset.visibility == Visibility::Public;
     if !publicly_available {
         let user_id = user.as_ref().map(|u| u.0.user_id.as_str());
-        if !state
-            .auth_db
-            .can_access_dataset(user_id, &dataset)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        {
+        let authorised = match user_id {
+            None => false,
+            Some(_) => state
+                .auth_db
+                .can_access_dataset(user_id, &dataset)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        };
+        if !authorised {
             return Err((
                 StatusCode::UNAUTHORIZED,
                 "Authentication required".to_string(),
@@ -7815,11 +7867,25 @@ pub async fn viewer_feed(
         q.located.as_deref().map(str::trim),
         Some("true" | "1" | "yes" | "on")
     );
-    let elements = crate::geo::viewer_feed::build_viewer_feed_opts(
+    let mut elements = crate::geo::viewer_feed::build_viewer_feed_opts(
         &state.store,
         &data_graphs,
         q.root.as_deref(),
         located,
+    );
+    // Hand the browser origin-relative URLs for models this deployment serves
+    // itself, so they resolve against the host the user actually opened — a
+    // LAN IP, a reverse-proxy hostname — and not the origin baked in at seed
+    // time (which is `localhost` on a default install, and therefore dead for
+    // every device except this one).
+    crate::geo::viewer_feed::relativise_self_urls(&mut elements, &state.base_url);
+    // Administrative place path (country → region → city) for the viewer's
+    // "Group by location" lens, inferred from the RDF only.
+    crate::geo::viewer_feed::resolve_places(
+        &state.store,
+        &data_graphs,
+        &mut elements,
+        &state.base_url,
     );
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,

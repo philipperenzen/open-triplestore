@@ -283,6 +283,7 @@
           {/if}
           <td>
             <Link to={`/datasets/${ds.id}`} class="ds-name-link">{ds.name}</Link>
+            {#if ds.description}<span class="ds-desc-line" title={ds.description}>{ds.description}</span>{/if}
           </td>
           <td class="col-role">
             {#if datasetRoles(ds).filter(r => ROLE_LABELS[r]).length}
@@ -343,7 +344,14 @@
           <tr><td colspan={$isAuthenticated ? 8 : 7}><span class="skel" style="display:block;height:1.1rem;border-radius:6px;"></span></td></tr>
         {/each}
       {:else if filtered.length === 0}
-        <tr><td colspan={$isAuthenticated ? 8 : 7}>{datasets.length === 0 ? $t('pages.datasets.noDatasets') : $t('pages.datasets.noMatch')}</td></tr>
+        <tr><td colspan={$isAuthenticated ? 8 : 7}>
+          {#if datasets.length === 0}
+            {$t('pages.datasets.noDatasets')}
+            {#if $isAuthenticated}
+              <button class="btn btn-sm empty-cta" on:click={() => showCreate = true}><Plus size={13} /> {$t('pages.datasets.emptyCta')}</button>
+            {/if}
+          {:else}{$t('pages.datasets.noMatch')}{/if}
+        </td></tr>
       {/if}
     </tbody>
   </table>
@@ -635,6 +643,11 @@
   .row-selected { background: #f0fdfa !important; }
 
   /* Actions cell */
+  .ds-desc-line {
+    display: block; font-size: 0.75rem; color: var(--ink-500);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch;
+  }
+  .empty-cta { margin-left: 0.6rem; }
   .td-actions {
     white-space: nowrap;
     text-align: right;

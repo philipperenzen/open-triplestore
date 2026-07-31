@@ -89,6 +89,13 @@ async function parse(url: string) {
 
   post({ type: 'progress', phase: 'parse', loaded: 0, total: 0 });
   const modelID = api.OpenModel(buffer, { COORDINATE_TO_ORIGIN: true });
+  // COORDINATE_TO_ORIGIN recentres the model on its first placement — an
+  // arbitrary vertical shift. The coordination matrix records it, so the
+  // IFC's own elevation-0 plane sits at emitted y = m[13]; the page uses it
+  // to stand the building on its real ground line instead of on the bottom
+  // of its foundations (which floats the ground floor by the basement depth).
+  const coord = api.GetCoordinationMatrix(modelID);
+  const groundY = Array.isArray(coord) && Number.isFinite(coord[13]) ? coord[13] : null;
   try {
     const guids = new Set<string>();
     const guidByExpress = new Map<number, string>();
@@ -235,7 +242,7 @@ async function parse(url: string) {
         if (bvh.index) transfer.add(bvh.index.buffer); // usually === idx.buffer (deduped by the Set)
       }
     }
-    post({ type: 'done', buckets: outBuckets, guids: [...guids] }, [...transfer]);
+    post({ type: 'done', buckets: outBuckets, guids: [...guids], groundY }, [...transfer]);
   } finally {
     api.CloseModel(modelID);
   }

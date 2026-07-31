@@ -7,9 +7,17 @@
 # viewer feed's reprojection onto the map. These exercise the GeoSPARQL geof:
 # relation/measurement functions (sfWithin, distance, …) and the 2D map layers.
 #
-# Coordinates are plausible real-world positions near the Schependomlaan block
-# (≈ 5.834 E, 51.841 N); the LINESTRING traces the street, the POLYGON a small
-# park parcel beside it.
+# Coordinates are REAL, traced from OpenStreetMap (© OpenStreetMap contributors,
+# ODbL — the same source as the viewer's basemap): the LINESTRING follows the
+# actual Schependomlaan carriageway, the POINT sits on it, and the POLYGON is
+# the Distelpark green space immediately south of the block.
+#
+# They used to be hand-authored round numbers "near" the site — an axis-aligned
+# lat/lon rectangle for the parcel and a dead-straight three-point line ~60 m
+# south of the real street at the wrong bearing (62° against the street's real
+# 68-84°). On satellite imagery that read as a box dropped on woodland and a road
+# crossing back gardens, which is exactly what a demo of GeoSPARQL geometry must
+# not look like.
 
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
@@ -18,21 +26,27 @@
 
 # ── A point of interest: the Schependomlaan street centroid ──
 gf:SchependomlaanPoint a geo:Feature ;
+    dcterms:source <https://www.openstreetmap.org/> ;
+    dcterms:license <https://opendatacommons.org/licenses/odbl/1-0/> ;
     rdfs:label "Schependomlaan (street centroid)"@en ;
     dcterms:type "point-of-interest" ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POINT(5.83373 51.84114)"^^geo:wktLiteral ] .
+        geo:asWKT "POINT(5.8366 51.84176)"^^geo:wktLiteral ] .
 
 # ── A linear feature: the Schependomlaan street alignment ──
 gf:SchependomlaanRoad a geo:Feature ;
+    dcterms:source <https://www.openstreetmap.org/> ;
+    dcterms:license <https://opendatacommons.org/licenses/odbl/1-0/> ;
     rdfs:label "Schependomlaan (alignment)"@en ;
     dcterms:type "road-centreline" ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "LINESTRING(5.83210 51.84060, 5.83373 51.84114, 5.83540 51.84168)"^^geo:wktLiteral ] .
+        geo:asWKT "LINESTRING(5.8326 51.84101, 5.8341 51.84121, 5.8366 51.84176, 5.83827 51.84224)"^^geo:wktLiteral ] .
 
 # ── An areal feature: a small park parcel beside the block ──
 gf:KwakkenbergPark a geo:Feature ;
-    rdfs:label "Park parcel (Schependomlaan)"@en ;
+    rdfs:label "Distelpark (Schependomlaan)"@en ;
+    dcterms:source <https://www.openstreetmap.org/> ;
+    dcterms:license <https://opendatacommons.org/licenses/odbl/1-0/> ;
     dcterms:type "green-space" ;
     geo:hasGeometry [ a geo:Geometry ;
-        geo:asWKT "POLYGON((5.83420 51.84150, 5.83520 51.84150, 5.83520 51.84200, 5.83420 51.84200, 5.83420 51.84150))"^^geo:wktLiteral ] .
+        geo:asWKT "POLYGON((5.83533 51.84044, 5.83655 51.8394, 5.83664 51.83934, 5.83734 51.8397, 5.83666 51.84023, 5.83608 51.8408, 5.83554 51.84143, 5.83449 51.84125, 5.83444 51.84123, 5.83443 51.84121, 5.83441 51.84118, 5.83533 51.84044))"^^geo:wktLiteral ] .

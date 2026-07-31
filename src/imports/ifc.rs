@@ -31,6 +31,13 @@ pub struct IfcImportBranding {
     pub source: Option<String>,
     pub license: Option<String>,
     pub attribution: Option<String>,
+    /// AUTHORED compass bearing (degrees clockwise from true north) the model's
+    /// +X axis should point along on the map — `ots:modelHeading` on every
+    /// element file-link. Authored per import, never derived from the file's
+    /// TrueNorth (see the note in src/ifc/rdf.rs: web-ifc already resolves
+    /// placements, so TrueNorth double-rotates). `None` keeps the viewer's
+    /// default of +X due east.
+    pub heading: Option<f64>,
 }
 
 /// Import one IFC file into `dataset_id`: persist the bytes as an asset (so
@@ -123,6 +130,7 @@ pub async fn import_ifc_bytes(
         provenance_source: branding.source,
         license: branding.license,
         attribution: branding.attribution,
+        model_heading: branding.heading,
     };
     let bot_graph_c = bot_graph.clone();
     let ifcowl_graph_c = ifcowl_graph.clone();
