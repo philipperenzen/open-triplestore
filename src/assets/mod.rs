@@ -137,6 +137,54 @@ pub fn sanitize_filename(filename: &str) -> String {
     }
 }
 
+/// Maximum folder nesting depth and per-segment/total length for asset folders.
+pub const FOLDER_MAX_DEPTH: usize = 10;
+pub const FOLDER_MAX_SEGMENT: usize = 100;
+pub const FOLDER_MAX_TOTAL: usize = 512;
+
+/// Normalize + validate a user-supplied folder path for the asset file manager.
+///
+/// Accepts `/` or `\` separators, trims empty segments (so `"a//b/"` → `"a/b"`),
+/// and returns the canonical `/`-joined relative path — `Ok("")` means the root.
+/// Rejects (rather than silently rewriting) anything that smells like traversal
+/// or hidden-file tricks: `.`/`..` segments, segments starting with a dot,
+/// control characters, and over-long/deep paths. The returned path is safe to
+/// store verbatim and to prefix-match with `folder LIKE path || '/%'`.
+pub fn sanitize_folder_path(path: &str) -> Result<String, String> {
+    let mut segments: Vec<String> = Vec::new();
+    for raw in path.split(['/', '\\']) {
+        let seg = raw.trim();
+        if seg.is_empty() {
+            continue; // collapse duplicate/leading/trailing separators
+        }
+        if seg == "." || seg == ".." {
+            return Err("folder segments may not be '.' or '..'".to_string());
+        }
+        if seg.starts_with('.') {
+            return Err("folder segments may not start with '.'".to_string());
+        }
+        if seg.chars().any(|c| c.is_control() || c == '\0') {
+            return Err("folder segments may not contain control characters".to_string());
+        }
+        if seg.chars().count() > FOLDER_MAX_SEGMENT {
+            return Err(format!(
+                "folder segment exceeds {FOLDER_MAX_SEGMENT} characters"
+            ));
+        }
+        segments.push(seg.to_string());
+    }
+    if segments.len() > FOLDER_MAX_DEPTH {
+        return Err(format!(
+            "folders may be at most {FOLDER_MAX_DEPTH} levels deep"
+        ));
+    }
+    let joined = segments.join("/");
+    if joined.chars().count() > FOLDER_MAX_TOTAL {
+        return Err(format!("folder path exceeds {FOLDER_MAX_TOTAL} characters"));
+    }
+    Ok(joined)
+}
+
 fn extension(filename: &str) -> String {
     filename
         .rsplit('.')
@@ -517,5 +565,54 @@ mod tests {
             "bridge-survey_2026.las"
         );
         assert_eq!(sanitize_filename("café.jpg"), "café.jpg");
+    }
+
+    // ── security + normalization: folder paths ─────────────────────────────────
+    #[test]
+    fn folder_path_normalizes_separators_and_blanks() {
+        assert_eq!(sanitize_folder_path("").unwrap(), "");
+        assert_eq!(sanitize_folder_path("/").unwrap(), "");
+        assert_eq!(sanitize_folder_path("docs").unwrap(), "docs");
+        assert_eq!(
+            sanitize_folder_path("/docs/reports/").unwrap(),
+            "docs/reports"
+        );
+        assert_eq!(
+            sanitize_folder_path("docs//reports").unwrap(),
+            "docs/reports"
+        );
+        assert_eq!(
+            sanitize_folder_path("docs\\reports").unwrap(),
+            "docs/reports"
+        );
+        assert_eq!(
+            sanitize_folder_path(" docs / reports ").unwrap(),
+            "docs/reports"
+        );
+        assert_eq!(
+            sanitize_folder_path("café/3d modellen").unwrap(),
+            "café/3d modellen"
+        );
+    }
+
+    #[test]
+    fn folder_path_rejects_traversal_and_hidden() {
+        assert!(sanitize_folder_path("..").is_err());
+        assert!(sanitize_folder_path("a/../b").is_err());
+        assert!(sanitize_folder_path("a/./b").is_err());
+        assert!(sanitize_folder_path(".hidden").is_err());
+        assert!(sanitize_folder_path("a/.thumbnails").is_err());
+        assert!(sanitize_folder_path("a\u{0}b").is_err());
+        assert!(sanitize_folder_path("a\nb").is_err());
+    }
+
+    #[test]
+    fn folder_path_enforces_limits() {
+        let deep = ["d"; FOLDER_MAX_DEPTH + 1].join("/");
+        assert!(sanitize_folder_path(&deep).is_err());
+        let ok_depth = ["d"; FOLDER_MAX_DEPTH].join("/");
+        assert!(sanitize_folder_path(&ok_depth).is_ok());
+        let long_seg = "x".repeat(FOLDER_MAX_SEGMENT + 1);
+        assert!(sanitize_folder_path(&long_seg).is_err());
     }
 }

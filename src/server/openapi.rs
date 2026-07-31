@@ -1842,11 +1842,73 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Assets",
                     "Upload asset",
-                    "Upload a file asset (multipart/form-data).",
+                    "Upload a file asset (multipart/form-data). An optional `folder` text part places the file in a file-manager folder (e.g. \"docs/reports\").",
                     vec![],
                     vec![
                         ("201", "Created asset with IRI"),
                         ("401", "Authentication required"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/folders",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Assets",
+                    "List folders",
+                    "Every file-manager folder of the dataset (explicit and implied by asset paths), with per-folder direct file counts and sizes.",
+                    vec![],
+                    vec![("200", "Folder list"), ("404", "Dataset not found")],
+                    false,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Assets",
+                    "Create folder",
+                    "Create an (empty) file-manager folder: {\"path\": \"docs/reports\"}.",
+                    vec![],
+                    vec![
+                        ("201", "Created"),
+                        ("400", "Invalid folder path"),
+                        ("401", "Authentication required"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Patch,
+                o(
+                    "Assets",
+                    "Rename or move folder",
+                    "Rename/move a folder subtree and everything in it: {\"from\": \"docs\", \"to\": \"archive/docs\"}.",
+                    vec![],
+                    vec![
+                        ("200", "Moved, with affected asset count"),
+                        ("400", "Invalid folder path"),
+                        ("401", "Authentication required"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Assets",
+                    "Delete folder",
+                    "Delete a folder (`?path=…`). Refuses with 409 when it still contains files unless `recursive=true`, which also deletes the contained assets.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("401", "Authentication required"),
+                        ("409", "Folder not empty"),
                     ],
                     true,
                 ),
@@ -1873,7 +1935,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Assets",
                     "Update asset metadata",
-                    "Edit an asset's metadata (title, description, media type).",
+                    "Edit an asset's metadata (title, description), rename it (filename) and/or move it to another file-manager folder (folder; null or \"\" = root). Absent keys keep their stored value.",
                     vec![],
                     vec![("200", "Updated asset"), ("401", "Authentication required")],
                     true,

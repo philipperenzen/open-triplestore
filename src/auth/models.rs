@@ -961,6 +961,10 @@ pub struct Asset {
     pub description: Option<String>,
     /// Whether this asset is publicly accessible without authentication (only effective when dataset is also public).
     pub public: bool,
+    /// Folder path within the dataset's file manager, `/`-separated and
+    /// normalized (no leading/trailing slash); empty string = root.
+    #[serde(default)]
+    pub folder: String,
 }
 
 #[cfg(test)]

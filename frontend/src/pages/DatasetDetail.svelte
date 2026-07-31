@@ -23,11 +23,6 @@
     setDatasetBannerPreset,
     clearDatasetBanner,
     getDatasetBannerUrl,
-    listAssets,
-    uploadAsset,
-    deleteAsset,
-    updateAssetVisibility,
-    updateAssetMetadata,
     uploadToGraph,
     listServiceGraphs,
     addServiceGraph,
@@ -50,8 +45,7 @@
   } from '../lib/api.js';
   import { unwrapValidationRun, validationErrorMessage } from '../lib/validationReport.js';
   import { toastSuccess } from '../lib/toast.ts';
-  import { compactNumber, formatBytes } from '../lib/format.ts';
-  import { assetBadge } from '../lib/assetBadge.ts';
+  import { compactNumber } from '../lib/format.ts';
   import { RESOURCE_ROLES, RESOURCE_ROLE_RANK } from '../lib/permissions.js';
   import { t as i18nT } from 'svelte-i18n';
   import { Link, navigate } from '../lib/router/index.js';
@@ -65,12 +59,13 @@
   // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, MoreHorizontal, CloudOff } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, Link as LinkIcon, Globe, Lock, Database, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, Maximize2 } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
   import Avatar from '../components/Avatar.svelte';
-  import AssetPreview from '../components/AssetPreview.svelte';
+  import FileBrowser from '../components/files/FileBrowser.svelte';
+  import FileBrowserModal from '../components/files/FileBrowserModal.svelte';
   import ContentKindWarning from '../components/ContentKindWarning.svelte';
   import DatasetContentSummary from '../components/DatasetContentSummary.svelte';
   import DatasetMetadataDialog from '../components/DatasetMetadataDialog.svelte';
@@ -193,38 +188,6 @@
 
   // ── SHACL validation modal ─────────────────────────────────────────────────
   let showValidationModal = false;
-
-  // ── Asset edit modal ───────────────────────────────────────────────────────
-  let editingAsset = null; // the asset being edited
-  let assetEditTitle = '';
-  let assetEditDesc = '';
-  let assetEditSaving = false;
-  let assetEditError = '';
-
-  function openAssetEdit(asset) {
-    editingAsset = asset;
-    assetEditTitle = asset.title || '';
-    assetEditDesc = asset.description || '';
-    assetEditError = '';
-  }
-
-  async function saveAssetMetadata() {
-    if (!editingAsset) return;
-    assetEditSaving = true;
-    assetEditError = '';
-    try {
-      const updated = await updateAssetMetadata(id, editingAsset.id, {
-        title: assetEditTitle || null,
-        description: assetEditDesc || null,
-      });
-      assets = assets.map(a => a.id === updated.asset.id ? { ...updated.asset, iri: updated.iri } : a);
-      editingAsset = null;
-    } catch (e) {
-      assetEditError = e.message || $i18nT('pages.datasetDetail.failedToSave');
-    } finally {
-      assetEditSaving = false;
-    }
-  }
 
   // Dataset metadata editing — handled by DatasetMetadataDialog
   let metadataDialogOpen = false;
@@ -717,79 +680,14 @@
     }
   }
 
-  // Assets state — a real state machine instead of a swallowed fetch, so the
-  // Files section can tell "empty" from "sign in" from "failed" honestly.
+  // Files: the FileBrowser owns loading and mutation; the page keeps only what
+  // the KPI pill shows, refreshed from the browser's `changed` event.
   let assets = [];
   let assetsState = 'loading'; // 'loading' | 'ready' | 'auth' | 'error'
-  let uploading = false;
-  let uploadProgress = 0;
-  let assetsError = ''; // mutation feedback (upload/delete/visibility) only
-  let copiedAssetId = null;
-  let previewAsset = null; // asset being previewed
-
-  // Newest first; sizes summed for the section subtitle.
-  $: assetsSorted = [...assets].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-  $: filesTotalBytes = assets.reduce((s, a) => s + (a.size_bytes || 0), 0);
-
-  // Per-asset context menu (copy IRI / Turtle / edit / delete collapse here so
-  // each row keeps three visible controls).
-  let assetMenuVisible = false;
-  let assetMenuX = 0, assetMenuY = 0;
-  let assetMenuAsset = null;
-  function openAssetMenu(e, asset) {
-    const r = e.currentTarget.getBoundingClientRect();
-    assetMenuAsset = asset;
-    assetMenuX = r.right;
-    assetMenuY = r.bottom + 4;
-    assetMenuVisible = true;
-  }
-  $: assetMenuItems = assetMenuAsset
-    ? [
-        { label: $i18nT('pages.datasetDetail.copyLinkedDataIri'), icon: LinkIcon, action: 'copyIri' },
-        { label: $i18nT('pages.datasetDetail.copyTurtleDescription'), icon: Clipboard, action: 'copyTurtle' },
-        ...(canWrite
-          ? [
-              { divider: true },
-              { label: $i18nT('pages.datasetDetail.editMetadata'), icon: Pencil, action: 'edit' },
-              { label: $i18nT('pages.datasetDetail.deleteAsset'), icon: Trash2, action: 'delete', danger: true },
-            ]
-          : []),
-      ]
-    : [];
-  function onAssetMenuAction(e) {
-    const asset = assetMenuAsset;
-    assetMenuVisible = false;
-    if (!asset) return;
-    if (e.detail === 'copyIri') void copyAssetIri(asset);
-    else if (e.detail === 'copyTurtle') copyAssetTurtle(asset);
-    else if (e.detail === 'edit') openAssetEdit(asset);
-    else if (e.detail === 'delete') deleteAssetId = asset.id;
-  }
-
-  // Linked data IRI for an asset — used for copy/turtle, not for fetching file content.
-  function assetIri(asset) {
-    return asset.iri || `${window.location.origin}/datasets/${id}/assets/${asset.id}`;
-  }
-
-  // Plain anchor target for downloads: the optional-auth /download route streams
-  // with ETag caching and works for anonymous visitors — no blob round-trip.
-  function assetDownloadUrl(asset) {
-    return `/api/datasets/${id}/assets/${asset.id}/download`;
-  }
-
-  // Determine preview category from content_type or filename extension.
-  // 3D model files open the same modal, which mounts a real viewer for them.
-  function previewKind(asset) {
-    if (assetBadge(asset.filename).model3dFormat) return 'model3d';
-    const ct = (asset.content_type || '').split(';')[0].trim().toLowerCase();
-    const ext = asset.filename.split('.').pop().toLowerCase();
-    if (ct.startsWith('image/') || ['jpg','jpeg','png','gif','webp','svg','bmp','ico'].includes(ext)) return 'image';
-    if (ct === 'application/pdf' || ext === 'pdf') return 'pdf';
-    if (ct.startsWith('audio/') || ['mp3','ogg','wav','flac','m4a','aac'].includes(ext)) return 'audio';
-    if (ct.startsWith('video/') || ['mp4','webm','ogv','mov','avi'].includes(ext)) return 'video';
-    if (ct === 'text/markdown' || ['md','markdown'].includes(ext)) return 'markdown';
-    if (ct.startsWith('text/') || ['txt','json','yaml','yml','toml','xml','csv','tsv','html','css','js','ts','py','rs','sh','sql'].includes(ext)) return 'text';
-    return null;
+  let filesModalOpen = false;
+  function onFilesChanged(e) {
+    assets = e.detail?.assets || [];
+    assetsState = e.detail?.state || 'ready';
   }
 
   onMount(() => {
@@ -801,7 +699,7 @@
     fetchGeoStats();
     (async () => {
       // fetchAccess depends on the loaded dataset (owner + can_manage), so run it after.
-      await Promise.all([fetchDataset(), fetchGraphs(), fetchServices(), fetchAssets(), fetchVersions()]);
+      await Promise.all([fetchDataset(), fetchGraphs(), fetchServices(), fetchVersions()]);
       await Promise.all([fetchAccess(), loadEffectiveShapes(), loadValidationState()]);
     })();
   });
@@ -1210,102 +1108,6 @@
     }
   }
 
-  async function fetchAssets() {
-    if (assetsState === 'error' || assetsState === 'auth') assetsState = 'loading';
-    try {
-      assets = await listAssets(id);
-      assetsState = 'ready';
-    } catch (e) {
-      assetsState = e?.status === 401 || e?.status === 403 ? 'auth' : 'error';
-    }
-  }
-
-  async function handleFileUpload(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    uploading = true;
-    uploadProgress = 0;
-    assetsError = '';
-    try {
-      const asset = await uploadAsset(id, file, (p) => { uploadProgress = p; });
-      assets = [...assets, asset];
-      assetsError = '';
-    } catch (e) {
-      const msg = e.message || '';
-      if (msg.toLowerCase().includes('service unavailable') || e.status === 503) {
-        assetsError = $i18nT('pages.datasetDetail.fileStorageNotConfigured');
-      } else if (msg.toLowerCase().includes('forbidden') || e.status === 403) {
-        assetsError = $i18nT('pages.datasetDetail.noWriteAccess');
-      } else {
-        assetsError = msg || $i18nT('pages.datasetDetail.uploadFailedDot');
-      }
-    } finally {
-      uploading = false;
-      uploadProgress = 0;
-      event.target.value = '';
-    }
-  }
-
-  let deleteAssetId = null;
-
-  async function doDeleteAsset() {
-    try {
-      await deleteAsset(id, deleteAssetId);
-      assets = assets.filter(a => a.id !== deleteAssetId);
-      assetsError = '';
-      deleteAssetId = null;
-    } catch (e) {
-      const msg = e.message || '';
-      if (msg.toLowerCase().includes('forbidden') || e.status === 403) {
-        assetsError = $i18nT('pages.datasetDetail.noDeleteAssetPermission');
-      } else {
-        assetsError = msg || $i18nT('pages.datasetDetail.failedToDeleteAsset');
-      }
-      deleteAssetId = null;
-    }
-  }
-
-  async function copyAssetIri(asset) {
-    if (await copyToClipboard(assetIri(asset))) {
-      copiedAssetId = asset.id;
-      setTimeout(() => { copiedAssetId = null; }, 2000);
-    }
-  }
-
-  function copyAssetTurtle(asset) {
-    const iri = assetIri(asset);
-    const title = asset.filename.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const turtle = `<${iri}> a <http://www.w3.org/ns/dcat#Distribution> ;\n    <http://purl.org/dc/terms/title> "${title}" ;\n    <http://www.w3.org/ns/dcat#mediaType> "${asset.content_type}" ;\n    <http://www.w3.org/ns/dcat#downloadURL> <${iri}> .`;
-    void copyToClipboard(turtle);
-  }
-
-  async function toggleAssetVisibility(asset) {
-    const makingPublic = !asset.public;
-    // Pre-flight: dataset must be public before an asset can be made public
-    if (makingPublic && dataset?.visibility !== 'public') {
-      const vis = dataset?.visibility === 'private' ? 'private' : 'members-only';
-      assetsError = $i18nT('pages.datasetDetail.cannotMakeAssetPublic', { values: { visibility: vis } });
-      return;
-    }
-    try {
-      await updateAssetVisibility(id, asset.id, makingPublic);
-      assets = assets.map(a => a.id === asset.id ? { ...a, public: makingPublic } : a);
-      assetsError = '';
-    } catch (e) {
-      // Map cryptic HTTP errors to friendly messages
-      const msg = e.message || '';
-      if (msg.toLowerCase().includes('method not allowed') || e.status === 405) {
-        assetsError = $i18nT('pages.datasetDetail.actionNotAllowed');
-      } else if (msg.toLowerCase().includes('forbidden') || e.status === 403) {
-        assetsError = $i18nT('pages.datasetDetail.noVisibilityPermission');
-      } else if (msg.toLowerCase().includes('unauthorized') || e.status === 401) {
-        assetsError = $i18nT('pages.datasetDetail.mustBeLoggedInVisibility');
-      } else {
-        assetsError = msg || $i18nT('pages.datasetDetail.failedToUpdateVisibility');
-      }
-    }
-  }
-
   async function runValidation() {
     validating = true;
     validationError = '';
@@ -1542,7 +1344,7 @@
   </div>
 </div>
 
-<!-- Files: the dataset's downloadable originals (IFC/STL/CityJSON/images/…).
+<!-- Files: the dataset's file manager (documents, images, 3D models, …).
      First-class section — an anonymous visitor on a public dataset sees the
      public files, can download them, and can open 3D models in a viewer. -->
 <div class="card" id="files">
@@ -1550,110 +1352,39 @@
     <div class="section-head-left">
       <FolderOpen size={15} />
       <h3>{$i18nT('pages.datasetDetail.filesTitle')}</h3>
-      {#if assetsState === 'ready' && assets.length}
-        <span class="files-summary">{$i18nT('pages.datasetDetail.filesSummary', { values: { count: assets.length, size: formatBytes(filesTotalBytes) } })}</span>
-      {/if}
     </div>
     <div class="files-head-actions">
-      {#if geoStats?.has_3d && assets.some((a) => assetBadge(a.filename).model3dFormat)}
+      {#if geoStats?.has_3d}
         <Link to="/datasets/{id}/viewer" class="btn btn-sm btn-ghost">
           <Boxes size={13} /> {$i18nT('pages.datasetDetail.open3dViewer')}
         </Link>
       {/if}
-      {#if canWrite}
-      <label class="btn btn-sm" class:btn-loading={uploading}>
-        {#if uploading}<Loader2 size={13} class="animate-spin" />{:else}<Upload size={13} />{/if}
-        {uploading ? $i18nT('pages.datasetDetail.uploading') : $i18nT('pages.datasetDetail.uploadFile')}
-        <input type="file" style="display:none" on:change={handleFileUpload} disabled={uploading} />
-      </label>
-      {/if}
+      <button class="btn btn-sm btn-ghost" on:click={() => filesModalOpen = true} title={$i18nT('pages.datasetDetail.filesExpand')}>
+        <Maximize2 size={13} /> {$i18nT('pages.datasetDetail.filesExpand')}
+      </button>
+      <Link class="btn btn-sm btn-ghost" to={`/files/${id}`} title={$i18nT('pages.datasetDetail.filesOpenPage')}>
+        <FolderOpen size={13} /> {$i18nT('pages.datasetDetail.filesOpenPage')}
+      </Link>
     </div>
   </div>
-
-  {#if uploading && uploadProgress > 0}
-    <div class="progress-bar">
-      <div class="progress-fill" style="width: {uploadProgress * 100}%"></div>
-    </div>
-  {/if}
-
-  {#if assetsError}
-    <div class="assets-error">
-      <span>{assetsError}</span>
-      <button class="btn btn-xs btn-ghost" on:click={() => assetsError = ''}><XIcon size={12} /></button>
-    </div>
-  {/if}
-
-  {#if assetsState === 'loading'}
-    <div class="skel file-skel"></div>
-    <div class="skel file-skel"></div>
-    <div class="skel file-skel"></div>
-  {:else if assetsState === 'auth'}
-    <div class="empty-state">
-      <Lock size={32} />
-      <strong>{$i18nT('pages.datasetDetail.filesSignInTitle')}</strong>
-      <p>{$i18nT('pages.datasetDetail.filesSignInHint')}</p>
-      <Link to="/login" class="btn btn-sm">{$i18nT('nav.signIn')}</Link>
-    </div>
-  {:else if assetsState === 'error'}
-    <div class="empty-state">
-      <CloudOff size={32} />
-      <strong>{$i18nT('pages.datasetDetail.filesErrorTitle')}</strong>
-      <button class="btn btn-sm btn-ghost" on:click={fetchAssets}>{$i18nT('pages.datasetDetail.filesRetry')}</button>
-    </div>
-  {:else if assets.length === 0}
-    <div class="empty-state">
-      <FolderOpen size={32} />
-      <strong>{$i18nT('pages.datasetDetail.filesEmptyTitle')}</strong>
-      <p>{canWrite ? $i18nT('pages.datasetDetail.filesEmptyHint') : $i18nT('pages.datasetDetail.filesEmptyHintReader')}</p>
-    </div>
-  {:else}
-    <ul class="file-list">
-      {#each assetsSorted as asset (asset.id)}
-        {@const badge = assetBadge(asset.filename)}
-        {@const kind = previewKind(asset)}
-        <li class="file-row">
-          <div class="file-badge tone-{badge.tone}" title="{badge.label} · {asset.content_type}">{badge.label}</div>
-          <div class="file-body">
-            <div class="file-title-row">
-              <span class="file-title">{asset.title || asset.filename}</span>
-              {#if !asset.public && !canWrite}
-                <span class="pill file-restricted" title={$i18nT('pages.datasetDetail.assetPrivateToggleTitle')}><Lock size={10} /> {$i18nT('pages.datasetDetail.visRestricted')}</span>
-              {/if}
-            </div>
-            <div class="file-meta">
-              {#if asset.title && asset.title !== asset.filename}<span class="file-filename">{asset.filename}</span>{/if}
-              <span>{formatBytes(asset.size_bytes)}</span>
-              <span>{new Date(asset.created_at).toLocaleDateString()}</span>
-              {#if asset.description}<span class="file-desc">{asset.description}</span>{/if}
-            </div>
-          </div>
-          <div class="file-actions">
-            {#if canWrite}
-              <button
-                class="btn btn-xs visibility-btn"
-                class:vis-public={asset.public}
-                class:vis-private={!asset.public}
-                on:click={() => toggleAssetVisibility(asset)}
-                title={asset.public ? $i18nT('pages.datasetDetail.assetPublicToggleTitle') : $i18nT('pages.datasetDetail.assetPrivateToggleTitle')}
-              >
-                {#if asset.public}<Globe size={11} /> {$i18nT('pages.datasetDetail.public')}{:else}<Lock size={11} /> {$i18nT('pages.datasetDetail.private')}{/if}
-              </button>
-            {/if}
-            {#if kind === 'model3d'}
-              <button class="btn btn-xs btn-ghost" on:click={() => previewAsset = asset} title={$i18nT('pages.datasetDetail.viewIn3d')}><Boxes size={12} /></button>
-            {:else if kind}
-              <button class="btn btn-xs btn-ghost" on:click={() => previewAsset = asset} title={$i18nT('pages.datasetDetail.preview')}><Eye size={12} /></button>
-            {/if}
-            <a class="btn btn-xs btn-ghost" href={assetDownloadUrl(asset)} download={asset.filename} title={$i18nT('pages.datasetDetail.download')}><Download size={12} /></a>
-            <button class="btn btn-xs btn-ghost" on:click={(e) => openAssetMenu(e, asset)} title={$i18nT('pages.datasetDetail.moreActions')}>
-              {#if copiedAssetId === asset.id}<CheckCheck size={12} />{:else}<MoreHorizontal size={12} />{/if}
-            </button>
-          </div>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+  <FileBrowser
+    datasetId={id}
+    {canWrite}
+    compact
+    datasetVisibility={dataset?.visibility}
+    on:changed={onFilesChanged}
+  />
 </div>
+
+{#if filesModalOpen}
+  <FileBrowserModal
+    datasetId={id}
+    datasetName={dataset?.name || ''}
+    {canWrite}
+    datasetVisibility={dataset?.visibility}
+    on:close={() => filesModalOpen = false}
+  />
+{/if}
 
 <!-- Graphs -->
 <div class="card" id="graphs">
@@ -1972,20 +1703,6 @@
 
 <!-- Commit history -->
 <CommitHistory kind="dataset" {id} />
-
-<!-- Asset preview modal -->
-{#if previewAsset}
-  <AssetPreview asset={previewAsset} datasetId={id} on:close={() => previewAsset = null} />
-{/if}
-
-<ContextMenu
-  visible={assetMenuVisible}
-  x={assetMenuX}
-  y={assetMenuY}
-  items={assetMenuItems}
-  on:action={onAssetMenuAction}
-  on:close={() => assetMenuVisible = false}
-/>
 
 <!-- SPARQL Services -->
 <div class="card" id="services">
@@ -2356,16 +2073,6 @@
   />
 {/if}
 
-{#if deleteAssetId !== null}
-  <ConfirmModal
-    title={$i18nT('pages.datasetDetail.deleteAssetConfirmTitle')}
-    message={$i18nT('pages.datasetDetail.cannotBeUndone')}
-    confirmLabel={$i18nT('pages.datasetDetail.deleteAssetConfirm')}
-    on:confirm={doDeleteAsset}
-    on:cancel={() => deleteAssetId = null}
-  />
-{/if}
-
 {#if deleteServiceTarget !== null}
   <ConfirmModal
     title={$i18nT('pages.datasetDetail.deleteServiceConfirmTitle', { values: { name: deleteServiceTarget.name } })}
@@ -2555,45 +2262,6 @@
 {/if}
 
 <!-- Asset edit metadata modal -->
-{#if editingAsset}
-  <div class="modal-backdrop" on:click={() => editingAsset = null} role="presentation" on:keydown={(e) => e.key === 'Escape' && (editingAsset = null)}>
-    <div class="modal-box" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-label={$i18nT('pages.datasetDetail.editAssetMetadataAria')} tabindex="-1">
-      <div class="modal-header">
-        <h3><Pencil size={16} /> {$i18nT('pages.datasetDetail.editAssetMetadata')}</h3>
-        <button class="btn btn-xs btn-ghost" on:click={() => editingAsset = null}><XIcon size={14} /></button>
-      </div>
-      <div class="modal-body">
-        <p class="asset-edit-filename"><FileText size={13} /> {editingAsset.filename} \u00b7 {formatBytes(editingAsset.size_bytes)}</p>
-        {#if assetEditError}<p class="error">{assetEditError}</p>{/if}
-        <div class="form-group">
-          <label for="asset-title">{$i18nT('pages.datasetDetail.displayTitle')} <span class="field-hint">{$i18nT('pages.datasetDetail.displayTitleHint')}</span></label>
-          <input id="asset-title" bind:value={assetEditTitle} placeholder={editingAsset.filename} />
-        </div>
-        <div class="form-group">
-          <label for="asset-desc">{$i18nT('pages.datasets.description')}</label>
-          <textarea id="asset-desc" bind:value={assetEditDesc} placeholder={$i18nT('pages.datasetDetail.assetDescPlaceholder')} rows="3"></textarea>
-        </div>
-        <div class="form-group metadata-readonly-group">
-          <p class="meta-readonly-label">{$i18nT('pages.datasetDetail.linkedDataMetadataAuto')}</p>
-          <div class="meta-readonly-rows">
-            <div class="meta-readonly-row"><span class="meta-key">dct:created</span><code class="meta-val">{editingAsset.created_at}</code></div>
-            {#if editingAsset.updated_at}<div class="meta-readonly-row"><span class="meta-key">dct:modified</span><code class="meta-val">{editingAsset.updated_at}</code></div>{/if}
-            <div class="meta-readonly-row"><span class="meta-key">dcat:mediaType</span><code class="meta-val">{editingAsset.content_type}</code></div>
-            <div class="meta-readonly-row"><span class="meta-key">dcat:byteSize</span><code class="meta-val">{editingAsset.size_bytes}</code></div>
-            <div class="meta-readonly-row"><span class="meta-key">dcat:downloadURL</span><code class="meta-val">{editingAsset.iri || assetIri(editingAsset)}</code></div>
-          </div>
-          <p class="meta-readonly-hint"><Info size={12} /> {$i18nT('pages.datasetDetail.metaReadonlyHint')}</p>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-ghost" on:click={() => editingAsset = null}>{$i18nT('system.cancel')}</button>
-        <button class="btn" on:click={saveAssetMetadata} disabled={assetEditSaving}>
-          {#if assetEditSaving}<Loader2 size={14} class="animate-spin" /> {$i18nT('pages.datasetDetail.saving')}{:else}<Check size={14} /> {$i18nT('pages.datasetDetail.saveMetadata')}{/if}
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
 
 <style>
   .detail-stack {
@@ -2808,9 +2476,7 @@
   h3 { margin-top: 0; }
   .meta { color: #666; font-size: 0.9rem; }
   .vis { padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.8rem; }
-  .vis-public { background: #d4edda; color: #155724; }
   .vis-members { background: #fff3cd; color: #856404; }
-  .vis-private { background: #f8d7da; color: #721c24; }
 
   /* About / metadata card */
   .about-desc {
@@ -3076,19 +2742,6 @@
     margin-bottom: 0.75rem;
   }
 
-  .progress-bar {
-    height: 4px;
-    background: var(--line-soft, #eee);
-    border-radius: 2px;
-    margin-bottom: 0.75rem;
-    overflow: hidden;
-  }
-  .progress-fill {
-    height: 100%;
-    background: var(--brand-500, #4f46e5);
-    transition: width 0.1s ease;
-  }
-
   .asset-name {
     display: inline-flex;
     align-items: center;
@@ -3110,44 +2763,6 @@
     align-items: center;
     white-space: nowrap;
   }
-
-  .assets-error {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    color: #991b1b;
-    border-radius: 6px;
-    padding: 0.5rem 0.75rem;
-    font-size: 0.875rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .visibility-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    font-size: 0.73rem;
-    font-weight: 600;
-    border-radius: 20px;
-    padding: 0.15rem 0.5rem;
-    border: 1px solid transparent;
-    cursor: pointer;
-  }
-  .vis-public {
-    background: #d4edda;
-    color: #155724;
-    border-color: #c3e6cb;
-  }
-  .vis-private {
-    background: #f5f5f5;
-    color: #555;
-    border-color: #ddd;
-  }
-  .vis-public:hover { background: #c3e6cb; }
-  .vis-private:hover { background: #e8e8e8; }
 
   /* Preview modal */
   .modal-backdrop {
@@ -3276,14 +2891,11 @@
   .preview-text--md {
     white-space: pre-wrap;
     word-break: break-word;
-  }
-
-  @media (max-width: 900px) {
+  }@media (max-width: 900px) {
     .explore-actions {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
-  }
-  @media (max-width: 600px) {
+  }@media (max-width: 600px) {
     .explore-actions {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
@@ -3499,67 +3111,9 @@
   .form-group label,
   .form-group .group-caption { font-size: 0.85rem; font-weight: 600; color: var(--ink-700); }
   .form-group .group-caption { display: block; }
-  .form-group textarea { width: 100%; min-height: 72px; resize: vertical; }
-
-  /* ── Asset metadata modal ─────────────────────────────────────────────────── */
-  .asset-edit-filename {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.85rem;
-    color: var(--ink-500);
-    background: var(--bg-subtle);
-    padding: 0.4rem 0.6rem;
-    border-radius: 6px;
-    margin-bottom: 1rem;
-  }
-  .metadata-readonly-group { margin-top: 0.5rem; }
-  .meta-readonly-label { font-size: 0.78rem; font-weight: 600; color: var(--ink-400); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 0.4rem; }
-  .meta-readonly-rows { display: flex; flex-direction: column; gap: 0.2rem; border: 1px solid var(--line-soft); border-radius: 6px; overflow: hidden; }
-  .meta-readonly-row { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.3rem 0.6rem; font-size: 0.8rem; background: var(--bg-subtle); border-bottom: 1px solid var(--line-soft, #eee); }
-  .meta-readonly-row:last-child { border-bottom: none; }
   .meta-key { font-family: monospace; font-size: 0.78rem; color: var(--brand-600, #4a90d9); min-width: 120px; flex-shrink: 0; }
   .meta-val { font-size: 0.77rem; color: var(--ink-600); word-break: break-all; }
-  .meta-readonly-hint { display: flex; align-items: center; gap: 0.3rem; font-size: 0.77rem; color: var(--ink-400); margin: 0.4rem 0 0; }
-
-  /* ── Asset cards ─────────────────────────────────────────────────────────── */
-  /* ── Files ── */
-  .files-summary { font-size: 0.78rem; color: var(--ink-500); margin-left: 0.5rem; }
   .files-head-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-  .file-skel { height: 52px; border-radius: 8px; margin-bottom: 0.4rem; }
-  .file-list { list-style: none; margin: 0; padding: 0; }
-  .file-row {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 0.75rem;
-    align-items: center;
-    padding: 0.6rem 0.5rem;
-    border-bottom: 1px solid var(--line-soft);
-  }
-  .file-row:last-child { border-bottom: none; }
-  .file-badge {
-    width: 40px; height: 40px;
-    display: flex; align-items: center; justify-content: center;
-    border-radius: var(--radius-sm);
-    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.02em;
-    background: var(--bg-soft); color: var(--ink-600);
-    flex-shrink: 0; overflow: hidden; text-align: center;
-  }
-  .file-badge.tone-model3d { background: var(--brand-100); color: var(--brand-700); }
-  .file-badge.tone-rdf { background: var(--violet-100); color: var(--violet-500); }
-  .file-badge.tone-image { background: var(--success-100); color: var(--success-500); }
-  .file-badge.tone-json { background: var(--warning-100); color: var(--warning-500); }
-  .file-body { min-width: 0; }
-  .file-title-row { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
-  .file-title { font-weight: 600; font-size: 0.88rem; color: var(--ink-800); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .file-restricted { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.66rem; flex-shrink: 0; }
-  .file-meta {
-    display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
-    font-size: 0.75rem; color: var(--ink-500); margin-top: 0.15rem; min-width: 0;
-  }
-  .file-filename { font-family: monospace; }
-  .file-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
-  .file-actions { display: flex; align-items: center; gap: 0.2rem; flex-shrink: 0; }
 
   /* ── Validation hint ─────────────────────────────────────────────────────── */
   .hint-text { font-size: 0.85rem; color: var(--ink-400); margin: 0; }
@@ -3583,16 +3137,7 @@
   :global(:is([data-theme="dark"], .dark)) .version-view-banner { background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.4); }
   :global(:is([data-theme="dark"], .dark)) .meta { color: var(--ink-500); }
   :global(:is([data-theme="dark"], .dark)) .md-status { background: rgba(59,130,246,0.18); color: #93c5fd; }
-
-  :global(:is([data-theme="dark"], .dark)) .vis-public,
-  :global(:is([data-theme="dark"], .dark)) .svc-badge-active,
-  :global(:is([data-theme="dark"], .dark)) .upload-success,
-  :global(:is([data-theme="dark"], .dark)) .role-model,
-  :global(:is([data-theme="dark"], .dark)) .linked-badge.conforms { background: rgba(16,185,129,0.18); color: #6ee7b7; border-color: rgba(16,185,129,0.35); }
-  :global(:is([data-theme="dark"], .dark)) .vis-public:hover { background: rgba(16,185,129,0.26); }
   :global(:is([data-theme="dark"], .dark)) .vis-members { background: rgba(245,158,11,0.18); color: #fcd34d; }
-  :global(:is([data-theme="dark"], .dark)) .vis-private { background: rgba(255,255,255,0.06); color: var(--ink-600); border-color: var(--line-strong); }
-  :global(:is([data-theme="dark"], .dark)) .vis-private:hover { background: rgba(255,255,255,0.1); }
   :global(:is([data-theme="dark"], .dark)) .svc-badge-inactive,
   :global(:is([data-theme="dark"], .dark)) .role-system { background: rgba(255,255,255,0.06); color: var(--ink-500); }
   :global(:is([data-theme="dark"], .dark)) .power-on,
@@ -3619,7 +3164,6 @@
   :global(:is([data-theme="dark"], .dark)) .onto-ns { color: #a5b4fc; }
 
   :global(:is([data-theme="dark"], .dark)) .action-tile { background: linear-gradient(160deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)); }
-  :global(:is([data-theme="dark"], .dark)) .assets-error { background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .upload-error,
   :global(:is([data-theme="dark"], .dark)) .preview-error { color: #fca5a5; }
   :global(:is([data-theme="dark"], .dark)) .toggle-track { background: rgba(255,255,255,0.2); }
