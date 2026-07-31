@@ -116,7 +116,7 @@ so every number below is residual noise:
 | benchmarks over 10 % | **50 of 68** | **1 of 68** |
 | `query_count_star/10000` (136 ns, O(1) index lookup) | +11.3 % | **+3.3 %** |
 
-The default tolerance is `default_tolerance_ratio` = **1.10** (+10 % before the
+The default tolerance is `default_tolerance_ratio` = **1.15** (+15 % before the
 gate trips). Tune per benchmark or per prefix in the `tolerances` map; precedence
 is an exact key, then the **longest matching prefix key ending in `/` or `_`**,
 then the default. Both terminators matter: Criterion renders the group boundary as
@@ -127,7 +127,7 @@ the group quietly falls back to the default.
 
 ```jsonc
 {
-  "default_tolerance_ratio": 1.10,
+  "default_tolerance_ratio": 1.15,
   "tolerances": {
     "concurrent_": 1.5,                    // genuinely variable; not in the gated subset
     "query_alternative_path/10000": 1.5,   // bimodal on this runner; see below
@@ -147,7 +147,27 @@ benchmarks one at a time in `tolerances` only ever catches whichever tripped las
 the floor covers the class. It is a *fallback*, so an explicit `tolerances` entry
 still wins if you want a particular small benchmark held tighter.
 
-Three benchmarks need an exception, and only three.
+**Why the default is 1.15 and not 1.10.** It was 1.10, and in a single afternoon
+the gate produced four false regressions on four different benchmarks, none of
+which the change in question could reach:
+
+| PR | what it changed | reading |
+|---|---|--:|
+| a file-browser UI | Svelte components | `query_alternative_path/10000` +10.7 % |
+| a dependency batch | Cargo/npm manifests | `query_alternative_path/10000` +11.9 % |
+| a security fix | registry write-path validation | `query_optional/1000` +10.6 % |
+| a tolerance change | **this JSON file and this page — no runtime code at all** | `path_negated_property_set/10000` +10.5 % |
+
+The last one settles it: a PR that changes no code cannot make path evaluation
+10.5 % slower, so +10 % sits inside this runner's noise floor for the 1–30 ms
+band rather than above it. Every reading landed between +10.5 % and +11.9 %,
+which is why 1.15 clears them with room and does not need to go further.
+
+Widening the four benchmarks one at a time would have been the wrong lever — the
+next unrelated PR trips a fifth. If the marginal failures come back at 1.15, the
+fix is a third pass per side rather than a fifth exception.
+
+Three benchmarks still need an exception on top of the default, and only three.
 
 `query_group_concat/*` is allocation-heavy at 1–3 µs and read +25.5 % with nothing
 changed.
@@ -158,11 +178,11 @@ alternative path over 10 000 persons each iteration, so what it measures is
 dominated by allocation and whatever state the runner's memory is in. Across ten
 runs of **identical** `develop` code the *merge base* alone came in at 12.3, 12.7,
 13.1, 14.5, 15.3, 15.3, 15.6, 15.9, 16.2 and 17.1 ms — a span of about **1.39×**,
-which by itself exceeds the +10 % bar before any change is measured. The deltas
-that produced follow: two unrelated PRs (a Svelte file-browser UI and a dependency
-bump, neither touching path evaluation) read +10.7 % and +11.9 % in the same
-afternoon, and one earlier run read **+46.1 %**. 1.5 sits above the worst observed
-reading rather than being tuned to make a particular run pass.
+which by itself clears even the raised default before any change is measured. It
+keeps a dedicated entry rather than riding the 1.15 default because one run read
+**+46.1 %**, far outside what a default meant for marginal noise should absorb.
+1.5 sits above that worst observed reading rather than being tuned to make a
+particular run pass.
 
 `query_simple_lookup/100000` is the awkward one, and worth understanding before
 you tighten it. At ~50–90 ms it is by far the heaviest in the subset, it

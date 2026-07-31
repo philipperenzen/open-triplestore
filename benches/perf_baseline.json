@@ -1,12 +1,14 @@
 {
   "schema_version": 1,
-  "default_tolerance_ratio": 1.1,
+  "default_tolerance_ratio": 1.15,
   "tolerances": {
     "concurrent_": 1.5,
     "query_alternative_path/10000": 1.5,
     "query_group_concat/": 1.35,
     "query_simple_lookup/100000": 1.45
   },
+  "small_benchmark_ns": 1000,
+  "small_benchmark_tolerance": 1.35,
   "generator": {
     "commit": "454aa2c",
     "generated_at": "2026-07-29T13:09:00Z",

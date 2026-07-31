@@ -424,7 +424,15 @@ def cmd_update(args):
     baseline = {
         "schema_version": SCHEMA_VERSION,
         "default_tolerance_ratio": existing.get("default_tolerance_ratio", DEFAULT_TOLERANCE),
-        "tolerances": existing.get("tolerances", {"concurrent/": 1.5}),
+        "tolerances": existing.get("tolerances", {"concurrent_": 1.5}),
+        # Carried over, not rebuilt: a refresh re-measures the numbers, it does not
+        # re-decide the policy. Omitting these dropped them on every refresh, and
+        # `resolve_tolerance` skips the whole small-benchmark branch when
+        # `small_benchmark_ns` is absent — so the documented floor silently never ran.
+        "small_benchmark_ns": existing.get("small_benchmark_ns", SMALL_BENCHMARK_NS),
+        "small_benchmark_tolerance": existing.get(
+            "small_benchmark_tolerance", SMALL_BENCHMARK_TOLERANCE
+        ),
         "generator": {
             "commit": git_short_commit() or "unknown",
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
