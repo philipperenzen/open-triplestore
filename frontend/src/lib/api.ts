@@ -1248,9 +1248,11 @@ export const clearDatasetBanner = (datasetId) => setDatasetBannerPreset(datasetI
 export const listAssets = (datasetId) =>
   request('GET', `/api/datasets/${datasetId}/assets`);
 
-export function uploadAsset(datasetId, file, onProgress) {
+// Upload one file, optionally into a file-manager folder ("docs/reports").
+export function uploadAsset(datasetId, file, onProgress, folder = '') {
   const token = getAccessToken();
   const formData = new FormData();
+  if (folder) formData.append('folder', folder);
   formData.append('file', file);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -1265,13 +1267,41 @@ export function uploadAsset(datasetId, file, onProgress) {
       if (xhr.status === 201) {
         resolve(JSON.parse(xhr.responseText));
       } else {
-        reject(new Error(xhr.responseText || 'Upload failed'));
+        let msg = xhr.responseText || 'Upload failed';
+        try { msg = JSON.parse(msg).message || msg; } catch { /* plain-text error body */ }
+        const err = new ApiError(msg);
+        err.status = xhr.status;
+        reject(err);
       }
     };
     xhr.onerror = () => reject(new Error('Network error'));
     xhr.send(formData);
   });
 }
+
+// File-manager folders. GET works anonymously for public datasets.
+export const listAssetFolders = (datasetId) =>
+  request('GET', `/api/datasets/${datasetId}/folders`);
+
+export const createAssetFolder = (datasetId, path) =>
+  request('POST', `/api/datasets/${datasetId}/folders`, { path });
+
+export const renameAssetFolder = (datasetId, from, to) =>
+  request('PATCH', `/api/datasets/${datasetId}/folders`, { from, to });
+
+export const deleteAssetFolder = (datasetId, path, recursive = false) =>
+  request(
+    'DELETE',
+    `/api/datasets/${datasetId}/folders?path=${encodeURIComponent(path)}${recursive ? '&recursive=true' : ''}`
+  );
+
+// Move (folder) and/or rename (filename) an asset; absent keys keep their value.
+export const moveAsset = (datasetId, assetId, { folder, filename } = {}) => {
+  const body = {};
+  if (folder !== undefined) body.folder = folder;
+  if (filename !== undefined) body.filename = filename;
+  return request('PATCH', `/api/datasets/${datasetId}/assets/${assetId}`, body);
+};
 
 export const deleteAsset = (datasetId, assetId) =>
   request('DELETE', `/api/datasets/${datasetId}/assets/${assetId}`);

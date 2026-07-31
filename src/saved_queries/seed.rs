@@ -495,6 +495,8 @@ fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
             size,
             owner_id,
             true,
+            // Seeded landmarks sit at the root of the demo's file manager.
+            "",
         ) {
             Ok(_) => tracing::info!("seed: landmark STL asset {filename} registered"),
             Err(e) => tracing::warn!("landmark STL {filename} asset record failed: {e}"),

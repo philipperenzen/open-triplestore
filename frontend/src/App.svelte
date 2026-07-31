@@ -13,7 +13,7 @@
     Home as HomeIcon, Search as SearchIcon,
     Upload, Database, Building2, BookOpen, HelpCircle, Library,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
-    Settings as SettingsIcon, Users as UsersIcon, Shield,
+    Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
@@ -65,6 +65,7 @@
   const lazyModelDiff           = () => import('./pages/ModelDiff.svelte');
   const lazyTripleBrowser       = () => import('./pages/TripleBrowser.svelte');
   const lazyLlmChat             = () => import('./pages/LlmChat.svelte');
+  const lazyFiles               = () => import('./pages/Files.svelte');
   const lazyDocumentation    = () => import('./pages/Documentation.svelte');
   const lazyApiDocs          = () => import('./pages/ApiDocs.svelte');
 
@@ -98,6 +99,7 @@
       items: [
         { to: '/graphs', labelKey: 'nav.namedGraphs', icon: Network, match: (p) => p === '/graphs' },
         { to: '/datasets', labelKey: 'nav.datasets', icon: Database, match: (p) => p.startsWith('/datasets') },
+        { to: '/files', labelKey: 'nav.files', icon: FolderOpen, match: (p) => p.startsWith('/files') },
         { to: '/organisations', labelKey: 'nav.organisations', icon: Building2, match: (p) => p.startsWith('/organisations') },
         { to: '/models', labelKey: 'nav.models', icon: BookOpen, match: (p) => p.startsWith('/models') },
         { to: '/vocabularies', labelKey: 'nav.vocabularySearch', icon: Library, match: (p) => p.startsWith('/vocabularies') },
@@ -228,6 +230,7 @@
       ['/shacl', 'pages.shaclStudio.title', 'pages.shaclStudio.detail'],
       ['/graphs', 'pages.graphList.title', 'pages.graphList.detail'],
       ['/datasets', 'pages.datasets.title', 'pages.datasets.detail'],
+      ['/files', 'pages.files.title', 'pages.files.detail'],
       ['/organisations', 'pages.organisations.title', 'pages.organisations.detail'],
       ['/login', 'pages.login.title', 'pages.login.detail'],
       ['/register', 'pages.register.title', 'pages.register.detail'],
@@ -633,6 +636,12 @@
         </Route>
         <Route path="/validation" component={Validation} />
         <Route path="/datasets" component={Datasets} />
+        <Route path="/files">
+          <LazyPage loader={lazyFiles} />
+        </Route>
+        <Route path="/files/:datasetId" let:params>
+          <LazyPage loader={lazyFiles} datasetId={params.datasetId} />
+        </Route>
         <Route path="/datasets/:id/viewer" let:params>
           <LazyPage loader={lazyDatasetViewer} id={params.id} />
         </Route>

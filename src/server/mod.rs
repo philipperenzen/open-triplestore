@@ -954,6 +954,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/visibility",
             put(routes::update_asset_visibility),
         )
+        // File-manager folders: listing is read-only (same anonymous reach as the
+        // asset list), the rest create / rename-move / delete.
+        .route(
+            "/api/datasets/:dataset_id/folders",
+            get(routes::list_asset_folders)
+                .post(routes::create_asset_folder)
+                .patch(routes::rename_asset_folder)
+                .delete(routes::delete_asset_folder),
+        )
         // optional_auth (not require_auth): a public dataset's asset LIST must be
         // reachable anonymously — the dataset page's Files section is primary UI
         // for logged-out visitors, exactly like its graphs/viewer-feed. Write

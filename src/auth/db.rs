@@ -16,6 +16,14 @@ type AccessibleGraphs = (HashSet<String>, HashSet<String>);
 use super::models::*;
 
 /// Helper to read a User from a row (columns per USER_COLS: id, username, email, password_hash, role, is_active, created_at, updated_at, is_public, avatar_key, can_publish, display_name, bio, website, phone, organization, email_verified, totp_enabled).
+/// Escape SQLite `LIKE` wildcards (`%`, `_`) in a literal prefix so folder paths
+/// containing them cannot widen a `LIKE prefix || '/%'` match. Pair with `ESCAPE '\'`.
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn read_user(row: &rusqlite::Row) -> rusqlite::Result<User> {
     // Tolerate NULLs in any column so one malformed row never fails the whole query.
     let role_str: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
@@ -557,9 +565,22 @@ impl AuthDb {
                 size_bytes INTEGER NOT NULL,
                 uploaded_by TEXT NOT NULL REFERENCES users(id),
                 created_at TEXT NOT NULL,
-                public INTEGER NOT NULL DEFAULT 0
+                public INTEGER NOT NULL DEFAULT 0,
+                folder TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_assets_dataset ON assets(dataset_id);
+
+            -- Explicitly-created asset folders. Folders are otherwise implicit in
+            -- assets.folder paths; this table keeps empty folders alive (create a
+            -- folder first, upload into it later; delete the last file without the
+            -- folder vanishing). `path` is a normalized slash-separated relative
+            -- path like docs/reports, never leading- or trailing-slashed.
+            CREATE TABLE IF NOT EXISTS asset_folders (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, path)
+            );
 
             CREATE TABLE IF NOT EXISTS refresh_tokens (
                 id TEXT PRIMARY KEY,
@@ -1052,6 +1073,8 @@ impl AuthDb {
             "ALTER TABLE assets ADD COLUMN title TEXT",
             "ALTER TABLE assets ADD COLUMN description TEXT",
             "ALTER TABLE assets ADD COLUMN updated_at TEXT",
+            // File-manager folders: a normalized relative path ('' = root).
+            "ALTER TABLE assets ADD COLUMN folder TEXT NOT NULL DEFAULT ''",
             // Dataset DCAT/ADMS/VoID metadata
             "ALTER TABLE datasets ADD COLUMN license TEXT",
             "ALTER TABLE datasets ADD COLUMN themes TEXT",
@@ -4285,12 +4308,13 @@ impl AuthDb {
         size_bytes: i64,
         uploaded_by: &str,
         public: bool,
+        folder: &str,
     ) -> anyhow::Result<Asset> {
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO assets (id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, created_at, public) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, now, public as i64],
+            "INSERT INTO assets (id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, created_at, public, folder) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, now, public as i64, folder],
         )?;
         Ok(Asset {
             id: id.to_string(),
@@ -4302,6 +4326,7 @@ impl AuthDb {
             uploaded_by: uploaded_by.to_string(),
             created_at: now,
             updated_at: None,
+            folder: folder.to_string(),
             title: None,
             description: None,
             public,
@@ -4322,13 +4347,16 @@ impl AuthDb {
             title: row.get(9)?,
             description: row.get(10)?,
             updated_at: row.get(11)?,
+            folder: row.get(12)?,
         })
     }
+
+    const ASSET_COLS: &'static str = "id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, created_at, public, title, description, updated_at, folder";
 
     pub fn get_asset(&self, id: &str) -> anyhow::Result<Option<Asset>> {
         let conn = self.pool.get()?;
         conn.query_row(
-            "SELECT id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, created_at, public, title, description, updated_at FROM assets WHERE id = ?1",
+            &format!("SELECT {} FROM assets WHERE id = ?1", Self::ASSET_COLS),
             params![id],
             Self::row_to_asset,
         )
@@ -4338,13 +4366,165 @@ impl AuthDb {
 
     pub fn list_dataset_assets(&self, dataset_id: &str) -> anyhow::Result<Vec<Asset>> {
         let conn = self.pool.get()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, dataset_id, filename, content_type, s3_key, size_bytes, uploaded_by, created_at, public, title, description, updated_at FROM assets WHERE dataset_id=?1 ORDER BY filename",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM assets WHERE dataset_id=?1 ORDER BY folder, filename",
+            Self::ASSET_COLS
+        ))?;
         let assets = stmt
             .query_map(params![dataset_id], Self::row_to_asset)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(assets)
+    }
+
+    /// Assets living in `folder` or any folder below it.
+    pub fn list_assets_under_folder(
+        &self,
+        dataset_id: &str,
+        folder: &str,
+    ) -> anyhow::Result<Vec<Asset>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM assets WHERE dataset_id=?1 AND (folder = ?2 OR folder LIKE ?3 ESCAPE '\\') ORDER BY folder, filename",
+            Self::ASSET_COLS
+        ))?;
+        let assets = stmt
+            .query_map(
+                params![dataset_id, folder, format!("{}/%", like_escape(folder))],
+                Self::row_to_asset,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(assets)
+    }
+
+    /// Rename and/or move an asset. `filename`/`folder` are already validated by
+    /// the caller; `None` keeps the current value. Bumps `updated_at`.
+    pub fn update_asset_location(
+        &self,
+        id: &str,
+        filename: Option<&str>,
+        folder: Option<&str>,
+    ) -> anyhow::Result<Asset> {
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE assets SET filename = COALESCE(?1, filename), folder = COALESCE(?2, folder), updated_at = ?3 WHERE id = ?4",
+            params![filename, folder, now, id],
+        )?;
+        // Release before get_asset re-acquires — the in-memory test pool has a
+        // single connection, so a held handle here would deadlock it.
+        drop(conn);
+        self.get_asset(id)?
+            .ok_or_else(|| anyhow::anyhow!("Asset not found"))
+    }
+
+    // ─── Asset folders ────────────────────────────────────────────────────────
+
+    /// Explicitly-created folder paths for a dataset (implicit folders come from
+    /// `assets.folder`; callers union the two).
+    pub fn list_asset_folders(&self, dataset_id: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT path FROM asset_folders WHERE dataset_id=?1 ORDER BY path")?;
+        let paths = stmt
+            .query_map(params![dataset_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(paths)
+    }
+
+    /// Record a folder (and every ancestor) as explicitly existing. Idempotent.
+    pub fn create_asset_folder(&self, dataset_id: &str, path: &str) -> anyhow::Result<()> {
+        if path.is_empty() {
+            return Ok(());
+        }
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut prefix = String::new();
+        for segment in path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            conn.execute(
+                "INSERT OR IGNORE INTO asset_folders (dataset_id, path, created_at) VALUES (?1,?2,?3)",
+                params![dataset_id, prefix, now],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Move/rename a folder subtree: rewrites the `folder` of every asset at or
+    /// below `from`, and the explicit folder rows, to live under `to` instead.
+    /// Returns the ids of the assets whose folder changed.
+    pub fn rename_asset_folder(
+        &self,
+        dataset_id: &str,
+        from: &str,
+        to: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut conn = self.pool.get()?;
+        let tx = conn.transaction()?;
+        let moved: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM assets WHERE dataset_id=?1 AND (folder = ?2 OR folder LIKE ?3 ESCAPE '\\')",
+            )?;
+            let ids = stmt
+                .query_map(
+                    params![dataset_id, from, format!("{}/%", like_escape(from))],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        // `substr` is 1-based and counts CHARACTERS (not bytes — so chars().count(),
+        // or a non-ASCII folder name would shear the path): keep everything after
+        // the old prefix, starting at its trailing `/`.
+        let from_chars = from.chars().count() as i64;
+        tx.execute(
+            "UPDATE assets SET folder = ?1 || substr(folder, ?2) WHERE dataset_id=?3 AND folder LIKE ?4 ESCAPE '\\'",
+            params![to, from_chars + 1, dataset_id, format!("{}/%", like_escape(from))],
+        )?;
+        tx.execute(
+            "UPDATE assets SET folder = ?1 WHERE dataset_id=?2 AND folder = ?3",
+            params![to, dataset_id, from],
+        )?;
+        // Explicit rows: INSERT the renamed paths, then drop the old ones (a plain
+        // UPDATE could collide with an existing (dataset_id, path) primary key).
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT OR IGNORE INTO asset_folders (dataset_id, path, created_at)
+             SELECT dataset_id, ?1 || substr(path, ?2), ?3 FROM asset_folders
+             WHERE dataset_id=?4 AND (path = ?5 OR path LIKE ?6 ESCAPE '\\')",
+            params![
+                to,
+                from_chars + 1,
+                now,
+                dataset_id,
+                from,
+                format!("{}/%", like_escape(from))
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM asset_folders WHERE dataset_id=?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+            params![dataset_id, from, format!("{}/%", like_escape(from))],
+        )?;
+        tx.commit()?;
+        // Release before create_asset_folder re-acquires (single-connection
+        // in-memory pools would deadlock on a held handle).
+        drop(conn);
+        // Ancestors of the destination must exist as explicit folders.
+        self.create_asset_folder(dataset_id, to)?;
+        Ok(moved)
+    }
+
+    /// Drop the explicit folder rows for `path` and everything below it.
+    /// (Contained assets are the caller's responsibility.)
+    pub fn delete_asset_folder(&self, dataset_id: &str, path: &str) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "DELETE FROM asset_folders WHERE dataset_id=?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\')",
+            params![dataset_id, path, format!("{}/%", like_escape(path))],
+        )?;
+        Ok(())
     }
 
     pub fn update_asset_public(&self, id: &str, public: bool) -> anyhow::Result<()> {
@@ -4368,6 +4548,9 @@ impl AuthDb {
             "UPDATE assets SET title=?1, description=?2, updated_at=?3 WHERE id=?4",
             params![title, description, now, id],
         )?;
+        // Release before get_asset re-acquires — the in-memory (test) pool has a
+        // single connection, so holding this handle across the call deadlocks.
+        drop(conn);
         self.get_asset(id)?
             .ok_or_else(|| anyhow::anyhow!("Asset not found"))
     }
