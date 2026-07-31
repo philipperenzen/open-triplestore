@@ -33,7 +33,7 @@
     {#await model3d()}
       <div class="placeholder">{$t('components.chat.model3dLoading')}</div>
     {:then mod}
-      <svelte:component this={mod.default} {refs} height="100%" />
+      <svelte:component this={mod.default} {refs} height="100%" wheelGate />
     {:catch}
       <div class="placeholder failed">{$t('components.chat.model3dFailed')}</div>
     {/await}

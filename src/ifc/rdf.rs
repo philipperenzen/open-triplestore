@@ -13,6 +13,7 @@ const FOG: &str = "https://w3id.org/fog#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+const OTS: &str = "https://opentriplestore.org/ns#";
 const GEO: &str = "http://www.opengis.net/ont/geosparql#";
 
 // Chunk size for the N-Triples sinks. Each chunk costs a store load round-trip
@@ -182,6 +183,28 @@ fn dms_to_deg(arg: &Arg) -> Option<f64> {
     Some(sign * (deg.abs() + min.abs() / 60.0 + sec.abs() / 3600.0 + micro.abs() / 3_600_000_000.0))
 }
 
+// NOT extracted: `IfcGeometricRepresentationContext.TrueNorth`.
+//
+// It looks like the right source for a survey rotation — the FZK-Haus declares
+// `IFCDIRECTION((0.766, 0.643))`, a clean 40° — and emitting it as
+// `ots:modelHeading` so the map could turn the building is an obvious idea. It
+// is wrong in practice: web-ifc resolves each element's IfcObjectPlacement
+// chain when it tessellates, so the geometry the viewer receives is ALREADY in
+// its final orientation. Applying TrueNorth on top double-rotates it.
+//
+// Measured, rather than argued: the KIT Campus North site grid that the
+// FZK-Haus stands on runs 15°/105° (principal axes of the surrounding ways in
+// OpenStreetMap). Un-rotated the model sits at 90° — 15° off the grid, which is
+// the model's own design. With the TrueNorth rotation applied it sits at 40°,
+// i.e. 65° off, visibly diagonal across its own plot.
+//
+// If a genuine survey rotation is ever needed, verify it against a real
+// footprint before shipping it — not against the IFC schema alone. The
+// sanctioned path is an AUTHORED heading (`ConvertOptions::model_heading`,
+// stamped below as `ots:modelHeading`): a human states the bearing after
+// checking the rendered model against the real site, exactly like the demo
+// seeds' authored anchors.
+
 /// WGS84 anchor from the file's own IfcSite georeference (RefLatitude /
 /// RefLongitude, attributes 9/10), when present and plausible. A site at
 /// exactly (0, 0) is an exporter default (Null Island), not a georeference.
@@ -346,6 +369,14 @@ pub fn emit(
                         &iri(&fog_ifc_pred),
                         &format!("{}^^<{XSD}anyURI>", lit(&target)),
                     );
+                    // Authored survey rotation (never TrueNorth — see above).
+                    if let Some(h) = opts.model_heading.filter(|h| h.is_finite()) {
+                        bot.triple(
+                            &node,
+                            &iri(&format!("{OTS}modelHeading")),
+                            &format!("\"{h}\"^^<{XSD}double>"),
+                        );
+                    }
                 }
             }
         };
@@ -661,6 +692,51 @@ ENDSEC;\nEND-ISO-10303-21;";
         )
         .unwrap();
         (bot, owl, stats)
+    }
+
+    #[test]
+    fn authored_heading_is_stamped_on_file_links_and_absent_by_default() {
+        // Default: no heading triple anywhere (the viewer's +X-east default).
+        let (bot, _, _) = run(false);
+        assert!(!bot.contains("modelHeading"), "no heading unless authored");
+        // Authored: every element file-link node carries it, typed xsd:double —
+        // the exact shape the viewer feed parses (`?og ots:modelHeading ?mhead`).
+        let mut bot = String::new();
+        let mut owl = String::new();
+        convert(
+            SAMPLE,
+            &ConvertOptions {
+                inst_base: "http://ex.test/m/".into(),
+                ifc_file_url: Some("http://ex.test/files/model.ifc".into()),
+                model_heading: Some(68.2),
+                ..Default::default()
+            },
+            &mut |c| bot.push_str(c),
+            &mut |c| owl.push_str(c),
+        )
+        .unwrap();
+        assert!(
+            bot.contains(
+                "<https://opentriplestore.org/ns#modelHeading> \"68.2\"^^<http://www.w3.org/2001/XMLSchema#double>"
+            ),
+            "authored heading must be emitted as xsd:double: {bot}"
+        );
+        // A non-finite value must be dropped, not serialised as NaN.
+        let mut bot2 = String::new();
+        let mut owl2 = String::new();
+        convert(
+            SAMPLE,
+            &ConvertOptions {
+                inst_base: "http://ex.test/m/".into(),
+                ifc_file_url: Some("http://ex.test/files/model.ifc".into()),
+                model_heading: Some(f64::NAN),
+                ..Default::default()
+            },
+            &mut |c| bot2.push_str(c),
+            &mut |c| owl2.push_str(c),
+        )
+        .unwrap();
+        assert!(!bot2.contains("modelHeading"));
     }
 
     #[test]

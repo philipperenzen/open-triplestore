@@ -159,6 +159,13 @@ RUN apt-get update && apt-get install -y \
 # (`release` → target/release, `release-dev` → target/release-dev).
 COPY --from=builder /app/target/${CARGO_PROFILE}/open-triplestore /usr/local/bin/open-triplestore
 
+# Ship the licence and attribution texts with the artifact. The image bundles
+# W3C vocabularies, an MPL-2.0 wasm binary, CC BY datasets (LOV, 3DBAG, IMBOR)
+# and Apache-2.0 frontend libraries — every one of those licences conditions
+# redistribution on the notice travelling with the distribution, and NOTICE is
+# also what scopes the Commons Clause away from the bundled components.
+COPY LICENSE NOTICE /app/
+
 # Copy frontend build
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 

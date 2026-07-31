@@ -196,13 +196,14 @@ fn try_seed(state: &AppState) -> anyhow::Result<()> {
         seed_dataset_branding(state, slug, slug, true, true);
     }
 
-    // The Schependomlaan IFC (layered Dutch BIM demo: BOT topology + full ifcOWL
+    // The headline IFC building (layered BIM demo: BOT topology + full ifcOWL
     // lift, every storey/wall/beam individually addressable) loads on first boot
     // so the public demo shows the IFC decomposition immediately. With an admin
     // owner it is also stored as a downloadable asset; without one (brand-new
     // install) the asset is skipped and the FOG file reference points at the
     // source URL — the linked data + decomposition are present either way.
     seed_ifc_buildings(state, report.owner_id.as_deref().unwrap_or(""));
+    seed_stl_landmarks(state, report.owner_id.as_deref().unwrap_or(""));
 
     // Lift the bundled real 3DBAG block into the store as volumetric WKT-Z, so
     // the 3D-Tiles pipeline (`/3dtiles`) and the 3D R*-tree index have a real
@@ -263,11 +264,18 @@ fn block_on_anywhere<T: Send>(
     })
 }
 
-/// Default source of the Schependomlaan design-model IFC — the canonical open
-/// Dutch BIM dataset (Nijmegen; CC BY 4.0, openBIMstandards/TU Eindhoven),
-/// mirrored on GitHub. Override with `SEED_IFC_URL`; disable the whole demo
+/// Default source of the headline IFC building — the Esplanades project
+/// (Maleva 18, Tallinn: the municipal seniors' home, a real 2021 project by
+/// Esplan for Tallinna Linnavaraamet), published by buildingSMART's community
+/// sample repository under CC BY 4.0 **from the copyright holder itself**.
+/// It replaces the Schependomlaan design model: that repository's LICENSE.MD
+/// says CC BY 4.0 but its README records the actual grant as "for scientific
+/// and academic purposes", a restriction this open-source demo cannot carry
+/// (and GitHub classifies the repo NOASSERTION). The URL is the Git-LFS media
+/// host — `raw.githubusercontent.com` serves a 133-byte LFS pointer for this
+/// file, not the model. Override with `SEED_IFC_URL`; disable the whole demo
 /// seed with `SEED_STANDARDS_DEMO=false`.
-const SCHEPENDOMLAAN_IFC_URL: &str = "https://raw.githubusercontent.com/jakob-beetz/DataSetSchependomlaan/master/Design%20model%20IFC/IFC%20Schependomlaan.ifc";
+const HEADLINE_IFC_URL: &str = "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/main/IFC%202.3.0.1%20(IFC%202x3)/Esplanades/1807_EP_AR_v18.ifc";
 
 /// One open IFC building to stand in the unified 3D/BIM demo. Each is downloaded
 /// once (first boot), stored as a public asset, and lifted to BOT + ifcOWL in its
@@ -283,8 +291,8 @@ struct IfcBuildingSeed {
     url: &'static str,
     /// `POINT(lon lat)` map anchor override. `None` trusts the file's own
     /// IfcSite georeference (the conversion falls back to it); `Some(..)` is for
-    /// files whose georef is a known exporter default — e.g. the Schependomlaan
-    /// model carries the RD false origin (Amersfoort) instead of its real site.
+    /// files whose georef is an exporter default or too coarse to trust — e.g.
+    /// the Esplanades model rounds to whole arc-minutes, ~5 km off its site.
     anchor: Option<&'static str>,
     /// Distinct BOT graph suffix per building so they don't collide.
     graph_suffix: &'static str,
@@ -297,17 +305,23 @@ struct IfcBuildingSeed {
     source_page: &'static str,
     license: &'static str,
     attribution: &'static str,
+    /// Authored map bearing for the model's +X axis (`ots:modelHeading`),
+    /// measured against the real site (web-ifc wall-grid histogram vs the OSM
+    /// footprint — see the Esplanades entry, whose measurement showed the
+    /// export already aligned). `None` keeps the viewer default (+X due east).
+    heading: Option<f64>,
 }
 
-/// The demo IFC buildings — all REAL, openly licensed models, each standing at
-/// its real-world site: FZK-Haus on the KIT Campus North, Smiley West in
-/// Karlsruhe, the Duplex Apartment at its nominal Chicago location (all three
-/// from their own IfcSite georeference), and Schependomlaan on its actual
-/// street in Nijmegen (authored anchor — the file's georef is the RD-origin
-/// default). The smaller files come FIRST so rich IFC buildings appear within
-/// seconds of first boot; the 49 MB Schependomlaan (which honours
-/// `SEED_IFC_URL`) imports last so it doesn't hold the others up. All carry
-/// full BOT topology, property sets and an ifcOWL lift.
+/// The demo IFC buildings — all REAL models with redistribution-clean terms,
+/// each standing at its real-world site: FZK-Haus on the KIT Campus North and
+/// Smiley West in Karlsruhe (their own IfcSite georeferences), the Duplex
+/// Apartment at its nominal Chicago location (the file's Revit-default
+/// georef, kept as the demo site — the real building's location was never
+/// published), and Esplanades at Maleva 18, Tallinn (authored anchor — the
+/// file's georef rounds to whole arc-minutes). The smaller files come FIRST
+/// so rich IFC buildings appear within seconds of first boot; the headline
+/// Esplanades (which honours `SEED_IFC_URL`) imports last. All carry full BOT
+/// topology, property sets and an ifcOWL lift.
 const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
     IfcBuildingSeed {
         name: "FZK-Haus.ifc",
@@ -318,20 +332,33 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         label: "FZK-Haus",
         display_label: "FZK-Haus (KIT research residence, IFC4)",
         source_page: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
-        license: "https://creativecommons.org/licenses/by/4.0/",
+        // KIT's terms are their own "for unrestricted use" statement (with a
+        // requested citation), NOT Creative Commons — the licence link points
+        // at the page that states the grant.
+        license: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
         attribution: "Institute for Automation and Applied Informatics (IAI) / KIT",
+        heading: None,
     },
     IfcBuildingSeed {
         name: "Duplex.ifc",
-        url: "https://raw.githubusercontent.com/MadsHolten/BOT-Duplex-house/master/Model%20files/IFC/Duplex.ifc",
-        // Real georef in the file: (41 52 27 840000), (-87 -38 -21 -839999) — Chicago.
+        // buildingSMART's own republication, CC BY 4.0 with a mandated credit
+        // line (the previous mirror repo carried no licence at all). Git-LFS:
+        // raw.githubusercontent serves a pointer; the media host has the model.
+        url: "https://media.githubusercontent.com/media/buildingsmart-community/Community-Sample-Test-Files/main/IFC%202.3.0.1%20(IFC%202x3)/Duplex%20Apartment/Duplex_A_20110907.ifc",
+        // The file's georef (41 52 27 …, -87 -38 -21 …) is Revit's default
+        // location (Chicago), NOT a survey — bSI says the model was first
+        // published in Germany and the real building's site was never
+        // published. The nominal Chicago placement is kept as the demo site;
+        // it is a location for the demo map, not a provenance claim.
         anchor: None,
         graph_suffix: "building-duplex",
         label: "Duplex Apartment",
-        display_label: "Duplex Apartment (buildingSMART Common BIM Files)",
-        source_page: "https://github.com/MadsHolten/BOT-Duplex-house",
+        display_label: "Duplex Apartment (buildingSMART test files)",
+        source_page: "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/main/IFC%202.3.0.1%20(IFC%202x3)/Duplex%20Apartment",
         license: "https://creativecommons.org/licenses/by/4.0/",
-        attribution: "buildingSMART alliance / NIBS Common BIM Files",
+        // The exact credit the CC BY grant requests.
+        attribution: "BSI (2020) \"Duplex Apartment Test Files\", buildingSMART International",
+        heading: None,
     },
     IfcBuildingSeed {
         name: "Smiley-West.ifc",
@@ -342,21 +369,32 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
         label: "Smiley West",
         display_label: "Smiley West (Karlsruhe student housing, IFC4)",
         source_page: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
-        license: "https://creativecommons.org/licenses/by/4.0/",
+        // Same KIT unrestricted-use terms as FZK-Haus above.
+        license: "https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples",
         attribution: "Institute for Automation and Applied Informatics (IAI) / KIT",
+        heading: None,
     },
     IfcBuildingSeed {
-        name: "Schependomlaan.ifc",
-        url: SCHEPENDOMLAAN_IFC_URL,
-        // The file's georef is the RD false origin (Amersfoort) — an ArchiCAD
-        // default, not the site. Anchor on the real Schependomlaan street.
-        anchor: Some("POINT(5.83668 51.84156)"),
+        name: "Esplanades.ifc",
+        url: HEADLINE_IFC_URL,
+        // The file's own georef is rounded to whole arc-minutes — (59 26 0 0),
+        // (24 45 0 0) ≈ 5 km from the site. Anchor on the real building: the
+        // OSM footprint centroid of the Seenioride maja at Maleva 18 (way
+        // 885614092), which Nominatim resolves for the project's address.
+        anchor: Some("POINT(24.67861 59.46050)"),
         graph_suffix: "building",
-        label: "Schependomlaan",
-        display_label: "Schependomlaan housing project (Nijmegen, IFC2x3)",
-        source_page: "https://github.com/openBIMstandards/DataSetSchependomlaan",
+        label: "Esplanades",
+        display_label: "Esplanades — Maleva 18 seniors' home (Tallinn, IFC2x3)",
+        source_page: "https://github.com/buildingsmart-community/Community-Sample-Test-Files/tree/main/IFC%202.3.0.1%20(IFC%202x3)/Esplanades",
         license: "https://creativecommons.org/licenses/by/4.0/",
-        attribution: "openBIMstandards / Hendriks Bouw en Ontwikkeling",
+        attribution: "© Esplan (esplan.ee), published under CC BY 4.0",
+        // None on purpose — and measured, like every orientation here: the
+        // export carries its survey rotation baked into the model axes. Its
+        // dominant wall grid sits at 29°/119° (web-ifc edge histogram, 73% of
+        // wall length) with the long axis rendering at ~119°, and the real
+        // footprint's principal axis is 119.2° (OSM way 885614092). Rotating
+        // it would UN-align it.
+        heading: None,
     },
 ];
 
@@ -365,6 +403,105 @@ const IFC_BUILDINGS: &[IfcBuildingSeed] = &[
 /// a BOT topology graph + a full ifcOWL lift, every storey, wall and beam
 /// individually addressable. Each building skips instantly when its graph already
 /// has data; a failed download just retries on the next boot.
+/// The demo landmarks' STL models. The viewer streams them straight from
+/// Wikimedia Commons (fog:asStl in landmarks.ttl — leave that alone), but the
+/// files must ALSO exist as first-class dataset assets so the dataset page's
+/// Files section lists them and the platform itself can serve a copy. Stable
+/// ids keep this idempotent across reseeds.
+const STL_LANDMARKS: &[(&str, &str, &str)] = &[
+    (
+        "demo-stl-dragon-bridge",
+        "Dragon_Bridge_in_Da_Nang.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/2/22/Dragon_Bridge_in_Da_Nang.stl",
+    ),
+    (
+        "demo-stl-big-ben",
+        "Big_Ben.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/c/c6/Big_Ben.stl",
+    ),
+    (
+        "demo-stl-white-house",
+        "White_House.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/5/50/White_House.stl",
+    ),
+    (
+        "demo-stl-empire-state",
+        "Empire_State_Building_(simplified).stl",
+        "https://upload.wikimedia.org/wikipedia/commons/2/2a/Empire_State_Building_%28simplified%29.stl",
+    ),
+    (
+        "demo-stl-sanno-shrine",
+        "Nagasaki_torii_shrine.stl",
+        "https://upload.wikimedia.org/wikipedia/commons/1/1d/Nagasaki_torii_shrine.stl",
+    ),
+];
+
+fn seed_stl_landmarks(state: &AppState, owner_id: &str) {
+    const DS: &str = "viewer-3d-demo";
+    if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
+        return;
+    }
+    // Same network kill-switch as the IFC demo (tests set SEED_IFC_URL="").
+    if std::env::var("SEED_IFC_URL").ok().as_deref().map(str::trim) == Some("") {
+        return;
+    }
+    for (id, filename, url) in STL_LANDMARKS.iter() {
+        if matches!(state.auth_db.get_asset(id), Ok(Some(_))) {
+            continue; // already seeded
+        }
+        tracing::info!("seed: downloading landmark STL {filename} ({url})");
+        let downloaded = block_on_anywhere(async {
+            // Wikimedia's robot policy 403s requests without a descriptive
+            // User-Agent — reqwest's default is not accepted.
+            let client = reqwest::Client::builder()
+                .user_agent("open-triplestore-seed/1.0 (https://opentriplestore.org; demo content bootstrap)")
+                .timeout(std::time::Duration::from_secs(600))
+                .build()?;
+            let bytes = client
+                .get(*url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            anyhow::Ok(bytes)
+        })
+        .and_then(|r| r);
+        let bytes = match downloaded {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    "landmark STL {filename} skipped (download failed, retries next boot): {e}"
+                );
+                continue;
+            }
+        };
+        let size = bytes.len() as i64;
+        let s3_key = format!("datasets/{DS}/{id}/{filename}");
+        let storage = state.object_store.clone();
+        let key = s3_key.clone();
+        if let Err(e) =
+            block_on_anywhere(async move { storage.upload(&key, bytes, "model/stl").await })
+        {
+            tracing::warn!("landmark STL {filename} upload failed: {e}");
+            continue;
+        }
+        match state.auth_db.create_asset(
+            id,
+            DS,
+            filename,
+            "model/stl",
+            &s3_key,
+            size,
+            owner_id,
+            true,
+        ) {
+            Ok(_) => tracing::info!("seed: landmark STL asset {filename} registered"),
+            Err(e) => tracing::warn!("landmark STL {filename} asset record failed: {e}"),
+        }
+    }
+}
+
 fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     const DS: &str = "viewer-3d-demo";
     if !matches!(state.auth_db.get_dataset(DS), Ok(Some(_))) {
@@ -372,7 +509,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
     }
     // An explicitly empty SEED_IFC_URL disables the whole IFC demo (also used by
     // tests, which must never reach out to the network). A custom value overrides
-    // only the first (Schependomlaan) building.
+    // only the headline (Esplanades) building.
     let env_url = std::env::var("SEED_IFC_URL").ok();
     if env_url.as_deref().map(str::trim) == Some("") {
         tracing::info!("SEED_IFC_URL is empty — skipping the IFC building demos");
@@ -388,10 +525,10 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
         {
             continue; // already seeded
         }
-        // SEED_IFC_URL overrides only the Schependomlaan source (the headline
-        // building), regardless of its position in the list.
+        // SEED_IFC_URL overrides only the headline building's source,
+        // regardless of its position in the list.
         let url = match env_url.as_deref() {
-            Some(u) if b.label == "Schependomlaan" && !u.trim().is_empty() => u.to_string(),
+            Some(u) if b.label == "Esplanades" && !u.trim().is_empty() => u.to_string(),
             _ => b.url.to_string(),
         };
         tracing::info!(
@@ -438,6 +575,7 @@ fn seed_ifc_buildings(state: &AppState, owner_id: &str) {
                 source: Some(b.source_page.to_string()),
                 license: Some(b.license.to_string()),
                 attribution: Some(b.attribution.to_string()),
+                heading: b.heading,
             },
         ))
         .and_then(|r| r.map_err(anyhow::Error::msg));
@@ -564,7 +702,42 @@ fn seed_bag_buildings(state: &AppState) {
 /// dataset union — the "duplicate models" bug); friendly IFC root labels.
 /// v3: IFC buildings stand at their REAL site (the file's own IfcSite georef,
 /// with the fixed negative-DMS parsing) instead of an authored Nijmegen cluster.
-const DEMO_CONTENT_VERSION: u32 = 3;
+// v4: the landmark models gained `ots:modelHeading` (real bearings measured from
+// OpenStreetMap footprints) and the Dragon Bridge lost its incorrect
+// `ots:modelUpAxis "Z"` — the STL is Y-up, and the declaration was laying the
+// bridge on its side.
+// v5: those headings are explicitly `^^xsd:double`, matching what the IFC
+// importer emits from TrueNorth, so the feed parses one datatype.
+// v13: refreshes the demo dataset's own name/description from the current
+// seed spec (set at CREATE time only, so old installs still narrated the
+// withdrawn Schependomlaan IFC as a bundled downloadable asset).
+// v12: purges ALL of the demo dataset's assets on refresh (the reseed
+// recreates the current set). Every prior version bump re-imported the IFC
+// buildings without removing the previous rounds' asset rows, so live installs
+// had piled up duplicate Duplex.ifc/FZK-Haus.ifc/… entries. Also seeds the five
+// landmark STLs as first-class dataset assets (stable ids, idempotent).
+// v11: purges the Schependomlaan.ifc ASSET. v10 swapped the graphs but assets
+// are only ever added, so the withdrawn 47 MB file stayed stored and publicly
+// downloadable — defeating the point of the swap.
+// v10: the headline IFC is now the Esplanades project (Tallinn) — CC BY 4.0
+// from the copyright holder — replacing the Schependomlaan design model, whose
+// upstream README limits the grant to "scientific and academic purposes". The
+// building graphs, sensors and dataset description all change with it.
+// v9: the (now removed) Schependomlaan lift briefly carried an authored
+// ots:modelHeading of 68.2°.
+// v8: geo-features + volumes-3d re-authored against real geometry — the street
+// alignment and park polygon now come from OpenStreetMap instead of round-number
+// placeholders, and the WKT-Z demo solids are rotated onto the real street grid.
+// v7: drops the IfcGeometricRepresentationContext.TrueNorth rotation from the
+// IFC lift (see src/ifc/rdf.rs) — web-ifc already resolves object placements, so
+// stamping it double-rotated every building. Re-seed to clear the stored
+// ots:modelHeading triples from the v4-v6 IFC graphs.
+// v6: adds "landmarks" to STALE_SUFFIXES. It was never in the list, so the
+// bundle engine (which only back-fills graphs it finds EMPTY) had left every
+// existing store on whatever landmarks.ttl shipped when its volume was first
+// created — neither v4 nor v5 could reach it. That is why the Dragon Bridge
+// stayed on its side and no bearing ever appeared.
+const DEMO_CONTENT_VERSION: u32 = 13;
 
 /// Wipe demo graphs whose content is stale relative to [`DEMO_CONTENT_VERSION`]
 /// so this boot's seeders re-fill them. Runs BEFORE the bundle engine, which
@@ -604,6 +777,8 @@ fn refresh_demo_content(state: &AppState) {
         "tiles3d-neighbourhood",
         "tiles3d-zone2",
         // re-authored bundled graphs (the bundle engine refills them this boot)
+        "landmarks",
+        "geo-features",
         "volumes-3d",
         "sensors",
         "assets",
@@ -630,6 +805,48 @@ fn refresh_demo_content(state: &AppState) {
         let _ = state.auth_db.remove_dataset_graph(DS, &graph);
     }
     state.auth_db.invalidate_accessible_graphs_cache();
+    // Refresh the demo dataset's own metadata too: name/description are set at
+    // CREATE time only, so installs from before a rework kept narrating content
+    // the demo no longer ships (e.g. the withdrawn Schependomlaan IFC).
+    if let Ok(Some(ds)) = state.auth_db.get_dataset(DS) {
+        if let Some(spec) = seed_data::datasets().iter().find(|d| d.slug == DS) {
+            if ds.name != spec.name || ds.description.as_deref() != Some(spec.description) {
+                if let Err(e) = state.auth_db.update_dataset(
+                    DS,
+                    spec.name,
+                    Some(spec.description),
+                    ds.visibility,
+                ) {
+                    tracing::warn!("demo refresh: could not update dataset metadata: {e}");
+                } else {
+                    tracing::info!(
+                        "demo refresh: dataset name/description updated to current seed"
+                    );
+                }
+            }
+        }
+    }
+    // Purge ALL of the demo dataset's assets: the seeders recreate the current
+    // set this boot, and anything not recreated is by definition withdrawn
+    // (Schependomlaan's academic-use IFC) or a duplicate from an earlier
+    // reseed (every version bump re-imported the IFC buildings into fresh
+    // asset rows without removing the previous ones).
+    if let Ok(assets) = state.auth_db.list_dataset_assets(DS) {
+        let n = assets.len();
+        for a in assets {
+            let storage = state.object_store.clone();
+            let key = a.s3_key.clone();
+            // Best-effort object delete on the blocking-safe path; the DB row
+            // goes regardless so the asset stops being listed/served.
+            let _ = block_on_anywhere(async move { storage.delete(&key).await });
+            if let Err(e) = state.auth_db.delete_asset(&a.id) {
+                tracing::warn!("demo refresh: could not purge {}: {e}", a.filename);
+            }
+        }
+        if n > 0 {
+            tracing::info!("demo refresh: purged {n} demo assets before reseed");
+        }
+    }
     tracing::info!(
         "demo content refreshed to v{DEMO_CONTENT_VERSION} (was v{recorded}): {wiped} stale graphs wiped, reseeding"
     );

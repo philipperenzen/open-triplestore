@@ -62,6 +62,11 @@ pub struct GuardConfig {
     /// LLM requests per principal per minute (`LLM_RATE_LIMIT_PER_MIN`,
     /// default 20; 0 disables).
     pub rate_per_min: u32,
+    /// LLM requests per minute for ANONYMOUS callers, keyed by client IP
+    /// (`LLM_RATE_LIMIT_ANON_PER_MIN`, default 5; 0 disables). Guests share a
+    /// GPU with everyone else and have no account to attribute cost to, so
+    /// their budget is deliberately tighter than a signed-in user's.
+    pub rate_per_min_anon: u32,
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -97,6 +102,10 @@ pub fn config() -> &'static GuardConfig {
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(20),
+        rate_per_min_anon: std::env::var("LLM_RATE_LIMIT_ANON_PER_MIN")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(5),
     })
 }
 
@@ -269,10 +278,11 @@ fn rate_buckets() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
     BUCKETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Count this request against `key` (user id, or `ip:<addr>` for guests).
-/// Returns the suggested Retry-After seconds when over the per-minute budget.
-pub fn check_rate(key: &str) -> Result<(), u64> {
-    let limit = config().rate_per_min;
+/// Count this request against `key` (user id, or `ip:<addr>` for guests) with
+/// an explicit per-minute budget — callers pass the anonymous budget for guests
+/// and the signed-in budget for users. Returns the suggested Retry-After
+/// seconds when over budget.
+pub fn check_rate_with(key: &str, limit: u32) -> Result<(), u64> {
     if limit == 0 {
         return Ok(());
     }
@@ -617,10 +627,18 @@ mod tests {
         let key = "test-rate-user";
         let limit = config().rate_per_min;
         for _ in 0..limit {
-            assert!(check_rate(key).is_ok());
+            assert!(check_rate_with(key, limit).is_ok());
         }
-        let retry = check_rate(key).expect_err("over budget must be rejected");
+        let retry = check_rate_with(key, limit).expect_err("over budget must be rejected");
         assert!((1..=61).contains(&retry));
+        // The anonymous budget is a separate, tighter default.
+        assert!(config().rate_per_min_anon <= limit);
+        let anon_key = "test-rate-anon-ip";
+        let anon = config().rate_per_min_anon;
+        for _ in 0..anon {
+            assert!(check_rate_with(anon_key, anon).is_ok());
+        }
+        assert!(check_rate_with(anon_key, anon).is_err());
     }
 
     #[test]

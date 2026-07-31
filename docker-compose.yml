@@ -260,6 +260,13 @@ services:
       # Serve a few requests concurrently (chat + NL→SPARQL from another tab)
       # instead of queueing them behind one generation.
       - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      # Context window. Ollama's default is 4096 tokens, and Spark's grounded
+      # system prompt (datasets + graphs + sampled vocabulary) does not fit in
+      # it — Ollama then TRUNCATES the prompt silently, cutting the retrieval
+      # instructions, so the model answers from dataset descriptions and never
+      # runs a query. 16k fits the whole grounding with room for the
+      # conversation; KV cost at 7B/q4 is ~1.8 GB.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-16384}
       # Flash attention reduces prompt-processing time on supported GPUs; it is
       # ignored on CPU, so the default is safe everywhere.
       - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}

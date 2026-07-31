@@ -12,7 +12,8 @@
   import { shortenIRI } from '../lib/rdf-utils.js';
   import { copyToClipboard } from '../lib/clipboard.ts';
   import { ChevronLeft, ChevronRight, Search, Boxes, MapPin, X, Download, FileDown, Footprints, Code2, Check } from 'lucide-svelte';
-  import { modelRefOf, modelRefsOf } from '../lib/viewer/detect';
+  import { modelRefOf, modelRefsOf, FORMAT_LABELS } from '../lib/viewer/detect';
+  import { groupElements, GROUPINGS } from '../lib/viewer/grouping';
   import { modelRefs } from '../lib/viewer/geometry';
   import { preview } from '../lib/viewer/preview';
   import { resourceCache } from '../lib/viewer/resourceCache';
@@ -69,10 +70,12 @@
     { key: 'ntriples', label: 'N-Triples' },
   ];
   $: ifcUrl = (elements.find((e) => e.ifc_url)?.ifc_url || '').split('#')[0];
+  // Static HTML (MapLibre's attribution control renders it as such): 3DBAG's
+  // terms ask digital media to link their copyright page, not just name them.
   $: mapAttribution = elements.some((e) =>
     (e.files || []).some(([, url]) => /3dbag/i.test(url || ''))
   )
-    ? '© 3DBAG by tudelft3d and 3DGI (CC BY 4.0)'
+    ? '© <a href="https://docs.3dbag.nl/en/copyright/" target="_blank" rel="noopener noreferrer">3DBAG</a> by tudelft3d and 3DGI (CC BY 4.0)'
     : '';
 
   // Several movable inspector WINDOWS can be open at once, each holding a group
@@ -159,10 +162,39 @@
   // (POLYHEDRALSURFACE / TIN / SOLID / Z) — gates the Cesium viewer entry point.
   $: has3dContent =
     elements.some((e) => modelRefOf(e)) ||
+    elements.some((e) => !!e.wkt3d) ||
     elements.some((e) => /POLYHEDRALSURFACE|\bTIN\b|\bSOLID\b| Z[ (]/i.test(e.wkt4326 || ''));
 
   const hasModel = (el) => !!modelRefOf(el);
   const nodeLabel = (el) => el?.label || shortenIRI(el?.id || '');
+  // Every model format an element offers ("IFC", "STL", "CityJSON"…) — shown as
+  // badges so the list says WHAT a thing is, not just that it is 3D.
+  const badgesOf = (el) => modelRefsOf(el).map((r) => FORMAT_LABELS[r.format]);
+
+  // ── Grouping ────────────────────────────────────────────────────────────────
+  // "Structure" is the BOT/IFC containment tree (below); the others re-bucket the
+  // same elements by place, model format or rdf:type. Search always wins: an
+  // active query shows a flat result list whatever the grouping.
+  let groupBy = 'structure';
+  // Groups start closed (see groupElements): switching grouping on a several
+  // thousand element dataset must not build a DOM row per element.
+  let expandedGroups = new Set();
+  function toggleGroup(path) {
+    const next = new Set(expandedGroups);
+    next.has(path) ? next.delete(path) : next.add(path);
+    expandedGroups = next;
+  }
+  // Changing the lens drops the old lens' open state — its paths are meaningless
+  // under the new one, and keeping them would re-expand arbitrary groups.
+  $: if (groupBy) expandedGroups = new Set();
+  $: groupedRows =
+    groupBy === 'structure'
+      ? []
+      : groupElements(filtered, groupBy, {
+          expanded: expandedGroups,
+          unknown: $i18nT('viewer.ungrouped'),
+          label: nodeLabel,
+        });
 
   // ── Structural tree ─────────────────────────────────────────────────────────
   // Arrange the side list by the BOT/IFC spatial structure — Site → Building →
@@ -616,11 +648,28 @@
             aria-label={$i18nT('viewer.search')}
           />
         </label>
-        {#if hasStructure && !query}
+        {#if !query && elements.length}
           <div class="tree-tools">
-            <button class="link-btn" on:click={expandAll}>{$i18nT('viewer.expandAll')}</button>
-            <span class="dot-sep">·</span>
-            <button class="link-btn" on:click={collapseAll}>{$i18nT('viewer.collapseAll')}</button>
+            <label class="group-by">
+              <span class="gb-label">{$i18nT('viewer.groupBy.label')}</span>
+              <!-- Every option is always present. Hiding "Structure" until the
+                   containment tree arrived meant the select lost its own selected
+                   value during phase 1 of the feed (located-only elements carry no
+                   parent links), so the control rendered blank and the grouping
+                   looked like it had disappeared. On a genuinely flat dataset
+                   "Structure" simply degrades to the located/unlocated split. -->
+              <select bind:value={groupBy} aria-label={$i18nT('viewer.groupBy.label')}>
+                {#each GROUPINGS as g}
+                  <option value={g}>{$i18nT(`viewer.groupBy.${g}`)}</option>
+                {/each}
+              </select>
+            </label>
+            {#if groupBy === 'structure' && hasStructure}
+              <span class="dot-sep">·</span>
+              <button class="link-btn" on:click={expandAll}>{$i18nT('viewer.expandAll')}</button>
+              <span class="dot-sep">·</span>
+              <button class="link-btn" on:click={collapseAll}>{$i18nT('viewer.collapseAll')}</button>
+            {/if}
           </div>
         {/if}
         <div class="list-scroll">
@@ -638,11 +687,51 @@
                   <button class="row" class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
                     <span class="label">{nodeLabel(el)}</span>
                     {#if el.wkt4326}<span class="loc-i"><MapPin size={11} /></span>{/if}
-                    {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                    {#each badgesOf(el) as b}<span class="badge">{b}</span>{/each}
                   </button>
                 </li>
               {/each}
               {#if !filtered.length}<li class="empty-row">{$i18nT('viewer.noMatches')}</li>{/if}
+            </ul>
+          {:else if groupBy === 'structure' && !hasStructure && !fullLoaded}
+            <!-- The feed loads in two phases: the located subset first (fast, but
+                 it carries no parent links) then the full hierarchy. Rendering the
+                 flat located/unlocated split in the gap meant the user watched a
+                 list appear and then rearrange itself into a tree seconds later.
+                 Wait for the structure instead of showing something we know is
+                 about to be replaced. -->
+            <div class="side-loading" role="status">
+              <span class="ls-spin"></span>{$i18nT('viewer.loadingStructure')}
+            </div>
+          {:else if groupBy !== 'structure'}
+            <!-- Grouped: place / format / type buckets over the same elements. -->
+            <ul class="tree">
+              {#each groupedRows as r (r.key)}
+                {#if r.header}
+                  <li class="tree-row group-head" style:--depth={r.depth}>
+                    <button
+                      class="twist"
+                      class:open={r.open}
+                      on:click={() => toggleGroup(r.path)}
+                      aria-expanded={r.open}
+                      aria-label={r.open ? $i18nT('viewer.collapse') : $i18nT('viewer.expand')}
+                    ><ChevronRight size={13} /></button>
+                    <span class="row group-row">
+                      <span class="label">{r.header}</span>
+                      <span class="cnt">{r.count}</span>
+                    </span>
+                  </li>
+                {:else}
+                  <li class="tree-row" class:active={r.el.id === selected} style:--depth={r.depth}>
+                    <span class="twist-spacer"></span>
+                    <button class="row row-main" on:click={() => open(r.el.id)} title={r.el.id}>
+                      <span class="label">{nodeLabel(r.el)}</span>
+                      {#if r.el.wkt4326}<span class="loc-i"><MapPin size={11} /></span>{/if}
+                      {#each badgesOf(r.el) as b}<span class="badge">{b}</span>{/each}
+                    </button>
+                  </li>
+                {/if}
+              {/each}
             </ul>
           {:else if hasStructure}
             <!-- Structural tree: Site → Building → Storey → Space → Element. -->
@@ -667,7 +756,7 @@
                     <span class="label">{nodeLabel(r.el)}</span>
                     {#if r.count}<span class="cnt">{r.count}</span>{/if}
                     {#if r.el.wkt4326}<span class="loc-i"><MapPin size={11} /></span>{/if}
-                    {#if hasModel(r.el)}<span class="badge">3D</span>{/if}
+                    {#each badgesOf(r.el) as b}<span class="badge">{b}</span>{/each}
                   </button>
                 </li>
               {/each}
@@ -681,7 +770,7 @@
                   <li>
                     <button class="row" class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
                       <span class="label">{nodeLabel(el)}</span>
-                      {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                      {#each badgesOf(el) as b}<span class="badge">{b}</span>{/each}
                     </button>
                   </li>
                 {/each}
@@ -694,7 +783,7 @@
                   <li>
                     <button class="row" class:active={el.id === selected} on:click={() => open(el.id)} title={el.id}>
                       <span class="label">{nodeLabel(el)}</span>
-                      {#if hasModel(el)}<span class="badge">3D</span>{/if}
+                      {#each badgesOf(el) as b}<span class="badge">{b}</span>{/each}
                     </button>
                   </li>
                 {/each}
@@ -834,6 +923,9 @@
     display: flex;
     flex-direction: column;
     height: calc(100vh - 90px);
+    /* dvh follows the mobile browser's collapsing URL bar; vh does not, which
+       left the map's bottom edge (and the walk prompt on it) under the chrome. */
+    height: calc(100dvh - 90px);
   }
   .page-head {
     display: flex;
@@ -857,7 +949,10 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 290px 1fr;
+    /* Fluid rather than a fixed 290px: narrow laptops got a sidebar that ate a
+       third of the canvas, wide monitors got one stuck at phone width while the
+       element labels (deep IFC paths) stayed truncated. */
+    grid-template-columns: clamp(250px, 21vw, 300px) 1fr;
     gap: 0.6rem;
   }
   .side,
@@ -1010,6 +1105,43 @@
     align-items: center;
     gap: 6px;
     padding: 2px 12px 0;
+    flex-wrap: wrap;
+  }
+  .group-by {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .gb-label {
+    color: var(--muted, #94a3b8);
+    font-size: 0.7rem;
+  }
+  .group-by select {
+    /* Sizing only — colours come from the global theme rules (theme.css styles
+       `select` per theme). The first cut hardcoded `--surface`/#fff here, and a
+       Svelte-scoped rule out-specifies `.dark select`, so dark mode rendered a
+       white pill with light text. */
+    width: auto;
+    font-size: 0.7rem;
+    padding: 2px 22px 2px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  /* Group headers in the non-structural groupings (place / format / type). */
+  .group-head .group-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    padding: 3px 6px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--muted, #64748b);
+  }
+  .group-head:hover {
+    background: transparent;
   }
   .link-btn {
     border: 0;
@@ -1348,10 +1480,62 @@
   .dock-closeall:hover {
     color: var(--ink-900, #0f172a);
   }
+  /* Wide monitors: give the list the room to show a full IFC element label
+     instead of ellipsing every row, without starving the canvas. */
+  @media (min-width: 1600px) {
+    .explorer {
+      grid-template-columns: clamp(300px, 18vw, 400px) 1fr;
+      gap: 0.8rem;
+    }
+  }
+
   @media (max-width: 900px) {
     .explorer {
       grid-template-columns: 1fr;
-      grid-template-rows: 220px 1fr;
+      /* Proportional, not a fixed 220px: on a short phone that left ~3 rows
+         visible, on a tablet it wasted the space. Bounded so the map keeps the
+         majority of the viewport either way. */
+      grid-template-rows: minmax(160px, 34dvh) 1fr;
+    }
+    .page-head {
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+  }
+
+  @media (max-width: 620px) {
+    .explorer-page {
+      height: calc(100dvh - 64px);
+    }
+    .page-head h1 {
+      font-size: 1.05rem;
+    }
+    .search {
+      padding: 8px 10px;
+    }
+    .tree-tools {
+      padding: 4px 10px 0;
+    }
+    /* The group-by select and the expand/collapse links compete for one line at
+       phone width; let the select own its row. */
+    .group-by {
+      flex: 1 1 100%;
+    }
+    .group-by select {
+      flex: 1;
+    }
+  }
+
+  /* Touch: the 22px rows are comfortable with a mouse and a coin-toss with a
+     thumb. Only widen the hit area — the visual density stays. */
+  @media (pointer: coarse) {
+    .tree-row .row-main,
+    .row {
+      min-height: 34px;
+    }
+    .twist,
+    .twist-spacer {
+      min-width: 30px;
     }
   }
 </style>

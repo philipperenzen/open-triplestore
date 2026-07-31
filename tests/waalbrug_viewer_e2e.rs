@@ -218,21 +218,31 @@ async fn viewer_feed_serves_wikidata_landmarks_demo() {
     let j = body_json(resp.into_body()).await;
     let elements = j["elements"].as_array().expect("elements");
     assert_eq!(elements.len(), 6, "collection root + 5 landmarks: {j}");
-    // Orientation annotations flow through: the Z-up STL landmarks carry it (their
-    // vertical extent is along Z), the Y-up torii stays unannotated (no rotation).
-    let up = |name: &str| {
+    // Orientation annotations flow through, and they are MEASURED from the STL
+    // binaries (the up axis is the one whose coordinate range starts at 0 — the
+    // ground plane): the three tower models are Z-up; the Dragon Bridge and the
+    // torii are Y-up and therefore carry no annotation — the bridge's previous
+    // `"Z"` was wrong and laid it on its side (a quarter-turn about its own
+    // long axis).
+    let el = |name: &str| {
         elements
             .iter()
             .find(|e| e["id"].as_str().unwrap_or("").ends_with(name))
-            .and_then(|e| e["up_axis"].as_str().map(str::to_string))
+            .unwrap_or_else(|| panic!("{name} in feed"))
     };
+    let up = |name: &str| el(name)["up_axis"].as_str().map(str::to_string);
     assert_eq!(up("BigBen").as_deref(), Some("Z"));
     assert_eq!(up("EmpireStateBuilding").as_deref(), Some("Z"));
     assert_eq!(up("WhiteHouse").as_deref(), Some("Z"));
-    // Dragon Bridge's STL is Z-up (deck height along Z); without this it rendered
-    // tipped ~82 m onto its side instead of lying flat on the map.
-    assert_eq!(up("DragonBridge").as_deref(), Some("Z"));
+    assert_eq!(up("DragonBridge"), None);
     assert_eq!(up("SannoShrine"), None);
+    // Real-world bearings (ots:modelHeading, measured from OSM footprints) reach
+    // the feed as numbers; the torii has no OSM way, so it stays unannotated
+    // rather than getting an invented bearing.
+    let heading = |name: &str| el(name)["heading"].as_f64();
+    assert_eq!(heading("DragonBridge"), Some(88.1));
+    assert_eq!(heading("EmpireStateBuilding"), Some(119.1));
+    assert_eq!(heading("SannoShrine"), None);
 
     let bridge = elements
         .iter()

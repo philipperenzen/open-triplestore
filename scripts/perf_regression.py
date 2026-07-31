@@ -25,14 +25,15 @@ Baseline file (benches/perf_baseline.json)
   {
     "schema_version": 1,
     "default_tolerance_ratio": 1.10,      # fail when run/baseline > this (here: +10%)
-    "tolerances": { "concurrent/": 1.5, "query/join/10000": 1.4 },
+    "tolerances": { "concurrent_": 1.5, "query_join/10000": 1.4 },
     "generator": { ...provenance metadata, never used in the pass/fail math... },
     "benchmarks": { "query/simple_lookup/1000": 275000.0, ... }   # id -> median nanoseconds
   }
 
 Tolerance precedence for a benchmark id (highest first):
   1. exact key in `tolerances`              (unless --force-tolerance is given)
-  2. longest matching prefix key ending in "/" in `tolerances`
+  2. longest matching prefix key ending in "/" or "_" (a group prefix — Criterion
+     sanitises a "/" inside a group name into "_") in `tolerances`
   3. `small_benchmark_tolerance` when the reference side is under `small_benchmark_ns`
   4. --tolerance / OTS_PERF_TOLERANCE override, else `default_tolerance_ratio` (default 1.10)
 With --force-tolerance, the CLI/env override beats per-bench and prefix entries too.
@@ -92,6 +93,18 @@ def collect_medians(criterion_dirs):
     """
     medians = {}
     for criterion_dir in criterion_dirs:
+        # `mv target/criterion <dest>` NESTS instead of renaming when <dest> already
+        # exists — and a restored build cache is enough to leave the destination
+        # behind — so Criterion's own root can end up one level down. Every bench id
+        # would then gain a "criterion/" prefix and silently stop matching the
+        # tolerance table: that is how a +12.9% run of `query_simple_lookup/100000`,
+        # deliberately tolerated at 1.45x because it is bimodal on this runner, came
+        # to fail against the 1.10 default. Descend when that is what we were handed.
+        nested = os.path.join(criterion_dir, "criterion")
+        if os.path.isdir(nested) and glob.glob(
+            os.path.join(nested, "**", "new", "estimates.json"), recursive=True
+        ):
+            criterion_dir = nested
         pattern = os.path.join(criterion_dir, "**", "new", "estimates.json")
         for path in sorted(glob.glob(pattern, recursive=True)):
             # bench_id is the path between criterion_dir and the trailing
@@ -155,9 +168,14 @@ def resolve_tolerance(bench_id, baseline, override, force, reference_ns=None):
     tols = baseline.get("tolerances", {})
     if bench_id in tols:
         return float(tols[bench_id])
+    # A prefix key names a whole group. Criterion renders the group boundary as "/"
+    # for a nested id, but sanitises a "/" INSIDE a group name into "_" when it
+    # builds the directory — `benchmark_group("concurrent/reads")` lands in
+    # `concurrent_reads/`. Accept both terminators, or a group-level key silently
+    # matches nothing (which is what "concurrent/" did against `concurrent_reads/…`).
     best_key = None
     for key in tols:
-        if key.endswith("/") and bench_id.startswith(key):
+        if key.endswith(("/", "_")) and bench_id.startswith(key):
             if best_key is None or len(key) > len(best_key):
                 best_key = key
     if best_key is not None:

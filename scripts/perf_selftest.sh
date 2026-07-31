@@ -138,5 +138,36 @@ expect_exit 1 "small-benchmark floor: an explicit tolerances entry still wins" -
                           --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
                           --baseline "$tight_base"
 
+# 7. A nested Criterion root must not change the bench ids. `mv target/criterion
+#    <dest>` puts the source INSIDE <dest> when <dest> already exists (a restored
+#    build cache is enough), so the gate can be handed <dest>/criterion/<id>/…
+#    instead of <dest>/<id>/…. Every id would gain a "criterion/" prefix and stop
+#    matching the tolerance table — the failure mode that made a 1.45x-tolerated
+#    benchmark fail against the 1.10 default.
+nest_root="$(mktemp -d)"
+trap 'rm -rf "$empty" "$cmp_root" "$nest_root"; rm -f "$out_json" "$cmp_base" "$small_base" "$tight_base"' EXIT
+for side in base head; do mkdir -p "$nest_root/$side/criterion/query_simple_lookup/100000/new"; done
+printf '{"median":{"point_estimate":74200000.0}}' > "$nest_root/base/criterion/query_simple_lookup/100000/new/estimates.json"
+printf '{"median":{"point_estimate":83700000.0}}' > "$nest_root/head/criterion/query_simple_lookup/100000/new/estimates.json"
+nest_base="$(mktemp)"
+trap 'rm -rf "$empty" "$cmp_root" "$nest_root"; rm -f "$out_json" "$cmp_base" "$small_base" "$tight_base" "$nest_base"' EXIT
+printf '{"schema_version":1,"default_tolerance_ratio":1.10,"tolerances":{"query_simple_lookup/100000":1.45},"benchmarks":{}}' > "$nest_base"
+expect_exit 0 "nested criterion root still matches its tolerance key" --   "$PY" "$script" compare --before "$nest_root/base" --after "$nest_root/head" --baseline "$nest_base"
+case "$LAST_OUT" in
+  *"criterion/query_simple_lookup"*) echo "FAIL: bench id kept the nesting prefix"; fails=$((fails + 1));;
+  *) echo "PASS: nested root did not prefix the bench id";;
+esac
+
+# 8. A group-prefix tolerance key ends in "_" whenever Criterion sanitised a "/"
+#    inside the group name (benchmark_group("concurrent/reads") -> concurrent_reads/).
+#    A "/"-only prefix rule matched none of them.
+grp_root="$(mktemp -d)"
+trap 'rm -rf "$empty" "$cmp_root" "$nest_root" "$grp_root"; rm -f "$out_json" "$cmp_base" "$small_base" "$tight_base" "$nest_base"' EXIT
+printf '{"schema_version":1,"default_tolerance_ratio":1.10,"tolerances":{"concurrent_":1.5},"benchmarks":{}}' > "$nest_base"
+for side in base head; do mkdir -p "$grp_root/$side/concurrent_reads/threads/8/new"; done
+printf '{"median":{"point_estimate":1000.0}}' > "$grp_root/base/concurrent_reads/threads/8/new/estimates.json"
+printf '{"median":{"point_estimate":1400.0}}' > "$grp_root/head/concurrent_reads/threads/8/new/estimates.json"
+expect_exit 0 "group prefix ending in _ applies to concurrent_reads/…" --   "$PY" "$script" compare --before "$grp_root/base" --after "$grp_root/head" --baseline "$nest_base"
+
 echo "===================================="
 if [ "$fails" -eq 0 ]; then echo "ALL PERF SELF-TESTS PASSED"; else echo "$fails PERF SELF-TEST(S) FAILED"; exit 1; fi

@@ -27,21 +27,23 @@
     listDatasetGrants,
     setDatasetGrant,
     revokeDatasetGrant,
+    getGeoStatsBatch,
   } from '../lib/api.js';
   import { t } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
   import { navigate } from '../lib/router/index.js';
-  import { isAdmin, user as userStore } from '../lib/stores.js';
+  import { isAdmin, isAuthenticated, user as userStore } from '../lib/stores.js';
   import { VISIBILITIES } from '../lib/permissions.js';
   import { safeExternalUrl } from '../lib/safeUrl.js';
   import { copyToClipboard } from '../lib/clipboard.js';
-  import { Plus, Trash2, X, UserPlus, Terminal, Database, Network, Rows3, Activity, Edit2, ShieldCheck, Loader2, Upload, Copy, CheckCheck, Users, Building2, Globe, Mail, Link as LinkIcon, ChevronRight, Info, Hash, Bookmark } from 'lucide-svelte';
+  import { Plus, Trash2, X, UserPlus, Terminal, Database, Network, Rows3, Activity, Edit2, Loader2, Upload, Copy, CheckCheck, Users, Building2, Globe, Mail, Link as LinkIcon, ChevronRight, Info, Hash, Bookmark, Boxes } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import OrganisationMetadataDialog from '../components/OrganisationMetadataDialog.svelte';
   import Avatar from '../components/Avatar.svelte';
   import BannerBackdrop from '../components/BannerBackdrop.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
+  import SectionNav from '../components/SectionNav.svelte';
 
   export let id;
 
@@ -51,6 +53,18 @@
   let orgDatasets = [];
   let allOrgs = [];
   let error = '';
+  // Honest KPI pills: only show member/group counts when their (auth-gated)
+  // fetches actually succeeded — an anonymous visitor gets no lying zeros.
+  let membersLoaded = false;
+  let groupsLoaded = false;
+  // Aggregate 3D/geo capability across the org's datasets (one batched probe).
+  let orgGeo = null;
+  // Member being removed — drives the confirm dialog.
+  let removeMemberTarget = null;
+
+  $: orgDatasetsSorted = [...orgDatasets].sort((a, b) =>
+    String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || ''))
+  );
 
   const ORG_TYPE_KEY = {
     FormalOrganization: 'pages.orgDetail.orgTypeFormal',
@@ -196,7 +210,11 @@
   }
 
   onMount(async () => {
-    await Promise.all([fetchOrg(), fetchMembers(), fetchGroups(), fetchOrgDatasets(), fetchAllOrgs()]);
+    // Members/groups are auth-gated endpoints — skip them for anonymous
+    // visitors instead of collecting guaranteed 401s.
+    const tasks = [fetchOrg(), fetchOrgDatasets(), fetchAllOrgs()];
+    if ($isAuthenticated) tasks.push(fetchMembers(), fetchGroups());
+    await Promise.all(tasks);
   });
 
   async function fetchAllOrgs() {
@@ -211,6 +229,10 @@
       // Filter datasets owned by this organisation using the canonical owner fields
       orgDatasets = all.filter(d => d.owner_type === 'organisation' && String(d.owner_id) === String(id));
     } catch (_) { /* ignore */ }
+    // One OR-aggregated probe for the whole org (never per-dataset fan-out).
+    if (orgDatasets.length) {
+      try { orgGeo = await getGeoStatsBatch(orgDatasets.map(d => d.id)); } catch { orgGeo = null; }
+    }
   }
 
   async function fetchOrg() {
@@ -331,6 +353,7 @@
   async function fetchMembers() {
     try {
       members = await listOrgMembers(id);
+      membersLoaded = true;
     } catch (_) { /* ignore */ }
   }
 
@@ -347,6 +370,7 @@
           }
         })
       );
+      groupsLoaded = true;
     } catch (_) { /* ignore */ }
   }
 
@@ -373,12 +397,29 @@
     }
   }
 
-  async function handleRemoveMember(userId) {
+  async function doRemoveMember() {
+    const m = removeMemberTarget;
+    removeMemberTarget = null;
+    if (!m) return;
     try {
-      await removeOrgMember(id, userId);
+      await removeOrgMember(id, m.user_id || m.user?.id);
       await fetchMembers();
     } catch (e) {
       error = e.message;
+    }
+  }
+
+  // Invite picker: users who aren't members yet (no raw-ID typing).
+  $: inviteCandidates = allUsers.filter(
+    (u) => !members.some((m) => (m.user_id || m.user?.id) === u.id)
+  );
+  async function openInviteModal() {
+    inviteError = '';
+    newMemberUserId = '';
+    newMemberRole = 'member';
+    showInviteModal = true;
+    if (allUsers.length === 0) {
+      try { allUsers = await listPublicUsers(); } catch { /* picker stays empty */ }
     }
   }
 
@@ -491,7 +532,13 @@
       <BannerBackdrop bannerKey={bannerKey} imageUrl="{getOrgBannerUrl(id)}?v={bannerVersion}" seed={id} />
       <div class="org-header glass">
         <div class="org-info">
-          <h2 class="org-title">{org.name}</h2>
+          <div class="org-title-row">
+            <Avatar kind="organisation" id={id} name={org.name} hasImage={!!imageKey} size={56} cacheKey={imageVersion} />
+            <div class="org-title-text">
+              <h2 class="org-title">{org.name}</h2>
+              <span class="pill org-type-pill"><Building2 size={11} /> {orgTypeLabel(org.org_type)}</span>
+            </div>
+          </div>
           {#if org.description}<p class="meta org-desc">{org.description}</p>{/if}
         </div>
         <div class="org-actions">
@@ -500,9 +547,6 @@
             <Edit2 size={13} /> {$t('pages.orgDetail.editPage')}
           </button>
         {/if}
-        <Link to="/organisations/{id}/sparql" class="btn btn-sm">
-          <Terminal size={13} /> {$t('pages.orgDetail.openSparql')}
-        </Link>
         <button class="btn btn-sm btn-ghost" title={$t('pages.orgDetail.copySparqlUrlTitle')} on:click={copyOrgSparqlUrl}>
           {#if copiedSparql}<CheckCheck size={13} /> {$t('system.copied')}{:else}<Copy size={13} /> {$t('pages.orgDetail.copyUrl')}{/if}
         </button>
@@ -516,100 +560,100 @@
   {/if}
 </div>
 
-<!-- About / metadata -->
 {#if org}
-<div class="card about-card">
-  <div class="explore-head">
-    <Info size={15} />
-    <h3>{$t('pages.orgDetail.about')}</h3>
-  </div>
-
-  <dl class="meta-grid">
-    <div class="meta-item">
-      <dt>{$t('pages.orgDetail.fieldType')}</dt>
-      <dd><span class="md-pill"><Building2 size={11} /> {$t(ORG_TYPE_KEY[org.org_type] || 'pages.orgDetail.orgTypeFormal')}</span></dd>
-    </div>
-
-    {#if org.identifier}
-      <div class="meta-item">
-        <dt>{$t('pages.orgDetail.fieldIdentifier')}</dt>
-        <dd><span class="md-mono"><Hash size={11} /> {org.identifier}</span></dd>
-      </div>
+  <div class="kpi-strip">
+    <button type="button" class="stat-pill kpi-pill" on:click={() => document.getElementById('datasets')?.scrollIntoView({ behavior: 'smooth' })}>
+      <span class="stat-value">{orgDatasets.length}</span>
+      <span class="stat-label">{$t('pages.orgDetail.statDatasets')}</span>
+    </button>
+    {#if childOrgs.length}
+      <button type="button" class="stat-pill kpi-pill" on:click={() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' })}>
+        <span class="stat-value">{childOrgs.length}</span>
+        <span class="stat-label">{$t('pages.orgDetail.statSubUnits')}</span>
+      </button>
     {/if}
-
-    {#if org.homepage}
-      <div class="meta-item">
-        <dt>{$t('pages.orgDetail.fieldHomepage')}</dt>
-        <dd><a href={safeExternalUrl(org.homepage)} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {org.homepage}</a></dd>
-      </div>
+    {#if membersLoaded}
+      <button type="button" class="stat-pill kpi-pill" on:click={() => document.getElementById('members')?.scrollIntoView({ behavior: 'smooth' })}>
+        <span class="stat-value">{members.length}</span>
+        <span class="stat-label">{$t('pages.orgDetail.statMembers')}</span>
+      </button>
     {/if}
-
-    {#if org.contact_name || org.contact_email || org.contact_url}
-      <div class="meta-item meta-wide">
-        <dt>{$t('pages.orgDetail.fieldContactPoint')}</dt>
-        <dd class="contact-dd">
-          {#if org.contact_name}<span class="contact-name">{org.contact_name}</span>{/if}
-          {#if org.contact_email}<a href="mailto:{org.contact_email}" class="md-link"><Mail size={11} /> {org.contact_email}</a>{/if}
-          {#if org.contact_url}<a href={safeExternalUrl(org.contact_url)} target="_blank" rel="noopener" class="md-link"><LinkIcon size={11} /> {org.contact_url}</a>{/if}
-        </dd>
-      </div>
+    {#if groupsLoaded}
+      <button type="button" class="stat-pill kpi-pill" on:click={() => document.getElementById('groups')?.scrollIntoView({ behavior: 'smooth' })}>
+        <span class="stat-value">{groups.length}</span>
+        <span class="stat-label">{$t('pages.orgDetail.statGroups')}</span>
+      </button>
     {/if}
-
-    {#if org.created_at}
-      <div class="meta-item">
-        <dt>{$t('pages.orgDetail.fieldCreated')}</dt>
-        <dd>{fmtDate(org.created_at)}</dd>
-      </div>
-    {/if}
-  </dl>
-
-  {#if !hasAboutMeta && canManageOrg}
-    <p class="about-empty">{$t('pages.orgDetail.aboutEmptyBefore')} <strong>{$t('pages.orgDetail.editPage')}</strong> {$t('pages.orgDetail.aboutEmptyAfter')}</p>
-  {/if}
-</div>
-
-<!-- Organisation hierarchy -->
-<div class="card">
-  <div class="explore-head">
-    <Network size={15} />
-    <h3>{$t('pages.orgDetail.hierarchyHeading')}</h3>
-  </div>
-
-  {#if parentOrg}
-    <div class="hier-block">
-      <span class="hier-label">{$t('pages.orgDetail.hierPartOf')}</span>
-      <Link to="/organisations/{parentOrg.id}" class="hier-chip hier-parent">
-        <Building2 size={13} /> {parentOrg.name}
-        {#if parentOrg.org_type}<span class="hier-type">{orgTypeLabel(parentOrg.org_type)}</span>{/if}
-      </Link>
-    </div>
-  {/if}
-
-  <div class="hier-block">
-    <span class="hier-label">{$t('pages.orgDetail.hierThisOrg')}</span>
-    <span class="hier-chip hier-self">
-      <Building2 size={13} /> {org.name}
-      <span class="hier-type">{$t(ORG_TYPE_KEY[org.org_type] || 'pages.orgDetail.orgTypeFormal')}</span>
-    </span>
-  </div>
-
-  <div class="hier-block">
-    <span class="hier-label">{$t('pages.orgDetail.hierSubUnits', { values: { count: childOrgs.length } })}</span>
-    {#if childOrgs.length > 0}
-      <div class="hier-children">
-        {#each childOrgs as c (c.id)}
-          <Link to="/organisations/{c.id}" class="hier-chip hier-child">
-            <ChevronRight size={13} /> {c.name}
-            {#if c.org_type}<span class="hier-type">{orgTypeLabel(c.org_type)}</span>{/if}
-          </Link>
-        {/each}
-      </div>
-    {:else}
-      <span class="hier-empty">{$t('pages.orgDetail.hierNoSubUnits')} {#if canManageOrg}{$t('pages.orgDetail.hierNoSubUnitsManage')}{/if}</span>
+    {#if orgGeo && (orgGeo.has_3d || orgGeo.has_coordinates)}
+      <span class="stat-pill kpi-pill kpi-3d">
+        <span class="stat-value"><Boxes size={16} /></span>
+        <span class="stat-label">{$t('pages.orgDetail.chip3d')}</span>
+      </span>
     {/if}
   </div>
-</div>
+
+  <SectionNav sections={[
+    { id: 'datasets', label: $t('pages.orgDetail.datasetsHeading') },
+    { id: 'members', label: $t('pages.orgDetail.members'), visible: $isAuthenticated },
+    { id: 'groups', label: $t('pages.orgDetail.groups'), visible: $isAuthenticated },
+    { id: 'about', label: $t('pages.orgDetail.about') },
+  ]} />
 {/if}
+
+<!-- Datasets: the org's product — promoted to the top -->
+<div class="card" id="datasets">
+  <div class="explore-head">
+    <Database size={15} />
+    <h3>{$t('pages.orgDetail.datasetsHeading')} <span class="count-chip">{orgDatasets.length}</span></h3>
+    {#if canManageOrg}
+      <button class="btn btn-sm" on:click={() => showNewDataset = !showNewDataset}>
+        {#if showNewDataset}<X size={13} /> {$t('system.cancel')}{:else}<Plus size={13} /> {$t('pages.orgDetail.newDataset')}{/if}
+      </button>
+    {/if}
+  </div>
+
+  {#if canManageOrg && showNewDataset}
+    <div class="new-ds-form">
+      <input bind:value={newDsName} placeholder={$t('pages.orgDetail.datasetNamePlaceholder')} />
+      <input bind:value={newDsDesc} placeholder={$t('pages.orgDetail.datasetDescPlaceholder')} />
+      <Select bind:value={newDsVisibility}
+        options={VISIBILITIES.map(v => ({ value: v.value, label: v.label }))} />
+      <button class="btn btn-sm" on:click={createOrgDataset} disabled={creatingDs || !newDsName}>
+        {#if creatingDs}{$t('pages.orgDetail.creating')}{:else}{$t('system.create')}{/if}
+      </button>
+    </div>
+  {/if}
+
+  {#if orgDatasetsSorted.length > 0}
+    <div class="ds-grid">
+      {#each orgDatasetsSorted as ds (ds.id)}
+        <Link to="/datasets/{ds.id}" class="ds-tile">
+          <div class="ds-tile-top">
+            <span class="ds-tile-name">
+              <Avatar kind="dataset" id={ds.id} name={ds.name} hasImage={!!ds.image_key} size={26} />
+              <strong>{ds.name}</strong>
+            </span>
+            <span class="vis vis-{ds.visibility}">{ds.visibility}</span>
+          </div>
+          {#if ds.description}
+            <p>{ds.description}</p>
+          {/if}
+          {#if ds.updated_at || ds.created_at}
+            <span class="ds-tile-date">{$t('pages.orgDetail.updatedDate', { values: { date: fmtDate(ds.updated_at || ds.created_at) } })}</span>
+          {/if}
+        </Link>
+      {/each}
+    </div>
+  {:else}
+    <div class="empty-state">
+      <Database size={32} />
+      <strong>{$t('pages.orgDetail.noDatasetsTitle')}</strong>
+      {#if canManageOrg}
+        <Link to="/import?org={id}" class="btn btn-sm">{$t('pages.orgDetail.dataImportLink')}</Link>
+      {/if}
+    </div>
+  {/if}
+</div>
 
 <!-- Explore -->
 <div class="card explore-card">
@@ -638,62 +682,20 @@
       <strong>{$t('pages.orgDetail.tileApiTitle')}</strong>
       <span>{$t('pages.orgDetail.tileApiDesc')}</span>
     </Link>
-    <Link to="/validation?org={id}" class="action-tile">
-      <ShieldCheck size={22} />
-      <strong>{$t('pages.orgDetail.tileValidateTitle')}</strong>
-      <span>{$t('pages.orgDetail.tileValidateDesc')}</span>
-    </Link>
-    <Link to="/import?org={id}" class="action-tile">
-      <Upload size={22} />
-      <strong>{$t('pages.orgDetail.tileImportTitle')}</strong>
-      <span>{$t('pages.orgDetail.tileImportDesc')}</span>
-    </Link>
+    {#if canManageOrg}
+      <Link to="/import?org={id}" class="action-tile">
+        <Upload size={22} />
+        <strong>{$t('pages.orgDetail.tileImportTitle')}</strong>
+        <span>{$t('pages.orgDetail.tileImportDesc')}</span>
+      </Link>
+    {/if}
   </div>
 </div>
 
-<!-- Datasets -->
-<div class="card">
-  <div class="explore-head">
-    <Database size={15} />
-    <h3>{$t('pages.orgDetail.datasetsHeading')}</h3>
-    <button class="btn btn-sm" on:click={() => showNewDataset = !showNewDataset}>
-      {#if showNewDataset}<X size={13} /> {$t('system.cancel')}{:else}<Plus size={13} /> {$t('pages.orgDetail.newDataset')}{/if}
-    </button>
-  </div>
-
-  {#if showNewDataset}
-    <div class="new-ds-form">
-      <input bind:value={newDsName} placeholder={$t('pages.orgDetail.datasetNamePlaceholder')} />
-      <input bind:value={newDsDesc} placeholder={$t('pages.orgDetail.datasetDescPlaceholder')} />
-      <Select bind:value={newDsVisibility}
-        options={VISIBILITIES.map(v => ({ value: v.value, label: v.label }))} />
-      <button class="btn btn-sm" on:click={createOrgDataset} disabled={creatingDs || !newDsName}>
-        {#if creatingDs}{$t('pages.orgDetail.creating')}{:else}{$t('system.create')}{/if}
-      </button>
-    </div>
-  {/if}
-
-  {#if orgDatasets.length > 0}
-    <div class="ds-grid">
-      {#each orgDatasets as ds}
-        <Link to="/datasets/{ds.id}" class="ds-tile">
-          <div class="ds-tile-top">
-            <strong>{ds.name}</strong>
-            <span class="vis vis-{ds.visibility}">{ds.visibility}</span>
-          </div>
-          {#if ds.description}
-            <p>{ds.description}</p>
-          {/if}
-        </Link>
-      {/each}
-    </div>
-  {:else}
-    <p class="empty-ds">{$t('pages.orgDetail.noDatasetsBefore')} <Link to="/import">{$t('pages.orgDetail.dataImportLink')}</Link>.</p>
-  {/if}
-</div>
-
-<!-- Members -->
-<div class="card">
+<!-- Members — the list endpoint is auth-gated; an anonymous visitor would
+     stare at an empty table, so the whole card is signed-in-only. -->
+{#if $isAuthenticated}
+<div class="card" id="members">
   <div class="members-header">
     <div>
       <h3>{$t('pages.orgDetail.members')}</h3>
@@ -705,18 +707,20 @@
         {#if membersByRole.viewer}<span class="role-chip role-viewer">{$t('pages.orgDetail.viewerCount', { values: { count: membersByRole.viewer } })}</span>{/if}
       </div>
     </div>
-    <div class="members-header-actions">
-      <button class="btn btn-sm btn-ghost" on:click={toggleAccessMatrix} title={$t('pages.orgDetail.accessMatrixTitle')}>
-        <Database size={13} /> {showAccessMatrix ? $t('pages.orgDetail.hideMatrix') : $t('pages.orgDetail.accessMatrix')}
-      </button>
-      <button class="btn btn-sm" on:click={() => { showInviteModal = true; inviteError = ''; }}>
-        <UserPlus size={13} /> {$t('pages.orgDetail.addMember')}
-      </button>
-    </div>
+    {#if canManageOrg}
+      <div class="members-header-actions">
+        <button class="btn btn-sm btn-ghost" on:click={toggleAccessMatrix} title={$t('pages.orgDetail.accessMatrixTitle')}>
+          <Database size={13} /> {showAccessMatrix ? $t('pages.orgDetail.hideMatrix') : $t('pages.orgDetail.accessMatrix')}
+        </button>
+        <button class="btn btn-sm" on:click={openInviteModal}>
+          <UserPlus size={13} /> {$t('pages.orgDetail.addMember')}
+        </button>
+      </div>
+    {/if}
   </div>
 
   <!-- Editable dataset access matrix -->
-  {#if showAccessMatrix}
+  {#if canManageOrg && showAccessMatrix}
     <div class="matrix-wrap">
       <p class="matrix-caption">
         {$t('pages.orgDetail.matrixCaptionIntro')} <strong>{$t('pages.orgDetail.roleViewer')}</strong> {$t('pages.orgDetail.matrixCaptionViewer')}
@@ -815,6 +819,7 @@
     </div>
   {/if}
 
+  <div class="table-scroll">
   <table>
     <thead><tr><th>{$t('pages.orgDetail.username')}</th><th>{$t('pages.orgDetail.role')}</th><th></th></tr></thead>
     <tbody>
@@ -828,7 +833,7 @@
             </span>
           </td>
           <td>
-            {#if m.user?.role !== 'super_admin'}
+            {#if canManageOrg && m.user?.role !== 'super_admin'}
               <Select
                 size="sm"
                 value={m.role}
@@ -839,19 +844,23 @@
                   { value: 'viewer', label: $t('pages.orgDetail.roleViewer') },
                 ]} />
             {:else}
-              <span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-amber-100 text-amber-800">{$t('pages.orgDetail.roleOwner')}</span>
+              <span class="role-chip {m.role === 'admin' ? 'role-admin' : m.role === 'viewer' ? 'role-viewer' : 'role-member'}">
+                {m.role === 'admin' ? $t('pages.orgDetail.roleOwner') : m.role === 'viewer' ? $t('pages.orgDetail.roleViewer') : $t('pages.orgDetail.roleMember')}
+              </span>
             {/if}
           </td>
           <td>
-            {#if m.user?.role !== 'super_admin'}
-              <button class="btn btn-sm btn-danger" on:click={() => handleRemoveMember(m.user_id || m.user?.id)}><Trash2 size={14} /> {$t('pages.orgDetail.removeMember')}</button>
+            {#if canManageOrg && m.user?.role !== 'super_admin'}
+              <button class="btn btn-sm btn-danger" on:click={() => removeMemberTarget = m}><Trash2 size={14} /> {$t('pages.orgDetail.removeMember')}</button>
             {/if}
           </td>
         </tr>
       {/each}
     </tbody>
   </table>
+  </div>
 </div>
+{/if}
 
 <!-- Invite Member Modal -->
 {#if showInviteModal}
@@ -863,8 +872,15 @@
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label for="invite-uid">{$t('pages.orgDetail.userId')}</label>
-          <input id="invite-uid" bind:value={newMemberUserId} placeholder={$t('pages.orgDetail.enterUserId')} required />
+          <label for="invite-uid">{$t('pages.orgDetail.username')}</label>
+          <Select id="invite-uid" bind:value={newMemberUserId}
+            options={[
+              { value: '', label: $t('pages.orgDetail.selectPerson') },
+              ...inviteCandidates.map(u => ({ value: u.id, label: u.username })),
+            ]} />
+          {#if allUsers.length > 0 && inviteCandidates.length === 0}
+            <span class="hint">{$t('pages.orgDetail.everyoneIsMember')}</span>
+          {/if}
         </div>
         <div class="form-group">
           <label for="invite-role">{$t('pages.orgDetail.role')}</label>
@@ -891,7 +907,8 @@
 {/if}
 
 <!-- Groups -->
-<div class="card">
+{#if $isAuthenticated}
+<div class="card" id="groups">
   <div class="header">
     <h3>{$t('pages.orgDetail.groups')}</h3>
     {#if canManageOrg}
@@ -907,7 +924,7 @@
           <td class="font-medium">{g.name}</td>
           <td class="text-sm text-[var(--ink-500)]">
             {#if g.members?.length > 0}
-              {g.members.map(m => m.username || m.user?.username || m.user_id).join(', ')}
+              {g.members.slice(0, 4).map(m => m.username || m.user?.username || m.user_id).join(', ')}{#if g.members.length > 4} <span class="gm-more">+{g.members.length - 4}</span>{/if}
             {:else}
               <span class="italic text-[var(--ink-400)]">{$t('pages.orgDetail.noMembers')}</span>
             {/if}
@@ -927,7 +944,101 @@
     </tbody>
   </table>
 </div>
+{/if}
+
+<!-- About & hierarchy: reference details + where this org sits in the tree.
+     (The hero owns name/description/type, so those aren't repeated.) -->
+{#if org}
+<div class="card about-card" id="about">
+  <div class="explore-head">
+    <Info size={15} />
+    <h3>{$t('pages.orgDetail.about')}</h3>
+  </div>
+
+  <dl class="meta-grid">
+    <div class="meta-item">
+      <dt>{$t('pages.orgDetail.fieldType')}</dt>
+      <dd><span class="md-pill"><Building2 size={11} /> {$t(ORG_TYPE_KEY[org.org_type] || 'pages.orgDetail.orgTypeFormal')}</span></dd>
+    </div>
+
+    {#if org.identifier}
+      <div class="meta-item">
+        <dt>{$t('pages.orgDetail.fieldIdentifier')}</dt>
+        <dd><span class="md-mono"><Hash size={11} /> {org.identifier}</span></dd>
+      </div>
+    {/if}
+
+    {#if org.homepage}
+      <div class="meta-item">
+        <dt>{$t('pages.orgDetail.fieldHomepage')}</dt>
+        <dd><a href={safeExternalUrl(org.homepage)} target="_blank" rel="noopener" class="md-link"><Globe size={11} /> {org.homepage}</a></dd>
+      </div>
+    {/if}
+
+    {#if org.contact_name || org.contact_email || org.contact_url}
+      <div class="meta-item meta-wide">
+        <dt>{$t('pages.orgDetail.fieldContactPoint')}</dt>
+        <dd class="contact-dd">
+          {#if org.contact_name}<span class="contact-name">{org.contact_name}</span>{/if}
+          {#if org.contact_email}<a href="mailto:{org.contact_email}" class="md-link"><Mail size={11} /> {org.contact_email}</a>{/if}
+          {#if org.contact_url}<a href={safeExternalUrl(org.contact_url)} target="_blank" rel="noopener" class="md-link"><LinkIcon size={11} /> {org.contact_url}</a>{/if}
+        </dd>
+      </div>
+    {/if}
+
+    {#if org.created_at}
+      <div class="meta-item">
+        <dt>{$t('pages.orgDetail.fieldCreated')}</dt>
+        <dd>{fmtDate(org.created_at)}</dd>
+      </div>
+    {/if}
+  </dl>
+
+  {#if parentOrg}
+    <div class="hier-block">
+      <span class="hier-label">{$t('pages.orgDetail.hierPartOf')}</span>
+      <Link to="/organisations/{parentOrg.id}" class="hier-chip hier-parent">
+        <Building2 size={13} /> {parentOrg.name}
+        {#if parentOrg.org_type}<span class="hier-type">{orgTypeLabel(parentOrg.org_type)}</span>{/if}
+      </Link>
+    </div>
+  {/if}
+
+  {#if childOrgs.length || canManageOrg}
+    <div class="hier-block">
+      <span class="hier-label">{$t('pages.orgDetail.hierSubUnits', { values: { count: childOrgs.length } })}</span>
+      {#if childOrgs.length > 0}
+        <div class="hier-children">
+          {#each childOrgs as c (c.id)}
+            <Link to="/organisations/{c.id}" class="hier-chip hier-child">
+              <ChevronRight size={13} /> {c.name}
+              {#if c.org_type}<span class="hier-type">{orgTypeLabel(c.org_type)}</span>{/if}
+            </Link>
+          {/each}
+        </div>
+      {:else}
+        <span class="hier-empty">{$t('pages.orgDetail.hierNoSubUnits')} {$t('pages.orgDetail.hierNoSubUnitsManage')}</span>
+      {/if}
+    </div>
+  {/if}
+
+  {#if !hasAboutMeta && canManageOrg}
+    <p class="about-empty">{$t('pages.orgDetail.aboutEmptyBefore')} <strong>{$t('pages.orgDetail.editPage')}</strong> {$t('pages.orgDetail.aboutEmptyAfter')}</p>
+  {/if}
+</div>
+{/if}
+
 </div><!-- /detail-stack -->
+
+{#if removeMemberTarget}
+  <ConfirmModal
+    title={$t('pages.orgDetail.confirmRemoveMemberTitle')}
+    message={$t('pages.orgDetail.confirmRemoveMemberMsg', { values: { name: removeMemberTarget.username || removeMemberTarget.user?.username || removeMemberTarget.user_id } })}
+    confirmLabel={$t('pages.orgDetail.removeMember')}
+    on:confirm={doRemoveMember}
+    on:cancel={() => removeMemberTarget = null}
+  />
+{/if}
 
 {#if deleteGroupId !== null}
   <ConfirmModal
@@ -1073,6 +1184,34 @@
   .breadcrumb {
     display: none;
   }
+
+  /* ── Hero title row + KPI strip + section anchors ── */
+  .org-title-row { display: flex; align-items: center; gap: 0.75rem; }
+  .org-title-text { display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem; }
+  .org-type-pill {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    font-size: 0.68rem; color: #fff;
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 999px; padding: 0.1rem 0.55rem;
+  }
+  .kpi-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .kpi-pill { cursor: pointer; font: inherit; text-align: left; text-decoration: none; }
+  button.kpi-pill { border: 1px solid var(--line-soft); }
+  .kpi-pill:hover { border-color: var(--brand-300); }
+  span.kpi-pill { cursor: default; }
+  .kpi-3d { border-color: var(--brand-300); }
+  .count-chip {
+    display: inline-block; font-size: 0.7rem; font-weight: 600;
+    color: var(--ink-500); background: var(--bg-soft);
+    border-radius: 999px; padding: 0.05rem 0.5rem; vertical-align: middle;
+  }
+  /* Anchored sections stop hiding under the sticky section nav. */
+  .card[id] { scroll-margin-top: 3.25rem; }
+  .table-scroll { overflow-x: auto; }
+  .ds-tile-name { display: inline-flex; align-items: center; gap: 0.45rem; min-width: 0; }
+  .ds-tile-date { font-size: 0.72rem; color: var(--ink-400); margin-top: 0.3rem; display: block; }
+  .gm-more { color: var(--ink-400); font-size: 0.78rem; }
 
   .org-title {
     font-size: 1.6rem;

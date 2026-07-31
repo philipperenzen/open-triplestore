@@ -2157,7 +2157,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Vocabularies",
                 "Recommend vocabularies",
-                "CLARIAH-style recommender: per-term ranked matches plus a minimal vocabulary set covering every search term (combiSQORE homogenization). Body: {terms:[{term,category}], preferred_vocabs?, per_term_limit?}.",
+                "CLARIAH-style recommender: per-term ranked matches plus a minimal vocabulary set covering every search term (combiSQORE homogenization). Body: {terms:[\"bridge\", {term,category}]} — terms accepts plain strings or {term, category: class|property|all}; plus preferred_vocabs? (prefix→weight) and per_term_limit?.",
                 vec![],
                 vec![("200", "Recommendation"), ("503", "Engine unavailable")],
                 false,

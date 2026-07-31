@@ -11,7 +11,7 @@
 #     Pand 0268100000029191 is a 2004 three-storey block (indoor climate +
 #     energy); pand 0268100000025440 is an 1876 building whose structure is
 #     monitored for tilt — a real preservation use case.
-#   * sd:   — the Schependomlaan IFC site root (GUID-stable IRI from the
+#   * sd:   — the headline IFC building site root (GUID-stable IRI from the
 #     canonical design model; resolves once the IFC seed has run, and dangles
 #     harmlessly when IFC seeding is disabled).
 #   * v3:   — an authored extruded solid from volumes-3d.ttl.
@@ -83,9 +83,9 @@ dt:Obs-Tilt-01 a sosa:Observation ;
     sosa:resultTime "2026-06-12T08:20:00Z"^^xsd:dateTime ;
     sosa:hasSimpleResult "0.12"^^xsd:double .
 
-# ── Occupancy on the Schependomlaan IFC site (BIM ↔ twin bridge) ──
+# ── Occupancy on the headline IFC site (Esplanades — BIM ↔ twin bridge) ──
 dt:OccupancySensor01 a sosa:Sensor ;
-    rdfs:label "Occupancy sensor (Schependomlaan site)"@en ;
+    rdfs:label "Occupancy sensor (Esplanades site)"@en ;
     sosa:isHostedBy sd:20FpTZCqJy2vhVJYtjuIce ;
     sosa:observes dt:occupancy .
 

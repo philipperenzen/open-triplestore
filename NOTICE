@@ -18,23 +18,84 @@ distributed under their own licenses, including but not limited to:
   - and other crates / npm packages listed in Cargo.toml, Cargo.lock,
     and frontend/package.json.
 
-Bundled datasets:
+Bundled binaries and frontend libraries:
+
+  - web-ifc (frontend/public/wasm/web-ifc.wasm and the web-ifc npm package) —
+    Mozilla Public License 2.0, © the ThatOpen Company / web-ifc contributors.
+    Source Code Form: https://github.com/ThatOpen/engine_web-ifc (the exact
+    version is pinned in frontend/package-lock.json). Per MPL-2.0 §3.2 this
+    notice tells recipients where to obtain the Source Code Form.
+  - CesiumJS — Apache-2.0, © Cesium GS, Inc. (https://github.com/CesiumGS/cesium)
+  - swagger-ui-dist — Apache-2.0, © SmartBear Software
+  - MapLibre GL JS — BSD-3-Clause, © MapLibre contributors
+  - three.js — MIT; Leaflet — BSD-2-Clause; and the other packages named in
+    frontend/package.json, each under its own license.
+
+Bundled datasets and vocabularies:
 
   - Linked Open Vocabularies (LOV) — vocabulary catalog metadata
-    (assets/vocab/lov-catalog.json.gz), vocabulary contents extracted into
-    frontend/public/vocab/, and the optional lov.nq.gz corpus baked into the
-    Docker image. © the LOV team (Pierre-Yves Vandenbussche et al.),
-    https://lov.linkeddata.es/ — CC BY 4.0.
+    (assets/vocab/lov-catalog.json.gz) and the optional lov.nq.gz corpus baked
+    into the Docker image. © the LOV team (Pierre-Yves Vandenbussche et al.),
+    https://lov.linkeddata.es/ — CC BY 4.0. The corpus aggregates ~900
+    third-party vocabularies; EACH VOCABULARY REMAINS UNDER ITS OWN UPSTREAM
+    TERMS — LOV's CC BY 4.0 covers the aggregation and its metadata.
+  - Standard vocabularies bundled in frontend/public/vocab/ (17 of them
+    extracted via LOV, the rest fetched or authored directly). Each remains
+    under its publisher's terms, notably:
+      * W3C vocabularies (RDF, RDFS, OWL, SHACL, SKOS, DCAT, PROV, SOSA/SSN,
+        Org, Time, ODRL, qb, …) — W3C Software and Document License,
+        https://www.w3.org/copyright/software-license/
+      * schema.org (schema.ttl, a subset with definitions reproduced
+        verbatim) — CC BY-SA 3.0, © schema.org,
+        https://schema.org/docs/terms.html
+      * Dublin Core (dcterms, dctype) — CC BY 4.0, © DCMI,
+        https://www.dublincore.org/about/copyright/
+      * FOAF — CC BY 1.0 (http://xmlns.com/foaf/spec/); GoodRelations —
+        CC BY 3.0 (© Martin Hepp); VOAF/VANN/SIOC/BIBO — Creative Commons
+        Attribution; PAV and DOAP — Apache-2.0
+      * GeoSPARQL — © Open Geospatial Consortium, OGC Document License
+      * SAREF — © ETSI, BSD-3-Clause (https://forge.etsi.org/etsi-software-license)
+      * BOT, FOG, OMG, props — © W3C Linked Building Data Community Group,
+        Creative Commons Attribution
+      * LOCN — ISA Open Metadata Licence v1.1, © European Union
+  - IMBOR 2025 Vocabulaire — © Stichting CROW, bundled verbatim
+    (frontend/public/vocab/imbor.ttl) from the official IMBOR 2025 Linked Data
+    release, https://github.com/Stichting-CROW/imbor. Licensed CC BY 4.0
+    (IMBOR gegevens) and ODC-BY (IMBOR producten) per CROW's licence table,
+    https://docs.crow.nl/imbor/techdoc/ — this database is made available
+    under the Open Data Commons Attribution License,
+    https://opendatacommons.org/licenses/by/1-0/.
   - prefix.cc — community prefix→namespace mappings, merged into
     src/prefixes/data/prefixes-snapshot.json. Community-contributed data from
-    https://prefix.cc/ (site code released under The Unlicense).
-  - The vocabulary recommender algorithm ports the CLARIAH
-    vocabulary-recommender (Triply B.V.) — MIT.
-    https://github.com/CLARIAH/vocabulary-recommender
-  - IMBOR 2025 Vocabulaire — © Stichting CROW, bundled verbatim
-    (frontend/public/vocab/imbor.ttl) from the official IMBOR 2025 Linked
-    Data release, https://github.com/Stichting-CROW/imbor (open standard
-    for public-space asset management; see https://www.crow.nl/kennisproducten/imbor/).
+    https://prefix.cc/ (site code released under The Unlicense; the mapping
+    data itself carries no stated license).
+  - The vocabulary recommender algorithm is an independent reimplementation of
+    the ideas in CLARIAH's vocabulary-recommender (Triply B.V.),
+    https://github.com/CLARIAH/vocabulary-recommender — whose repository
+    states no license; no upstream code is included.
+
+Demo content (seeded datasets):
+
+  - Esplanades IFC model (Maleva 18, Tallinn) — © Esplan (https://www.esplan.ee/en),
+    CC BY 4.0, via buildingSMART Community-Sample-Test-Files. Downloaded at
+    first boot and re-served as a dataset asset.
+  - Duplex Apartment IFC — CC BY 4.0, credit: BSI (2020) "Duplex Apartment
+    Test Files", buildingSMART International,
+    https://github.com/buildingsmart-community/Community-Sample-Test-Files
+  - FZK-Haus and Smiley West IFC — Institute for Automation and Applied
+    Informatics (IAI) / Karlsruhe Institute of Technology (KIT), provided
+    "for unrestricted use" with a requested citation,
+    https://www.ifcwiki.org/index.php?title=KIT_IFC_Examples
+  - 3DBAG excerpt (frontend/public/samples/schependomlaan-3dbag.city.json,
+    modified: a small excerpt of the full dataset) — © 3DBAG by tudelft3d
+    and 3DGI, CC BY 4.0, https://docs.3dbag.nl/en/copyright/
+  - World-landmark 3D models (STL, Wikimedia Commons): Big Ben, White House,
+    Empire State Building (simplified) and Nagasaki torii shrine © Microsoft,
+    CC BY 4.0; Dragon Bridge in Da Nang by -karlos-, CC0. Licence and creator
+    are also recorded per model in the seeded RDF.
+  - Demo street/park geometries traced from OpenStreetMap —
+    © OpenStreetMap contributors, ODbL, https://www.openstreetmap.org/copyright
+  - Wikidata-derived landmark facts — CC0.
 
 The licenses of bundled and dependency components are unaffected by the Commons
 Clause condition above, which applies only to Open Triplestore itself.
