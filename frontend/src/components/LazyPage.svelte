@@ -17,7 +17,6 @@
 
   // LazyPage forwards arbitrary props to the lazily-loaded page; the rest element
   // is intentional and this component is never compiled as a custom element.
-  // eslint-disable-next-line svelte/valid-compile
   let { loader, ...restProps }: Props = $props();
 
   let Component = $state(null);
