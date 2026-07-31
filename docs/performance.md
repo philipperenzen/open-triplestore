@@ -125,9 +125,10 @@ default:
 {
   "default_tolerance_ratio": 1.10,
   "tolerances": {
-    "concurrent/": 1.5,                 // genuinely variable; not in the gated subset
-    "query_group_concat/": 1.35,        // both sizes; allocation-heavy, measured +25.5 %
-    "query_simple_lookup/100000": 1.45  // bimodal on this runner; see below
+    "concurrent/": 1.5,                    // genuinely variable; not in the gated subset
+    "query_alternative_path/10000": 1.5,   // bimodal on this runner; see below
+    "query_group_concat/": 1.35,           // both sizes; allocation-heavy, measured +25.5 %
+    "query_simple_lookup/100000": 1.45     // bimodal on this runner; see below
   },
   "small_benchmark_ns": 1000,           // below 1 µs, a percentage bar means nothing
   "small_benchmark_tolerance": 1.35
@@ -142,10 +143,22 @@ benchmarks one at a time in `tolerances` only ever catches whichever tripped las
 the floor covers the class. It is a *fallback*, so an explicit `tolerances` entry
 still wins if you want a particular small benchmark held tighter.
 
-Two benchmarks need an exception, and only two.
+Three benchmarks need an exception, and only three.
 
 `query_group_concat/*` is allocation-heavy at 1–3 µs and read +25.5 % with nothing
 changed.
+
+`query_alternative_path/10000` is bimodal the same way `query_simple_lookup/100000`
+is, and for the same reason: it materialises every solution of a two-branch
+alternative path over 10 000 persons each iteration, so what it measures is
+dominated by allocation and whatever state the runner's memory is in. Across ten
+runs of **identical** `develop` code the *merge base* alone came in at 12.3, 12.7,
+13.1, 14.5, 15.3, 15.3, 15.6, 15.9, 16.2 and 17.1 ms — a span of about **1.39×**,
+which by itself exceeds the +10 % bar before any change is measured. The deltas
+that produced follow: two unrelated PRs (a Svelte file-browser UI and a dependency
+bump, neither touching path evaluation) read +10.7 % and +11.9 % in the same
+afternoon, and one earlier run read **+46.1 %**. 1.5 sits above the worst observed
+reading rather than being tuned to make a particular run pass.
 
 `query_simple_lookup/100000` is the awkward one, and worth understanding before
 you tighten it. At ~50–90 ms it is by far the heaviest in the subset, it
