@@ -16,9 +16,12 @@
 //!
 //! 1. **Platform** — prefixes derived from the model/vocabulary registry
 //!    (kept fresh by the registry seed and model mutations).
-//! 2. **Bundled dataset** — the prefix.cc + LOV snapshot (~3.7k prefixes).
-//! 3. **Local cache** — mappings confirmed earlier (persisted JSON).
-//! 4. **prefix.cc network fallback** — opt-in only.
+//! 2. **Seeded** — declared by the seed bundles installed on this deployment.
+//!    Above the snapshot on purpose: an operator who declares a label for their
+//!    own namespace means that namespace, not whatever a community list says.
+//! 3. **Bundled dataset** — the prefix.cc + LOV snapshot (~3.7k prefixes).
+//! 4. **Local cache** — mappings confirmed earlier (persisted JSON).
+//! 5. **prefix.cc network fallback** — opt-in only.
 //!
 //! ## How auto-resolution works
 //!
@@ -57,7 +60,7 @@ use std::sync::{Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 pub use dataset::{PrefixDataset, PrefixSource};
@@ -129,6 +132,10 @@ pub struct PrefixRegistry {
     state: Mutex<RuntimeState>,
     dataset: PrefixDataset,
     platform: RwLock<PlatformPrefixes>,
+    /// Prefixes declared by installed seed bundles. Its own tier because it is a
+    /// deployment's own statement about its namespaces and must outrank the
+    /// bundled prefix.cc/LOV snapshots (see `insert_seeded`).
+    seeded: RwLock<PlatformPrefixes>,
     /// Contact live prefix.cc for unknown labels (PREFIX_CC_FALLBACK=true).
     allow_network: bool,
 }
@@ -182,6 +189,7 @@ impl PrefixRegistry {
             }),
             dataset: PrefixDataset::bundled(),
             platform: RwLock::new(PlatformPrefixes::default()),
+            seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network,
         })
     }
@@ -195,6 +203,7 @@ impl PrefixRegistry {
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::empty(),
             platform: RwLock::new(PlatformPrefixes::default()),
+            seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network: false,
         }
     }
@@ -208,6 +217,7 @@ impl PrefixRegistry {
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::bundled(),
             platform: RwLock::new(PlatformPrefixes::default()),
+            seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network: false,
         }
     }
@@ -215,6 +225,10 @@ impl PrefixRegistry {
     /// Number of prefixes in the bundled dataset.
     pub fn dataset_len(&self) -> usize {
         self.dataset.len()
+    }
+
+    fn read_seeded(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {
+        self.seeded.read().unwrap_or_else(|e| e.into_inner())
     }
 
     fn read_platform(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {
@@ -241,7 +255,7 @@ impl PrefixRegistry {
 
     // ── Local resolution ─────────────────────────────────────────────────────
 
-    /// Resolve `label` from the local tiers only (platform → dataset → cache).
+    /// Resolve `label` from the local tiers only (platform → seeded → dataset → cache).
     pub fn lookup_local(&self, label: &str) -> Option<ResolvedPrefix> {
         if !is_valid_label(label) {
             return None;
@@ -251,6 +265,13 @@ impl PrefixRegistry {
                 prefix: label.to_string(),
                 namespace: iri.clone(),
                 source: PrefixSource::Platform,
+            });
+        }
+        if let Some(iri) = self.read_seeded().by_label.get(label) {
+            return Some(ResolvedPrefix {
+                prefix: label.to_string(),
+                namespace: iri.clone(),
+                source: PrefixSource::Seeded,
             });
         }
         if let Some(entry) = self.dataset.lookup(label) {
@@ -278,6 +299,13 @@ impl PrefixRegistry {
                 prefix: label.clone(),
                 namespace: iri.to_string(),
                 source: PrefixSource::Platform,
+            });
+        }
+        if let Some(label) = self.read_seeded().by_iri.get(iri) {
+            return Some(ResolvedPrefix {
+                prefix: label.clone(),
+                namespace: iri.to_string(),
+                source: PrefixSource::Seeded,
             });
         }
         if let Some(entry) = self.dataset.reverse(iri) {
@@ -357,6 +385,20 @@ impl PrefixRegistry {
                 });
             }
         }
+        {
+            let seeded = self.read_seeded();
+            let mut labels: Vec<_> = seeded.by_label.iter().collect();
+            labels.sort_by(|a, b| a.0.cmp(b.0));
+            for (label, iri) in labels {
+                if seen.insert(label.clone()) {
+                    out.push(ResolvedPrefix {
+                        prefix: label.clone(),
+                        namespace: iri.clone(),
+                        source: PrefixSource::Seeded,
+                    });
+                }
+            }
+        }
         for entry in self.dataset.entries() {
             if seen.insert(entry.prefix.clone()) {
                 out.push(ResolvedPrefix {
@@ -421,6 +463,29 @@ impl PrefixRegistry {
                 }
             }
         }
+        {
+            // Without this a deployment's own namespaces never shorten back into
+            // their seeded prefix — those IRIs would render in full.
+            let seeded = self.read_seeded();
+            for (ns, label) in seeded.by_iri.iter() {
+                if iri.starts_with(ns.as_str()) && iri.len() > ns.len() {
+                    let better = match &best {
+                        Some((b, _)) => ns.len() > b.namespace.len(),
+                        None => true,
+                    };
+                    if better {
+                        best = Some((
+                            ResolvedPrefix {
+                                prefix: label.clone(),
+                                namespace: ns.clone(),
+                                source: PrefixSource::Seeded,
+                            },
+                            iri[ns.len()..].to_string(),
+                        ));
+                    }
+                }
+            }
+        }
         if let Some((entry, local)) = self.dataset.shrink(iri) {
             let better = match &best {
                 Some((b, _)) => entry.namespace.len() > b.namespace.len(),
@@ -444,7 +509,7 @@ impl PrefixRegistry {
 
     /// Return the namespace IRI for a prefix `label`.
     ///
-    /// Resolution order: platform → bundled dataset → cache → live prefix.cc
+    /// Resolution order: platform → seeded → bundled dataset → cache → live prefix.cc
     /// (only when the registry was opened with `allow_network`).
     ///
     /// Returns `None` when the label is invalid or unknown to every tier.
@@ -638,32 +703,47 @@ impl PrefixRegistry {
         Some((label, resolved_iri))
     }
 
-    /// Seed a validated `prefix → namespace` mapping into the cache (from a
-    /// seed bundle or other trusted config), persisting on change. Existing
-    /// entries always win — a learned or previously seeded mapping is never
-    /// clobbered. Returns whether the mapping was newly inserted.
+    /// Seed a validated `prefix → namespace` mapping declared by a seed bundle
+    /// or other trusted deployment config. The first seed of a label wins, so
+    /// installing a second bundle never silently repoints an established prefix.
+    /// Returns whether the mapping was newly inserted.
+    ///
+    /// Seeds live in their own tier ABOVE the bundled prefix.cc/LOV snapshots.
+    /// They used to be written into the cache — the lowest tier — while
+    /// de-duplicating only against the cache, so a seed whose label the snapshot
+    /// also knows reported success and was then shadowed at every lookup — a
+    /// bundle declaring a common label for its own namespace kept expanding to
+    /// the community mapping. A deployment naming its own namespace outranks a
+    /// community list.
     pub fn insert_seeded(&self, label: &str, iri: &str) -> bool {
         if !is_valid_label(label) || !is_valid_iri(iri) {
             warn!("prefix seed rejected (invalid label or IRI): {label:?} → {iri:?}");
             return false;
         }
         {
-            let mut state = self.lock_state();
-            if state.cache.by_label.contains_key(label) {
+            let mut seeded = self.seeded.write().unwrap_or_else(|e| e.into_inner());
+            if seeded.by_label.contains_key(label) {
                 return false;
             }
-            state
-                .cache
-                .by_label
-                .insert(label.to_string(), iri.to_string());
-            // Keep an existing reverse mapping for this namespace if present.
-            state
-                .cache
+            // Worth surfacing: the seed now takes precedence over a well-known
+            // mapping, which is intended but changes what CURIEs expand to.
+            if let Some(known) = self.dataset.lookup(label) {
+                if known.namespace != iri {
+                    info!(
+                        "prefix seed {label:?} → {iri:?} overrides the bundled \
+                         mapping {:?}",
+                        known.namespace
+                    );
+                }
+            }
+            seeded.by_label.insert(label.to_string(), iri.to_string());
+            seeded
                 .by_iri
                 .entry(iri.to_string())
                 .or_insert_with(|| label.to_string());
         }
-        self.persist_cache();
+        // Nothing to persist: seeds are re-applied from the installed bundles on
+        // every start, and they no longer live in the on-disk cache.
         true
     }
 
@@ -1139,5 +1219,107 @@ mod tests {
             undeclared
         );
         assert!(undeclared.contains(&"foaf".to_string()), "{:?}", undeclared);
+    }
+}
+
+#[cfg(test)]
+mod seeded_tier_tests {
+    use super::*;
+
+    fn registry() -> PrefixRegistry {
+        // Bundled snapshot present, no network, no cache file.
+        PrefixRegistry::open("", false).unwrap()
+    }
+
+    /// A label the bundled snapshot already knows, so seeding it collides.
+    const COLLIDING_LABEL: &str = "geo";
+    const SEEDED_NS: &str = "https://data.example.org/geo/def/";
+
+    #[test]
+    fn seeded_prefix_outranks_the_bundled_snapshot() {
+        let reg = registry();
+        // The collision that matters: a deployment declares a label for its own
+        // namespace while the community snapshot maps it somewhere else.
+        let bundled = reg
+            .lookup_local(COLLIDING_LABEL)
+            .expect("snapshot knows the label");
+        assert_ne!(bundled.namespace, SEEDED_NS);
+        assert_ne!(bundled.source, PrefixSource::Seeded);
+
+        assert!(reg.insert_seeded(COLLIDING_LABEL, SEEDED_NS));
+
+        let resolved = reg
+            .lookup_local(COLLIDING_LABEL)
+            .expect("the seeded mapping resolves");
+        assert_eq!(resolved.namespace, SEEDED_NS);
+        assert_eq!(resolved.source, PrefixSource::Seeded);
+        // ...which is what a CURIE actually expands to.
+        assert_eq!(
+            reg.expand_curie(&format!("{COLLIDING_LABEL}:Thing"))
+                .unwrap(),
+            format!("{SEEDED_NS}Thing")
+        );
+    }
+
+    #[test]
+    fn seeded_prefix_is_listed_and_reversible() {
+        let reg = registry();
+        reg.insert_seeded(COLLIDING_LABEL, SEEDED_NS);
+
+        // /api/prefixes must advertise the seeded mapping, not the shadowed one.
+        let listed = reg
+            .all_prefixes()
+            .into_iter()
+            .find(|p| p.prefix == COLLIDING_LABEL)
+            .expect("the seeded label is listed");
+        assert_eq!(listed.namespace, SEEDED_NS);
+        assert_eq!(listed.source, PrefixSource::Seeded);
+
+        // Reverse + shrink drive how IRIs render in the UI.
+        let rev = reg.reverse_local(SEEDED_NS).unwrap();
+        assert_eq!(rev.prefix, COLLIDING_LABEL);
+        let (pref, local) = reg.shrink_iri(&format!("{SEEDED_NS}Thing")).unwrap();
+        assert_eq!(
+            (pref.prefix.as_str(), local.as_str()),
+            (COLLIDING_LABEL, "Thing")
+        );
+    }
+
+    #[test]
+    fn first_seed_of_a_label_wins() {
+        let reg = registry();
+        assert!(reg.insert_seeded("ex", "https://example.org/one/"));
+        // A second bundle must not silently repoint an established prefix.
+        assert!(!reg.insert_seeded("ex", "https://example.org/two/"));
+        assert_eq!(
+            reg.lookup_local("ex").unwrap().namespace,
+            "https://example.org/one/"
+        );
+    }
+
+    #[test]
+    fn invalid_seeds_are_still_rejected() {
+        let reg = registry();
+        // A label the bundled snapshot does not define, so "unresolved" here can
+        // only mean the seed was refused ("ok" is a real prefix.cc entry).
+        const UNUSED: &str = "zzseedtest";
+        assert!(reg.lookup_local(UNUSED).is_none(), "precondition");
+
+        assert!(!reg.insert_seeded("not a label", "https://example.org/"));
+        assert!(!reg.insert_seeded(UNUSED, "javascript:alert(1)"));
+        assert!(reg.lookup_local(UNUSED).is_none());
+    }
+
+    #[test]
+    fn platform_still_outranks_a_seed() {
+        let reg = registry();
+        reg.insert_seeded("ex", "https://example.org/seeded/");
+        reg.set_platform_prefixes([(
+            "ex".to_string(),
+            "https://example.org/platform/".to_string(),
+        )]);
+        let r = reg.lookup_local("ex").unwrap();
+        assert_eq!(r.namespace, "https://example.org/platform/");
+        assert_eq!(r.source, PrefixSource::Platform);
     }
 }

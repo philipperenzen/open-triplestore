@@ -1977,10 +1977,17 @@ impl AuthDb {
         token_hash: &str,
     ) -> anyhow::Result<Option<(String, String, String, String)>> {
         let conn = self.pool.get()?;
+        // One statement, so the read and the delete cannot be interleaved. The
+        // previous SELECT-then-DELETE let two concurrent `grant_type=refresh_token`
+        // requests both observe the row and both receive a fresh token pair —
+        // exactly the replay the single-use rule exists to prevent. With
+        // DELETE ... RETURNING only the caller whose delete actually removed the
+        // row gets the values; the loser gets nothing. (Needs SQLite >= 3.35; the
+        // `bundled` rusqlite feature pins a far newer one.)
         let row = conn
             .query_row(
-                "SELECT client_id, user_id, scope, expires_at
-                 FROM oauth_client_refresh_tokens WHERE token_hash = ?1",
+                "DELETE FROM oauth_client_refresh_tokens WHERE token_hash = ?1
+                 RETURNING client_id, user_id, scope, expires_at",
                 [token_hash],
                 |r| {
                     Ok((
@@ -1992,12 +1999,6 @@ impl AuthDb {
                 },
             )
             .optional()?;
-        if row.is_some() {
-            conn.execute(
-                "DELETE FROM oauth_client_refresh_tokens WHERE token_hash = ?1",
-                [token_hash],
-            )?;
-        }
         Ok(row)
     }
 
@@ -6328,5 +6329,80 @@ mod tests {
                 .contains(&legacy.to_string()),
             "legacy public grant must be discoverable (parity with enforcement)"
         );
+    }
+}
+
+#[cfg(test)]
+mod refresh_rotation_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Refresh rotation makes every refresh token single-use, so the check and
+    /// the delete have to be ONE statement. With a SELECT followed by a separate
+    /// DELETE, two concurrent `grant_type=refresh_token` requests could both see
+    /// the row and both be issued a fresh token pair — a stolen refresh token
+    /// replayable inside that window.
+    ///
+    /// Uses a file-backed database on purpose: `AuthDb::in_memory` pins the pool
+    /// to a single connection, so every thread serialises on it and the
+    /// interleaving this guards against can never occur. Production opens 8.
+    #[test]
+    fn a_refresh_token_can_only_be_taken_once_under_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(AuthDb::open(&dir.path().join("auth.db")).unwrap());
+        let expires = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        // Repeat: the losing interleaving is timing-dependent, so one round could
+        // pass by luck even against the racy implementation.
+        for round in 0..25 {
+            let hash = format!("hash-{round}");
+            db.insert_client_refresh_token(&hash, "client-a", "user-1", "openid", &expires)
+                .unwrap();
+
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                let hash = hash.clone();
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait(); // release all callers into the take together
+                    db.take_client_refresh_token(&hash).unwrap().is_some()
+                }));
+            }
+            let winners = handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .filter(|got| *got)
+                .count();
+
+            assert_eq!(
+                winners, 1,
+                "round {round}: exactly one caller may consume a refresh token"
+            );
+            assert!(
+                db.take_client_refresh_token(&hash).unwrap().is_none(),
+                "round {round}: the token must be gone afterwards"
+            );
+        }
+    }
+
+    #[test]
+    fn taking_returns_the_stored_grant_and_is_single_use() {
+        let db = AuthDb::in_memory().unwrap();
+        let expires = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        db.insert_client_refresh_token("hash-2", "client-b", "user-2", "openid write", &expires)
+            .unwrap();
+
+        let (client_id, user_id, scope, exp) =
+            db.take_client_refresh_token("hash-2").unwrap().unwrap();
+        assert_eq!(
+            (client_id.as_str(), user_id.as_str(), scope.as_str()),
+            ("client-b", "user-2", "openid write")
+        );
+        assert_eq!(exp, expires);
+        assert!(db.take_client_refresh_token("hash-2").unwrap().is_none());
+        // An unknown hash is simply absent, not an error.
+        assert!(db.take_client_refresh_token("nope").unwrap().is_none());
     }
 }
