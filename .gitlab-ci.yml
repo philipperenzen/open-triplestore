@@ -167,7 +167,7 @@ perf-baseline:
 # ── Frontend: lint, test, build ───────────────────────────────────────────────
 frontend:
   stage: test
-  image: node:20-bookworm
+  image: node:24-bookworm
   cache:
     key: "npm-$CI_COMMIT_REF_SLUG"
     paths:
@@ -200,7 +200,7 @@ cargo-deny:
 # ── npm audit (production dependencies, high severity) ────────────────────────
 npm-audit:
   stage: audit
-  image: node:20-bookworm
+  image: node:24-bookworm
   script:
     - cd frontend
     - npm audit --audit-level=high --omit=dev
