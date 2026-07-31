@@ -2,7 +2,11 @@
   import { onMount, onDestroy, createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import { fetchAssetContent, assetMetadata } from '../lib/api.js';
-  import { X, Download, ZoomIn, ZoomOut, FileText, Image as ImageIcon, Code2, ExternalLink } from 'lucide-svelte';
+  import { assetBadge } from '../lib/assetBadge';
+  import { X, Download, ZoomIn, ZoomOut, FileText, Image as ImageIcon, Code2, ExternalLink, Boxes } from 'lucide-svelte';
+
+  // 3D preview pulls the heavy three.js chunk; load it only for model files.
+  const model3d = () => import('./viewer/Model3D.svelte');
 
   /**
    * Asset preview modal.
@@ -77,9 +81,16 @@
     return 'binary';
   }
 
-  $: category = fileCategory(mime, asset?.filename);
+  // 3D model files (IFC/STL/glTF/CityJSON/CityGML) get a real viewer instead of
+  // the binary fallback. Format comes from the FILENAME — the download route
+  // carries no extension, so Model3D needs it passed explicitly.
+  $: badge = assetBadge(asset?.filename);
+  $: category = badge.model3dFormat ? 'model3d' : fileCategory(mime, asset?.filename);
   $: isText   = ['text','code','rdf','csv'].includes(category);
   $: isBinary = ['image','pdf','audio','video'].includes(category);
+  $: downloadUrl = asset && datasetId
+    ? `/api/datasets/${datasetId}/assets/${asset.id}/download`
+    : null;
 
   // Reload content when asset changes
   $: if (asset && datasetId) { loadContent(); }
@@ -102,6 +113,15 @@
 
   async function loadContent() {
     if (!asset) return;
+    // Model3D fetches the file itself — no pre-fetch needed (and a 50 MB IFC
+    // must not be pulled twice).
+    if (category === 'model3d') {
+      loadingContent = false;
+      contentError = null;
+      content = null;
+      revokeUrl();
+      return;
+    }
     loadingContent = true;
     contentError = null;
     content = null;
@@ -186,7 +206,9 @@
     <!-- Header -->
     <div class="preview-header">
       <div class="preview-title-area">
-        {#if category === 'image'}
+        {#if category === 'model3d'}
+          <Boxes size={16} class="file-icon" />
+        {:else if category === 'image'}
           <ImageIcon size={16} class="file-icon" />
         {:else if category === 'rdf' || category === 'code'}
           <Code2 size={16} class="file-icon" />
@@ -233,6 +255,23 @@
         <div class="preview-error">
           <p>{contentError}</p>
           <button class="btn btn-sm" on:click={downloadAsset}><Download size={13}/> {$t('components.assetPreview.downloadInstead')}</button>
+        </div>
+
+      <!-- 3D model preview (IFC / STL / glTF / CityJSON / CityGML) -->
+      {:else if category === 'model3d' && downloadUrl}
+        <div class="model3d-wrap">
+          {#await model3d() then mod}
+            <svelte:component
+              this={mod.default}
+              refs={[{ id: downloadUrl, url: downloadUrl, format: badge.model3dFormat, upAxis: null }]}
+              height="100%"
+            />
+          {:catch}
+            <div class="preview-unavailable">
+              <FileText size={48} />
+              <p>{$t('components.assetPreview.previewUnavailable')}</p>
+            </div>
+          {/await}
         </div>
 
       <!-- Image preview -->
@@ -397,6 +436,11 @@
     border-radius: 4px;
     transition: transform 0.15s;
     display: block;
+  }
+
+  /* 3D model */
+  .model3d-wrap {
+    width: 100%; height: 100%;
   }
 
   /* PDF */

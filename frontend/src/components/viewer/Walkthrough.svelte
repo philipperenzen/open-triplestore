@@ -168,11 +168,15 @@
     // Ease the eye height toward standing/crouched (Ctrl) so it doesn't snap.
     const eyeTargetH = move.crouch ? EYE_CROUCH : EYE_HEIGHT;
     eyeNow += (eyeTargetH - eyeNow) * Math.min(1, 12 * dt);
-    const floorY = floorUnder(camera.position);
+    let floorY = floorUnder(camera.position);
     if (!Number.isFinite(floorY)) {
-      vy = 0;
-      grounded = false;
-      return;
+      // No raycast hit below (outside the model's meshes, over a gap, a model
+      // whose BVH failed to build). The scene's normalised models rest on y=0,
+      // so treat the ground plane as the floor rather than freezing physics:
+      // the early return here left `grounded` false forever, which silently
+      // disabled BOTH jump (gated on `grounded`) and crouch (the eased eye
+      // height only reaches the camera through the floor-relative branch below).
+      floorY = 0;
     }
     const rise = floorY - (camera.position.y - eyeNow);
     if (rise > MAX_STEP) {

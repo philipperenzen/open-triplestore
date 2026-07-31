@@ -28,7 +28,6 @@
     deleteAsset,
     updateAssetVisibility,
     updateAssetMetadata,
-    fetchAssetContent,
     uploadToGraph,
     listServiceGraphs,
     addServiceGraph,
@@ -51,7 +50,9 @@
   } from '../lib/api.js';
   import { unwrapValidationRun, validationErrorMessage } from '../lib/validationReport.js';
   import { toastSuccess } from '../lib/toast.ts';
-  import { RESOURCE_ROLES, RESOURCE_ROLE_RANK, VISIBILITY_LABEL } from '../lib/permissions.js';
+  import { compactNumber, formatBytes } from '../lib/format.ts';
+  import { assetBadge } from '../lib/assetBadge.ts';
+  import { RESOURCE_ROLES, RESOURCE_ROLE_RANK } from '../lib/permissions.js';
   import { t as i18nT } from 'svelte-i18n';
   import { Link, navigate } from '../lib/router/index.js';
   import { isAuthenticated, user } from '../lib/stores.js';
@@ -64,7 +65,7 @@
   // eagerly-imported page would otherwise drag it into.
   import RdfTerm from '../components/RdfTerm.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History } from 'lucide-svelte';
+  import { Plus, Trash2, Check, X as XIcon, Loader2, ShieldCheck, LayoutGrid, Terminal, Network, Bookmark, Boxes, MapPin, Rows3, Activity, Copy, CheckCheck, Edit2, Power, Upload, FileText, Download, Link as LinkIcon, Clipboard, Globe, Lock, Eye, Database, Pencil, Info, Tag, ChevronLeft, ChevronRight, Unlink, Users, UserPlus, History, FolderOpen, MoreHorizontal, CloudOff } from 'lucide-svelte';
   import { Parser as N3Parser } from 'n3';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import AttachShapesDialog from '../components/AttachShapesDialog.svelte';
@@ -77,6 +78,7 @@
   import BannerBackdrop from '../components/BannerBackdrop.svelte';
   import CommitHistory from '../components/CommitHistory.svelte';
   import DatasetVersions from '../components/DatasetVersions.svelte';
+  import SectionNav from '../components/SectionNav.svelte';
   import Select from '../components/Select.svelte';
   import { findLicense, LICENSE_CATEGORY_LABEL } from '../lib/vocab/licenses';
   import { findTheme, findAdmsStatus } from '../lib/vocab/themes';
@@ -715,40 +717,70 @@
     }
   }
 
-  // Assets state
+  // Assets state — a real state machine instead of a swallowed fetch, so the
+  // Files section can tell "empty" from "sign in" from "failed" honestly.
   let assets = [];
+  let assetsState = 'loading'; // 'loading' | 'ready' | 'auth' | 'error'
   let uploading = false;
   let uploadProgress = 0;
-  let assetsError = '';
+  let assetsError = ''; // mutation feedback (upload/delete/visibility) only
   let copiedAssetId = null;
   let previewAsset = null; // asset being previewed
+
+  // Newest first; sizes summed for the section subtitle.
+  $: assetsSorted = [...assets].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  $: filesTotalBytes = assets.reduce((s, a) => s + (a.size_bytes || 0), 0);
+
+  // Per-asset context menu (copy IRI / Turtle / edit / delete collapse here so
+  // each row keeps three visible controls).
+  let assetMenuVisible = false;
+  let assetMenuX = 0, assetMenuY = 0;
+  let assetMenuAsset = null;
+  function openAssetMenu(e, asset) {
+    const r = e.currentTarget.getBoundingClientRect();
+    assetMenuAsset = asset;
+    assetMenuX = r.right;
+    assetMenuY = r.bottom + 4;
+    assetMenuVisible = true;
+  }
+  $: assetMenuItems = assetMenuAsset
+    ? [
+        { label: $i18nT('pages.datasetDetail.copyLinkedDataIri'), icon: LinkIcon, action: 'copyIri' },
+        { label: $i18nT('pages.datasetDetail.copyTurtleDescription'), icon: Clipboard, action: 'copyTurtle' },
+        ...(canWrite
+          ? [
+              { divider: true },
+              { label: $i18nT('pages.datasetDetail.editMetadata'), icon: Pencil, action: 'edit' },
+              { label: $i18nT('pages.datasetDetail.deleteAsset'), icon: Trash2, action: 'delete', danger: true },
+            ]
+          : []),
+      ]
+    : [];
+  function onAssetMenuAction(e) {
+    const asset = assetMenuAsset;
+    assetMenuVisible = false;
+    if (!asset) return;
+    if (e.detail === 'copyIri') void copyAssetIri(asset);
+    else if (e.detail === 'copyTurtle') copyAssetTurtle(asset);
+    else if (e.detail === 'edit') openAssetEdit(asset);
+    else if (e.detail === 'delete') deleteAssetId = asset.id;
+  }
 
   // Linked data IRI for an asset — used for copy/turtle, not for fetching file content.
   function assetIri(asset) {
     return asset.iri || `${window.location.origin}/datasets/${id}/assets/${asset.id}`;
   }
 
-  // Programmatic download via the authenticated API endpoint.
-  async function downloadAssetFile(asset) {
-    try {
-      const res = await fetchAssetContent(id, asset.id);
-      if (!res.ok) { assetsError = $i18nT('pages.datasetDetail.downloadFailedHttp', { values: { status: res.status } }); return; }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = asset.filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-    } catch (e) {
-      assetsError = e.message || $i18nT('pages.datasetDetail.downloadFailed');
-    }
+  // Plain anchor target for downloads: the optional-auth /download route streams
+  // with ETag caching and works for anonymous visitors — no blob round-trip.
+  function assetDownloadUrl(asset) {
+    return `/api/datasets/${id}/assets/${asset.id}/download`;
   }
 
-  // Determine preview category from content_type or filename extension
+  // Determine preview category from content_type or filename extension.
+  // 3D model files open the same modal, which mounts a real viewer for them.
   function previewKind(asset) {
+    if (assetBadge(asset.filename).model3dFormat) return 'model3d';
     const ct = (asset.content_type || '').split(';')[0].trim().toLowerCase();
     const ext = asset.filename.split('.').pop().toLowerCase();
     if (ct.startsWith('image/') || ['jpg','jpeg','png','gif','webp','svg','bmp','ico'].includes(ext)) return 'image';
@@ -766,6 +798,7 @@
     // that gating is why the preview appeared late (or seemed absent) on first paint.
     loadDataPreview();
     loadContentSummary();
+    fetchGeoStats();
     (async () => {
       // fetchAccess depends on the loaded dataset (owner + can_manage), so run it after.
       await Promise.all([fetchDataset(), fetchGraphs(), fetchServices(), fetchAssets(), fetchVersions()]);
@@ -800,7 +833,6 @@
       else setTimeout(prefetch, 600);
     }
   }
-  fetchGeoStats();
 
   async function fetchDataset() {
     try {
@@ -1078,10 +1110,26 @@
     }
   }
 
+  let graphsLoaded = false;
   async function fetchGraphs() {
     try {
       graphs = await listDatasetGraphs(id);
     } catch (_) { /* ignore */ }
+    finally { graphsLoaded = true; }
+  }
+
+  // KPI strip: triple total from the per-graph counts the graphs fetch already
+  // carries — zero extra requests.
+  $: totalTriples = graphs.reduce(
+    (s, g) => s + (typeof g === 'string' ? 0 : g.triple_count || 0),
+    0
+  );
+
+  function scrollToSection(sectionId) {
+    const el = document.getElementById(sectionId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    history.replaceState(null, '', `#${sectionId}`);
   }
 
   // True once loadDataPreview has resolved at least once, so the card can show a
@@ -1163,9 +1211,13 @@
   }
 
   async function fetchAssets() {
+    if (assetsState === 'error' || assetsState === 'auth') assetsState = 'loading';
     try {
       assets = await listAssets(id);
-    } catch (_) { /* ignore if user lacks access */ }
+      assetsState = 'ready';
+    } catch (e) {
+      assetsState = e?.status === 401 || e?.status === 403 ? 'auth' : 'error';
+    }
   }
 
   async function handleFileUpload(event) {
@@ -1254,12 +1306,6 @@
     }
   }
 
-  function formatBytes(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / 1048576).toFixed(1) + ' MB';
-  }
-
   async function runValidation() {
     validating = true;
     validationError = '';
@@ -1337,9 +1383,6 @@
               <Edit2 size={13} /> {$i18nT('pages.datasetDetail.editPage')}
             </button>
           {/if}
-          <Link to="/datasets/{id}/sparql" class="btn btn-sm">
-            <Terminal size={13} /> {$i18nT('pages.datasetDetail.openSparql')}
-          </Link>
         </div>
       </div>
     </div>
@@ -1350,9 +1393,452 @@
   {/if}
 </div>
 
-<!-- About / metadata -->
+<!-- KPI strip: what's in here, at a glance. Zero extra requests — every value
+     rides on fetches the page already makes. Pills scroll to their section. -->
 {#if dataset}
-<div class="card about-card">
+  <div class="kpi-strip">
+    {#if !graphsLoaded}
+      <div class="skel kpi-skel"></div>
+      <div class="skel kpi-skel"></div>
+      <div class="skel kpi-skel"></div>
+    {:else}
+      <button type="button" class="stat-pill kpi-pill" on:click={() => scrollToSection('graphs')}>
+        <span class="stat-value">{compactNumber(totalTriples)}</span>
+        <span class="stat-label">{$i18nT('pages.datasetDetail.statTriples')}</span>
+      </button>
+      <button type="button" class="stat-pill kpi-pill" on:click={() => scrollToSection('graphs')}>
+        <span class="stat-value">{graphs.length}</span>
+        <span class="stat-label">{$i18nT('pages.datasetDetail.statGraphs')}</span>
+      </button>
+      {#if assetsState === 'ready'}
+        <button type="button" class="stat-pill kpi-pill" on:click={() => scrollToSection('files')}>
+          <span class="stat-value">{assets.length}</span>
+          <span class="stat-label">{$i18nT('pages.datasetDetail.statFiles')}</span>
+        </button>
+      {:else if assetsState === 'auth'}
+        <button type="button" class="stat-pill kpi-pill" on:click={() => scrollToSection('files')} title={$i18nT('pages.datasetDetail.filesSignInTitle')}>
+          <span class="stat-value"><Lock size={16} /></span>
+          <span class="stat-label">{$i18nT('pages.datasetDetail.statFiles')}</span>
+        </button>
+      {/if}
+      {#if versions.length}
+        <button type="button" class="stat-pill kpi-pill" on:click={() => scrollToSection('dataset-versions')}>
+          <span class="stat-value">{versions.length}</span>
+          <span class="stat-label">{$i18nT('pages.datasetDetail.statVersions')}</span>
+        </button>
+      {/if}
+      {#if geoStats && (geoStats.has_3d || geoStats.has_coordinates)}
+        <Link to="/datasets/{id}/viewer" class="stat-pill kpi-pill kpi-3d">
+          <span class="stat-value">{compactNumber(geoStats.element_count)}</span>
+          <span class="stat-label">{$i18nT('pages.datasetDetail.stat3d')}</span>
+        </Link>
+      {/if}
+    {/if}
+  </div>
+
+  <SectionNav sections={[
+    { id: 'files', label: $i18nT('pages.datasetDetail.filesTitle') },
+    { id: 'graphs', label: $i18nT('pages.datasetDetail.graphs') },
+    { id: 'preview', label: $i18nT('pages.datasetDetail.linkedDataGraph') },
+    { id: 'metadata', label: $i18nT('pages.datasetDetail.aboutThisDataset') },
+    { id: 'dataset-versions', label: $i18nT('pages.datasetDetail.historyTitle') },
+    { id: 'services', label: $i18nT('pages.datasetDetail.sparqlServices') },
+    { id: 'validation', label: $i18nT('pages.datasetDetail.validation'), visible: $isAuthenticated },
+    { id: 'access', label: $i18nT('pages.datasetDetail.access'), visible: canManage },
+  ]} />
+{/if}
+
+{#if viewingVersion}
+  <div class="card version-view-banner">
+    <span class="vvb-text">
+      <History size={15} />
+      {$i18nT('pages.datasetDetail.showingSnapshotPre')}<strong>v{viewingVersion}</strong>{$i18nT('pages.datasetDetail.showingSnapshotPost')}
+    </span>
+    <button class="btn btn-sm btn-ghost" on:click={clearVersionView}>{$i18nT('pages.datasetDetail.backToLive')}</button>
+  </div>
+{/if}
+
+<!-- Always-on content summary + (when it doesn't match the declared role) the
+     mismatch warning. Both read the SAME cheap facet-derived summary, so there is
+     no store scan and no size gate — it runs on datasets of any size. -->
+{#if contentSummaryLoading || (contentSummary && contentSummary.verdict !== 'empty')}
+  <DatasetContentSummary summary={contentSummary} loading={contentSummaryLoading && !contentSummary} />
+{/if}
+{#if contentSummary && contentSummary.verdict !== 'empty'}
+  <ContentKindWarning
+    expected="dataset"
+    contextName={dataset?.name}
+    datasetId={id}
+    declaredRole={dataset?.graph_role ?? null}
+    preloadedProbe={contentSummary}
+    onresolved={(e) => {
+      dataset = { ...dataset, graph_role: e.role };
+      if (e.role === 'shapes') onShapesRoleAssigned();
+    }}
+  />
+{/if}
+
+{#if shapesRoleNotice}
+  <div class="card shapes-studio-note">
+    <ShieldCheck size={15} />
+    <span>{$i18nT('pages.datasetDetail.shapesAutoRegisteredNotice')}</span>
+    <Link to="/shacl/shapes" class="btn btn-sm btn-ghost shapes-studio-link">{$i18nT('pages.datasetDetail.openShaclStudio')}</Link>
+  </div>
+{/if}
+
+<!-- Explore & Visualize -->
+<div class="card explore-card">
+  <div class="explore-head">
+    <Activity size={15} />
+    <h3>{$i18nT('pages.datasetDetail.explore')}</h3>
+  </div>
+  <div class="explore-actions">
+    <Link
+      to={`/browse?dataset=${id}${versionParam ? `&version=${versionParam}` : ''}`}
+      class="action-tile"
+    >
+      <Rows3 size={22} />
+      <strong>{$i18nT('pages.datasetDetail.browseTriples')}</strong>
+      <span>{$i18nT('pages.datasetDetail.browseTriplesDesc')}</span>
+    </Link>
+    <Link
+      to={`/browse?view=graph&dataset=${id}${versionParam ? `&version=${versionParam}` : ''}`}
+      class="action-tile"
+    >
+      <Network size={22} />
+      <strong>{$i18nT('pages.datasetDetail.graphExplorer')}</strong>
+      <span>{$i18nT('pages.datasetDetail.graphExplorerDesc')}</span>
+    </Link>
+    <Link to={`/datasets/${id}/sparql${versionParam ? `?version=${versionParam}` : ''}`} class="action-tile">
+      <Terminal size={22} />
+      <strong>{$i18nT('pages.datasetDetail.sparql')}</strong>
+      <span>{$i18nT('pages.datasetDetail.sparqlDesc')}</span>
+    </Link>
+    {#if geoStats && (geoStats.has_coordinates || geoStats.has_3d)}
+      <!-- Gated by data capability: 3D viewer when there's 3D data, otherwise a
+           plain map for coordinate-only features. -->
+      <Link to="/datasets/{id}/viewer" class="action-tile">
+        {#if geoStats.has_3d}
+          <Boxes size={22} />
+          <strong>{$i18nT('pages.datasetDetail.viewer3d')}</strong>
+          <span>{$i18nT('pages.datasetDetail.viewer3dDesc')}</span>
+        {:else}
+          <MapPin size={22} />
+          <strong>{$i18nT('pages.datasetDetail.viewerMap')}</strong>
+          <span>{$i18nT('pages.datasetDetail.viewerMapDesc')}</span>
+        {/if}
+      </Link>
+    {/if}
+    <Link to="/datasets/{id}/api-services" class="action-tile">
+      <Bookmark size={22} />
+      <strong>{$i18nT('pages.datasetDetail.apiServices')}</strong>
+      <span>{$i18nT('pages.datasetDetail.apiServicesDesc')}</span>
+    </Link>
+    <Link to={`/graphs?dataset=${id}${versionParam ? `&version=${versionParam}` : ''}`} class="action-tile">
+      <LayoutGrid size={22} />
+      <strong>{$i18nT('pages.datasetDetail.namedGraphs')}</strong>
+      <span>{$i18nT('pages.datasetDetail.namedGraphsDesc')}</span>
+    </Link>
+  </div>
+</div>
+
+<!-- Files: the dataset's downloadable originals (IFC/STL/CityJSON/images/…).
+     First-class section — an anonymous visitor on a public dataset sees the
+     public files, can download them, and can open 3D models in a viewer. -->
+<div class="card" id="files">
+  <div class="section-head">
+    <div class="section-head-left">
+      <FolderOpen size={15} />
+      <h3>{$i18nT('pages.datasetDetail.filesTitle')}</h3>
+      {#if assetsState === 'ready' && assets.length}
+        <span class="files-summary">{$i18nT('pages.datasetDetail.filesSummary', { values: { count: assets.length, size: formatBytes(filesTotalBytes) } })}</span>
+      {/if}
+    </div>
+    <div class="files-head-actions">
+      {#if geoStats?.has_3d && assets.some((a) => assetBadge(a.filename).model3dFormat)}
+        <Link to="/datasets/{id}/viewer" class="btn btn-sm btn-ghost">
+          <Boxes size={13} /> {$i18nT('pages.datasetDetail.open3dViewer')}
+        </Link>
+      {/if}
+      {#if canWrite}
+      <label class="btn btn-sm" class:btn-loading={uploading}>
+        {#if uploading}<Loader2 size={13} class="animate-spin" />{:else}<Upload size={13} />{/if}
+        {uploading ? $i18nT('pages.datasetDetail.uploading') : $i18nT('pages.datasetDetail.uploadFile')}
+        <input type="file" style="display:none" on:change={handleFileUpload} disabled={uploading} />
+      </label>
+      {/if}
+    </div>
+  </div>
+
+  {#if uploading && uploadProgress > 0}
+    <div class="progress-bar">
+      <div class="progress-fill" style="width: {uploadProgress * 100}%"></div>
+    </div>
+  {/if}
+
+  {#if assetsError}
+    <div class="assets-error">
+      <span>{assetsError}</span>
+      <button class="btn btn-xs btn-ghost" on:click={() => assetsError = ''}><XIcon size={12} /></button>
+    </div>
+  {/if}
+
+  {#if assetsState === 'loading'}
+    <div class="skel file-skel"></div>
+    <div class="skel file-skel"></div>
+    <div class="skel file-skel"></div>
+  {:else if assetsState === 'auth'}
+    <div class="empty-state">
+      <Lock size={32} />
+      <strong>{$i18nT('pages.datasetDetail.filesSignInTitle')}</strong>
+      <p>{$i18nT('pages.datasetDetail.filesSignInHint')}</p>
+      <Link to="/login" class="btn btn-sm">{$i18nT('nav.signIn')}</Link>
+    </div>
+  {:else if assetsState === 'error'}
+    <div class="empty-state">
+      <CloudOff size={32} />
+      <strong>{$i18nT('pages.datasetDetail.filesErrorTitle')}</strong>
+      <button class="btn btn-sm btn-ghost" on:click={fetchAssets}>{$i18nT('pages.datasetDetail.filesRetry')}</button>
+    </div>
+  {:else if assets.length === 0}
+    <div class="empty-state">
+      <FolderOpen size={32} />
+      <strong>{$i18nT('pages.datasetDetail.filesEmptyTitle')}</strong>
+      <p>{canWrite ? $i18nT('pages.datasetDetail.filesEmptyHint') : $i18nT('pages.datasetDetail.filesEmptyHintReader')}</p>
+    </div>
+  {:else}
+    <ul class="file-list">
+      {#each assetsSorted as asset (asset.id)}
+        {@const badge = assetBadge(asset.filename)}
+        {@const kind = previewKind(asset)}
+        <li class="file-row">
+          <div class="file-badge tone-{badge.tone}" title="{badge.label} · {asset.content_type}">{badge.label}</div>
+          <div class="file-body">
+            <div class="file-title-row">
+              <span class="file-title">{asset.title || asset.filename}</span>
+              {#if !asset.public && !canWrite}
+                <span class="pill file-restricted" title={$i18nT('pages.datasetDetail.assetPrivateToggleTitle')}><Lock size={10} /> {$i18nT('pages.datasetDetail.visRestricted')}</span>
+              {/if}
+            </div>
+            <div class="file-meta">
+              {#if asset.title && asset.title !== asset.filename}<span class="file-filename">{asset.filename}</span>{/if}
+              <span>{formatBytes(asset.size_bytes)}</span>
+              <span>{new Date(asset.created_at).toLocaleDateString()}</span>
+              {#if asset.description}<span class="file-desc">{asset.description}</span>{/if}
+            </div>
+          </div>
+          <div class="file-actions">
+            {#if canWrite}
+              <button
+                class="btn btn-xs visibility-btn"
+                class:vis-public={asset.public}
+                class:vis-private={!asset.public}
+                on:click={() => toggleAssetVisibility(asset)}
+                title={asset.public ? $i18nT('pages.datasetDetail.assetPublicToggleTitle') : $i18nT('pages.datasetDetail.assetPrivateToggleTitle')}
+              >
+                {#if asset.public}<Globe size={11} /> {$i18nT('pages.datasetDetail.public')}{:else}<Lock size={11} /> {$i18nT('pages.datasetDetail.private')}{/if}
+              </button>
+            {/if}
+            {#if kind === 'model3d'}
+              <button class="btn btn-xs btn-ghost" on:click={() => previewAsset = asset} title={$i18nT('pages.datasetDetail.viewIn3d')}><Boxes size={12} /></button>
+            {:else if kind}
+              <button class="btn btn-xs btn-ghost" on:click={() => previewAsset = asset} title={$i18nT('pages.datasetDetail.preview')}><Eye size={12} /></button>
+            {/if}
+            <a class="btn btn-xs btn-ghost" href={assetDownloadUrl(asset)} download={asset.filename} title={$i18nT('pages.datasetDetail.download')}><Download size={12} /></a>
+            <button class="btn btn-xs btn-ghost" on:click={(e) => openAssetMenu(e, asset)} title={$i18nT('pages.datasetDetail.moreActions')}>
+              {#if copiedAssetId === asset.id}<CheckCheck size={12} />{:else}<MoreHorizontal size={12} />{/if}
+            </button>
+          </div>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</div>
+
+<!-- Graphs -->
+<div class="card" id="graphs">
+  <div class="graphs-head">
+    <h3>{$i18nT('pages.datasetDetail.graphs')} <span class="count-chip">{graphs.length}</span></h3>
+    {#if canWrite}
+    <button class="btn btn-sm btn-ghost" on:click={() => { showRdfUpload = !showRdfUpload; uploadRdfGraph = graphs.length ? graphIri(graphs[0]) : ''; uploadRdfError = ''; uploadRdfSuccess = ''; }}>
+      <Upload size={13} /> {$i18nT('pages.datasetDetail.uploadRdf')}
+    </button>
+    {/if}
+  </div>
+
+  {#if uploadRdfSuccess}
+    <div class="upload-success">{uploadRdfSuccess}</div>
+  {/if}
+
+  {#if canWrite && showRdfUpload}
+    <div class="rdf-upload-form">
+      <div class="upload-row">
+        <label class="file-pick-btn btn btn-sm" class:btn-loading={uploadingRdf}>
+          <Upload size={13} />
+          {uploadRdfFile ? uploadRdfFile.name : $i18nT('pages.datasetDetail.chooseRdfFile')}
+          <input type="file" accept=".ttl,.n3,.nt,.nq,.trig,.jsonld,.rdf,.owl,.xml" style="display:none"
+            on:change={(e) => { uploadRdfFile = e.currentTarget.files?.[0] || null; if (!uploadRdfGraph && graphs.length) uploadRdfGraph = graphIri(graphs[0]); }} />
+        </label>
+        {#if graphs.length > 0}
+          <Select bind:value={uploadRdfGraph} class="graph-select" size="sm"
+            options={graphs.map(g => ({ value: graphIri(g), label: graphIri(g) }))} />
+        {:else}
+          <input bind:value={uploadRdfGraph} placeholder={$i18nT('pages.datasetDetail.targetGraphIri')} class="graph-iri-input" />
+        {/if}
+        <label class="toggle">
+          <input type="checkbox" bind:checked={uploadRdfReplace} />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+          <span class="toggle-text">{$i18nT('pages.datasetDetail.replace')}</span>
+        </label>
+        <button class="btn btn-sm" on:click={handleRdfUpload} disabled={uploadingRdf || !uploadRdfFile || !uploadRdfGraph}>
+          {#if uploadingRdf}<Loader2 size={13} class="animate-spin" />{:else}<Upload size={13} />{/if}
+          {$i18nT('pages.datasetDetail.upload')}
+        </button>
+        <button class="btn btn-sm btn-ghost" on:click={() => showRdfUpload = false}><XIcon size={13} /></button>
+      </div>
+      {#if uploadRdfError}<p class="upload-error">{uploadRdfError}</p>{/if}
+    </div>
+  {/if}
+
+  {#if canWrite}
+  <div class="inline-form">
+    <input placeholder={$i18nT('pages.datasetDetail.graphIri')} bind:value={newGraphIri} />
+    <button class="btn btn-sm" on:click={addGraph}><Plus size={13} /> {$i18nT('system.add')}</button>
+  </div>
+  {/if}
+  <ul class="graph-list">
+    {#each graphs as g}
+      {@const iri = graphIri(g)}
+      {@const role = normalizeGraphRole(graphRole(g))}
+      {@const isPrivate = graphPrivate(g)}
+      <li class="graph-item">
+        <div class="graph-item-main">
+          <code class="graph-iri">{iri}</code>
+          {#if role}
+            <span class="graph-role-badge role-{role}" title={ROLE_HINT[role] || ''}><Tag size={11} /> {graphRoleLabel(role)}</span>
+          {/if}
+          {#if isPrivate}
+            <span class="graph-private-badge" title={$i18nT('pages.datasetDetail.privateBadgeTitle')}><Lock size={11} /> {$i18nT('pages.datasetDetail.private')}</span>
+          {/if}
+        </div>
+        <div class="graph-item-actions">
+          {#if canWrite}
+            {#if editingGraphRoleIri === iri}
+              <Select
+                size="sm"
+                disabled={updatingGraphRole}
+                value={role ?? ''}
+                options={GRAPH_ROLE_OPTIONS}
+                on:change={(e) => setGraphRole(g, e.detail)}
+              />
+              <button class="btn btn-sm btn-ghost" on:click={() => editingGraphRoleIri = null}><XIcon size={12} /></button>
+            {:else}
+              <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.setGraphRole')} on:click={() => editingGraphRoleIri = iri}>
+                <Tag size={12} /> {$i18nT('pages.datasetDetail.role')}
+              </button>
+            {/if}
+            <button
+              class="btn btn-sm btn-ghost"
+              title={$i18nT('pages.datasetDetail.attachShapesGraphTitle')}
+              on:click={() => attachTarget = { kind: 'graph', id: iri, label: iri }}
+            >
+              <ShieldCheck size={12} /> {$i18nT('pages.datasetDetail.shapes')}
+            </button>
+            <button
+              class="btn btn-sm btn-ghost"
+              class:btn-active={isPrivate}
+              title={isPrivate ? $i18nT('pages.datasetDetail.makeGraphVisibleTitle') : $i18nT('pages.datasetDetail.makeGraphPrivateTitle')}
+              disabled={updatingGraphPrivacy === iri}
+              on:click={() => toggleGraphPrivacy(g)}
+            >
+              {#if isPrivate}<Lock size={12} /> {$i18nT('pages.datasetDetail.private')}{:else}<Globe size={12} /> {$i18nT('pages.datasetDetail.public')}{/if}
+            </button>
+            <button class="btn btn-sm btn-danger" on:click={() => removeGraph(g)}><XIcon size={13} /></button>
+          {/if}
+        </div>
+      </li>
+    {/each}
+    {#if graphs.length === 0}
+      <li class="empty">{$i18nT('pages.datasetDetail.noGraphs')}</li>
+    {/if}
+  </ul>
+</div>
+
+<!-- Preview card: shown from the first load attempt on (previewLoaded), so it
+     reserves its slot and shows a proper empty state instead of vanishing. -->
+{#if previewLoaded || loadingPreview || versionLoading || graphNodes.length > 0 || previewError || versionError}
+  <div class="card" id="preview">
+    <div class="explore-head">
+      <Network size={15} />
+      <h3>{viewingVersion ? $i18nT('pages.datasetDetail.linkedDataGraphVersion', { values: { version: viewingVersion } }) : $i18nT('pages.datasetDetail.linkedDataGraph')}</h3>
+    </div>
+    {#if loadingPreview || versionLoading}
+      <div class="preview-loading"><Loader2 size={18} class="animate-spin" /> {$i18nT('system.loading')}</div>
+    {:else if previewError || versionError}
+      <p class="error">{previewError || versionError}</p>
+    {:else if graphNodes.length === 0}
+      <div class="preview-empty">{$i18nT('pages.datasetDetail.previewEmpty')}</div>
+    {:else}
+      {#await graphCanvasMod then GC}
+        {#if GC}
+          <svelte:component this={GC.default}
+            nodes={graphNodes}
+            edges={graphEdges}
+            height="400px"
+            expandedNodes={previewExpandedIris}
+            expandingNode={previewExpandingUri}
+            exhaustedNodes={previewExhaustedIris}
+            on:nodeExpand={handlePreviewNodeExpand}
+            on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)}
+            on:nodeContextMenu={handlePreviewNodeContextMenu}
+          />
+        {/if}
+      {/await}
+      <ContextMenu
+        visible={previewCtxVisible}
+        x={previewCtxX}
+        y={previewCtxY}
+        items={previewCtxItems}
+        on:action={handlePreviewCtxAction}
+        on:close={() => previewCtxVisible = false}
+      />
+    {/if}
+  </div>
+{/if}
+
+{#if sampleTriples.length > 0}
+  <div class="card">
+    <div class="explore-head">
+      <Rows3 size={15} />
+      <h3>{$i18nT('pages.datasetDetail.sampleTriples')}</h3>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>{$i18nT('pages.tripleBrowser.subject')}</th>
+            <th>{$i18nT('pages.tripleBrowser.predicate')}</th>
+            <th>{$i18nT('pages.tripleBrowser.object')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each sampleTriples as row}
+            <tr>
+              <td><RdfTerm term={row.s} /></td>
+              <td><RdfTerm term={row.p} navigable={false} /></td>
+              <td><RdfTerm term={row.o} /></td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{/if}
+
+<!-- About & metadata: reference details. The hero owns name/description/
+     visibility, so those rows are gone from here (no duplication). -->
+{#if dataset}
+<div class="card about-card" id="metadata">
   <div class="section-head">
     <div class="section-head-left">
       <Info size={15} />
@@ -1360,16 +1846,7 @@
     </div>
   </div>
 
-  {#if dataset.description}
-    <p class="about-desc">{dataset.description}</p>
-  {/if}
-
   <dl class="meta-grid">
-    <div class="meta-item">
-      <dt>{$i18nT('pages.datasets.visibility')}</dt>
-      <dd><span class="vis vis-{dataset.visibility}">{VISIBILITY_LABEL[dataset.visibility] || dataset.visibility}</span></dd>
-    </div>
-
     {#if datasetRole}
       <div class="meta-item">
         <dt>{$i18nT('pages.datasetDetail.role')}</dt>
@@ -1488,285 +1965,6 @@
 </div>
 {/if}
 
-<!-- Always-on content summary + (when it doesn't match the declared role) the
-     mismatch warning. Both read the SAME cheap facet-derived summary, so there is
-     no store scan and no size gate — it runs on datasets of any size. -->
-{#if contentSummaryLoading || (contentSummary && contentSummary.verdict !== 'empty')}
-  <DatasetContentSummary summary={contentSummary} loading={contentSummaryLoading && !contentSummary} />
-{/if}
-{#if contentSummary && contentSummary.verdict !== 'empty'}
-  <ContentKindWarning
-    expected="dataset"
-    contextName={dataset?.name}
-    datasetId={id}
-    declaredRole={dataset?.graph_role ?? null}
-    preloadedProbe={contentSummary}
-    onresolved={(e) => {
-      dataset = { ...dataset, graph_role: e.role };
-      if (e.role === 'shapes') onShapesRoleAssigned();
-    }}
-  />
-{/if}
-
-{#if shapesRoleNotice}
-  <div class="card shapes-studio-note">
-    <ShieldCheck size={15} />
-    <span>{$i18nT('pages.datasetDetail.shapesAutoRegisteredNotice')}</span>
-    <Link to="/shacl/shapes" class="btn btn-sm btn-ghost shapes-studio-link">{$i18nT('pages.datasetDetail.openShaclStudio')}</Link>
-  </div>
-{/if}
-
-<!-- Explore & Visualize -->
-<div class="card explore-card">
-  <div class="explore-head">
-    <Activity size={15} />
-    <h3>{$i18nT('pages.datasetDetail.explore')}</h3>
-  </div>
-  <div class="explore-actions">
-    <Link
-      to={`/browse?dataset=${id}${versionParam ? `&version=${versionParam}` : ''}`}
-      class="action-tile"
-    >
-      <Rows3 size={22} />
-      <strong>{$i18nT('pages.datasetDetail.browseTriples')}</strong>
-      <span>{$i18nT('pages.datasetDetail.browseTriplesDesc')}</span>
-    </Link>
-    <Link
-      to={`/browse?view=graph&dataset=${id}${versionParam ? `&version=${versionParam}` : ''}`}
-      class="action-tile"
-    >
-      <Network size={22} />
-      <strong>{$i18nT('pages.datasetDetail.graphExplorer')}</strong>
-      <span>{$i18nT('pages.datasetDetail.graphExplorerDesc')}</span>
-    </Link>
-    <Link to={`/datasets/${id}/sparql${versionParam ? `?version=${versionParam}` : ''}`} class="action-tile">
-      <Terminal size={22} />
-      <strong>{$i18nT('pages.datasetDetail.sparql')}</strong>
-      <span>{$i18nT('pages.datasetDetail.sparqlDesc')}</span>
-    </Link>
-    {#if geoStats && (geoStats.has_coordinates || geoStats.has_3d)}
-      <!-- Gated by data capability: 3D viewer when there's 3D data, otherwise a
-           plain map for coordinate-only features. -->
-      <Link to="/datasets/{id}/viewer" class="action-tile">
-        {#if geoStats.has_3d}
-          <Boxes size={22} />
-          <strong>{$i18nT('pages.datasetDetail.viewer3d')}</strong>
-          <span>{$i18nT('pages.datasetDetail.viewer3dDesc')}</span>
-        {:else}
-          <MapPin size={22} />
-          <strong>{$i18nT('pages.datasetDetail.viewerMap')}</strong>
-          <span>{$i18nT('pages.datasetDetail.viewerMapDesc')}</span>
-        {/if}
-      </Link>
-    {/if}
-    <Link to="/datasets/{id}/api-services" class="action-tile">
-      <Bookmark size={22} />
-      <strong>{$i18nT('pages.datasetDetail.apiServices')}</strong>
-      <span>{$i18nT('pages.datasetDetail.apiServicesDesc')}</span>
-    </Link>
-    <Link to={`/graphs?dataset=${id}${versionParam ? `&version=${versionParam}` : ''}`} class="action-tile">
-      <LayoutGrid size={22} />
-      <strong>{$i18nT('pages.datasetDetail.namedGraphs')}</strong>
-      <span>{$i18nT('pages.datasetDetail.namedGraphsDesc')}</span>
-    </Link>
-    <Link to="/validation?dataset={id}" class="action-tile">
-      <ShieldCheck size={22} />
-      <strong>{$i18nT('pages.datasetDetail.validate')}</strong>
-      <span>{$i18nT('pages.datasetDetail.validateDesc')}</span>
-    </Link>
-  </div>
-</div>
-
-{#if viewingVersion}
-  <div class="card version-view-banner">
-    <span class="vvb-text">
-      <History size={15} />
-      {$i18nT('pages.datasetDetail.showingSnapshotPre')}<strong>v{viewingVersion}</strong>{$i18nT('pages.datasetDetail.showingSnapshotPost')}
-    </span>
-    <button class="btn btn-sm btn-ghost" on:click={clearVersionView}>{$i18nT('pages.datasetDetail.backToLive')}</button>
-  </div>
-{/if}
-
-<!-- Preview card: shown from the first load attempt on (previewLoaded), so it
-     reserves its slot and shows a proper empty state instead of vanishing. -->
-{#if previewLoaded || loadingPreview || versionLoading || graphNodes.length > 0 || previewError || versionError}
-  <div class="card">
-    <div class="explore-head">
-      <Network size={15} />
-      <h3>{viewingVersion ? $i18nT('pages.datasetDetail.linkedDataGraphVersion', { values: { version: viewingVersion } }) : $i18nT('pages.datasetDetail.linkedDataGraph')}</h3>
-    </div>
-    {#if loadingPreview || versionLoading}
-      <div class="preview-loading"><Loader2 size={18} class="animate-spin" /> {$i18nT('system.loading')}</div>
-    {:else if previewError || versionError}
-      <p class="error">{previewError || versionError}</p>
-    {:else if graphNodes.length === 0}
-      <div class="preview-empty">{$i18nT('pages.datasetDetail.previewEmpty')}</div>
-    {:else}
-      {#await graphCanvasMod then GC}
-        {#if GC}
-          <svelte:component this={GC.default}
-            nodes={graphNodes}
-            edges={graphEdges}
-            height="400px"
-            expandedNodes={previewExpandedIris}
-            expandingNode={previewExpandingUri}
-            exhaustedNodes={previewExhaustedIris}
-            on:nodeExpand={handlePreviewNodeExpand}
-            on:nodeOpen={(e) => e.detail.fullIri && navigate(`/resource?iri=${encodeURIComponent(e.detail.fullIri)}`)}
-            on:nodeContextMenu={handlePreviewNodeContextMenu}
-          />
-        {/if}
-      {/await}
-      <ContextMenu
-        visible={previewCtxVisible}
-        x={previewCtxX}
-        y={previewCtxY}
-        items={previewCtxItems}
-        on:action={handlePreviewCtxAction}
-        on:close={() => previewCtxVisible = false}
-      />
-    {/if}
-  </div>
-{/if}
-
-{#if sampleTriples.length > 0}
-  <div class="card">
-    <div class="explore-head">
-      <Rows3 size={15} />
-      <h3>{$i18nT('pages.datasetDetail.sampleTriples')}</h3>
-    </div>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>{$i18nT('pages.tripleBrowser.subject')}</th>
-            <th>{$i18nT('pages.tripleBrowser.predicate')}</th>
-            <th>{$i18nT('pages.tripleBrowser.object')}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each sampleTriples as row}
-            <tr>
-              <td><RdfTerm term={row.s} /></td>
-              <td><RdfTerm term={row.p} navigable={false} /></td>
-              <td><RdfTerm term={row.o} /></td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  </div>
-{/if}
-
-<!-- Graphs -->
-<div class="card">
-  <div class="graphs-head">
-    <h3>{$i18nT('pages.datasetDetail.graphs')}</h3>
-    {#if canWrite}
-    <button class="btn btn-sm btn-ghost" on:click={() => { showRdfUpload = !showRdfUpload; uploadRdfGraph = graphs.length ? graphIri(graphs[0]) : ''; uploadRdfError = ''; uploadRdfSuccess = ''; }}>
-      <Upload size={13} /> {$i18nT('pages.datasetDetail.uploadRdf')}
-    </button>
-    {/if}
-  </div>
-
-  {#if uploadRdfSuccess}
-    <div class="upload-success">{uploadRdfSuccess}</div>
-  {/if}
-
-  {#if canWrite && showRdfUpload}
-    <div class="rdf-upload-form">
-      <div class="upload-row">
-        <label class="file-pick-btn btn btn-sm" class:btn-loading={uploadingRdf}>
-          <Upload size={13} />
-          {uploadRdfFile ? uploadRdfFile.name : $i18nT('pages.datasetDetail.chooseRdfFile')}
-          <input type="file" accept=".ttl,.n3,.nt,.nq,.trig,.jsonld,.rdf,.owl,.xml" style="display:none"
-            on:change={(e) => { uploadRdfFile = e.currentTarget.files?.[0] || null; if (!uploadRdfGraph && graphs.length) uploadRdfGraph = graphIri(graphs[0]); }} />
-        </label>
-        {#if graphs.length > 0}
-          <Select bind:value={uploadRdfGraph} class="graph-select" size="sm"
-            options={graphs.map(g => ({ value: graphIri(g), label: graphIri(g) }))} />
-        {:else}
-          <input bind:value={uploadRdfGraph} placeholder={$i18nT('pages.datasetDetail.targetGraphIri')} class="graph-iri-input" />
-        {/if}
-        <label class="toggle">
-          <input type="checkbox" bind:checked={uploadRdfReplace} />
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          <span class="toggle-text">{$i18nT('pages.datasetDetail.replace')}</span>
-        </label>
-        <button class="btn btn-sm" on:click={handleRdfUpload} disabled={uploadingRdf || !uploadRdfFile || !uploadRdfGraph}>
-          {#if uploadingRdf}<Loader2 size={13} class="animate-spin" />{:else}<Upload size={13} />{/if}
-          {$i18nT('pages.datasetDetail.upload')}
-        </button>
-        <button class="btn btn-sm btn-ghost" on:click={() => showRdfUpload = false}><XIcon size={13} /></button>
-      </div>
-      {#if uploadRdfError}<p class="upload-error">{uploadRdfError}</p>{/if}
-    </div>
-  {/if}
-
-  {#if canWrite}
-  <div class="inline-form">
-    <input placeholder={$i18nT('pages.datasetDetail.graphIri')} bind:value={newGraphIri} />
-    <button class="btn btn-sm" on:click={addGraph}><Plus size={13} /> {$i18nT('system.add')}</button>
-  </div>
-  {/if}
-  <ul class="graph-list">
-    {#each graphs as g}
-      {@const iri = graphIri(g)}
-      {@const role = normalizeGraphRole(graphRole(g))}
-      {@const isPrivate = graphPrivate(g)}
-      <li class="graph-item">
-        <div class="graph-item-main">
-          <code class="graph-iri">{iri}</code>
-          {#if role}
-            <span class="graph-role-badge role-{role}" title={ROLE_HINT[role] || ''}><Tag size={11} /> {graphRoleLabel(role)}</span>
-          {/if}
-          {#if isPrivate}
-            <span class="graph-private-badge" title={$i18nT('pages.datasetDetail.privateBadgeTitle')}><Lock size={11} /> {$i18nT('pages.datasetDetail.private')}</span>
-          {/if}
-        </div>
-        <div class="graph-item-actions">
-          {#if canWrite}
-            {#if editingGraphRoleIri === iri}
-              <Select
-                size="sm"
-                disabled={updatingGraphRole}
-                value={role ?? ''}
-                options={GRAPH_ROLE_OPTIONS}
-                on:change={(e) => setGraphRole(g, e.detail)}
-              />
-              <button class="btn btn-sm btn-ghost" on:click={() => editingGraphRoleIri = null}><XIcon size={12} /></button>
-            {:else}
-              <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.setGraphRole')} on:click={() => editingGraphRoleIri = iri}>
-                <Tag size={12} /> {$i18nT('pages.datasetDetail.role')}
-              </button>
-            {/if}
-            <button
-              class="btn btn-sm btn-ghost"
-              title={$i18nT('pages.datasetDetail.attachShapesGraphTitle')}
-              on:click={() => attachTarget = { kind: 'graph', id: iri, label: iri }}
-            >
-              <ShieldCheck size={12} /> {$i18nT('pages.datasetDetail.shapes')}
-            </button>
-            <button
-              class="btn btn-sm btn-ghost"
-              class:btn-active={isPrivate}
-              title={isPrivate ? $i18nT('pages.datasetDetail.makeGraphVisibleTitle') : $i18nT('pages.datasetDetail.makeGraphPrivateTitle')}
-              disabled={updatingGraphPrivacy === iri}
-              on:click={() => toggleGraphPrivacy(g)}
-            >
-              {#if isPrivate}<Lock size={12} /> {$i18nT('pages.datasetDetail.private')}{:else}<Globe size={12} /> {$i18nT('pages.datasetDetail.public')}{/if}
-            </button>
-            <button class="btn btn-sm btn-danger" on:click={() => removeGraph(g)}><XIcon size={13} /></button>
-          {/if}
-        </div>
-      </li>
-    {/each}
-    {#if graphs.length === 0}
-      <li class="empty">{$i18nT('pages.datasetDetail.noGraphs')}</li>
-    {/if}
-  </ul>
-</div>
-
 <!-- Version snapshots + branches -->
 <div class="card" id="dataset-versions">
   <DatasetVersions {id} {canWrite} {graphs} />
@@ -1775,106 +1973,237 @@
 <!-- Commit history -->
 <CommitHistory kind="dataset" {id} />
 
-<!-- Assets -->
-<div class="card">
-  <div class="section-head">
-    <div class="section-head-left">
-      <FileText size={15} />
-      <h3>{$i18nT('pages.datasetDetail.assets')}</h3>
-    </div>
-    {#if canWrite}
-    <label class="btn btn-sm" class:btn-loading={uploading}>
-      {#if uploading}<Loader2 size={13} class="animate-spin" />{:else}<Upload size={13} />{/if}
-      {uploading ? $i18nT('pages.datasetDetail.uploading') : $i18nT('pages.datasetDetail.uploadFile')}
-      <input type="file" style="display:none" on:change={handleFileUpload} disabled={uploading} />
-    </label>
-    {/if}
-  </div>
-
-  {#if uploading && uploadProgress > 0}
-    <div class="progress-bar">
-      <div class="progress-fill" style="width: {uploadProgress * 100}%"></div>
-    </div>
-  {/if}
-
-  {#if assetsError}
-    <div class="assets-error">
-      <span>{assetsError}</span>
-      <button class="btn btn-xs btn-ghost" on:click={() => assetsError = ''}><XIcon size={12} /></button>
-    </div>
-  {/if}
-
-  {#if assets.length > 0}
-    <div class="asset-cards">
-      {#each assets as asset}
-        <div class="asset-card">
-          <div class="asset-card-icon">
-            <FileText size={20} />
-          </div>
-          <div class="asset-card-body">
-            <div class="asset-card-title">
-              {asset.title || asset.filename}
-              {#if asset.title && asset.title !== asset.filename}
-                <span class="asset-filename-sub">{asset.filename}</span>
-              {/if}
-            </div>
-            {#if asset.description}
-              <p class="asset-card-desc">{asset.description}</p>
-            {/if}
-            <div class="asset-card-meta">
-              <code class="media-type">{asset.content_type}</code>
-              <span class="asset-size">{formatBytes(asset.size_bytes)}</span>
-              <span class="asset-created">{$i18nT('pages.datasetDetail.uploadedDate', { values: { date: new Date(asset.created_at).toLocaleDateString() } })}</span>
-              {#if asset.updated_at}
-                <span class="asset-created">{$i18nT('pages.datasetDetail.updatedDate', { values: { date: new Date(asset.updated_at).toLocaleDateString() } })}</span>
-              {/if}
-            </div>
-          </div>
-          <div class="asset-card-actions">
-            {#if canWrite}
-            <button
-              class="btn btn-xs visibility-btn"
-              class:vis-public={asset.public}
-              class:vis-private={!asset.public}
-              on:click={() => toggleAssetVisibility(asset)}
-              title={asset.public ? $i18nT('pages.datasetDetail.assetPublicToggleTitle') : $i18nT('pages.datasetDetail.assetPrivateToggleTitle')}
-            >
-              {#if asset.public}<Globe size={11} /> {$i18nT('pages.datasetDetail.public')}{:else}<Lock size={11} /> {$i18nT('pages.datasetDetail.private')}{/if}
-            </button>
-            {:else}
-            <span class="vis-badge {asset.public ? 'vis-public' : 'vis-private'}">
-              {#if asset.public}<Globe size={11} /> {$i18nT('pages.datasetDetail.public')}{:else}<Lock size={11} /> {$i18nT('pages.datasetDetail.private')}{/if}
-            </span>
-            {/if}
-            {#if previewKind(asset)}
-              <button class="btn btn-xs btn-ghost" on:click={() => previewAsset = asset} title={$i18nT('pages.datasetDetail.preview')}><Eye size={12} /></button>
-            {/if}
-            <button class="btn btn-xs btn-ghost" on:click={() => downloadAssetFile(asset)} title={$i18nT('pages.datasetDetail.download')}><Download size={12} /></button>
-            <button class="btn btn-xs btn-ghost" on:click={() => copyAssetIri(asset)} title={$i18nT('pages.datasetDetail.copyLinkedDataIri')}>
-              {#if copiedAssetId === asset.id}<CheckCheck size={12} />{:else}<LinkIcon size={12} />{/if}
-            </button>
-            <button class="btn btn-xs btn-ghost" on:click={() => copyAssetTurtle(asset)} title={$i18nT('pages.datasetDetail.copyTurtleDescription')}><Clipboard size={12} /></button>
-            {#if canWrite}
-              <button class="btn btn-xs btn-ghost" on:click={() => openAssetEdit(asset)} title={$i18nT('pages.datasetDetail.editMetadata')}><Pencil size={12} /></button>
-              <button class="btn btn-xs btn-ghost btn-danger" on:click={() => deleteAssetId = asset.id} title={$i18nT('pages.datasetDetail.deleteAsset')}><Trash2 size={12} /></button>
-            {/if}
-          </div>
-        </div>
-      {/each}
-    </div>
-  {:else if !assetsError}
-    <p class="empty">{$i18nT('pages.datasetDetail.noAssets')}</p>
-  {/if}
-</div>
-
 <!-- Asset preview modal -->
 {#if previewAsset}
   <AssetPreview asset={previewAsset} datasetId={id} on:close={() => previewAsset = null} />
 {/if}
 
+<ContextMenu
+  visible={assetMenuVisible}
+  x={assetMenuX}
+  y={assetMenuY}
+  items={assetMenuItems}
+  on:action={onAssetMenuAction}
+  on:close={() => assetMenuVisible = false}
+/>
+
+<!-- SPARQL Services -->
+<div class="card" id="services">
+  <div class="section-head">
+    <div class="section-head-left">
+      <Database size={15} />
+      <h3>{$i18nT('pages.datasetDetail.sparqlServices')}</h3>
+    </div>
+    {#if canWrite}
+      <button class="btn btn-sm" on:click={openAddServiceModal}><Plus size={13} /> {$i18nT('pages.datasetDetail.newService')}</button>
+    {/if}
+  </div>
+
+  {#if services.length > 0}
+  <div class="svc-list">
+    {#each services as svc}
+      <div class="svc-card" class:svc-card-inactive={!svc.is_active}>
+        <!-- Service header row -->
+        <div class="svc-card-header">
+          <div class="svc-card-meta">
+            {#if editSvcId === svc.id}
+              <input bind:value={editSvcName} class="inline-edit-input svc-name-input" placeholder={$i18nT('pages.datasetDetail.serviceName')} />
+            {:else}
+              <span class="svc-name">{svc.name}</span>
+            {/if}
+            <code class="svc-slug">{svc.slug}</code>
+            <span class="svc-badge" class:svc-badge-active={svc.is_active} class:svc-badge-inactive={!svc.is_active}>
+              {svc.is_active ? $i18nT('pages.datasetDetail.active') : $i18nT('pages.datasetDetail.inactive')}
+            </span>
+          </div>
+          <div class="svc-card-actions">
+            {#if editSvcId === svc.id}
+              <button class="btn btn-xs" on:click={saveService} disabled={savingSvc}>
+                {#if savingSvc}<Loader2 size={12} class="animate-spin" />{:else}<Check size={12} />{/if} {$i18nT('system.save')}
+              </button>
+              <button class="btn btn-xs btn-ghost" on:click={() => editSvcId = null}><XIcon size={12} /></button>
+            {:else}
+              {#if svc.is_active}
+                <div class="svc-endpoint-row">
+                  <code class="endpoint-url">{window.location.origin}/api/datasets/{id}/services/{svc.slug}/sparql</code>
+                  <button class="btn btn-xs btn-ghost copy-btn" on:click={() => copyEndpoint(svc.slug)} title={$i18nT('pages.datasetDetail.copyEndpointUrl')}>
+                    {#if copiedSlug === svc.slug}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
+                  </button>
+                </div>
+              {/if}
+              {#if canWrite}
+                <button class="btn btn-xs btn-ghost" on:click={() => openEditSvc(svc)} title={$i18nT('system.edit')}><Edit2 size={12} /></button>
+                <button class="btn btn-xs btn-ghost" on:click={() => toggleService(svc)} title={svc.is_active ? $i18nT('pages.datasetDetail.deactivate') : $i18nT('pages.datasetDetail.activate')}>
+                  <Power size={12} class={svc.is_active ? 'power-on' : 'power-off'} />
+                </button>
+                <button class="btn btn-xs btn-ghost btn-danger" on:click={() => deleteServiceTarget = svc} title={$i18nT('system.delete')}><Trash2 size={12} /></button>
+              {/if}
+            {/if}
+          </div>
+        </div>
+
+        {#if editSvcId === svc.id}
+          <input bind:value={editSvcDesc} placeholder={$i18nT('pages.datasetDetail.descriptionOptional')} class="inline-edit-input" style="margin: 0.4rem 0; width:100%" />
+        {:else if svc.description}
+          <p class="svc-desc">{svc.description}</p>
+        {/if}
+
+        <!-- Graph subset panel — always visible for write users -->
+        {#if canWrite}
+          <div class="svc-graph-section">
+            <button class="svc-graph-toggle" on:click={() => toggleSvcGraphPanel(svc)}>
+              <Database size={12} />
+              <span>{$i18nT('pages.datasetDetail.graphSubset')}</span>
+              {#if expandedSvcId === svc.id && !svcGraphsLoading}
+                <span class="svc-graph-count-hint">{$i18nT('pages.datasetDetail.graphSubsetCount', { values: { selected: svcGraphs.length, total: graphs.length } })}</span>
+              {/if}
+              <span class="svc-graph-chevron" class:open={expandedSvcId === svc.id}>›</span>
+            </button>
+            {#if expandedSvcId === svc.id}
+              <div class="svc-graph-panel-inner">
+                <div class="svc-graph-panel-header">
+                  <span class="svc-graph-panel-label">{$i18nT('pages.datasetDetail.selectGraphsExposed')}</span>
+                  <div class="svc-graph-bulk">
+                    <button class="btn btn-xs btn-ghost" on:click={() => bulkSetAllServiceGraphs(true)} disabled={svcGraphsSaving}>{$i18nT('pages.datasetDetail.all')}</button>
+                    <button class="btn btn-xs btn-ghost" on:click={() => bulkSetAllServiceGraphs(false)} disabled={svcGraphsSaving}>{$i18nT('pages.datasetDetail.none')}</button>
+                  </div>
+                </div>
+                {#if svcGraphsLoading}
+                  <div class="svc-graph-loading"><Loader2 size={13} class="animate-spin" /> {$i18nT('system.loading')}</div>
+                {:else if graphs.length === 0}
+                  <p class="svc-graph-empty">{$i18nT('pages.datasetDetail.noNamedGraphsYet')}</p>
+                {:else}
+                  <div class="svc-graph-list">
+                    {#each graphs as g}
+                      {@const iri = typeof g === 'string' ? g : g.graph_iri}
+                      {@const isRegistered = svcGraphs.includes(iri)}
+                      <label class="svc-graph-item" class:checked={isRegistered}>
+                        <input type="checkbox" checked={isRegistered} disabled={svcGraphsSaving}
+                          on:change={() => toggleGraphInService(iri, isRegistered)} />
+                        <code class="svc-graph-iri">{iri}</code>
+                        {#if isRegistered}<span class="svc-graph-tick"><Check size={11} /></span>{/if}
+                      </label>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/each}
+  </div>
+  {:else}
+    <p class="empty">{$i18nT('pages.datasetDetail.noServices')}</p>
+  {/if}
+</div>
+
+<!-- SHACL Validation — logged-in only: every validation endpoint requires
+     auth, so an anonymous visitor could act on none of this. -->
+{#if $isAuthenticated}
+<div class="card" id="validation">
+  <div class="section-head">
+    <div class="section-head-left">
+      <ShieldCheck size={15} />
+      <h3>{$i18nT('pages.datasetDetail.validation')}</h3>
+    </div>
+      <div class="flex items-center gap-2">
+        <Link to="/validation?dataset={id}" class="btn btn-sm btn-ghost">
+          {$i18nT('pages.datasetDetail.openValidationStudio')}
+        </Link>
+        <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.attachShapesDatasetTitle')} on:click={() => attachTarget = { kind: 'dataset', id, label: dataset?.name || id }}>
+          <ShieldCheck size={13} /> {$i18nT('pages.datasetDetail.attachShapes')}
+        </button>
+        <button class="btn btn-sm btn-ghost" on:click={() => showValidationModal = true}>
+          {#if validating}<Loader2 size={13} class="animate-spin" />{:else}<ShieldCheck size={13} />{/if}
+          {$i18nT('pages.datasetDetail.runValidation')}
+        </button>
+      </div>
+  </div>
+
+  {#if $isAuthenticated}
+    <div class="effective-shapes">
+      <div class="eff-head">
+        {$i18nT('pages.datasetDetail.effectiveShapes')}
+        <span class="eff-hint">{$i18nT('pages.datasetDetail.effectiveShapesHint')}</span>
+      </div>
+      {#if loadingEffective}
+        <span class="hint-text"><Loader2 size={12} class="animate-spin" /> {$i18nT('system.loading')}</span>
+      {:else if effectiveShapes.length === 0}
+        <span class="hint-text">{$i18nT('pages.datasetDetail.noShapesAttachedPre')}<strong>{$i18nT('pages.datasetDetail.attachShapes')}</strong>{$i18nT('pages.datasetDetail.noShapesAttachedPost')}</span>
+      {:else}
+        <ul class="eff-list">
+          {#each effectiveShapes as s (s.id)}
+            <li class="eff-item">
+              <ShieldCheck size={12} class="text-[var(--brand-500)]" />
+              <Link to={`/shacl/shape-graphs/${s.id}`} class="eff-name">{s.name}</Link>
+              {#if datasetBoundIds.has(s.id)}
+                <span class="eff-badge eff-dataset" title={$i18nT('pages.datasetDetail.boundDirectlyTitle')}>{$i18nT('pages.datasetDetail.datasetBadge')}</span>
+              {:else}
+                <span class="eff-badge eff-inherited" title={$i18nT('pages.datasetDetail.inheritedFromGraphTitle')}>{$i18nT('pages.datasetDetail.inheritedFromGraph')}</span>
+              {/if}
+              {#if s.status}<span class="eff-badge eff-status-{s.status}">{s.status}</span>{/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
+
+  {#if validationError}
+    <p class="error validation-error">{validationError}</p>
+  {/if}
+
+  {#if validationReport}
+    <div class="report" class:conforms={validationReport.conforms}>
+      <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
+        — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}
+        {#if validationRanAt}<span class="run-meta" title={validationRanAt}> · {fmtDateTime(validationRanAt)}</span>{/if}</p>
+      {#if validationReport.results.length > 0}
+        <table>
+          <thead>
+            <tr><th>{$i18nT('pages.datasetDetail.severity')}</th><th>{$i18nT('pages.datasetDetail.focusNode')}</th><th>{$i18nT('pages.datasetDetail.path')}</th><th>{$i18nT('pages.datasetDetail.message')}</th></tr>
+          </thead>
+          <tbody>
+            {#each validationReport.results as r}
+              <tr>
+                <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
+                <td><code>{r.focus_node}</code></td>
+                <td>{r.path || '—'}</td>
+                <td>{r.message}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
+    </div>
+  {:else if !validationError}
+    <p class="hint-text">{$i18nT('pages.datasetDetail.runValidationHint')}</p>
+  {/if}
+
+  {#if validationHistory.length > 0}
+    <div class="val-history">
+      <div class="eff-head">{$i18nT('pages.datasetDetail.recentValidationRuns')}</div>
+      <ul class="val-history-list">
+        {#each validationHistory as run (run.id)}
+          <li class="val-history-item">
+            {#if run.conforms}
+              <span class="vh-pill vh-ok"><Check size={11} /> {$i18nT('pages.datasetDetail.conforms')}</span>
+            {:else}
+              <span class="vh-pill vh-fail"><XIcon size={11} /> {run.results_count} {$i18nT('pages.datasetDetail.results')}</span>
+            {/if}
+            <span class="vh-time" title={run.run_timestamp}>{fmtDateTime(run.run_timestamp)}</span>
+          </li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
+</div>
+{/if}
+
 <!-- Access management (users + teams, role-based) -->
 {#if canManage}
-<div class="card">
+<div class="card" id="access">
   <div class="section-head">
     <div class="section-head-left">
       <Users size={15} />
@@ -2015,215 +2344,6 @@
 </div>
 {/if}
 
-<!-- SPARQL Services -->
-<div class="card">
-  <div class="section-head">
-    <div class="section-head-left">
-      <Database size={15} />
-      <h3>{$i18nT('pages.datasetDetail.sparqlServices')}</h3>
-    </div>
-    {#if canWrite}
-      <button class="btn btn-sm" on:click={openAddServiceModal}><Plus size={13} /> {$i18nT('pages.datasetDetail.newService')}</button>
-    {/if}
-  </div>
-
-  {#if services.length > 0}
-  <div class="svc-list">
-    {#each services as svc}
-      <div class="svc-card" class:svc-card-inactive={!svc.is_active}>
-        <!-- Service header row -->
-        <div class="svc-card-header">
-          <div class="svc-card-meta">
-            {#if editSvcId === svc.id}
-              <input bind:value={editSvcName} class="inline-edit-input svc-name-input" placeholder={$i18nT('pages.datasetDetail.serviceName')} />
-            {:else}
-              <span class="svc-name">{svc.name}</span>
-            {/if}
-            <code class="svc-slug">{svc.slug}</code>
-            <span class="svc-badge" class:svc-badge-active={svc.is_active} class:svc-badge-inactive={!svc.is_active}>
-              {svc.is_active ? $i18nT('pages.datasetDetail.active') : $i18nT('pages.datasetDetail.inactive')}
-            </span>
-          </div>
-          <div class="svc-card-actions">
-            {#if editSvcId === svc.id}
-              <button class="btn btn-xs" on:click={saveService} disabled={savingSvc}>
-                {#if savingSvc}<Loader2 size={12} class="animate-spin" />{:else}<Check size={12} />{/if} {$i18nT('system.save')}
-              </button>
-              <button class="btn btn-xs btn-ghost" on:click={() => editSvcId = null}><XIcon size={12} /></button>
-            {:else}
-              {#if svc.is_active}
-                <div class="svc-endpoint-row">
-                  <code class="endpoint-url">{window.location.origin}/api/datasets/{id}/services/{svc.slug}/sparql</code>
-                  <button class="btn btn-xs btn-ghost copy-btn" on:click={() => copyEndpoint(svc.slug)} title={$i18nT('pages.datasetDetail.copyEndpointUrl')}>
-                    {#if copiedSlug === svc.slug}<CheckCheck size={12} />{:else}<Copy size={12} />{/if}
-                  </button>
-                </div>
-              {/if}
-              {#if canWrite}
-                <button class="btn btn-xs btn-ghost" on:click={() => openEditSvc(svc)} title={$i18nT('system.edit')}><Edit2 size={12} /></button>
-                <button class="btn btn-xs btn-ghost" on:click={() => toggleService(svc)} title={svc.is_active ? $i18nT('pages.datasetDetail.deactivate') : $i18nT('pages.datasetDetail.activate')}>
-                  <Power size={12} class={svc.is_active ? 'power-on' : 'power-off'} />
-                </button>
-                <button class="btn btn-xs btn-ghost btn-danger" on:click={() => deleteServiceTarget = svc} title={$i18nT('system.delete')}><Trash2 size={12} /></button>
-              {/if}
-            {/if}
-          </div>
-        </div>
-
-        {#if editSvcId === svc.id}
-          <input bind:value={editSvcDesc} placeholder={$i18nT('pages.datasetDetail.descriptionOptional')} class="inline-edit-input" style="margin: 0.4rem 0; width:100%" />
-        {:else if svc.description}
-          <p class="svc-desc">{svc.description}</p>
-        {/if}
-
-        <!-- Graph subset panel — always visible for write users -->
-        {#if canWrite}
-          <div class="svc-graph-section">
-            <button class="svc-graph-toggle" on:click={() => toggleSvcGraphPanel(svc)}>
-              <Database size={12} />
-              <span>{$i18nT('pages.datasetDetail.graphSubset')}</span>
-              {#if expandedSvcId === svc.id && !svcGraphsLoading}
-                <span class="svc-graph-count-hint">{$i18nT('pages.datasetDetail.graphSubsetCount', { values: { selected: svcGraphs.length, total: graphs.length } })}</span>
-              {/if}
-              <span class="svc-graph-chevron" class:open={expandedSvcId === svc.id}>›</span>
-            </button>
-            {#if expandedSvcId === svc.id}
-              <div class="svc-graph-panel-inner">
-                <div class="svc-graph-panel-header">
-                  <span class="svc-graph-panel-label">{$i18nT('pages.datasetDetail.selectGraphsExposed')}</span>
-                  <div class="svc-graph-bulk">
-                    <button class="btn btn-xs btn-ghost" on:click={() => bulkSetAllServiceGraphs(true)} disabled={svcGraphsSaving}>{$i18nT('pages.datasetDetail.all')}</button>
-                    <button class="btn btn-xs btn-ghost" on:click={() => bulkSetAllServiceGraphs(false)} disabled={svcGraphsSaving}>{$i18nT('pages.datasetDetail.none')}</button>
-                  </div>
-                </div>
-                {#if svcGraphsLoading}
-                  <div class="svc-graph-loading"><Loader2 size={13} class="animate-spin" /> {$i18nT('system.loading')}</div>
-                {:else if graphs.length === 0}
-                  <p class="svc-graph-empty">{$i18nT('pages.datasetDetail.noNamedGraphsYet')}</p>
-                {:else}
-                  <div class="svc-graph-list">
-                    {#each graphs as g}
-                      {@const iri = typeof g === 'string' ? g : g.graph_iri}
-                      {@const isRegistered = svcGraphs.includes(iri)}
-                      <label class="svc-graph-item" class:checked={isRegistered}>
-                        <input type="checkbox" checked={isRegistered} disabled={svcGraphsSaving}
-                          on:change={() => toggleGraphInService(iri, isRegistered)} />
-                        <code class="svc-graph-iri">{iri}</code>
-                        {#if isRegistered}<span class="svc-graph-tick"><Check size={11} /></span>{/if}
-                      </label>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
-    {/each}
-  </div>
-  {:else}
-    <p class="empty">{$i18nT('pages.datasetDetail.noServices')}</p>
-  {/if}
-</div>
-
-<!-- SHACL Validation -->
-<div class="card">
-  <div class="section-head">
-    <div class="section-head-left">
-      <ShieldCheck size={15} />
-      <h3>{$i18nT('pages.datasetDetail.validation')}</h3>
-    </div>
-    {#if $isAuthenticated}
-      <div class="flex items-center gap-2">
-        <button class="btn btn-sm btn-ghost" title={$i18nT('pages.datasetDetail.attachShapesDatasetTitle')} on:click={() => attachTarget = { kind: 'dataset', id, label: dataset?.name || id }}>
-          <ShieldCheck size={13} /> {$i18nT('pages.datasetDetail.attachShapes')}
-        </button>
-        <button class="btn btn-sm btn-ghost" on:click={() => showValidationModal = true}>
-          {#if validating}<Loader2 size={13} class="animate-spin" />{:else}<ShieldCheck size={13} />{/if}
-          {$i18nT('pages.datasetDetail.runValidation')}
-        </button>
-      </div>
-    {/if}
-  </div>
-
-  {#if $isAuthenticated}
-    <div class="effective-shapes">
-      <div class="eff-head">
-        {$i18nT('pages.datasetDetail.effectiveShapes')}
-        <span class="eff-hint">{$i18nT('pages.datasetDetail.effectiveShapesHint')}</span>
-      </div>
-      {#if loadingEffective}
-        <span class="hint-text"><Loader2 size={12} class="animate-spin" /> {$i18nT('system.loading')}</span>
-      {:else if effectiveShapes.length === 0}
-        <span class="hint-text">{$i18nT('pages.datasetDetail.noShapesAttachedPre')}<strong>{$i18nT('pages.datasetDetail.attachShapes')}</strong>{$i18nT('pages.datasetDetail.noShapesAttachedPost')}</span>
-      {:else}
-        <ul class="eff-list">
-          {#each effectiveShapes as s (s.id)}
-            <li class="eff-item">
-              <ShieldCheck size={12} class="text-[var(--brand-500)]" />
-              <Link to={`/shacl/shape-graphs/${s.id}`} class="eff-name">{s.name}</Link>
-              {#if datasetBoundIds.has(s.id)}
-                <span class="eff-badge eff-dataset" title={$i18nT('pages.datasetDetail.boundDirectlyTitle')}>{$i18nT('pages.datasetDetail.datasetBadge')}</span>
-              {:else}
-                <span class="eff-badge eff-inherited" title={$i18nT('pages.datasetDetail.inheritedFromGraphTitle')}>{$i18nT('pages.datasetDetail.inheritedFromGraph')}</span>
-              {/if}
-              {#if s.status}<span class="eff-badge eff-status-{s.status}">{s.status}</span>{/if}
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-  {/if}
-
-  {#if validationError}
-    <p class="error validation-error">{validationError}</p>
-  {/if}
-
-  {#if validationReport}
-    <div class="report" class:conforms={validationReport.conforms}>
-      <p><strong>{#if validationReport.conforms}<Check size={14} /> {$i18nT('pages.datasetDetail.conforms')}{:else}<XIcon size={14} /> {$i18nT('pages.datasetDetail.doesNotConform')}{/if}</strong>
-        — {validationReport.results_count} {$i18nT('pages.datasetDetail.results')}
-        {#if validationRanAt}<span class="run-meta" title={validationRanAt}> · {fmtDateTime(validationRanAt)}</span>{/if}</p>
-      {#if validationReport.results.length > 0}
-        <table>
-          <thead>
-            <tr><th>{$i18nT('pages.datasetDetail.severity')}</th><th>{$i18nT('pages.datasetDetail.focusNode')}</th><th>{$i18nT('pages.datasetDetail.path')}</th><th>{$i18nT('pages.datasetDetail.message')}</th></tr>
-          </thead>
-          <tbody>
-            {#each validationReport.results as r}
-              <tr>
-                <td><span class="sev sev-{r.severity}">{r.severity}</span></td>
-                <td><code>{r.focus_node}</code></td>
-                <td>{r.path || '—'}</td>
-                <td>{r.message}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-    </div>
-  {:else if !validationError}
-    <p class="hint-text">{$i18nT('pages.datasetDetail.runValidationHint')}</p>
-  {/if}
-
-  {#if validationHistory.length > 0}
-    <div class="val-history">
-      <div class="eff-head">{$i18nT('pages.datasetDetail.recentValidationRuns')}</div>
-      <ul class="val-history-list">
-        {#each validationHistory as run (run.id)}
-          <li class="val-history-item">
-            {#if run.conforms}
-              <span class="vh-pill vh-ok"><Check size={11} /> {$i18nT('pages.datasetDetail.conforms')}</span>
-            {:else}
-              <span class="vh-pill vh-fail"><XIcon size={11} /> {run.results_count} {$i18nT('pages.datasetDetail.results')}</span>
-            {/if}
-            <span class="vh-time" title={run.run_timestamp}>{fmtDateTime(run.run_timestamp)}</span>
-          </li>
-        {/each}
-      </ul>
-    </div>
-  {/if}
-</div>
 </div><!-- /detail-stack -->
 
 {#if attachTarget}
@@ -2544,7 +2664,7 @@
   .grant-select {
     font-size: 0.78rem; padding: 0.25rem 0.4rem;
     border: 1px solid var(--line-soft, #e5e7eb); border-radius: 6px;
-    background: white; cursor: pointer;
+    background: var(--bg-strong, #fff); cursor: pointer;
   }
   .grant-select:disabled { opacity: 0.5; cursor: progress; }
 
@@ -3170,6 +3290,21 @@
   }
 
   /* ── Section head (shared across cards) ──────────────────────────────────── */
+  /* ── KPI strip + section anchors ── */
+  .kpi-strip { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .kpi-skel { width: 84px; height: 52px; border-radius: var(--radius-md); }
+  .kpi-pill { cursor: pointer; font: inherit; text-align: left; text-decoration: none; }
+  button.kpi-pill { border: 1px solid var(--line-soft); }
+  .kpi-pill:hover { border-color: var(--brand-300); }
+  :global(a.stat-pill.kpi-3d) { border-color: var(--brand-300); }
+  .count-chip {
+    display: inline-block; font-size: 0.7rem; font-weight: 600;
+    color: var(--ink-500); background: var(--bg-soft);
+    border-radius: 999px; padding: 0.05rem 0.5rem; vertical-align: middle;
+  }
+  /* Anchored sections stop hiding under the sticky section nav. */
+  .card[id] { scroll-margin-top: 3.25rem; }
+
   .section-head {
     display: flex;
     align-items: center;
@@ -3388,34 +3523,43 @@
   .meta-readonly-hint { display: flex; align-items: center; gap: 0.3rem; font-size: 0.77rem; color: var(--ink-400); margin: 0.4rem 0 0; }
 
   /* ── Asset cards ─────────────────────────────────────────────────────────── */
-  .asset-cards { display: flex; flex-direction: column; gap: 0.5rem; }
-  .asset-card {
-    display: flex;
-    align-items: flex-start;
+  /* ── Files ── */
+  .files-summary { font-size: 0.78rem; color: var(--ink-500); margin-left: 0.5rem; }
+  .files-head-actions { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+  .file-skel { height: 52px; border-radius: 8px; margin-bottom: 0.4rem; }
+  .file-list { list-style: none; margin: 0; padding: 0; }
+  .file-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
     gap: 0.75rem;
-    padding: 0.75rem 0.85rem;
-    border: 1px solid var(--line-soft, #e5e7eb);
-    border-radius: 10px;
-    background: var(--bg-subtle, #fafafa);
-    transition: border-color 0.15s;
-  }
-  .asset-card:hover { border-color: var(--brand-200, #a5c8f2); }
-  .asset-card-icon { color: var(--ink-300); flex-shrink: 0; margin-top: 0.1rem; }
-  .asset-card-body { flex: 1; min-width: 0; }
-  .asset-card-title { font-weight: 600; font-size: 0.88rem; display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; }
-  .asset-filename-sub { font-weight: 400; font-size: 0.78rem; color: var(--ink-400); font-family: monospace; }
-  .asset-card-desc { font-size: 0.82rem; color: var(--ink-500); margin: 0.2rem 0 0; }
-  .asset-card-meta {
-    display: flex;
     align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    margin-top: 0.3rem;
-    font-size: 0.78rem;
-    color: var(--ink-400);
+    padding: 0.6rem 0.5rem;
+    border-bottom: 1px solid var(--line-soft);
   }
-  .asset-created { font-size: 0.77rem; color: var(--ink-400); }
-  .asset-card-actions { display: flex; align-items: center; gap: 0.2rem; flex-shrink: 0; flex-wrap: wrap; }
+  .file-row:last-child { border-bottom: none; }
+  .file-badge {
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-sm);
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.02em;
+    background: var(--bg-soft); color: var(--ink-600);
+    flex-shrink: 0; overflow: hidden; text-align: center;
+  }
+  .file-badge.tone-model3d { background: var(--brand-100); color: var(--brand-700); }
+  .file-badge.tone-rdf { background: var(--violet-100); color: var(--violet-500); }
+  .file-badge.tone-image { background: var(--success-100); color: var(--success-500); }
+  .file-badge.tone-json { background: var(--warning-100); color: var(--warning-500); }
+  .file-body { min-width: 0; }
+  .file-title-row { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
+  .file-title { font-weight: 600; font-size: 0.88rem; color: var(--ink-800); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-restricted { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.66rem; flex-shrink: 0; }
+  .file-meta {
+    display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
+    font-size: 0.75rem; color: var(--ink-500); margin-top: 0.15rem; min-width: 0;
+  }
+  .file-filename { font-family: monospace; }
+  .file-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+  .file-actions { display: flex; align-items: center; gap: 0.2rem; flex-shrink: 0; }
 
   /* ── Validation hint ─────────────────────────────────────────────────────── */
   .hint-text { font-size: 0.85rem; color: var(--ink-400); margin: 0; }

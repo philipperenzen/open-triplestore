@@ -12,15 +12,21 @@
   // maplibre-gl 6 dropped its `default` export in favour of named exports.
   import * as maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
+  // …and moved its worker out of the bundle; without this the basemap silently
+  // never loads. See lib/viewer/maplibreWorker.ts.
+  import { configureMapLibreWorker } from '../../lib/viewer/maplibreWorker';
+  configureMapLibreWorker();
   import * as THREE from 'three';
   import { t as i18nT } from 'svelte-i18n';
   import { Map as MapIcon, Satellite, Crosshair, Maximize } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf, modelRefsOf, cityBaseUrl, cityObjectFragment } from '../../lib/viewer/detect';
-  import { loadModel, realWorldMeters, defaultMaterial, NORMALISED_DIM } from '../../lib/viewer/models';
+  import { loadModel, realWorldMeters, defaultMaterial, normalise, NORMALISED_DIM } from '../../lib/viewer/models';
   import { ifcGuidAt, groupHasGuid, ifcProgress } from '../../lib/viewer/ifc';
   import { cityObjectIdAt, groupHasCityObject } from '../../lib/viewer/cityjson';
+  import { parseWktZ, wktZCentroid, wktZToLocalTriangles } from '../../lib/viewer/wktz';
+  import { lonLatToLocalMeters } from '../../lib/viewer/crs';
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import {
     styleFor,
@@ -32,7 +38,6 @@
     buildingIdFilter,
     buildingSuppressionFilter,
     combineFilters,
-    footprintPolygon,
     footprintsFromLocalPoints,
     footprintsToMultiPolygon,
     polygonsIntersect,
@@ -149,6 +154,10 @@
     onAdd(m, gl) {
       renderer = new THREE.WebGLRenderer({ canvas: m.getCanvas(), context: gl, antialias: true });
       renderer.autoClear = false;
+      // Models can now carry below-grade geometry (basements sit below their
+      // file's ground line) — clip it against the basemap plane, or foundations
+      // ghost through the streets (map tiles write no depth for the ground).
+      renderer.localClippingEnabled = true;
       // Filmic tone mapping for the standing models (same studio look as the
       // modal viewer / walkthrough) — only affects our own draw calls.
       applyStudioLook(renderer);
@@ -185,13 +194,27 @@
   });
 
   /** Model-local (y-up metres, normalised) → mercator placement matrix. */
-  function mercMatrixFor(lonLat, meters) {
+  /**
+   * Place a normalised model at `lonLat`, sized to `meters` and turned to face
+   * its real-world bearing.
+   *
+   * The matrix maps the Y-up scene into Mercator: scene +X → east, scene +Z →
+   * south (Mercator Y grows southward), scene +Y → altitude. So an unrotated
+   * model's local +X lands due east, i.e. bearing 90°. `heading` is the bearing
+   * that +X should actually point along, and the extra Y-rotation (applied to
+   * the model FIRST, hence last in the chain) turns it there: solving
+   * atan2(cosθ, sinθ) = heading gives θ = 90° − heading, which is 0 for the
+   * default 90° and so leaves every unannotated model exactly where it was.
+   */
+  function mercMatrixFor(lonLat, meters, heading) {
     const merc = maplibregl.MercatorCoordinate.fromLngLat({ lng: lonLat[0], lat: lonLat[1] }, 0);
     const s = merc.meterInMercatorCoordinateUnits() * (meters / NORMALISED_DIM);
+    const bearing = typeof heading === 'number' && Number.isFinite(heading) ? heading : 90;
     return new THREE.Matrix4()
       .makeTranslation(merc.x, merc.y, merc.z)
       .multiply(new THREE.Matrix4().makeScale(s, -s, s))
-      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
+      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(90 - bearing)));
   }
 
   let shadowTexture = null;
@@ -238,6 +261,62 @@
     return scene;
   }
 
+  /**
+   * Stand an element's volumetric WKT (`wkt3d`) on the map as real geometry.
+   * The demo's extruded WKT-Z solids only ever rendered in the Cesium 3D-Tiles
+   * view; the map showed just their anchor dots. The feed now ships the solid
+   * in 4326 with metre heights, so it renders here exactly like a loaded
+   * model: same entry contract (modelGroup/scene/mercMatrix/meters), so the
+   * fit, theming, suppression and click paths need no special cases.
+   */
+  function attachVolumetric(entry, el) {
+    const geom = parseWktZ(el.wkt3d);
+    if (!geom) return;
+    const anchor = wktZCentroid(geom);
+    const positions = wktZToLocalTriangles(geom, anchor, lonLatToLocalMeters);
+    if (!positions.length) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, defaultMaterial(dark));
+    mesh.userData.stl = true; // themeMaterials() re-skins default-material meshes
+    const model = new THREE.Group();
+    model.add(mesh);
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const meters = Math.max(size.x, size.y, size.z) || 10;
+    model.userData.geo = {
+      format: 'wktz',
+      realSize: { x: size.x, y: size.y, z: size.z },
+      anchorLonLat: anchor,
+      cityObjects: [],
+    };
+    normalise(model);
+    const groundClip = [new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)];
+    model.traverse((n) => {
+      if (n.isMesh && n.material) n.material.clippingPlanes = groundClip;
+    });
+    const nbox = new THREE.Box3().setFromObject(model);
+    const radius = Math.max(nbox.max.x - nbox.min.x, nbox.max.z - nbox.min.z) * 0.62;
+    const holder = new THREE.Group();
+    holder.add(model, makeShadowDisc(radius));
+    entry.modelGroup = model;
+    entry.box = nbox;
+    entry.scene = buildEntryScene(holder);
+    entry.meters = meters;
+    entry.anchorUsed = anchor;
+    entry.footprint = null;
+    entry.isIfc = false;
+    entry.isCity = false;
+    entry.cityObjectById = new Map();
+    entry.mercMatrix = mercMatrixFor(anchor, meters, null);
+    themeMaterials();
+    highlightModels();
+    scheduleBuildingSuppression();
+    maybeAutoFitModels();
+    map?.triggerRepaint();
+  }
+
   async function attachModel(entry, el) {
     const ref = modelRefOf(el);
     if (!ref) return;
@@ -249,10 +328,15 @@
       const cached = await loadModel(ref.url, ref.format, { upAxis: ref.upAxis });
       if (entries.get(el.id) !== entry) return; // rebuilt meanwhile
       const model = cached.clone(true);
-      // Clone materials so per-entry theming/highlighting never mutates the cache.
+      // Clone materials so per-entry theming/highlighting never mutates the
+      // cache, and clip everything below the basemap plane (see onAdd).
+      const groundClip = [new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)];
       model.traverse((n) => {
         if (n.isMesh && n.material) {
           n.material = Array.isArray(n.material) ? n.material.map((m) => m.clone()) : n.material.clone();
+          for (const mat of Array.isArray(n.material) ? n.material : [n.material]) {
+            mat.clippingPlanes = groundClip;
+          }
           if (ref.format === 'stl') n.userData.stl = true;
         }
       });
@@ -283,7 +367,8 @@
       // x-ray + info); cache the metadata by object id for hover/popup.
       entry.isCity = ref.format === 'cityjson' || ref.format === 'citygml';
       entry.cityObjectById = new Map((cached.userData.geo?.cityObjects || []).map((o) => [o.id, o]));
-      entry.mercMatrix = mercMatrixFor(anchor, meters);
+      entry.heading = ref.heading; // the footprint pass must turn with the model
+      entry.mercMatrix = mercMatrixFor(anchor, meters, ref.heading);
       themeMaterials();
       highlightModels();
       updateWalkSuggest(); // a building may have loaded while already zoomed in
@@ -293,7 +378,12 @@
       // until the next pan.
       scheduleBuildingSuppression();
       map?.triggerRepaint();
-    } catch {
+    } catch (err) {
+      // The chip only counts failures; without this the *reason* (404, CORS, a
+      // web-ifc parse abort) is invisible — a silent `catch {}` made "8 model(s)
+      // failed to load" undiagnosable from the browser alone.
+      // eslint-disable-next-line no-console
+      console.warn(`[viewer] model failed: ${ref.format} ${ref.url}`, err);
       modelsFailed += 1; // model failed to load — the vector dot remains
     } finally {
       modelsLoading -= 1;
@@ -786,7 +876,15 @@
   let baseFilters = new Map();
   let suppressTimer = 0;
   /** 'geometry' uses MapLibre's `distance` expression (evaluated in the tile
-   *  worker, viewport-independent); 'ids' is the fallback below. Latched once. */
+   *  worker, viewport-independent); 'ids' is the fallback for engines that
+   *  reject `distance`. Geometry is the primary mode ON PURPOSE, measured both
+   *  ways: an id filter looked attractive because the distance filter is
+   *  evaluated per tile fragment (a building straddling a tile boundary can
+   *  render sliced at the footprint's edge) — but planetiler feature ids are
+   *  NOT stable across zoom levels, so an id set collected at one zoom hides
+   *  unrelated buildings at other zooms: whole blocks far from any model
+   *  vanished and reappeared as the camera zoomed and tilted. A rare sliver at
+   *  a footprint edge beats city-wide flicker. */
   let suppressionMode = 'geometry';
   /** Bumped when a building source finishes loading tiles — only the id fallback
    *  depends on which tiles are present. */
@@ -832,17 +930,34 @@
     if (!anchor || !e.modelGroup || !e.box) return [];
     if (e.footprint) return e.footprint;
     const meters = e.meters || 30;
-    const pts = sampleModelXZ(e);
-    e.footprint = pts.length
-      ? footprintsFromLocalPoints(pts, meters, anchor, { normalisedDim: NORMALISED_DIM })
-      : // No readable geometry (a placeholder, an exotic loader) — fall back to
-        // the bounding box, padded, which is what the old code approximated.
-        [
-          footprintPolygon(e.box, meters, anchor, {
-            normalisedDim: NORMALISED_DIM,
-            padMeters: SUPPRESSION_BUFFER_M,
-          }),
-        ];
+    // The placement matrix turns a headed model about Y before it lands on the
+    // map (see mercMatrixFor); the footprint must turn WITH it or the hidden
+    // basemap blocks sit rotated away from where the model actually stands.
+    const theta = THREE.MathUtils.degToRad(
+      90 - (typeof e.heading === 'number' && Number.isFinite(e.heading) ? e.heading : 90),
+    );
+    const cos = Math.cos(theta);
+    const sin = Math.sin(theta);
+    const turn = ([x, z]) => [x * cos + z * sin, -x * sin + z * cos];
+    let pts = sampleModelXZ(e);
+    if (!pts.length) {
+      // No readable geometry (a placeholder, an exotic loader) — fall back to
+      // the bounding-box corners; the hull pass below closes them into the box
+      // the old footprintPolygon fallback approximated.
+      const { min, max } = e.box;
+      pts = [
+        [min.x, min.z],
+        [max.x, min.z],
+        [max.x, max.z],
+        [min.x, max.z],
+      ];
+    }
+    // The 0.5 m tolerance (SUPPRESSION_BUFFER_M) is applied by the *filters*,
+    // not baked into the rings: the distance filter takes it as its threshold,
+    // and the id fallback's intersection test needs no buffer to catch overlap.
+    e.footprint = footprintsFromLocalPoints(pts.map(turn), meters, anchor, {
+      normalisedDim: NORMALISED_DIM,
+    });
     return e.footprint;
   }
 
@@ -896,6 +1011,7 @@
   function applyIdSuppression(multi) {
     const rings = multi ? multi.coordinates.map((c) => c[0]) : [];
     const ids = new Set();
+    let idless = 0;
     if (rings.length) {
       const sources = new Set();
       for (const id of buildingLayerIds(map)) {
@@ -910,7 +1026,10 @@
           continue;
         }
         for (const f of feats) {
-          if (f.id === undefined || f.id === null) continue;
+          if (f.id === undefined || f.id === null) {
+            idless += 1;
+            continue;
+          }
           const g = f.geometry;
           const polys =
             g?.type === 'Polygon' ? [g.coordinates] : g?.type === 'MultiPolygon' ? g.coordinates : [];
@@ -924,6 +1043,14 @@
       }
     }
     applyFilterToBuildingLayers(buildingIdFilter([...ids]));
+    return { hidden: ids.size, idless };
+  }
+
+  /** Give every building layer its own filter back (rebuilds, empty model set). */
+  function resetBuildingSuppression() {
+    lastSuppressionKey = '';
+    if (!map || !styleReady) return;
+    applyFilterToBuildingLayers(null);
   }
 
   function applyBuildingSuppression() {
@@ -955,7 +1082,7 @@
     } else if (res === 'unsupported') {
       suppressionMode = 'ids';
       lastSuppressionKey = '';
-      applyIdSuppression(multi);
+      applyBuildingSuppression();
     }
   }
 
@@ -1038,6 +1165,13 @@
     entries = new Map();
     citySel = null;
     hideCityPopup();
+    // Give the basemap its blocks back for the whole rebuild window. The feed
+    // loads in two phases, and phase 2 tears every entry down and re-parses the
+    // models (the 3DBAG block alone is ~77 buildings, the IFC tens of MB). The
+    // previous pass's filter would otherwise keep the neighbourhood's basemap
+    // buildings hidden for those seconds with nothing standing in for them —
+    // an empty city block that reads as "the map lost my buildings".
+    resetBuildingSuppression();
     // Which base CityJSON/CityGML files carry a WHOLE-file (no-fragment) reference:
     // those render the entire block once; every `#objectId` fragment ref for the
     // same file then only maps a pick back to its element (no second render).
@@ -1076,6 +1210,9 @@
         continue;
       }
       if (anchor) attachModel(entry, el);
+      // Volumetric WKT stands as its own geometry; a file-backed model (if the
+      // element somehow had both) takes precedence via the async attach above.
+      if (el.wkt3d && !modelRefOf(el)) attachVolumetric(entry, el);
     }
     if (import.meta.env.DEV) window.__otsViewerEntries = entries; // dev: re-point after reassign
     ensureOverlays();

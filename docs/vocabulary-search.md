@@ -65,7 +65,8 @@ content is present in the bundled corpus.
 
 ## Recommender
 
-`POST /api/vocab/recommend`
+`POST /api/vocab/recommend` — public, no auth required; also driven by the
+**Recommender** tab on the Vocabularies page.
 
 ```json
 {
@@ -75,6 +76,15 @@ content is present in the bundled corpus.
   ],
   "preferred_vocabs": { "schema": 0.2 }
 }
+```
+
+Terms also accept plain strings for the common case (`category` defaults to
+`all`):
+
+```bash
+curl -s -X POST "$BASE/api/vocab/recommend" \
+  -H "Content-Type: application/json" \
+  -d '{"terms": ["bridge", "deck height"]}'
 ```
 
 A port of the CLARIAH

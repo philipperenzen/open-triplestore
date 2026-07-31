@@ -128,7 +128,8 @@ Every LLM-backed request passes a guard before any completion is spent:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LLM_RATE_LIMIT_PER_MIN` | `20` | Per-user (per-IP for guests) request budget per minute, separate from the global rate limiter. `0` disables. |
+| `LLM_RATE_LIMIT_PER_MIN` | `20` | Signed-in per-user request budget per minute, separate from the global rate limiter. `0` disables. |
+| `LLM_RATE_LIMIT_ANON_PER_MIN` | `5` | Guest (per-IP) request budget per minute — deliberately tighter than the signed-in budget. Both limits are surfaced to the UI via `GET /api/llm/health`. `0` disables. |
 | `LLM_GUARD_MAX_MESSAGE_CHARS` | `8000` | Per-message size cap. |
 | `LLM_GUARD_MAX_MESSAGES` / `LLM_GUARD_MAX_TOTAL_CHARS` | `40` / `64000` | Whole-conversation caps — start a new chat past them. |
 | `LLM_GUARD_INJECTION_ACTION` | `block` | What a prompt-injection heuristic hit does: `block`, `flag` (allow but log), or `off`. |

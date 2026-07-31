@@ -32,6 +32,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'scripts/perf_regression.py'
+      - 'scripts/perf_selftest.sh'
       - '.github/workflows/perf.yml'
   # `develop` is intentionally NOT here: every change reaches it through a PR that
   # already runs this gate, and the develop→main release PR runs it again — listing
@@ -45,6 +46,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'scripts/perf_regression.py'
+      - 'scripts/perf_selftest.sh'
       - '.github/workflows/perf.yml'
 
 # Collapse superseded runs: a new push/PR-update on the same ref cancels the
@@ -68,6 +70,12 @@ jobs:
           # Both revisions are benched in this job, so the base commit has to be in
           # the clone.
           fetch-depth: 0
+
+      # Fixture-driven, pure-python, seconds — and the only coverage the gate's own
+      # comparison logic has. Runs BEFORE the hour of benching so a broken gate
+      # fails fast rather than after four bench passes.
+      - name: Self-test the regression gate
+        run: bash scripts/perf_selftest.sh
 
       - name: Install system dependencies (GEOS for GeoSPARQL, xmlsec1 for SAML)
         run: |
@@ -116,7 +124,11 @@ jobs:
       # Fastest median per benchmark wins within each side (see `collect_medians`),
       # which is what makes the pairing work: each side keeps its quietest sample.
       # Criterion overwrites new/estimates.json each run, so every pass is moved
-      # aside. The four checkouts cost four rebuilds of the local crate rather than
+      # aside — into a destination cleared first, because `mv A B` nests A INSIDE B
+      # when B already exists, and the restored build cache is enough to leave the
+      # previous run's directory there. That nesting pushed Criterion's root one
+      # level down, prefixed every bench id with "criterion/", and so disabled every
+      # tolerance key in the baseline. The four checkouts cost four rebuilds of the local crate rather than
       # two — the dependency graph is unchanged, so only this crate and the bench
       # binary are rebuilt.
       - name: Bench the merge base (pass 1)
@@ -124,6 +136,7 @@ jobs:
         run: |
           git checkout --detach ${{ steps.base.outputs.sha }}
           cargo bench --bench performance --features full -- 'query|path|geosparql'
+          rm -rf target/criterion-base-1
           mv target/criterion target/criterion-base-1
 
       - name: Bench this change (pass 1)
@@ -131,6 +144,7 @@ jobs:
         run: |
           git checkout --detach ${{ steps.base.outputs.head }}
           cargo bench --bench performance --features full -- 'query|path|geosparql'
+          rm -rf target/criterion-head-1
           mv target/criterion target/criterion-head-1
 
       - name: Bench the merge base (pass 2)
@@ -138,6 +152,7 @@ jobs:
         run: |
           git checkout --detach ${{ steps.base.outputs.sha }}
           cargo bench --bench performance --features full -- 'query|path|geosparql'
+          rm -rf target/criterion-base-2
           mv target/criterion target/criterion-base-2
 
       # Ends on the change, so the comparison, the tolerances and the script below
@@ -148,6 +163,7 @@ jobs:
         run: |
           git checkout --detach ${{ steps.base.outputs.head }}
           cargo bench --bench performance --features full -- 'query|path|geosparql'
+          rm -rf target/criterion-head-2
           mv target/criterion target/criterion-head-2
 
       # ubuntu-latest ships python3. Tolerances still come from the committed

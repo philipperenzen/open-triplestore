@@ -954,7 +954,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/visibility",
             put(routes::update_asset_visibility),
         )
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        // optional_auth (not require_auth): a public dataset's asset LIST must be
+        // reachable anonymously — the dataset page's Files section is primary UI
+        // for logged-out visitors, exactly like its graphs/viewer-feed. Write
+        // handlers demand a user themselves via require_user(); per-asset
+        // visibility (Asset.public) is enforced in the handlers.
+        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .layer(DefaultBodyLimit::max(routes::ASSET_MAX_BYTES + 1024 * 1024))
         .with_state(state.clone());
 

@@ -62,7 +62,7 @@ describe('modelRefsOf', () => {
 
   it('falls back to the dedicated ifc_url when FOG lists none', () => {
     const refs = modelRefsOf({ ifc_url: 'https://x/m.ifc' });
-    expect(refs).toEqual([{ url: 'https://x/m.ifc', format: 'ifc', upAxis: null }]);
+    expect(refs).toEqual([{ url: 'https://x/m.ifc', format: 'ifc', upAxis: null, heading: null }]);
   });
 });
 
@@ -228,7 +228,7 @@ describe('model format detection', () => {
         ['Cityjson_v2.0', 'https://x.test/m'], // extensionless: the key decides
       ] as [string, string][],
     };
-    expect(modelRefOf(el)).toEqual({ url: 'https://x.test/m', format: 'cityjson', upAxis: null });
+    expect(modelRefOf(el)).toEqual({ url: 'https://x.test/m', format: 'cityjson', upAxis: null, heading: null });
     expect(modelRefOf({ gltf_url: 'https://x.test/m.glb', ...el })?.format).toBe('gltf');
   });
 });

@@ -16,6 +16,8 @@
 
   /** Models to show: [{ id, label, url, format, slot?: [x, z] }]. */
   export let refs = [];
+  /** Gate wheel-zoom behind a click (for viewers embedded in scrollable pages). */
+  export let wheelGate = false;
   export let height = '100%';
   /** Currently selected model id (highlighted). */
   export let selected = '';
@@ -175,14 +177,19 @@
         // metres — tens of units next to a 1.6-unit building.
         group.userData.model = model;
         loadedCount += 1;
-      } catch {
+      } catch (err) {
         if (sig !== lastSig) return;
         failedCount += 1;
+        // Name the failure — a silent wireframe cube reads as "a box that does
+        // not work", with nothing to diagnose it by.
+        // eslint-disable-next-line no-console
+        console.warn(`[model3d] failed to load ${ref.format} ${ref.url}`, err);
         const placeholder = new THREE.Mesh(
           new THREE.BoxGeometry(1, 1, 1),
           new THREE.MeshStandardMaterial({ color: 0x9aa6b2, wireframe: true })
         );
         placeholder.position.y = 0.5;
+        placeholder.userData.loadFailed = true;
         group.add(placeholder);
       }
     });
@@ -283,6 +290,20 @@
     controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0.6, 0);
     controls.enableDamping = true;
+    // Embedded viewers (chat answers, inspector panels) sit in scrollable
+    // pages: an always-on wheel-zoom hijacks the page scroll the moment the
+    // cursor crosses the widget. Zoom arms on pointerdown inside the canvas
+    // and disarms when the cursor leaves, so scrolling past a 3D answer works
+    // and zooming still takes exactly one click.
+    if (wheelGate) {
+      controls.enableZoom = false;
+      renderer.domElement.addEventListener('pointerdown', () => {
+        controls.enableZoom = true;
+      });
+      renderer.domElement.addEventListener('pointerleave', () => {
+        controls.enableZoom = false;
+      });
+    }
 
     const resize = () => {
       const w = canvasEl.clientWidth || 480;

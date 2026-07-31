@@ -537,7 +537,13 @@
       "memoryEnabled": "Geheugen gebruiken in chats",
       "memorySave": "Opslaan",
       "memorySaved": "Opgeslagen",
-      "close": "Sluiten"
+      "close": "Sluiten",
+      "copyMessage": "Bericht kopiëren",
+      "copyChat": "Chat kopiëren",
+      "guestLimit": "Gasten kunnen {anon} AI-verzoeken per minuut sturen; ingelogde gebruikers {user}.",
+      "aboutRateLimit": "Limiet",
+      "aboutRateLimitValue": "{n} verzoeken/min voor jou",
+      "aboutRateLimitSignIn": "(log in voor {n}/min)"
     },
     "sparql": {
       "title": "SPARQL-werkruimte",
@@ -891,7 +897,8 @@
         "shapes": "Shapes",
         "entailment": "Entailment",
         "system": "Systeem"
-      }
+      },
+      "emptyCta": "Maak je eerste dataset"
     },
     "datasetDetail": {
       "openSparql": "SPARQL-editor openen",
@@ -1118,7 +1125,27 @@
       "viewer3d": "3D- & kaartviewer",
       "viewer3dDesc": "Bekijk onderdelen op de kaart en in 3D, met hun linked data",
       "viewerMap": "Kaartviewer",
-      "viewerMapDesc": "Bekijk gelokaliseerde objecten op een interactieve kaart, met hun linked data"
+      "viewerMapDesc": "Bekijk gelokaliseerde objecten op een interactieve kaart, met hun linked data",
+      "filesTitle": "Bestanden",
+      "filesSummary": "{count, plural, one {# bestand} other {# bestanden}} · {size}",
+      "filesSignInTitle": "Log in om bestanden te zien",
+      "filesSignInHint": "De bestanden in deze dataset zijn alleen beschikbaar voor ingelogde leden.",
+      "filesErrorTitle": "Bestanden laden mislukt",
+      "filesRetry": "Opnieuw proberen",
+      "filesEmptyTitle": "Nog geen bestanden",
+      "filesEmptyHint": "Upload bronbestanden (IFC, STL, CityJSON, afbeeldingen, …) om ze naast de grafen te publiceren.",
+      "filesEmptyHintReader": "Deze dataset heeft geen downloadbare bestanden.",
+      "visRestricted": "Beperkt",
+      "viewIn3d": "Bekijk in 3D",
+      "open3dViewer": "Open 3D-viewer",
+      "statTriples": "Triples",
+      "statGraphs": "Grafen",
+      "statFiles": "Bestanden",
+      "statVersions": "Versies",
+      "stat3d": "3D-elementen",
+      "historyTitle": "Versies & geschiedenis",
+      "openValidationStudio": "Open validatiestudio",
+      "moreActions": "Meer acties"
     },
     "validation": {
       "title": "SHACL-validatie",
@@ -1243,7 +1270,8 @@
       "bulkDeleteMessage": "Hiermee worden {count} organisatie, alle datasets die zij bezit en alle bijbehorende grafen permanent verwijderd. Dit kan niet ongedaan worden gemaakt.",
       "bulkDeleteMessagePlural": "Hiermee worden {count} organisaties, alle datasets die zij bezitten en alle bijbehorende grafen permanent verwijderd. Dit kan niet ongedaan worden gemaakt.",
       "bulkDeleteConfirmLabel": "{count} organisatie verwijderen",
-      "bulkDeleteConfirmLabelPlural": "{count} organisaties verwijderen"
+      "bulkDeleteConfirmLabelPlural": "{count} organisaties verwijderen",
+      "bulkDeleteFailed": "Verwijderen mislukt: {names}"
     },
     "orgDetail": {
       "openSparql": "SPARQL-editor openen",
@@ -1365,7 +1393,17 @@
       "teamHintViewer": "Lezers krijgen alleen-lezen toegang tot datasets die met dit team zijn gedeeld.",
       "everyoneInTeam": "Iedereen zit al in dit team.",
       "noPeopleToAdd": "Geen personen beschikbaar om toe te voegen.",
-      "done": "Klaar"
+      "done": "Klaar",
+      "statDatasets": "Datasets",
+      "statMembers": "Leden",
+      "statGroups": "Groepen",
+      "statSubUnits": "Subeenheden",
+      "chip3d": "3D-inhoud",
+      "noDatasetsTitle": "Nog geen datasets",
+      "updatedDate": "Bijgewerkt {date}",
+      "everyoneIsMember": "Iedereen is al lid.",
+      "confirmRemoveMemberTitle": "Lid verwijderen",
+      "confirmRemoveMemberMsg": "{name} uit deze organisatie verwijderen? Toegang tot datasets via deze organisatie vervalt direct."
     },
     "login": {
       "title": "Inloggen",
@@ -2813,7 +2851,9 @@
       "recommendBest": "Beste match in set",
       "recommendAlternatives": "Alternatieven",
       "recommendNone": "geen match",
-      "attribution": "Vocabulairemetadata en -inhoud van"
+      "attribution": "Vocabulairemetadata en -inhoud van",
+      "recommendApiHint": "Ook beschikbaar als API:",
+      "recommendApiDocs": "API-documentatie"
     },
     "oauthAuthorize": {
       "missingParams": "Deze aanmeldlink is onvolledig (client_id of redirect_uri ontbreekt).",
@@ -3785,6 +3825,14 @@
     "search": "Zoek onderdelen…",
     "located": "Op de kaart",
     "noLocation": "Geen locatie",
+    "groupBy": {
+      "label": "Groeperen op",
+      "structure": "Structuur",
+      "location": "Locatie",
+      "format": "Bestandsformaat",
+      "type": "Type"
+    },
+    "ungrouped": "Niet gegroepeerd",
     "expandAll": "Alles uitvouwen",
     "collapseAll": "Alles invouwen",
     "expand": "Uitvouwen",
