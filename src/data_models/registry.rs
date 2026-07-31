@@ -681,6 +681,10 @@ pub fn get_version(
     data_model_id: &str,
     version: &str,
 ) -> Option<DataModelVersion> {
+    // The version becomes part of an IRI inside the SELECT below; an unsafe one
+    // could close it and append graph patterns, so treat it as "no such version"
+    // rather than querying with it.
+    crate::data_models::version_iri::validate_version(version).ok()?;
     let _dm_iri = format!("{}/data-model/{}", base_url, data_model_id);
     let ver_iri = format!(
         "{}/data-model/{}/version/{}",
@@ -742,6 +746,11 @@ pub fn insert_version(
     base_url: &str,
     record: &DataModelVersion,
 ) -> Result<(), crate::store::engine::StoreError> {
+    // The version lands in both an IRI and an `owl:versionInfo` literal below, and
+    // this function is reached from several upload/seed/pipeline paths — validate
+    // here so a caller that forgot to check cannot inject SPARQL.
+    crate::data_models::version_iri::validate_version(&record.version)
+        .map_err(crate::store::engine::StoreError::Parse)?;
     let ont_iri = format!("{}/data-model/{}", base_url, record.data_model_id);
     let ver_iri = format!(
         "{}/data-model/{}/version/{}",

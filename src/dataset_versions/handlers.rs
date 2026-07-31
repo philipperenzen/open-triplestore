@@ -57,12 +57,7 @@ fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppErr
 }
 
 fn validate_version(v: &str) -> Result<(), AppError> {
-    if v.trim().is_empty() || v.contains('/') || v.contains(' ') || v.contains('#') {
-        return Err(AppError::BadRequest(format!(
-            "Invalid version string: '{v}'"
-        )));
-    }
-    Ok(())
+    crate::data_models::version_iri::validate_version(v).map_err(AppError::BadRequest)
 }
 
 // ─── list / get ─────────────────────────────────────────────────────────────

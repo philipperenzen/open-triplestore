@@ -22,6 +22,49 @@ const DCT_IS_REPLACED_BY: &str = "http://purl.org/dc/terms/isReplacedBy";
 const PAV_VERSION: &str = "http://purl.org/pav/version";
 const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 
+/// Longest accepted version identifier.
+pub const MAX_VERSION_LEN: usize = 64;
+
+/// Reject any version string that is not safe to interpolate into SPARQL.
+///
+/// A version reaches the store through two different constructs — IRIs
+/// (`…/version/{version}`) and string literals (`owl:versionInfo "{version}"`)
+/// — so a blocklist has to anticipate the escape characters of both. This is an
+/// allowlist instead: ASCII alphanumerics plus `.`, `-`, `_`, `~` and `+`, which
+/// is a subset of both the IRI `unreserved` set and the characters that carry no
+/// meaning inside a quoted literal. `"`, `\`, `<`, `>`, `{`, `}`, `;` and every
+/// whitespace/control character are therefore impossible by construction, so no
+/// caller can terminate a literal or an IRI and append its own SPARQL operations.
+///
+/// Callers should run this at the API boundary to return a clean 400; every
+/// SPARQL sink runs it again so a missed boundary cannot become an injection.
+pub fn validate_version(version: &str) -> Result<(), String> {
+    if version.is_empty() {
+        return Err("Version must not be empty".to_string());
+    }
+    if version.len() > MAX_VERSION_LEN {
+        return Err(format!(
+            "Version must be at most {MAX_VERSION_LEN} characters (got {})",
+            version.len()
+        ));
+    }
+    if let Some(bad) = version
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~' | '+')))
+    {
+        return Err(format!(
+            "Invalid version string: character {bad:?} is not allowed \
+             (use letters, digits, '.', '-', '_', '~' or '+')"
+        ));
+    }
+    // `.` / `..` are relative-path segments: harmless in a literal, but they make
+    // `…/version/..` normalise away in an IRI, so a version may not be dots alone.
+    if version.chars().all(|c| c == '.') {
+        return Err("Version must not consist only of dots".to_string());
+    }
+    Ok(())
+}
+
 /// Build a version IRI by concatenating namespace and version with a single `/`.
 pub fn build_version_iri(namespace: &str, version: &str) -> String {
     let ns = namespace.trim_end_matches('/').trim_end_matches('#');
@@ -59,6 +102,7 @@ pub fn mint(
     version: &str,
     prior_version_iri: Option<&str>,
 ) -> Result<String, StoreError> {
+    validate_version(version).map_err(StoreError::Parse)?;
     let subject = find_ontology_subject(store, graph_iri).unwrap_or_else(|| {
         namespace
             .trim_end_matches('/')
@@ -138,6 +182,7 @@ fn stamp(
     issued_at: &str,
     replaces_version_iri: Option<&str>,
 ) -> Result<String, StoreError> {
+    validate_version(version).map_err(StoreError::Parse)?;
     let subject = find_scheme_subject(store, graph_iri).unwrap_or_else(|| {
         namespace
             .trim_end_matches('/')
@@ -258,6 +303,40 @@ pub fn stamp_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_the_version_shapes_actually_in_use() {
+        for ok in [
+            "1",
+            "1.0",
+            "0.0.1",
+            "2.3.1",
+            "v1.2.0",
+            "2008-01-14",
+            "latest",
+            "1.0.0-rc.1",
+            "1.0.0+build_7",
+            "a~b",
+        ] {
+            assert!(validate_version(ok).is_ok(), "{ok} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_sparql_injection_payloads() {
+        // The reported payload: closes the literal, then appends its own operations.
+        // It contains no '/', ' ' or '#', so the previous blocklist let it through.
+        let payload = "x\"}}\t;\tDELETE\tWHERE{GRAPH?g{?s?p?o}}\t;\tINSERT\tDATA\t{GRAPH<urn:x>{<urn:s><urn:p>\"";
+        assert!(validate_version(payload).is_err());
+
+        for bad in [
+            "1.0\"", "1.0\\", "a<b", "a>b", "a{b", "a}b", "a;b", "a b", "a\tb", "a\nb", "a/b",
+            "a#b", "", ".", "..",
+        ] {
+            assert!(validate_version(bad).is_err(), "{bad:?} should be rejected");
+        }
+        assert!(validate_version(&"1".repeat(MAX_VERSION_LEN + 1)).is_err());
+    }
 
     #[test]
     fn version_iri_strips_trailing_slash() {

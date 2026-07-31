@@ -23,6 +23,12 @@ pub struct AuthenticatedUser {
     /// True if this principal has write scope. Always true for JWT sessions; for API tokens
     /// this is `true` only when the token was issued with `write` or `admin` scope (M-8).
     pub write_access: bool,
+    /// True if this principal may exchange itself for a long-lived API token at
+    /// `POST /api/auth/tokens`. False for OIDC access tokens under the default
+    /// policy: a credential delegated to a client (possibly for read-only
+    /// scopes) must not be upgradable into permanent account access. See
+    /// [`crate::auth::policy::OidcSessionPolicy`].
+    pub can_mint_api_tokens: bool,
 }
 
 impl AuthenticatedUser {
@@ -34,6 +40,31 @@ impl AuthenticatedUser {
     /// Returns true if the user can create/edit/upload/publish ontology versions.
     pub fn is_publisher(&self) -> bool {
         self.role.is_admin() || self.can_publish
+    }
+
+    /// Whether this principal may create datasets of their own.
+    ///
+    /// Everyone signed in may, except a `Guest` in a deployment that has not
+    /// granted `create_datasets` — the default.
+    pub fn can_create_datasets(&self) -> bool {
+        self.role != SystemRole::Guest || crate::auth::policy::guest_capabilities().create_datasets
+    }
+
+    /// Clamp a freshly-resolved principal to the capabilities its role is
+    /// configured for.
+    ///
+    /// Applied on every authentication path, so a guest is equally limited
+    /// whether they arrive by session cookie, API token or OIDC token. Only
+    /// ever removes authority — a role can never gain power here — and roles
+    /// other than `Guest` are untouched.
+    fn clamped_to_role_policy(mut self) -> Self {
+        if self.role == SystemRole::Guest {
+            let caps = crate::auth::policy::guest_capabilities();
+            self.write_access &= caps.write;
+            self.can_mint_api_tokens &= caps.api_tokens;
+            self.can_publish &= caps.publish;
+        }
+        self
     }
 }
 
@@ -130,7 +161,11 @@ fn resolve_token(
             role: user.role,
             can_publish: user.can_publish,
             write_access,
-        })
+            // An API token is already a long-lived credential; it does not get to
+            // mint more of them.
+            can_mint_api_tokens: false,
+        }
+        .clamped_to_role_policy())
     } else {
         // JWT token path
         let claims = verify_token(jwt_config, token)
@@ -154,8 +189,10 @@ fn resolve_token(
             user_id: claims.sub,
             role: user.role, // Use DB role, not token role (in case it changed)
             can_publish: user.can_publish,
-            write_access: true, // JWT sessions always have write access
-        })
+            write_access: true,        // JWT sessions always have write access
+            can_mint_api_tokens: true, // a first-party interactive session
+        }
+        .clamped_to_role_policy())
     }
 }
 
@@ -193,7 +230,9 @@ async fn resolve_oidc_token(
         role: user.role,
         can_publish: user.can_publish,
         write_access: true, // interactive (OIDC) sessions always have write access
-    })
+        can_mint_api_tokens: true,
+    }
+    .clamped_to_role_policy())
 }
 
 /// Resolve a bearer token to an authenticated user, honoring the legacy-token
@@ -229,7 +268,7 @@ async fn authenticate(
 
     // Our own OIDC-provider access tokens (ES256, issued at /oauth/token).
     if let Some(keys) = provider.0.as_deref() {
-        if let Some(sub) = crate::auth::oidc_provider::provider_token_subject(
+        if let Some((sub, scope)) = crate::auth::oidc_provider::provider_token_identity(
             keys,
             issuer.trim_end_matches('/'),
             token,
@@ -241,12 +280,19 @@ async fn authenticate(
             if !user.is_active {
                 return Err(deactivated_response(auth_db, &user.id));
             }
+            // How far a delegated access token reaches is deployment policy: by
+            // default it behaves like an interactive session (may write) but may
+            // not mint a long-lived API token, which would turn a delegation the
+            // user granted to a client into permanent account access.
+            let policy = crate::auth::policy::oidc_session_policy();
             return Ok(AuthenticatedUser {
                 user_id: user.id,
                 role: user.role,
                 can_publish: user.can_publish,
-                write_access: true, // interactive OIDC sessions have write access
-            });
+                write_access: policy.allows_write(&scope),
+                can_mint_api_tokens: policy.allows_api_token_minting(),
+            }
+            .clamped_to_role_policy());
         }
     }
 
@@ -487,4 +533,73 @@ pub async fn endpoint_acl_guard(
     }
 
     Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod role_policy_tests {
+    use super::*;
+
+    fn principal(role: SystemRole) -> AuthenticatedUser {
+        // Everything on, as an interactive session would arrive.
+        AuthenticatedUser {
+            user_id: "u1".to_string(),
+            role,
+            can_publish: true,
+            write_access: true,
+            can_mint_api_tokens: true,
+        }
+    }
+
+    /// The env var is process-global, so the guest cases share one test to keep
+    /// them ordered rather than racing other tests in the same binary.
+    #[test]
+    fn guest_capabilities_clamp_the_resolved_principal() {
+        // Default: a guest reads and nothing else, even arriving on a session
+        // that would otherwise carry full authority.
+        std::env::remove_var("OTS_GUEST_CAPABILITIES");
+        let g = principal(SystemRole::Guest).clamped_to_role_policy();
+        assert!(!g.write_access, "guests must not write by default");
+        assert!(!g.can_mint_api_tokens, "guests must not mint API tokens");
+        assert!(!g.can_publish && !g.is_publisher());
+        assert!(!g.can_create_datasets());
+
+        // Opt in to exactly one capability: the others stay denied.
+        std::env::set_var("OTS_GUEST_CAPABILITIES", "write");
+        let g = principal(SystemRole::Guest).clamped_to_role_policy();
+        assert!(g.write_access);
+        assert!(!g.can_mint_api_tokens && !g.can_publish);
+        assert!(!g.can_create_datasets());
+
+        // The escape hatch restores user-equivalent power.
+        std::env::set_var("OTS_GUEST_CAPABILITIES", "all");
+        let g = principal(SystemRole::Guest).clamped_to_role_policy();
+        assert!(g.write_access && g.can_mint_api_tokens && g.can_publish);
+        assert!(g.can_create_datasets());
+
+        // Other roles are never touched by the guest policy.
+        std::env::set_var("OTS_GUEST_CAPABILITIES", "read");
+        for role in [SystemRole::User, SystemRole::Admin, SystemRole::SuperAdmin] {
+            let u = principal(role).clamped_to_role_policy();
+            assert!(u.write_access, "{role:?} must keep write");
+            assert!(u.can_mint_api_tokens, "{role:?} must keep token minting");
+            assert!(
+                u.can_create_datasets(),
+                "{role:?} must keep dataset creation"
+            );
+        }
+        std::env::remove_var("OTS_GUEST_CAPABILITIES");
+    }
+
+    /// The clamp only ever removes authority — it cannot hand a guest something
+    /// the authentication path did not already grant.
+    #[test]
+    fn clamping_never_adds_authority() {
+        std::env::set_var("OTS_GUEST_CAPABILITIES", "all");
+        let mut p = principal(SystemRole::Guest);
+        p.write_access = false;
+        p.can_mint_api_tokens = false;
+        let g = p.clamped_to_role_policy();
+        assert!(!g.write_access && !g.can_mint_api_tokens);
+        std::env::remove_var("OTS_GUEST_CAPABILITIES");
+    }
 }
