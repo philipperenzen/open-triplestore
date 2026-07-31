@@ -24,7 +24,7 @@ ARG CARGO_PROFILE=release
 ARG CARGO_FEATURES=full
 
 # ─── Stage 1: Frontend ───
-FROM node:20-slim AS frontend
+FROM node:24-slim AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
 # `npm ci` installs straight from the lock file: faster and reproducible. The
