@@ -118,14 +118,18 @@ so every number below is residual noise:
 
 The default tolerance is `default_tolerance_ratio` = **1.10** (+10 % before the
 gate trips). Tune per benchmark or per prefix in the `tolerances` map; precedence
-is an exact key, then the **longest matching prefix key ending in `/`**, then the
-default:
+is an exact key, then the **longest matching prefix key ending in `/` or `_`**,
+then the default. Both terminators matter: Criterion renders the group boundary as
+`/` for a nested id, but sanitises a `/` *inside* a group name into `_`, so
+`benchmark_group("concurrent/reads")` lands in `concurrent_reads/` and only a
+`concurrent_` key reaches it — a `concurrent/` key silently matches nothing and
+the group quietly falls back to the default.
 
 ```jsonc
 {
   "default_tolerance_ratio": 1.10,
   "tolerances": {
-    "concurrent/": 1.5,                    // genuinely variable; not in the gated subset
+    "concurrent_": 1.5,                    // genuinely variable; not in the gated subset
     "query_alternative_path/10000": 1.5,   // bimodal on this runner; see below
     "query_group_concat/": 1.35,           // both sizes; allocation-heavy, measured +25.5 %
     "query_simple_lookup/100000": 1.45     // bimodal on this runner; see below
