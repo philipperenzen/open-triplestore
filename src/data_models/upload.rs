@@ -182,10 +182,10 @@ pub fn load_parsed(
         .or_else(|| extract_owl_version_info(&quads))
         .ok_or_else(|| "Version not found in file and no version override provided".to_string())?;
 
-    // Validate version string is safe for use in an IRI
-    if version.contains('/') || version.contains(' ') || version.contains('#') {
-        return Err(format!("Invalid version string: '{version}'"));
-    }
+    // Safe for use in an IRI *and* in the `owl:versionInfo` literal the registry
+    // writes. Applies to the file's own `owl:versionInfo` too, not just the
+    // override — both are caller-supplied.
+    crate::data_models::version_iri::validate_version(&version)?;
 
     let base_graph = format!("{base_url}/data-model/{data_model_id}/version/{version}");
 

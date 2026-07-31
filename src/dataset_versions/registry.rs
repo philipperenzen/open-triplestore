@@ -108,6 +108,9 @@ pub fn get_version(
     dataset_id: &str,
     version: &str,
 ) -> Option<DatasetVersion> {
+    // Same reasoning as the data-model registry: the version is interpolated into
+    // an IRI in the SELECT below, so an unsafe one reads as "not found".
+    crate::data_models::version_iri::validate_version(version).ok()?;
     let ver_iri = version_iri(base_url, dataset_id, version);
     let q = format!(
         r#"
@@ -208,6 +211,15 @@ pub fn insert_version(
     base_url: &str,
     record: &DatasetVersion,
 ) -> Result<(), crate::store::engine::StoreError> {
+    // Reached from the version/branch/pipeline paths as well as the HTTP handlers;
+    // the version goes into an IRI and an `owl:versionInfo` literal below, so it is
+    // validated here too rather than trusting each caller to have checked.
+    crate::data_models::version_iri::validate_version(&record.version)
+        .map_err(crate::store::engine::StoreError::Parse)?;
+    if let Some(derived) = record.derived_from.as_deref() {
+        crate::data_models::version_iri::validate_version(derived)
+            .map_err(crate::store::engine::StoreError::Parse)?;
+    }
     let ds_iri = dataset_iri(base_url, &record.dataset_id);
     let ver_iri = version_iri(base_url, &record.dataset_id, &record.version);
 
