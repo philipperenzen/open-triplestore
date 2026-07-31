@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 pub enum PrefixSource {
     /// Registered on this triplestore (model/vocabulary registry).
     Platform,
+    /// Declared by a seed bundle installed on this deployment. Outranks the
+    /// bundled community snapshots: an operator who declares a label for their
+    /// own namespace means that namespace, not whatever prefix.cc lists.
+    Seeded,
     /// The bundled prefix.cc snapshot.
     #[serde(rename = "prefix.cc")]
     PrefixCc,
