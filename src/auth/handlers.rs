@@ -2165,6 +2165,16 @@ pub async fn create_api_token(
     headers: HeaderMap,
     Json(req): Json<CreateApiTokenRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Minting a long-lived credential is a first-party session action. An OIDC
+    // access token delegated to a client — possibly consented for read-only
+    // scopes — must not be able to upgrade itself into permanent account access,
+    // and an API token may not breed more tokens. See auth::policy.
+    if !current_user.can_mint_api_tokens {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This credential may not create API tokens; sign in directly to create one".to_string(),
+        ));
+    }
     if req.name.is_empty() || req.name.len() > 100 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -3645,6 +3655,14 @@ pub async fn create_dataset(
     Json(req): Json<CreateDatasetRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let current_user = require_user(user_opt)?;
+    // Guests only create datasets where the deployment has granted it
+    // (OTS_GUEST_CAPABILITIES); every other role always may.
+    if !current_user.can_create_datasets() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This account is not permitted to create datasets".to_string(),
+        ));
+    }
     let owner_type = OwnerType::from_str(&req.owner_type)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid owner_type".to_string()))?;
 
