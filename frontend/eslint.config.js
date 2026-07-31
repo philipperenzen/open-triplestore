@@ -103,6 +103,29 @@ export default [
     languageOptions: { globals: { ...globals.node } },
   },
   {
+    // eslint-plugin-svelte 3 turned on a batch of rules its v2 `flat/recommended`
+    // did not include. They fired ~430 times on code that predates them, and the
+    // fixes are behaviour changes (keying an each block changes DOM reuse;
+    // SvelteMap/SvelteSet change reactivity), not lint tidy-ups — so they are
+    // staged here rather than bundled into a dependency bump.
+    //
+    // The two bulk stylistic rules are off; adopting either is its own PR.
+    // The rest are demoted to warnings so they stay visible without gating CI —
+    // several of them (infinite-reactive-loop, no-immutable-reactive-statements)
+    // are the exact class of bug that has bitten this codebase before, so they
+    // are worth triaging file by file.
+    files: ['**/*.svelte'],
+    rules: {
+      'svelte/require-each-key': 'off', // 265 hits
+      'svelte/prefer-svelte-reactivity': 'off', // 137 hits
+      'svelte/infinite-reactive-loop': 'warn',
+      'svelte/no-reactive-functions': 'warn',
+      'svelte/no-immutable-reactive-statements': 'warn',
+      'svelte/no-dom-manipulating': 'warn',
+      'svelte/no-reactive-reassign': 'warn',
+    },
+  },
+  {
     ignores: ['dist/**', 'node_modules/**'],
   },
 ];

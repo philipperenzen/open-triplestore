@@ -28,7 +28,7 @@
     "@types/proj4": "^2.19.0",
     "@typescript-eslint/parser": "^8.65.0",
     "eslint": "^9.0.0",
-    "eslint-plugin-svelte": "^2.46.0",
+    "eslint-plugin-svelte": "^3.22.0",
     "globals": "^17.7.0",
     "jsdom": "^29.1.1",
     "svelte": "^5.56.3",

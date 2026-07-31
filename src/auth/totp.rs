@@ -5,7 +5,9 @@
 //! base32 (RFC 4648, no padding) and stored AES-GCM-encrypted via
 //! [`super::secret`].
 
-use hmac::{Hmac, Mac};
+// `KeyInit` carries `new_from_slice`; hmac 0.13 (digest 0.11) no longer folds it
+// into `Mac`, so it has to be imported explicitly.
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 
 /// Time-step length in seconds (RFC 6238 default).
