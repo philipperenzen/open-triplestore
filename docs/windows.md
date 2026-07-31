@@ -133,7 +133,7 @@ source "$HOME/.cargo/env"
 cargo build --release --features full
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 
-# Frontend (Node 20+; install via nvm or apt)
+# Frontend (Node 24+; install via nvm or apt)
 cd frontend
 npm install
 npm run dev      # http://localhost:5173, proxied to :7878

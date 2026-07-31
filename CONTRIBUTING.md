@@ -107,7 +107,7 @@ make nextest      # run tests in parallel (faster than cargo test)
 The full build-performance guide — profiles, linker, Docker cache mounts, and
 rust-analyzer tuning — is in [`docs/development.md`](docs/development.md).
 
-### Frontend (Node 20+)
+### Frontend (Node 24+)
 
 ```bash
 cd frontend
