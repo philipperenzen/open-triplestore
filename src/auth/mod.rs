@@ -25,6 +25,7 @@ pub mod oidc_rs;
 pub mod org_graph;
 pub mod passkey;
 pub mod password;
+pub mod policy;
 pub mod saml;
 pub mod secret;
 pub mod totp;

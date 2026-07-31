@@ -748,9 +748,25 @@ pub fn provider_token_subject(
     issuer: &str,
     token: &str,
 ) -> Option<String> {
+    provider_token_identity(state_keys, issuer, token).map(|(sub, _scope)| sub)
+}
+
+/// As [`provider_token_subject`], but also returns the token's `scope` claim.
+///
+/// The scope is minted into every access token (see the `access_claims` above)
+/// but was never read back, so a token delegated for `openid profile email`
+/// carried exactly the authority of one consented for write. `auth::policy`
+/// decides what that scope is allowed to do.
+pub fn provider_token_identity(
+    state_keys: &ProviderKeys,
+    issuer: &str,
+    token: &str,
+) -> Option<(String, String)> {
     let claims = state_keys.verify(issuer, token)?;
     if claims["token_use"].as_str() != Some("access") {
         return None;
     }
-    claims["sub"].as_str().map(str::to_string)
+    let sub = claims["sub"].as_str()?.to_string();
+    let scope = claims["scope"].as_str().unwrap_or_default().to_string();
+    Some((sub, scope))
 }
