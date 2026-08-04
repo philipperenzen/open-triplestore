@@ -233,12 +233,61 @@ async fn sparql_post(
 
 // ─── Streaming response plumbing ──────────────────────────────────────────────
 
-/// `std::io::Write` adapter that pumps every successful write into a Tokio mpsc
-/// channel as a `Bytes` chunk. Lets `spawn_blocking` SPARQL serialisation
-/// stream straight through `axum::body::Body::from_stream` without first
-/// buffering the whole result in a `Vec<u8>`.
+/// `std::io::Write` adapter that pumps writes into a Tokio mpsc channel as
+/// `Bytes` chunks. Lets `spawn_blocking` SPARQL serialisation stream straight
+/// through `axum::body::Body::from_stream` without first buffering the whole
+/// result in a `Vec<u8>`.
+///
+/// Writes are coalesced into `CHUNK_SIZE` blocks first. The serializers write in
+/// very small pieces — oxigraph's SPARQL-results JSON writer emits as little as
+/// one byte per call — and an unbuffered send turns each of those into a heap
+/// allocation, a cross-thread channel handoff and its own HTTP chunk. That
+/// per-write overhead, not the query itself, dominated response time: a 500-row
+/// SELECT produced ~115k chunks averaging 1 byte each, making JSON results ~95x
+/// slower to serialise than the same rows as CSV.
+///
+/// Callers MUST call [`ChannelWriter::finish`] when serialisation finishes, or
+/// the last partial block is dropped and the response body is truncated.
 struct ChannelWriter {
     tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+    buf: Vec<u8>,
+}
+
+impl ChannelWriter {
+    /// Big enough that per-chunk overhead vanishes, small enough to keep memory
+    /// bounded and the stream responsive for slow-trickling results.
+    const CHUNK_SIZE: usize = 64 * 1024;
+
+    fn new(tx: mpsc::Sender<Result<Bytes, std::io::Error>>) -> Self {
+        Self {
+            tx,
+            buf: Vec::with_capacity(Self::CHUNK_SIZE),
+        }
+    }
+
+    /// Hand the buffered bytes to the channel, leaving an empty buffer behind.
+    fn send_buffered(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = Bytes::from(std::mem::replace(
+            &mut self.buf,
+            Vec::with_capacity(Self::CHUNK_SIZE),
+        ));
+        // `blocking_send` is correct here: we run inside `spawn_blocking`, and
+        // applying back-pressure on the runtime (rather than dropping bytes) is
+        // what keeps memory bounded for huge result sets.
+        self.tx.blocking_send(Ok(chunk)).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
+        })
+    }
+
+    /// Send the tail of the buffered stream. Inherent (rather than only
+    /// `Write::flush`) so call sites don't need the trait in scope, and so the
+    /// "must be called" contract is visible at the call site.
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.send_buffered()
+    }
 }
 
 impl std::io::Write for ChannelWriter {
@@ -246,18 +295,15 @@ impl std::io::Write for ChannelWriter {
         if buf.is_empty() {
             return Ok(0);
         }
-        let chunk = Bytes::copy_from_slice(buf);
-        // `blocking_send` is correct here: we run inside `spawn_blocking`, and
-        // applying back-pressure on the runtime (rather than dropping bytes) is
-        // what keeps memory bounded for huge result sets.
-        self.tx.blocking_send(Ok(chunk)).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
-        })?;
+        self.buf.extend_from_slice(buf);
+        if self.buf.len() >= Self::CHUNK_SIZE {
+            self.send_buffered()?;
+        }
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+        self.send_buffered()
     }
 }
 
@@ -300,6 +346,110 @@ mod receiver_stream_tests {
         assert!(
             done_again.is_none(),
             "stream should remain completed on repeated polls"
+        );
+    }
+}
+
+#[cfg(test)]
+mod channel_writer_tests {
+    use super::ChannelWriter;
+    use axum::body::Bytes;
+    use std::io::Write;
+    use tokio::sync::mpsc;
+
+    /// Drain everything currently queued on the receiver.
+    fn drain(rx: &mut mpsc::Receiver<Result<Bytes, std::io::Error>>) -> Vec<Bytes> {
+        let mut out = Vec::new();
+        while let Ok(Ok(chunk)) = rx.try_recv() {
+            out.push(chunk);
+        }
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_writes_are_coalesced_into_one_chunk() {
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+        tokio::task::spawn_blocking(move || {
+            let mut w = ChannelWriter::new(tx);
+            // The JSON results writer emits single bytes; 10k of them must not
+            // become 10k chunks (the bug this guards against).
+            for _ in 0..10_000 {
+                w.write_all(b"x").expect("write should succeed");
+            }
+            w.finish().expect("finish should succeed");
+        })
+        .await
+        .expect("writer task should not panic");
+
+        let chunks = drain(&mut rx);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "10k one-byte writes should coalesce into a single sub-chunk-size block"
+        );
+        assert_eq!(chunks[0].len(), 10_000, "no bytes may be lost");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finish_emits_the_tail_so_the_body_is_never_truncated() {
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+        tokio::task::spawn_blocking(move || {
+            let mut w = ChannelWriter::new(tx);
+            w.write_all(b"tail").expect("write should succeed");
+            // Nothing is sent yet: the buffer is far below CHUNK_SIZE.
+            w.finish().expect("finish should succeed");
+        })
+        .await
+        .expect("writer task should not panic");
+
+        let body: Vec<u8> = drain(&mut rx).concat();
+        assert_eq!(body, b"tail", "finish must flush the partial block");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oversized_content_is_split_and_fully_delivered() {
+        let total = ChannelWriter::CHUNK_SIZE * 2 + 7;
+        let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+        tokio::task::spawn_blocking(move || {
+            let mut w = ChannelWriter::new(tx);
+            for _ in 0..total {
+                w.write_all(b"y").expect("write should succeed");
+            }
+            w.finish().expect("finish should succeed");
+        })
+        .await
+        .expect("writer task should not panic");
+
+        let chunks = drain(&mut rx);
+        assert!(
+            chunks.len() > 1,
+            "content past CHUNK_SIZE should stream as multiple chunks, got {}",
+            chunks.len()
+        );
+        assert_eq!(
+            chunks.concat().len(),
+            total,
+            "every byte must survive the split"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_reports_broken_pipe_once_the_client_is_gone() {
+        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        drop(rx);
+        let err = tokio::task::spawn_blocking(move || {
+            let mut w = ChannelWriter::new(tx);
+            // Exceed CHUNK_SIZE so the write actually attempts a send.
+            let payload = vec![b'z'; ChannelWriter::CHUNK_SIZE + 1];
+            w.write_all(&payload).err().map(|e| e.kind())
+        })
+        .await
+        .expect("writer task should not panic");
+
+        assert_eq!(
+            err,
+            Some(std::io::ErrorKind::BrokenPipe),
+            "a disconnected client should surface as BrokenPipe, not a silent success"
         );
     }
 }
@@ -478,13 +628,14 @@ async fn execute_query(
             return;
         }
 
-        let mut writer = ChannelWriter {
-            tx: chunk_tx.clone(),
-        };
+        let mut writer = ChannelWriter::new(chunk_tx.clone());
         let result = match mode {
             Mode::Tabular(f) => serialize_results_to(results, f, &mut writer),
             Mode::Graph(f) => serialize_graph_to(results, f, &mut writer),
         };
+        // Emit the tail of the buffered stream before reporting success —
+        // otherwise every response loses the bytes since the last full chunk.
+        let result = result.and_then(|()| writer.finish().map_err(|e| e.to_string()));
         if let Err(msg) = result {
             let _ = chunk_tx.blocking_send(Err(std::io::Error::other(msg)));
         }
@@ -1031,14 +1182,17 @@ async fn graph_store_get(
     let (start_tx, start_rx) = oneshot::channel::<Result<(), AppError>>();
 
     tokio::task::spawn_blocking(move || {
-        let mut writer = ChannelWriter {
-            tx: chunk_tx.clone(),
-        };
+        let mut writer = ChannelWriter::new(chunk_tx.clone());
         // Signal "ok to send headers" before producing data so the caller
         // can surface an error as a real 5xx if the dump cannot be initiated.
         let _ = start_tx.send(Ok(()));
-        if let Err(e) = store.dump_to_writer(&mut writer, rdf_format, graph_iri.as_deref()) {
-            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+        let result = store
+            .dump_to_writer(&mut writer, rdf_format, graph_iri.as_deref())
+            .map_err(|e| e.to_string())
+            // Emit the tail of the buffered stream, else the dump is truncated.
+            .and_then(|_| writer.finish().map_err(|e| e.to_string()));
+        if let Err(e) = result {
+            let _ = chunk_tx.blocking_send(Err(std::io::Error::other(e)));
         }
     });
 
@@ -3891,13 +4045,14 @@ pub(crate) async fn run_scoped_sparql(
             return;
         }
 
-        let mut writer = ChannelWriter {
-            tx: chunk_tx.clone(),
-        };
+        let mut writer = ChannelWriter::new(chunk_tx.clone());
         let result = match mode {
             Mode::Tabular(f) => serialize_results_to(results, f, &mut writer),
             Mode::Graph(f) => serialize_graph_to(results, f, &mut writer),
         };
+        // Emit the tail of the buffered stream before reporting success —
+        // otherwise every response loses the bytes since the last full chunk.
+        let result = result.and_then(|()| writer.finish().map_err(|e| e.to_string()));
         if let Err(msg) = result {
             let _ = chunk_tx.blocking_send(Err(std::io::Error::other(msg)));
         }
