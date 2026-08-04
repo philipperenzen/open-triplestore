@@ -18,7 +18,7 @@
   configureMapLibreWorker();
   import * as THREE from 'three';
   import { t as i18nT } from 'svelte-i18n';
-  import { Map as MapIcon, Satellite, Crosshair, Maximize } from 'lucide-svelte';
+  import { Map as MapIcon, Satellite, Crosshair, Maximize, Layers } from 'lucide-svelte';
   import { isDark } from '../../lib/theme.js';
   import { elementsToGeoJSON, featureBounds, toMapFeature, modelAnchor } from '../../lib/viewer/geometry';
   import { modelRefOf, modelRefsOf, cityBaseUrl, cityObjectFragment } from '../../lib/viewer/detect';
@@ -93,6 +93,11 @@
   // dissolve around the selection and let the ground contact-shadow show through
   // as a dark ring, which is what "a x-ray circle … through the 3d model" was.
   let xrayOn = false;
+  // Phone layout: the legend is a permanent ~170x220 overlay, which on a narrow
+  // map covers a third of the canvas. There it collapses behind a single button
+  // and opens as a sheet. Desktop keeps the always-visible panel — `null` means
+  // "follow the CSS", so the panel is never force-opened on a wide screen.
+  let layersOpen = false;
   const LAYER_DEFS = [
     { key: 'points', shape: 'dot', color: '#2f88d8', label: 'viewer.layerPoints' },
     { key: 'lines', shape: 'line', color: '#2f88d8', label: 'viewer.layerLines' },
@@ -1685,8 +1690,24 @@
     </div>
   {/if}
 
-  <!-- Layers + legend: toggle each feature kind on/off; the swatch is the legend. -->
-  <div class="map-layers" role="group" aria-label={$i18nT('viewer.layers')}>
+  <!-- Layers + legend: toggle each feature kind on/off; the swatch is the legend.
+       The button is phone-only (CSS hides it from ~700px up, where the panel is
+       always shown) and is what `.map-layers.open` hangs off. -->
+  <button
+    class="map-layers-btn"
+    class:open={layersOpen}
+    aria-expanded={layersOpen}
+    aria-controls="viewer-map-layers"
+    aria-label={$i18nT('viewer.layers')}
+    on:click={() => (layersOpen = !layersOpen)}
+  ><Layers size={16} /></button>
+  <div
+    id="viewer-map-layers"
+    class="map-layers"
+    class:open={layersOpen}
+    role="group"
+    aria-label={$i18nT('viewer.layers')}
+  >
     <div class="ml-title">{$i18nT('viewer.layers')}</div>
     {#each LAYER_DEFS as L}
       <label class="ml-row" class:off={!layersOn[L.key]}>
@@ -2014,6 +2035,93 @@
   @media (prefers-reduced-motion: reduce) {
     .mlc-spin {
       animation: none;
+    }
+  }
+
+  /* The layers button only exists in the phone layout; from 700px up the panel
+     is always on screen and the button would be a second way to do nothing. */
+  .map-layers-btn {
+    display: none;
+  }
+
+  /* ── Phone / narrow map ──────────────────────────────────────────────────
+     Everything above assumes a map wide enough to spend 170px on a permanent
+     legend. Under ~700px it isn't: the panel covered roughly a third of the
+     canvas, and the 28px controls are below the 44px touch target. The legend
+     becomes a sheet behind one button, and the controls grow. 700px (not 620)
+     because the DatasetViewer grid stacks at 900px — between the two, the map
+     column is already narrow while the old rules still treated it as desktop. */
+  @media (max-width: 700px) {
+    .map-layers-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 6;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border-radius: 10px;
+      border: 1px solid var(--line-soft, #e6eaef);
+      background: var(--bg-elevated, rgba(255, 255, 255, 0.95));
+      color: var(--ink-900, #0f172a);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+      backdrop-filter: blur(8px);
+      cursor: pointer;
+    }
+    .map-layers-btn.open {
+      border-color: var(--brand-500, #2f88d8);
+      color: var(--brand-500, #2f88d8);
+    }
+    .map-layers-btn:focus-visible {
+      outline: 2px solid var(--brand-500, #2f88d8);
+      outline-offset: 2px;
+    }
+    /* Anchored under the button, NOT to the map's bottom edge: the map wrap can
+       run past the visible viewport on a short phone, and a `bottom: 8px` sheet
+       then opens off-screen. `top: 56px` clears the 40px button (8 + 40 + 8) and
+       is on screen whenever the button that opened it is. */
+    .map-layers {
+      top: 56px;
+      right: 8px;
+      bottom: auto;
+      left: 8px;
+      display: none;
+      font-size: 0.85rem;
+      padding: 10px 12px;
+    }
+    .map-layers.open {
+      display: flex;
+      flex-flow: row wrap;
+      gap: 4px 16px;
+    }
+    .map-layers.open .ml-title {
+      flex: 1 0 100%;
+    }
+    /* Two comfortable columns instead of one tall list, so the sheet stays
+       short enough to leave most of the map visible while it's open. */
+    .map-layers.open .ml-row,
+    .map-layers.open .ml-legend-sel {
+      flex: 1 1 calc(50% - 16px);
+      min-height: 32px;
+    }
+    /* The divider's top rule reads as a broken line once rows sit side by side. */
+    .ml-divider {
+      border-top: 0;
+      margin-top: 0;
+      padding-top: 0;
+    }
+    .basemap-toggle button {
+      width: 40px;
+      height: 40px;
+    }
+    /* Clears the now-40px basemap toggle above it (8 + 40 + 8), and may run the
+       full width because the layers panel no longer occupies the right side. */
+    .sel-chip {
+      top: 56px;
+      max-width: calc(100% - 20px);
     }
   }
 </style>
