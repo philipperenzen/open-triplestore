@@ -1503,12 +1503,35 @@
     }
   }
 
-  @media (max-width: 620px) {
+  /* 700, not 620: a 627px-wide phone landed between this and the 900px rule —
+     wide enough to miss every phone tweak below, far too narrow for the desktop
+     head. It matches the ViewerMap breakpoint so the map chrome and the page
+     chrome switch to their phone forms together. */
+  @media (max-width: 700px) {
     .explorer-page {
       height: calc(100dvh - 64px);
     }
+    /* The head is a back button, a title, a count and three actions on one row.
+       Wrapping alone left the title in a ~50px column, three words tall. Giving
+       it its own full-width row is what stops the wrap. */
     .page-head h1 {
       font-size: 1.05rem;
+      flex: 1 0 100%;
+      order: -1;
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+    /* Once the title owns row one, the back link is alone on row two and the
+       global button width stretches it into a full-width banner. Shrink it back
+       to its label so it reads as a back control, not a primary action. */
+    .page-head :global(a.btn) {
+      width: auto;
+      flex: 0 0 auto;
+    }
+    /* The tree defaults smaller here: the map is the point of this page, and a
+       34dvh list on a phone left it a letterbox. Still resizable by the user. */
+    .explorer {
+      grid-template-rows: minmax(120px, 26dvh) 1fr;
     }
     .search {
       padding: 8px 10px;
