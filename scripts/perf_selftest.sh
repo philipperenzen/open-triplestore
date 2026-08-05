@@ -79,7 +79,8 @@ fi
 #    measured here. Two passes a side, and the FASTEST median per benchmark wins,
 #    so a single slow pass on either side must not swing the verdict.
 cmp_root="$(mktemp -d)"; trap 'rm -rf "$empty" "$cmp_root"; rm -f "$out_json"' EXIT
-for side in base-1 base-2 head-1 head-2; do mkdir -p "$cmp_root/$side/b/new"; done
+# base-3/head-3 back the confirmation pass in test 10.
+for side in base-1 base-2 head-1 head-2 base-3 head-3; do mkdir -p "$cmp_root/$side/b/new"; done
 write_median() { printf '{"median":{"point_estimate":%s}}' "$2" > "$cmp_root/$1/b/new/estimates.json"; }
 cmp_base="$(mktemp)"; trap 'rm -rf "$empty" "$cmp_root"; rm -f "$out_json" "$cmp_base"' EXIT
 printf '{"schema_version":1,"default_tolerance_ratio":1.10,"tolerances":{},"benchmarks":{}}' > "$cmp_base"
@@ -168,6 +169,96 @@ for side in base head; do mkdir -p "$grp_root/$side/concurrent_reads/threads/8/n
 printf '{"median":{"point_estimate":1000.0}}' > "$grp_root/base/concurrent_reads/threads/8/new/estimates.json"
 printf '{"median":{"point_estimate":1400.0}}' > "$grp_root/head/concurrent_reads/threads/8/new/estimates.json"
 expect_exit 0 "group prefix ending in _ applies to concurrent_reads/…" --   "$PY" "$script" compare --before "$grp_root/base" --after "$grp_root/head" --baseline "$nest_base"
+
+# 9. Screening (--soft) + the flagged-id handoff that drives the confirmation
+#    re-bench. Two samples a side already require a benchmark to be slow in BOTH
+#    head passes, but that bar is applied to ~68 benchmarks at once, so the odds
+#    that SOME benchmark trips it by luck are much higher than for any one of
+#    them — three consecutive PRs were failed that way. The screen reports and
+#    hands its flagged ids to a third pass instead of failing outright.
+flag_out="$(mktemp)"
+trap 'rm -rf "$empty" "$cmp_root" "$nest_root" "$grp_root"; rm -f "$out_json" "$cmp_base" "$small_base" "$tight_base" "$nest_base" "$flag_out"' EXIT
+
+write_median base-1 1000.0; write_median base-2 1000.0
+write_median head-1 1300.0; write_median head-2 1300.0
+expect_exit 0 "screen: --soft reports a regression without failing" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$cmp_base" --soft --flagged-out "$flag_out"
+case "$LAST_OUT" in
+  *REGRESSION*) echo "PASS: --soft still reports the regression";;
+  *) echo "FAIL: --soft swallowed the regression report"; fails=$((fails + 1));;
+esac
+case "$(cat "$flag_out")" in
+  '^b$') echo "PASS: flagged id written as a Criterion filter";;
+  *) echo "FAIL: unexpected --flagged-out contents: '$(cat "$flag_out")'"; fails=$((fails + 1));;
+esac
+
+# Nothing flagged -> an EMPTY file, which is what makes the workflow skip the
+# confirmation steps (and so the gate) entirely.
+write_median head-1 1000.0; write_median head-2 1000.0
+expect_exit 0 "screen: a clean run writes an empty flagged file" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" \
+                          --baseline "$cmp_base" --soft --flagged-out "$flag_out"
+if [ -s "$flag_out" ]; then
+  echo "FAIL: clean run still flagged something: '$(cat "$flag_out")'"; fails=$((fails + 1))
+else
+  echo "PASS: clean run flagged nothing"
+fi
+
+# 10. The confirmation pass itself. A third sample per side joins the same
+#     fastest-median-wins aggregation, so a fluke that was slow in passes 1+2 but
+#     normal in pass 3 clears, while a real regression still fails.
+write_median base-1 1000.0; write_median base-2 1000.0; write_median base-3 1000.0
+write_median head-1 1300.0; write_median head-2 1300.0; write_median head-3 1000.0
+expect_exit 0 "confirm: a fluke clears when pass 3 comes back normal" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" --before "$cmp_root/base-3" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" --after "$cmp_root/head-3" \
+                          --baseline "$cmp_base"
+
+write_median head-3 1300.0
+expect_exit 1 "confirm: a real regression still fails after pass 3" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" --before "$cmp_root/base-3" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" --after "$cmp_root/head-3" \
+                          --baseline "$cmp_base"
+
+# A confirmation dir holds ONLY the flagged benchmarks. Every OTHER benchmark is
+# absent from both pass-3 dirs, keeps its passes 1-2 samples on both sides, and so
+# must be compared exactly as before — not reported as added or removed.
+for side in base-1 base-2 head-1 head-2; do mkdir -p "$cmp_root/$side/c/new"; done
+for side in base-1 base-2; do printf '{"median":{"point_estimate":2000.0}}' > "$cmp_root/$side/c/new/estimates.json"; done
+for side in head-1 head-2; do printf '{"median":{"point_estimate":2020.0}}' > "$cmp_root/$side/c/new/estimates.json"; done
+# `b` is the flagged one and clears on its third sample; `c` never left passes 1-2.
+write_median head-3 1000.0
+expect_exit 0 "confirm: an unflagged benchmark is unaffected by partial pass-3 dirs" -- \
+  "$PY" "$script" compare --before "$cmp_root/base-1" --before "$cmp_root/base-2" --before "$cmp_root/base-3" \
+                          --after "$cmp_root/head-1" --after "$cmp_root/head-2" --after "$cmp_root/head-3" \
+                          --baseline "$cmp_base"
+case "$LAST_OUT" in
+  *WARN*) echo "FAIL: an unflagged benchmark was reported as added/removed"; fails=$((fails + 1));;
+  *) echo "PASS: unflagged benchmark compared normally, no spurious WARN";;
+esac
+case "$LAST_OUT" in
+  *'`c`'*) echo "PASS: the unflagged benchmark is still in the table";;
+  *) echo "FAIL: the unflagged benchmark vanished from the comparison"; fails=$((fails + 1));;
+esac
+
+# 11. Criterion's filter matches the UNSANITISED id, while the ids we parse come
+#     from directories where a "/" inside a group name became "_". The filter we
+#     hand back has to match the real thing again.
+filt="$("$PY" -c "
+import sys; sys.path.insert(0, '$here')
+from perf_regression import criterion_filter
+print(criterion_filter(['query_alternative_path/10000']))
+")"
+"$PY" -c "
+import re, sys
+if re.search(sys.argv[1], 'query/alternative_path/10000'):
+    print('PASS: filter matches the unsanitised Criterion id')
+else:
+    print('FAIL: filter does not match query/alternative_path/10000'); sys.exit(1)
+" "$filt" || fails=$((fails + 1))
 
 echo "===================================="
 if [ "$fails" -eq 0 ]; then echo "ALL PERF SELF-TESTS PASSED"; else echo "$fails PERF SELF-TEST(S) FAILED"; exit 1; fi

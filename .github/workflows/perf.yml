@@ -167,11 +167,68 @@ jobs:
           mv target/criterion target/criterion-head-2
 
       # ubuntu-latest ships python3. Tolerances still come from the committed
-      # baseline; only its measured numbers go unused here. Non-zero exit fails.
-      - name: Check for performance regressions
+      # baseline; only its measured numbers go unused here.
+      #
+      # `--soft`: this pass SCREENS, it does not gate. Two samples a side already
+      # require a benchmark to be slow in BOTH head passes before it is flagged
+      # (the sides are compared fastest-to-fastest), but that bar is applied to 68
+      # benchmarks at once — so the chance that *some* benchmark trips it by luck
+      # is much higher than the chance for any one of them. Three consecutive PRs
+      # were failed that way by a single benchmark whose sibling input size was
+      # flat and whose code the diff could not reach.
+      #
+      # So the flagged ids go to a confirmation re-bench below instead of straight
+      # to a red X.
+      - name: Screen for performance regressions
         if: steps.base.outputs.sha != ''
         run: |
           python3 scripts/perf_regression.py compare \
             --before target/criterion-base-1 --before target/criterion-base-2 \
             --after  target/criterion-head-1 --after  target/criterion-head-2 \
-            --baseline benches/perf_baseline.json --github-summary
+            --baseline benches/perf_baseline.json --github-summary \
+            --summary-title 'Performance vs merge base (screening)' \
+            --soft --flagged-out target/perf-flagged.txt
+
+      - name: Any regressions to confirm?
+        id: flagged
+        if: steps.base.outputs.sha != ''
+        run: |
+          filter="$(cat target/perf-flagged.txt 2>/dev/null || true)"
+          if [ -n "$filter" ]; then
+            echo "filter=$filter" >> "$GITHUB_OUTPUT"
+            echo "Confirming: $filter"
+          fi
+
+      # Only the flagged benchmarks are re-run — usually one or two out of 68, so
+      # this costs a couple of minutes rather than another full pass. Interference
+      # can only ever make a benchmark look SLOWER, so adding a third sample and
+      # keeping the fastest strictly improves both sides' estimates: a real
+      # regression still reproduces, a fluke does not.
+      - name: Confirm the merge base (pass 3, flagged only)
+        if: steps.flagged.outputs.filter != ''
+        run: |
+          git checkout --detach ${{ steps.base.outputs.sha }}
+          cargo bench --bench performance --features full -- '${{ steps.flagged.outputs.filter }}'
+          rm -rf target/criterion-base-3
+          mv target/criterion target/criterion-base-3
+
+      - name: Confirm this change (pass 3, flagged only)
+        if: steps.flagged.outputs.filter != ''
+        run: |
+          git checkout --detach ${{ steps.base.outputs.head }}
+          cargo bench --bench performance --features full -- '${{ steps.flagged.outputs.filter }}'
+          rm -rf target/criterion-head-3
+          mv target/criterion target/criterion-head-3
+
+      # The gate. All three passes feed in (pass 3 only has the flagged ids, and a
+      # benchmark missing from a dir simply doesn't contribute a sample), so a
+      # benchmark now has to look slow in every head pass to fail. Skipped entirely
+      # when nothing was flagged — the screen above already reported the table.
+      - name: Check for performance regressions
+        if: steps.flagged.outputs.filter != ''
+        run: |
+          python3 scripts/perf_regression.py compare \
+            --before target/criterion-base-1 --before target/criterion-base-2 --before target/criterion-base-3 \
+            --after  target/criterion-head-1 --after  target/criterion-head-2 --after  target/criterion-head-3 \
+            --baseline benches/perf_baseline.json --github-summary \
+            --summary-title 'Performance vs merge base (confirmed)'
