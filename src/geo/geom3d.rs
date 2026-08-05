@@ -573,6 +573,77 @@ impl Geometry3D {
         v.abs()
     }
 
+    /// Watertightness of a face set (manifold closure): the shell bounds a
+    /// volume iff every undirected edge of its face rings is shared by exactly
+    /// two faces. A missing wall, a dangling sliver or a duplicated face all
+    /// break that invariant, whatever the face COUNT happens to be — which is
+    /// why this replaces the old "at least four faces" heuristic in the seeded
+    /// validation shape. Returns `None` for face-less geometry (points, lines)
+    /// where closedness is undefined.
+    ///
+    /// Vertex identity is decided on coordinates quantized to ~1e-9 of the
+    /// geometry's own magnitude, so a textual WKT round-trip never splits a
+    /// shared vertex, while anything a metre-scale author would call "the same
+    /// point" still matches.
+    pub fn is_closed(&self) -> Option<bool> {
+        let mut rings: Vec<&[Coord3]> = Vec::new();
+        let mut tris: Vec<[Coord3; 3]> = Vec::new();
+        let mut faces = 0usize;
+        collect_face_rings(self, &mut rings, &mut tris, &mut faces);
+        if faces == 0 {
+            return None;
+        }
+        // Fewer than four faces cannot bound a volume, whatever their edges do.
+        if faces < 4 {
+            return Some(false);
+        }
+        // Quantum relative to the coordinate magnitude (RD metres and WGS84
+        // degrees both land on a sensible tolerance).
+        let mut scale = 0f64;
+        let mut probe = |c: Coord3| {
+            scale = scale.max(c.x.abs()).max(c.y.abs()).max(c.z.abs());
+        };
+        rings.iter().for_each(|r| r.iter().for_each(|c| probe(*c)));
+        tris.iter().for_each(|t| t.iter().for_each(|c| probe(*c)));
+        let quantum = (scale * 1e-9).max(1e-9);
+        let key = |c: &Coord3| -> (i64, i64, i64) {
+            (
+                (c.x / quantum).round() as i64,
+                (c.y / quantum).round() as i64,
+                (c.z / quantum).round() as i64,
+            )
+        };
+        let mut edges: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), u32> =
+            std::collections::HashMap::new();
+        let mut add_ring = |ring: &[Coord3]| {
+            // Drop the closing duplicate; walk consecutive pairs (wrapping).
+            let mut pts: Vec<(i64, i64, i64)> = ring.iter().map(&key).collect();
+            if pts.len() >= 2 && pts.first() == pts.last() {
+                pts.pop();
+            }
+            let n = pts.len();
+            if n < 3 {
+                return;
+            }
+            for i in 0..n {
+                let a = pts[i];
+                let b = pts[(i + 1) % n];
+                if a == b {
+                    continue; // degenerate zero-length edge
+                }
+                let e = if a <= b { (a, b) } else { (b, a) };
+                *edges.entry(e).or_insert(0) += 1;
+            }
+        };
+        for ring in rings {
+            add_ring(ring);
+        }
+        for t in &tris {
+            add_ring(&t[..]);
+        }
+        Some(!edges.is_empty() && edges.values().all(|&n| n == 2))
+    }
+
     /// 2D footprint: the convex hull of all vertices projected to the XY plane,
     /// as a closed ring of `(x, y)`. Bridges back to the GEOS 2D predicates
     /// (spec §3.4). Convex hull is an approximation of a true (possibly concave)
@@ -587,6 +658,51 @@ impl Geometry3D {
 fn poly_coords(p: &Polygon3, f: &mut impl FnMut(Coord3)) {
     p.exterior.iter().for_each(|c| f(*c));
     p.interiors.iter().flatten().for_each(|c| f(*c));
+}
+
+/// Every face boundary of a geometry, for the closure test: polygon rings
+/// (exterior and interiors — a hole's edges must pair up too) plus TIN
+/// triangles, recursing through collections. `faces` counts the faces seen.
+fn collect_face_rings<'a>(
+    g: &'a Geometry3D,
+    rings: &mut Vec<&'a [Coord3]>,
+    tris: &mut Vec<[Coord3; 3]>,
+    faces: &mut usize,
+) {
+    match g {
+        Geometry3D::Polygon(p) => {
+            rings.push(&p.exterior);
+            for hole in &p.interiors {
+                rings.push(hole);
+            }
+            *faces += 1;
+        }
+        Geometry3D::Triangle(t) => {
+            tris.push(*t);
+            *faces += 1;
+        }
+        Geometry3D::MultiPolygon(ps) | Geometry3D::PolyhedralSurface(ps) => {
+            for p in ps {
+                rings.push(&p.exterior);
+                for hole in &p.interiors {
+                    rings.push(hole);
+                }
+                *faces += 1;
+            }
+        }
+        Geometry3D::Tin(ts) => {
+            for t in ts {
+                tris.push(*t);
+                *faces += 1;
+            }
+        }
+        Geometry3D::GeometryCollection(gs) => {
+            for gg in gs {
+                collect_face_rings(gg, rings, tris, faces);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Fan-triangulate a ring from its first vertex.
@@ -945,6 +1061,56 @@ mod tests {
         ((1 0 0,1 1 0,1 1 1,1 0 1,1 0 0)),\
         ((0 0 0,1 0 0,1 0 1,0 0 1,0 0 0)),\
         ((0 1 0,0 1 1,1 1 1,1 1 0,0 1 0)))";
+
+    /// CUBE with its last (y=1) face dropped: five healthy-looking faces, open.
+    const CUBE_MISSING_WALL: &str = "POLYHEDRALSURFACE Z (\
+        ((0 0 0,0 1 0,1 1 0,1 0 0,0 0 0)),\
+        ((0 0 1,1 0 1,1 1 1,0 1 1,0 0 1)),\
+        ((0 0 0,0 0 1,0 1 1,0 1 0,0 0 0)),\
+        ((1 0 0,1 1 0,1 1 1,1 0 1,1 0 0)),\
+        ((0 0 0,1 0 0,1 0 1,0 0 1,0 0 0)))";
+
+    #[test]
+    fn is_closed_watertight_cube() {
+        assert_eq!(parse_wkt3d(CUBE).unwrap().is_closed(), Some(true));
+    }
+
+    #[test]
+    fn is_closed_catches_missing_wall_despite_face_count() {
+        // Five faces pass any "at least four faces" heuristic; the unpaired
+        // edges of the missing wall must still fail the geometric test.
+        assert_eq!(
+            parse_wkt3d(CUBE_MISSING_WALL).unwrap().is_closed(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn is_closed_degenerate_two_face_shell() {
+        let two = "POLYHEDRALSURFACE Z (\
+            ((0 0 0,0 1 0,1 1 0,1 0 0,0 0 0)),\
+            ((0 0 1,1 0 1,1 1 1,0 1 1,0 0 1)))";
+        assert_eq!(parse_wkt3d(two).unwrap().is_closed(), Some(false));
+    }
+
+    #[test]
+    fn is_closed_tin_tetrahedron() {
+        let tetra = "TIN Z (\
+            ((0 0 0,1 0 0,0 1 0,0 0 0)),\
+            ((0 0 0,0 0 1,1 0 0,0 0 0)),\
+            ((0 0 0,0 1 0,0 0 1,0 0 0)),\
+            ((1 0 0,0 0 1,0 1 0,1 0 0)))";
+        assert_eq!(parse_wkt3d(tetra).unwrap().is_closed(), Some(true));
+    }
+
+    #[test]
+    fn is_closed_undefined_for_faceless_geometry() {
+        assert_eq!(parse_wkt3d("POINT Z (1 2 3)").unwrap().is_closed(), None);
+        assert_eq!(
+            parse_wkt3d("LINESTRING Z (0 0 0,1 1 1)").unwrap().is_closed(),
+            None
+        );
+    }
 
     #[test]
     fn detects_3d() {
