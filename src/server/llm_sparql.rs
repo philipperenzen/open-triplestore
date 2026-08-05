@@ -81,6 +81,16 @@ fn shacl_model() -> String {
     env_nonempty("LLM_SHACL_MODEL").unwrap_or_else(default_model)
 }
 
+/// Model for the Spark chat assistant (`LLM_CHAT_MODEL`).
+///
+/// Chat is by far the most demanding task here — a long system prompt, an
+/// execution protocol to follow and strict-JSON widget specs — so an instance
+/// that runs a small local model for cheap NL→SPARQL often wants a stronger one
+/// here. Falls back to `LLM_MODEL` like the other per-task overrides.
+pub(crate) fn chat_model() -> String {
+    env_nonempty("LLM_CHAT_MODEL").unwrap_or_else(default_model)
+}
+
 /// Optional bearer token for the endpoint (`LLM_API_KEY`). Required by hosted APIs
 /// (OpenAI, OpenRouter, …); leave unset for local servers (Ollama, LM Studio).
 fn api_key() -> Option<String> {
@@ -160,7 +170,20 @@ pub(crate) async fn chat_completion(
 /// service runs on whatever hardware is at hand — a 7B model on CPU with a long
 /// platform context can legitimately take more than a minute per completion.
 /// Hosted APIs answer in seconds and are unaffected.
-const CHAT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
+///
+/// Raise it with `LLM_TIMEOUT_SECONDS` when serving a large model from local
+/// hardware: past this budget the turn fails outright, so a 20B+ model on CPU
+/// needs a bigger one to answer at all.
+const CHAT_COMPLETION_TIMEOUT_DEFAULT_SECS: u64 = 120;
+
+fn chat_completion_timeout() -> Duration {
+    Duration::from_secs(
+        env_nonempty("LLM_TIMEOUT_SECONDS")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(CHAT_COMPLETION_TIMEOUT_DEFAULT_SECS),
+    )
+}
 
 /// Send a full multi-turn conversation to the gateway and return the assistant's
 /// raw reply (trimmed, no code-fence stripping — the chat answer is prose, and any
@@ -183,7 +206,7 @@ pub(crate) async fn chat_completion_messages(
     let mut rb = http()
         .post(&url)
         .json(&payload)
-        .timeout(CHAT_COMPLETION_TIMEOUT);
+        .timeout(chat_completion_timeout());
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -358,7 +381,7 @@ async fn chat_completion_messages_stream(
     let mut rb = http()
         .post(&url)
         .json(&payload)
-        .timeout(CHAT_COMPLETION_TIMEOUT);
+        .timeout(chat_completion_timeout());
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
@@ -1353,7 +1376,7 @@ async fn run_chat_turn(
     sink: EventSink,
 ) -> Result<ChatResponse, AppError> {
     let user = user.as_ref();
-    let model = req.model.clone().unwrap_or_else(default_model);
+    let model = req.model.clone().unwrap_or_else(chat_model);
 
     // The set of graphs this caller may read — the security scope for any query.
     let graphs = chat_accessible_graphs(&state, user)?;
@@ -1406,8 +1429,45 @@ async fn run_chat_turn(
     })
     .await;
     let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink).await?;
+
+    // Retrieval nudge. The `SPARQL:` protocol sits inside a long system prompt,
+    // and a model that does not follow it silently answers from the platform
+    // summary or its own memory — the failure mode looks like "the assistant
+    // ignores the data". So when the opening reply asks for no query at all, ask
+    // once, in a short and explicit message. The model may decline (a conceptual
+    // question needs no data), and if it does we keep its original answer, so the
+    // nudge can only add retrieval, never take an answer away. Costs at most one
+    // extra completion per turn.
+    if extract_query_request(&reply, true).is_none() {
+        let original = (reply.clone(), forwarded);
+        msgs.push(json!({"role": "assistant", "content": reply}));
+        msgs.push(json!({"role": "user", "content":
+            "You answered without querying the graphs. If answering my question needs data from \
+             them (any name, number, date, value or geometry), reply with EXACTLY one line: \
+             `SPARQL:` followed by a single query and nothing else. If it genuinely needs no data \
+             from the graphs, repeat your previous answer unchanged."}));
+        sink.send(ChatStreamEvent::RoundReset).await;
+        sink.send(ChatStreamEvent::Status {
+            round: 0,
+            state: "thinking",
+        })
+        .await;
+        (reply, forwarded) = match next_reply(&model, &msgs, &sink).await {
+            Ok(v) if extract_query_request(&v.0, true).is_some() => v,
+            // No query the second time either (or the gateway failed): the first
+            // answer was the model's real one — keep it.
+            _ => {
+                sink.send(ChatStreamEvent::RoundReset).await;
+                msgs.truncate(msgs.len() - 2);
+                original
+            }
+        };
+    }
+
     for round in 1..=MAX_CHAT_QUERY_ROUNDS {
-        let Some(query) = extract_sparql_directive(&reply) else {
+        // Before anything has been retrieved a fenced ```sparql block counts as a
+        // request to run it; afterwards it is a query card the user is meant to see.
+        let Some(query) = extract_query_request(&reply, runs.is_empty()) else {
             break;
         };
         // The streaming client hung up — stop burning completions on a turn
@@ -2237,10 +2297,46 @@ fn extract_sparql_directive(reply: &str) -> Option<String> {
     let pos = directive_pos(reply)?;
     let after = reply[pos + "SPARQL:".len()..].trim();
     let query = strip_code_fence(after);
-    let is_query = ["SELECT", "ASK", "CONSTRUCT", "DESCRIBE"]
+    is_query_form(&query).then_some(query)
+}
+
+/// The query this reply asks the platform to run, if any: the `SPARQL:`
+/// execution directive, or — when `allow_fence` — a bare ```sparql block.
+fn extract_query_request(reply: &str, allow_fence: bool) -> Option<String> {
+    extract_sparql_directive(reply).or_else(|| allow_fence.then(|| first_sparql_fence(reply))?)
+}
+
+/// The first ```sparql fenced block in a reply, when it holds a real query.
+///
+/// Instruction-tuned models — especially small ones — routinely answer a
+/// retrieval prompt by *writing the query in a code fence* instead of emitting
+/// the `SPARQL:` execution marker. Read strictly, that reply retrieves nothing:
+/// the turn ends, the fence renders as a query card, and the model then answers
+/// from memory. Treating the fence as a directive is only safe while nothing has
+/// been retrieved yet this turn (see [`chat_query_request`]) — once rows are in,
+/// a fenced query is a *presented* query card and must stay one.
+fn first_sparql_fence(reply: &str) -> Option<String> {
+    let mut rest = reply;
+    while let Some(open) = rest.find("```") {
+        let after = &rest[open + 3..];
+        let nl = after.find('\n')?;
+        let (lang, body) = (after[..nl].trim(), &after[nl + 1..]);
+        let end = body.find("```")?;
+        let inner = body[..end].trim();
+        if lang.eq_ignore_ascii_case("sparql") && is_query_form(inner) {
+            return Some(inner.to_string());
+        }
+        rest = &body[end + 3..];
+    }
+    None
+}
+
+/// Does this text contain a SPARQL *read* query form? Updates are never run
+/// from a chat turn, so they must not qualify.
+fn is_query_form(s: &str) -> bool {
+    ["SELECT", "ASK", "CONSTRUCT", "DESCRIBE"]
         .iter()
-        .any(|kw| find_ci(&query, kw).is_some());
-    is_query.then_some(query)
+        .any(|kw| find_ci(s, kw).is_some())
 }
 
 /// Byte offset of the first line-anchored `SPARQL:` marker — a line whose
@@ -2339,12 +2435,52 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_sparql_directive, fallback_answer, find_ci, is_bare_sparql_directive,
-        looks_like_wkt, sse_data, stream_delta_text, strip_code_fence, truncate, validate_sparql,
-        widgets_without_retrieval, ChatQueryRun, ChatStreamEvent, DeltaGate, EventSink,
-        SseLineBuffer, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
+        extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
+        first_sparql_fence, is_bare_sparql_directive, looks_like_wkt, sse_data, stream_delta_text,
+        strip_code_fence, truncate, validate_sparql, widgets_without_retrieval, ChatQueryRun,
+        ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
+        CHAT_WKT_CELL_MAX_CHARS,
     };
     use serde_json::json;
+
+    #[test]
+    fn fenced_query_counts_as_a_request_only_before_any_retrieval() {
+        // What a model that ignores the `SPARQL:` protocol actually sends.
+        let reply = "Let me look that up:\n\n```sparql\nSELECT ?s WHERE { ?s ?p ?o } LIMIT 5\n```";
+        assert!(extract_sparql_directive(reply).is_none());
+        assert_eq!(
+            extract_query_request(reply, true).as_deref(),
+            Some("SELECT ?s WHERE { ?s ?p ?o } LIMIT 5")
+        );
+        // After a round has run, the same fence is a query card for the user.
+        assert!(extract_query_request(reply, false).is_none());
+    }
+
+    #[test]
+    fn fence_scan_skips_non_sparql_and_non_query_blocks() {
+        // A chart widget must never be mistaken for a query request.
+        let widgets = "```chart\n{\"type\":\"bar\",\"data\":[]}\n```\n\n```json\n{\"a\":1}\n```";
+        assert!(first_sparql_fence(widgets).is_none());
+        // A sparql fence holding an update is not a read query.
+        assert!(first_sparql_fence("```sparql\nDROP GRAPH <urn:g>\n```").is_none());
+        // The first *query* fence wins, even behind another language's block.
+        let mixed = "```json\n{}\n```\n```sparql\nASK { ?s ?p ?o }\n```";
+        assert_eq!(
+            first_sparql_fence(mixed).as_deref(),
+            Some("ASK { ?s ?p ?o }")
+        );
+        // An unterminated fence is not a request.
+        assert!(first_sparql_fence("```sparql\nSELECT * WHERE {").is_none());
+    }
+
+    #[test]
+    fn directive_still_wins_over_a_fence() {
+        let reply = "SPARQL:\nSELECT ?a WHERE { ?a ?b ?c }\n\n```sparql\nASK { ?s ?p ?o }\n```";
+        assert_eq!(
+            extract_query_request(reply, true).as_deref(),
+            Some("SELECT ?a WHERE { ?a ?b ?c }")
+        );
+    }
 
     fn ok_run() -> ChatQueryRun {
         ChatQueryRun {
