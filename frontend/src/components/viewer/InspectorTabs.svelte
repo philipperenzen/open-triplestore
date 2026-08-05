@@ -88,6 +88,41 @@
     return strip?.getAttribute('data-wid') || null;
   }
 
+  /**
+   * Insertion index for a drop at viewport x, in THIS strip: the number of tabs
+   * whose horizontal midpoint the pointer has passed. The dragged tab is skipped
+   * so the index is expressed in the post-removal list — which is what
+   * `moveTabToWindow` splices into.
+   */
+  function dropIndexAt(x, dragKey) {
+    let index = 0;
+    for (let i = 0; i < tabs.length; i++) {
+      if (tabs[i].key === dragKey) continue;
+      const r = btnEls[i]?.getBoundingClientRect?.();
+      if (!r) continue;
+      if (x > r.left + r.width / 2) index++;
+    }
+    return index;
+  }
+
+  /**
+   * Position of tab `i` in the drag's numbering (which omits the dragged tab),
+   * so the caret can be placed before the tab that would follow the drop.
+   */
+  function visualSlot(i) {
+    const from = tabs.findIndex((t) => t.key === drag?.key);
+    return from !== -1 && i > from ? i - 1 : i;
+  }
+
+  /** Move a tab by `delta` places (the keyboard/menu equivalent of the drag). */
+  function nudge(key, delta) {
+    const from = tabs.findIndex((t) => t.key === key);
+    if (from === -1) return;
+    const to = from + delta;
+    if (to < 0 || to >= tabs.length) return;
+    dispatch('reorder', { key, index: to });
+  }
+
   function onPointerDown(e, tab) {
     if (e.button !== 0) return;
     closeMenu();
@@ -123,9 +158,16 @@
       drag.el?.setPointerCapture?.(drag.pointerId);
     }
     const overWid = stripWidAt(e.clientX, e.clientY);
-    drag = { ...drag, x: e.clientX, y: e.clientY, overWid, moved: true };
+    // Over our own strip the gesture is a REORDER, and the caret shows where the
+    // tab would land; over another strip it groups; over nothing it detaches.
+    const dropAt = overWid === wid ? dropIndexAt(e.clientX, drag.key) : -1;
+    drag = { ...drag, x: e.clientX, y: e.clientY, overWid, dropAt, moved: true };
     dropHint =
-      overWid && overWid !== wid ? $i18nT('viewer.dropToGroup') : $i18nT('viewer.dropToDetach');
+      overWid === wid
+        ? $i18nT('viewer.dropToReorder')
+        : overWid
+          ? $i18nT('viewer.dropToGroup')
+          : $i18nT('viewer.dropToDetach');
   }
 
   function onPointerUp(e) {
@@ -134,7 +176,14 @@
     if (!d?.moved) return;
     suppressClick = true;
     const overWid = stripWidAt(e.clientX, e.clientY);
-    if (overWid === wid) return; // dropped back on its own strip — nothing to do
+    if (overWid === wid) {
+      // Dropped back on its own strip: reorder to the caret position.
+      const index = dropIndexAt(e.clientX, d.key);
+      const from = tabs.findIndex((t) => t.key === d.key);
+      // `index` is post-removal, so landing back where it started is a no-op.
+      if (from !== -1 && index !== from) dispatch('reorder', { key: d.key, index });
+      return;
+    }
     if (overWid) {
       dispatch('move', { key: d.key, toWid: overWid });
     } else {
@@ -207,6 +256,15 @@
     // An open menu owns the arrow keys (it is portalled away from this strip, so
     // a stray key here must not switch tabs underneath it).
     if (menuKey) return;
+    // Ctrl/⌘+Arrow MOVES the tab instead of changing the selection — the
+    // keyboard equivalent of dragging it along the strip.
+    if (onTabItself && (e.ctrlKey || e.metaKey) && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+      e.preventDefault();
+      e.stopPropagation();
+      nudge(tab.key, e.key === 'ArrowRight' ? 1 : -1);
+      tick().then(() => focusActive());
+      return;
+    }
     const i = tabs.findIndex((t) => t.key === activeKey);
     let n = -1;
     if (e.key === 'ArrowRight') n = (i + 1 + tabs.length) % tabs.length;
@@ -304,6 +362,10 @@
     closeMenu(true);
     dispatch('move', { key, toWid });
   }
+  function menuNudge(key, delta) {
+    closeMenu(true);
+    nudge(key, delta);
+  }
 
   // A window can disappear mid-gesture (evicted at the cap, or emptied by the
   // very drop being made), so the global listeners are torn down here too.
@@ -322,6 +384,11 @@
   data-wid={wid}
 >
   {#each tabs as tab, i (tab.key)}
+    <!-- Insertion caret while dragging within this strip. `dropAt` counts tabs
+         excluding the dragged one, so compare against that same numbering. -->
+    {#if drag?.moved && drag.overWid === wid && drag.dropAt === visualSlot(i)}
+      <span class="drop-caret" aria-hidden="true"></span>
+    {/if}
     <div
       class="tab"
       class:active={tab.key === activeKey}
@@ -368,6 +435,9 @@
       ><X size={12} /></button>
     </div>
   {/each}
+  {#if drag?.moved && drag.overWid === wid && drag.dropAt === tabs.length - 1}
+    <span class="drop-caret" aria-hidden="true"></span>
+  {/if}
 </div>
 <span class="sr-only" id={`tabhint-${wid}`}>{$i18nT('viewer.tabKeyHint')}</span>
 
@@ -388,6 +458,24 @@
     on:keydown={onMenuKey}
     on:focusout={onMenuFocusOut}
   >
+    {#if tabs.length > 1}
+      <button
+        role="menuitem"
+        tabindex="-1"
+        disabled={tabs.findIndex((t) => t.key === menuTab.key) === 0}
+        on:click|stopPropagation={() => menuNudge(menuTab.key, -1)}
+      >
+        {$i18nT('viewer.moveTabLeft')}
+      </button>
+      <button
+        role="menuitem"
+        tabindex="-1"
+        disabled={tabs.findIndex((t) => t.key === menuTab.key) === tabs.length - 1}
+        on:click|stopPropagation={() => menuNudge(menuTab.key, 1)}
+      >
+        {$i18nT('viewer.moveTabRight')}
+      </button>
+    {/if}
     <button role="menuitem" tabindex="-1" on:click|stopPropagation={() => menuDetach(menuTab.key)}>
       {$i18nT('viewer.moveToNewWindow')}
     </button>
@@ -467,6 +555,16 @@
   .tab.dragging {
     opacity: 0.45;
   }
+  /* Insertion point shown while dragging a tab along its own strip. */
+  .drop-caret {
+    flex: none;
+    align-self: center;
+    width: 2px;
+    height: 60%;
+    margin: 0 -1px;
+    border-radius: 1px;
+    background: var(--brand-500, #2f88d8);
+  }
   .tab:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--brand-400, #5aa9e0);
@@ -544,6 +642,13 @@
   .tab-menu button:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--brand-400, #5aa9e0);
+  }
+  .tab-menu button:disabled {
+    color: var(--muted, #94a3b8);
+    cursor: default;
+  }
+  .tab-menu button:disabled:hover {
+    background: transparent;
   }
   .menu-head {
     font-size: 0.64rem;

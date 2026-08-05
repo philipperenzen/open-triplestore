@@ -17,8 +17,10 @@
   //   3D         — interactive model viewer (orbit: rotate / pan / zoom)
   import { createEventDispatcher, onDestroy, setContext, tick } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
-  import { X, Maximize2, Minimize2, Minus, Boxes, ChevronRight, MapPin, Footprints } from 'lucide-svelte';
+  import { X, Maximize2, Minimize2, Minus, Boxes, ChevronRight, MapPin, Footprints, Link as LinkIcon, Check } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils.js';
+  import { copyToClipboard } from '../../lib/clipboard.js';
+  import { viewerShareUrl } from '../../lib/viewer/shareLink';
   import { safeExternalUrl } from '../../lib/safeUrl';
   import { Link } from '../../lib/router/index.js';
   import { modelRefOf, modelRefsOf, FORMAT_LABELS } from '../../lib/viewer/detect';
@@ -117,6 +119,7 @@
     // A window that is minimised or closed stops waiting on its read; the shared
     // cache only cancels the request when no other window still wants it.
     inflightAbort?.abort();
+    clearTimeout(shareCopiedTimer);
   });
 
   let dragPos = null; // local override while dragging (avoids a state round-trip per frame)
@@ -166,15 +169,42 @@
   $: modelOptions = element ? modelRefsOf(element) : [];
   $: modelRef = modelOptions.find((o) => o.format === chosenFormat) ?? modelOptions[0] ?? null;
   // A first-person walkthrough is offered for an IFC *container* (Site / Building
-  // / Storey — it has contained elements): walking through a single leaf wall is
-  // pointless, so a bare element with no substructure doesn't get the action.
+  // / Storey — it has contained elements), which walks its own model.
   $: canWalk = children.length > 0 && modelOptions.some((o) => o.format === 'ifc');
+
+  // …and for a LEAF part too (a door, a hinge). A leaf owns no IFC of its own —
+  // it's a GlobalId inside an ancestor's building model — so the action walks
+  // that ancestor's model and spawns in front of this part. Without this, the
+  // only way to see a door in context was to walk the building and find it.
+  $: walkAncestor = (() => {
+    if (canWalk || !element?.ifc_guid) return null;
+    const byId = new Map(elements.map((e) => [e.id, e]));
+    const seen = new Set();
+    let cur = element.parent ? byId.get(element.parent) : null;
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      if (modelRefsOf(cur).some((r) => r.format === 'ifc')) return cur;
+      cur = cur.parent ? byId.get(cur.parent) : null;
+    }
+    return null;
+  })();
+  $: canWalkToPart = !!walkAncestor;
   // A "lite" window (3D viewer capped) auto-loads its model in the background the
   // moment the user opens its 3D section — no manual "Load" button to click.
   // The request is one-shot on purpose: another window can later take the slot
   // back, and an automatic re-request would make the two windows fight over it
   // forever. When that happens the section offers an explicit "load" instead.
   let modelPending = false;
+
+  // "Copy link" — a URL that reopens this viewer framed on this element.
+  let shareCopied = false;
+  let shareCopiedTimer = null;
+  async function copyShareLink() {
+    const url = viewerShareUrl(window.location, element.id);
+    shareCopied = await copyToClipboard(url);
+    clearTimeout(shareCopiedTimer);
+    shareCopiedTimer = setTimeout(() => (shareCopied = false), 2000);
+  }
   // Holding a slot counts as "already asked", however the slot was obtained: a
   // window granted one at open time never went through the branch below, so
   // without this an eviction (a third window claiming the budget) would make it
@@ -385,6 +415,7 @@
       on:select={(e) => dispatch('tabselect', e.detail)}
       on:close={(e) => dispatch('tabclose', e.detail)}
       on:move={(e) => dispatch('tabmove', e.detail)}
+      on:reorder={(e) => dispatch('tabreorder', e.detail)}
       on:detach={(e) => dispatch('tabdetach', e.detail)}
     />
 
@@ -399,7 +430,22 @@
         <button class="btn btn-sm walk-btn" on:click={() => dispatch('walkthrough', { id: element.id })}>
           <Footprints size={13} /> {$i18nT('viewer.exploreInside')}
         </button>
+      {:else if canWalkToPart}
+        <!-- Leaf part: walk the ancestor's building, spawning beside this part. -->
+        <button
+          class="btn btn-sm walk-btn"
+          title={$i18nT('viewer.viewInWalkthroughTitle', { values: { building: walkAncestor.label || shortenIRI(walkAncestor.id) } })}
+          on:click={() => dispatch('walkthrough', { id: walkAncestor.id, guid: element.ifc_guid, label: element.label || shortenIRI(element.id) })}
+        >
+          <Footprints size={13} /> {$i18nT('viewer.viewInWalkthrough')}
+        </button>
       {/if}
+      <!-- Copy a link that reopens the viewer framed on THIS element, so a find
+           can be shared. The URL carries no credentials — a recipient still has
+           to be able to open the dataset. -->
+      <button class="btn btn-sm" on:click={copyShareLink} title={$i18nT('viewer.copyLinkTitle')}>
+        {#if shareCopied}<Check size={13} /> {$i18nT('system.copied')}{:else}<LinkIcon size={13} /> {$i18nT('viewer.copyLink')}{/if}
+      </button>
       <!-- The deliberate "leave the viewer" escape hatch: everything else in
            this window now stays in this window. -->
       <Link to={`/resource?iri=${encodeURIComponent(element.id)}`} class="btn btn-sm">

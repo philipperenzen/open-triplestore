@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import { shortenIRI } from '../../lib/rdf-utils.js';
+  import { filterByQuery } from '../../lib/searchMatch.js';
   import { prefixForNamespace, lookupNamespacePrefix } from '../../lib/ontology/prefixService.js';
   import { Shapes, Tag, Library, Database, ChevronDown, ChevronRight, X, PanelLeftClose, PanelLeftOpen } from 'lucide-svelte';
 
@@ -94,15 +95,13 @@
     }
   }
 
-  function match(label, iri) {
-    if (!railSearch) return true;
-    const q = railSearch.toLowerCase();
-    return (label || '').toLowerCase().includes(q) || (iri || '').toLowerCase().includes(q);
-  }
-  $: fClasses = (facets.classes || []).filter((c) => match(shortenIRI(c.iri), c.iri));
-  $: fProps = (facets.properties || []).filter((c) => match(shortenIRI(c.iri), c.iri));
-  $: fVocab = vocabularies.filter((v) => match(vocabLabels[v.ns], v.ns));
-  $: fGraphs = (facets.graphs || []).filter((g) => match(shortenIRI(g.iri), g.iri));
+  // NOTE: `railSearch` must be referenced *inside* each reactive statement.
+  // Svelte only tracks variables read syntactically in the `$:` block, so
+  // hiding the query inside a helper closure silently froze this filter.
+  $: fClasses = filterByQuery(facets.classes || [], railSearch, (c) => [shortenIRI(c.iri), c.iri]);
+  $: fProps = filterByQuery(facets.properties || [], railSearch, (c) => [shortenIRI(c.iri), c.iri]);
+  $: fVocab = filterByQuery(vocabularies, railSearch, (v) => [vocabLabels[v.ns], v.ns]);
+  $: fGraphs = filterByQuery(facets.graphs || [], railSearch, (g) => [shortenIRI(g.iri), g.iri, g.roleLabel]);
 
   // Active-state lookups against current chips.
   $: classSel = new Set(chips.filter((c) => c.field === 'object' && c.mode === 'exact' && !c.neg).map((c) => c.value));
@@ -119,18 +118,18 @@
 </script>
 
 {#if collapsed}
-  <button class="rail-reopen" on:click={() => (collapsed = false)} title={$t('components.facetRail.showFacets')}>
+  <button class="rail-reopen" on:click={() => (collapsed = false)} title={$t('components.facetRail.showTerms')}>
     <PanelLeftOpen size={16} />
   </button>
 {:else}
   <aside class="rail">
     <div class="rail-head">
       <span class="rail-title">{$t('components.facetRail.termsInScope')}</span>
-      <button class="rail-collapse" on:click={() => (collapsed = true)} title={$t('components.facetRail.hideFacets')}><PanelLeftClose size={15} /></button>
+      <button class="rail-collapse" on:click={() => (collapsed = true)} title={$t('components.facetRail.hideTerms')}><PanelLeftClose size={15} /></button>
     </div>
 
     <div class="rail-search-wrap">
-      <input class="rail-search" placeholder={$t('components.facetRail.filterFacets')} bind:value={railSearch} />
+      <input class="rail-search" placeholder={$t('components.facetRail.filterTerms')} bind:value={railSearch} />
       {#if railSearch}<button class="rail-search-x" on:click={() => (railSearch = '')}><X size={12} /></button>{/if}
     </div>
 

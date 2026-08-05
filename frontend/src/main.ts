@@ -1,6 +1,7 @@
 import { mount } from 'svelte';
-import { waitLocale } from 'svelte-i18n';
+import { waitLocale, locale } from 'svelte-i18n';
 import './lib/i18n/index.js';
+import { setUiLang } from './lib/ontology/termDisplay.js';
 import App from './App.svelte';
 import './theme.css';
 import './app.css';
@@ -27,6 +28,11 @@ initServiceRegistry();
 // gated by LD_DISCOVERY): fetched once, applied as soon as it resolves, and a
 // complete no-op when no config.json is present. See runtimeConfig.ts.
 loadRuntimeConfig();
+
+// Mirror the UI locale into the RDF display helpers, so a Dutch UI picks Dutch
+// rdfs:labels / rdfs:comments (and an English UI picks English) everywhere the
+// parsers choose one literal out of several languages. See termDisplay.ts.
+locale.subscribe((tag) => setUiLang(tag));
 
 let app: ReturnType<typeof mount>;
 

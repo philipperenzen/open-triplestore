@@ -114,12 +114,17 @@
     },
   ];
 
-  const BOTTOM_TABS = [
+  // Phone bottom bar: two tabs, the raised Spark action, two more tabs. Spark
+  // sits in the middle because it's the primary "just ask" entry point.
+  const BOTTOM_TABS_LEFT = [
     { to: '/', labelKey: 'nav.overview', icon: HomeIcon, match: (p) => p === '/' },
     { to: '/browse', labelKey: 'nav.exploreTriples', icon: Share2, match: (p) => p.startsWith('/browse') },
+  ];
+  const BOTTOM_TABS_RIGHT = [
     { to: '/sparql', labelKey: 'nav.sparqlWorkspace', icon: Terminal, match: (p) => p === '/sparql' },
     { to: '/datasets', labelKey: 'nav.datasets', icon: Database, match: (p) => p.startsWith('/datasets') },
   ];
+  const BOTTOM_SPARK = { to: '/chat', labelKey: 'nav.llmChat', icon: Sparkles, match: (p) => p === '/chat' };
 
   // Pages where ⌘K search is meaningful. Auth/settings/admin pages don't need it.
   const SEARCH_ENABLED_PREFIXES = ['/', '/browse', '/resource', '/sparql', '/graph-viz', '/graphs', '/datasets', '/organisations', '/models', '/import', '/validation', '/shacl'];
@@ -704,7 +709,23 @@
     </main>
 
     <nav class="bottom-tabs sm:hidden" aria-label={$t('nav.quickNavigation')}>
-      {#each BOTTOM_TABS as tab}
+      {#each BOTTOM_TABS_LEFT as tab}
+        <Link to={tab.to} class={`bottom-tab ${tab.match(currentPath) ? 'bottom-tab-active' : ''}`}>
+          <svelte:component this={tab.icon} size={20} />
+          <span class="text-[0.6rem] mt-0.5">{$t(tab.labelKey).split(' ')[0]}</span>
+        </Link>
+      {/each}
+
+      <Link
+        to={BOTTOM_SPARK.to}
+        class={`bottom-tab bottom-tab-spark ${BOTTOM_SPARK.match(currentPath) ? 'bottom-tab-active' : ''}`}
+        aria-label={$t(BOTTOM_SPARK.labelKey)}
+      >
+        <span class="spark-orb"><svelte:component this={BOTTOM_SPARK.icon} size={22} /></span>
+        <span class="text-[0.6rem] mt-0.5">{$t(BOTTOM_SPARK.labelKey).split(' ')[0]}</span>
+      </Link>
+
+      {#each BOTTOM_TABS_RIGHT as tab}
         <Link to={tab.to} class={`bottom-tab ${tab.match(currentPath) ? 'bottom-tab-active' : ''}`}>
           <svelte:component this={tab.icon} size={20} />
           <span class="text-[0.6rem] mt-0.5">{$t(tab.labelKey).split(' ')[0]}</span>
@@ -1164,6 +1185,22 @@
   :global(.bottom-tab) { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; padding: 0.5rem 0; text-decoration: none; color: var(--ink-500); transition: color 0.14s ease; }
   :global(.bottom-tab-active) { color: var(--brand-500); }
 
+  /* Raised centre action for Spark: a brand orb that lifts out of the bar. */
+  :global(.bottom-tab-spark) { color: var(--brand-600); }
+  :global(.bottom-tab-spark .spark-orb) {
+    display: flex; align-items: center; justify-content: center;
+    width: 46px; height: 46px; margin-top: -22px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+    color: #fff;
+    border: 3px solid var(--bg-strong, #fffcf8);
+    box-shadow: 0 6px 16px rgba(47, 122, 140, 0.38);
+    transition: transform 0.14s ease, box-shadow 0.14s ease;
+  }
+  :global(.bottom-tab-spark:active .spark-orb) { transform: scale(0.94); }
+  :global(.bottom-tab-spark.bottom-tab-active .spark-orb) {
+    box-shadow: 0 0 0 4px rgba(90, 184, 190, 0.28), 0 6px 16px rgba(47, 122, 140, 0.42);
+  }
+
   @media (max-width: 1024px) {
     .app-shell { grid-template-columns: 1fr; padding-top: 4rem; }
     .mobile-topbar {
@@ -1240,4 +1277,12 @@
     background: rgba(11, 18, 32, 0.95);
     border-top-color: var(--line-soft);
   }
+  /* The orb's ring reads as a cut-out of the bar, so it tracks the bar colour.
+     Fully :global() because the class is applied through <Link class={…}>, which
+     the compiler can't see. */
+  :global(html.dark .bottom-tab-spark .spark-orb) {
+    border-color: #0b1220;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.55);
+  }
+  :global(html.dark .bottom-tab-spark) { color: var(--brand-300); }
 </style>

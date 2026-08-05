@@ -7971,6 +7971,10 @@ pub struct ViewerFeedQuery {
     /// string (not a bool) so a stray value never 400s the whole feed request.
     #[serde(default)]
     pub located: Option<String>,
+    /// Reader's UI language (`nl`, `en-GB`, …). Picks which `rdfs:label` an
+    /// element gets when it carries several languages; omitted = English first.
+    #[serde(default)]
+    pub lang: Option<String>,
 }
 
 use crate::geo::viewer_feed::is_tiles3d_graph;
@@ -8027,6 +8031,7 @@ pub async fn viewer_feed(
         &data_graphs,
         q.root.as_deref(),
         located,
+        q.lang.as_deref().map(str::trim).filter(|s| !s.is_empty()),
     );
     // Hand the browser origin-relative URLs for models this deployment serves
     // itself, so they resolve against the host the user actually opened — a

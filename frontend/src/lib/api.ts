@@ -1,4 +1,9 @@
 
+// The active UI language, for requests whose response depends on it (see
+// getViewerFeed). termDisplay owns it and pulls in nothing itself, so this stays
+// free of the import cycle api.ts is otherwise careful to avoid.
+import { uiLang } from './ontology/termDisplay';
+
 const API_BASE = '';
 
 // In-memory token storage (M-2: avoids localStorage XSS exposure).
@@ -603,6 +608,11 @@ export const getViewerFeed = (datasetId, root = null, opts: { located?: boolean 
   // The backend parses this tolerantly (true|1|yes|on all work); 'true' is the
   // canonical spelling we send.
   if (opts.located) params.set('located', 'true');
+  // Element labels are collapsed to one per element server-side, so the reader's
+  // language has to travel with the request — otherwise a Dutch UI gets whichever
+  // rdfs:label the store happened to return first.
+  const lang = uiLang();
+  if (lang) params.set('lang', lang);
   const qs = params.toString() ? `?${params.toString()}` : '';
   return request('GET', `/api/datasets/${encodeURIComponent(datasetId)}/viewer-feed${qs}`);
 };

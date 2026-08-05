@@ -1605,7 +1605,11 @@
       "passkeyRemove": "Passkey verwijderen",
       "passkeyRemoveTitle": "Passkey verwijderen",
       "passkeyRemoveBody": "Met deze passkey kun je daarna niet meer inloggen op je account. Bevestig met je wachtwoord.",
-      "passkeyUnsupported": "Deze browser ondersteunt geen passkeys."
+      "passkeyUnsupported": "Deze browser ondersteunt geen passkeys.",
+      "tabProfile": "Profiel",
+      "tabSecurity": "Beveiliging",
+      "tabTokens": "API-tokens",
+      "tabAccount": "Account"
     },
     "admin": {
       "title": "Gebruikersbeheer",
@@ -2856,7 +2860,9 @@
       "recommendNone": "geen match",
       "attribution": "Vocabulairemetadata en -inhoud van",
       "recommendApiHint": "Ook beschikbaar als API:",
-      "recommendApiDocs": "API-documentatie"
+      "recommendApiDocs": "API-documentatie",
+      "openInModelBrowser": "Modelbrowser",
+      "openResourceDetail": "Resourcedetails"
     },
     "oauthAuthorize": {
       "missingParams": "Deze aanmeldlink is onvolledig (client_id of redirect_uri ontbreekt).",
@@ -3317,12 +3323,10 @@
       "noIssues": "Geen problemen die aan het huidige filter voldoen."
     },
     "facetRail": {
-      "showFacets": "Facetten tonen",
-      "hideFacets": "Facetten verbergen",
-      "whatsInHere": "Wat zit hierin",
-      "facetsInScope": "Facetten in bereik",
+      "showTerms": "Termen tonen",
+      "hideTerms": "Termen verbergen",
       "termsInScope": "Termen in bereik",
-      "filterFacets": "Facetten filteren…",
+      "filterTerms": "Termen filteren…",
       "scanningScope": "Bereik scannen…",
       "noDataInScope": "Geen gegevens in het huidige bereik.",
       "classes": "Klassen",
@@ -4020,7 +4024,7 @@
     "moveToNewWindow": "Verplaatsen naar een nieuw venster",
     "dropToGroup": "Sleep hierheen om aan dit venster toe te voegen",
     "dropToDetach": "Sleep buiten een venster om los te maken",
-    "tabKeyHint": "Druk op Delete om dit tabblad te sluiten, Shift+F10 voor tabblad-opties",
+    "tabKeyHint": "Druk op Delete om dit tabblad te sluiten, Ctrl+pijltoets om het te verplaatsen, Shift+F10 voor tabbladopties",
     "linkedFrom": "Gelinkt vanaf",
     "moreLinks": "Nog {count} links — open de volledige resourceweergave voor alle.",
     "noStatements": "Geen uitspraken gevonden voor deze resource.",
@@ -4044,7 +4048,18 @@
     "parsingModel": "Geometrie opbouwen…",
     "modelsFailed": "model(len) niet geladen",
     "loadingStructure": "Volledige structuur laden…",
-    "loadingElements": "Elementen laden…"
+    "loadingElements": "Elementen laden…",
+    "dropToReorder": "Hier neerzetten om dit tabblad te verplaatsen",
+    "moveTabLeft": "Tabblad naar links",
+    "moveTabRight": "Tabblad naar rechts",
+    "copyLink": "Link kopiëren",
+    "copyLinkTitle": "Kopieer een link die dit element opnieuw opent in de viewer",
+    "loadingModel": "Model laden…",
+    "loadingModelsProgress": "Modellen laden… {done}/{total}",
+    "hoverSelected": "Geselecteerd — druk op X voor röntgenweergave",
+    "hoverClickToSelect": "Klik om te selecteren",
+    "viewInWalkthrough": "Bekijken in wandelmodus",
+    "viewInWalkthroughTitle": "Loop door {building} en sta voor dit onderdeel"
   },
   "embed": {
     "signInNeeded": "Deze dataset vereist inloggen.",
