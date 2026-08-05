@@ -10,6 +10,11 @@
   --bg-soft: #f8fafc;
   --bg-accent: #153a43;
   --bg-accent-soft: #e6f7f5;
+  /* Opaque surface for things that FLOAT over arbitrary content — popovers,
+     menus, modals. `--bg-elevated` is deliberately translucent and only reads
+     correctly when paired with a backdrop blur (see `.card`); floating layers
+     that skip the blur end up see-through, so they use this instead. */
+  --bg-float: #ffffff;
 
   /* Ink */
   --ink-900: #0f2027;
@@ -354,6 +359,7 @@ kbd {
   --bg-elevated: rgba(30, 41, 59, 0.78);
   --bg-strong: #111827;
   --bg-soft: #0f172a;
+  --bg-float: #1a2436;
   --bg-accent: #134e5e;
   --bg-accent-soft: rgba(126, 214, 208, 0.10);
   /* These are referenced only via fallbacks (var(--bg, #fff), var(--border,

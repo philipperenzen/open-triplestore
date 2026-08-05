@@ -202,6 +202,27 @@ describe('viewer window/tab state', () => {
     expect(JSON.stringify(before)).toBe(snapshot);
   });
 
+  it('reorders tabs inside one window when given an index', () => {
+    let s = openInNewWindow(createState(), el('a'));
+    const wid = s.windows[0].wid;
+    s = openTabInWindow(s, wid, el('b'));
+    s = openTabInWindow(s, wid, el('c'));
+    expect(s.windows[0].tabs.map((t) => t.id)).toEqual(['a', 'b', 'c']);
+
+    // Drag the last tab to the front.
+    s = moveTabToWindow(s, wid, tabKey('element', 'c'), wid, 0);
+    expect(s.windows[0].tabs.map((t) => t.id)).toEqual(['c', 'a', 'b']);
+    // The moved tab stays the active one, as after a drag.
+    expect(activeTabOf(s.windows[0])!.id).toBe('c');
+
+    // …and to the end. An out-of-range index clamps rather than throwing.
+    s = moveTabToWindow(s, wid, tabKey('element', 'c'), wid, 99);
+    expect(s.windows[0].tabs.map((t) => t.id)).toEqual(['a', 'b', 'c']);
+
+    // Reordering never opens or closes a window.
+    expect(s.windows).toHaveLength(1);
+  });
+
   it('returns the SAME state for no-ops so callers can skip a re-render', () => {
     const s = withWindows(1);
     const wid = s.windows[0].wid;

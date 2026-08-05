@@ -10,6 +10,7 @@
   // page — cytoscape is off the initial/landing download.
   import ValueRenderer from '../components/ontology/ValueRenderer.svelte';
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
+  import AnnotationText from '../components/ontology/AnnotationText.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
   // GeoPreview pulls in leaflet; load it lazily only when the resource actually
   // has geometry (geoPreviewMod below) so leaflet stays out of the main bundle.
@@ -922,7 +923,7 @@
             {#each definitions as row}
               <div class="def-item">
                 <div class="def-text">
-                  {row.o.value}
+                  <AnnotationText text={row.o.value} baseIri={iri} />
                   {#if langOf(row.o)}<span class="lang-tag">@{langOf(row.o)}</span>{/if}
                 </div>
                 <div class="def-pred" title={row.p.value}>{shortenIRI(row.p.value)}</div>

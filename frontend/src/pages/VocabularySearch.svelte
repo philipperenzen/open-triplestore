@@ -316,7 +316,16 @@
                   {:else}
                     <code class="vs-iri">{hit.iri}</code>
                   {/if}
+                  <!-- A hit is only useful if you can get from it to the term in
+                       this platform: its resource page, and — when the vocabulary
+                       is installed — the model browser and registry entry. -->
+                  <Link to={`/resource?iri=${encodeURIComponent(hit.iri)}`} class="vs-model-link">
+                    {$t('pages.vocabularySearch.openResourceDetail')} <ChevronRight size={12} />
+                  </Link>
                   {#if hit.model_id}
+                    <Link to={`/models/${hit.model_id}/viewer`} class="vs-model-link">
+                      {$t('pages.vocabularySearch.openInModelBrowser')} <ChevronRight size={12} />
+                    </Link>
                     <Link to={`/models/${hit.model_id}`} class="vs-model-link">
                       {$t('pages.vocabularySearch.openInRegistry')} <ChevronRight size={12} />
                     </Link>
@@ -421,6 +430,9 @@
               <div class="vs-card-actions">
                 <code class="vs-nsp" title={entry.nsp}>{entry.nsp}</code>
                 {#if entry.model_id}
+                  <Link to={`/models/${entry.model_id}/viewer`} class="vs-model-link">
+                    {$t('pages.vocabularySearch.openInModelBrowser')} <ChevronRight size={12} />
+                  </Link>
                   <Link to={`/models/${entry.model_id}`} class="vs-model-link">
                     {$t('pages.vocabularySearch.openInRegistry')} <ChevronRight size={12} />
                   </Link>

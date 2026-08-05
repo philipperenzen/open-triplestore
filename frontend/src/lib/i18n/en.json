@@ -1605,7 +1605,11 @@
       "passkeyRemove": "Remove passkey",
       "passkeyRemoveTitle": "Remove passkey",
       "passkeyRemoveBody": "This passkey will no longer be able to sign in to your account. Confirm with your password.",
-      "passkeyUnsupported": "This browser does not support passkeys."
+      "passkeyUnsupported": "This browser does not support passkeys.",
+      "tabProfile": "Profile",
+      "tabSecurity": "Security",
+      "tabTokens": "API tokens",
+      "tabAccount": "Account"
     },
     "admin": {
       "title": "User Management",
@@ -2856,7 +2860,9 @@
       "recommendNone": "no match",
       "attribution": "Vocabulary metadata and contents from",
       "recommendApiHint": "Also available as an API:",
-      "recommendApiDocs": "API docs"
+      "recommendApiDocs": "API docs",
+      "openInModelBrowser": "Model browser",
+      "openResourceDetail": "Resource detail"
     },
     "oauthAuthorize": {
       "missingParams": "This sign-in link is incomplete (missing client_id or redirect_uri).",
@@ -3317,12 +3323,10 @@
       "noIssues": "No issues matching the current filter."
     },
     "facetRail": {
-      "showFacets": "Show facets",
-      "hideFacets": "Hide facets",
-      "whatsInHere": "What's in here",
-      "facetsInScope": "Facets in scope",
+      "showTerms": "Show terms",
+      "hideTerms": "Hide terms",
       "termsInScope": "Terms in scope",
-      "filterFacets": "Filter facets…",
+      "filterTerms": "Filter terms…",
       "scanningScope": "Scanning scope…",
       "noDataInScope": "No data in the current scope.",
       "classes": "Classes",
@@ -4020,7 +4024,7 @@
     "moveToNewWindow": "Move to a new window",
     "dropToGroup": "Drop here to add to this window",
     "dropToDetach": "Drop outside a window to detach",
-    "tabKeyHint": "Press Delete to close this tab, Shift+F10 for tab options",
+    "tabKeyHint": "Press Delete to close this tab, Ctrl+Arrow to move it, Shift+F10 for tab options",
     "linkedFrom": "Linked from",
     "moreLinks": "{count} more links — open the full resource view for all of them.",
     "noStatements": "No statements found for this resource.",
@@ -4044,7 +4048,18 @@
     "parsingModel": "Building geometry…",
     "modelsFailed": "model(s) failed to load",
     "loadingStructure": "Loading full structure…",
-    "loadingElements": "Loading elements…"
+    "loadingElements": "Loading elements…",
+    "dropToReorder": "Drop here to reorder this tab",
+    "moveTabLeft": "Move tab left",
+    "moveTabRight": "Move tab right",
+    "copyLink": "Copy link",
+    "copyLinkTitle": "Copy a link that reopens this element in the viewer",
+    "loadingModel": "Loading model…",
+    "loadingModelsProgress": "Loading models… {done}/{total}",
+    "hoverSelected": "Selected — press X for x-ray",
+    "hoverClickToSelect": "Click to select",
+    "viewInWalkthrough": "View in walkthrough",
+    "viewInWalkthroughTitle": "Walk through {building} standing in front of this part"
   },
   "embed": {
     "signInNeeded": "This dataset requires sign-in.",

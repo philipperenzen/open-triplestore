@@ -13,6 +13,7 @@
   import { applyStudioLook, studioEnvironment } from '../../lib/viewer/studio';
   import { refsSignature, guidsSignature } from '../../lib/viewer/refsSignature';
   import { buildHighlightOverlay, disposeHighlightOverlay } from '../../lib/viewer/highlight';
+  import { fitDistance } from '../../lib/viewer/fitCamera';
 
   /** Models to show: [{ id, label, url, format, slot?: [x, z] }]. */
   export let refs = [];
@@ -39,6 +40,8 @@
   let groupsById = new Map();
   let loadedCount = 0;
   let failedCount = 0;
+  /** Models still in flight for the current refs set — drives the busy overlay. */
+  let pending = 0;
   let dark = false;
   let needsRender = true; // render-on-demand flag (see the animate loop)
   const unsubTheme = isDark.subscribe((v) => {
@@ -86,10 +89,25 @@
     emisFrames = 24; // ~0.4s of easing at the 0.18 lerp factor below
   }
 
-  /** Frame the loaded model set: centre the orbit target and pull the camera back
-   *  so the whole bounding box fits — multi-model slot layouts used to spill off
-   *  screen against the old fixed camera pose. Runs on each refs change only, so a
-   *  user's mid-session orbit is never yanked. */
+  /** Direction the framing camera sits in, relative to the model centre. */
+  const VIEW_DIR = new THREE.Vector3(0.7, 0.55, 1).normalize();
+  /** Slack left around the framed model. 1.0 = corners exactly on the edges. */
+  const FIT_PADDING = 1.06;
+
+  /**
+   * Frame the loaded model set: centre the orbit target and place the camera so
+   * the whole bounding box fills the viewport.
+   *
+   * The fit is EXACT rather than a bounding-sphere approximation. The old code
+   * fitted a sphere sized by the largest single axis, which for the usual shape
+   * of a building model — a wide, shallow footprint — parked the camera far
+   * enough away that the model used well under half the frame. Here each of the
+   * eight box corners is projected onto the camera's own basis and the distance
+   * is the smallest one that keeps every corner inside BOTH frustum planes, so
+   * wide viewports and tall models are framed equally tightly.
+   *
+   * Runs on each refs change only, so a user's mid-session orbit is never yanked.
+   */
   function fitView() {
     if (!camera || !controls || groupsById.size === 0) return;
     const box = new THREE.Box3();
@@ -103,14 +121,25 @@
     if (!any) return;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
-    const radius = Math.max(size.x, size.y, size.z, 0.001) * 0.5;
-    const fov = (camera.fov * Math.PI) / 180;
-    const dist = (radius / Math.sin(fov / 2)) * 1.3;
+    const radius = Math.max(size.length() * 0.5, 0.001);
+    const dist = fitDistance(box, {
+      fov: camera.fov,
+      aspect: camera.aspect || 1,
+      dir: VIEW_DIR,
+      padding: FIT_PADDING,
+    });
+
     controls.target.copy(center);
-    camera.position.copy(center).add(new THREE.Vector3(0.7, 0.55, 1).normalize().multiplyScalar(dist));
-    camera.near = Math.max(0.01, dist / 200);
-    camera.far = dist * 200;
+    camera.position.copy(center).addScaledVector(VIEW_DIR, dist);
+    // Near/far track the MODEL, not the initial distance: they used to be derived
+    // from the fit distance, so zooming in close clipped the geometry away.
+    camera.near = Math.max(radius / 5000, 1e-4);
+    camera.far = dist * 20 + radius * 20;
     camera.updateProjectionMatrix();
+    // Keep the dolly inside a sane band — close enough to read a door handle,
+    // never so far that the model becomes a dot you cannot orbit back to.
+    controls.minDistance = Math.max(radius * 0.01, 1e-3);
+    controls.maxDistance = dist * 8;
     controls.update();
     needsRender = true;
   }
@@ -143,6 +172,10 @@
     loadedCount = 0;
     failedCount = 0;
     const wanted = refs;
+    // Big IFC/glTF payloads can take many seconds to fetch and tessellate. Say
+    // so: an empty grid with no indicator reads as a broken viewer, which is a
+    // large part of why loading "feels" slow.
+    pending = wanted.length;
     // Load every model concurrently: each task owns its group, the counters
     // are order-independent and loadModel caches per URL, so parallelism is
     // safe and much faster than the old one-await-per-model loop.
@@ -195,6 +228,7 @@
     });
     await Promise.allSettled(tasks);
     if (sig !== lastSig) return;
+    pending = 0;
     highlight();
     applyGuidHighlight(); // the groups only exist now, so re-attach the overlays
     // Frame the loaded set (multi-model layouts used to spill off-screen). This
@@ -290,6 +324,17 @@
     controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0.6, 0);
     controls.enableDamping = true;
+    // Dolly toward the CURSOR rather than the orbit centre. Zooming used to
+    // always drive at the model's middle, so getting close to a detail off to
+    // one side meant zoom-pan-zoom-pan; now the point under the pointer stays
+    // put, which is what every other 3D tool does.
+    controls.zoomToCursor = true;
+    controls.zoomSpeed = 0.9;
+    // Damped orbit + a slightly slower rotate reads as much less twitchy on a
+    // trackpad, where one flick used to spin the model right past the face
+    // you were aiming at.
+    controls.dampingFactor = 0.08;
+    controls.rotateSpeed = 0.85;
     // Embedded viewers (chat answers, inspector panels) sit in scrollable
     // pages: an always-on wheel-zoom hijacks the page scroll the moment the
     // cursor crosses the widget. Zoom arms on pointerdown inside the canvas
@@ -402,6 +447,17 @@
   <canvas bind:this={canvasEl} on:click={onClick} aria-label="3D model viewer"></canvas>
   {#if refs.length === 0}
     <div class="overlay">{$i18nT('viewer.noModels')}</div>
+  {:else if pending > 0}
+    <div class="loading-veil" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <span>
+        {#if refs.length > 1}
+          {$i18nT('viewer.loadingModelsProgress', { values: { done: loadedCount + failedCount, total: refs.length } })}
+        {:else}
+          {$i18nT('viewer.loadingModel')}
+        {/if}
+      </span>
+    </div>
   {:else if failedCount > 0}
     <div class="overlay subtle">{loadedCount}/{refs.length}</div>
   {/if}
@@ -437,5 +493,36 @@
   }
   .overlay.subtle {
     opacity: 0.8;
+  }
+  /* Busy state while models fetch + tessellate. Centred and unmissable: the
+     point is that the viewer is working, not broken. */
+  .loading-veil {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    pointer-events: none;
+    color: var(--ink-500, #64748b);
+    font-size: 0.82rem;
+  }
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    animation: m3d-spin 0.7s linear infinite;
+  }
+  @keyframes m3d-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner {
+      animation-duration: 2.4s;
+    }
   }
 </style>
