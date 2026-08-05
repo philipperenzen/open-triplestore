@@ -471,6 +471,9 @@
           camera.quaternion.fromArray(saved.quat);
           mode = saved.mode || mode;
         } else {
+          // Compose first — IFC meshes opt out of matrix auto-update, and no
+          // render has touched this fresh clone yet (see standBeside above).
+          model.updateMatrixWorld(true);
           const box = new THREE.Box3().setFromObject(model);
           const size = box.getSize(new THREE.Vector3());
           const c = box.getCenter(new THREE.Vector3());

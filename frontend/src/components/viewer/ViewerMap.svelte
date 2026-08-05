@@ -284,6 +284,11 @@
     g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     g.computeVertexNormals();
     const mesh = new THREE.Mesh(g, defaultMaterial(dark));
+    // GeoSPARQL puts no orientation requirement on polyhedral rings, so face
+    // winding in the wild is arbitrary — with front-face culling the walls of
+    // a solid can vanish and an extruded block renders as its roof lying flat
+    // on the map. Draw both sides, like the IFC surface material does.
+    mesh.material.side = THREE.DoubleSide;
     mesh.userData.stl = true; // themeMaterials() re-skins default-material meshes
     const model = new THREE.Group();
     model.add(mesh);
@@ -355,6 +360,11 @@
         el.size_meters && el.size_meters > 0
           ? el.size_meters
           : realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
+      // Compose before measuring: the clone copies the cache master's matrixWorld
+      // and IFC meshes never auto-update theirs, so an unrendered clone would
+      // otherwise measure at whatever transform the master last composed —
+      // `entry.box` then drives fit/suppression at raw model scale.
+      model.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(model);
       const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.62;
       const holder = new THREE.Group();
@@ -401,7 +411,14 @@
   function themeMaterials() {
     for (const e of entries.values()) {
       e.modelGroup?.traverse((n) => {
-        if (n.isMesh && n.userData.stl) n.material = defaultMaterial(dark);
+        if (n.isMesh && n.userData.stl) {
+          // Carry render-geometry flags across the re-skin: volumetric WKT
+          // meshes draw DoubleSide (arbitrary ring winding), and losing that on
+          // a theme toggle would flatten them again.
+          const side = n.material?.side;
+          n.material = defaultMaterial(dark);
+          if (side !== undefined) n.material.side = side;
+        }
       });
     }
     map?.triggerRepaint();
