@@ -55,6 +55,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -125,6 +126,26 @@ def collect_medians(criterion_dirs):
             previous = medians.get(bench_id)
             medians[bench_id] = median if previous is None else min(previous, median)
     return medians
+
+
+def criterion_filter(bench_ids):
+    """A Criterion filter regex matching exactly `bench_ids`, or '' for none.
+
+    Criterion's *directory* name sanitises a "/" INSIDE a group name into "_"
+    (`benchmark_group("query/alternative_path")` → `query_alternative_path/`),
+    but its command-line filter matches the UNSANITISED id. The ids we parse come
+    from directories, so every "_" is allowed to match either character on the way
+    back — `query_alternative_path/10000` becomes
+    `query[_/]alternative[_/]path/10000`, which matches the real
+    `query/alternative_path/10000` and nothing else of interest.
+    """
+    parts = []
+    for bench_id in bench_ids:
+        escaped = re.escape(bench_id)
+        # re.escape leaves "_" alone and escapes "/" on older Pythons; normalise both.
+        escaped = escaped.replace("\\/", "/").replace("_", "[_/]")
+        parts.append(f"^{escaped}$")
+    return "|".join(parts)
 
 
 # ─────────────────────────── Baseline I/O ───────────────────────────
@@ -394,7 +415,7 @@ def cmd_compare(args):
     if args.github_summary and os.environ.get("GITHUB_STEP_SUMMARY"):
         try:
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
-                fh.write("## Performance vs merge base\n\n" + report + "\n")
+                fh.write(f"## {args.summary_title}\n\n" + report + "\n")
         except OSError as exc:
             print(f"warning: could not write GITHUB_STEP_SUMMARY: {exc}", file=sys.stderr)
 
@@ -404,6 +425,22 @@ def cmd_compare(args):
                                    "improved": improvements, "warnings": warnings},
                        "rows": rows}, fh, indent=2)
 
+    # Hand the flagged ids to the confirmation step as a Criterion filter, so it can
+    # re-bench ONLY those instead of all 68 (see criterion_filter).
+    if args.flagged_out:
+        flagged = [r["id"] for r in rows if r["status"].startswith("REGRESSION")]
+        with open(args.flagged_out, "w", encoding="utf-8") as fh:
+            fh.write(criterion_filter(flagged))
+        if flagged:
+            print(f"\nflagged for confirmation: {', '.join(flagged)}", file=sys.stderr)
+
+    if args.soft and regressions:
+        print(
+            "\nnote: --soft, so the regressions above do not fail this step; the "
+            "confirmation pass decides.",
+            file=sys.stderr,
+        )
+        return 0
     return 1 if regressions else 0
 
 
@@ -501,6 +538,14 @@ def main(argv=None):
     cmp_.add_argument("--github-summary", action="store_true",
                       help="also append the table to $GITHUB_STEP_SUMMARY")
     cmp_.add_argument("--json-out", default=None, help="also dump a machine-readable result")
+    cmp_.add_argument("--flagged-out", default=None, metavar="PATH",
+                      help="write a Criterion filter regex for the regressing benchmarks "
+                           "(empty file when there are none), for a confirmation re-bench")
+    cmp_.add_argument("--soft", action="store_true",
+                      help="report regressions but exit 0 — the confirmation pass gates instead")
+    cmp_.add_argument("--summary-title", default="Performance vs merge base",
+                      help="heading for the --github-summary table, so a screening pass and a "
+                           "confirmation pass are told apart in the job summary")
     cmp_.set_defaults(func=cmd_compare)
 
     upd = sub.add_parser("update", help="(re)generate the baseline from a fresh run")
