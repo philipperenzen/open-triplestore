@@ -15,6 +15,7 @@
   } from '../lib/api.js';
   import { Search, X, Plus, Check, Database, FileCode, Layers, FolderInput, BookmarkPlus, Loader2, ChevronRight, ChevronDown, ExternalLink } from 'lucide-svelte';
   import { navigate } from '../lib/router/index.js';
+  import { filterByQuery } from '../lib/searchMatch.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
   import Select from './Select.svelte';
   import { toastError, toastSuccess } from '../lib/toast.ts';
@@ -112,12 +113,15 @@
   $: totalNode = graphs.reduce((a, g) => a + (g.node_count || 0), 0);
   $: totalProperty = graphs.reduce((a, g) => a + (g.property_count || 0), 0);
 
-  function visibleShapes(graph) {
+  // `q` and `kind` are PARAMETERS, not closure reads, for the same reason
+  // `filteredGraphs` inlines its checks: the template calls this from inside an
+  // {@const}, and Svelte only re-evaluates that when a syntactically referenced
+  // dependency changes. Reading `search` from the closure would leave the shape
+  // list frozen at whatever the filter was when the graph was expanded.
+  function visibleShapes(graph, q = search, kind = kindFilter) {
     let all = shapesByGraph[graph] || [];
-    if (kindFilter !== 'all') all = all.filter((s) => s.kind === kindFilter);
-    if (!search.trim()) return all;
-    const q = search.trim().toLowerCase();
-    return all.filter((s) => [s.shape, s.label || '', ...(s.target_classes || [])].join(' ').toLowerCase().includes(q));
+    if (kind !== 'all') all = all.filter((s) => s.kind === kind);
+    return filterByQuery(all, q, (s) => [s.shape, s.label || '', ...(s.target_classes || [])]);
   }
 
   async function openGraphInViewer(g) {
@@ -272,7 +276,7 @@
           {#if loadingGraph.has(g.graph)}
             <div class="grp-loading"><Loader2 size={15} class="spin" /> loading shapes…</div>
           {:else}
-            {@const vis = visibleShapes(g.graph)}
+            {@const vis = visibleShapes(g.graph, search, kindFilter)}
             {#if vis.length === 0}
               <div class="grp-loading dim">No shapes match the filter in this graph.</div>
             {:else}

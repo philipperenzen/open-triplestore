@@ -149,7 +149,23 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 | --- | --- |
 | `LLM_GATEWAY_URL` | Base URL of any OpenAI-compatible `/v1/chat/completions` endpoint — OpenAI, OpenRouter, Azure OpenAI, Ollama, LM Studio, vLLM, llama.cpp, or a self-hosted gateway. Defaults to `http://127.0.0.1:8000`. |
 | `LLM_MODEL` | Model name sent on every completion (an OpenAI model id, an Ollama tag, a vLLM-served name, …). |
+| `LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `LLM_MODEL`. |
 | `LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
+| `LLM_TIMEOUT_SECONDS` | Per-completion budget (default `120`). Raise it when a large model is served from local hardware — past this the turn fails outright. |
+
+**Which model.** Spark is the most demanding task on the platform: a long system
+prompt, a retrieval protocol to follow, and strict-JSON widget specs. A model
+that handles NL→SPARQL fine can still answer Spark's questions straight from
+memory instead of querying, and skip the chart/map/3D widgets entirely. Around
+**7B instruct-tuned is the practical floor**; below that, expect prose-only
+answers. `LLM_CHAT_MODEL` exists so a small local model can keep serving the
+cheap tasks while chat gets a stronger one.
+
+Two guards make weaker models useful anyway: a reply that writes the query in a
+```` ```sparql ```` fence instead of the `SPARQL:` directive is still executed
+(while nothing has been retrieved yet that turn), and a turn that asks for no
+query at all gets one explicit nudge to query before answering — the model may
+decline, and its original answer is kept when it does.
 
 Availability is probed at `GET /api/llm/health`. The chat streams over `POST /api/llm/chat/stream` (SSE) so the first tokens appear while the turn is still running; `POST /api/llm/chat` is the buffered fallback.
 

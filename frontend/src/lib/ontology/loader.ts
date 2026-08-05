@@ -11,6 +11,7 @@
 import { Parser, Store, Writer, DataFactory } from 'n3';
 import type { Quad_Subject, Quad_Predicate, Quad_Object } from 'n3';
 import { fetchRetry429 } from '../api';
+import { isBetterLang } from './termDisplay';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
@@ -160,6 +161,7 @@ function termFromBinding(b: SparqlBinding | undefined): Quad_Subject | Quad_Pred
 export function extractOntologyModel(store: Store) {
   const labels = new Map();
   const comments = new Map();
+  const commentLang = new Map();
   const classes = new Map();
   const properties = new Map();
   const shapes = new Map();
@@ -185,11 +187,17 @@ export function extractOntologyModel(store: Store) {
     const s = q.subject.value, p = q.predicate.value, o = q.object;
     if (p === RDFS + 'label' && o.termType === 'Literal') {
       const cur = labels.get(s);
-      if (!cur || (o.language === 'en' && cur.language !== 'en')) {
+      // Prefer the UI language, then English, then untagged (see langRank).
+      if (!cur || isBetterLang(o.language, cur.language)) {
         labels.set(s, { value: o.value, language: o.language || '' });
       }
     } else if (p === RDFS + 'comment' && o.termType === 'Literal') {
-      if (!comments.has(s)) comments.set(s, o.value);
+      // Same language preference as labels; `commentLang` only exists to rank
+      // candidates, so `comments` keeps its plain string shape for callers.
+      if (!comments.has(s) || isBetterLang(o.language, commentLang.get(s))) {
+        comments.set(s, o.value);
+        commentLang.set(s, o.language || '');
+      }
     } else if (p === RDF + 'type') {
       const t = o.value;
       if (t === RDFS + 'Class' || t === OWL + 'Class') ensureClass(s);

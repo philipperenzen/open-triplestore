@@ -31,6 +31,9 @@
   export let format = 'ifc';
   export let upAxis = null;
   export let label = '';
+  /** IFC GlobalId to spawn in front of — set when entering from a sub-element
+   *  ("View in walkthrough" on a door, a hinge…). Empty = the normal entrance. */
+  export let spawnGuid = '';
   /** Viewer-feed elements, so a picked mesh's GlobalId resolves to its info. */
   export let elements = [];
 
@@ -50,7 +53,9 @@
   let dragging = false;
   let dragMoved = 0; // px travelled while dragging (a real drag isn't a pick)
   const DRAG_EULER = new THREE.Euler(0, 0, 0, 'YXZ');
-  let hoverLabel = '';
+  /** Element under the crosshair: { guid, label, type, id, known } or null.
+   *  Drives the hover card — the old bare string only ever showed a name. */
+  let hover = null;
   let picked = null; // { label, type, guid, id }
   let wtNeedsRender = true; // draw a frame while paused (render-on-demand)
 
@@ -339,6 +344,59 @@
     applySelection(null);
   }
 
+  /** Select `guid` as if it had been clicked (highlight + info card). */
+  function selectGuid(guid) {
+    const el = guidToEl.get(guid) || null;
+    picked = {
+      label: el?.label || shortenIRI(guid),
+      type: el ? shortType(el.types) : '',
+      guid,
+      id: el?.id || '',
+    };
+    applySelection(guid);
+  }
+
+  /**
+   * Stand next to `guid` and look at it — the landing pose for "View in
+   * walkthrough" on a specific part.
+   *
+   * The element's geometry is located by building the same highlight overlay the
+   * selection uses, then measuring its world bounds. The camera is placed at eye
+   * height, backed off along whichever horizontal axis the object is thinnest
+   * (you face a door from the front, not from its edge), far enough away to see
+   * the whole thing. Returns false when the GlobalId isn't in this model, so the
+   * caller can fall back to the normal spawn.
+   */
+  function standBeside(guid) {
+    if (!model || !camera) return false;
+    const probe = buildHighlightOverlay(model, new Set([guid]), false);
+    if (!probe) return false;
+    // The overlay is built in the model's local space; parent it so the world
+    // matrix (which carries the model's own transform) is correct, measure, then
+    // drop it — applySelection() builds the real, kept overlay separately.
+    model.add(probe);
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(probe);
+    model.remove(probe);
+    disposeHighlightOverlay(probe);
+    if (box.isEmpty()) return false;
+
+    const c = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    // Back off far enough to frame the object, but never closer than arm's reach
+    // nor so far that a hinge is lost in the wall behind it.
+    const dist = Math.min(Math.max(Math.max(size.x, size.y, size.z) * 1.6, 1.8), 8);
+    // Approach along the thinner horizontal axis — that's the face of a wall,
+    // door or panel rather than its edge.
+    const offset =
+      size.x <= size.z ? new THREE.Vector3(dist, 0, 0) : new THREE.Vector3(0, 0, dist);
+    const eye = Math.max(c.y, box.min.y + 1.6);
+    camera.position.set(c.x + offset.x, eye, c.z + offset.z);
+    camera.lookAt(c.x, c.y, c.z);
+    wtNeedsRender = true;
+    return true;
+  }
+
   onMount(() => {
     let ro;
     (async () => {
@@ -403,7 +461,12 @@
         // an element's data no longer restarts you outside the front door); a
         // first visit starts at eye height just outside the building, facing in.
         const saved = wtPoseByUrl.get(url);
-        if (saved) {
+        // Arriving from "View in walkthrough" on a specific part (a door, a
+        // hinge) beats both the saved pose and the front-door default: the whole
+        // point of that action is to be put in front of THAT object.
+        if (spawnGuid && standBeside(spawnGuid)) {
+          selectGuid(spawnGuid);
+        } else if (saved) {
           camera.position.fromArray(saved.pos);
           camera.quaternion.fromArray(saved.quat);
           mode = saved.mode || mode;
@@ -470,7 +533,20 @@
           if (t - lastPickT > 120) {
             lastPickT = t;
             const p = pickAhead();
-            hoverLabel = p ? p.el?.label || shortenIRI(p.guid) : '';
+            // Keep the object identity stable while the crosshair stays on the
+            // same element, so the hover card doesn't re-render 8×/s.
+            const guid = p?.guid || '';
+            if (guid !== (hover?.guid || '')) {
+              hover = p
+                ? {
+                    guid,
+                    label: p.el?.label || shortenIRI(guid),
+                    type: p.el ? shortType(p.el.types) : '',
+                    id: p.el?.id || '',
+                    known: !!p.el,
+                  }
+                : null;
+            }
           }
         }
         // Render every frame while walking/VR; when paused (pointer unlocked) the
@@ -537,9 +613,20 @@
 
   <!-- Centre reticle + what it's aimed at -->
   {#if !loading && !error}
-    <div class="reticle" class:hot={!!hoverLabel}></div>
-    {#if hoverLabel && locked}
-      <div class="reticle-label">{hoverLabel}</div>
+    <div class="reticle" class:hot={!!hover}></div>
+    {#if hover && locked}
+      <!-- Hover card: what the crosshair is on, before you commit to a click.
+           Deliberately terse — it sits in the middle of the view while you move. -->
+      <div class="hover-card" class:is-selected={picked?.guid === hover.guid}>
+        <span class="hover-name">{hover.label}</span>
+        {#if hover.type}<span class="hover-type">{hover.type}</span>{/if}
+        <span class="hover-guid">{hover.guid}</span>
+        <span class="hover-hint">
+          {picked?.guid === hover.guid
+            ? $i18nT('viewer.hoverSelected')
+            : $i18nT('viewer.hoverClickToSelect')}
+        </span>
+      </div>
     {/if}
     {#if locked}
       <!-- Always-visible control hints; Esc is the one nobody guesses. -->
@@ -749,21 +836,53 @@
     border-color: #ff8a2a;
     background: rgba(255, 138, 42, 0.35);
   }
-  .reticle-label {
+  /* Card under the crosshair describing whatever it is aimed at. Sits just
+     below centre so it never covers the thing being inspected. */
+  .hover-card {
     position: absolute;
     left: 50%;
-    top: calc(50% + 14px);
+    top: calc(50% + 18px);
     transform: translateX(-50%);
-    background: rgba(8, 13, 22, 0.85);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 6px 12px;
+    border-radius: 9px;
+    background: rgba(8, 13, 22, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
     color: #fff;
-    padding: 3px 9px;
-    border-radius: 6px;
-    font-size: 0.78rem;
-    white-space: nowrap;
     pointer-events: none;
-    max-width: 60vw;
+    max-width: min(60vw, 380px);
+    text-align: center;
+  }
+  .hover-card.is-selected {
+    border-color: rgba(232, 89, 12, 0.75);
+  }
+  .hover-name {
+    font-size: 0.84rem;
+    font-weight: 600;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .hover-type {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #7ed6d0;
+  }
+  .hover-guid {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.64rem;
+    color: #8fa3b8;
+  }
+  .hover-hint {
+    font-size: 0.66rem;
+    color: #b6c6d6;
   }
   .wt-hints {
     position: absolute;

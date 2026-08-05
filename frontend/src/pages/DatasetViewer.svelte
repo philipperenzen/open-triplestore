@@ -38,6 +38,7 @@
     tabKey,
     toggleFull,
   } from '../lib/viewer/windows';
+  import { focusUrlUpdate } from '../lib/viewer/shareLink';
   import ViewerMap from '../components/viewer/ViewerMap.svelte';
   import Model3D from '../components/viewer/Model3D.svelte';
   import CesiumViewer from '../components/viewer/CesiumViewer.svelte';
@@ -338,11 +339,28 @@
   function syncSelection() {
     if (!wstate.windows.length) {
       selected = '';
+      syncFocusUrl('');
       return;
     }
     const top = wstate.windows.filter((w) => !w.minimized).sort((a, b) => b.z - a.z)[0];
     const tab = activeTabOf(top);
-    if (tab?.kind === 'element') selected = tab.id;
+    if (tab?.kind === 'element') {
+      selected = tab.id;
+      syncFocusUrl(tab.id);
+    }
+  }
+
+  // Mirror the current element into `?focus=` so the address bar is always a
+  // link someone else can open (subject to their own dataset access). Uses
+  // replaceState: framing an element is not a navigation, and pushing would turn
+  // Back into an undo of every click.
+  function syncFocusUrl(iri) {
+    try {
+      const next = focusUrlUpdate(window.location, iri);
+      if (next) history.replaceState(history.state, '', next);
+    } catch {
+      // Non-browser/oddly-sandboxed host: the deep link is a convenience only.
+    }
   }
 
   // A pick in the side list / on the map opens a NEW window…
@@ -429,6 +447,8 @@
     }
   }
   const moveTab = (wid, { key, toWid }) => apply(moveTabToWindow(wstate, wid, key, toWid));
+  // Reorder within one window: the same move, with the window as its own target.
+  const reorderTab = (wid, { key, index }) => apply(moveTabToWindow(wstate, wid, key, wid, index));
   const detachTab = (wid, { key, pos }) => apply(detachTabToNewWindow(wstate, wid, key, pos));
   // Promote an info-only window to a live 3D viewer; the state module revokes the
   // lowest-stacked live viewer when the cap is reached, so the user can always
@@ -507,7 +527,7 @@
   // ViewerMap suggests an IFC building to walk through once you're zoomed in on
   // it; clicking the prompt opens the whole-building model in a first-person view.
   let walkSuggest = null; // { id, label } | null
-  let walkthrough = null; // { url, format, upAxis, label } | null
+  let walkthrough = null; // { url, format, upAxis, label, spawnGuid } | null
   function onWalkSuggest(e) {
     walkSuggest = e.detail || null;
   }
@@ -524,7 +544,12 @@
   }
   // "Explore inside" from an element inspector — open the walkthrough for the
   // element's whole IFC building (a container: Site / Building / Storey).
-  function walkthroughFor(elId) {
+  //
+  // `guid` is set when the trip starts from a LEAF part ("View in walkthrough"
+  // on a door or a hinge): the building being walked is the ancestor that owns
+  // the IFC, and the walkthrough spawns standing in front of that part. `label`
+  // then names the part, since that's what the user asked to see.
+  function walkthroughFor({ id: elId, guid = '', label = '' }) {
     const el = elements.find((x) => x.id === elId);
     const ref = el && modelRefsOf(el).find((r) => r.format === 'ifc');
     if (!ref) return;
@@ -532,7 +557,8 @@
       url: ref.url.split('#')[0],
       format: 'ifc',
       upAxis: ref.upAxis,
-      label: el.label || shortenIRI(el.id),
+      label: label || el.label || shortenIRI(el.id),
+      spawnGuid: guid,
     };
   }
   // Leaving the walkthrough to read an element's data keeps the trip resumable:
@@ -541,7 +567,10 @@
   // where you stood in the house.
   let lastWalkthrough = null;
   function walkInspect(e) {
-    lastWalkthrough = walkthrough;
+    // Resuming must restore the pose the user left from — drop the spawn target,
+    // or stepping out to read a door's data and coming back would teleport them
+    // to that door again instead of to where they had walked to.
+    lastWalkthrough = walkthrough ? { ...walkthrough, spawnGuid: '' } : null;
     walkthrough = null; // leave the immersive view to show the full RDF panel
     onMapSelect(e);
   }
@@ -859,10 +888,11 @@
       on:tabselect={(e) => selectTab(w.wid, e.detail.key)}
       on:tabclose={(e) => closeTabIn(w.wid, e.detail.key)}
       on:tabmove={(e) => moveTab(w.wid, e.detail)}
+      on:tabreorder={(e) => reorderTab(w.wid, e.detail)}
       on:tabdetach={(e) => detachTab(w.wid, e.detail)}
       on:loadmodel={() => loadModelFor(w.wid)}
       on:showonmap={(e) => showOnMap(e.detail.id)}
-      on:walkthrough={(e) => walkthroughFor(e.detail.id)}
+      on:walkthrough={(e) => walkthroughFor(e.detail)}
     />
   {/if}
 {/each}
@@ -902,6 +932,7 @@
     format={walkthrough.format}
     upAxis={walkthrough.upAxis}
     label={walkthrough.label}
+    spawnGuid={walkthrough.spawnGuid || ''}
     {elements}
     on:close={() => (walkthrough = null)}
     on:inspect={walkInspect}
