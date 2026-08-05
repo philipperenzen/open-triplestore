@@ -9,6 +9,7 @@
   import { DataFactory } from 'n3';
   import { ChevronDown, ExternalLink, BookOpen, Boxes } from 'lucide-svelte';
   import { shortenIRI } from '../../lib/rdf-utils';
+  import { pickByLang } from '../../lib/ontology/termDisplay';
   import { NAMESPACES, VOCAB_INFO } from '../../lib/ontology/vocabularies';
   import type { SchemaModel } from '../../lib/ontology/schema-model';
 
@@ -47,8 +48,8 @@
         objs = [];
       }
       if (!objs.length) continue;
-      const en = objs.find((o) => o.language === 'en' || o.language === 'en-US');
-      return (en || objs[0]).value;
+      // UI language first, then English — see langRank().
+      return (pickByLang(objs, (o) => o.language) ?? objs[0]).value;
     }
     return '';
   }

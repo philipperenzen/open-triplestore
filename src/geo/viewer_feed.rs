@@ -190,7 +190,34 @@ pub fn build_viewer_feed(
     data_graphs: &[String],
     root: Option<&str>,
 ) -> Vec<ViewerElement> {
-    build_viewer_feed_opts(store, data_graphs, root, false)
+    build_viewer_feed_opts(store, data_graphs, root, false, None)
+}
+
+/// Rank a literal's language tag against the reader's — LOWER IS BETTER:
+/// 0 exact · 1 same primary subtag · 2 English · 3 untagged · 4 anything else.
+///
+/// Mirrors `langRank()` in the frontend's `lib/ontology/termDisplay.ts`, so a
+/// label collapsed here and one picked in the browser agree on which language
+/// wins. An element with both `"Deur"@nl` and `"Door"@en` shows "Deur" to a
+/// Dutch reader and "Door" to everyone else, instead of whichever the store
+/// happened to return first.
+fn lang_rank(lang: Option<&str>, want: Option<&str>) -> u8 {
+    let l = lang.unwrap_or("").to_ascii_lowercase();
+    let w = want.unwrap_or("").to_ascii_lowercase();
+    let primary = |s: &str| s.split('-').next().unwrap_or("").to_string();
+    if !w.is_empty() && l == w {
+        return 0;
+    }
+    if !w.is_empty() && !l.is_empty() && primary(&l) == primary(&w) {
+        return 1;
+    }
+    if primary(&l) == "en" {
+        return 2;
+    }
+    if l.is_empty() {
+        return 3;
+    }
+    4
 }
 
 /// As [`build_viewer_feed`], but with `located_only` to fetch just the elements
@@ -201,11 +228,15 @@ pub fn build_viewer_feed(
 /// BOT containment closure for the map turns a multi-second whole-building scan
 /// into a sub-second query, so the map paints immediately while the full feed
 /// (for the tree) streams in behind it.
+/// `lang` is the reader's UI language (e.g. `nl`, `en-GB`); when an element
+/// carries `rdfs:label` in several languages the closest match wins — see
+/// [`lang_rank`]. `None` keeps the previous behaviour (English, then untagged).
 pub fn build_viewer_feed_opts(
     store: &TripleStore,
     data_graphs: &[String],
     root: Option<&str>,
     located_only: bool,
+    lang: Option<&str>,
 ) -> Vec<ViewerElement> {
     let from: String = data_graphs
         .iter()
@@ -270,6 +301,10 @@ pub fn build_viewer_feed_opts(
     );
 
     let mut elements: BTreeMap<String, ViewerElement> = BTreeMap::new();
+    // Language rank of the label currently held for each element, so a later
+    // solution can replace it with a closer-matching language. Kept beside the
+    // elements rather than on `ViewerElement`, which is the wire format.
+    let mut label_rank: BTreeMap<String, u8> = BTreeMap::new();
     let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) = store.query(&query) else {
         return Vec::new();
     };
@@ -278,14 +313,19 @@ pub fn build_viewer_feed_opts(
             continue;
         };
         let entry = elements.entry(id.clone()).or_insert_with(|| ViewerElement {
-            id,
+            id: id.clone(),
             ..Default::default()
         });
         if entry.parent.is_none() {
             entry.parent = sol.get("parent").map(term_str);
         }
-        if entry.label.is_none() {
-            entry.label = sol.get("label").map(term_value);
+        if let Some(term) = sol.get("label") {
+            let rank = lang_rank(term_lang(term), lang);
+            // Ties keep the incumbent, so equally-good labels stay stable.
+            if entry.label.is_none() || rank < *label_rank.get(&id).unwrap_or(&u8::MAX) {
+                entry.label = Some(term_value(term));
+                label_rank.insert(id.clone(), rank);
+            }
         }
         if let Some(t) = sol.get("type").map(term_str) {
             if !entry.types.contains(&t) {
@@ -695,6 +735,14 @@ fn term_value(t: &oxigraph::model::Term) -> String {
     }
 }
 
+/// A literal's language tag, or `None` for untagged literals and non-literals.
+fn term_lang(t: &oxigraph::model::Term) -> Option<&str> {
+    match t {
+        oxigraph::model::Term::Literal(l) => l.language(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,7 +927,7 @@ mod tests {
         // Located feed (the map's fast path) returns ONLY the coordinate-bearing
         // Site — its size does not grow with the tree, however deep it gets. This
         // is the contract that keeps the map paint fast on big buildings.
-        let located = build_viewer_feed_opts(&store, &[], None, true);
+        let located = build_viewer_feed_opts(&store, &[], None, true, None);
         assert_eq!(located.len(), 1, "located feed stays tiny: {located:?}");
         assert_eq!(located[0].id, "http://example.org/Site");
         assert!(located[0].wkt4326.is_some(), "Site keeps its coordinate");
@@ -1036,5 +1084,56 @@ mod tests {
         );
         assert_eq!(el.files[0].1, "/api/datasets/d/assets/g/download");
         assert_eq!(el.files[1].1, "https://upload.wikimedia.org/big.stl");
+    }
+
+    /// Multilingual `rdfs:label`: the reader's language wins, then English,
+    /// then an untagged literal. Without this the feed kept whichever label the
+    /// store returned first, so a Dutch UI showed English element names.
+    const MULTILANG: &str = r#"
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix geo:  <http://www.opengis.net/ont/geosparql#> .
+        @prefix ex:   <http://example.org/> .
+        ex:Door a ex:Deur ;
+            rdfs:label "Door"@en, "Deur"@nl, "Tür"@de ;
+            geo:hasGeometry [ geo:asWKT "POINT(5.86 51.85)"^^geo:wktLiteral ] .
+        ex:Plain a ex:Ding ;
+            rdfs:label "Naamloos" ;
+            geo:hasGeometry [ geo:asWKT "POINT(5.87 51.86)"^^geo:wktLiteral ] .
+    "#;
+
+    fn label_for(lang: Option<&str>, id_suffix: &str) -> String {
+        let store = TripleStore::in_memory().unwrap();
+        store.load_str(MULTILANG, RdfFormat::Turtle, None).unwrap();
+        let feed = build_viewer_feed_opts(&store, &[], None, false, lang);
+        feed.iter()
+            .find(|e| e.id.ends_with(id_suffix))
+            .and_then(|e| e.label.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn feed_label_prefers_the_readers_language() {
+        assert_eq!(label_for(Some("nl"), "Door"), "Deur");
+        assert_eq!(label_for(Some("de"), "Door"), "Tür");
+        assert_eq!(label_for(Some("en"), "Door"), "Door");
+        // Regional tag falls back to the same primary subtag.
+        assert_eq!(label_for(Some("nl-BE"), "Door"), "Deur");
+        // A language the data doesn't have falls back to English.
+        assert_eq!(label_for(Some("fr"), "Door"), "Door");
+        // No preference stated: English, as before.
+        assert_eq!(label_for(None, "Door"), "Door");
+        // An untagged label is used when it's all there is.
+        assert_eq!(label_for(Some("nl"), "Plain"), "Naamloos");
+    }
+
+    #[test]
+    fn lang_rank_orders_exact_then_primary_then_english_then_untagged() {
+        assert!(lang_rank(Some("nl"), Some("nl")) < lang_rank(Some("nl-BE"), Some("nl")));
+        assert!(lang_rank(Some("nl-BE"), Some("nl")) < lang_rank(Some("en"), Some("nl")));
+        assert!(lang_rank(Some("en"), Some("nl")) < lang_rank(None, Some("nl")));
+        assert!(lang_rank(None, Some("nl")) < lang_rank(Some("de"), Some("nl")));
+        // Case-insensitive on both sides.
+        assert_eq!(lang_rank(Some("NL"), Some("nl")), 0);
+        assert_eq!(lang_rank(Some("EN"), None), 2);
     }
 }

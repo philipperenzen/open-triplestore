@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { parseTurtle } from '../loader';
 import { indexStore, VOCAB_FILES, lookupTerm, lookupTermSync, _resetTermCaches } from '../termDictionary';
 import { NAMESPACES } from '../vocabularies';
-import { pickLang, groupByLang } from '../termDisplay';
+import { pickLang, groupByLang, pickByLang, langRank, setUiLang, uiLang } from '../termDisplay';
 
 const DCAT = 'http://www.w3.org/ns/dcat#';
 const DCT = 'http://purl.org/dc/terms/';
@@ -125,5 +125,59 @@ describe('display helpers', () => {
   it('groupByLang orders the active language first, then English', () => {
     expect(groupByLang(vals, 'it').map((v) => v.lang)).toEqual(['it', 'en', 'nl']);
     expect(groupByLang(vals, 'de').map((v) => v.lang)).toEqual(['en', 'it', 'nl']);
+  });
+});
+
+describe('pickByLang / langRank / uiLang', () => {
+  // Arbitrary shapes: the display layer reads labels straight off the wire,
+  // where the language tag lives under a different key in every payload.
+  const rows = [
+    { o: { value: 'Door', 'xml:lang': 'en' } },
+    { o: { value: 'Deur', 'xml:lang': 'nl' } },
+    { o: { value: 'Tür', 'xml:lang': 'de' } },
+  ];
+  const langOf = (r: (typeof rows)[number]) => r.o['xml:lang'];
+
+  it('picks the reader language, then English', () => {
+    expect(pickByLang(rows, langOf, 'nl')?.o.value).toBe('Deur');
+    expect(pickByLang(rows, langOf, 'de')?.o.value).toBe('Tür');
+    expect(pickByLang(rows, langOf, 'fr')?.o.value).toBe('Door');
+  });
+
+  it('matches a regional tag on its primary subtag', () => {
+    expect(pickByLang(rows, langOf, 'nl-BE')?.o.value).toBe('Deur');
+    expect(pickByLang(rows, langOf, 'NL')?.o.value).toBe('Deur');
+  });
+
+  it('falls back to an untagged literal before an unrelated language', () => {
+    const mixed = [{ l: 'de', v: 'Tür' }, { l: '', v: 'Naamloos' }];
+    expect(pickByLang(mixed, (x) => x.l, 'nl')?.v).toBe('Naamloos');
+  });
+
+  it('keeps the first of equally-ranked values', () => {
+    const dupes = [{ l: 'nl', v: 'eerste' }, { l: 'nl', v: 'tweede' }];
+    expect(pickByLang(dupes, (x) => x.l, 'nl')?.v).toBe('eerste');
+  });
+
+  it('returns null for an empty or missing list', () => {
+    expect(pickByLang([], (x: any) => x.l, 'nl')).toBeNull();
+    expect(pickByLang(null, (x: any) => x.l, 'nl')).toBeNull();
+  });
+
+  it('defaults to the module-level UI language when none is passed', () => {
+    setUiLang('nl');
+    expect(uiLang()).toBe('nl');
+    expect(pickByLang(rows, langOf)?.o.value).toBe('Deur');
+    setUiLang('en');
+    expect(pickByLang(rows, langOf)?.o.value).toBe('Door');
+    setUiLang(null); // resets to the 'en' default
+    expect(uiLang()).toBe('en');
+  });
+
+  it('langRank orders exact < primary subtag < English < untagged < other', () => {
+    expect(langRank('nl', 'nl')).toBeLessThan(langRank('nl-BE', 'nl'));
+    expect(langRank('nl-BE', 'nl')).toBeLessThan(langRank('en', 'nl'));
+    expect(langRank('en', 'nl')).toBeLessThan(langRank('', 'nl'));
+    expect(langRank('', 'nl')).toBeLessThan(langRank('de', 'nl'));
   });
 });

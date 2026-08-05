@@ -11,6 +11,7 @@
   import { pickLang, groupByLang } from '../../lib/ontology/termDisplay.js';
   import { lookupTerm, lookupTermSync } from '../../lib/ontology/termDictionary.js';
   import { openSparkExplain } from '../../lib/sparkHelp.js';
+  import AnnotationText from './AnnotationText.svelte';
 
   /** @type {string} */
   export let iri = '';
@@ -107,17 +108,19 @@
     <div class="tdc-iri">{shortenIRI(iri)}</div>
 
     {#if variant === 'compact'}
-      {#if compactDef}<p class="tdc-compact-def">{compactDef}</p>{/if}
+      {#if compactDef}
+        <div class="tdc-compact-def"><AnnotationText text={compactDef} baseIri={iri} onOpenTerm={onOpen} /></div>
+      {/if}
       <button class="tdc-more" on:click|stopPropagation={() => onOpen(iri)}>{$t('components.termDefinitionCard.moreDetails')}</button>
     {:else}
       {#each noteSections as sec}
         <section class="tdc-sec">
           <h5 class="tdc-sec-h">{sec.label}</h5>
           {#each groupByLang(sec.values, lang) as v}
-            <p class="tdc-val">
+            <div class="tdc-val">
               {#if v.lang}<span class="tdc-lang" title={v.lang}>{langToFlag(v.lang)}{v.lang}</span>{/if}
-              <span>{v.value}</span>
-            </p>
+              <AnnotationText text={v.value} baseIri={iri} onOpenTerm={onOpen} />
+            </div>
           {/each}
         </section>
       {/each}

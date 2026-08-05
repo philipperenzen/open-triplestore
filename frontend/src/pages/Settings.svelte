@@ -9,7 +9,7 @@
   import { validateEmail } from '../lib/validate.ts';
   import { navigate } from '../lib/router/index.js';
   import { renderSVG } from 'uqr';
-  import { Key, KeyRound, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle, ShieldCheck, ShieldOff, MailCheck, MailWarning, Pencil } from 'lucide-svelte';
+  import { Key, KeyRound, Plus, Trash2, Copy, Loader2, Check, Globe, Lock, Camera, AlertTriangle, ShieldCheck, ShieldOff, MailCheck, MailWarning, Pencil, UserRound, ShieldHalf } from 'lucide-svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
 
   let profile = null;
@@ -46,6 +46,31 @@
   let createTokenLoading = false;
   let createdToken = null;
   let copied = false;
+
+  // Settings used to be one long scroll of seven unrelated cards. It's now four
+  // tabs; the active one lives in the URL hash so a tab survives a reload and
+  // can be linked to (e.g. /settings#tokens).
+  const TABS = [
+    { id: 'profile', labelKey: 'pages.settings.tabProfile', icon: UserRound },
+    { id: 'security', labelKey: 'pages.settings.tabSecurity', icon: ShieldHalf },
+    { id: 'tokens', labelKey: 'pages.settings.tabTokens', icon: Key },
+    { id: 'account', labelKey: 'pages.settings.tabAccount', icon: AlertTriangle },
+  ];
+  let tab = TABS.some((x) => x.id === location.hash.slice(1)) ? location.hash.slice(1) : 'profile';
+  function selectTab(id) {
+    tab = id;
+    history.replaceState(null, '', `#${id}`);
+  }
+
+  // The server rejects an `admin`-scoped token for non-admin accounts
+  // (auth/handlers.rs: "Admin scope requires admin privileges"), so don't offer
+  // the scope at all — an unusable control is worse than a missing one.
+  $: isAdmin = profile?.role === 'admin' || profile?.role === 'super_admin';
+  $: offeredScopes = TOKEN_SCOPES.filter((s) => s.value !== 'admin' || isAdmin);
+  // Defensive: if a stale selection carries `admin`, drop it once we know the role.
+  $: if (!isAdmin && tokenScopes.includes('admin')) {
+    tokenScopes = tokenScopes.filter((s) => s !== 'admin');
+  }
 
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
@@ -449,6 +474,54 @@
 </script>
 
 <div class="settings-page">
+  <!-- Identity summary: who you're editing, at a glance. -->
+  <header class="settings-hero">
+    {#if profile?.avatar_key}
+      <img
+        src="{getUserAvatarUrl(profile.id)}?v={avatarVersion}"
+        alt={$t('pages.settings.avatarAlt')}
+        class="hero-avatar"
+        on:error={e => { /** @type {HTMLElement} */ (e.currentTarget).style.display = 'none'; }}
+      />
+    {:else}
+      <div class="hero-avatar hero-avatar-fallback">{profile?.username?.[0]?.toUpperCase() || '?'}</div>
+    {/if}
+    <div class="hero-text">
+      <h1 class="hero-name">{profile?.display_name || profile?.username || $t('system.loading')}</h1>
+      <p class="hero-sub">
+        {#if profile}
+          <span class="hero-email">{profile.email}</span>
+          {#if profile.email_verified}
+            <span class="hero-chip chip-ok"><MailCheck size={12} /> {$t('pages.settings.emailVerified')}</span>
+          {:else}
+            <span class="hero-chip chip-warn"><MailWarning size={12} /> {$t('pages.settings.emailUnverified')}</span>
+          {/if}
+          <span class="hero-chip chip-role">{profile.role}</span>
+          <span class="hero-chip">
+            {#if profile.is_public}<Globe size={12} /> {$t('pages.settings.publicProfile')}
+            {:else}<Lock size={12} /> {$t('pages.settings.privateProfile')}{/if}
+          </span>
+        {/if}
+      </p>
+    </div>
+  </header>
+
+  <nav class="settings-tabs" aria-label={$t('pages.settings.title')}>
+    {#each TABS as x}
+      <button
+        type="button"
+        class="settings-tab"
+        class:active={tab === x.id}
+        aria-current={tab === x.id ? 'page' : undefined}
+        on:click={() => selectTab(x.id)}
+      >
+        <svelte:component this={x.icon} size={15} />
+        <span>{$t(x.labelKey)}</span>
+      </button>
+    {/each}
+  </nav>
+
+  {#if tab === 'profile'}
   <div class="card">
     <h2>{$t('pages.settings.profileHeading')}</h2>
     {#if profileError}<p class="error">{profileError}</p>{/if}
@@ -539,7 +612,9 @@
       </button>
     </form>
   </div>
+  {/if}
 
+  {#if tab === 'security'}
   <div class="card">
     <h2>{$t('pages.settings.changePasswordHeading')}</h2>
     {#if pwError}<p class="error">{pwError}</p>{/if}
@@ -642,7 +717,9 @@
       <p class="hint">{$t('pages.settings.passkeyUnsupported')}</p>
     {/if}
   </div>
+  {/if}
 
+  {#if tab === 'profile'}
   <div class="card">
     <h2>
       {#if profile?.is_public}<Globe size={18} />{:else}<Lock size={18} />{/if}
@@ -680,8 +757,10 @@
       <p class="hint">{$t('system.loading')}</p>
     {/if}
   </div>
+  {/if}
 
-  <div class="card danger-zone-card">
+  {#if tab === 'account'}
+  <div class="card card-wide danger-zone-card">
     <h2><AlertTriangle size={18} /> {$t('pages.settings.dangerZone')}</h2>
     <p class="hint">{$t('pages.settings.dangerZoneHint')}</p>
 
@@ -706,8 +785,10 @@
       <p class="hint">{$t('pages.settings.superAdminCannotSelfDelete')}</p>
     {/if}
   </div>
+  {/if}
 
-  <div class="card">
+  {#if tab === 'tokens'}
+  <div class="card card-wide">
     <h2><Key size={18} /> {$t('pages.settings.apiTokensHeading')}</h2>
     <p class="hint">{$t('pages.settings.apiTokensHint')}</p>
 
@@ -728,13 +809,15 @@
             <p class="scope-note">{$t('pages.settings.scopeWriteNote')}</p>
           </div>
         </div>
-        <div class="scope-row">
-          <code class="scope-pill scope-admin">admin</code>
-          <div>
-            <p>{$t('pages.settings.scopeAdminDescPre')} <code>read</code> + <code>write</code>{$t('pages.settings.scopeAdminDescPost')}</p>
-            <p class="scope-note">{$t('pages.settings.scopeAdminNotePre')} <strong>admin</strong> {$t('pages.settings.scopeAdminNoteOr')} <strong>super_admin</strong> {$t('pages.settings.scopeAdminNotePost')}</p>
+        {#if isAdmin}
+          <div class="scope-row">
+            <code class="scope-pill scope-admin">admin</code>
+            <div>
+              <p>{$t('pages.settings.scopeAdminDescPre')} <code>read</code> + <code>write</code>{$t('pages.settings.scopeAdminDescPost')}</p>
+              <p class="scope-note">{$t('pages.settings.scopeAdminNotePre')} <strong>admin</strong> {$t('pages.settings.scopeAdminNoteOr')} <strong>super_admin</strong> {$t('pages.settings.scopeAdminNotePost')}</p>
+            </div>
           </div>
-        </div>
+        {/if}
       </div>
     </div>
 
@@ -764,7 +847,7 @@
       <div class="form-group">
         <span class="group-label">{$t('pages.settings.scopes')}</span>
         <div class="scope-chips">
-          {#each TOKEN_SCOPES as s}
+          {#each offeredScopes as s}
             <label class="scope-chip" class:active={tokenScopes.includes(s.value)}>
               <input type="checkbox" checked={tokenScopes.includes(s.value)} on:change={() => toggleScope(s.value)} />
               {s.label}
@@ -816,6 +899,7 @@
       </table>
     {/if}
   </div>
+  {/if}
 </div>
 
 {#if revokeTokenId !== null}
@@ -1047,11 +1131,138 @@
 {/if}
 
 <style>
+  /* One column on narrow screens; on a wide one the cards sit side by side
+     instead of running down a single 800px ribbon with the rest of the
+     viewport empty. The `{#if tab === …}` wrappers emit no DOM, so the cards
+     are direct grid items no matter which tab they belong to. */
   .settings-page {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: 1.25rem;
+    max-width: 820px;
+  }
+  /* Hero and tabs always span the full width of whatever grid is in play. */
+  .settings-hero,
+  .settings-tabs {
+    grid-column: 1 / -1;
+  }
+
+  @media (min-width: 1024px) {
+    .settings-page {
+      max-width: 1180px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      /* Cards keep their natural height rather than stretching to match the
+         tallest one in the row. */
+      align-items: start;
+      gap: 1.25rem 1.5rem;
+    }
+    /* The token table and the danger zone are wide by nature — a half-column
+       squeezes the table into a scrollbar. */
+    .settings-page > .card-wide {
+      grid-column: 1 / -1;
+    }
+  }
+
+  /* Very wide: a third column would make the forms too short and wide, so
+     cap the grid and let the page centre instead. */
+  @media (min-width: 1600px) {
+    .settings-page {
+      max-width: 1320px;
+    }
+  }
+
+  /* ── Identity hero ─────────────────────────────────────────────────────── */
+  .settings-hero {
     display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    max-width: 800px;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--line-soft);
+    border-radius: 16px;
+    background: linear-gradient(135deg, var(--bg-soft), var(--bg-elevated));
+  }
+  .hero-avatar {
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 2px solid var(--line-soft);
+  }
+  .hero-avatar-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+    border-color: transparent;
+  }
+  .hero-text { min-width: 0; }
+  .hero-name {
+    margin: 0 0 0.3rem;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--ink-800);
+  }
+  .hero-sub {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.78rem;
+    color: var(--ink-500);
+  }
+  .hero-email { overflow-wrap: anywhere; }
+  .hero-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.22rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: var(--bg-soft);
+    border: 1px solid var(--line-soft);
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+  .chip-ok { color: #15803d; background: #dcfce7; border-color: #bbf7d0; }
+  .chip-warn { color: #b45309; background: #fef3c7; border-color: #fde68a; }
+  .chip-role { text-transform: capitalize; color: var(--brand-600); }
+
+  /* ── Section tabs ──────────────────────────────────────────────────────── */
+  .settings-tabs {
+    display: flex;
+    gap: 0.3rem;
+    padding-bottom: 0.15rem;
+    border-bottom: 1px solid var(--line-soft);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .settings-tabs::-webkit-scrollbar { display: none; }
+  .settings-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+    padding: 0.5rem 0.85rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    background: transparent;
+    font: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--ink-500);
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+  }
+  .settings-tab:hover { color: var(--ink-800); background: var(--bg-soft); }
+  .settings-tab.active {
+    color: var(--brand-600);
+    border-bottom-color: var(--brand-500);
   }
   h2 {
     margin-top: 0;
@@ -1387,6 +1598,9 @@
   .modal-title-plain { color: inherit !important; }
 
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */
+  :global(:is([data-theme="dark"], .dark)) .chip-ok { background: rgba(16,185,129,0.16); color: #6ee7b7; border-color: rgba(16,185,129,0.32); }
+  :global(:is([data-theme="dark"], .dark)) .chip-warn { background: rgba(245,158,11,0.16); color: #fcd34d; border-color: rgba(245,158,11,0.32); }
+  :global(:is([data-theme="dark"], .dark)) .settings-tab:hover { background: rgba(255,255,255,0.05); }
   :global(:is([data-theme="dark"], .dark)) .success { background: rgba(16,185,129,0.14); color: #6ee7b7; }
   :global(:is([data-theme="dark"], .dark)) .token-created { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.35); }
   :global(:is([data-theme="dark"], .dark)) .token-value code { background: var(--bg-soft); }

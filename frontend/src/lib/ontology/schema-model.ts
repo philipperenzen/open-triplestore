@@ -7,6 +7,7 @@ import { Store, DataFactory } from 'n3';
 import type { Term } from 'n3';
 import { loadOntologyGraph } from './loader';
 import { kindOf, splitIri, prefixForNamespace, type VocabKind } from './vocabularies';
+import { isBetterLang } from './termDisplay';
 import type { ClassExpr, Restriction } from './dl-render';
 
 const { namedNode } = DataFactory;
@@ -125,10 +126,15 @@ function preferredLabel(store: Store, subj: Term, fallback: string): string {
   const candidates = store.getObjects(subj, namedNode(RDFS + 'label'), null)
     .concat(store.getObjects(subj, namedNode(SKOS + 'prefLabel'), null));
   let best = '';
+  let bestLang: string | null = null;
   for (const o of candidates) {
     if (o.termType !== 'Literal') continue;
-    if ((o as any).language === 'en') return o.value;
-    if (!best) best = o.value;
+    const lang = (o as any).language || '';
+    // UI language first, then English, then untagged — see langRank().
+    if (bestLang === null || isBetterLang(lang, bestLang)) {
+      best = o.value;
+      bestLang = lang;
+    }
   }
   return best || fallback;
 }
@@ -233,6 +239,10 @@ export async function buildSchemaModel(graphs: string[]): Promise<SchemaModel> {
 export function extractSchema(store: Store): SchemaModel {
   const labels = new Map<string, string>();
   const comments = new Map<string, string>();
+  // Language tag of whatever is currently in `labels` / `comments`, so a later
+  // literal can be compared against it without changing those maps' shape.
+  const labelLang = new Map<string, string>();
+  const commentLang = new Map<string, string>();
   const classes = new Map<string, ClassEntry>();
   const properties = new Map<string, PropertyEntry>();
   const concepts = new Map<string, ConceptEntry>();
@@ -302,10 +312,17 @@ export function extractSchema(store: Store): SchemaModel {
     if (q.subject.termType !== 'NamedNode') continue;
 
     if (p === RDFS + 'label' && o.termType === 'Literal') {
-      const cur = labels.get(s);
-      if (!cur || ((o as any).language === 'en')) labels.set(s, o.value);
+      const lang = (o as any).language || '';
+      if (!labels.has(s) || isBetterLang(lang, labelLang.get(s))) {
+        labels.set(s, o.value);
+        labelLang.set(s, lang);
+      }
     } else if (p === RDFS + 'comment' && o.termType === 'Literal') {
-      if (!comments.has(s)) comments.set(s, o.value);
+      const lang = (o as any).language || '';
+      if (!comments.has(s) || isBetterLang(lang, commentLang.get(s))) {
+        comments.set(s, o.value);
+        commentLang.set(s, lang);
+      }
     } else if (p === TYPE) {
       const t = o.value;
       if (t === RDFS + 'Class' || t === OWL + 'Class') ensureClass(s);

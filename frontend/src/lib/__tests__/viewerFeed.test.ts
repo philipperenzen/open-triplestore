@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getViewerFeed } from '../api.ts';
+import { setUiLang } from '../ontology/termDisplay.ts';
 
 // Speed/responsiveness regression guard for the dataset 3D/map explorer.
 //
@@ -39,8 +40,23 @@ describe('getViewerFeed request contract (map load speed)', () => {
     const f = mockFetch();
     await getViewerFeed('viewer-3d-demo');
     const url = lastUrl(f);
-    expect(url).toBe('/api/datasets/viewer-3d-demo/viewer-feed');
+    expect(url.split('?')[0]).toBe('/api/datasets/viewer-3d-demo/viewer-feed');
     expect(url).not.toContain('located');
+  });
+
+  // Element labels are collapsed to one per element server-side, so the reader's
+  // language has to travel with the request or a Dutch UI gets English names.
+  it('always sends the reader language', async () => {
+    const f = mockFetch();
+    setUiLang('nl');
+    await getViewerFeed('viewer-3d-demo');
+    expect(new URL(lastUrl(f), 'http://x').searchParams.get('lang')).toBe('nl');
+
+    setUiLang('en');
+    await getViewerFeed('viewer-3d-demo', null, { located: true });
+    const params = new URL(lastUrl(f), 'http://x').searchParams;
+    expect(params.get('lang')).toBe('en');
+    expect(params.get('located')).toBe('true');
   });
 
   it('the map fast path requests located=true', async () => {

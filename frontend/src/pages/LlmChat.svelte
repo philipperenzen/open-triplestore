@@ -734,18 +734,20 @@
         <strong><NotebookPen size={14} /> {$t('pages.llmChat.memoryTitle')}</strong>
         <button class="head-btn" on:click={() => { memoryOpen = false; }} aria-label={$t('pages.llmChat.close')}><X size={14} /></button>
       </div>
-      <p class="memory-hint">{$t('pages.llmChat.memoryHint')}</p>
-      <textarea
-        class="memory-input"
-        rows="6"
-        maxlength="4000"
-        bind:value={memory.instructions}
-        placeholder={$t('pages.llmChat.memoryPlaceholder')}
-      ></textarea>
-      <label class="memory-toggle">
-        <input type="checkbox" bind:checked={memory.enabled} />
-        {$t('pages.llmChat.memoryEnabled')}
-      </label>
+      <div class="memory-body">
+        <p class="memory-hint">{$t('pages.llmChat.memoryHint')}</p>
+        <textarea
+          class="memory-input"
+          rows="6"
+          maxlength="4000"
+          bind:value={memory.instructions}
+          placeholder={$t('pages.llmChat.memoryPlaceholder')}
+        ></textarea>
+        <label class="memory-toggle">
+          <input type="checkbox" bind:checked={memory.enabled} />
+          {$t('pages.llmChat.memoryEnabled')}
+        </label>
+      </div>
       <div class="memory-actions">
         {#if memorySaved}<span class="memory-saved"><Check size={13} /> {$t('pages.llmChat.memorySaved')}</span>{/if}
         <button class="memory-save" on:click={saveMemory} disabled={memorySaving}>
@@ -853,7 +855,9 @@
   /* ── About popover ────────────────────────────────────────────────────── */
   .about-pop {
     position: absolute; top: 2rem; right: 0; z-index: 30; width: min(340px, 90vw);
-    background: var(--bg-elevated); border: 1px solid var(--line-strong); border-radius: 12px;
+    /* Opaque: this floats over chat transcript, so a translucent surface made
+       the text underneath bleed through and the panel unreadable. */
+    background: var(--bg-float); border: 1px solid var(--line-strong); border-radius: 12px;
     box-shadow: 0 10px 30px rgba(15,32,39,0.16); padding: 0.8rem 0.95rem; text-align: left;
   }
   .about-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
@@ -866,26 +870,37 @@
   /* ── Memory modal ─────────────────────────────────────────────────────── */
   .memory-overlay {
     position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center;
-    background: rgba(15, 23, 42, 0.45); padding: 1rem;
+    background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(2px); padding: 1rem;
   }
   .memory-modal {
-    width: min(480px, 94vw); background: var(--bg-elevated); border: 1px solid var(--line-strong);
-    border-radius: 14px; box-shadow: 0 16px 48px rgba(15,32,39,0.25); padding: 1rem 1.1rem;
+    /* Opaque surface — a translucent one let the chat behind show through. */
+    width: min(480px, 94vw); background: var(--bg-float); border: 1px solid var(--line-soft);
+    border-radius: 16px; box-shadow: 0 24px 64px rgba(15,32,39,0.32); padding: 0;
+    overflow: hidden;
   }
-  .memory-head { display: flex; align-items: center; justify-content: space-between; }
-  .memory-head strong { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.95rem; color: var(--ink-800); }
-  .memory-hint { margin: 0.45rem 0 0.6rem; font-size: 0.78rem; color: var(--ink-500); line-height: 1.45; }
+  .memory-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.85rem 1.05rem; border-bottom: 1px solid var(--line-soft);
+    background: var(--bg-soft);
+  }
+  .memory-head strong { display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.95rem; color: var(--ink-800); }
+  .memory-body { padding: 0.95rem 1.05rem 0; }
+  .memory-hint { margin: 0 0 0.7rem; font-size: 0.78rem; color: var(--ink-500); line-height: 1.5; }
   .memory-input {
     width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem;
-    min-height: 110px; padding: 0.55rem 0.65rem; border-radius: 10px;
+    min-height: 130px; padding: 0.6rem 0.7rem; border-radius: 10px; line-height: 1.5;
     border: 1px solid var(--line-strong); background: var(--bg-strong); color: var(--ink-800);
   }
   .memory-input:focus { outline: none; border-color: #a5b4fc; box-shadow: 0 0 0 3px rgba(99,102,241,0.12); }
   .memory-toggle {
-    display: flex; align-items: center; gap: 0.45rem; margin: 0.55rem 0 0;
+    display: flex; align-items: center; gap: 0.45rem; margin: 0.7rem 0 0;
     font-size: 0.8rem; color: var(--ink-700); cursor: pointer;
   }
-  .memory-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.6rem; margin-top: 0.75rem; }
+  .memory-actions {
+    display: flex; align-items: center; justify-content: flex-end; gap: 0.6rem;
+    margin-top: 1rem; padding: 0.8rem 1.05rem; border-top: 1px solid var(--line-soft);
+    background: var(--bg-soft);
+  }
   .memory-saved { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.76rem; color: #16a34a; }
   .memory-save {
     display: inline-flex; align-items: center; gap: 0.35rem; cursor: pointer;
