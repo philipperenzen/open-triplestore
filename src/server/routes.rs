@@ -277,9 +277,9 @@ impl ChannelWriter {
         // `blocking_send` is correct here: we run inside `spawn_blocking`, and
         // applying back-pressure on the runtime (rather than dropping bytes) is
         // what keeps memory bounded for huge result sets.
-        self.tx.blocking_send(Ok(chunk)).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected")
-        })
+        self.tx
+            .blocking_send(Ok(chunk))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client disconnected"))
     }
 
     /// Send the tail of the buffered stream. Inherent (rather than only
