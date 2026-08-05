@@ -12,6 +12,7 @@
   import TermDefinitionCard from '../components/ontology/TermDefinitionCard.svelte';
   import AnnotationText from '../components/ontology/AnnotationText.svelte';
   import { lookupTerm } from '../lib/ontology/termDictionary.js';
+  import { pickByLang } from '../lib/ontology/termDisplay.js';
   // GeoPreview pulls in leaflet; load it lazily only when the resource actually
   // has geometry (geoPreviewMod below) so leaflet stays out of the main bundle.
   import FileViewer from '../components/viewer/FileViewer.svelte';
@@ -89,7 +90,7 @@
   }
   $: measureModel(allModels);
   import Select from '../components/Select.svelte';
-  import { t as i18nT } from 'svelte-i18n';
+  import { t as i18nT, locale } from 'svelte-i18n';
   import {
     ArrowLeft, ArrowRight, ArrowDownLeft,
     BookOpen, Tag, Layers, Copy, Check, MapPin, Image as ImageIcon, Link2, Info,
@@ -432,15 +433,11 @@
   $: definitions = outgoing.filter(r =>
     DEFINITION_PREDS.has(r.p?.value) && r.o?.type === 'literal');
 
-  // Highlighted label candidate for header: prefer English/no-lang first, else first.
-  $: primaryLabel = (() => {
-    if (labels.length === 0) return '';
-    const en = labels.find(r => {
-      const l = langOf(r.o);
-      return !l || l.toLowerCase().startsWith('en');
-    });
-    return (en || labels[0])?.o?.value || '';
-  })();
+  // Header label: the current UI locale wins when the data carries one — a
+  // Dutch UI shows the @nl label — then English, then untagged. `$locale` is
+  // read here (not inside the helper) so switching language re-picks it.
+  $: primaryLabel =
+    pickByLang(labels, (r) => langOf(r.o), $locale || 'en')?.o?.value || '';
 
   // ── Featured visuals for Overview ────────────────────────────────────────
   // A WKT literal, identified by datatype or by its leading geometry keyword.

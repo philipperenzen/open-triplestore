@@ -18,6 +18,7 @@
   import { formatSparql } from '../lib/ontology/sparqlFormat.js';
   import { Sparkles } from 'lucide-svelte';
   import { t as i18nT } from 'svelte-i18n';
+  import { pickByLang } from '../lib/ontology/termDisplay.js';
 
   export let query = '';
   export let mode = 'sparql';
@@ -140,11 +141,10 @@ WHERE {
     return p;
   }
 
+  // Completion tooltips follow the UI language too: an @nl rdfs:comment is what
+  // a Dutch reader wants to see above an English one.
   function pickLang(arr) {
-    if (!arr.length) return null;
-    return arr.find(x => (x['xml:lang'] || x.lang) === 'en')
-        || arr.find(x => !(x['xml:lang'] || x.lang))
-        || arr[0];
+    return pickByLang(arr, (x) => x['xml:lang'] || x.lang);
   }
 
   function iriHoverTooltip(terms) {

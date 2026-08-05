@@ -73,6 +73,34 @@ export function pickLang(values: LangValue[], uiLang = 'en'): string {
 }
 
 /**
+ * Pick the best item for the active language out of an arbitrarily-shaped list,
+ * using `langOf` to read each item's language tag. Ties keep the first, so a
+ * source's own ordering breaks equal matches. Returns null for an empty list.
+ *
+ * `pickLang` is the LangValue-shaped special case of this; everything that
+ * renders labels straight off the wire (resource pages, vocabulary cards,
+ * editor tooltips) goes through here so "prefer the current locale" means one
+ * thing across the app.
+ */
+export function pickByLang<T>(
+  values: readonly T[] | null | undefined,
+  langOf: (v: T) => string | null | undefined,
+  ui: string = activeLang,
+): T | null {
+  if (!values || !values.length) return null;
+  let best = values[0];
+  let bestRank = langRank(langOf(best), ui);
+  for (let i = 1; i < values.length; i++) {
+    const r = langRank(langOf(values[i]), ui);
+    if (r < bestRank) {
+      best = values[i];
+      bestRank = r;
+    }
+  }
+  return best;
+}
+
+/**
  * Order values for a grouped, multi-language display: the active UI language
  * first, then English, then other languages alphabetically, with untagged
  * values last. Non-mutating.

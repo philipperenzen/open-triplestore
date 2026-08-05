@@ -760,7 +760,7 @@
   {/if}
 
   {#if tab === 'account'}
-  <div class="card danger-zone-card">
+  <div class="card card-wide danger-zone-card">
     <h2><AlertTriangle size={18} /> {$t('pages.settings.dangerZone')}</h2>
     <p class="hint">{$t('pages.settings.dangerZoneHint')}</p>
 
@@ -788,7 +788,7 @@
   {/if}
 
   {#if tab === 'tokens'}
-  <div class="card">
+  <div class="card card-wide">
     <h2><Key size={18} /> {$t('pages.settings.apiTokensHeading')}</h2>
     <p class="hint">{$t('pages.settings.apiTokensHint')}</p>
 
@@ -1131,11 +1131,45 @@
 {/if}
 
 <style>
+  /* One column on narrow screens; on a wide one the cards sit side by side
+     instead of running down a single 800px ribbon with the rest of the
+     viewport empty. The `{#if tab === …}` wrappers emit no DOM, so the cards
+     are direct grid items no matter which tab they belong to. */
   .settings-page {
-    display: flex;
-    flex-direction: column;
-    gap: 1.5rem;
-    max-width: 800px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: 1.25rem;
+    max-width: 820px;
+  }
+  /* Hero and tabs always span the full width of whatever grid is in play. */
+  .settings-hero,
+  .settings-tabs {
+    grid-column: 1 / -1;
+  }
+
+  @media (min-width: 1024px) {
+    .settings-page {
+      max-width: 1180px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      /* Cards keep their natural height rather than stretching to match the
+         tallest one in the row. */
+      align-items: start;
+      gap: 1.25rem 1.5rem;
+    }
+    /* The token table and the danger zone are wide by nature — a half-column
+       squeezes the table into a scrollbar. */
+    .settings-page > .card-wide {
+      grid-column: 1 / -1;
+    }
+  }
+
+  /* Very wide: a third column would make the forms too short and wide, so
+     cap the grid and let the page centre instead. */
+  @media (min-width: 1600px) {
+    .settings-page {
+      max-width: 1320px;
+    }
   }
 
   /* ── Identity hero ─────────────────────────────────────────────────────── */

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { t } from 'svelte-i18n';
+  import { t, locale } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
   import {
     Search, Loader2, BookOpen, Sparkles, Tag, Download, Check, ExternalLink,
@@ -12,6 +12,7 @@
   } from '../lib/api.ts';
   import { isAdmin } from '../lib/stores.js';
   import { safeExternalUrl } from '../lib/safeUrl.ts';
+  import { pickByLang } from '../lib/ontology/termDisplay.js';
   import { toastSuccess, toastError } from '../lib/toast.ts';
 
   // ── Tabs ──────────────────────────────────────────────────────────────────
@@ -149,14 +150,15 @@
     runVocabSearch();
   }
 
-  function title(entry) {
-    const en = entry.titles?.find((x) => x.lang === 'en');
-    return (en || entry.titles?.[0])?.value || entry.prefix;
+  // A vocabulary's title/description in the reader's language when the catalogue
+  // carries one, then English. `lang` is a parameter (bound to `$locale` at the
+  // call sites) so the cards re-render when the UI language changes.
+  function title(entry, lang) {
+    return pickByLang(entry.titles, (x) => x.lang, lang)?.value || entry.prefix;
   }
 
-  function description(entry) {
-    const en = entry.descriptions?.find((x) => x.lang === 'en');
-    const d = (en || entry.descriptions?.[0])?.value || '';
+  function description(entry, lang) {
+    const d = pickByLang(entry.descriptions, (x) => x.lang, lang)?.value || '';
     return d.length > 220 ? d.slice(0, 220) + '…' : d;
   }
 
@@ -409,8 +411,10 @@
                   <span class="vs-badge vs-src-lov">LOV</span>
                 {/if}
               </div>
-              <h4>{title(entry)}</h4>
-              {#if description(entry)}<p class="vs-card-desc">{description(entry)}</p>{/if}
+              <h4>{title(entry, $locale)}</h4>
+              {#if description(entry, $locale)}
+                <p class="vs-card-desc">{description(entry, $locale)}</p>
+              {/if}
               <div class="vs-card-tags">
                 {#each (entry.tags || []).slice(0, 4) as tg}
                   <span class="vs-tag">{tg}</span>
