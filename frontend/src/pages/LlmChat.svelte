@@ -12,13 +12,14 @@
   import { renderMarkdown, highlightSparql } from '../lib/markdown.js';
   import { copyToClipboard } from '../lib/clipboard.ts';
   import ChatRichMessage from '../components/chat/ChatRichMessage.svelte';
+  import { prettySparql } from '../lib/resultHighlight.js';
   import ApiRunBlock from '../components/chat/ApiRunBlock.svelte';
   import CsvPreview from '../components/chat/CsvPreview.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import {
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
-    Plus, Pencil, Trash2, Info, NotebookPen, X, MessageSquare, Copy,
+    Plus, Pencil, Trash2, Info, NotebookPen, X, MessageSquare, Copy, Eye, EyeOff,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
@@ -26,6 +27,26 @@
   // While a turn streams, the trail entries are live: {sparql, pending, ok?,
   // rowCount?, truncated?, error?} — replaced by the authoritative trail on done.
   let messages = []; // { role, content, streaming?, stopped?, queries?, ranQuery?, showQuery?, reviewed?, isError?, runs? }
+
+  // ── Verbosity ───────────────────────────────────────────────────────────────
+  // Spark does a lot that the answer never shows: it plans, writes SPARQL, runs
+  // it (sometimes several times, sometimes failing and retrying) and only then
+  // writes prose. The quiet default is right for reading an answer and wrong for
+  // trusting one — "Thinking…" tells you nothing about WHAT it is doing. Verbose
+  // opens the retrieval trail as it happens and keeps it open afterwards, so the
+  // queries, their row counts and their failures are visible without a click per
+  // turn. Persisted, because it is a working style, not a per-turn choice.
+  const VERBOSE_KEY = 'spark.verbose';
+  let verbose = false;
+  try { verbose = localStorage.getItem(VERBOSE_KEY) === '1'; } catch { /* private mode */ }
+  function toggleVerbose() {
+    verbose = !verbose;
+    try { localStorage.setItem(VERBOSE_KEY, verbose ? '1' : '0'); } catch { /* ignore */ }
+    // Re-render the existing turns under the new default (see `showTrail`).
+    messages = messages;
+  }
+  /** Is this turn's trail open? An explicit per-turn toggle wins over the mode. */
+  const showTrail = (msg, v) => (msg.showQuery === undefined ? v : msg.showQuery);
   let input = '';
   let loading = false;
   let llmStatus = null;
@@ -127,7 +148,6 @@
         content: m.content,
         queries: m.queries || [],
         ranQuery: (m.queries || []).some((q) => q.ok),
-        showQuery: false,
         reviewed: null,
         stopped: !!m.stopped,
         runs: [],
@@ -276,7 +296,6 @@
       streaming: true,
       queries: [],
       ranQuery: false,
-      showQuery: false,
       reviewed: null,
       runs: [],
     };
@@ -434,6 +453,13 @@
   }
 
   // Hand the generated query off to the SPARQL workspace (read on mount there).
+  /** Open an IRI mentioned in an answer on its resource page — the natural next
+   *  question after "what is X?" is "show me X". */
+  function openResource(iri) {
+    if (!iri) return;
+    navigate(`/resource?iri=${encodeURIComponent(iri)}`);
+  }
+
   function openInSparql(sparql) {
     try { sessionStorage.setItem('ots_sparql_load', sparql); } catch {}
     navigate('/sparql');
@@ -501,6 +527,16 @@
         <NotebookPen size={14} />
       </button>
     {/if}
+    <button
+      class="head-btn"
+      class:on={verbose}
+      on:click={toggleVerbose}
+      aria-pressed={verbose}
+      aria-label={$t('pages.llmChat.verboseTitle')}
+      title={$t('pages.llmChat.verboseTitle')}
+    >
+      {#if verbose}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+    </button>
     <button class="head-btn" on:click={() => { aboutOpen = !aboutOpen; }} aria-label={$t('pages.llmChat.aboutSpark')} title={$t('pages.llmChat.aboutSpark')} aria-expanded={aboutOpen}>
       <Info size={14} />
     </button>
@@ -598,6 +634,15 @@
                   </span>
                 {/each}
               </div>
+              {#if verbose}
+                <!-- Verbose: the query itself, while it runs. The chips say a
+                     round happened; this says what was asked. -->
+                {#each msg.queries as q}
+                  {#if q.sparql}
+                    <pre class="live-sparql">{prettySparql(q.sparql)}</pre>
+                  {/if}
+                {/each}
+              {/if}
             {/if}
           {:else if msg.role === 'assistant' && !msg.isError}
             <!-- Interactive answer: markdown plus runnable sparql/api blocks and
@@ -608,6 +653,7 @@
                 queries={msg.queries}
                 on:runApi={(e) => attachRun(msg, e.detail)}
                 on:openInSparql={(e) => openInSparql(e.detail)}
+                on:openResource={(e) => openResource(e.detail?.iri)}
               />
             </div>
             {#if msg.stopped}
@@ -637,8 +683,8 @@
 
           {#if !msg.streaming && msg.queries?.length}
             <div class="query-block">
-              <button class="query-toggle" on:click={() => { msg.showQuery = !msg.showQuery; messages = messages; }}>
-                {#if msg.showQuery}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
+              <button class="query-toggle" on:click={() => { msg.showQuery = !showTrail(msg, verbose); messages = messages; }}>
+                {#if showTrail(msg, verbose)}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
                 <Terminal size={13} />
                 {#if msg.queries.length > 1}
                   {$t('pages.llmChat.ranQueries', { values: { count: msg.queries.length } })}
@@ -649,7 +695,7 @@
                   <span class="row-count">· {msg.queries[0].rows.length}{msg.queries[0].truncated ? '+' : ''} {msg.queries[0].rows.length === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}</span>
                 {/if}
               </button>
-              {#if msg.showQuery}
+              {#if showTrail(msg, verbose)}
                 {#each msg.queries as q, qi}
                   <div class="query-item">
                     {#if msg.queries.length > 1}
@@ -843,6 +889,24 @@
     position: relative;
     display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem;
     margin-bottom: 0.5rem; min-height: 1.6rem;
+  }
+  .head-btn.on {
+    color: var(--brand-600, #2563a8);
+    background: var(--brand-50, #eff6ff);
+  }
+  .live-sparql {
+    margin: 0.35rem 0 0;
+    padding: 0.45rem 0.6rem;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border-radius: 7px;
+    font-family: 'SF Mono', ui-monospace, monospace;
+    font-size: 0.7rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 11rem;
+    overflow: auto;
   }
   .head-spacer { flex: 1; }
   .head-btn {

@@ -12,6 +12,7 @@ import {
   sniffLang,
   normalizeSparqlResult,
   decorateApiLinks,
+  decorateIriLinks,
   lenientJsonParse,
 } from '../chatRich.js';
 
@@ -113,12 +114,31 @@ describe('parseApiEndpoint', () => {
     expect(parseApiEndpoint('`GET /api/x/run`')).toEqual({ method: 'GET', path: '/api/x/run' });
   });
 
+  it('keeps a query string that contains spaces (WKT parameters)', () => {
+    // A GeoSPARQL service is called with a polygon, and WKT is full of spaces.
+    // The same endpoint used to render runnable without parameters and as inert
+    // text with them, which is exactly when the reader needs the run button.
+    const wkt = 'GET /api/datasets/spatial/api-services/cities-in-bbox/run?from=POLYGON((3.5 51, 4.5 51, 4.5 52, 3.5 52, 3.5 51))';
+    expect(parseApiEndpoint(wkt)).toEqual({
+      method: 'GET',
+      path: '/api/datasets/spatial/api-services/cities-in-bbox/run?from=POLYGON((3.5 51, 4.5 51, 4.5 52, 3.5 52, 3.5 51))',
+    });
+    // …and without the method, where the spaces are still inside the query.
+    expect(parseApiEndpoint('/api/x/run?from=POLYGON((3.5 51, 4.5 52))')).toEqual({
+      method: 'GET',
+      path: '/api/x/run?from=POLYGON((3.5 51, 4.5 52))',
+    });
+  });
+
   it('rejects non-GET methods, non-/api paths and prose', () => {
     expect(parseApiEndpoint('POST /api/x/run')).toBeNull();
     expect(parseApiEndpoint('DELETE /api/x')).toBeNull();
     expect(parseApiEndpoint('GET /sparql')).toBeNull();
     expect(parseApiEndpoint('call the api please')).toBeNull();
     expect(parseApiEndpoint('')).toBeNull();
+    // Prose that merely mentions a path is still prose.
+    expect(parseApiEndpoint('/api/x/run is the endpoint to call')).toBeNull();
+    expect(parseApiEndpoint('GET the data from somewhere else')).toBeNull();
   });
 });
 
@@ -462,3 +482,30 @@ describe('query-sourced widgets', () => {
   });
 });
 
+
+describe('decorateIriLinks', () => {
+
+  it('turns an IRI in inline code into a resource chip', () => {
+    const html = decorateIriLinks('<p>see <code>https://ex.org/id/thing</code></p>');
+    expect(html).toContain('chat-iri-link');
+    expect(html).toContain('data-iri="https://ex.org/id/thing"');
+    expect(html).toContain('role="button"');
+  });
+
+  it('accepts urn: and strips angle brackets', () => {
+    expect(decorateIriLinks('<code>urn:uuid:1234</code>')).toContain('data-iri="urn:uuid:1234"');
+    expect(decorateIriLinks('<code>&lt;https://ex.org/x&gt;</code>')).toContain('data-iri="https://ex.org/x"');
+  });
+
+  it('replaces an auto-linked URL with the in-app chip', () => {
+    const html = decorateIriLinks('<p><a href="https://ex.org/id/thing">https://ex.org/id/thing</a></p>');
+    expect(html).toContain('chat-iri-link');
+    expect(html).not.toContain('<a href');
+  });
+
+  it('leaves code BLOCKS, prose and non-IRIs alone', () => {
+    expect(decorateIriLinks('<pre><code>https://ex.org/x</code></pre>')).not.toContain('chat-iri-link');
+    expect(decorateIriLinks('<code>SELECT ?s</code>')).not.toContain('chat-iri-link');
+    expect(decorateIriLinks('<p>https://ex.org/x</p>')).not.toContain('chat-iri-link');
+  });
+});
