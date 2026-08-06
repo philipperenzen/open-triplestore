@@ -175,7 +175,7 @@ sha1 = "0.11"
 # (no danger-allow-state-serialisation), only finished credentials are stored.
 # conditional-ui enables the discoverable-credential login flow (no username).
 webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
-rand = "0.8"
+rand = "0.10"
 base64 = "0.22"
 flate2 = "1"
 age = { version = "0.12", optional = true }
