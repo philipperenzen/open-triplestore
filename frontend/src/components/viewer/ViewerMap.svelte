@@ -54,6 +54,15 @@
   export let elements = [];
   export let selected = '';
   export let height = '100%';
+  /**
+   * IRI the FIRST fit should frame, instead of the whole dataset extent.
+   *
+   * A shared/embedded link names one thing (`?element=`/`?focus=`), and this
+   * dataset spans the globe — fitting everything first meant a world map, then
+   * a long flight once the element finally resolved. With this set the camera
+   * opens on the subject; the dataset-wide fit is still one "Fit all" away.
+   */
+  export let initialFocus = '';
   /** Extra map attribution line (e.g. the 3DBAG CC-BY credit). */
   export let extraAttribution = '';
   /** Fallback footprint (m) for models with untrustworthy units (most STLs). */
@@ -113,6 +122,7 @@
   const camera = new THREE.Camera();
   let lastProj = null; // latest map projection matrix (for raycasting)
   let fitted = false;
+  let mapResizeObs = null;
   // Auto-fit bookkeeping. `userMoved` goes true on the first USER-initiated camera
   // move so we never yank the view out from under someone. `modelsAutoFitted` makes
   // the "include the 3D models once they finish loading" refit happen at most once.
@@ -284,6 +294,11 @@
     g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     g.computeVertexNormals();
     const mesh = new THREE.Mesh(g, defaultMaterial(dark));
+    // GeoSPARQL puts no orientation requirement on polyhedral rings, so face
+    // winding in the wild is arbitrary — with front-face culling the walls of
+    // a solid can vanish and an extruded block renders as its roof lying flat
+    // on the map. Draw both sides, like the IFC surface material does.
+    mesh.material.side = THREE.DoubleSide;
     mesh.userData.stl = true; // themeMaterials() re-skins default-material meshes
     const model = new THREE.Group();
     model.add(mesh);
@@ -355,6 +370,11 @@
         el.size_meters && el.size_meters > 0
           ? el.size_meters
           : realWorldMeters(cached, FALLBACK_FOOTPRINT_M);
+      // Compose before measuring: the clone copies the cache master's matrixWorld
+      // and IFC meshes never auto-update theirs, so an unrendered clone would
+      // otherwise measure at whatever transform the master last composed —
+      // `entry.box` then drives fit/suppression at raw model scale.
+      model.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(model);
       const radius = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 0.62;
       const holder = new THREE.Group();
@@ -401,7 +421,14 @@
   function themeMaterials() {
     for (const e of entries.values()) {
       e.modelGroup?.traverse((n) => {
-        if (n.isMesh && n.userData.stl) n.material = defaultMaterial(dark);
+        if (n.isMesh && n.userData.stl) {
+          // Carry render-geometry flags across the re-skin: volumetric WKT
+          // meshes draw DoubleSide (arbitrary ring winding), and losing that on
+          // a theme toggle would flatten them again.
+          const side = n.material?.side;
+          n.material = defaultMaterial(dark);
+          if (side !== undefined) n.material.side = side;
+        }
       });
     }
     map?.triggerRepaint();
@@ -1222,13 +1249,22 @@
     if (import.meta.env.DEV) window.__otsViewerEntries = entries; // dev: re-point after reassign
     ensureOverlays();
     if (!fitted) {
-      const features = elements.map(toMapFeature).filter(Boolean);
-      const b = featureBounds(features);
-      if (b) {
+      // A deep link names its subject: open ON it rather than on the dataset's
+      // whole extent (a world view for a globe-spanning dataset), which then
+      // needed a second, long flight once the subject resolved.
+      const focusAnchor = initialFocus ? anchorForFocus(initialFocus) : null;
+      if (focusAnchor) {
         fitted = true;
-        map.fitBounds([[b[0][1], b[0][0]], [b[1][1], b[1][0]]], { padding: 70, maxZoom: 16.2, duration: 0 });
-        // Cinematic tilt-in when there is something 3D to look at.
-        if (elements.some((el) => modelRefOf(el))) map.easeTo({ pitch: 52, duration: 1100 });
+        map.jumpTo({ center: focusAnchor, zoom: 17.6, pitch: 52 });
+      } else {
+        const features = elements.map(toMapFeature).filter(Boolean);
+        const b = featureBounds(features);
+        if (b) {
+          fitted = true;
+          map.fitBounds([[b[0][1], b[0][0]], [b[1][1], b[1][0]]], { padding: 70, maxZoom: 16.2, duration: 0 });
+          // Cinematic tilt-in when there is something 3D to look at.
+          if (elements.some((el) => modelRefOf(el))) map.easeTo({ pitch: 52, duration: 1100 });
+        }
       }
     }
   }
@@ -1355,6 +1391,19 @@
    * zoom is only ever RAISED, and a target that is already comfortably framed
    * does not move the camera at all — pass `{ force: true }` to frame it anyway.
    */
+  /** Map anchor of `id`, walking up to the nearest located ancestor — the same
+   *  resolution focusElement() does, but usable before any model has attached
+   *  (the first fit runs while the IFC is still parsing). */
+  function anchorForFocus(id) {
+    let el = elements.find((e) => e.id === id);
+    const seen = new Set();
+    while (el && !el.wkt4326 && el.parent && !seen.has(el.id)) {
+      seen.add(el.id);
+      el = elements.find((e) => e.id === el.parent) || null;
+    }
+    return el ? modelAnchor(el) : null;
+  }
+
   export function focusElement(id, opts = {}) {
     if (!map) return;
     let el = elements.find((e) => e.id === id);
@@ -1574,6 +1623,15 @@
     });
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-left');
+    // Follow the CONTAINER, not just the window: MapLibre sizes its canvas once
+    // at construction and afterwards only listens for window resizes. A host
+    // that lays the container out after mount — an iframe that gets its height
+    // from the embedding page, a panel that opens, a flex row that settles —
+    // therefore kept MapLibre's 400×300 fallback canvas inside a full-size box,
+    // painting the map into one corner. One observer, and the canvas always
+    // matches the box it is in.
+    mapResizeObs = new ResizeObserver(() => map?.resize());
+    mapResizeObs.observe(mapEl);
     map.on('style.load', () => {
       styleReady = true;
       // setStyle recreates every layer, so the stashed originals and the
@@ -1613,6 +1671,8 @@
 
   onDestroy(() => {
     unsubTheme();
+    mapResizeObs?.disconnect();
+    mapResizeObs = null;
     if (tweenRAF) cancelAnimationFrame(tweenRAF);
     if (suppressTimer) clearTimeout(suppressTimer);
     for (const e of entries.values()) {

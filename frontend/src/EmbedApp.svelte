@@ -55,9 +55,49 @@
   let unauthorized = false;
   let selected = elementParam;
   let mapComponent;
+  /** Did the fast (located) feed already frame the deep-linked element? */
+  let focusApplied = false;
 
-  $: hasGeo = elements.some((e) => e.wkt4326);
-  $: refs = modelRefs(elements);
+  /**
+   * What an `?element=` embed actually shows: that element, the ancestors it
+   * inherits geometry from, and its own sub-elements — not the rest of the
+   * dataset.
+   *
+   * The map places (and therefore downloads + parses) a model per located
+   * element, so a one-building embed of this demo dataset was pulling every
+   * other building, the city block and the landmark meshes with it: a long
+   * wait for content the link never asked for. A share link names its subject;
+   * showing exactly that is both faster and what the reader expects.
+   */
+  function scopeToElement(all, id) {
+    const byId = new Map(all.map((e) => [e.id, e]));
+    if (!byId.has(id)) return all; // not in this feed phase yet — show everything
+    const keep = new Set([id]);
+    // Ancestors: a sub-element's geometry (and map anchor) lives up the chain.
+    let cur = byId.get(id);
+    const guard = new Set();
+    while (cur?.parent && !guard.has(cur.id)) {
+      guard.add(cur.id);
+      keep.add(cur.parent);
+      cur = byId.get(cur.parent);
+    }
+    // Descendants: what you can pick once you are inside the subject.
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const e of all) {
+        if (e.parent && keep.has(e.parent) && !keep.has(e.id)) {
+          keep.add(e.id);
+          grew = true;
+        }
+      }
+    }
+    return all.filter((e) => keep.has(e.id));
+  }
+  $: shown = elementParam ? scopeToElement(elements, elementParam) : elements;
+
+  $: hasGeo = shown.some((e) => e.wkt4326);
+  $: refs = modelRefs(shown);
 
   // /embed/model — a single file by URL, no dataset feed involved.
   const srcParam = params.get('src') || '';
@@ -69,6 +109,10 @@
 
   async function load() {
     if (!valid || kind === 'model') return;
+    // An ?element= link is an explicit framing request. Hand it to the map as
+    // `initialFocus` so its very FIRST fit opens on that element (see
+    // ViewerMap.initialFocus) — no world-extent flash, no second flight.
+    if (elementParam) selected = elementParam;
     try {
       // Fast located subset first so the map paints immediately…
       if (kind === 'map') {
@@ -76,6 +120,14 @@
           const fast = await getViewerFeed(datasetId, null, { located: true });
           elements = fast?.elements || [];
           loading = false;
+          // The located feed almost always already carries the deep-linked
+          // element (or its located ancestor). Frame it NOW rather than after
+          // the full feed, which on a big dataset is tens of seconds of
+          // structure the embed does not need in order to point a camera.
+          if (elementParam && elements.some((e) => e.id === elementParam)) {
+            focusApplied = true;
+            setTimeout(() => mapComponent?.focusElement?.(elementParam, { force: true }), 60);
+          }
         } catch {
           /* the full feed below is the source of truth */
         }
@@ -86,10 +138,12 @@
       loading = false;
       if (elementParam) {
         selected = elementParam;
-        // `force`: an ?element= deep link is an explicit framing request, so it
-        // must move the camera even when the element happens to already be in
-        // view at the dataset's default extent.
-        setTimeout(() => mapComponent?.focusElement?.(elementParam, { force: true }), 400);
+        // Re-frame only for an element the fast feed did not have (a sub-element
+        // that resolves to a located ancestor): re-running it otherwise would
+        // yank a camera the user has meanwhile moved.
+        if (!focusApplied) {
+          setTimeout(() => mapComponent?.focusElement?.(elementParam, { force: true }), 200);
+        }
       }
     } catch (e) {
       loading = false;
@@ -115,7 +169,7 @@
   function onSelect(event) {
     const { id, guid } = event.detail || {};
     // An IFC mesh pick carries a GlobalId — prefer that element, like the full viewer.
-    const byGuid = guid ? elements.find((e) => e.ifc_guid === guid) : null;
+    const byGuid = guid ? shown.find((e) => e.ifc_guid === guid) : null;
     selected = byGuid?.id || id || selected;
     postSelect({ id: selected, guid });
   }
@@ -149,7 +203,15 @@
       <!-- No located elements — same fallback as the full explorer: pure 3D. -->
       <Model3D {refs} {selected} height="100%" on:select={onSelect} />
     {:else}
-      <ViewerMap bind:this={mapComponent} {elements} {selected} basemap={basemapParam} height="100%" on:select={onSelect} />
+      <ViewerMap
+        bind:this={mapComponent}
+        elements={shown}
+        {selected}
+        initialFocus={elementParam}
+        basemap={basemapParam}
+        height="100%"
+        on:select={onSelect}
+      />
     {/if}
   {:else if kind === 'cesium'}
     <CesiumViewer {datasetId} {selected} embedded expand={false} height="100%" on:select={onSelect} />

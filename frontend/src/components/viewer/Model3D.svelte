@@ -59,7 +59,13 @@
     }
     for (const group of groupsById.values()) {
       group.traverse((n) => {
-        if (n.isMesh && n.userData.stl) n.material = defaultMaterial(dark);
+        if (n.isMesh && n.userData.stl) {
+          // Preserve side across the re-skin (volumetric WKT meshes draw
+          // DoubleSide because polyhedral ring winding is arbitrary).
+          const side = n.material?.side;
+          n.material = defaultMaterial(dark);
+          if (side !== undefined) n.material.side = side;
+        }
       });
     }
     highlight();
@@ -113,6 +119,10 @@
     const box = new THREE.Box3();
     let any = false;
     for (const g of groupsById.values()) {
+      // The freshly-added clones carry the cache master's matrixWorld and their
+      // meshes opt out of auto-update; no render has composed them yet when the
+      // post-load fit runs, so measure against explicitly composed matrices.
+      g.updateMatrixWorld(true);
       const b = new THREE.Box3().setFromObject(g);
       if (b.isEmpty()) continue;
       box.union(b);

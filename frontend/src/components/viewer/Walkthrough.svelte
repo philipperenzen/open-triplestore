@@ -59,6 +59,40 @@
   let picked = null; // { label, type, guid, id }
   let wtNeedsRender = true; // draw a frame while paused (render-on-demand)
 
+  // ── When the detail card opens ──────────────────────────────────────────────
+  // Two permanent cards (an aim card in the middle of the view + a data card in
+  // the corner) covered the building and made the walkthrough feel like a form.
+  // Now: aiming shows a single quiet line, and the DATA card is earned — the
+  // element must be SELECTED and the crosshair must rest on it. Walking past
+  // your own selection therefore never flashes the card open.
+  const DETAIL_DWELL_MS = 1600;
+  let detailOpen = false;
+  let dwellTimer = null;
+
+  /** Arm/disarm the dwell timer for the (hover, selection, lock) combination. */
+  function syncDwell(hoverGuid, pickedGuid, isLocked) {
+    // Unlocked (Esc) is "reading" mode: the card must stay put so its buttons
+    // can actually be clicked — the cursor doesn't exist while pointer-locked.
+    if (!isLocked) return;
+    const onSelection = !!pickedGuid && hoverGuid === pickedGuid;
+    if (!onSelection) {
+      clearTimeout(dwellTimer);
+      dwellTimer = null;
+      if (detailOpen) {
+        detailOpen = false;
+        wtNeedsRender = true;
+      }
+      return;
+    }
+    if (detailOpen || dwellTimer) return; // already open, or already counting
+    dwellTimer = setTimeout(() => {
+      dwellTimer = null;
+      detailOpen = true;
+      wtNeedsRender = true;
+    }, DETAIL_DWELL_MS);
+  }
+  $: syncDwell(hover?.guid || '', picked?.guid || '', locked);
+
   // Movement mode: 'walk' = first-person, bound by gravity to the floors/stairs
   // (Space jumps, Ctrl crouches) — the natural way to inspect an interior;
   // 'fly' = free/creative "god" mode (Space/E up, Ctrl/Q/C down). Toggle with
@@ -341,6 +375,9 @@
 
   function clearPicked() {
     picked = null;
+    clearTimeout(dwellTimer);
+    dwellTimer = null;
+    detailOpen = false;
     applySelection(null);
   }
 
@@ -471,12 +508,34 @@
           camera.quaternion.fromArray(saved.quat);
           mode = saved.mode || mode;
         } else {
+          // Compose first — IFC meshes opt out of matrix auto-update, and no
+          // render has touched this fresh clone yet (see standBeside above).
+          model.updateMatrixWorld(true);
           const box = new THREE.Box3().setFromObject(model);
           const size = box.getSize(new THREE.Vector3());
           const c = box.getCenter(new THREE.Vector3());
-          const eye = box.min.y + 1.6;
-          camera.position.set(c.x, eye, box.max.z + Math.max(3, size.z * 0.35));
-          camera.lookAt(c.x, eye, c.z);
+          // Where to stand when nothing more specific was asked for.
+          //
+          // A house is best met from the outside — a few metres back from its
+          // façade, whole building in frame. That rule does NOT survive scale:
+          // applied to the 615 m viaduct it put the camera 215 m past the end
+          // of the deck at ground level, so "walk through" opened on a speck on
+          // the horizon with nothing to walk on. Infrastructure is walked FROM
+          // it, not at it: for anything longer than a city block, spawn over
+          // the middle and let walk-mode gravity (applyWalkGravity) settle the
+          // camera onto whatever surface is under that point — the deck.
+          const LONG_MODEL_M = 120;
+          const plan = Math.max(size.x, size.z);
+          if (plan > LONG_MODEL_M) {
+            camera.position.set(c.x, box.max.y + EYE_HEIGHT, c.z);
+            // Look along the model's long axis — the direction you can walk.
+            const along = size.z >= size.x ? [c.x, box.max.y + EYE_HEIGHT, box.max.z] : [box.max.x, box.max.y + EYE_HEIGHT, c.z];
+            camera.lookAt(along[0], along[1], along[2]);
+          } else {
+            const eye = box.min.y + EYE_HEIGHT;
+            camera.position.set(c.x, eye, box.max.z + Math.max(3, size.z * 0.35));
+            camera.lookAt(c.x, eye, c.z);
+          }
         }
       } catch (e) {
         error = e?.message || 'Failed to load the building model.';
@@ -567,6 +626,8 @@
   });
 
   onDestroy(() => {
+    clearTimeout(dwellTimer);
+    dwellTimer = null;
     // Remember where the user stood so re-opening this model resumes in place.
     if (camera && model) {
       wtPoseByUrl.set(url, {
@@ -615,13 +676,13 @@
   {#if !loading && !error}
     <div class="reticle" class:hot={!!hover}></div>
     {#if hover && locked}
-      <!-- Hover card: what the crosshair is on, before you commit to a click.
-           Deliberately terse — it sits in the middle of the view while you move. -->
-      <div class="hover-card" class:is-selected={picked?.guid === hover.guid}>
-        <span class="hover-name">{hover.label}</span>
-        {#if hover.type}<span class="hover-type">{hover.type}</span>{/if}
-        <span class="hover-guid">{hover.guid}</span>
-        <span class="hover-hint">
+      <!-- Aim line: one quiet row naming what the crosshair is on. Everything
+           else about the element waits for a deliberate selection (see
+           DETAIL_DWELL_MS) so the view stays a view, not a dashboard. -->
+      <div class="aim" class:is-selected={picked?.guid === hover.guid}>
+        {#if hover.type}<span class="aim-type">{hover.type}</span>{/if}
+        <span class="aim-name">{hover.label}</span>
+        <span class="aim-hint">
           {picked?.guid === hover.guid
             ? $i18nT('viewer.hoverSelected')
             : $i18nT('viewer.hoverClickToSelect')}
@@ -710,8 +771,9 @@
     </button>
   {/if}
 
-  <!-- Picked-element info card -->
-  {#if picked}
+  <!-- Detail card for the SELECTED element — opens once the crosshair has
+       rested on it (or as soon as you leave pointer lock to read it). -->
+  {#if picked && (detailOpen || !locked)}
     <div class="wt-info">
       <div class="wt-info-head">
         <strong>{picked.label}</strong>
@@ -836,53 +898,59 @@
     border-color: #ff8a2a;
     background: rgba(255, 138, 42, 0.35);
   }
-  /* Card under the crosshair describing whatever it is aimed at. Sits just
-     below centre so it never covers the thing being inspected. */
-  .hover-card {
+  /* One quiet line under the crosshair naming what it is aimed at. Sized and
+     weighted to read at a glance without becoming another panel — the element's
+     data lives in .wt-info, which only opens on a deliberate selection. */
+  .aim {
     position: absolute;
     left: 50%;
-    top: calc(50% + 18px);
+    top: calc(50% + 20px);
     transform: translateX(-50%);
     display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 2px;
-    padding: 6px 12px;
-    border-radius: 9px;
-    background: rgba(8, 13, 22, 0.88);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-    color: #fff;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 11px;
+    border-radius: 999px;
+    background: rgba(8, 13, 22, 0.66);
+    color: #eef4fa;
     pointer-events: none;
-    max-width: min(60vw, 380px);
-    text-align: center;
+    max-width: min(56vw, 420px);
+    white-space: nowrap;
+    backdrop-filter: blur(3px);
   }
-  .hover-card.is-selected {
-    border-color: rgba(232, 89, 12, 0.75);
+  .aim.is-selected {
+    background: rgba(232, 89, 12, 0.82);
+    color: #fff;
   }
-  .hover-name {
-    font-size: 0.84rem;
+  .aim-name {
+    font-size: 0.82rem;
     font-weight: 600;
-    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
-  .hover-type {
-    font-size: 0.68rem;
+  .aim-type {
+    font-size: 0.62rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     color: #7ed6d0;
+    flex: none;
   }
-  .hover-guid {
-    font-family: var(--font-mono, monospace);
+  .aim.is-selected .aim-type {
+    color: rgba(255, 255, 255, 0.85);
+  }
+  .aim-hint {
     font-size: 0.64rem;
-    color: #8fa3b8;
+    color: #9db1c6;
+    flex: none;
   }
-  .hover-hint {
-    font-size: 0.66rem;
-    color: #b6c6d6;
+  .aim.is-selected .aim-hint {
+    color: rgba(255, 255, 255, 0.8);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .wt-info {
+      animation: none;
+    }
   }
   .wt-hints {
     position: absolute;
@@ -1029,11 +1097,20 @@
     bottom: 16px;
     width: min(320px, 80vw);
     background: rgba(13, 20, 31, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    /* Selection accent: the card and the highlighted geometry read as one act. */
+    border: 1px solid rgba(232, 89, 12, 0.5);
     border-radius: 10px;
     padding: 10px 12px;
     color: #dbe6f2;
     backdrop-filter: blur(8px);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
+    animation: wt-info-in 160ms ease-out both;
+  }
+  @keyframes wt-info-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
   }
   .wt-info-head {
     display: flex;
