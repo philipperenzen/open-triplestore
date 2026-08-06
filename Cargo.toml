@@ -251,7 +251,7 @@ ots-plugin-accounts-dashboard = { path = "plugins/accounts-dashboard", optional 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
 imagesize = "0.15"
-infer = "0.16"
+infer = "0.22"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
 lopdf = { version = "0.44", optional = true }
 kamadak-exif = { version = "0.5", optional = true }
