@@ -68,6 +68,12 @@ pub enum Geometry3D {
     GeometryCollection(Vec<Geometry3D>),
 }
 
+/// A vertex snapped to the closure test's tolerance grid — the identity two
+/// faces must agree on for their shared edge to pair up (see [`Geometry3D::is_closed`]).
+type QuantizedVertex = (i64, i64, i64);
+/// An undirected edge between two quantized vertices, stored smallest-first.
+type QuantizedEdge = (QuantizedVertex, QuantizedVertex);
+
 /// Axis-aligned 3D bounding box.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb3 {
@@ -606,18 +612,18 @@ impl Geometry3D {
         rings.iter().for_each(|r| r.iter().for_each(|c| probe(*c)));
         tris.iter().for_each(|t| t.iter().for_each(|c| probe(*c)));
         let quantum = (scale * 1e-9).max(1e-9);
-        let key = |c: &Coord3| -> (i64, i64, i64) {
+        let key = |c: &Coord3| -> QuantizedVertex {
             (
                 (c.x / quantum).round() as i64,
                 (c.y / quantum).round() as i64,
                 (c.z / quantum).round() as i64,
             )
         };
-        let mut edges: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), u32> =
+        let mut edges: std::collections::HashMap<QuantizedEdge, u32> =
             std::collections::HashMap::new();
         let mut add_ring = |ring: &[Coord3]| {
             // Drop the closing duplicate; walk consecutive pairs (wrapping).
-            let mut pts: Vec<(i64, i64, i64)> = ring.iter().map(&key).collect();
+            let mut pts: Vec<QuantizedVertex> = ring.iter().map(&key).collect();
             if pts.len() >= 2 && pts.first() == pts.last() {
                 pts.pop();
             }
@@ -1107,7 +1113,9 @@ mod tests {
     fn is_closed_undefined_for_faceless_geometry() {
         assert_eq!(parse_wkt3d("POINT Z (1 2 3)").unwrap().is_closed(), None);
         assert_eq!(
-            parse_wkt3d("LINESTRING Z (0 0 0,1 1 1)").unwrap().is_closed(),
+            parse_wkt3d("LINESTRING Z (0 0 0,1 1 1)")
+                .unwrap()
+                .is_closed(),
             None
         );
     }
