@@ -778,9 +778,9 @@ pub(crate) fn issue_email_token(
     new_email: Option<&str>,
     ttl_minutes: i64,
 ) -> anyhow::Result<String> {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
 
     db.invalidate_email_tokens(user_id, kind)?;

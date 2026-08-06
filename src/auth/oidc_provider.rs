@@ -61,9 +61,9 @@ fn b64url(data: &[u8]) -> String {
 }
 
 fn rand_token(prefix: &str) -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill(&mut bytes);
+    rand::rng().fill(&mut bytes);
     format!("{prefix}{}", b64url(&bytes))
 }
 

@@ -141,8 +141,8 @@ pub fn verify_token(config: &JwtConfig, token: &str) -> anyhow::Result<Claims> {
 
 /// Generate a random API token string with `ots_` prefix.
 pub fn generate_api_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     let mut bytes = [0u8; 32];
     rng.fill(&mut bytes);
     let encoded = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
