@@ -120,7 +120,7 @@ tower_governor = { version = "0.4", features = ["axum"] }
 # GeoSPARQL spatial operations
 geo = "0.28"
 geos = "11.0"
-wkt = { version = "0.11", features = ["geo-types"] }
+wkt = { version = "0.14", features = ["geo-types"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
