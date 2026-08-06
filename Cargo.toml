@@ -176,7 +176,7 @@ sha1 = "0.11"
 # conditional-ui enables the discoverable-credential login flow (no username).
 webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
 rand = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 flate2 = "1"
 age = { version = "0.12", optional = true }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
