@@ -51,6 +51,7 @@ pub fn all_functions_3d() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::OTS3D_SF_DISJOINT, fn_sf3d_disjoint),
         make_fn(vocab::OTS3D_SF_CONTAINS, fn_sf3d_contains),
         make_fn(vocab::OTS3D_SF_WITHIN, fn_sf3d_within),
+        make_fn(vocab::OTS3D_IS_CLOSED3D, fn_is_closed3d),
         // ─── certified CSG (SFCGAL; only present in an `sfcgal3d` build) ───
         #[cfg(feature = "sfcgal3d")]
         make_fn(vocab::OTS3D_UNION3D, fn_union3d),
@@ -298,6 +299,15 @@ fn fn_sf3d_within(args: &[Term]) -> Option<Term> {
     let (a, b) = parse_two(args)?;
     // a within b  ⇔  b contains a
     Some(boolean_literal(solid_contains(&b, &a)?))
+}
+
+/// `ots-geof:isClosed3d(geom)` — true iff the face set is watertight (every
+/// edge shared by exactly two faces). Unbound for face-less geometry, where
+/// closedness is undefined. This is the geometric truth the seeded SHACL
+/// closure shape checks; a face-count heuristic cannot see a missing wall.
+fn fn_is_closed3d(args: &[Term]) -> Option<Term> {
+    let g = parse_geom3d(args.first()?)?;
+    Some(boolean_literal(g.is_closed()?))
 }
 
 /// Exact "solid `a` contains geometry `b`": every vertex of `b` lies inside (or
@@ -700,6 +710,21 @@ mod tests {
     }
 
     #[test]
+    fn is_closed3d_watertight_vs_open() {
+        assert!(as_bool(fn_is_closed3d(&[wkt(CUBE)])));
+        // The 5-face open box a face-count heuristic waves through.
+        let open = "POLYHEDRALSURFACE Z (\
+            ((0 0 0,0 1 0,1 1 0,1 0 0,0 0 0)),\
+            ((0 0 1,1 0 1,1 1 1,0 1 1,0 0 1)),\
+            ((0 0 0,0 0 1,0 1 1,0 1 0,0 0 0)),\
+            ((1 0 0,1 1 0,1 1 1,1 0 1,1 0 0)),\
+            ((0 0 0,1 0 0,1 0 1,0 0 1,0 0 0)))";
+        assert!(!as_bool(fn_is_closed3d(&[wkt(open)])));
+        // Closedness is undefined for a point — unbound, not false.
+        assert!(fn_is_closed3d(&[wkt("POINT Z (1 2 3)")]).is_none());
+    }
+
+    #[test]
     fn distance_between_two_points() {
         let d = as_f64(fn_distance3d(&[
             wkt("POINT Z (0 0 0)"),
@@ -734,12 +759,12 @@ mod tests {
     fn registry_has_all() {
         let fns = all_functions_3d();
         // Default (no sfcgal3d): 10 always-on + convexHull3d + intersects/disjoint
-        // + contains/within = 15. The 4 SFCGAL CSG functions are only present in
-        // an `sfcgal3d` build.
+        // + contains/within + isClosed3d = 16. The 4 SFCGAL CSG functions are
+        // only present in an `sfcgal3d` build.
         #[cfg(not(feature = "sfcgal3d"))]
-        assert_eq!(fns.len(), 15);
+        assert_eq!(fns.len(), 16);
         #[cfg(feature = "sfcgal3d")]
-        assert_eq!(fns.len(), 19);
+        assert_eq!(fns.len(), 20);
         let iris: Vec<&str> = fns.iter().map(|(i, _)| i.as_str()).collect();
         assert!(iris.contains(&vocab::OTS3D_DISTANCE3D));
         assert!(iris.contains(&vocab::OTS3D_VOLUME));

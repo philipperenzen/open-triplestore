@@ -140,11 +140,22 @@ export const NORMALISED_DIM = 1.6;
  * geometry sits below y=0 instead of lifting the whole building.
  */
 export function normalise(object3d: THREE.Object3D, opts: { groundY?: number } = {}): void {
+  // Force-compose world matrices around every measurement. Since three r177,
+  // updateWorldMatrix() skips recomposition for nodes whose local matrix did
+  // not change — and the merged IFC meshes run with matrixAutoUpdate=false, so
+  // after the scale below Box3.setFromObject() would still read the matrixWorld
+  // those meshes carried BEFORE the scale. The box then comes back in raw model
+  // units and every offset derived from it lands ~1/scale off: the camera fit
+  // frames a 60 m box around a 1.6-unit building (an "empty" viewer) and the
+  // ground rest floats the model. Composing explicitly keeps the measurements
+  // honest whatever the auto-update flags say.
+  object3d.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(object3d);
   const size = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z) || 1;
   const s = NORMALISED_DIM / maxDim;
   object3d.scale.setScalar(s);
+  object3d.updateMatrixWorld(true);
   const scaled = new THREE.Box3().setFromObject(object3d);
   const centre = scaled.getCenter(new THREE.Vector3());
   object3d.position.x -= centre.x;
@@ -159,6 +170,10 @@ export function normalise(object3d: THREE.Object3D, opts: { groundY?: number } =
     }
   }
   object3d.position.y -= rest;
+  // Leave the tree fully composed: the loadModel cache hands out clones of this
+  // group, and a clone copies matrixWorld verbatim — a stale one would resurface
+  // the same mismeasurement in every consumer that measures before rendering.
+  object3d.updateMatrixWorld(true);
 }
 
 /**
