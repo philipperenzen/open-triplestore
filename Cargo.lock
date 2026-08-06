@@ -4110,7 +4110,7 @@ dependencies = [
  "webauthn-rs",
  "webauthn-rs-proto",
  "wkt",
- "zip 3.0.0",
+ "zip 8.6.0",
 ]
 
 [[package]]
