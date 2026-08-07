@@ -120,7 +120,7 @@ tower_governor = { version = "0.4", features = ["axum"] }
 # GeoSPARQL spatial operations
 geo = "0.28"
 geos = "11.0"
-wkt = { version = "0.11", features = ["geo-types"] }
+wkt = { version = "0.14", features = ["geo-types"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -175,8 +175,8 @@ sha1 = "0.11"
 # (no danger-allow-state-serialisation), only finished credentials are stored.
 # conditional-ui enables the discoverable-credential login flow (no username).
 webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
-rand = "0.8"
-base64 = "0.22"
+rand = "0.10"
+base64 = "0.23"
 flate2 = "1"
 age = { version = "0.12", optional = true }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
@@ -229,7 +229,7 @@ rstar = "0.13"
 # Exact 3D solid kernel (geometry3d feature). Pure Rust — no native dependency.
 # parry3d-f64 wraps its own glam-backed math types (`parry3d_f64::math::Vector3`);
 # we use that rather than adding a separate `glam`/`nalgebra` dependency, to avoid version skew.
-parry3d-f64 = { version = "0.29", optional = true }
+parry3d-f64 = { version = "0.30", optional = true }
 # Certified constructive solid geometry (sfcgal3d feature only). Wraps the native
 # libSFCGAL C library, so it is excluded from `full` and the default CI build.
 sfcgal = { version = "0.8", optional = true }
@@ -251,14 +251,14 @@ ots-plugin-accounts-dashboard = { path = "plugins/accounts-dashboard", optional 
 # Asset metadata extraction (classify uploads by kind + per-kind detail).
 # imagesize/infer are pure-Rust and tiny; the heavier probers are feature-gated.
 imagesize = "0.15"
-infer = "0.16"
+infer = "0.22"
 # >= 0.42 required: RUSTSEC-2026-0187 (stack overflow on deeply nested PDF objects).
 lopdf = { version = "0.44", optional = true }
 kamadak-exif = { version = "0.5", optional = true }
-zip = { version = "3", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
 calamine = { version = "0.36", optional = true }
 mp4 = { version = "0.14", optional = true }
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "isomp4"], optional = true }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "ogg", "vorbis", "wav", "isomp4"], optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"], optional = true }
 
 # Full-text search (text-search feature)
