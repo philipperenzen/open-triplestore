@@ -83,6 +83,83 @@ describe('prefixService (internal endpoints)', () => {
     expect(hits.some((h) => h.prefix === 'foafrealm')).toBe(true);
   });
 
+  // The facet rail resolves one namespace per row and re-runs whenever any row
+  // resolves, so an unresolved namespace used to be re-requested on every pass —
+  // enough repeats of the same URL to trip the server's rate limiter (429).
+  it('coalesces concurrent reverse lookups of one namespace into a single fetch', async () => {
+    mockFetch({
+      '/api/prefixes/reverse': {
+        prefix: 'gr',
+        namespace: 'http://purl.org/goodrelations/v1#',
+        source: 'lov',
+      },
+    });
+    const svc = await freshService();
+    const ns = 'http://purl.org/goodrelations/v1#';
+
+    // Ten components mount in the same tick and each asks for the same namespace.
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => svc.lookupNamespacePrefix(ns)),
+    );
+
+    expect(results).toEqual(Array(10).fill('gr'));
+    expect(fetchCalls.filter((u) => u.includes('/api/prefixes/reverse')).length).toBe(1);
+  });
+
+  it('caches a reverse hit whose prefix label is already taken by another namespace', async () => {
+    // 'foaf' is a built-in, so the prefix-keyed cache slot is occupied. The hit
+    // still has to be recorded, or the namespace never resolves and the caller
+    // re-fetches forever.
+    const ns = 'https://example.org/foaf-alike#';
+    mockFetch({
+      '/api/prefixes/reverse': { prefix: 'foaf', namespace: ns, source: 'lov' },
+    });
+    const svc = await freshService();
+
+    expect(await svc.lookupNamespacePrefix(ns)).toBe('foaf');
+    expect(svc.prefixForNamespace(ns)).toBe('foaf');
+    // The built-in mapping must not be clobbered by the colliding label.
+    expect(await svc.lookupPrefix('foaf')).toBe('http://xmlns.com/foaf/0.1/');
+
+    const calls = fetchCalls.length;
+    expect(await svc.lookupNamespacePrefix(ns)).toBe('foaf');
+    expect(fetchCalls.length).toBe(calls);
+  });
+
+  it('remembers a 404 namespace so it is not requested again', async () => {
+    mockFetch({}); // everything 404s
+    const svc = await freshService();
+    const ns = 'http://example.org/nothing-here#';
+
+    expect(await svc.lookupNamespacePrefix(ns)).toBe(null);
+    const calls = fetchCalls.length;
+    expect(calls).toBe(1);
+    expect(await svc.lookupNamespacePrefix(ns)).toBe(null);
+    expect(await svc.lookupNamespacePrefix(ns)).toBe(null);
+    expect(fetchCalls.length).toBe(calls);
+  });
+
+  it('does not cache a rate-limited lookup as a miss', async () => {
+    // A 429 says "ask later", not "unknown" — caching it would blank the label
+    // for the whole negative TTL.
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      fetchCalls.push(String(url));
+      return { ok: false, status: 429, json: async () => ({}) } as Response;
+    }));
+    fetchCalls.length = 0;
+    const svc = await freshService();
+    const ns = 'http://example.org/later#';
+
+    expect(await svc.lookupNamespacePrefix(ns)).toBe(null);
+    expect(fetchCalls.length).toBe(1);
+
+    // Once the limiter clears, the namespace resolves rather than staying blank.
+    mockFetch({
+      '/api/prefixes/reverse': { prefix: 'later', namespace: ns, source: 'lov' },
+    });
+    expect(await svc.lookupNamespacePrefix(ns)).toBe('later');
+  });
+
   it('never contacts prefix.cc directly', async () => {
     mockFetch({});
     const svc = await freshService();

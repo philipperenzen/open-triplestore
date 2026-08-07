@@ -137,6 +137,10 @@ thiserror = "2"
 bytes = "1"
 percent-encoding = "2"
 url = "2"
+# Used to evaluate `regex` browse filters on the blank-node scan path, which has
+# no SPARQL query to push REGEX() into. Same crate spareval (Oxigraph's
+# evaluator) uses, so the two paths accept identical patterns.
+regex = "1"
 
 # HTTP client for prefix.cc lookup (rustls avoids system OpenSSL in Docker runtime)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
