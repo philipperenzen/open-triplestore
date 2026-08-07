@@ -1508,11 +1508,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         router = router.merge(swrl_auth_routes);
     }
 
-    // NOTE: utoipa-swagger-ui 7.x is incompatible with axum 0.7 / matchit 0.7
-    // because it internally registers "/api-docs/{_:.*}" which uses regex syntax
-    // unsupported by matchit, causing a panic at startup.
-    // Swagger UI is therefore disabled; the OpenAPI JSON spec is served below.
-    // TODO: upgrade utoipa-swagger-ui to 8.x when migrating to axum 0.8.
+    // NOTE: only the OpenAPI JSON spec is served — there is no Swagger UI route.
+    // Rendering the UI needs utoipa-swagger-ui, whose axum integration has targeted
+    // axum 0.8 since its 8.x release; an axum 0.8 `Router` is a different type from
+    // ours and cannot be merged in. Serving the UI therefore depends on an axum 0.8
+    // migration, not on a swagger-ui bump. (The frontend ships its own viewer over
+    // this spec via `swagger-ui-dist`, so nothing is lost meanwhile.)
     // optional_auth so the handler can tailor the spec to the caller: token-required
     // operations are hidden from anonymous callers, and Admin operations from non-admins.
     let openapi_doc_route = Router::new()

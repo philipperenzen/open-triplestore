@@ -784,7 +784,7 @@ open-triplestore
 │   ├── auth/           RBAC auth — models, db, JWT, middleware, handlers
 │   ├── store/          TripleStore (Oxigraph wrapper)
 │   ├── server/         Axum HTTP server — routes, OpenAPI spec, error handling
-│   │   ├── openapi.rs  Swagger UI + /api-docs/openapi.json
+│   │   ├── openapi.rs  OpenAPI spec at /api-docs/openapi.json (the UI is a frontend page)
 │   │   └── linked_data.rs  /.well-known/void (DCAT 2), /resource/* (dereference)
 │   ├── shacl/          SHACL validation engine, SHACL-AF inference, reports
 │   ├── shaclc/         SHACL Compact Syntax parser (SHACLC → Turtle) and serializer
