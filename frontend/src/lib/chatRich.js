@@ -171,13 +171,21 @@ export function parseApiEndpoint(line) {
   if (!t) return null;
   let method = 'GET';
   let target = t;
-  const m = /^([A-Z]+)\s+(\S+)$/i.exec(t);
+  // `METHOD <target>`, where the target may itself contain spaces: a GeoSPARQL
+  // query string carries WKT — ?from=POLYGON((3.5 51, 4.5 51, …)) — and the old
+  // \S+ target stopped at the first space, so the SAME endpoint rendered as a
+  // runnable block without parameters and as inert text with them. Take the
+  // rest of the line as the target and let the checks below judge it.
+  const m = /^([A-Z]+)\s+(\S.*)$/i.exec(t);
   if (m) {
     method = m[1].toUpperCase();
-    target = m[2];
-  } else if (/\s/.test(t)) {
+    target = m[2].trim();
+  } else if (/^\s|\s{2,}/.test(t)) {
     return null;
   }
+  // A bare target (no method) is only an endpoint if it is a single token or a
+  // path whose spaces are inside its query string — prose is not an endpoint.
+  if (!m && /\s/.test(target) && !/^\/api\/[^\s?]*\?/.test(target)) return null;
   let path = target;
   if (/^https?:\/\//i.test(target)) {
     try {
@@ -637,6 +645,48 @@ export function normalizeSparqlResult(resp) {
  * Only attributes are added to existing sanitized nodes, so this cannot
  * introduce markup from the (model-controlled) message.
  */
+/**
+ * Turn IRIs in an answer into links to their resource page.
+ *
+ * An answer names things by IRI constantly — that IS the identifier in a
+ * knowledge graph — but they rendered as dead monospace text, so the one thing
+ * a reader wants next ("what IS that thing?") meant copying the IRI into the
+ * browser. Decorated the same way as the API chips: attributes only, on
+ * already-sanitized HTML.
+ *
+ * Only absolute http(s)/urn IRIs qualify, and only outside code BLOCKS — a
+ * query or a Turtle sample is source, not a set of links.
+ */
+export function decorateIriLinks(html) {
+  if (typeof DOMParser === 'undefined') return html;
+  const doc = new DOMParser().parseFromString(String(html ?? ''), 'text/html');
+  const isIri = (t) => /^(https?:\/\/|urn:)[^\s<>"']+$/i.test(t);
+  const decorate = (el, iri) => {
+    el.classList.add('chat-iri-link');
+    el.setAttribute('data-iri', iri);
+    el.setAttribute('role', 'button');
+    el.setAttribute('tabindex', '0');
+    el.setAttribute('title', iri);
+  };
+  doc.querySelectorAll('code').forEach((code) => {
+    if (code.closest('pre') || code.closest('a')) return;
+    if (code.classList.contains('chat-api-link')) return; // already an endpoint
+    const text = (code.textContent || '').trim().replace(/^[<]|[>]$/g, '');
+    if (isIri(text)) decorate(code, text);
+  });
+  // marked auto-links bare URLs; an IRI is not a page to browse away to, so
+  // swap those for the same in-app chip.
+  doc.querySelectorAll('a[href]').forEach((a) => {
+    const href = (a.getAttribute('href') || '').trim();
+    if (!isIri(href) || a.closest('pre')) return;
+    const code = doc.createElement('code');
+    code.textContent = a.textContent || href;
+    decorate(code, href);
+    a.replaceWith(code);
+  });
+  return doc.body.innerHTML;
+}
+
 export function decorateApiLinks(html) {
   if (typeof DOMParser === 'undefined') return html;
   const doc = new DOMParser().parseFromString(String(html ?? ''), 'text/html');

@@ -544,7 +544,8 @@
       "guestLimit": "Gasten kunnen {anon} AI-verzoeken per minuut sturen; ingelogde gebruikers {user}.",
       "aboutRateLimit": "Limiet",
       "aboutRateLimitValue": "{n} verzoeken/min voor jou",
-      "aboutRateLimitSignIn": "(log in voor {n}/min)"
+      "aboutRateLimitSignIn": "(log in voor {n}/min)",
+      "verboseTitle": "Laat zien wat Spark doet — toon de query's die hij uitvoert"
     },
     "sparql": {
       "title": "SPARQL-werkruimte",
