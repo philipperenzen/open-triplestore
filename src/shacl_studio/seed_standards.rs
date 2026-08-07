@@ -287,22 +287,24 @@ geo:GeometryShape a sh:NodeShape ;
         run_inference: false,
         ttl: r#"@prefix sh: <http://www.w3.org/ns/shacl#> .
 @prefix geo: <http://www.opengis.net/ont/geosparql#> .
-# Pragmatic closure check for volumetric solids: a POLYHEDRALSURFACE Z that bounds
-# a watertight volume needs several faces. Each face opens with "((", so we flag a
-# Z polyhedral surface whose WKT carries fewer than four "((" face openers — a
-# degenerate, almost-certainly-unclosed shell. Counts via STRLEN over the WKT with
-# the "((" sequences removed (each removed pair is 2 chars).
+# Geometric closure check for volumetric solids: ots-geof:isClosed3d() tests
+# real watertightness — every edge of the face set must be shared by exactly
+# two faces. That catches what a face-count heuristic cannot: a box missing one
+# wall has a healthy-looking five faces and is still open. The face-count guard
+# stays as a fallback so a build without the geometry3d feature (where the
+# function is unavailable and errors) still flags the degenerate shells.
 geo:SolidClosureShape a sh:NodeShape ;
    sh:targetSubjectsOf geo:asWKT ;
    sh:sparql [
        a sh:SPARQLConstraint ;
-       sh:message "A POLYHEDRALSURFACE Z should have at least four faces to bound a closed solid." ;
+       sh:message "This POLYHEDRALSURFACE Z is not watertight: at least one edge is not shared by exactly two faces, so the shell does not bound a closed solid." ;
        sh:select """
+         PREFIX geo3d: <https://open-triplestore.org/def/function/geo3d/>
          SELECT $this ?value WHERE {
            $this <http://www.opengis.net/ont/geosparql#asWKT> ?value .
            FILTER(CONTAINS(UCASE(STR(?value)), \"POLYHEDRALSURFACE Z\"))
            BIND((STRLEN(STR(?value)) - STRLEN(REPLACE(STR(?value), \"\\\\(\\\\(\", \"\"))) / 2 AS ?faces)
-           FILTER(?faces < 4)
+           FILTER(?faces < 4 || !geo3d:isClosed3d(?value))
          }
        """ ;
    ] .

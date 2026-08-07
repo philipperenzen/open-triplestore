@@ -168,9 +168,17 @@
   // format is the default.
   $: modelOptions = element ? modelRefsOf(element) : [];
   $: modelRef = modelOptions.find((o) => o.format === chosenFormat) ?? modelOptions[0] ?? null;
-  // A first-person walkthrough is offered for an IFC *container* (Site / Building
-  // / Storey — it has contained elements), which walks its own model.
-  $: canWalk = children.length > 0 && modelOptions.some((o) => o.format === 'ifc');
+  // A first-person walkthrough is offered for ANY element that links an IFC
+  // file. The walkthrough always loads the whole model (walkthroughFor strips
+  // the `#GlobalId` fragment) and spawns in front of the element, so the old
+  // extra `children.length > 0` requirement only ever removed the action from
+  // models whose BOT containment the exporter didn't nest — an IfcBridge and
+  // its roads sit at the ROOT of an infrastructure file, so the bridge demo
+  // offered no way in at all.
+  $: canWalk = modelOptions.some((o) => o.format === 'ifc');
+  // A container (Site / Building / Storey) is entered as a whole; a leaf part
+  // spawns the camera in front of that part instead.
+  $: isWalkContainer = children.length > 0;
 
   // …and for a LEAF part too (a door, a hinge). A leaf owns no IFC of its own —
   // it's a GlobalId inside an ancestor's building model — so the action walks
@@ -426,9 +434,19 @@
           <MapPin size={13} /> {$i18nT('viewer.showOnMap')}
         </button>
       {/if}
-      {#if canWalk}
+      {#if canWalk && isWalkContainer}
         <button class="btn btn-sm walk-btn" on:click={() => dispatch('walkthrough', { id: element.id })}>
           <Footprints size={13} /> {$i18nT('viewer.exploreInside')}
+        </button>
+      {:else if canWalk}
+        <!-- Owns an IFC file but nests nothing (a leaf, or a root the exporter
+             left flat — e.g. the IfcBridge of an infrastructure model): walk its
+             own model, spawning in front of this element. -->
+        <button
+          class="btn btn-sm walk-btn"
+          on:click={() => dispatch('walkthrough', { id: element.id, guid: element.ifc_guid || '', label: element.label || shortenIRI(element.id) })}
+        >
+          <Footprints size={13} /> {$i18nT('viewer.viewInWalkthrough')}
         </button>
       {:else if canWalkToPart}
         <!-- Leaf part: walk the ancestor's building, spawning beside this part. -->

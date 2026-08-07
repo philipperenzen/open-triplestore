@@ -54,6 +54,8 @@ pub const OTS3D_CONVEXHULL3D: &str = "https://open-triplestore.org/def/function/
 pub const OTS3D_SF_CONTAINS: &str = "https://open-triplestore.org/def/function/geo3d/sf3dContains";
 /// Exact "first geometry is within the second solid" (inverse of contains).
 pub const OTS3D_SF_WITHIN: &str = "https://open-triplestore.org/def/function/geo3d/sf3dWithin";
+/// Watertightness of a face set: every edge shared by exactly two faces.
+pub const OTS3D_IS_CLOSED3D: &str = "https://open-triplestore.org/def/function/geo3d/isClosed3d";
 
 // ─── ots-geof: certified CSG function IRIs (SFCGAL; sfcgal3d feature only) ───
 // These are advertised only when the platform is built with `sfcgal3d`; the

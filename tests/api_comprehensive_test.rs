@@ -3740,6 +3740,345 @@ mod browse {
             "Health check must return status=ok: {json}"
         );
     }
+
+    // ── Blank-node filters ───────────────────────────────────────────────────
+    //
+    // SPARQL cannot name a stored blank node, so `/api/browse/triples` used to
+    // answer a `_:label` subject filter with a SPARQL parse error (400) and a
+    // `_:label` object filter with a silently empty page — which is what the
+    // resource page's "open in triple browser" deep link sends for a blank node,
+    // breaking both the table and the graph view. These cover the quad-index
+    // scan path that serves those requests.
+
+    /// Public dataset holding one graph, plus a blank node with two properties
+    /// and one incoming reference. Returns the state and the blank node's label.
+    async fn bnode_fixture() -> (open_triplestore::server::AppState, String) {
+        let state = test_state();
+        state
+            .auth_db
+            .create_organisation("o1", "Acme", "acme", None, None)
+            .unwrap();
+        state
+            .auth_db
+            .create_dataset(
+                "d1",
+                "Pub",
+                None,
+                OwnerType::Organisation,
+                "o1",
+                Visibility::Public,
+                None,
+            )
+            .unwrap();
+        state
+            .auth_db
+            .add_dataset_graph("d1", "http://ex.org/g")
+            .unwrap();
+        state
+            .store
+            .update(
+                "INSERT DATA { GRAPH <http://ex.org/g> { \
+                 <http://ex.org/doc> <http://ex.org/checksum> _:b1 . \
+                 _:b1 <http://ex.org/algorithm> <http://ex.org/sha256> . \
+                 _:b1 <http://ex.org/value> \"abc123\" . \
+                 <http://ex.org/other> <http://ex.org/p> <http://ex.org/unrelated> . } }",
+            )
+            .unwrap();
+
+        // INSERT DATA mints its own label, so read back the one the store kept.
+        let json = browse(&state, "limit=100").await;
+        let label = json["triples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|t| {
+                (t["subject"]["type"] == "bnode")
+                    .then(|| t["subject"]["value"].as_str().unwrap().to_string())
+            })
+            .expect("fixture must store a blank-node subject");
+        (state, label)
+    }
+
+    /// GET /api/browse/triples with a raw query string, asserting 200.
+    async fn browse(state: &open_triplestore::server::AppState, query: &str) -> serde_json::Value {
+        let resp = test_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!("/api/browse/triples?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "query was: {query}");
+        body_json(resp.into_body()).await
+    }
+
+    fn subject_chip(label: &str) -> String {
+        url_encode(&format!(
+            r#"[{{"field":"subject","value":"_:{label}","mode":"exact"}}]"#
+        ))
+    }
+
+    /// The reported bug: an exact `_:label` subject chip must return that blank
+    /// node's own triples instead of failing to parse as SPARQL.
+    #[tokio::test]
+    async fn browse_triples_blank_node_subject_chip_returns_its_triples() {
+        let (state, label) = bnode_fixture().await;
+        let json = browse(&state, &format!("filters={}", subject_chip(&label))).await;
+
+        let triples = json["triples"].as_array().unwrap();
+        assert_eq!(
+            triples.len(),
+            2,
+            "Blank node's two outgoing triples must come back: {json}"
+        );
+        for t in triples {
+            assert_eq!(t["subject"]["type"], "bnode", "{json}");
+            assert_eq!(t["subject"]["value"], label.as_str(), "{json}");
+            assert_eq!(
+                t["graph"]["value"], "http://ex.org/g",
+                "Rows must carry their graph, like the query path: {json}"
+            );
+        }
+        let body = json.to_string();
+        assert!(
+            body.contains("sha256") && body.contains("abc123"),
+            "Both properties of the blank node must be present: {json}"
+        );
+        assert!(
+            !body.contains("unrelated"),
+            "Triples of other subjects must not leak in: {json}"
+        );
+    }
+
+    /// The same pin as an object filter returns the incoming reference. This one
+    /// used to fail silently: a `_:` value is not IRI-shaped, so it fell into the
+    /// object-literal branch and compared as a string, matching nothing.
+    #[tokio::test]
+    async fn browse_triples_blank_node_object_chip_returns_incoming() {
+        let (state, label) = bnode_fixture().await;
+        let filters = url_encode(&format!(
+            r#"[{{"field":"object","value":"_:{label}","mode":"exact"}}]"#
+        ));
+        let json = browse(&state, &format!("filters={filters}")).await;
+
+        let triples = json["triples"].as_array().unwrap();
+        assert_eq!(
+            triples.len(),
+            1,
+            "The one triple pointing at the blank node must come back: {json}"
+        );
+        assert_eq!(
+            triples[0]["subject"]["value"], "http://ex.org/doc",
+            "{json}"
+        );
+        assert_eq!(triples[0]["object"]["type"], "bnode", "{json}");
+    }
+
+    /// Filters that accompany the blank-node pin still apply — they are evaluated
+    /// in Rust on the scan path, so they have to keep the query path's semantics:
+    /// positive chips AND across fields, negated chips exclude, `q` AND-s on top.
+    #[tokio::test]
+    async fn browse_triples_blank_node_pin_still_applies_other_filters() {
+        let (state, label) = bnode_fixture().await;
+
+        let filters = url_encode(&format!(
+            r#"[{{"field":"subject","value":"_:{label}","mode":"exact"}},
+                {{"field":"predicate","value":"algorithm","mode":"contains"}}]"#
+        ));
+        let json = browse(&state, &format!("filters={filters}")).await;
+        assert_eq!(
+            json["triples"].as_array().unwrap().len(),
+            1,
+            "Predicate chip must narrow the blank node's triples: {json}"
+        );
+        assert!(json.to_string().contains("sha256"), "{json}");
+
+        let negated = url_encode(&format!(
+            r#"[{{"field":"subject","value":"_:{label}","mode":"exact"}},
+                {{"field":"predicate","value":"algorithm","mode":"contains","neg":true}}]"#
+        ));
+        let json = browse(&state, &format!("filters={negated}")).await;
+        assert_eq!(
+            json["triples"].as_array().unwrap().len(),
+            1,
+            "Negated chip must exclude the matching row: {json}"
+        );
+        assert!(json.to_string().contains("abc123"), "{json}");
+
+        let json = browse(
+            &state,
+            &format!("filters={}&q=abc123", subject_chip(&label)),
+        )
+        .await;
+        assert_eq!(
+            json["triples"].as_array().unwrap().len(),
+            1,
+            "Quick-search must AND with the blank-node pin: {json}"
+        );
+
+        let json = browse(
+            &state,
+            &format!("filters={}&q=nothingmatches", subject_chip(&label)),
+        )
+        .await;
+        assert!(
+            json["triples"].as_array().unwrap().is_empty(),
+            "A non-matching quick-search must empty the page: {json}"
+        );
+    }
+
+    /// Pagination and the opt-in exact count behave as on the query path.
+    #[tokio::test]
+    async fn browse_triples_blank_node_paginates_and_counts() {
+        let (state, label) = bnode_fixture().await;
+        let chip = subject_chip(&label);
+
+        let first = browse(&state, &format!("filters={chip}&limit=1&count=true")).await;
+        assert_eq!(first["triples"].as_array().unwrap().len(), 1, "{first}");
+        assert_eq!(first["total"], 2, "Exact count covers all matches: {first}");
+        assert_eq!(first["hasMore"], true, "{first}");
+
+        let second = browse(&state, &format!("filters={chip}&limit=1&offset=1")).await;
+        assert_eq!(second["triples"].as_array().unwrap().len(), 1, "{second}");
+        assert_eq!(second["hasMore"], false, "Last page must end: {second}");
+        assert_ne!(
+            first["triples"][0], second["triples"][0],
+            "Pages must not repeat a row: {first} / {second}"
+        );
+
+        let past_end = browse(&state, &format!("filters={chip}&limit=10&offset=99")).await;
+        assert!(
+            past_end["triples"].as_array().unwrap().is_empty(),
+            "Offset past the end is an empty page: {past_end}"
+        );
+    }
+
+    /// The scan reads the quad index directly rather than going through SPARQL's
+    /// FROM-based scoping, so it has to enforce graph access itself: a blank node
+    /// in a private graph must stay invisible to an anonymous caller.
+    #[tokio::test]
+    async fn browse_triples_blank_node_respects_graph_acl() {
+        let (state, label) = bnode_fixture().await;
+        state
+            .auth_db
+            .create_dataset(
+                "d2",
+                "Private",
+                None,
+                OwnerType::Organisation,
+                "o1",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+        state
+            .auth_db
+            .add_dataset_graph("d2", "http://ex.org/secret")
+            .unwrap();
+        state
+            .store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <http://ex.org/secret> {{ \
+                 _:{label} <http://ex.org/classified> \"top secret\" . }} }}"
+            ))
+            .unwrap();
+
+        let json = browse(&state, &format!("filters={}", subject_chip(&label))).await;
+        let body = json.to_string();
+        assert!(
+            !body.contains("classified") && !body.contains("top secret"),
+            "A blank node in an inaccessible graph must not leak: {json}"
+        );
+        assert!(
+            !body.contains("ex.org/secret"),
+            "The private graph must not appear: {json}"
+        );
+
+        // Scoping to a graph the caller cannot read yields nothing, not its rows.
+        let scoped = browse(
+            &state,
+            &format!(
+                "filters={}&graph={}",
+                subject_chip(&label),
+                url_encode("http://ex.org/secret")
+            ),
+        )
+        .await;
+        assert!(
+            scoped["triples"].as_array().unwrap().is_empty(),
+            "An unauthorized graph scope must return nothing: {scoped}"
+        );
+    }
+
+    /// An explicit graph scope narrows the scan the same way it narrows a query.
+    #[tokio::test]
+    async fn browse_triples_blank_node_honours_graph_scope() {
+        let (state, label) = bnode_fixture().await;
+        let json = browse(
+            &state,
+            &format!(
+                "filters={}&graph={}",
+                subject_chip(&label),
+                url_encode("http://ex.org/g")
+            ),
+        )
+        .await;
+        assert_eq!(
+            json["triples"].as_array().unwrap().len(),
+            2,
+            "The blank node's graph is in scope, so its triples show: {json}"
+        );
+    }
+
+    /// A blank-node filter the scan cannot anchor on (here: OR-ed with a second
+    /// subject chip, which would widen the result past the pinned node) must come
+    /// back as a readable 400 rather than a leaked SPARQL parse error.
+    #[tokio::test]
+    async fn browse_triples_unanchorable_blank_node_filter_is_a_clear_error() {
+        let (state, label) = bnode_fixture().await;
+        for filters in [
+            // OR-ed with another subject value.
+            format!(
+                r#"[{{"field":"subject","value":"_:{label}","mode":"exact"}},
+                    {{"field":"subject","value":"http://ex.org/doc","mode":"exact"}}]"#
+            ),
+            // Negated on its own — nothing pins the scan.
+            format!(r#"[{{"field":"subject","value":"_:{label}","mode":"exact","neg":true}}]"#),
+            // A blank node can never be a predicate.
+            format!(r#"[{{"field":"predicate","value":"_:{label}","mode":"exact"}}]"#),
+        ] {
+            let resp = test_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(format!(
+                            "/api/browse/triples?filters={}",
+                            url_encode(&filters)
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Unanchorable blank-node filter must be rejected: {filters}"
+            );
+            let text = body_text(resp.into_body()).await;
+            assert!(
+                text.contains("Blank node"),
+                "Error must explain the blank-node restriction, not leak SPARQL: {text}"
+            );
+            assert!(
+                !text.contains("syntax error"),
+                "Must not surface a SPARQL parse error: {text}"
+            );
+        }
+    }
 }
 
 // ─── Visibility / access-control regression tests ─────────────────────────────

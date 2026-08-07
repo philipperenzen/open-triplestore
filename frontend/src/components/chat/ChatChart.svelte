@@ -32,6 +32,15 @@
   $: width = PAD_L + plotW + PAD_R;
   $: height = PAD_T + PLOT_H + PAD_B;
 
+  // Horizontal room per category, and how many ticks that leaves room for. A
+  // "triples per named graph" answer returns dozens of categories; drawing a
+  // rotated label for every one of them produced a smear of overlapping text
+  // where no single label could be read. Draw every Nth instead — the bars are
+  // all still there, each with its full label in a <title> on hover.
+  $: perCat = plotW / Math.max(1, labels.length);
+  $: labelStride = Math.max(1, Math.ceil(22 / Math.max(1, perCat)));
+  $: steepLabels = perCat < 34;
+
   $: y = (v) => PAD_T + PLOT_H - ((v - yMin) / ySpan) * PLOT_H;
   $: groupX = (i) => PAD_L + i * (plotW / Math.max(1, labels.length));
   $: lineX = (i) => PAD_L + (labels.length === 1 ? plotW / 2 : (i * plotW) / (labels.length - 1));
@@ -184,10 +193,20 @@
         {/if}
 
         {#each labels as label, i}
-          {@const cx = spec.type === 'bar' ? groupX(i) + groupW / 2 - 2 : lineX(i)}
-          <text x={cx} y={PAD_T + PLOT_H + 14} class="xlab" text-anchor={label.length > 8 ? 'end' : 'middle'} transform={label.length > 8 ? `rotate(-30 ${cx} ${PAD_T + PLOT_H + 14})` : ''}>
-            {short(display(label), 18)}<title>{label}</title>
-          </text>
+          {#if i % labelStride === 0}
+            {@const cx = spec.type === 'bar' ? groupX(i) + groupW / 2 - 2 : lineX(i)}
+            {@const angled = steepLabels || label.length > 8}
+            {@const angle = steepLabels ? -45 : -30}
+            <text
+              x={cx}
+              y={PAD_T + PLOT_H + 14}
+              class="xlab"
+              text-anchor={angled ? 'end' : 'middle'}
+              transform={angled ? `rotate(${angle} ${cx} ${PAD_T + PLOT_H + 14})` : ''}
+            >
+              {short(display(label), steepLabels ? 14 : 18)}<title>{label}</title>
+            </text>
+          {/if}
         {/each}
         {#if spec.xLabel}<text x={PAD_L + plotW / 2} y={height - 4} class="axis-label" text-anchor="middle">{spec.xLabel}</text>{/if}
         {#if spec.yLabel}<text x={12} y={PAD_T + PLOT_H / 2} class="axis-label" text-anchor="middle" transform="rotate(-90 12 {PAD_T + PLOT_H / 2})">{spec.yLabel}</text>{/if}

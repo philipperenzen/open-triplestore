@@ -12,6 +12,8 @@
 # Conformance summary (against the seeded example shapes):
 #   v3v:GoodTower   — closed 6-face solid, full metadata  → CONFORMS
 #   v3v:BrokenShed  — degenerate 2-face shell             → FAILS 3D closure
+#   v3v:OpenTank    — 5-face box, one wall missing        → FAILS 3D closure
+#                     (watertightness — a face-count heuristic passes it)
 #   v3v:GhostUnit   — no geometry at all                  → FAILS geometry-present
 #   v3v:GoodGltfDist / v3v:GoodIfcDist — full file metadata → CONFORM
 #   v3v:BadModelDist — 3D distribution missing dct:format  → FAILS 3D-file metadata
@@ -27,7 +29,7 @@
 v3v:ValidationZone a bot:Zone ;
     rdfs:label "SHACL 3D validation demo (mixed valid / invalid)"@en ;
     rdfs:comment "Deliberately mixed features to demonstrate SHACL validation and the Show-in-3D flow."@en ;
-    bot:containsElement v3v:GoodTower , v3v:BrokenShed , v3v:GhostUnit .
+    bot:containsElement v3v:GoodTower , v3v:BrokenShed , v3v:OpenTank , v3v:GhostUnit .
 
 # ── GoodTower — closed 6-face solid, 12 m × 12 m × 8 m — CONFORMS ──
 v3v:GoodTower a bot:Element , geo:Feature ;
@@ -48,6 +50,18 @@ v3v:BrokenShed a bot:Element , geo:Feature ;
         geo:asWKT "POINT(5.83370 51.83933)"^^geo:wktLiteral ] ;
     geo:hasGeometry [ a geo:Geometry ;
         geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185750 427945 0,185750 427952 0,185758 427952 0,185758 427945 0,185750 427945 0)),((185750 427945 5,185758 427945 5,185758 427952 5,185750 427952 5,185750 427945 5)))"^^geo:wktLiteral ] .
+
+# ── OpenTank — 5-face box missing its east wall — FAILS watertightness ──
+# The interesting failure: five faces LOOK like a solid to any face-count
+# heuristic, but the missing wall leaves eight boundary edges unpaired —
+# exactly what ots-geof:isClosed3d() detects.
+v3v:OpenTank a bot:Element , geo:Feature ;
+    rdfs:label "Open tank (missing wall)"@en ;
+    dcterms:description "Five of six faces: bottom, top and three walls — the east wall is missing, so the shell is not watertight even though the face count looks healthy." ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "POINT(5.83390 51.83932)"^^geo:wktLiteral ] ;
+    geo:hasGeometry [ a geo:Geometry ;
+        geo:asWKT "<http://www.opengis.net/def/crs/EPSG/0/7415> POLYHEDRALSURFACE Z (((185764 427945 0,185764 427953 0,185772 427953 0,185772 427945 0,185764 427945 0)),((185764 427945 6,185772 427945 6,185772 427953 6,185764 427953 6,185764 427945 6)),((185764 427945 0,185764 427945 6,185764 427953 6,185764 427953 0,185764 427945 0)),((185764 427945 0,185772 427945 0,185772 427945 6,185764 427945 6,185764 427945 0)),((185764 427953 0,185764 427953 6,185772 427953 6,185772 427953 0,185764 427953 0)))"^^geo:wktLiteral ] .
 
 # ── GhostUnit — no geometry — FAILS the geometry-present check ──
 v3v:GhostUnit a bot:Element , geo:Feature ;

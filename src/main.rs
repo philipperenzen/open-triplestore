@@ -393,9 +393,9 @@ async fn main() -> anyhow::Result<()> {
                 (s.trim().to_string(), true)
             }
             _ => {
-                use rand::Rng;
-                let secret: String = rand::thread_rng()
-                    .sample_iter(&rand::distributions::Alphanumeric)
+                use rand::RngExt;
+                let secret: String = rand::rng()
+                    .sample_iter(&rand::distr::Alphanumeric)
                     .take(64)
                     .map(char::from)
                     .collect();

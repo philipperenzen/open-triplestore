@@ -24,6 +24,7 @@ CityGML) parses the ISO-13249 **WKT-Z** forms that the 2D GEOS path leaves alone
 | Metric | `distance3d`, `volume`, `area3d`, `zMin`, `zMax`, `height` |
 | Constructive | `boundingBox3d`, `centroid3d`, `footprint2d`, `extrude` |
 | Topological (AABB broad-phase) | `sf3dIntersects`, `sf3dDisjoint` |
+| Validity | `isClosed3d` — watertightness: every edge shared by exactly two faces (unbound for face-less geometry) |
 
 ```sparql
 PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
