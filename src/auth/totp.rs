@@ -21,9 +21,9 @@ const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// Generate a fresh 160-bit shared secret, base32-encoded (no padding).
 pub fn generate_secret() -> String {
-    use rand::RngCore;
+    use rand::Rng;
     let mut bytes = [0u8; 20];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base32_encode(&bytes)
 }
 
@@ -144,11 +144,11 @@ pub fn otpauth_url(secret_b32: &str, username: &str, issuer: &str) -> String {
 
 /// Generate `n` single-use recovery codes (`xxxx-xxxx-xxxx`, base32 charset).
 pub fn generate_recovery_codes(n: usize) -> Vec<String> {
-    use rand::RngCore;
+    use rand::Rng;
     (0..n)
         .map(|_| {
             let mut bytes = [0u8; 8];
-            rand::thread_rng().fill_bytes(&mut bytes);
+            rand::rng().fill_bytes(&mut bytes);
             let s = base32_encode(&bytes).to_lowercase();
             format!("{}-{}-{}", &s[0..4], &s[4..8], &s[8..12])
         })
