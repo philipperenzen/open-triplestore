@@ -537,39 +537,52 @@ fn exif_metadata(bytes: &[u8], meta: &mut AssetMetadata) {
 #[cfg(feature = "asset-media")]
 fn symphonia_metadata(bytes: &[u8], filename: &str, meta: &mut AssetMetadata) {
     use std::io::Cursor;
-    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
+    use symphonia::core::units::Timestamp;
 
     let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = file_ext(filename) {
         hint.with_extension(&ext);
     }
-    let Ok(probed) = symphonia::default::get_probe().format(
+    // symphonia 0.6 renamed `Probe::format` to `probe`, which now takes the options by
+    // value and returns the `FormatReader` directly instead of a `ProbedFormat` wrapper.
+    let Ok(format) = symphonia::default::get_probe().probe(
         &hint,
         mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
+        FormatOptions::default(),
+        MetadataOptions::default(),
     ) else {
         return;
     };
-    let Some(track) = probed.format.default_track() else {
+    let Some(track) = format.default_track(TrackType::Audio) else {
         return;
     };
-    let params = &track.codec_params;
-    if let Some(sr) = params.sample_rate {
+    // Also 0.6: `codec_params` became an `Option<CodecParameters>` enum (audio/video/subtitle),
+    // and the frame count / timebase moved off the codec params onto `Track` itself.
+    let sample_rate = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .and_then(|a| a.sample_rate);
+    if let Some(sr) = sample_rate {
         meta.sample_rate = Some(sr);
     }
-    // Duration = n_frames / sample_rate (or via the codec time_base when present).
-    if let (Some(n_frames), Some(tb)) = (params.n_frames, params.time_base) {
-        let t = tb.calc_time(n_frames);
-        let secs = t.seconds as f64 + t.frac;
+    // Duration = n_frames / sample_rate (or via the track time_base when present).
+    // 0.6 again: `calc_time` takes a `Timestamp` newtype and returns `Option<Time>` (None on
+    // overflow), and `Time`'s seconds/fraction split is now behind `as_secs_f64()`. An
+    // overflow folds into 0.0, which the existing guard below already discards.
+    if let (Some(n_frames), Some(tb)) = (track.num_frames, track.time_base) {
+        let secs = tb
+            .calc_time(Timestamp::from(n_frames as i64))
+            .map_or(0.0, |t| t.as_secs_f64());
         if secs > 0.0 {
             meta.duration_secs = Some(secs);
         }
-    } else if let (Some(n_frames), Some(sr)) = (params.n_frames, params.sample_rate) {
+    } else if let (Some(n_frames), Some(sr)) = (track.num_frames, sample_rate) {
         if sr > 0 {
             meta.duration_secs = Some(n_frames as f64 / sr as f64);
         }
