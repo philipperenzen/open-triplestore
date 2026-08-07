@@ -40,6 +40,59 @@ export function prettyXml(raw) {
   return out.join('\n');
 }
 
+/**
+ * Re-indent a SPARQL query. LAYOUT ONLY — every token is preserved in order, so
+ * the query that runs means exactly what the one that came in meant.
+ *
+ * An LLM usually emits its query as a single line. That is valid SPARQL and
+ * unreadable prose: a chat answer then shows one long wrapped ribbon while the
+ * SPARQL workspace beside it shows the same query laid out.
+ *
+ * A source that is ALREADY multi-line is returned untouched — an author's (or
+ * the server's) own layout beats anything reconstructed here.
+ */
+export function prettySparql(raw) {
+  const src = String(raw ?? '');
+  if (!src.trim()) return src;
+  if (src.trim().includes('\n')) return src; // already laid out
+  // Split string literals, IRIs and comments out first, so punctuation inside
+  // them is never mistaken for structure (a label may contain "." or "{").
+  const TOKEN = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|<[^<>"{}|^`\s]*>|#[^\n]*)/g;
+  const KEYWORD = /\b(SELECT|CONSTRUCT|ASK|DESCRIBE|WHERE|FROM|GRAPH|OPTIONAL|FILTER|BIND|VALUES|SERVICE|MINUS|UNION|ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET|PREFIX|BASE|INSERT(?:\s+DATA)?|DELETE(?:\s+DATA|\s+WHERE)?|WITH|USING)\b/gi;
+  const BR = '\u0000'; // break marker: a character SPARQL source cannot contain
+  const parts = src.split(TOKEN);
+  const lines = [''];
+  let depth = 0;
+  const put = (text) => {
+    const i = lines.length - 1;
+    lines[i] = lines[i].trim() ? `${lines[i]} ${text}` : '  '.repeat(Math.max(0, depth)) + text;
+  };
+  const br = () => { if (lines[lines.length - 1].trim()) lines.push(''); };
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i] ?? '';
+    if (!part) continue;
+    // Odd indices are the split-out literals/IRIs/comments: they CONTINUE the
+    // current line (a PREFIX and its IRI belong together), never start one.
+    if (i % 2 === 1) { put(part); continue; }
+    let seg = part.replace(/\s+/g, ' ');
+    seg = seg.replace(KEYWORD, (kw) => `${BR}${kw}`);          // break before keywords
+    seg = seg.replace(/\s*\{\s*/g, ` {${BR}`);                 // and around braces
+    seg = seg.replace(/\s*\}\s*/g, `${BR}}${BR}`);
+    seg = seg.replace(/\s*\.\s*(?=[^\d]|$)/g, ` .${BR}`);      // after a triple end
+    seg = seg.replace(/\s*;\s*/g, ` ;${BR}`);                  // and a predicate list
+    const chunks = seg.split(BR);
+    for (let c = 0; c < chunks.length; c++) {
+      const chunk = chunks[c].trim();
+      if (c > 0) br();
+      if (!chunk) continue;
+      if (chunk.startsWith('}')) depth -= 1;
+      put(chunk);
+      depth += (chunk.match(/\{/g) || []).length - (chunk.match(/\}/g) || []).length;
+    }
+  }
+  return lines.map((l) => l.replace(/\s+$/, '')).filter((l) => l.trim()).join('\n').trim();
+}
+
 // ── Highlighters (input is treated as raw text; all text is escaped) ─────────
 
 export function highlightJson(src) {

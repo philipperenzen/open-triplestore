@@ -7,7 +7,7 @@
   import { createEventDispatcher } from 'svelte';
   import { t } from 'svelte-i18n';
   import { renderMarkdown } from '../../lib/markdown.js';
-  import { parseChatBlocks, decorateApiLinks } from '../../lib/chatRich.js';
+  import { parseChatBlocks, decorateApiLinks, decorateIriLinks } from '../../lib/chatRich.js';
   import SparqlRunBlock from './SparqlRunBlock.svelte';
   import ApiRunBlock from './ApiRunBlock.svelte';
   import ChatChart from './ChatChart.svelte';
@@ -30,24 +30,39 @@
   });
 
   function mdHtml(src) {
-    return decorateApiLinks(renderMarkdown(src, { breaks: true }).html);
+    // API chips first: an endpoint is also an IRI-shaped string, and it should
+    // stay a runnable call rather than become a resource link.
+    return decorateIriLinks(decorateApiLinks(renderMarkdown(src, { breaks: true }).html));
   }
 
   function apiLinkFrom(e) {
     const el = e.target?.closest?.('.chat-api-link');
     return el ? { method: el.dataset.method || 'GET', path: el.dataset.path || '' } : null;
   }
-  function onClick(e) {
+  function iriFrom(e) {
+    const el = e.target?.closest?.('.chat-iri-link');
+    return el?.dataset?.iri || '';
+  }
+  /** Run an endpoint, or open an IRI's resource page — whichever was clicked. */
+  function activate(e) {
     const ep = apiLinkFrom(e);
-    if (ep?.path) dispatch('runApi', ep);
+    if (ep?.path) {
+      dispatch('runApi', ep);
+      return true;
+    }
+    const iri = iriFrom(e);
+    if (iri) {
+      dispatch('openResource', { iri });
+      return true;
+    }
+    return false;
+  }
+  function onClick(e) {
+    activate(e);
   }
   function onKeydown(e) {
     if (e.key !== 'Enter' && e.key !== ' ') return;
-    const ep = apiLinkFrom(e);
-    if (ep?.path) {
-      e.preventDefault();
-      dispatch('runApi', ep);
-    }
+    if (activate(e)) e.preventDefault();
   }
 </script>
 
@@ -99,6 +114,23 @@
     background: #d1fae5; border-color: #6ee7b7; outline: none;
   }
   .md-seg :global(code.chat-api-link)::after { content: ' ▸'; font-size: 0.85em; }
+  /* IRIs decorated by decorateIriLinks() — a name you can open, not dead text. */
+  .md-seg :global(code.chat-iri-link) {
+    cursor: pointer;
+    color: var(--brand-700, #1d4ed8);
+    background: var(--brand-50, #eff6ff);
+    border: 1px solid var(--brand-200, #bfdbfe);
+    padding: 0 6px;
+    border-radius: 6px;
+    word-break: break-all;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .md-seg :global(code.chat-iri-link:hover),
+  .md-seg :global(code.chat-iri-link:focus-visible) {
+    background: var(--brand-100, #dbeafe);
+    border-color: var(--brand-300, #93c5fd);
+    outline: none;
+  }
   .broken { margin: 0 0 0.55rem; }
   .broken-note { margin: 0 0 0.25rem; font-size: 0.72rem; color: var(--ink-400); font-style: italic; }
   .broken-raw {
