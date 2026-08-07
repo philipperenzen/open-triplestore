@@ -213,13 +213,13 @@ aws-smithy-http-client = { version = "1", features = ["rustls-ring"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 
-# OpenAPI documentation
-# NB: utoipa-swagger-ui stays on 7.x — it pairs with utoipa 5 and targets axum
-# 0.7. Bumping it to 8/9 would force an axum 0.8 migration. (Swagger UI itself is
-# disabled at runtime; only the JSON spec is served.) swagger-ui 7 carries its
-# own utoipa 4 transitively, which coexists fine with our utoipa 5.
+# OpenAPI documentation. `utoipa` supplies the derive macros and the `OpenApi`
+# type; the spec is served as JSON from `/api-docs/openapi.json` (see
+# `server::openapi`). There is deliberately no Swagger UI dependency: rendering
+# the UI needs utoipa-swagger-ui's axum integration, and every release of that
+# crate since 8.x targets axum 0.8, whose `Router` cannot be merged into our
+# axum 0.7 one. Adding it back only makes sense as part of an axum 0.8 migration.
 utoipa = { version = "5", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # SHACL Compact Syntax parser
 nom = "7"
