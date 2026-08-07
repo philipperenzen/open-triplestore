@@ -1876,6 +1876,20 @@ fn validate_regex(val: &str) -> Result<(), AppError> {
 fn chip_clause(var: &str, value: &str, mode: &str, is_object: bool) -> Result<String, AppError> {
     match mode {
         "exact" => {
+            // A stored blank node cannot be named in SPARQL: `_:x` in a query is a
+            // fresh variable, `<_:x>` is a relative IRI (a parse error), and STR()
+            // on a blank node is a type error. Anything reaching here is a
+            // blank-node filter the scan path in `browse_triples` could not anchor
+            // on — reject it with a usable message rather than emitting SPARQL that
+            // fails to parse, or (for objects) a literal comparison that silently
+            // matches nothing. See `detect_bnode_anchor`.
+            if value.starts_with("_:") {
+                return Err(AppError::BadRequest(
+                    "Blank nodes can only be filtered as a single positive exact \
+                     subject or object filter"
+                        .to_string(),
+                ));
+            }
             let is_iri = is_object
                 && (value.starts_with("http://")
                     || value.starts_with("https://")
@@ -1933,6 +1947,488 @@ fn vocab_clause(value: &str, mode: &str) -> Result<String, AppError> {
         }
     };
     Ok(format!("({})", parts.join(" || ")))
+}
+
+// ── Blank-node browse path ───────────────────────────────────────────────────
+//
+// SPARQL cannot name a stored blank node: `_:x` in a query is a fresh variable,
+// `<_:x>` parses as a relative IRI, and STR() on a blank node is a type error.
+// So a browse request pinned to a blank node — the deep link the resource page
+// emits for `_:abc`, in both the table and the graph view — has no query form at
+// all; it used to come back as a SPARQL parse error (subject) or silently empty
+// (object, where the value fell into the literal branch of `chip_clause`).
+//
+// Oxigraph does keep blank-node labels in storage, so these requests are served
+// by scanning the quad index for the pinned node across the same ACL-resolved
+// graph set the query path would have used, then applying every remaining filter
+// in Rust. `resolve_blank_node` (the resource endpoint) resolves blank nodes the
+// same way.
+
+/// The blank node(s) a browse request is pinned to; at least one field is set
+/// whenever the scan path is taken. Values are bare labels, without the `_:`.
+struct BnodeAnchor {
+    subject: Option<String>,
+    object: Option<String>,
+}
+
+fn bnode_filter_unsupported() -> AppError {
+    AppError::BadRequest(
+        "Blank nodes can only be filtered as a single positive exact subject or object filter"
+            .to_string(),
+    )
+}
+
+/// Decide whether a browse request has to take the blank-node scan path, and on
+/// which column(s) the scan is pinned.
+///
+/// A field can anchor a scan when its *positive* constraint narrows to exactly
+/// one `exact` blank node. Two OR-ed positive chips on the same field would
+/// widen the result beyond the pinned node, which a quad-index lookup cannot
+/// express, and a `contains`/`regex` blank-node value would mean scanning every
+/// blank node in scope — both are rejected here. The legacy single-field param
+/// AND-s with the chips, so it can pin the scan by itself; if it disagrees with a
+/// chip-pinned node the post-filter simply yields no rows.
+fn detect_bnode_anchor(
+    params: &BrowseTripleParams,
+    chips: &[BrowseFilterChip],
+    contains_mode: bool,
+) -> Result<Option<BnodeAnchor>, AppError> {
+    let mut anchor = BnodeAnchor {
+        subject: None,
+        object: None,
+    };
+
+    for (field, legacy) in [
+        ("subject", params.subject.as_deref()),
+        ("object", params.object.as_deref()),
+    ] {
+        let positives: Vec<&BrowseFilterChip> = chips
+            .iter()
+            .filter(|c| c.field == field && !c.value.is_empty() && !c.neg.unwrap_or(false))
+            .collect();
+
+        let mut label: Option<String> = None;
+        if positives.iter().any(|c| c.value.starts_with("_:")) {
+            if positives.len() > 1 {
+                return Err(bnode_filter_unsupported());
+            }
+            let chip = positives[0];
+            if chip.mode.as_deref().unwrap_or("contains") != "exact" {
+                return Err(bnode_filter_unsupported());
+            }
+            label = Some(chip.value[2..].to_string());
+        }
+        if let Some(v) = legacy.filter(|v| v.starts_with("_:")) {
+            if contains_mode {
+                return Err(bnode_filter_unsupported());
+            }
+            label.get_or_insert_with(|| v[2..].to_string());
+        }
+
+        match field {
+            "subject" => anchor.subject = label,
+            _ => anchor.object = label,
+        }
+    }
+
+    Ok((anchor.subject.is_some() || anchor.object.is_some()).then_some(anchor))
+}
+
+/// Which column(s) a compiled clause applies to. `Vocabulary` spans s/p/o, the
+/// same as `vocab_clause`'s three-way disjunction.
+#[derive(Clone, Copy, PartialEq)]
+enum RowField {
+    Subject,
+    Predicate,
+    Object,
+    Graph,
+    Vocabulary,
+}
+
+/// One compiled comparison, mirroring the SPARQL `chip_clause`/`vocab_clause`
+/// would have emitted for the same chip.
+enum RowClause {
+    /// `?x = <iri>` — term identity, so an IRI-shaped *literal* does not match.
+    /// A `_:label` value matches the blank node with that label.
+    Term(String),
+    /// `str(?o) = "v"` — the object-exact form for non-IRI values, which
+    /// deliberately also matches typed and language-tagged literals.
+    Lexical(String),
+    /// `CONTAINS(LCASE(STR(?x)), LCASE("v"))`; the needle is pre-lowercased.
+    Contains(String),
+    /// `REGEX(STR(?x), "…", "i")`.
+    Regex(regex::Regex),
+    /// `STRSTARTS(STR(?x), "ns")` — the `vocabulary` exact form.
+    StartsWith(String),
+}
+
+/// A browse filter set compiled for row-by-row evaluation. Same shape as the
+/// SPARQL the query path builds: positive clauses OR within a field and AND
+/// across fields, each negated clause excludes independently, and `q` AND-s on
+/// top of all of them.
+#[derive(Default)]
+struct RowFilter {
+    positive: Vec<(RowField, Vec<RowClause>)>,
+    negative: Vec<(RowField, RowClause)>,
+    q: Option<QExpr>,
+}
+
+fn compile_row_clause(value: &str, mode: &str, is_object: bool) -> Result<RowClause, AppError> {
+    match mode {
+        "exact" => {
+            if value.starts_with("_:") {
+                return Ok(RowClause::Term(value.to_string()));
+            }
+            let is_iri = is_object
+                && (value.starts_with("http://")
+                    || value.starts_with("https://")
+                    || value.starts_with("urn:"));
+            if is_object && !is_iri {
+                validate_literal_value(value)?;
+                Ok(RowClause::Lexical(value.to_string()))
+            } else {
+                validate_iri(value)?;
+                Ok(RowClause::Term(value.to_string()))
+            }
+        }
+        "regex" => {
+            validate_regex(value)?;
+            compile_row_regex(value)
+        }
+        _ => {
+            validate_substring(value)?;
+            Ok(RowClause::Contains(value.to_lowercase()))
+        }
+    }
+}
+
+/// `(?i)` is the inline form of the `"i"` flag the query path passes to REGEX().
+/// Oxigraph's evaluator compiles SPARQL REGEX with this same crate, so a pattern
+/// accepted on one path is accepted on the other.
+fn compile_row_regex(value: &str) -> Result<RowClause, AppError> {
+    regex::Regex::new(&format!("(?i){value}"))
+        .map(RowClause::Regex)
+        .map_err(|e| AppError::BadRequest(format!("Invalid regex filter: {e}")))
+}
+
+fn compile_vocab_row_clause(value: &str, mode: &str) -> Result<RowClause, AppError> {
+    match mode {
+        "exact" => {
+            validate_substring(value)?;
+            Ok(RowClause::StartsWith(value.to_string()))
+        }
+        "regex" => {
+            validate_regex(value)?;
+            compile_row_regex(value)
+        }
+        _ => {
+            validate_substring(value)?;
+            Ok(RowClause::Contains(value.to_lowercase()))
+        }
+    }
+}
+
+/// Compile the chips, the legacy single-field params and `q` into a filter the
+/// scan path can apply per row. Values go through the same validators as the
+/// query path, so a rejected value is rejected identically on both.
+fn compile_row_filter(
+    params: &BrowseTripleParams,
+    chips: &[BrowseFilterChip],
+    contains_mode: bool,
+) -> Result<RowFilter, AppError> {
+    let mut filter = RowFilter::default();
+    let mut groups: Vec<(RowField, Vec<RowClause>)> = Vec::new();
+
+    for chip in chips.iter().filter(|c| !c.value.is_empty()) {
+        let mode = chip.mode.as_deref().unwrap_or("contains");
+        let (field, clause) = match chip.field.as_str() {
+            "subject" => (
+                RowField::Subject,
+                compile_row_clause(&chip.value, mode, false)?,
+            ),
+            "predicate" => (
+                RowField::Predicate,
+                compile_row_clause(&chip.value, mode, false)?,
+            ),
+            "object" => (
+                RowField::Object,
+                compile_row_clause(&chip.value, mode, true)?,
+            ),
+            "graph" => (
+                RowField::Graph,
+                compile_row_clause(&chip.value, mode, false)?,
+            ),
+            "vocabulary" => (
+                RowField::Vocabulary,
+                compile_vocab_row_clause(&chip.value, mode)?,
+            ),
+            _ => {
+                return Err(AppError::BadRequest(
+                    "filter field must be subject, predicate, object, graph, or vocabulary"
+                        .to_string(),
+                ))
+            }
+        };
+        if chip.neg.unwrap_or(false) {
+            filter.negative.push((field, clause));
+            continue;
+        }
+        match groups.iter_mut().find(|(f, _)| *f == field) {
+            Some((_, clauses)) => clauses.push(clause),
+            None => groups.push((field, vec![clause])),
+        }
+    }
+
+    // Legacy single-field params AND with the chip groups above, so each becomes
+    // its own single-clause group rather than joining one.
+    //
+    // `graph` is the exception: in `contains` mode the query path turns it into a
+    // substring FILTER, which is reproduced here, while in exact mode it is a
+    // scope that `resolve_scope_graphs` has already applied (or, when a graph chip
+    // is present, that the query path drops — mirrored so both paths agree).
+    let legacy_mode = if contains_mode { "contains" } else { "exact" };
+    for (field, value, is_object) in [
+        (RowField::Subject, params.subject.as_deref(), false),
+        (RowField::Predicate, params.predicate.as_deref(), false),
+        (RowField::Object, params.object.as_deref(), true),
+        (
+            RowField::Graph,
+            params.graph.as_deref().filter(|_| contains_mode),
+            false,
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        // The pinned blank node is the scan's anchor, not a clause to re-check.
+        if value.starts_with("_:") {
+            continue;
+        }
+        groups.push((
+            field,
+            vec![compile_row_clause(value, legacy_mode, is_object)?],
+        ));
+    }
+
+    filter.positive = groups;
+    filter.q = params.q.as_deref().map(parse_q_expr).transpose()?.flatten();
+    Ok(filter)
+}
+
+/// One column of a scanned quad: its `STR()`-equivalent text plus the term kind,
+/// which term-identity clauses need so an IRI-shaped literal cannot satisfy
+/// `?o = <iri>`.
+struct RowCol {
+    text: String,
+    kind: RowKind,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum RowKind {
+    Named,
+    Blank,
+    Literal,
+}
+
+/// Render a term the way the filters compare it.
+///
+/// Blank nodes get their displayed `_:label` form. SPARQL's STR() is a type
+/// error on a blank node, so the query path can never match one on a substring,
+/// regex or lexical comparison; on the path that exists precisely to reach blank
+/// nodes, comparing against the label the UI shows (and deep-links with) is what
+/// the filter UI implies.
+fn row_col(term: &Term) -> RowCol {
+    match term {
+        Term::NamedNode(n) => RowCol {
+            text: n.as_str().to_string(),
+            kind: RowKind::Named,
+        },
+        Term::BlankNode(b) => RowCol {
+            text: format!("_:{}", b.as_str()),
+            kind: RowKind::Blank,
+        },
+        Term::Literal(l) => RowCol {
+            text: l.value().to_string(),
+            kind: RowKind::Literal,
+        },
+        other => RowCol {
+            text: other.to_string(),
+            kind: RowKind::Literal,
+        },
+    }
+}
+
+fn clause_matches_col(clause: &RowClause, col: &RowCol) -> bool {
+    match clause {
+        RowClause::Term(v) => {
+            if let Some(label) = v.strip_prefix("_:") {
+                col.kind == RowKind::Blank
+                    && col.text.len() == label.len() + 2
+                    && col.text[2..] == *label
+            } else {
+                col.kind == RowKind::Named && col.text == *v
+            }
+        }
+        RowClause::Lexical(v) => col.kind != RowKind::Blank && col.text == *v,
+        RowClause::Contains(needle) => col.text.to_lowercase().contains(needle),
+        RowClause::Regex(re) => re.is_match(&col.text),
+        RowClause::StartsWith(prefix) => col.text.starts_with(prefix),
+    }
+}
+
+/// `cols` is `[s, p, o, g]`, matching the columns `q_leaf` searches.
+fn clause_matches(clause: &RowClause, field: RowField, cols: &[RowCol; 4]) -> bool {
+    match field {
+        RowField::Subject => clause_matches_col(clause, &cols[0]),
+        RowField::Predicate => clause_matches_col(clause, &cols[1]),
+        RowField::Object => clause_matches_col(clause, &cols[2]),
+        RowField::Graph => clause_matches_col(clause, &cols[3]),
+        // vocab_clause ORs the same comparison over subject, predicate and object.
+        RowField::Vocabulary => cols[..3].iter().any(|c| clause_matches_col(clause, c)),
+    }
+}
+
+/// Evaluate a parsed `q` expression against a row. A leaf matches when the term
+/// appears, case-insensitively, in any of the four columns — the Rust twin of
+/// `q_leaf`.
+fn q_expr_matches(e: &QExpr, cols: &[RowCol; 4]) -> bool {
+    match e {
+        QExpr::Term(t) => {
+            let needle = t.to_lowercase();
+            cols.iter().any(|c| c.text.to_lowercase().contains(&needle))
+        }
+        QExpr::Not(a) => !q_expr_matches(a, cols),
+        QExpr::And(a, b) => q_expr_matches(a, cols) && q_expr_matches(b, cols),
+        QExpr::Or(a, b) => q_expr_matches(a, cols) || q_expr_matches(b, cols),
+        QExpr::Xor(a, b) => q_expr_matches(a, cols) != q_expr_matches(b, cols),
+    }
+}
+
+fn row_filter_matches(filter: &RowFilter, cols: &[RowCol; 4]) -> bool {
+    filter
+        .positive
+        .iter()
+        .all(|(field, clauses)| clauses.iter().any(|c| clause_matches(c, *field, cols)))
+        && !filter
+            .negative
+            .iter()
+            .any(|(field, clause)| clause_matches(clause, *field, cols))
+        && filter.q.as_ref().is_none_or(|q| q_expr_matches(q, cols))
+}
+
+/// Answer a blank-node-pinned browse request from the quad index. Returns the
+/// same body shape as the query path.
+fn browse_blank_node_scan(
+    store: &oxigraph::store::Store,
+    anchor: &BnodeAnchor,
+    scope: &ScopeGraphs,
+    filter: &RowFilter,
+    limit: usize,
+    offset: usize,
+    want_count: bool,
+) -> serde_json::Value {
+    use oxigraph::model::{BlankNode, GraphNameRef, NamedNode, NamedOrBlankNodeRef, TermRef};
+
+    // An unusable label simply names no stored node — an empty page, not an error.
+    let parse = |l: &Option<String>| match l {
+        Some(l) => match BlankNode::new(l) {
+            Ok(b) => Some(Some(b)),
+            Err(_) => None,
+        },
+        None => Some(None),
+    };
+    let (Some(subject), Some(object)) = (parse(&anchor.subject), parse(&anchor.object)) else {
+        return empty_browse_body(limit, offset, want_count);
+    };
+
+    let graphs: Option<Vec<NamedNode>> = match scope {
+        // Admin, unscoped — every named graph, as `GRAPH ?g { … }` would.
+        ScopeGraphs::All => None,
+        ScopeGraphs::Set(gs) => {
+            let mut nodes: Vec<NamedNode> =
+                gs.iter().filter_map(|g| NamedNode::new(g).ok()).collect();
+            if nodes.is_empty() {
+                return empty_browse_body(limit, offset, want_count);
+            }
+            // The accessible set is a HashSet with a per-rebuild RandomState, so
+            // scanning in its iteration order would reshuffle pages on a 30s
+            // cadence with no data change. See `sorted_iris`.
+            nodes.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+            Some(nodes)
+        }
+        ScopeGraphs::Empty => return empty_browse_body(limit, offset, want_count),
+    };
+
+    let subject_ref = subject
+        .as_ref()
+        .map(|b| NamedOrBlankNodeRef::BlankNode(b.as_ref()));
+    let object_ref = object.as_ref().map(|b| TermRef::BlankNode(b.as_ref()));
+
+    let mut rows: Vec<(String, String, String, serde_json::Value)> = Vec::new();
+    let mut collect = |quads: oxigraph::store::QuadIter| {
+        for quad in quads.flatten() {
+            // `GRAPH ?g` never binds the default graph; keep the two paths aligned.
+            let oxigraph::model::GraphName::NamedNode(ref g) = quad.graph_name else {
+                continue;
+            };
+            let cols = [
+                row_col(&Term::from(quad.subject.clone())),
+                row_col(&Term::from(quad.predicate.clone())),
+                row_col(&quad.object),
+                row_col(&Term::from(g.clone())),
+            ];
+            if !row_filter_matches(filter, &cols) {
+                continue;
+            }
+            let json = serde_json::json!({
+                "subject": format_term(&Term::from(quad.subject.clone())),
+                "predicate": format_term(&Term::from(quad.predicate.clone())),
+                "object": format_term(&quad.object),
+                "graph": format_term(&Term::from(g.clone())),
+            });
+            rows.push((
+                cols[3].text.clone(),
+                cols[1].text.clone(),
+                cols[2].text.clone(),
+                json,
+            ));
+        }
+    };
+
+    match &graphs {
+        None => collect(store.quads_for_pattern(subject_ref, None, object_ref, None)),
+        Some(gs) => {
+            for g in gs {
+                collect(store.quads_for_pattern(
+                    subject_ref,
+                    None,
+                    object_ref,
+                    Some(GraphNameRef::NamedNode(g.as_ref())),
+                ));
+            }
+        }
+    }
+
+    // The query path has no ORDER BY, but it also never revisits the same row
+    // twice; here the page has to stay put across requests, so order on the
+    // columns that identify a row within the pinned node.
+    rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+
+    let total = rows.len();
+    let triples: Vec<serde_json::Value> = rows
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(_, _, _, json)| json)
+        .collect();
+    let mut body = serde_json::json!({
+        "triples": triples,
+        "hasMore": total > offset.saturating_add(limit),
+        "limit": limit,
+        "offset": offset,
+    });
+    if want_count {
+        body["total"] = serde_json::json!(total);
+    }
+    body
 }
 
 /// One token of the free-text search mini-language.
@@ -2003,6 +2499,21 @@ fn tokenize_q(q: &str) -> Vec<QTok> {
     toks
 }
 
+/// A parsed `q` expression.
+///
+/// The parser builds this tree rather than emitting SPARQL text directly because
+/// the same expression has to be evaluated two ways: rendered into the browse
+/// query (`q_expr_to_sparql`), and evaluated row-by-row in Rust (`q_expr_matches`)
+/// on the blank-node scan path, where there is no SPARQL query to filter with.
+#[derive(Clone, Debug, PartialEq)]
+enum QExpr {
+    Term(String),
+    Not(Box<QExpr>),
+    And(Box<QExpr>, Box<QExpr>),
+    Or(Box<QExpr>, Box<QExpr>),
+    Xor(Box<QExpr>, Box<QExpr>),
+}
+
 /// A leaf term matches if the substring appears in ANY column (s/p/o/g),
 /// case-insensitively. The term is assumed pre-validated by `build_q_filter`.
 fn q_leaf(term: &str) -> String {
@@ -2010,6 +2521,20 @@ fn q_leaf(term: &str) -> String {
     format!(
         "(CONTAINS(LCASE(STR(?s)), {n}) || CONTAINS(LCASE(STR(?p)), {n}) || CONTAINS(LCASE(STR(?o)), {n}) || CONTAINS(LCASE(STR(?g)), {n}))"
     )
+}
+
+/// Render a parsed `q` expression as a SPARQL boolean expression over s/p/o/g.
+fn q_expr_to_sparql(e: &QExpr) -> String {
+    match e {
+        QExpr::Term(t) => q_leaf(t),
+        QExpr::Not(a) => format!("(!{})", q_expr_to_sparql(a)),
+        QExpr::And(a, b) => format!("({} && {})", q_expr_to_sparql(a), q_expr_to_sparql(b)),
+        QExpr::Or(a, b) => format!("({} || {})", q_expr_to_sparql(a), q_expr_to_sparql(b)),
+        QExpr::Xor(a, b) => {
+            let (l, r) = (q_expr_to_sparql(a), q_expr_to_sparql(b));
+            format!("(({l} || {r}) && !({l} && {r}))")
+        }
+    }
 }
 
 /// Recursive-descent parser for the search mini-language. Precedence (lowest→
@@ -2022,53 +2547,53 @@ impl QParser {
     fn peek(&self) -> Option<QTok> {
         self.toks.get(self.pos).cloned()
     }
-    fn parse_or(&mut self) -> Result<String, ()> {
+    fn parse_or(&mut self) -> Result<QExpr, ()> {
         let mut left = self.parse_xor()?;
         while self.peek() == Some(QTok::Or) {
             self.pos += 1;
             let r = self.parse_xor()?;
-            left = format!("({left} || {r})");
+            left = QExpr::Or(Box::new(left), Box::new(r));
         }
         Ok(left)
     }
-    fn parse_xor(&mut self) -> Result<String, ()> {
+    fn parse_xor(&mut self) -> Result<QExpr, ()> {
         let mut left = self.parse_and()?;
         while self.peek() == Some(QTok::Xor) {
             self.pos += 1;
             let r = self.parse_and()?;
-            left = format!("(({left} || {r}) && !({left} && {r}))");
+            left = QExpr::Xor(Box::new(left), Box::new(r));
         }
         Ok(left)
     }
-    fn parse_and(&mut self) -> Result<String, ()> {
+    fn parse_and(&mut self) -> Result<QExpr, ()> {
         let mut left = self.parse_not()?;
         loop {
             match self.peek() {
                 Some(QTok::And) => {
                     self.pos += 1;
                     let r = self.parse_not()?;
-                    left = format!("({left} && {r})");
+                    left = QExpr::And(Box::new(left), Box::new(r));
                 }
                 // Implicit AND when an atom (term / NOT / "(") follows with no operator.
                 Some(QTok::Term(_)) | Some(QTok::Not) | Some(QTok::LParen) => {
                     let r = self.parse_not()?;
-                    left = format!("({left} && {r})");
+                    left = QExpr::And(Box::new(left), Box::new(r));
                 }
                 _ => break,
             }
         }
         Ok(left)
     }
-    fn parse_not(&mut self) -> Result<String, ()> {
+    fn parse_not(&mut self) -> Result<QExpr, ()> {
         if self.peek() == Some(QTok::Not) {
             self.pos += 1;
             let a = self.parse_not()?;
-            Ok(format!("(!{a})"))
+            Ok(QExpr::Not(Box::new(a)))
         } else {
             self.parse_atom()
         }
     }
-    fn parse_atom(&mut self) -> Result<String, ()> {
+    fn parse_atom(&mut self) -> Result<QExpr, ()> {
         match self.peek() {
             Some(QTok::LParen) => {
                 self.pos += 1;
@@ -2081,7 +2606,7 @@ impl QParser {
             }
             Some(QTok::Term(t)) => {
                 self.pos += 1;
-                Ok(q_leaf(&t))
+                Ok(QExpr::Term(t))
             }
             _ => Err(()),
         }
@@ -2093,6 +2618,14 @@ impl QParser {
 /// imply AND. Returns `None` for an empty query. Every term is validated as a
 /// substring so nothing can break out of the generated SPARQL.
 fn build_q_filter(q: &str) -> Result<Option<String>, AppError> {
+    Ok(parse_q_expr(q)?.as_ref().map(q_expr_to_sparql))
+}
+
+/// Parse a `q` search string into its expression tree, validating every term as
+/// a substring so nothing can break out of the generated SPARQL. Returns `None`
+/// for an empty query. Shared by the SPARQL path (`build_q_filter`) and the
+/// blank-node scan path, so both apply exactly the same search semantics.
+fn parse_q_expr(q: &str) -> Result<Option<QExpr>, AppError> {
     let q = q.trim();
     if q.is_empty() {
         return Ok(None);
@@ -2220,7 +2753,7 @@ fn resolve_scope_graphs(
     }
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct BrowseTripleParams {
     pub graph: Option<String>,
     pub subject: Option<String>,
@@ -2640,6 +3173,54 @@ pub async fn browse_triples(
             "too many filter chips (max 64)".to_string(),
         ));
     }
+
+    // A request pinned to a blank node has no SPARQL form (see the blank-node
+    // browse path above), so it is served from the quad index instead. Detected
+    // before any clause is built, which leaves `chip_clause`'s blank-node guard
+    // to reject only the shapes no scan can anchor.
+    if let Some(anchor) = detect_bnode_anchor(&params, &chips, contains_mode)? {
+        let want_count = params.count.unwrap_or(false);
+        // Mirror how the query path treats `?graph=`: a scope on the exact path,
+        // but a substring filter in `contains` mode, and superseded by any graph
+        // chip. `resolve_scope_graphs` reads it from `params`, so hide it when it
+        // is not acting as a scope.
+        let graph_is_scope = !contains_mode
+            && !chips
+                .iter()
+                .any(|c| c.field == "graph" && !c.value.is_empty());
+        let mut scope_params = params.clone();
+        if !graph_is_scope {
+            scope_params.graph = None;
+        }
+        let scope = resolve_scope_graphs(&state, &scope_params, user_id, is_admin)?;
+        if matches!(scope, ScopeGraphs::Empty) {
+            return Ok(Json(empty_browse_body(limit, offset, want_count)));
+        }
+        let filter = compile_row_filter(&params, &chips, contains_mode)?;
+
+        let _browse_permit = state
+            .browse_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AppError::Internal("browse concurrency limiter closed".to_string()))?;
+        let store = state.store.clone();
+        let body = tokio::task::spawn_blocking(move || {
+            browse_blank_node_scan(
+                store.store(),
+                &anchor,
+                &scope,
+                &filter,
+                limit,
+                offset,
+                want_count,
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        return Ok(Json(body));
+    }
+
     let mut subj_clauses: Vec<String> = Vec::new();
     let mut pred_clauses: Vec<String> = Vec::new();
     let mut obj_clauses: Vec<String> = Vec::new();

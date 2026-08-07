@@ -4078,6 +4078,7 @@ dependencies = [
  "r2d2_sqlite",
  "rand 0.8.5",
  "rayon",
+ "regex",
  "reqwest",
  "ring",
  "rstar 0.13.0",
