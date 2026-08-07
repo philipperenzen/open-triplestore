@@ -544,7 +544,8 @@
       "guestLimit": "Guests can send {anon} AI requests per minute; signed-in users get {user}.",
       "aboutRateLimit": "Rate limit",
       "aboutRateLimitValue": "{n} requests/min for you",
-      "aboutRateLimitSignIn": "(sign in for {n}/min)"
+      "aboutRateLimitSignIn": "(sign in for {n}/min)",
+      "verboseTitle": "Show what Spark is doing — open the queries it runs"
     },
     "sparql": {
       "title": "SPARQL workspace",
