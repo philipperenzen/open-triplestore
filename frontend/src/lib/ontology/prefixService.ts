@@ -11,6 +11,7 @@ import { NAMESPACES, VOCAB_INFO } from './vocabularies.js';
 // cache held direct prefix.cc responses; a stale v1 entry could shadow a
 // platform-registered prefix, so the key is bumped).
 const CACHE_KEY = 'prefix_cache_v2';
+const NS_CACHE_KEY = 'prefix_ns_cache_v1';
 const NEG_TTL_MS = 1000 * 60 * 60 * 24; // 24h for misses
 
 interface CacheEntry {
@@ -35,6 +36,50 @@ function saveCache() {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch {}
 }
 
+// Reverse results, keyed by namespace IRI.
+//
+// Deliberately separate from `cache`, which is keyed by *prefix*: several
+// distinct namespaces can share one prefix label, so a reverse hit whose label
+// was already taken had nowhere to live. It was dropped, `prefixForNamespace`
+// kept returning null for it, and callers re-requested it on every render —
+// which is what let the facet rail hammer /api/prefixes/reverse into a 429.
+interface NsCacheEntry {
+  prefix: string | null;
+  t: number;
+}
+
+let nsCache: Record<string, NsCacheEntry> | null = null;
+
+function loadNsCache() {
+  if (nsCache) return nsCache;
+  try {
+    nsCache = JSON.parse(localStorage.getItem(NS_CACHE_KEY) || '{}');
+  } catch { nsCache = {}; }
+  return nsCache;
+}
+
+function saveNsCache() {
+  try { localStorage.setItem(NS_CACHE_KEY, JSON.stringify(nsCache)); } catch {}
+}
+
+// One in-flight request per key. Without this, every consumer that asks for the
+// same prefix/namespace in the same tick issues its own fetch — the facet rail
+// resolves one namespace per row, and each row raced the others.
+const inFlightPrefix = new Map<string, Promise<string | null>>();
+const inFlightNs = new Map<string, Promise<string | null>>();
+
+function coalesce(
+  map: Map<string, Promise<string | null>>,
+  key: string,
+  run: () => Promise<string | null>,
+): Promise<string | null> {
+  const pending = map.get(key);
+  if (pending) return pending;
+  const p = run().finally(() => map.delete(key));
+  map.set(key, p);
+  return p;
+}
+
 export function lookupPrefixSync(prefix: string): string | null {
   const c = loadCache();
   const hit = c[prefix];
@@ -46,19 +91,21 @@ export async function lookupPrefix(prefix: string): Promise<string | null> {
   const hit = c[prefix];
   if (hit && hit.iri) return hit.iri;
   if (hit && !hit.iri && Date.now() - hit.t < NEG_TTL_MS) return null;
-  try {
-    const res = await fetch(`/api/prefixes/${encodeURIComponent(prefix)}`);
-    if (!res.ok) throw new Error('not found');
-    const data = await res.json();
-    if (data && data.namespace) {
-      c[prefix] = { iri: data.namespace, t: Date.now() };
-      saveCache();
-      return data.namespace;
-    }
-  } catch {}
-  c[prefix] = { iri: null, t: Date.now() };
-  saveCache();
-  return null;
+  return coalesce(inFlightPrefix, prefix, async () => {
+    try {
+      const res = await fetch(`/api/prefixes/${encodeURIComponent(prefix)}`);
+      if (!res.ok) throw new Error('not found');
+      const data = await res.json();
+      if (data && data.namespace) {
+        c[prefix] = { iri: data.namespace, t: Date.now() };
+        saveCache();
+        return data.namespace;
+      }
+    } catch {}
+    c[prefix] = { iri: null, t: Date.now() };
+    saveCache();
+    return null;
+  });
 }
 
 export function warmPrefix(prefix: string): void {
@@ -80,30 +127,59 @@ function reverseMap(): Record<string, string> {
  *  using the cached internal-service / NAMESPACES data. Returns null if unknown. */
 export function prefixForNamespace(ns: string): string | null {
   if (!ns) return null;
-  return reverseMap()[ns] || null;
+  const direct = reverseMap()[ns];
+  if (direct) return direct;
+  // Namespaces resolved earlier by `lookupNamespacePrefix`. Consulting this here
+  // is what stops a caller re-requesting a namespace it has already resolved.
+  return loadNsCache()[ns]?.prefix || null;
 }
 
 /** Reverse-resolve an unknown namespace via the internal prefix service
  *  (best-effort, cached). Falls back to longest-namespace matching on the
- *  server, so term IRIs resolve too. */
+ *  server, so term IRIs resolve too.
+ *
+ *  Hits and definitive misses are both cached, and concurrent callers for the
+ *  same namespace share one request, so a list of N terms in one namespace costs
+ *  a single lookup rather than N per render. */
 export async function lookupNamespacePrefix(ns: string): Promise<string | null> {
+  if (!ns) return null;
   const known = prefixForNamespace(ns);
   if (known) return known;
+  const hit = loadNsCache()[ns];
+  if (hit && !hit.prefix && Date.now() - hit.t < NEG_TTL_MS) return null;
+  return coalesce(inFlightNs, ns, () => fetchNamespacePrefix(ns));
+}
+
+async function fetchNamespacePrefix(ns: string): Promise<string | null> {
+  let prefix: string | null = null;
+  // Only a definitive answer is worth remembering. A 429 or a network blip is
+  // transient — caching it as a miss would blank the label for a full day.
+  let definitive = false;
   try {
     const res = await fetch(`/api/prefixes/reverse?uri=${encodeURIComponent(ns)}`);
-    if (!res.ok) throw new Error('not found');
-    const data = await res.json();
-    if (data && data.prefix && data.namespace) {
-      const c = loadCache();
-      if (!c[data.prefix]) {
-        c[data.prefix] = { iri: data.namespace, t: Date.now() };
-        saveCache();
-        reverse = null;
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.prefix && data.namespace) {
+        prefix = data.prefix;
+        const c = loadCache();
+        if (!c[data.prefix]) {
+          c[data.prefix] = { iri: data.namespace, t: Date.now() };
+          saveCache();
+          reverse = null;
+        }
       }
-      return data.prefix;
+      definitive = true;
+    } else if (res.status === 404) {
+      definitive = true; // the service knows nothing about this namespace
     }
-  } catch {}
-  return null;
+  } catch { /* offline — retry on a later render */ }
+
+  if (definitive) {
+    const nc = loadNsCache();
+    nc[ns] = { prefix, t: Date.now() };
+    saveNsCache();
+  }
+  return prefix;
 }
 
 export function extractDeclaredPrefixes(query: string): Record<string, string> {
