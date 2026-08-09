@@ -828,7 +828,9 @@ fn known_vocab_iris() -> HashMap<String, String> {
     for (_, summary) in cache.values() {
         let mut rest = summary.as_str();
         while let Some(start) = rest.find('<') {
-            let Some(end) = rest[start + 1..].find('>') else { break };
+            let Some(end) = rest[start + 1..].find('>') else {
+                break;
+            };
             let iri = &rest[start + 1..start + 1 + end];
             // The graph's own IRI heads each block; harmless either way, it is a
             // real IRI too and is never what a predicate slot gets confused with.
@@ -857,7 +859,9 @@ fn repair_iri_case(sparql: &str, known: &HashMap<String, String>) -> String {
     let mut out = String::with_capacity(sparql.len());
     let mut rest = sparql;
     while let Some(start) = rest.find('<') {
-        let Some(len) = rest[start + 1..].find('>') else { break };
+        let Some(len) = rest[start + 1..].find('>') else {
+            break;
+        };
         let iri = &rest[start + 1..start + 1 + len];
         out.push_str(&rest[..start + 1]);
         match known.get(&iri.to_lowercase()) {
@@ -891,7 +895,9 @@ fn unknown_vocab_iris(sparql: &str, known: &HashMap<String, String>) -> Vec<Stri
     let mut bad: Vec<String> = Vec::new();
     let mut rest = sparql;
     while let Some(start) = rest.find('<') {
-        let Some(len) = rest[start + 1..].find('>') else { break };
+        let Some(len) = rest[start + 1..].find('>') else {
+            break;
+        };
         let iri = &rest[start + 1..start + 1 + len];
         rest = &rest[start + 1 + len + 1..];
         let in_sampled_ns = iri
@@ -2164,7 +2170,9 @@ const VOCAB_EVIDENCE_HITS: usize = 12;
 /// or they are long and hyphen/underscore-joined.
 fn evidence_terms(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '?' | '!' | '(' | ')' | '"' | '\'')) {
+    for raw in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ';' | '?' | '!' | '(' | ')' | '"' | '\'')
+    }) {
         let t = raw.trim_matches(|c: char| c == '.' || c == ':');
         if t.len() < 4 || t.len() > 64 {
             continue;
@@ -2192,7 +2200,11 @@ fn evidence_terms(text: &str) -> Vec<String> {
 /// with every other small graph in the store. The text index knows which graph
 /// actually holds the literal, so ask it. Best-effort throughout — no index, no
 /// identifier-shaped terms, or no hits simply leaves the ordering as it was.
-async fn evidence_graphs(state: &AppState, messages: &[ChatMessage], in_scope: &[String]) -> Vec<String> {
+async fn evidence_graphs(
+    state: &AppState,
+    messages: &[ChatMessage],
+    in_scope: &[String],
+) -> Vec<String> {
     let text: String = messages
         .iter()
         .rev()
@@ -2293,11 +2305,7 @@ async fn evidence_graphs(state: &AppState, messages: &[ChatMessage], in_scope: &
 /// (up to [`VOCAB_GRAPH_LIMIT`] graphs). Served from a TTL cache; cold graphs are
 /// sampled inside a strict time budget — on timeout the turn proceeds with
 /// whatever was sampled or already cached.
-async fn graph_vocab_context(
-    state: &AppState,
-    graphs: &[String],
-    evidence: &[String],
-) -> String {
+async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[String]) -> String {
     // WHICH graphs get a slot matters as much as sampling them reliably. Taking
     // the first N in list order let a handful of huge derived layers (an IFC
     // import's ifcOWL lift is ~700k triples and dozens of graphs) consume every
@@ -2333,7 +2341,12 @@ async fn graph_vocab_context(
     });
     let wanted: Vec<&String> = evidence
         .iter()
-        .chain(graphs.iter().take(mentioned).filter(|g| !evidence.contains(g)))
+        .chain(
+            graphs
+                .iter()
+                .take(mentioned)
+                .filter(|g| !evidence.contains(g)),
+        )
         .chain(rest.into_iter())
         .take(VOCAB_GRAPH_LIMIT)
         .collect();
@@ -2497,8 +2510,11 @@ async fn run_chat_query_timed(
     graphs: &HashSet<String>,
 ) -> Result<ChatQueryResult, AppError> {
     let secs = state.query_timeout_secs.min(CHAT_QUERY_MAX_SECS);
-    match tokio::time::timeout(Duration::from_secs(secs), run_chat_query(state, query, graphs))
-        .await
+    match tokio::time::timeout(
+        Duration::from_secs(secs),
+        run_chat_query(state, query, graphs),
+    )
+    .await
     {
         Ok(result) => result,
         // Report the bound that actually fired: the model is being asked to
@@ -2804,16 +2820,15 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
+        evidence_terms, extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
         first_sparql_fence, hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
-        evidence_terms, repair_iri_case, repair_sparql, sse_data, stream_delta_text,
-        strip_code_fence, truncate, unknown_vocab_iris,
-        validate_sparql,
-        widgets_without_retrieval, ChatQueryRun, ChatStreamEvent, DeltaGate, EventSink,
-        SseLineBuffer, CHAT_CELL_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
+        repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence, truncate,
+        unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatQueryRun,
+        ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
+        CHAT_WKT_CELL_MAX_CHARS,
     };
-    use std::collections::HashMap;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn fenced_query_counts_as_a_request_only_before_any_retrieval() {
@@ -3054,9 +3069,7 @@ mod tests {
 
     #[test]
     fn evidence_terms_picks_identifiers_not_ordinary_words() {
-        let t = evidence_terms(
-            "Which parts of AB-12-345-C have a condition rating of 3 or worse?",
-        );
+        let t = evidence_terms("Which parts of AB-12-345-C have a condition rating of 3 or worse?");
         assert_eq!(t, vec!["AB-12-345-C".to_string()]);
         // Nothing identifier-shaped ⇒ no lookup at all (the index would just
         // return noise for ordinary words).
