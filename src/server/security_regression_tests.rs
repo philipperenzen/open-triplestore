@@ -53,6 +53,8 @@ mod tests {
             text_index: None,
             #[cfg(feature = "text-search")]
             text_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "text-search")]
+            text_sync_lock: Arc::new(std::sync::Mutex::new(())),
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
