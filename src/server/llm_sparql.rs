@@ -786,6 +786,149 @@ async fn finalize_sparql(state: &AppState, sparql: String) -> String {
     resolved.unwrap_or(sparql)
 }
 
+/// Hoist solution modifiers a model wrote INSIDE the WHERE block back out where
+/// the grammar wants them: `… } LIMIT 50 }` → `… } } LIMIT 50`.
+///
+/// This is the single most common syntax error small models make on this
+/// endpoint — the prompt tells them to always add a LIMIT, and they attach it to
+/// the pattern rather than the query. The parser reports it as a bewildering
+/// `expected OPTIONAL` at the offending offset, which gives self-repair nothing
+/// to work with and burns a retrieval round.
+///
+/// Deliberately conservative: it only fires on a query that ALREADY failed to
+/// parse, only moves a trailing run that begins with a modifier keyword, and the
+/// caller keeps the rewrite only when the result parses. So it can never change
+/// the meaning of a query that worked.
+fn hoist_misplaced_modifiers(sparql: &str) -> Option<String> {
+    let trimmed = sparql.trim_end();
+    // The query must end at the WHERE block's closing brace for the modifiers to
+    // be *inside* it in the first place.
+    let body = trimmed.strip_suffix('}')?;
+    // Everything after the last inner `}` is the misplaced tail, if any.
+    let inner_close = body.rfind('}')?;
+    let (head, tail) = body.split_at(inner_close + 1);
+    let modifiers = tail.trim();
+    if modifiers.is_empty() {
+        return None;
+    }
+    let upper = modifiers.to_uppercase();
+    const MODIFIER_KEYWORDS: [&str; 5] = ["LIMIT", "OFFSET", "ORDER BY", "GROUP BY", "HAVING"];
+    if !MODIFIER_KEYWORDS.iter().any(|k| upper.starts_with(k)) {
+        return None;
+    }
+    Some(format!("{}}}\n{}", head.trim_end(), modifiers))
+}
+
+/// Every IRI the vocabulary sampler has described, indexed by its lowercased
+/// form. Built from the same cache that feeds the prompt, so it only ever
+/// contains IRIs that genuinely occur in an in-scope graph.
+fn known_vocab_iris() -> HashMap<String, String> {
+    let cache = vocab_cache().lock().unwrap();
+    let mut out = HashMap::new();
+    for (_, summary) in cache.values() {
+        let mut rest = summary.as_str();
+        while let Some(start) = rest.find('<') {
+            let Some(end) = rest[start + 1..].find('>') else {
+                break;
+            };
+            let iri = &rest[start + 1..start + 1 + end];
+            // The graph's own IRI heads each block; harmless either way, it is a
+            // real IRI too and is never what a predicate slot gets confused with.
+            out.insert(iri.to_lowercase(), iri.to_string());
+            rest = &rest[start + 1 + end + 1..];
+        }
+    }
+    out
+}
+
+/// Correct the CASE of IRIs the model retyped from the vocabulary block.
+///
+/// Small models reliably "tidy" an IRI's local name into conventional camelCase
+/// — `…/asset#conditionrating` comes back as `…#conditionRating`. The query then
+/// parses, runs, matches nothing, and the model reports the data as absent,
+/// which is indistinguishable to the user from the data really being missing.
+/// No amount of prompt emphasis fixes it reliably, so fix it mechanically.
+///
+/// Only ever rewrites an IRI that does NOT occur in any sampled graph to one
+/// that does, and only when the two differ by case alone — so it cannot redirect
+/// a query at something the user did not ask for.
+fn repair_iri_case(sparql: &str, known: &HashMap<String, String>) -> String {
+    if known.is_empty() {
+        return sparql.to_string();
+    }
+    let mut out = String::with_capacity(sparql.len());
+    let mut rest = sparql;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start + 1..].find('>') else {
+            break;
+        };
+        let iri = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start + 1]);
+        match known.get(&iri.to_lowercase()) {
+            // Present as written (or unknown to us): leave it exactly alone.
+            Some(actual) if actual != iri => out.push_str(actual),
+            _ => out.push_str(iri),
+        }
+        out.push('>');
+        rest = &rest[start + 1 + len + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// IRIs in `sparql` that sit in a vocabulary slot but occur in no sampled graph.
+///
+/// A query built from invented IRIs is *valid* SPARQL and runs happily to zero
+/// rows, which the model then reports as "the data isn't there" — the single
+/// worst failure this endpoint has, because it is indistinguishable from a true
+/// negative. Naming the invented IRIs turns that dead end into a repairable
+/// error. Only IRIs under a namespace we HAVE sampled are judged: an IRI from a
+/// vocabulary the sampler never looked at is unknown to us, not wrong.
+fn unknown_vocab_iris(sparql: &str, known: &HashMap<String, String>) -> Vec<String> {
+    if known.is_empty() {
+        return Vec::new();
+    }
+    let namespaces: HashSet<&str> = known
+        .values()
+        .filter_map(|iri| iri.rfind(['#', '/']).map(|i| &iri[..=i]))
+        .collect();
+    let mut bad: Vec<String> = Vec::new();
+    let mut rest = sparql;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start + 1..].find('>') else {
+            break;
+        };
+        let iri = &rest[start + 1..start + 1 + len];
+        rest = &rest[start + 1 + len + 1..];
+        let in_sampled_ns = iri
+            .rfind(['#', '/'])
+            .is_some_and(|i| namespaces.contains(&iri[..=i]));
+        if in_sampled_ns
+            && !known.contains_key(&iri.to_lowercase())
+            && !bad.iter().any(|b| b == iri)
+        {
+            bad.push(iri.to_string());
+        }
+    }
+    bad
+}
+
+/// Verify and correct a model-written query before it is shown or run: fix IRI
+/// case against the sampled vocabulary, then parse-check and, on failure, try
+/// the one mechanical syntax repair worth attempting (see
+/// [`hoist_misplaced_modifiers`]). Returns the query to actually run — repaired
+/// or unchanged — so the query the user sees is the query that runs.
+fn repair_sparql(sparql: String) -> String {
+    let sparql = repair_iri_case(&sparql, &known_vocab_iris());
+    if validate_sparql(&sparql).is_ok() {
+        return sparql;
+    }
+    match hoist_misplaced_modifiers(&sparql) {
+        Some(fixed) if validate_sparql(&fixed).is_ok() => fixed,
+        _ => sparql,
+    }
+}
+
 /// Parse-check a query string with the same grammar the engine uses, returning the
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
@@ -1402,7 +1545,8 @@ async fn run_chat_turn(
     // graph list both truncate by position (see prioritise_graphs_for_conversation).
     let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
     let context = build_platform_context(&state, user_id, &graph_list);
-    let vocab = graph_vocab_context(&state, &graph_list).await;
+    let evidence = evidence_graphs(&state, &req.messages, &graph_list).await;
+    let vocab = graph_vocab_context(&state, &graph_list, &evidence).await;
     // The user's saved memory rides at the END of the system prompt: everything
     // before it is stable across users and turns, which keeps the shared prefix
     // cacheable by the gateway (vLLM APC, llama.cpp prompt cache, …).
@@ -1496,7 +1640,10 @@ async fn run_chat_turn(
         // own text BEFORE scoping: a syntax error reported against the scoped
         // rewrite has line numbers that mean nothing to the model, which makes
         // self-repair hopeless.
-        let query = finalize_sparql(&state, query).await;
+        // Repair BEFORE the query is streamed to the client and recorded in the
+        // conversation, so the query the user sees in the retrieval trail is the
+        // query that actually runs.
+        let query = repair_sparql(finalize_sparql(&state, query).await);
         msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
         sink.send(ChatStreamEvent::Query {
             round,
@@ -1504,9 +1651,24 @@ async fn run_chat_turn(
         })
         .await;
         let remaining = MAX_CHAT_QUERY_ROUNDS - round;
+        // Reject invented vocabulary BEFORE running it. Such a query is valid
+        // SPARQL and returns zero rows, which the model reports as absent data —
+        // a false negative the user cannot tell from a true one. Failing it with
+        // the offending IRIs named gives the next round something to act on.
         let run_result = match validate_sparql(&query) {
             Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
-            Ok(()) => run_chat_query_timed(&state, &query, &graphs).await,
+            Ok(()) => match unknown_vocab_iris(&query, &known_vocab_iris()) {
+                bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
+                    "these IRIs do not exist in the graphs you queried: {}. Use ONLY the IRIs \
+                     listed under \"Graph vocabulary\" — copy them character for character, \
+                     including capitalisation.",
+                    bad.iter()
+                        .map(|b| format!("<{b}>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+                _ => run_chat_query_timed(&state, &query, &graphs).await,
+            },
         };
         let follow_up = match run_result {
             Ok(qr) => {
@@ -2005,12 +2167,201 @@ fn vocab_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// How many graphs the text index may pull to the front of the grounding list.
+const VOCAB_EVIDENCE_GRAPHS: usize = 4;
+/// How many text hits to resolve to graphs. Small: we want the graphs a few
+/// strong matches live in, not a survey.
+const VOCAB_EVIDENCE_HITS: usize = 12;
+
+/// Terms from the question worth looking up in the text index.
+///
+/// Identifiers are what actually locate data — an asset code like `AB-12-345-C`
+/// appears verbatim as a literal in exactly the graph the question is about,
+/// while ordinary words ("welke", "onderdelen") match everywhere and locate
+/// nothing. So take only tokens that look like identifiers: they carry a digit,
+/// or they are long and hyphen/underscore-joined.
+fn evidence_terms(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ';' | '?' | '!' | '(' | ')' | '"' | '\'')
+    }) {
+        let t = raw.trim_matches(|c: char| c == '.' || c == ':');
+        if t.len() < 4 || t.len() > 64 {
+            continue;
+        }
+        let has_digit = t.chars().any(|c| c.is_ascii_digit());
+        let joined = t.contains('-') || t.contains('_');
+        if (has_digit && (joined || t.len() >= 6)) || (joined && t.len() >= 8) {
+            let t = t.to_string();
+            if !out.contains(&t) {
+                out.push(t);
+            }
+            if out.len() >= 3 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Graphs that demonstrably contain something the question named.
+///
+/// Size and list position are both proxies for "is this graph relevant", and
+/// both are wrong often enough to matter: a 74-triple asset-management graph is
+/// the whole answer to a question about an asset code, yet it competes for slots
+/// with every other small graph in the store. The text index knows which graph
+/// actually holds the literal, so ask it. Best-effort throughout — no index, no
+/// identifier-shaped terms, or no hits simply leaves the ordering as it was.
+async fn evidence_graphs(
+    state: &AppState,
+    messages: &[ChatMessage],
+    in_scope: &[String],
+) -> Vec<String> {
+    let text: String = messages
+        .iter()
+        .rev()
+        .take(4)
+        .filter(|m| m.role != "assistant")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let terms = evidence_terms(&text);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    // Preferred path: the text index. It is rebuilt lazily and only on demand, so
+    // sync first — searching without that sees whatever was last committed, which
+    // after a fresh import is nothing.
+    #[cfg(feature = "text-search")]
+    state.sync_text_index_if_dirty();
+    let index = state.text_index.clone();
+    let search_terms = terms.clone();
+    let subjects: Vec<String> = match index {
+        None => Vec::new(),
+        Some(index) => tokio::task::spawn_blocking(move || {
+            let mut subs: Vec<String> = Vec::new();
+            for term in search_terms {
+                // Quoted: an identifier with hyphens is several tokens to the
+                // query parser, and the unquoted form would match any of them.
+                let q = format!("\"{}\"", term.replace('"', ""));
+                let Ok(hits) = index.search(&q, None, VOCAB_EVIDENCE_HITS) else {
+                    continue;
+                };
+                for h in hits {
+                    if !subs.contains(&h.subject) {
+                        subs.push(h.subject);
+                    }
+                }
+            }
+            subs
+        })
+        .await
+        .unwrap_or_default(),
+    };
+
+    // Fall back to matching the literal directly when the index yields nothing —
+    // it may be unavailable, not yet built, or (observed on a store whose index
+    // held 540k documents) simply not answering. A scan is the expensive way to
+    // ask this question, so it is strictly a fallback: bounded by LIMIT, by the
+    // deadline below, and by only running for identifier-shaped terms, whose
+    // whole point is that they match almost nothing.
+    let store = state.store.clone();
+    let sparql = if subjects.is_empty() {
+        let filters = terms
+            .iter()
+            .map(|t| format!("CONTAINS(STR(?o), \"{}\")", t.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        format!(
+            "SELECT DISTINCT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o . \
+             FILTER(isLiteral(?o) && ({filters})) }} }} LIMIT {VOCAB_EVIDENCE_GRAPHS}"
+        )
+    } else {
+        // One lookup for every hit at once; subject-position patterns are indexed,
+        // so this stays cheap even on a large store.
+        let values = subjects
+            .iter()
+            .take(VOCAB_EVIDENCE_HITS)
+            .map(|s| format!("<{s}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("SELECT DISTINCT ?g WHERE {{ VALUES ?s {{ {values} }} GRAPH ?g {{ ?s ?p ?o }} }}")
+    };
+    let found: Vec<String> = tokio::time::timeout(
+        VOCAB_TIME_BUDGET,
+        tokio::task::spawn_blocking(move || {
+            let mut gs = Vec::new();
+            if let Ok(QueryResults::Solutions(sols)) = store.query(&sparql) {
+                for sol in sols.flatten() {
+                    if let Some(Term::NamedNode(n)) = sol.get("g") {
+                        gs.push(n.as_str().to_string());
+                    }
+                }
+            }
+            gs
+        }),
+    )
+    .await
+    .map(|r| r.unwrap_or_default())
+    .unwrap_or_default();
+
+    // Only graphs the caller may actually read.
+    found
+        .into_iter()
+        .filter(|g| in_scope.contains(g))
+        .take(VOCAB_EVIDENCE_GRAPHS)
+        .collect()
+}
+
 /// A prompt section listing sampled classes + predicates per in-scope graph
-/// (first [`VOCAB_GRAPH_LIMIT`] of the sorted list). Served from a TTL cache;
-/// cold graphs are sampled inside a strict time budget — on timeout the turn
-/// proceeds with whatever context is already cached.
-async fn graph_vocab_context(state: &AppState, graphs: &[String]) -> String {
-    let wanted: Vec<&String> = graphs.iter().take(VOCAB_GRAPH_LIMIT).collect();
+/// (up to [`VOCAB_GRAPH_LIMIT`] graphs). Served from a TTL cache; cold graphs are
+/// sampled inside a strict time budget — on timeout the turn proceeds with
+/// whatever was sampled or already cached.
+async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[String]) -> String {
+    // WHICH graphs get a slot matters as much as sampling them reliably. Taking
+    // the first N in list order let a handful of huge derived layers (an IFC
+    // import's ifcOWL lift is ~700k triples and dozens of graphs) consume every
+    // slot, so the small hand-authored graphs that questions are actually about
+    // — an asset-management graph is a few hundred triples — were never
+    // described. The model then invented plausible IRIs for them (`#conditionRating`
+    // for `#conditionrating`), queried successfully, got 0 rows, and reported the
+    // data as absent.
+    //
+    // So: graphs the conversation pointed at keep their priority (they are
+    // already at the front — see prioritise_graphs_for_conversation), and the
+    // remaining slots go to the SMALLEST graphs. Small graphs are both cheaper to
+    // sample and denser in vocabulary per triple; a giant derived layer costs the
+    // whole time budget to describe and is rarely what a question is about.
+    // Graphs the text index proved contain something the question named go
+    // FIRST — that is direct evidence of relevance, where size and list position
+    // are only proxies.
+    let mentioned = graphs.len().min(VOCAB_GRAPH_LIMIT / 2);
+    let mut rest: Vec<&String> = graphs
+        .iter()
+        .skip(mentioned)
+        .filter(|g| !evidence.contains(g))
+        .collect();
+    // An UNCOUNTED graph is not a small one. The counter is populated lazily, so
+    // a freshly restarted store answers `None` for graphs it has not touched —
+    // and `None` sorts before `Some(n)`, which would hand the scarce slots to
+    // whichever big derived layer happened to stay cold. That is precisely what
+    // this ordering exists to prevent, so unknown sizes go LAST. A genuinely
+    // empty graph yields no vocabulary either way, so deferring it costs nothing.
+    rest.sort_by_key(|g| match state.store.graph_count_cached(Some(g)) {
+        Some(n) if n > 0 => n,
+        _ => usize::MAX,
+    });
+    let wanted: Vec<&String> = evidence
+        .iter()
+        .chain(
+            graphs
+                .iter()
+                .take(mentioned)
+                .filter(|g| !evidence.contains(g)),
+        )
+        .chain(rest)
+        .take(VOCAB_GRAPH_LIMIT)
+        .collect();
     if wanted.is_empty() {
         return String::new();
     }
@@ -2028,26 +2379,43 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String]) -> String {
         }
     }
     if !missing.is_empty() {
-        let store = state.store.clone();
-        let sampled = tokio::time::timeout(
-            VOCAB_TIME_BUDGET,
-            tokio::task::spawn_blocking(move || {
-                missing
-                    .into_iter()
-                    .map(|g| {
-                        let line = graph_vocab_summary(&store, &g).unwrap_or_default();
-                        (g, line)
-                    })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .await;
-        if let Ok(Ok(pairs)) = sampled {
-            let mut cache = vocab_cache().lock().unwrap();
-            for (g, summary) in pairs {
-                cache.insert(g.clone(), (Instant::now(), summary.clone()));
-                summaries.insert(g, summary);
+        // Sample ONE GRAPH PER TASK against a shared deadline, keeping each
+        // result as it lands. Sampling the whole batch inside a single timed
+        // task instead made the budget all-or-nothing: a big graph (an ifcOWL
+        // layer's class+predicate aggregate costs ~2s on its own) would blow the
+        // 3s budget and discard EVERY summary in the batch — including the ones
+        // that had already come back in single-digit milliseconds. The user-
+        // visible failure was a chat turn with no vocabulary at all, so the
+        // model guessed IRIs (`…#conditionRating` for `…#conditionrating`), queried
+        // successfully, got 0 rows, and reported the data as missing.
+        //
+        // Cheapest-first, so a tight budget buys the most graphs rather than
+        // being spent on whichever happened to sort first. Nothing is cancelled
+        // mid-flight: the deadline is checked between graphs, and an in-flight
+        // sample is still awaited and cached (its cost is already paid).
+        let deadline = Instant::now() + VOCAB_TIME_BUDGET;
+        missing.sort_by_key(|g| state.store.graph_count_cached(Some(g)));
+        for g in missing {
+            if Instant::now() >= deadline {
+                break;
             }
+            let store = state.store.clone();
+            let g2 = g.clone();
+            let Ok(Ok(summary)) = tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                tokio::task::spawn_blocking(move || {
+                    graph_vocab_summary(&store, &g2).unwrap_or_default()
+                }),
+            )
+            .await
+            else {
+                break;
+            };
+            vocab_cache()
+                .lock()
+                .unwrap()
+                .insert(g.clone(), (Instant::now(), summary.clone()));
+            summaries.insert(g, summary);
         }
     }
     let blocks: Vec<&str> = wanted
@@ -2135,20 +2503,37 @@ struct ChatQueryResult {
     truncated: bool,
 }
 
-/// [`run_chat_query`] bounded by the same configurable timeout as the public
-/// SPARQL endpoint, so a pathological model-written query cannot stall the
-/// chat. The timeout message feeds back to the model for self-repair.
+/// Upper bound on ONE chat retrieval round, whatever the endpoint's own timeout
+/// is. A turn gets [`MAX_CHAT_QUERY_ROUNDS`] attempts and a human is waiting on
+/// all of them, so a model-written query that is going nowhere has to fail while
+/// there is still time to repair it. Deployments raise the endpoint timeout for
+/// legitimately long analytical queries (a constrained box needs 120s for an
+/// aggregate over a few million triples); inheriting that here meant a single
+/// hallucinated pattern could spend the entire turn — observed: 120s of a 222s
+/// turn burned on round 1, leaving two rounds that the user never waited for.
+const CHAT_QUERY_MAX_SECS: u64 = 30;
+
+/// [`run_chat_query`] bounded by the smaller of the endpoint timeout and
+/// [`CHAT_QUERY_MAX_SECS`], so a pathological model-written query cannot stall
+/// the chat. The timeout message feeds back to the model for self-repair.
 async fn run_chat_query_timed(
     state: &AppState,
     query: &str,
     graphs: &Arc<HashSet<String>>,
 ) -> Result<ChatQueryResult, AppError> {
-    let limit = Duration::from_secs(state.query_timeout_secs);
-    match tokio::time::timeout(limit, run_chat_query(state, query, graphs)).await {
+    let secs = state.query_timeout_secs.min(CHAT_QUERY_MAX_SECS);
+    match tokio::time::timeout(
+        Duration::from_secs(secs),
+        run_chat_query(state, query, graphs),
+    )
+    .await
+    {
         Ok(result) => result,
+        // Report the bound that actually fired: the model is being asked to
+        // repair against this number, so quoting the endpoint's larger timeout
+        // would tell it the query was slower than it really was.
         Err(_) => Err(AppError::BadRequest(format!(
-            "query timed out after {}s — simplify the pattern or add a LIMIT",
-            state.query_timeout_secs
+            "query timed out after {secs}s — simplify the pattern or add a LIMIT"
         ))),
     }
 }
@@ -2463,13 +2848,15 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
-        first_sparql_fence, is_bare_sparql_directive, looks_like_wkt, sse_data, stream_delta_text,
-        strip_code_fence, truncate, validate_sparql, widgets_without_retrieval, ChatQueryRun,
+        evidence_terms, extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
+        first_sparql_fence, hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
+        repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence, truncate,
+        unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatQueryRun,
         ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
         CHAT_WKT_CELL_MAX_CHARS,
     };
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn fenced_query_counts_as_a_request_only_before_any_retrieval() {
@@ -2628,6 +3015,110 @@ mod tests {
         // An undeclared prefix must fail to parse — this is exactly why the server
         // injects forgotten prefixes (finalize_sparql) before validating.
         assert!(validate_sparql("SELECT ?s WHERE { ?s foaf:name ?n }").is_err());
+    }
+
+    #[test]
+    fn repairs_limit_written_inside_the_where_block() {
+        // The exact shape a small model produces when told to always add a LIMIT.
+        let broken = "SELECT ?g ?s ?p ?o\nWHERE {\n  GRAPH ?g {\n    ?s ?p ?o\n    \
+                      FILTER (STR(?s) = \"AB-12-345-C\" )\n  }\nLIMIT 50\n}";
+        assert!(validate_sparql(broken).is_err());
+        let fixed = repair_sparql(broken.to_string());
+        assert!(validate_sparql(&fixed).is_ok(), "repaired query must parse");
+        assert!(fixed.trim_end().ends_with("LIMIT 50"));
+
+        // Single-line variant, and a multi-modifier tail.
+        let one_line = "SELECT ?l WHERE { GRAPH <http://e.org/g> { ?s ?p ?l } LIMIT 50 }";
+        assert!(validate_sparql(one_line).is_err());
+        assert!(validate_sparql(&repair_sparql(one_line.to_string())).is_ok());
+
+        let ordered = "SELECT ?s ?n WHERE { GRAPH <http://e.org/g> { ?s <http://e.org/n> ?n } \
+                       ORDER BY DESC(?n) LIMIT 10 }";
+        assert!(validate_sparql(ordered).is_err());
+        assert!(validate_sparql(&repair_sparql(ordered.to_string())).is_ok());
+    }
+
+    #[test]
+    fn repairs_iri_case_the_model_camel_cased() {
+        let mut known = HashMap::new();
+        for iri in [
+            "http://example.org/asset#conditionrating",
+            "http://example.org/asset#AssetItem",
+            "http://example.org/asset#conditionNote",
+        ] {
+            known.insert(iri.to_lowercase(), iri.to_string());
+        }
+
+        // The observed failure: the model tidies the local name into camelCase.
+        let wrong = "SELECT ?s WHERE { ?s <http://example.org/asset#conditionRating> ?n }";
+        let fixed = repair_iri_case(wrong, &known);
+        assert!(fixed.contains("#conditionrating>"), "got: {fixed}");
+
+        // Already-correct IRIs — including one that IS camelCase — are untouched,
+        // and so are IRIs we know nothing about.
+        let right = "SELECT ?s WHERE { ?s a <http://example.org/asset#AssetItem> ; \
+                     <http://example.org/asset#conditionNote> ?t ; \
+                     <http://example.org/Unknown#someThing> ?u }";
+        assert_eq!(repair_iri_case(right, &known), right);
+
+        // Nothing sampled yet ⇒ never rewrite anything.
+        assert_eq!(repair_iri_case(wrong, &HashMap::new()), wrong);
+    }
+
+    #[test]
+    fn names_invented_iris_but_not_unsampled_vocabularies() {
+        let mut known = HashMap::new();
+        for iri in [
+            "http://example.org/asset#conditionrating",
+            "http://example.org/asset#AssetItem",
+        ] {
+            known.insert(iri.to_lowercase(), iri.to_string());
+        }
+
+        // Invented sibling in a namespace we HAVE sampled ⇒ reported.
+        let invented = "SELECT ?s WHERE { ?s <http://example.org/asset#conditionGrade> ?n }";
+        assert_eq!(
+            unknown_vocab_iris(invented, &known),
+            vec!["http://example.org/asset#conditionGrade".to_string()]
+        );
+
+        // A namespace the sampler never looked at is unknown to us, not wrong.
+        let other = "SELECT ?s WHERE { ?s <http://xmlns.com/foaf/0.1/name> ?n }";
+        assert!(unknown_vocab_iris(other, &known).is_empty());
+
+        // Everything present ⇒ nothing reported.
+        let good = "SELECT ?s WHERE { ?s a <http://example.org/asset#AssetItem> ; \
+                    <http://example.org/asset#conditionrating> ?n }";
+        assert!(unknown_vocab_iris(good, &known).is_empty());
+
+        // Nothing sampled ⇒ never judge.
+        assert!(unknown_vocab_iris(invented, &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn evidence_terms_picks_identifiers_not_ordinary_words() {
+        let t = evidence_terms("Which parts of AB-12-345-C have a condition rating of 3 or worse?");
+        assert_eq!(t, vec!["AB-12-345-C".to_string()]);
+        // Nothing identifier-shaped ⇒ no lookup at all (the index would just
+        // return noise for ordinary words).
+        assert!(evidence_terms("Hoeveel bruggen zijn er?").is_empty());
+    }
+
+    #[test]
+    fn repair_leaves_valid_and_unfixable_queries_alone() {
+        // Already correct: byte-identical out.
+        let good = "SELECT ?s WHERE { ?s ?p ?o } LIMIT 50";
+        assert_eq!(repair_sparql(good.to_string()), good);
+
+        // A nested group whose tail is NOT a modifier must not be touched.
+        let nested = "SELECT ?s WHERE { { ?s ?p ?o } UNION { ?s ?p2 ?o } }";
+        assert_eq!(repair_sparql(nested.to_string()), nested);
+        assert!(hoist_misplaced_modifiers(nested).is_none());
+
+        // Broken beyond this one repair: returned unchanged so the parser's own
+        // message is what feeds back to the model.
+        let hopeless = "SELECT ?s WHERE { ?s ?p";
+        assert_eq!(repair_sparql(hopeless.to_string()), hopeless);
     }
 
     #[test]
