@@ -864,6 +864,17 @@ Query efficiently: fetch everything you need in as FEW rounds as possible (selec
 together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows come back; use LIMIT 50 \
 for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
 build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\
+Search by name with the full-text index, not by scanning. The platform indexes every literal and \
+exposes it as a magic property: `(?s ?score) text:search (\"waalbrug\" 20) .` binds ?s to the 20 \
+best-matching subjects and ?score to their relevance, already restricted to the graphs you may read. \
+Narrow it to one predicate with a second argument: \
+`(?s ?score) text:search (\"waalbrug\" <http://www.w3.org/2000/01/rdf-schema#label> 20) .` \
+Reach for it whenever the user is LOOKING FOR something by name or keyword and you do not know the \
+IRI — it is ranked and indexed, where `FILTER(CONTAINS(…))` reads every literal in scope. Keep \
+`FILTER(CONTAINS(…))` for narrowing a set you are already matching on. Always pair a text:search with \
+the triple patterns whose values you need (`GRAPH <g> { ?s ?p ?o }`) and `ORDER BY DESC(?score)`; on \
+its own it returns bare IRIs. It matches whole words, so search the distinctive word, not a fragment \
+of one, and if it returns nothing, say so rather than inventing a result.\n\
 Aggregate correctly: `COUNT(*)` counts rows; `COUNT(?v)` counts only rows where ?v is BOUND, so \
 counting a variable that never appears in the pattern silently yields 0 for every group. The \
 canonical per-graph triple count is: \
@@ -1379,7 +1390,8 @@ async fn run_chat_turn(
     let model = req.model.clone().unwrap_or_else(chat_model);
 
     // The set of graphs this caller may read — the security scope for any query.
-    let graphs = chat_accessible_graphs(&state, user)?;
+    // Arc'd because every retrieval round hands it to a blocking task.
+    let graphs = Arc::new(chat_accessible_graphs(&state, user)?);
     // A sorted copy for everything that ends up in the prompt: HashSet iteration
     // order is random per process, and a prompt that reshuffles between turns
     // defeats provider-side prompt caching (and makes runs non-reproducible).
@@ -2129,7 +2141,7 @@ struct ChatQueryResult {
 async fn run_chat_query_timed(
     state: &AppState,
     query: &str,
-    graphs: &HashSet<String>,
+    graphs: &Arc<HashSet<String>>,
 ) -> Result<ChatQueryResult, AppError> {
     let limit = Duration::from_secs(state.query_timeout_secs);
     match tokio::time::timeout(limit, run_chat_query(state, query, graphs)).await {
@@ -2147,9 +2159,25 @@ async fn run_chat_query_timed(
 async fn run_chat_query(
     state: &AppState,
     query: &str,
-    graphs: &HashSet<String>,
+    graphs: &Arc<HashSet<String>>,
 ) -> Result<ChatQueryResult, AppError> {
     let scoped = scope_query_to_authorized(query, graphs);
+
+    // Same full-text preprocessing the SPARQL endpoint applies. Without it a
+    // `text:search` pattern reaches the parser verbatim and fails, and the
+    // "Open in SPARQL workspace" action on every answer would run a query that
+    // behaves differently from the one Spark just ran. `graphs` already folds
+    // in an admin's registered graphs, so it is the caller's whole read scope;
+    // it is Arc'd by the turn so each of the (up to three) rounds hands it to
+    // the blocking task without copying the set.
+    #[cfg(feature = "text-search")]
+    let scoped = state
+        .apply_text_search(
+            &scoped,
+            crate::text_search::index::GraphScopeOwned::Only(Arc::clone(graphs)),
+        )
+        .await?;
+
     let resolved = resolve_prefixes(state, &scoped).await;
     let final_query = resolved.unwrap_or(scoped);
     let store = state.store.clone();

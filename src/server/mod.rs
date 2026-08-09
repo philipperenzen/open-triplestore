@@ -283,6 +283,9 @@ pub struct AppState {
     /// Set to `true` after any write; triggers lazy Tantivy reindex before next search.
     #[cfg(feature = "text-search")]
     pub text_dirty: Arc<AtomicBool>,
+    /// Held for the duration of a Tantivy rebuild so only one runs at a time.
+    #[cfg(feature = "text-search")]
+    pub text_sync_lock: Arc<std::sync::Mutex<()>>,
     /// Vocabulary catalog (bundled LOV metadata + public registry overlay).
     pub vocab_catalog: Arc<crate::vocab_search::catalog::VocabCatalog>,
     /// Set after model/vocabulary registry mutations; vocab routes rebuild
@@ -336,6 +339,8 @@ impl AppState {
             text_index: None,
             #[cfg(feature = "text-search")]
             text_dirty: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "text-search")]
+            text_sync_lock: Arc::new(std::sync::Mutex::new(())),
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
@@ -366,22 +371,105 @@ impl AppState {
     /// Rebuild the Tantivy index if it has been marked dirty since the last sync.
     ///
     /// Called automatically before each SPARQL query that may use `text:search`.
+    ///
+    /// Rebuilds are serialised: `reindex_from_store` empties the index before
+    /// refilling it, so two concurrent rebuilds would race a `delete_all` against
+    /// the other's inserts and leave the index missing documents. Waiters re-check
+    /// the flag and take the finished rebuild instead of repeating it.
+    ///
+    /// BLOCKING: reads every literal in the store — seconds to minutes on a
+    /// large instance, and it parks on a `std::sync::Mutex` while another
+    /// rebuild runs. Call it from `spawn_blocking` (or a blocking context),
+    /// never directly from an async task; [`AppState::apply_text_search`] is
+    /// the async-safe entry point.
     #[cfg(feature = "text-search")]
     pub fn sync_text_index_if_dirty(&self) {
         if !self.text_dirty.load(Ordering::Relaxed) {
             return;
         }
-        if let Some(ref idx) = self.text_index {
-            match idx.reindex_from_store(&self.store) {
-                Ok(n) => {
-                    tracing::debug!("Text index auto-synced: {} documents", n);
-                    self.text_dirty.store(false, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    tracing::warn!("Text index auto-sync failed: {}", e);
-                }
+        let Some(ref idx) = self.text_index else {
+            return;
+        };
+        let _guard = self
+            .text_sync_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.text_dirty.load(Ordering::Relaxed) {
+            return;
+        }
+        // Cleared *before* the rebuild: a write landing mid-rebuild must leave
+        // the index dirty afterwards, not have its mark erased by the rebuild
+        // that could not have seen it.
+        self.text_dirty.store(false, Ordering::Relaxed);
+        match idx.reindex_from_store(&self.store) {
+            Ok(n) => tracing::debug!("Text index auto-synced: {} documents", n),
+            Err(e) => {
+                tracing::warn!("Text index auto-sync failed: {}", e);
+                self.text_dirty.store(true, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Apply the full-text preprocessing pipeline to an already read-scoped query.
+    ///
+    /// Expands the `text:search` / `ft:search` magic property and pushes
+    /// `CONTAINS` / `STRSTARTS` filters down to the index. Every caller that
+    /// runs user- or model-authored SPARQL must go through this, or the same
+    /// query answers differently depending on which endpoint ran it.
+    ///
+    /// `scope` is the graph set the query was scoped to. It is applied to the
+    /// index lookups as well: an expanded `text:search` can consist of nothing
+    /// but a `VALUES` clause, which has no triple pattern for the query's
+    /// `FROM` scoping to constrain.
+    ///
+    /// The work happens on `spawn_blocking`. Everything below is blocking —
+    /// a possible whole-store reindex, then Tantivy reads that hit the index
+    /// files — and both call sites are async handlers, so running it inline
+    /// would park a Tokio worker for the duration.
+    #[cfg(feature = "text-search")]
+    pub async fn apply_text_search(
+        &self,
+        sparql: &str,
+        scope: crate::text_search::index::GraphScopeOwned,
+    ) -> Result<String, error::AppError> {
+        // Decided on the runtime: with no index, or a query the index cannot
+        // affect, there is no blocking work to hand off and no reason to pay
+        // for a thread hop.
+        if self.text_index.is_none()
+            || !crate::text_search::sparql_fn::query_uses_text_index(sparql)
+        {
+            return Ok(sparql.to_string());
+        }
+
+        let state = self.clone();
+        let owned = sparql.to_string();
+        tokio::task::spawn_blocking(move || state.apply_text_search_blocking(&owned, scope))
+            .await
+            .map_err(|e| error::AppError::Internal(format!("text search task failed: {e}")))
+    }
+
+    /// The blocking half of [`AppState::apply_text_search`].
+    ///
+    /// BLOCKING: see [`AppState::sync_text_index_if_dirty`]. Only call this
+    /// from inside `spawn_blocking`.
+    #[cfg(feature = "text-search")]
+    fn apply_text_search_blocking(
+        &self,
+        sparql: &str,
+        scope: crate::text_search::index::GraphScopeOwned,
+    ) -> String {
+        use crate::text_search::sparql_fn;
+
+        let Some(ref idx) = self.text_index else {
+            return sparql.to_string();
+        };
+        // A rebuild reads every literal in the store, so it is gated on the
+        // caller having established that this query can use the index.
+        self.sync_text_index_if_dirty();
+
+        let scope = scope.as_scope();
+        let expanded = sparql_fn::preprocess_text_search(sparql, idx, scope);
+        sparql_fn::preprocess_substring_pushdown(&expanded, idx, scope)
     }
 }
 
@@ -1903,8 +1991,14 @@ pub async fn run(
         expensive_semaphore: Arc::new(tokio::sync::Semaphore::new(expensive_op_capacity())),
         #[cfg(feature = "text-search")]
         text_index,
+        // Start dirty: the index is a derived cache that can be missing, wiped
+        // or left behind by a restore, and nothing else rebuilds it until the
+        // first write. Booting clean would leave every text query answering
+        // "no results" against a fully populated store.
         #[cfg(feature = "text-search")]
-        text_dirty: Arc::new(AtomicBool::new(false)),
+        text_dirty: Arc::new(AtomicBool::new(true)),
+        #[cfg(feature = "text-search")]
+        text_sync_lock: Arc::new(std::sync::Mutex::new(())),
         vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
         // Start dirty: persisted registry entries from earlier boots become
         // visible on the first vocab request even before the boot seed chain
@@ -2028,6 +2122,20 @@ pub async fn run(
             let vocab_data_dir = data_dir.clone();
             tokio::spawn(async move {
                 let _ = seed_handle.await;
+                // 6b. Full-text index build. The index is a derived cache that
+                //     can be absent, wiped or restored from a backup out of
+                //     sync with the store, and `AppState` therefore boots
+                //     dirty. Building it here — after the seed chain, off the
+                //     request path — means the first search hits a warm index
+                //     instead of paying for a whole-store reindex inline.
+                #[cfg(feature = "text-search")]
+                {
+                    let text_state = vocab_state.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        text_state.sync_text_index_if_dirty();
+                    })
+                    .await;
+                }
                 crate::vocab_search::boot_vocab_search(vocab_state, vocab_data_dir).await;
             });
         }

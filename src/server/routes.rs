@@ -530,26 +530,25 @@ async fn execute_query(
         Some(scope_query_to_authorized(query, &accessible))
     };
 
-    // text:search magic property preprocessing (text-search feature)
-    // Rebuild Tantivy index first if the store has been written since last sync.
-    #[cfg(feature = "text-search")]
-    state.sync_text_index_if_dirty();
+    // Full-text preprocessing: `text:search` expansion + CONTAINS/STRSTARTS
+    // push-down (text-search feature). Runs on the already-scoped query, and
+    // is handed the same graph set so index hits obey the same read boundary.
+    // Admins read every registered graph, matching the FROM branch above.
     #[cfg(feature = "text-search")]
     let query_after_text_search: String;
     #[cfg(feature = "text-search")]
-    let query_after_regex_pushdown: String;
-    #[cfg(feature = "text-search")]
-    let query = if let Some(ref idx) = state.text_index {
-        query_after_text_search = crate::text_search::sparql_fn::preprocess_text_search(
-            scoped_query.as_deref().unwrap_or(query),
-            idx,
+    let query = {
+        // `accessible` is already an owned per-request set (the cached one plus
+        // this caller's graph-ACL grants), so handing it to the blocking task
+        // costs an Arc, not a second copy. It is not read again below.
+        let scope = crate::text_search::sparql_fn::graph_scope(
+            user.map(|u| u.is_admin()).unwrap_or(false),
+            std::sync::Arc::new(accessible),
         );
-        // REGEX/CONTAINS → Tantivy push-down (~100x for text-heavy queries)
-        query_after_regex_pushdown =
-            crate::text_search::sparql_fn::preprocess_regex_pushdown(&query_after_text_search, idx);
-        &query_after_regex_pushdown as &str
-    } else {
-        scoped_query.as_deref().unwrap_or(query)
+        query_after_text_search = state
+            .apply_text_search(scoped_query.as_deref().unwrap_or(query), scope)
+            .await?;
+        &query_after_text_search as &str
     };
     #[cfg(not(feature = "text-search"))]
     let query = scoped_query.as_deref().unwrap_or(query);
