@@ -2347,7 +2347,7 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
                 .take(mentioned)
                 .filter(|g| !evidence.contains(g)),
         )
-        .chain(rest.into_iter())
+        .chain(rest)
         .take(VOCAB_GRAPH_LIMIT)
         .collect();
     if wanted.is_empty() {
