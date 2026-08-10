@@ -1672,8 +1672,9 @@ async fn run_chat_turn(
         })
         .unwrap_or_default();
 
-    let mut system_content =
-        format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{services_hint}{memory}");
+    let mut system_content = format!(
+        "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{services_hint}{memory}"
+    );
 
     // Fit the prompt inside the declared context window, oldest history first.
     // A runtime that truncates silently cuts the START of the prompt — i.e. the
@@ -2349,7 +2350,7 @@ fn relevant_services_hint(question: &str, services: &[String]) -> String {
     if scored.is_empty() {
         return String::new();
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
     let mut out = String::from(
         "\n\n# API SERVICES MATCHING THIS QUESTION (answer with these — cite the GET path or \
          use an ```api widget — before writing any SPARQL)\n",
@@ -3088,13 +3089,13 @@ fn strip_code_fence(s: &str) -> String {
 mod tests {
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
-        fallback_answer, find_ci, first_sparql_fence, history_within_budget, relevant_services_hint, 
-        hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt, render_rows_for_llm,
-        repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence,
-        trim_at_parse_error, truncate,
-        unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatMessage,
-        ChatQueryResult, ChatQueryRun, ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer,
-        CHAT_CELL_MAX_CHARS, CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
+        fallback_answer, find_ci, first_sparql_fence, history_within_budget,
+        hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
+        relevant_services_hint, render_rows_for_llm, repair_iri_case, repair_sparql, sse_data,
+        stream_delta_text, strip_code_fence, trim_at_parse_error, truncate, unknown_vocab_iris,
+        validate_sparql, widgets_without_retrieval, ChatMessage, ChatQueryResult, ChatQueryRun,
+        ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
+        CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -3116,8 +3117,14 @@ mod tests {
             "Is there an API service I can call to answer a question about cities, and how do I call it?",
             &services,
         );
-        assert!(hint.contains("cities-in-bbox"), "cities service must surface: {hint}");
-        assert!(!hint.contains("all-statements"), "unrelated service must not: {hint}");
+        assert!(
+            hint.contains("cities-in-bbox"),
+            "cities service must surface: {hint}"
+        );
+        assert!(
+            !hint.contains("all-statements"),
+            "unrelated service must not: {hint}"
+        );
 
         // No content-word overlap → no section at all.
         assert!(relevant_services_hint("How many triples are there?", &services).is_empty());
@@ -3128,14 +3135,13 @@ mod tests {
     #[test]
     fn history_trimming_drops_oldest_turns_first() {
         let history = vec![
-            msg("user", &"old ".repeat(300)),      // ~400 estimated tokens
+            msg("user", &"old ".repeat(300)), // ~400 estimated tokens
             msg("assistant", &"older ".repeat(300)),
             msg("user", "the current question"),
         ];
         // Budget fits the newest two messages, not all three.
-        let newest_two = estimate_tokens(&history[1].content)
-            + estimate_tokens(&history[2].content)
-            + 10;
+        let newest_two =
+            estimate_tokens(&history[1].content) + estimate_tokens(&history[2].content) + 10;
         let kept = history_within_budget(&history, newest_two);
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].role, "assistant");
@@ -3164,7 +3170,11 @@ mod tests {
         let wide = ChatQueryResult {
             columns: vec!["a".into(), "b".into(), "c".into(), "d".into()],
             rows: (0..50)
-                .map(|i| (0..4).map(|j| format!("{i}-{j}-{}", "x".repeat(70))).collect())
+                .map(|i| {
+                    (0..4)
+                        .map(|j| format!("{i}-{j}-{}", "x".repeat(70)))
+                        .collect()
+                })
                 .collect(),
             truncated: false,
         };
@@ -3473,8 +3483,7 @@ mod tests {
 
         // Prose directly attached (no blank line) is cut just the same — the
         // parser's error position, not paragraph structure, decides the cut.
-        let attached =
-            "ASK { ?s ?p ?o }\nThe pattern above checks whether any triple exists.";
+        let attached = "ASK { ?s ?p ?o }\nThe pattern above checks whether any triple exists.";
         let repaired = repair_sparql(attached.to_string());
         assert_eq!(repaired, "ASK { ?s ?p ?o }");
 
@@ -3707,5 +3716,3 @@ mod tests {
         assert!(forwarded);
     }
 }
-
-
