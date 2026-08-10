@@ -923,10 +923,61 @@ fn repair_sparql(sparql: String) -> String {
     if validate_sparql(&sparql).is_ok() {
         return sparql;
     }
+    if let Some(fixed) = trim_at_parse_error(&sparql) {
+        return fixed;
+    }
     match hoist_misplaced_modifiers(&sparql) {
         Some(fixed) if validate_sparql(&fixed).is_ok() => fixed,
         _ => sparql,
     }
+}
+
+/// Cut a query that fails to parse at the parser's own error position, keeping
+/// the prefix when that alone parses.
+///
+/// The unfenced `SPARQL:` directive has no closing fence, so a model that
+/// explains itself — `SPARQL:\n<query>\n\nThis counts the triples …` — drags
+/// the prose into the query text. The parser then rejects the WHOLE thing at
+/// the first prose word ("expected one of HAVING, OFFSET, VALUES"), the round
+/// burns, and after three of those the turn answers from memory: the
+/// fabrication failure, caused by a query that was correct all along. The
+/// parser already points at where the garbage starts; everything before it is
+/// the query. Fail-soft: an unrecognised error format or a prefix that still
+/// doesn't parse returns None and the other repairs get their turn.
+fn trim_at_parse_error(sparql: &str) -> Option<String> {
+    let err = validate_sparql(sparql).err()?;
+    // spargebra reports "error at <line>:<col>: …", 1-based, cols in chars.
+    let pos = err.strip_prefix("error at ")?;
+    let (line, rest) = pos.split_once(':')?;
+    let (col, _) = rest.split_once(':')?;
+    let (line, col) = (line.parse::<usize>().ok()?, col.parse::<usize>().ok()?);
+    let mut line_start = 0usize;
+    for (i, l) in sparql.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            // peg reports the FURTHEST failure, which for trailing prose can sit
+            // a few tokens into the garbage ("This query …" fails at "query").
+            // Try the exact column first, then the whole error line — whichever
+            // prefix actually parses is the query. A genuinely broken query
+            // validates under neither and comes back None.
+            let col_cut = line_start
+                + l.char_indices()
+                    .nth(col.saturating_sub(1))
+                    .map(|(b, _)| b)
+                    .unwrap_or(l.len());
+            for cut in [col_cut, line_start] {
+                let prefix = sparql[..cut].trim();
+                if !prefix.is_empty()
+                    && prefix.len() < sparql.trim().len()
+                    && validate_sparql(prefix).is_ok()
+                {
+                    return Some(prefix.to_string());
+                }
+            }
+            return None;
+        }
+        line_start += l.len();
+    }
+    None
 }
 
 /// Parse-check a query string with the same grammar the engine uses, returning the
@@ -2963,9 +3014,10 @@ fn strip_code_fence(s: &str) -> String {
 mod tests {
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
-        fallback_answer, find_ci, first_sparql_fence, history_within_budget,
+        fallback_answer, find_ci, first_sparql_fence, history_within_budget, 
         hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt, render_rows_for_llm,
-        repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence, truncate,
+        repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence,
+        trim_at_parse_error, truncate,
         unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatMessage,
         ChatQueryResult, ChatQueryRun, ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer,
         CHAT_CELL_MAX_CHARS, CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
@@ -3309,6 +3361,36 @@ mod tests {
     }
 
     #[test]
+    fn repair_cuts_trailing_prose_from_an_unfenced_directive() {
+        // The observed failure: an unfenced `SPARQL:` reply that explains
+        // itself. There is no closing fence to stop extraction, so the prose
+        // rides into the query text and the parser rejects a correct query at
+        // the first prose word — every counting question burned all its rounds
+        // this way.
+        let with_prose = "SELECT (COUNT(?s) AS ?triplesCount) WHERE { \
+                          GRAPH <https://x.org/g> { ?s ?p ?o } }\n\n\
+                          This query counts the number of triples in the dataset.";
+        let repaired = repair_sparql(with_prose.to_string());
+        assert!(
+            validate_sparql(&repaired).is_ok(),
+            "prose tail must be cut: {repaired}"
+        );
+        assert!(repaired.starts_with("SELECT (COUNT(?s)"));
+        assert!(!repaired.contains("This query"));
+
+        // Prose directly attached (no blank line) is cut just the same — the
+        // parser's error position, not paragraph structure, decides the cut.
+        let attached =
+            "ASK { ?s ?p ?o }\nThe pattern above checks whether any triple exists.";
+        let repaired = repair_sparql(attached.to_string());
+        assert_eq!(repaired, "ASK { ?s ?p ?o }");
+
+        // A truly broken query stays broken — the trim must not "fix" a text
+        // whose prefix never parses either.
+        assert!(trim_at_parse_error("SELECT ?s WHERE { ?s ?p").is_none());
+    }
+
+    #[test]
     fn extracts_sparql_directive_with_fence() {
         let q = extract_sparql_directive("SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```")
             .expect("should detect a query");
@@ -3532,3 +3614,5 @@ mod tests {
         assert!(forwarded);
     }
 }
+
+
