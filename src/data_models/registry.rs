@@ -996,8 +996,17 @@ mod tests {
 
     fn seed_one(store: &TripleStore, id: &str, created: &str) {
         insert_data_model(
-            store, BASE, id, "Good Relations", "http://purl.org/goodrelations/v1#", None, true,
-            None, None, None, created,
+            store,
+            BASE,
+            id,
+            "Good Relations",
+            "http://purl.org/goodrelations/v1#",
+            None,
+            true,
+            None,
+            None,
+            None,
+            created,
         )
         .unwrap();
     }
