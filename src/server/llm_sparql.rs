@@ -1108,6 +1108,52 @@ const CHAT_WKT_CELL_MAX_CHARS: usize = 600;
 /// Output-token budget per chat turn. Rich answers (markdown + widget JSON specs)
 /// need headroom; short answers still stop early.
 const CHAT_MAX_TOKENS: u32 = 3072;
+/// Reserved prompt headroom when [`llm_context_tokens`] budgeting is on: role/JSON
+/// framing, estimator error, and the in-turn growth every retrieval round adds
+/// (its result table is separately capped at [`CHAT_TABLE_MAX_CHARS`]).
+const CHAT_PROMPT_MARGIN: usize = 2048;
+/// Total character cap for one result table rendered into a follow-up prompt.
+/// Per-cell truncation alone still lets a wide 50-row result reach several
+/// thousand tokens — and a turn can run several rounds, each appending a table
+/// to a prompt that must fit the model's context window.
+const CHAT_TABLE_MAX_CHARS: usize = 6000;
+
+/// The serving model's context window in tokens (`LLM_CONTEXT_TOKENS`), if the
+/// operator declared one. Local runtimes (Ollama, llama.cpp, vLLM with a small
+/// `max_model_len`) silently truncate an over-long prompt, and what falls off
+/// first is the system prompt — the execution protocol and the graph vocabulary
+/// — after which the model "answers" from whatever fragments survive. Unset or
+/// 0 disables client-side budgeting (the right choice for large-context APIs).
+fn llm_context_tokens() -> Option<usize> {
+    env_nonempty("LLM_CONTEXT_TOKENS")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Estimated token count for `s`. Deliberately conservative (≈3 chars/token):
+/// prompts here are dense with IRIs and tables, which tokenize far worse than
+/// prose, and over-estimating merely trims history a little sooner while
+/// under-estimating reintroduces the silent-truncation failure this guards.
+fn estimate_tokens(s: &str) -> usize {
+    s.chars().count() / 3 + 1
+}
+
+/// The newest suffix of `history` that fits `budget` estimated tokens.
+/// The last message (the question being answered) is always kept, even alone
+/// and even if it exceeds the budget by itself — sending the question is
+/// strictly better than sending nothing.
+fn history_within_budget(history: &[ChatMessage], budget: usize) -> &[ChatMessage] {
+    let mut start = history.len();
+    let mut used = 0usize;
+    for (i, m) in history.iter().enumerate().rev() {
+        used += estimate_tokens(&m.content);
+        if used > budget && start < history.len() {
+            break;
+        }
+        start = i;
+    }
+    &history[start..]
+}
 
 #[derive(Deserialize)]
 pub struct ChatMessage {
@@ -1421,10 +1467,12 @@ async fn llm_chat(
 }
 
 /// POST /api/llm/chat/stream — the same grounded chat turn, streamed as SSE.
-/// The client sees answer tokens while the model writes them and a live
-/// retrieval trail (each query + its outcome) while rounds run; the terminal
-/// `done` event carries the exact payload the JSON endpoint would have sent.
-/// Closing the connection aborts the turn server-side.
+/// The client sees a live retrieval trail (each query + its outcome) while
+/// rounds run, and answer tokens as the model writes them — but only once the
+/// answer is grounded: pre-retrieval prose is buffered server-side, so nothing
+/// the model wrote before seeing data is ever shown (or has to be retracted).
+/// The terminal `done` event carries the exact payload the JSON endpoint would
+/// have sent. Closing the connection aborts the turn server-side.
 async fn llm_chat_stream(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -1502,14 +1550,23 @@ fn sse_event(ev: &ChatStreamEvent) -> Result<Event, Infallible> {
 }
 
 /// One completion round: streamed (with tokens forwarded through a
-/// [`DeltaGate`]) when someone is listening, plain otherwise. Returns the full
-/// reply text plus whether any of it was forwarded to the client live.
+/// [`DeltaGate`]) when someone is listening AND the round may be shown live,
+/// plain otherwise. Returns the full reply text plus whether any of it was
+/// forwarded to the client live.
+///
+/// `live` is false for pre-retrieval rounds. Whatever prose the model writes
+/// before its first query cannot be grounded in data — streaming it paints a
+/// confident answer the next event has to wipe, which reads as the assistant
+/// making things up and then retracting them. Buffered rounds cost nothing to
+/// correct: the user sees "thinking", then the retrieval trail, then only text
+/// that survived grounding.
 async fn next_reply(
     model: &str,
     msgs: &[Value],
     sink: &EventSink,
+    live: bool,
 ) -> Result<(String, bool), AppError> {
-    if sink.is_live() {
+    if live && sink.is_live() {
         let mut gate = DeltaGate::new();
         let text =
             chat_completion_messages_stream(model, msgs, CHAT_MAX_TOKENS, sink, &mut gate).await?;
@@ -1561,12 +1618,45 @@ async fn run_chat_turn(
         })
         .unwrap_or_default();
 
-    let mut msgs: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
+    let mut system_content =
+        format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{memory}");
+
+    // Fit the prompt inside the declared context window, oldest history first.
+    // A runtime that truncates silently cuts the START of the prompt — i.e. the
+    // execution protocol — so an over-budget turn doesn't degrade, it flips into
+    // confident fabrication. Better to forget last week's turns than the rules.
+    let mut history: &[ChatMessage] = &req.messages;
+    if let Some(window) = llm_context_tokens() {
+        let budget = window.saturating_sub(CHAT_MAX_TOKENS as usize + CHAT_PROMPT_MARGIN);
+        if estimate_tokens(&system_content) > budget && !vocab.is_empty() {
+            // The vocabulary blocks are the largest elastic part of the system
+            // prompt. Dropping them costs answer quality; overflowing the
+            // window costs the protocol itself.
+            tracing::warn!(
+                window,
+                "chat system prompt exceeds LLM_CONTEXT_TOKENS budget — dropping graph vocabulary"
+            );
+            system_content =
+                format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{memory}");
+        }
+        let remaining = budget.saturating_sub(estimate_tokens(&system_content));
+        history = history_within_budget(history, remaining);
+        if history.len() < req.messages.len() {
+            tracing::debug!(
+                window,
+                dropped = req.messages.len() - history.len(),
+                kept = history.len(),
+                "chat history trimmed to fit the context window"
+            );
+        }
+    }
+
+    let mut msgs: Vec<Value> = Vec::with_capacity(history.len() + 1);
     msgs.push(json!({
         "role": "system",
-        "content": format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{memory}"),
+        "content": system_content,
     }));
-    for m in &req.messages {
+    for m in history {
         let role = if m.role == "assistant" {
             "assistant"
         } else {
@@ -1584,7 +1674,9 @@ async fn run_chat_turn(
         state: "thinking",
     })
     .await;
-    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink).await?;
+    // Pre-retrieval rounds are never streamed live (`live: false`): any prose
+    // here predates the data, so showing it would only set up a retraction.
+    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink, false).await?;
 
     // Retrieval nudge. The `SPARQL:` protocol sits inside a long system prompt,
     // and a model that does not follow it silently answers from the platform
@@ -1602,18 +1694,16 @@ async fn run_chat_turn(
              them (any name, number, date, value or geometry), reply with EXACTLY one line: \
              `SPARQL:` followed by a single query and nothing else. If it genuinely needs no data \
              from the graphs, repeat your previous answer unchanged."}));
-        sink.send(ChatStreamEvent::RoundReset).await;
         sink.send(ChatStreamEvent::Status {
             round: 0,
             state: "thinking",
         })
         .await;
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink).await {
+        (reply, forwarded) = match next_reply(&model, &msgs, &sink, false).await {
             Ok(v) if extract_query_request(&v.0, true).is_some() => v,
             // No query the second time either (or the gateway failed): the first
             // answer was the model's real one — keep it.
             _ => {
-                sink.send(ChatStreamEvent::RoundReset).await;
                 msgs.truncate(msgs.len() - 2);
                 original
             }
@@ -1770,7 +1860,11 @@ async fn run_chat_turn(
             state: "thinking",
         })
         .await;
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink).await {
+        // Post-retrieval rounds stream live: the model now writes against real
+        // results, and a directive-shaped reply (another query request) is
+        // caught at the first token by the DeltaGate, so nothing that would be
+        // superseded reaches the client.
+        (reply, forwarded) = match next_reply(&model, &msgs, &sink, true).await {
             Ok(v) => v,
             Err(_) => (fallback_answer(&runs), false),
         };
@@ -2658,13 +2752,26 @@ fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     let mut s = String::new();
     s.push_str(&qr.columns.join(" | "));
     s.push('\n');
+    let mut shown = 0usize;
     for row in &qr.rows {
+        // Per-cell truncation bounds one row, not the table: a wide result can
+        // still reach thousands of tokens, and every retrieval round appends
+        // one of these to a prompt that must keep fitting the context window.
+        if s.len() >= CHAT_TABLE_MAX_CHARS {
+            break;
+        }
         let cells: Vec<String> = row.iter().map(|c| truncate(c, cell_budget(c))).collect();
         s.push_str(&cells.join(" | "));
         s.push('\n');
+        shown += 1;
     }
     if qr.rows.is_empty() {
         s.push_str("(no rows)\n");
+    } else if shown < qr.rows.len() {
+        s.push_str(&format!(
+            "(showing first {shown} of {} retrieved rows)\n",
+            qr.rows.len()
+        ));
     } else if qr.truncated {
         s.push_str(&format!("(showing first {MAX_CHAT_QUERY_ROWS} rows)\n"));
     }
@@ -2855,15 +2962,88 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        evidence_terms, extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
-        first_sparql_fence, hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
+        estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
+        fallback_answer, find_ci, first_sparql_fence, history_within_budget,
+        hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt, render_rows_for_llm,
         repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence, truncate,
-        unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatQueryRun,
-        ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
-        CHAT_WKT_CELL_MAX_CHARS,
+        unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatMessage,
+        ChatQueryResult, ChatQueryRun, ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer,
+        CHAT_CELL_MAX_CHARS, CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn history_trimming_drops_oldest_turns_first() {
+        let history = vec![
+            msg("user", &"old ".repeat(300)),      // ~400 estimated tokens
+            msg("assistant", &"older ".repeat(300)),
+            msg("user", "the current question"),
+        ];
+        // Budget fits the newest two messages, not all three.
+        let newest_two = estimate_tokens(&history[1].content)
+            + estimate_tokens(&history[2].content)
+            + 10;
+        let kept = history_within_budget(&history, newest_two);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].role, "assistant");
+        assert_eq!(kept[1].content, "the current question");
+    }
+
+    #[test]
+    fn history_trimming_always_keeps_the_current_question() {
+        let history = vec![
+            msg("user", &"context ".repeat(500)),
+            msg("user", &"question ".repeat(500)),
+        ];
+        // Budget too small even for one message: the question still goes.
+        let kept = history_within_budget(&history, 1);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].content.starts_with("question"));
+        // A generous budget keeps everything untouched.
+        let kept = history_within_budget(&history, usize::MAX);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn result_table_is_capped_in_total_size() {
+        // 50 rows of near-budget cells: per-cell truncation alone would let
+        // this table reach ~4× the total cap.
+        let wide = ChatQueryResult {
+            columns: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            rows: (0..50)
+                .map(|i| (0..4).map(|j| format!("{i}-{j}-{}", "x".repeat(70))).collect())
+                .collect(),
+            truncated: false,
+        };
+        let table = render_rows_for_llm(&wide);
+        assert!(
+            table.len() < CHAT_TABLE_MAX_CHARS + 500,
+            "table blew the cap: {} chars",
+            table.len()
+        );
+        assert!(
+            table.contains("retrieved rows"),
+            "capped table must say it is partial: {}",
+            table.lines().last().unwrap_or("")
+        );
+        // A small result is untouched — no cap note, all rows present.
+        let small = ChatQueryResult {
+            columns: vec!["n".into()],
+            rows: vec![vec!["1".into()], vec!["2".into()]],
+            truncated: false,
+        };
+        let table = render_rows_for_llm(&small);
+        assert_eq!(table.lines().count(), 3);
+        assert!(!table.contains("retrieved rows"));
+    }
 
     #[test]
     fn fenced_query_counts_as_a_request_only_before_any_retrieval() {
