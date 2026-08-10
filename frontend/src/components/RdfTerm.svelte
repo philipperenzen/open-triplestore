@@ -10,6 +10,7 @@
   import { copyToClipboard } from '../lib/clipboard.js';
   import { modelFormatFromUrl, isWktDatatype } from '../lib/viewer/detect';
   import { openPreview } from '../lib/viewer/preview';
+  import { resourceHover, hideNow } from '../lib/resourcePreview.js';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -135,6 +136,7 @@
   function handleClick(e) {
     if (!navigable || !isClickable) return;
     if (e) e.stopPropagation();
+    hideNow();
     const t = term?.type;
     // Blank-node identity is graph-local; carry the graph scope so the resource
     // view can resolve it within the right graph.
@@ -222,6 +224,8 @@
 {:else if term}
   <span class="term-wrap">
     {#if isClickable}
+      <!-- Hover preview only for IRIs: blank-node identity is graph-local, so a
+           subject lookup by _:label would hit the wrong node as often as not. -->
       <span
         class="rdf-term type-{term.type} clickable"
         style="color: {color}"
@@ -230,6 +234,10 @@
         on:keypress={(e) => e.key === 'Enter' && handleClick(e)}
         role="link"
         tabindex="0"
+        use:resourceHover={{
+          iri: term.type === 'uri' || term.type === 'iri' ? term.value : null,
+          graph,
+        }}
       >{display}</span>
     {:else}
       <span

@@ -35,6 +35,7 @@
   import GraphList from './pages/GraphList.svelte';
   import ResourceDetail from './pages/ResourceDetail.svelte';
   import PreviewOverlay from './components/viewer/PreviewOverlay.svelte';
+  import ResourceHoverCard from './components/ResourceHoverCard.svelte';
   import Validation from './pages/Validation.svelte';
 
   // W4-20: Heavy pages use dynamic imports so their vendor chunks (CodeMirror,
@@ -787,6 +788,8 @@
 <!-- Global 3D-model / geometry preview, requested by RDF terms anywhere
      (triple table, graph explorer, resource panels). -->
 <PreviewOverlay />
+<!-- Global resource hover preview, anchored by RDF terms and chat links. -->
+<ResourceHoverCard />
 {/if}
 
 <style>
