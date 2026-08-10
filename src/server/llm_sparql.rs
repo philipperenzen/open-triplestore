@@ -1652,9 +1652,12 @@ async fn run_chat_turn(
     // Mentioned datasets' graphs first — the vocab sampler and the prompt's
     // graph list both truncate by position (see prioritise_graphs_for_conversation).
     let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
-    let context = build_platform_context(&state, user_id, &graph_list);
+    let (context, service_lines) = build_platform_context(&state, user_id, &graph_list);
     let evidence = evidence_graphs(&state, &req.messages, &graph_list).await;
     let vocab = graph_vocab_context(&state, &graph_list, &evidence).await;
+    // Question-matched API services again, at the tail this time — the full
+    // list is mid-prompt where small models lose it (see relevant_services_hint).
+    let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
     // The user's saved memory rides at the END of the system prompt: everything
     // before it is stable across users and turns, which keeps the shared prefix
     // cacheable by the gateway (vLLM APC, llama.cpp prompt cache, …).
@@ -1670,7 +1673,7 @@ async fn run_chat_turn(
         .unwrap_or_default();
 
     let mut system_content =
-        format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{memory}");
+        format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{services_hint}{memory}");
 
     // Fit the prompt inside the declared context window, oldest history first.
     // A runtime that truncates silently cuts the START of the prompt — i.e. the
@@ -1687,8 +1690,11 @@ async fn run_chat_turn(
                 window,
                 "chat system prompt exceeds LLM_CONTEXT_TOKENS budget — dropping graph vocabulary"
             );
-            system_content =
-                format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{memory}");
+            // The services hint survives the vocab drop: it is tiny and answers
+            // the question the turn is actually about.
+            system_content = format!(
+                "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{services_hint}{memory}"
+            );
         }
         let remaining = budget.saturating_sub(estimate_tokens(&system_content));
         history = history_within_budget(history, remaining);
@@ -2156,7 +2162,14 @@ fn chat_accessible_graphs(
 /// datasets (name, visibility, description, DCAT topics), the API services runnable
 /// against them, and the named graphs in scope. `graphs` must be pre-sorted so the
 /// prompt is stable across turns (prompt-cache friendly).
-fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[String]) -> String {
+/// Platform summary for the system prompt, plus the API-service lines on their
+/// own so [`relevant_services_hint`] can re-surface question-matched ones at
+/// the prompt's tail.
+fn build_platform_context(
+    state: &AppState,
+    user_id: Option<&str>,
+    graphs: &[String],
+) -> (String, Vec<String>) {
     let mut ctx = String::new();
 
     let datasets = state
@@ -2291,7 +2304,61 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
         }
     }
 
-    ctx
+    (ctx, services)
+}
+
+/// API services whose name or description shares a content word with the
+/// question, rendered as a short section for the END of the system prompt.
+///
+/// The full service list sits mid-prompt, and a small model reliably loses it
+/// there: asked "is there an API service about cities?" it walks straight past
+/// a service literally named "Cities within a bounding box" and starts writing
+/// SPARQL about whatever the vocabulary blocks feature. Repeating just the
+/// matched lines at the tail puts the answer where tail-weighted attention
+/// actually looks. Exact lowercase token overlap only (≥4 chars, service
+/// boilerplate stopworded) — no match, no section, no tokens spent.
+fn relevant_services_hint(question: &str, services: &[String]) -> String {
+    const STOP: [&str; 12] = [
+        "service", "services", "dataset", "datasets", "query", "queries", "with", "from", "that",
+        "this", "every", "each",
+    ];
+    let tokens: Vec<String> = question
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 4 && !STOP.contains(t))
+        .map(str::to_string)
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let mut scored: Vec<(usize, &String)> = services
+        .iter()
+        .map(|line| {
+            let hay = line.to_lowercase();
+            let hits = tokens
+                .iter()
+                .filter(|t| {
+                    hay.split(|c: char| !c.is_alphanumeric())
+                        .any(|w| w == t.as_str())
+                })
+                .count();
+            (hits, line)
+        })
+        .filter(|(hits, _)| *hits > 0)
+        .collect();
+    if scored.is_empty() {
+        return String::new();
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = String::from(
+        "\n\n# API SERVICES MATCHING THIS QUESTION (answer with these — cite the GET path or \
+         use an ```api widget — before writing any SPARQL)\n",
+    );
+    for (_, line) in scored.into_iter().take(3) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 // ─── Graph vocabulary grounding ────────────────────────────────────────────────
@@ -3021,7 +3088,7 @@ fn strip_code_fence(s: &str) -> String {
 mod tests {
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
-        fallback_answer, find_ci, first_sparql_fence, history_within_budget, 
+        fallback_answer, find_ci, first_sparql_fence, history_within_budget, relevant_services_hint, 
         hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt, render_rows_for_llm,
         repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence,
         trim_at_parse_error, truncate,
@@ -3037,6 +3104,25 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
         }
+    }
+
+    #[test]
+    fn service_hint_matches_question_words_and_stays_silent_otherwise() {
+        let services = vec![
+            "- \"Cities within a bounding box\" on dataset \"Spatial\": GET /api/datasets/spatial/api-services/cities-in-bbox/run — GeoSPARQL bbox".to_string(),
+            "- \"All statements\" on dataset \"Core\": GET /api/datasets/core/api-services/all-statements/run".to_string(),
+        ];
+        let hint = relevant_services_hint(
+            "Is there an API service I can call to answer a question about cities, and how do I call it?",
+            &services,
+        );
+        assert!(hint.contains("cities-in-bbox"), "cities service must surface: {hint}");
+        assert!(!hint.contains("all-statements"), "unrelated service must not: {hint}");
+
+        // No content-word overlap → no section at all.
+        assert!(relevant_services_hint("How many triples are there?", &services).is_empty());
+        // Boilerplate words alone must not match everything.
+        assert!(relevant_services_hint("Which dataset services exist?", &services).is_empty());
     }
 
     #[test]
