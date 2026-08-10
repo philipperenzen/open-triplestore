@@ -1861,7 +1861,11 @@ async fn run_chat_turn(
                     format!(
                         "Query results:\n{table}\nWrite the final answer to my previous question \
                          in clear natural language, using the presentation widgets where they \
-                         help. Do not output another SPARQL: line."
+                         help. Do not output another SPARQL: line. If the results above are \
+                         empty, say you could not FIND the data — never state that something \
+                         does not exist based on an empty result — and check the PLATFORM \
+                         CONTEXT sections (Datasets, API Services, Files) first: if one of \
+                         those already answers the question, use it."
                     )
                 }
             }
@@ -1900,7 +1904,10 @@ async fn run_chat_turn(
                     format!(
                         "That query failed to run: {emsg}\nAnswer my previous question as well as \
                          you can without another query; include a corrected query as a ```sparql \
-                         block if useful. Do not output another SPARQL: line."
+                         block if useful. Do not output another SPARQL: line. Never state that \
+                         something does not exist because a query failed or returned nothing — \
+                         and check the PLATFORM CONTEXT sections (Datasets, API Services, \
+                         Files) first: if one of those already answers the question, use it."
                     )
                 }
             }
