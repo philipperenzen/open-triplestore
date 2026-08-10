@@ -2236,6 +2236,13 @@ async fn evidence_graphs(
     state.sync_text_index_if_dirty();
     let index = state.text_index.clone();
     let search_terms = terms.clone();
+    // The same read boundary the graph filter below applies, pushed into the
+    // index instead: hits from graphs the caller cannot read are dropped by the
+    // search itself, so they never consume one of the few VOCAB_EVIDENCE_HITS
+    // slots and crowd out a subject that is actually visible.
+    let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::new(
+        in_scope.iter().cloned().collect::<HashSet<String>>(),
+    ));
     let subjects: Vec<String> = match index {
         None => Vec::new(),
         Some(index) => tokio::task::spawn_blocking(move || {
@@ -2244,7 +2251,7 @@ async fn evidence_graphs(
                 // Quoted: an identifier with hyphens is several tokens to the
                 // query parser, and the unquoted form would match any of them.
                 let q = format!("\"{}\"", term.replace('"', ""));
-                let Ok(hits) = index.search(&q, None, VOCAB_EVIDENCE_HITS) else {
+                let Ok(hits) = index.search(&q, None, scope.as_scope(), VOCAB_EVIDENCE_HITS) else {
                     continue;
                 };
                 for h in hits {
