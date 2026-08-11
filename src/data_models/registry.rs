@@ -59,6 +59,18 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
         "#
     );
     let mut records = Vec::new();
+    // One record per model, whatever the registry graph holds. Every property
+    // above except `a`, title and namespace is OPTIONAL, so a subject carrying
+    // two values for any of them (a stray second `dct:created` from an
+    // interrupted re-register, a description in two languages, …) makes this
+    // SELECT fan out into one row per combination — and `data_model_id` is the
+    // IRI's last path segment, so distinct IRIs can collide onto one id too.
+    // Both hand the API duplicate ids. The registry page keys its list by id,
+    // where a duplicate key is a hard render abort: the list never paints and
+    // the page sits on its loading spinner forever, with only a console error
+    // to show for it. Deduplicating here also skips the redundant
+    // `count_versions` query each surplus row would otherwise run.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
         for row in solutions.flatten() {
             let vals: Vec<Option<Term>> = row.values().to_vec();
@@ -68,6 +80,14 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
             };
             // Extract data_model_id from the IRI (last path segment after /data-model/)
             let data_model_id = id.rsplit('/').next().unwrap_or(&id).to_string();
+            if !seen.insert(data_model_id.clone()) {
+                tracing::debug!(
+                    id = %data_model_id,
+                    iri = %id,
+                    "registry list: dropping a duplicate row for this model"
+                );
+                continue;
+            }
 
             // Count versions
             let version_count = count_versions(store, &id);
@@ -966,4 +986,71 @@ pub fn version_exists(
 /// Check whether a data model IRI already exists in the registry.
 pub fn data_model_exists(store: &TripleStore, base_url: &str, data_model_id: &str) -> bool {
     get_data_model(store, base_url, data_model_id).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "http://localhost:7878";
+
+    fn seed_one(store: &TripleStore, id: &str, created: &str) {
+        insert_data_model(
+            store,
+            BASE,
+            id,
+            "Good Relations",
+            "http://purl.org/goodrelations/v1#",
+            None,
+            true,
+            None,
+            None,
+            None,
+            created,
+        )
+        .unwrap();
+    }
+
+    /// A registry entry carrying a second value for one of the OPTIONAL
+    /// properties must still list as exactly one model. Without the guard the
+    /// SELECT fans out into a row per combination, the API hands the registry
+    /// page two records with the same `id`, and its keyed list aborts mid-render
+    /// — the symptom being a page stuck on "Loading models…" forever.
+    #[test]
+    fn a_second_created_date_does_not_duplicate_the_model() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, "gr", "2026-07-24T13:06:28Z");
+
+        // Exactly what an interrupted re-register leaves behind: every other
+        // triple is identical (RDF set semantics collapse them), only the fresh
+        // timestamp survives alongside the original.
+        store
+            .update(&format!(
+                r#"INSERT DATA {{ GRAPH <{REGISTRY_GRAPH}> {{
+                     <{BASE}/data-model/gr> <{DCT}created> "2026-07-29T12:39:19Z"^^<{XSD}dateTime> .
+                   }} }}"#
+            ))
+            .unwrap();
+
+        let records = list_data_models(&store);
+        assert_eq!(
+            records.len(),
+            1,
+            "one registry entry must list once, got {:?}",
+            records.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert_eq!(records[0].id, "gr");
+    }
+
+    /// The ordinary case keeps listing every distinct model.
+    #[test]
+    fn lists_each_distinct_model_once() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, "gr", "2026-07-24T13:06:28Z");
+        seed_one(&store, "prov", "2026-07-24T13:06:29Z");
+
+        let mut ids: Vec<String> = list_data_models(&store).into_iter().map(|r| r.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["gr".to_string(), "prov".to_string()]);
+    }
 }
