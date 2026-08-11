@@ -20,6 +20,7 @@
     Sparkles, Send, ThumbsUp, ThumbsDown, Loader2, Square, Check,
     Terminal, AlertTriangle, ChevronDown, ChevronRight, Database,
     Plus, Pencil, Trash2, Info, NotebookPen, X, MessageSquare, Copy, Eye, EyeOff,
+    RotateCcw,
   } from 'lucide-svelte';
 
   // One assistant turn carries the retrieval trail (every SPARQL round the
@@ -349,7 +350,11 @@
       } else {
         draft.isError = true;
         draft.content = e?.message || $t('pages.llmChat.unavailable');
-        draft.queries = [];
+        // Keep draft.queries: the retrieval trail the user watched is real
+        // work that already happened — wiping it with the error makes the
+        // whole turn look imagined. Only the ANSWER failed to arrive.
+        // A failed turn is retryable in place (same question, fresh turn).
+        draft.retryFor = content;
         // The server rejected this request outright (guard block, rate limit):
         // keep the bubble visible but never replay the message in later turns.
         if (e?.status === 400 || e?.status === 429) userMsg.rejected = true;
@@ -458,6 +463,18 @@
   function openResource(iri) {
     if (!iri) return;
     navigate(`/resource?iri=${encodeURIComponent(iri)}`);
+  }
+
+  /** Re-run a failed turn in place: drop the error bubble and its user message
+   *  (send() re-appends both), so the conversation history the model sees is
+   *  identical to a first attempt — no duplicated question, no error residue. */
+  function retryTurn(draft) {
+    const q = draft.retryFor;
+    if (!q || loading) return;
+    const at = messages.indexOf(draft);
+    const pair = at > 0 && messages[at - 1].role === 'user' ? [messages[at - 1], draft] : [draft];
+    messages = messages.filter((m) => !pair.includes(m));
+    send(q);
   }
 
   function openInSparql(sparql) {
@@ -666,6 +683,28 @@
             <!-- renderRich() renders markdown and sanitizes it with DOMPurify -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             <div class="bubble-text">{@html renderRich(msg.content)}</div>
+            {#if msg.isError}
+              <!-- The retrieval trail survives the error: those rounds ran.
+                   Only the answer was lost, and that is retryable in place. -->
+              {#if msg.queries?.length}
+                <div class="live-trail">
+                  {#each msg.queries as q}
+                    <span class="trail-chip" class:failed={q.pending === false && !q.ok}>
+                      {#if q.ok}
+                        <Check size={11} /> {q.rowCount ?? 0}{q.truncated ? '+' : ''} {(q.rowCount ?? 0) === 1 ? $t('pages.llmChat.rowSingular') : $t('pages.llmChat.rowPlural')}
+                      {:else}
+                        <AlertTriangle size={11} /> {$t('pages.llmChat.queryFailedShort')}
+                      {/if}
+                    </span>
+                  {/each}
+                </div>
+              {/if}
+              {#if msg.retryFor}
+                <button class="retry-btn" on:click={() => retryTurn(msg)} disabled={loading}>
+                  <RotateCcw size={12} /> {$t('pages.llmChat.retry')}
+                </button>
+              {/if}
+            {/if}
             {#if msg.role === 'user'}
               <button class="msg-copy" on:click={() => copyMessage(msg, i)} aria-label={$t('pages.llmChat.copyMessage')} title={$t('pages.llmChat.copyMessage')}>
                 {#if copiedIdx === i}<Check size={12} />{:else}<Copy size={12} />{/if}
@@ -1078,6 +1117,14 @@
   }
   .trail-chip.failed { color: #b91c1c; background: #fff8f8; border-color: #f3c9c9; }
   .stopped-note { margin: 0.45rem 0 0; font-size: 0.74rem; font-style: italic; color: var(--ink-400); }
+  .retry-btn {
+    margin-top: 0.5rem; display: inline-flex; align-items: center; gap: 0.35rem;
+    padding: 0.3rem 0.7rem; border-radius: 8px; font-size: 0.76rem; cursor: pointer;
+    background: var(--panel, #fff); border: 1px solid var(--line-soft, #e2e8f0);
+    color: var(--ink-700, #334155); transition: background 0.12s, border-color 0.12s;
+  }
+  .retry-btn:hover:not(:disabled) { background: var(--accent-soft, #eef2ff); border-color: var(--accent, #4338ca); }
+  .retry-btn:disabled { opacity: 0.5; cursor: default; }
 
   /* Markdown-rendered assistant text. Tight vertical rhythm so blocks sit snugly in
      the bubble; `breaks:true` turns single newlines into <br>, so no pre-wrap. */

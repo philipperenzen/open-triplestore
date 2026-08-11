@@ -8,6 +8,7 @@
   import { t } from 'svelte-i18n';
   import { renderMarkdown } from '../../lib/markdown.js';
   import { parseChatBlocks, decorateApiLinks, decorateIriLinks } from '../../lib/chatRich.js';
+  import { resourceLinkDelegate } from '../../lib/resourcePreview.js';
   import SparqlRunBlock from './SparqlRunBlock.svelte';
   import ApiRunBlock from './ApiRunBlock.svelte';
   import ChatChart from './ChatChart.svelte';
@@ -71,7 +72,7 @@
     <!-- renderMarkdown sanitizes with DOMPurify; decorateApiLinks only adds attributes. -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-    <div class="md-seg" on:click={onClick} on:keydown={onKeydown}>{@html mdHtml(seg.source)}</div>
+    <div class="md-seg" use:resourceLinkDelegate on:click={onClick} on:keydown={onKeydown}>{@html mdHtml(seg.source)}</div>
   {:else if seg.kind === 'sparql'}
     <SparqlRunBlock code={seg.code} on:openInSparql />
   {:else if seg.kind === 'api'}
