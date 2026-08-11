@@ -545,7 +545,8 @@
       "aboutRateLimit": "Rate limit",
       "aboutRateLimitValue": "{n} requests/min for you",
       "aboutRateLimitSignIn": "(sign in for {n}/min)",
-      "verboseTitle": "Show what Spark is doing — open the queries it runs"
+      "verboseTitle": "Show what Spark is doing — open the queries it runs",
+      "retry": "Try again"
     },
     "sparql": {
       "title": "SPARQL workspace",
@@ -3941,6 +3942,12 @@
       "openFullPage": "Open full page",
       "signInTitle": "Sign in to see files",
       "signInHint": "The files in this dataset are only available to signed-in members."
+    },
+    "resourceCard": {
+      "loading": "Looking up resource…",
+      "facts": "{count}{more} facts in the store",
+      "clickToOpen": "click to open",
+      "notInStore": "No data about this IRI in the store — external link"
     }
   },
   "viewer": {

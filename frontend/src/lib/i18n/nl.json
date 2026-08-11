@@ -545,7 +545,8 @@
       "aboutRateLimit": "Limiet",
       "aboutRateLimitValue": "{n} verzoeken/min voor jou",
       "aboutRateLimitSignIn": "(log in voor {n}/min)",
-      "verboseTitle": "Laat zien wat Spark doet — toon de query's die hij uitvoert"
+      "verboseTitle": "Laat zien wat Spark doet — toon de query's die hij uitvoert",
+      "retry": "Opnieuw proberen"
     },
     "sparql": {
       "title": "SPARQL-werkruimte",
@@ -3941,6 +3942,12 @@
       "openFullPage": "Volledige pagina openen",
       "signInTitle": "Log in om bestanden te zien",
       "signInHint": "De bestanden in deze dataset zijn alleen beschikbaar voor ingelogde leden."
+    },
+    "resourceCard": {
+      "loading": "Resource opzoeken…",
+      "facts": "{count}{more} feiten in de store",
+      "clickToOpen": "klik om te openen",
+      "notInStore": "Geen data over deze IRI in de store — externe link"
     }
   },
   "viewer": {

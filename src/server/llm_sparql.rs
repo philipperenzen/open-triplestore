@@ -923,10 +923,61 @@ fn repair_sparql(sparql: String) -> String {
     if validate_sparql(&sparql).is_ok() {
         return sparql;
     }
+    if let Some(fixed) = trim_at_parse_error(&sparql) {
+        return fixed;
+    }
     match hoist_misplaced_modifiers(&sparql) {
         Some(fixed) if validate_sparql(&fixed).is_ok() => fixed,
         _ => sparql,
     }
+}
+
+/// Cut a query that fails to parse at the parser's own error position, keeping
+/// the prefix when that alone parses.
+///
+/// The unfenced `SPARQL:` directive has no closing fence, so a model that
+/// explains itself — `SPARQL:\n<query>\n\nThis counts the triples …` — drags
+/// the prose into the query text. The parser then rejects the WHOLE thing at
+/// the first prose word ("expected one of HAVING, OFFSET, VALUES"), the round
+/// burns, and after three of those the turn answers from memory: the
+/// fabrication failure, caused by a query that was correct all along. The
+/// parser already points at where the garbage starts; everything before it is
+/// the query. Fail-soft: an unrecognised error format or a prefix that still
+/// doesn't parse returns None and the other repairs get their turn.
+fn trim_at_parse_error(sparql: &str) -> Option<String> {
+    let err = validate_sparql(sparql).err()?;
+    // spargebra reports "error at <line>:<col>: …", 1-based, cols in chars.
+    let pos = err.strip_prefix("error at ")?;
+    let (line, rest) = pos.split_once(':')?;
+    let (col, _) = rest.split_once(':')?;
+    let (line, col) = (line.parse::<usize>().ok()?, col.parse::<usize>().ok()?);
+    let mut line_start = 0usize;
+    for (i, l) in sparql.split_inclusive('\n').enumerate() {
+        if i + 1 == line {
+            // peg reports the FURTHEST failure, which for trailing prose can sit
+            // a few tokens into the garbage ("This query …" fails at "query").
+            // Try the exact column first, then the whole error line — whichever
+            // prefix actually parses is the query. A genuinely broken query
+            // validates under neither and comes back None.
+            let col_cut = line_start
+                + l.char_indices()
+                    .nth(col.saturating_sub(1))
+                    .map(|(b, _)| b)
+                    .unwrap_or(l.len());
+            for cut in [col_cut, line_start] {
+                let prefix = sparql[..cut].trim();
+                if !prefix.is_empty()
+                    && prefix.len() < sparql.trim().len()
+                    && validate_sparql(prefix).is_ok()
+                {
+                    return Some(prefix.to_string());
+                }
+            }
+            return None;
+        }
+        line_start += l.len();
+    }
+    None
 }
 
 /// Parse-check a query string with the same grammar the engine uses, returning the
@@ -1108,6 +1159,52 @@ const CHAT_WKT_CELL_MAX_CHARS: usize = 600;
 /// Output-token budget per chat turn. Rich answers (markdown + widget JSON specs)
 /// need headroom; short answers still stop early.
 const CHAT_MAX_TOKENS: u32 = 3072;
+/// Reserved prompt headroom when [`llm_context_tokens`] budgeting is on: role/JSON
+/// framing, estimator error, and the in-turn growth every retrieval round adds
+/// (its result table is separately capped at [`CHAT_TABLE_MAX_CHARS`]).
+const CHAT_PROMPT_MARGIN: usize = 2048;
+/// Total character cap for one result table rendered into a follow-up prompt.
+/// Per-cell truncation alone still lets a wide 50-row result reach several
+/// thousand tokens — and a turn can run several rounds, each appending a table
+/// to a prompt that must fit the model's context window.
+const CHAT_TABLE_MAX_CHARS: usize = 6000;
+
+/// The serving model's context window in tokens (`LLM_CONTEXT_TOKENS`), if the
+/// operator declared one. Local runtimes (Ollama, llama.cpp, vLLM with a small
+/// `max_model_len`) silently truncate an over-long prompt, and what falls off
+/// first is the system prompt — the execution protocol and the graph vocabulary
+/// — after which the model "answers" from whatever fragments survive. Unset or
+/// 0 disables client-side budgeting (the right choice for large-context APIs).
+fn llm_context_tokens() -> Option<usize> {
+    env_nonempty("LLM_CONTEXT_TOKENS")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Estimated token count for `s`. Deliberately conservative (≈3 chars/token):
+/// prompts here are dense with IRIs and tables, which tokenize far worse than
+/// prose, and over-estimating merely trims history a little sooner while
+/// under-estimating reintroduces the silent-truncation failure this guards.
+fn estimate_tokens(s: &str) -> usize {
+    s.chars().count() / 3 + 1
+}
+
+/// The newest suffix of `history` that fits `budget` estimated tokens.
+/// The last message (the question being answered) is always kept, even alone
+/// and even if it exceeds the budget by itself — sending the question is
+/// strictly better than sending nothing.
+fn history_within_budget(history: &[ChatMessage], budget: usize) -> &[ChatMessage] {
+    let mut start = history.len();
+    let mut used = 0usize;
+    for (i, m) in history.iter().enumerate().rev() {
+        used += estimate_tokens(&m.content);
+        if used > budget && start < history.len() {
+            break;
+        }
+        start = i;
+    }
+    &history[start..]
+}
 
 #[derive(Deserialize)]
 pub struct ChatMessage {
@@ -1421,10 +1518,12 @@ async fn llm_chat(
 }
 
 /// POST /api/llm/chat/stream — the same grounded chat turn, streamed as SSE.
-/// The client sees answer tokens while the model writes them and a live
-/// retrieval trail (each query + its outcome) while rounds run; the terminal
-/// `done` event carries the exact payload the JSON endpoint would have sent.
-/// Closing the connection aborts the turn server-side.
+/// The client sees a live retrieval trail (each query + its outcome) while
+/// rounds run, and answer tokens as the model writes them — but only once the
+/// answer is grounded: pre-retrieval prose is buffered server-side, so nothing
+/// the model wrote before seeing data is ever shown (or has to be retracted).
+/// The terminal `done` event carries the exact payload the JSON endpoint would
+/// have sent. Closing the connection aborts the turn server-side.
 async fn llm_chat_stream(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
@@ -1502,14 +1601,23 @@ fn sse_event(ev: &ChatStreamEvent) -> Result<Event, Infallible> {
 }
 
 /// One completion round: streamed (with tokens forwarded through a
-/// [`DeltaGate`]) when someone is listening, plain otherwise. Returns the full
-/// reply text plus whether any of it was forwarded to the client live.
+/// [`DeltaGate`]) when someone is listening AND the round may be shown live,
+/// plain otherwise. Returns the full reply text plus whether any of it was
+/// forwarded to the client live.
+///
+/// `live` is false for pre-retrieval rounds. Whatever prose the model writes
+/// before its first query cannot be grounded in data — streaming it paints a
+/// confident answer the next event has to wipe, which reads as the assistant
+/// making things up and then retracting them. Buffered rounds cost nothing to
+/// correct: the user sees "thinking", then the retrieval trail, then only text
+/// that survived grounding.
 async fn next_reply(
     model: &str,
     msgs: &[Value],
     sink: &EventSink,
+    live: bool,
 ) -> Result<(String, bool), AppError> {
-    if sink.is_live() {
+    if live && sink.is_live() {
         let mut gate = DeltaGate::new();
         let text =
             chat_completion_messages_stream(model, msgs, CHAT_MAX_TOKENS, sink, &mut gate).await?;
@@ -1544,9 +1652,12 @@ async fn run_chat_turn(
     // Mentioned datasets' graphs first — the vocab sampler and the prompt's
     // graph list both truncate by position (see prioritise_graphs_for_conversation).
     let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
-    let context = build_platform_context(&state, user_id, &graph_list);
+    let (context, service_lines) = build_platform_context(&state, user_id, &graph_list);
     let evidence = evidence_graphs(&state, &req.messages, &graph_list).await;
     let vocab = graph_vocab_context(&state, &graph_list, &evidence).await;
+    // Question-matched API services again, at the tail this time — the full
+    // list is mid-prompt where small models lose it (see relevant_services_hint).
+    let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
     // The user's saved memory rides at the END of the system prompt: everything
     // before it is stable across users and turns, which keeps the shared prefix
     // cacheable by the gateway (vLLM APC, llama.cpp prompt cache, …).
@@ -1561,12 +1672,49 @@ async fn run_chat_turn(
         })
         .unwrap_or_default();
 
-    let mut msgs: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
+    let mut system_content = format!(
+        "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{services_hint}{memory}"
+    );
+
+    // Fit the prompt inside the declared context window, oldest history first.
+    // A runtime that truncates silently cuts the START of the prompt — i.e. the
+    // execution protocol — so an over-budget turn doesn't degrade, it flips into
+    // confident fabrication. Better to forget last week's turns than the rules.
+    let mut history: &[ChatMessage] = &req.messages;
+    if let Some(window) = llm_context_tokens() {
+        let budget = window.saturating_sub(CHAT_MAX_TOKENS as usize + CHAT_PROMPT_MARGIN);
+        if estimate_tokens(&system_content) > budget && !vocab.is_empty() {
+            // The vocabulary blocks are the largest elastic part of the system
+            // prompt. Dropping them costs answer quality; overflowing the
+            // window costs the protocol itself.
+            tracing::warn!(
+                window,
+                "chat system prompt exceeds LLM_CONTEXT_TOKENS budget — dropping graph vocabulary"
+            );
+            // The services hint survives the vocab drop: it is tiny and answers
+            // the question the turn is actually about.
+            system_content = format!(
+                "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{services_hint}{memory}"
+            );
+        }
+        let remaining = budget.saturating_sub(estimate_tokens(&system_content));
+        history = history_within_budget(history, remaining);
+        if history.len() < req.messages.len() {
+            tracing::debug!(
+                window,
+                dropped = req.messages.len() - history.len(),
+                kept = history.len(),
+                "chat history trimmed to fit the context window"
+            );
+        }
+    }
+
+    let mut msgs: Vec<Value> = Vec::with_capacity(history.len() + 1);
     msgs.push(json!({
         "role": "system",
-        "content": format!("{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{memory}"),
+        "content": system_content,
     }));
-    for m in &req.messages {
+    for m in history {
         let role = if m.role == "assistant" {
             "assistant"
         } else {
@@ -1584,7 +1732,9 @@ async fn run_chat_turn(
         state: "thinking",
     })
     .await;
-    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink).await?;
+    // Pre-retrieval rounds are never streamed live (`live: false`): any prose
+    // here predates the data, so showing it would only set up a retraction.
+    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink, false).await?;
 
     // Retrieval nudge. The `SPARQL:` protocol sits inside a long system prompt,
     // and a model that does not follow it silently answers from the platform
@@ -1602,18 +1752,16 @@ async fn run_chat_turn(
              them (any name, number, date, value or geometry), reply with EXACTLY one line: \
              `SPARQL:` followed by a single query and nothing else. If it genuinely needs no data \
              from the graphs, repeat your previous answer unchanged."}));
-        sink.send(ChatStreamEvent::RoundReset).await;
         sink.send(ChatStreamEvent::Status {
             round: 0,
             state: "thinking",
         })
         .await;
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink).await {
+        (reply, forwarded) = match next_reply(&model, &msgs, &sink, false).await {
             Ok(v) if extract_query_request(&v.0, true).is_some() => v,
             // No query the second time either (or the gateway failed): the first
             // answer was the model's real one — keep it.
             _ => {
-                sink.send(ChatStreamEvent::RoundReset).await;
                 msgs.truncate(msgs.len() - 2);
                 original
             }
@@ -1720,7 +1868,11 @@ async fn run_chat_turn(
                     format!(
                         "Query results:\n{table}\nWrite the final answer to my previous question \
                          in clear natural language, using the presentation widgets where they \
-                         help. Do not output another SPARQL: line."
+                         help. Do not output another SPARQL: line. If the results above are \
+                         empty, say you could not FIND the data — never state that something \
+                         does not exist based on an empty result — and check the PLATFORM \
+                         CONTEXT sections (Datasets, API Services, Files) first: if one of \
+                         those already answers the question, use it."
                     )
                 }
             }
@@ -1759,7 +1911,10 @@ async fn run_chat_turn(
                     format!(
                         "That query failed to run: {emsg}\nAnswer my previous question as well as \
                          you can without another query; include a corrected query as a ```sparql \
-                         block if useful. Do not output another SPARQL: line."
+                         block if useful. Do not output another SPARQL: line. Never state that \
+                         something does not exist because a query failed or returned nothing — \
+                         and check the PLATFORM CONTEXT sections (Datasets, API Services, \
+                         Files) first: if one of those already answers the question, use it."
                     )
                 }
             }
@@ -1770,7 +1925,11 @@ async fn run_chat_turn(
             state: "thinking",
         })
         .await;
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink).await {
+        // Post-retrieval rounds stream live: the model now writes against real
+        // results, and a directive-shaped reply (another query request) is
+        // caught at the first token by the DeltaGate, so nothing that would be
+        // superseded reaches the client.
+        (reply, forwarded) = match next_reply(&model, &msgs, &sink, true).await {
             Ok(v) => v,
             Err(_) => (fallback_answer(&runs), false),
         };
@@ -2004,7 +2163,14 @@ fn chat_accessible_graphs(
 /// datasets (name, visibility, description, DCAT topics), the API services runnable
 /// against them, and the named graphs in scope. `graphs` must be pre-sorted so the
 /// prompt is stable across turns (prompt-cache friendly).
-fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[String]) -> String {
+/// Platform summary for the system prompt, plus the API-service lines on their
+/// own so [`relevant_services_hint`] can re-surface question-matched ones at
+/// the prompt's tail.
+fn build_platform_context(
+    state: &AppState,
+    user_id: Option<&str>,
+    graphs: &[String],
+) -> (String, Vec<String>) {
     let mut ctx = String::new();
 
     let datasets = state
@@ -2139,7 +2305,61 @@ fn build_platform_context(state: &AppState, user_id: Option<&str>, graphs: &[Str
         }
     }
 
-    ctx
+    (ctx, services)
+}
+
+/// API services whose name or description shares a content word with the
+/// question, rendered as a short section for the END of the system prompt.
+///
+/// The full service list sits mid-prompt, and a small model reliably loses it
+/// there: asked "is there an API service about cities?" it walks straight past
+/// a service literally named "Cities within a bounding box" and starts writing
+/// SPARQL about whatever the vocabulary blocks feature. Repeating just the
+/// matched lines at the tail puts the answer where tail-weighted attention
+/// actually looks. Exact lowercase token overlap only (≥4 chars, service
+/// boilerplate stopworded) — no match, no section, no tokens spent.
+fn relevant_services_hint(question: &str, services: &[String]) -> String {
+    const STOP: [&str; 12] = [
+        "service", "services", "dataset", "datasets", "query", "queries", "with", "from", "that",
+        "this", "every", "each",
+    ];
+    let tokens: Vec<String> = question
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 4 && !STOP.contains(t))
+        .map(str::to_string)
+        .collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let mut scored: Vec<(usize, &String)> = services
+        .iter()
+        .map(|line| {
+            let hay = line.to_lowercase();
+            let hits = tokens
+                .iter()
+                .filter(|t| {
+                    hay.split(|c: char| !c.is_alphanumeric())
+                        .any(|w| w == t.as_str())
+                })
+                .count();
+            (hits, line)
+        })
+        .filter(|(hits, _)| *hits > 0)
+        .collect();
+    if scored.is_empty() {
+        return String::new();
+    }
+    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let mut out = String::from(
+        "\n\n# API SERVICES MATCHING THIS QUESTION (answer with these — cite the GET path or \
+         use an ```api widget — before writing any SPARQL)\n",
+    );
+    for (_, line) in scored.into_iter().take(3) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 // ─── Graph vocabulary grounding ────────────────────────────────────────────────
@@ -2658,13 +2878,26 @@ fn render_rows_for_llm(qr: &ChatQueryResult) -> String {
     let mut s = String::new();
     s.push_str(&qr.columns.join(" | "));
     s.push('\n');
+    let mut shown = 0usize;
     for row in &qr.rows {
+        // Per-cell truncation bounds one row, not the table: a wide result can
+        // still reach thousands of tokens, and every retrieval round appends
+        // one of these to a prompt that must keep fitting the context window.
+        if s.len() >= CHAT_TABLE_MAX_CHARS {
+            break;
+        }
         let cells: Vec<String> = row.iter().map(|c| truncate(c, cell_budget(c))).collect();
         s.push_str(&cells.join(" | "));
         s.push('\n');
+        shown += 1;
     }
     if qr.rows.is_empty() {
         s.push_str("(no rows)\n");
+    } else if shown < qr.rows.len() {
+        s.push_str(&format!(
+            "(showing first {shown} of {} retrieved rows)\n",
+            qr.rows.len()
+        ));
     } else if qr.truncated {
         s.push_str(&format!("(showing first {MAX_CHAT_QUERY_ROWS} rows)\n"));
     }
@@ -2855,15 +3088,117 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        evidence_terms, extract_query_request, extract_sparql_directive, fallback_answer, find_ci,
-        first_sparql_fence, hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
-        repair_iri_case, repair_sparql, sse_data, stream_delta_text, strip_code_fence, truncate,
-        unknown_vocab_iris, validate_sparql, widgets_without_retrieval, ChatQueryRun,
+        estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
+        fallback_answer, find_ci, first_sparql_fence, history_within_budget,
+        hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
+        relevant_services_hint, render_rows_for_llm, repair_iri_case, repair_sparql, sse_data,
+        stream_delta_text, strip_code_fence, trim_at_parse_error, truncate, unknown_vocab_iris,
+        validate_sparql, widgets_without_retrieval, ChatMessage, ChatQueryResult, ChatQueryRun,
         ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
-        CHAT_WKT_CELL_MAX_CHARS,
+        CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn service_hint_matches_question_words_and_stays_silent_otherwise() {
+        let services = vec![
+            "- \"Cities within a bounding box\" on dataset \"Spatial\": GET /api/datasets/spatial/api-services/cities-in-bbox/run — GeoSPARQL bbox".to_string(),
+            "- \"All statements\" on dataset \"Core\": GET /api/datasets/core/api-services/all-statements/run".to_string(),
+        ];
+        let hint = relevant_services_hint(
+            "Is there an API service I can call to answer a question about cities, and how do I call it?",
+            &services,
+        );
+        assert!(
+            hint.contains("cities-in-bbox"),
+            "cities service must surface: {hint}"
+        );
+        assert!(
+            !hint.contains("all-statements"),
+            "unrelated service must not: {hint}"
+        );
+
+        // No content-word overlap → no section at all.
+        assert!(relevant_services_hint("How many triples are there?", &services).is_empty());
+        // Boilerplate words alone must not match everything.
+        assert!(relevant_services_hint("Which dataset services exist?", &services).is_empty());
+    }
+
+    #[test]
+    fn history_trimming_drops_oldest_turns_first() {
+        let history = vec![
+            msg("user", &"old ".repeat(300)), // ~400 estimated tokens
+            msg("assistant", &"older ".repeat(300)),
+            msg("user", "the current question"),
+        ];
+        // Budget fits the newest two messages, not all three.
+        let newest_two =
+            estimate_tokens(&history[1].content) + estimate_tokens(&history[2].content) + 10;
+        let kept = history_within_budget(&history, newest_two);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].role, "assistant");
+        assert_eq!(kept[1].content, "the current question");
+    }
+
+    #[test]
+    fn history_trimming_always_keeps_the_current_question() {
+        let history = vec![
+            msg("user", &"context ".repeat(500)),
+            msg("user", &"question ".repeat(500)),
+        ];
+        // Budget too small even for one message: the question still goes.
+        let kept = history_within_budget(&history, 1);
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].content.starts_with("question"));
+        // A generous budget keeps everything untouched.
+        let kept = history_within_budget(&history, usize::MAX);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn result_table_is_capped_in_total_size() {
+        // 50 rows of near-budget cells: per-cell truncation alone would let
+        // this table reach ~4× the total cap.
+        let wide = ChatQueryResult {
+            columns: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            rows: (0..50)
+                .map(|i| {
+                    (0..4)
+                        .map(|j| format!("{i}-{j}-{}", "x".repeat(70)))
+                        .collect()
+                })
+                .collect(),
+            truncated: false,
+        };
+        let table = render_rows_for_llm(&wide);
+        assert!(
+            table.len() < CHAT_TABLE_MAX_CHARS + 500,
+            "table blew the cap: {} chars",
+            table.len()
+        );
+        assert!(
+            table.contains("retrieved rows"),
+            "capped table must say it is partial: {}",
+            table.lines().last().unwrap_or("")
+        );
+        // A small result is untouched — no cap note, all rows present.
+        let small = ChatQueryResult {
+            columns: vec!["n".into()],
+            rows: vec![vec!["1".into()], vec!["2".into()]],
+            truncated: false,
+        };
+        let table = render_rows_for_llm(&small);
+        assert_eq!(table.lines().count(), 3);
+        assert!(!table.contains("retrieved rows"));
+    }
 
     #[test]
     fn fenced_query_counts_as_a_request_only_before_any_retrieval() {
@@ -3126,6 +3461,35 @@ mod tests {
         // message is what feeds back to the model.
         let hopeless = "SELECT ?s WHERE { ?s ?p";
         assert_eq!(repair_sparql(hopeless.to_string()), hopeless);
+    }
+
+    #[test]
+    fn repair_cuts_trailing_prose_from_an_unfenced_directive() {
+        // The observed failure: an unfenced `SPARQL:` reply that explains
+        // itself. There is no closing fence to stop extraction, so the prose
+        // rides into the query text and the parser rejects a correct query at
+        // the first prose word — every counting question burned all its rounds
+        // this way.
+        let with_prose = "SELECT (COUNT(?s) AS ?triplesCount) WHERE { \
+                          GRAPH <https://x.org/g> { ?s ?p ?o } }\n\n\
+                          This query counts the number of triples in the dataset.";
+        let repaired = repair_sparql(with_prose.to_string());
+        assert!(
+            validate_sparql(&repaired).is_ok(),
+            "prose tail must be cut: {repaired}"
+        );
+        assert!(repaired.starts_with("SELECT (COUNT(?s)"));
+        assert!(!repaired.contains("This query"));
+
+        // Prose directly attached (no blank line) is cut just the same — the
+        // parser's error position, not paragraph structure, decides the cut.
+        let attached = "ASK { ?s ?p ?o }\nThe pattern above checks whether any triple exists.";
+        let repaired = repair_sparql(attached.to_string());
+        assert_eq!(repaired, "ASK { ?s ?p ?o }");
+
+        // A truly broken query stays broken — the trim must not "fix" a text
+        // whose prefix never parses either.
+        assert!(trim_at_parse_error("SELECT ?s WHERE { ?s ?p").is_none());
     }
 
     #[test]

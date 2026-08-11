@@ -152,6 +152,7 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 | `LLM_CHAT_MODEL` | Model for Spark specifically; falls back to `LLM_MODEL`. |
 | `LLM_API_KEY` | Optional bearer token for the endpoint. Required by hosted APIs; leave unset for local servers. |
 | `LLM_TIMEOUT_SECONDS` | Per-completion budget (default `120`). Raise it when a large model is served from local hardware — past this the turn fails outright. |
+| `LLM_CONTEXT_TOKENS` | The serving model's context window, in tokens. When set, Spark budgets its prompt to fit (dropping the oldest conversation turns first, then the graph-vocabulary blocks) instead of letting the runtime truncate silently. **Set this whenever the endpoint is a local runtime** — Ollama, llama.cpp and vLLM cut an over-long prompt from the top, which deletes Spark's execution protocol and turns grounded answers into confident fabrication mid-conversation. Unset (or `0`) disables budgeting — fine for large-context hosted APIs. |
 
 **Which model.** Spark is the most demanding task on the platform: a long system
 prompt, a retrieval protocol to follow, and strict-JSON widget specs. A model
