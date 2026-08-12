@@ -38,7 +38,7 @@ describe('bundled vocabulary assets', () => {
 
     expect((await load('skos.ttl')).get('http://www.w3.org/2004/02/skos/core#definition')).toBeTruthy();
     expect((await load('foaf.ttl')).get('http://xmlns.com/foaf/0.1/Person')).toBeTruthy();
-    expect((await load('void.ttl')).get('http://rdfs.org/ns/void#triples')).toBeTruthy();
+    expect((await load('sosa.ttl')).get('http://www.w3.org/ns/sosa/Observation')).toBeTruthy();
     expect((await load('xsd.ttl')).get('http://www.w3.org/2001/XMLSchema#string')).toBeTruthy();
     expect((await load('owl.ttl')).size).toBeGreaterThan(0);
 

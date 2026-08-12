@@ -103,9 +103,7 @@ plumbing.
 The bundled **3D & Map Viewer Demo** dataset exercises every supported geo
 feature/format: mixed 2D GeoSPARQL geometry (point/line/polygon), native WKT-Z
 volumetric solids (`EPSG:7415`), 3D BAG LoD2.2 CityJSON (real + a small authored
-sample), STL/glTF/IFC models, a SOSA/SSN sensor + observation layer, and an
-asset-management asset-alignment example (the NEN 2660-2 vocabulary itself is not
-bundled — it is not freely redistributable).
+sample), STL/glTF/IFC models, and a SOSA/SSN sensor + observation layer.
 
 ## 7. Standards
 

@@ -585,8 +585,8 @@ static DATASETS: &[DatasetSpec] = &[
                       BAG registry with owl:sameAs — pick any building on the map or in 3D to see \
                       its data. Real Wikidata landmarks (CC0) with open 3D models from Wikimedia \
                       Commons, mixed GeoSPARQL feature types, native WKT-Z volumetric solids for \
-                      the 3D engine, a SOSA/SSN digital-twin sensor layer on the real buildings, \
-                      and an asset-management asset-management alignment complete the picture. Served \
+                      the 3D engine, and a SOSA/SSN digital-twin sensor layer on the real \
+                      buildings complete the picture. Served \
                       per element by /api/datasets/:id/viewer-feed, reprojected to WGS84.",
         graphs: &[
             GraphSpec { suffix: "landmarks", role: GraphKind::Instances, fmt: Fmt::Turtle, data: LANDMARKS_TTL },
@@ -594,7 +594,6 @@ static DATASETS: &[DatasetSpec] = &[
             GraphSpec { suffix: "volumes-3d", role: GraphKind::Instances, fmt: Fmt::Turtle, data: VOLUMES_3D_TTL },
             GraphSpec { suffix: "validation-3d", role: GraphKind::Instances, fmt: Fmt::Turtle, data: VALIDATION_3D_TTL },
             GraphSpec { suffix: "sensors", role: GraphKind::Instances, fmt: Fmt::Turtle, data: SENSORS_SOSA_TTL },
-            GraphSpec { suffix: "assets", role: GraphKind::Instances, fmt: Fmt::Turtle, data: ASSETS_OTL_TTL },
         ],
     },
 ];
@@ -615,9 +614,6 @@ const VALIDATION_3D_TTL: &str = include_str!("data/validation-3d.ttl");
 /// SOSA/SSN digital-twin layer: sensors + observations on the REAL demo
 /// buildings (BAG panden + the extruded worked-example solids).
 const SENSORS_SOSA_TTL: &str = include_str!("data/sensors-sosa.ttl");
-/// asset-management-style asset-management alignment (third-party vocab not bundled),
-/// aligned with a real BAG pand.
-const ASSETS_OTL_TTL: &str = include_str!("data/assets-otl.ttl");
 
 /// OWL/RDFS data model for the `ots:` terms the codebase uses. All terms live in
 /// the single `…/ns#` namespace: Standard, AuthMethod, conformance, plus the

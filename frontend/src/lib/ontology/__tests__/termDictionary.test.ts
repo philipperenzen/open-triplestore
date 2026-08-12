@@ -77,8 +77,14 @@ describe('indexStore', () => {
 });
 
 describe('VOCAB_FILES registry', () => {
+  // Namespaces we resolve prefixes and curated terms for, but ship no .ttl for:
+  // VoID's canonical vocabulary is not published as Turtle at any stable URL
+  // (vocab.deri.ie is gone), so only the curated VOCAB entries describe it.
+  const NO_BUNDLED_FILE = new Set([NAMESPACES.void]);
+
   it('covers every bundled namespace in NAMESPACES', () => {
     for (const ns of Object.values(NAMESPACES)) {
+      if (NO_BUNDLED_FILE.has(ns)) continue;
       expect(VOCAB_FILES[ns], `missing VOCAB_FILES entry for ${ns}`).toBeTruthy();
     }
   });

@@ -8,7 +8,7 @@
 // over /sparql. Model-registry version graphs are never inserted into
 // `dataset_graphs`, so `scope_query_to_authorized` excludes them for every principal
 // and that CONSTRUCT returns HTTP 200 with ZERO bytes — verified for schema, bot,
-// rdfs, time, otl and org, all of which serve 8–126 KB over the registry endpoint.
+// rdfs, time, sosa and org, all of which serve 8–126 KB over the registry endpoint.
 // Whichever loader resolved LAST won. The empty one usually did, clobbering a good
 // model with an empty one.
 //

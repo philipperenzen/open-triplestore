@@ -58,7 +58,6 @@ const SCHEMA_TTL: &str = include_str!("../../frontend/public/vocab/schema.ttl");
 const SHACL_TTL: &str = include_str!("../../frontend/public/vocab/shacl.ttl");
 const TIME_TTL: &str = include_str!("../../frontend/public/vocab/time.ttl");
 const VANN_TTL: &str = include_str!("../../frontend/public/vocab/vann.ttl");
-const VOID_TTL: &str = include_str!("../../frontend/public/vocab/void.ttl");
 const GEOSPARQL_TTL: &str = include_str!("../../frontend/public/vocab/geosparql.ttl");
 const GEOSPARQL_10_TTL: &str = include_str!("../../frontend/public/vocab/geosparql/1.0.0.ttl");
 const OTS_TTL: &str = include_str!("../../frontend/public/vocab/ots.ttl");
@@ -429,21 +428,6 @@ const VOCABS: &[StdVocab] = &[
         }],
     },
     StdVocab {
-        id: "void",
-        title: "VoID",
-        namespace: "http://rdfs.org/ns/void#",
-        versions: &[StdVersion {
-            version: "2011-03-06",
-            official_name: "Describing Linked Datasets with VoID (2011)",
-            date: "2011-03-06",
-            spec_url: "https://www.w3.org/TR/void/",
-            status: VersionStatus::Published,
-            latest: true,
-            prior: None,
-            ttl: VOID_TTL,
-        }],
-    },
-    StdVocab {
         id: "geosparql",
         title: "GeoSPARQL",
         namespace: "http://www.opengis.net/ont/geosparql#",
@@ -514,8 +498,8 @@ const VOCABS: &[StdVocab] = &[
         title: "Ontology for Managing Geometry (OMG)",
         namespace: "https://w3id.org/omg#",
         versions: &[StdVersion {
-            version: "0.0.1",
-            official_name: "Ontology for Managing Geometry 0.0.1",
+            version: "0.3",
+            official_name: "Ontology for Managing Geometry 0.3",
             date: "2019-01-01",
             spec_url: "https://w3id.org/omg",
             status: VersionStatus::Published,
@@ -529,8 +513,8 @@ const VOCABS: &[StdVocab] = &[
         title: "File Ontology for Geometry formats (FOG)",
         namespace: "https://w3id.org/fog#",
         versions: &[StdVersion {
-            version: "0.0.1",
-            official_name: "File Ontology for Geometry formats 0.0.1",
+            version: "0.0.4",
+            official_name: "File Ontology for Geometry formats 0.0.4",
             date: "2020-01-01",
             spec_url: "https://w3id.org/fog",
             status: VersionStatus::Published,
@@ -552,21 +536,6 @@ const VOCABS: &[StdVocab] = &[
             latest: true,
             prior: None,
             ttl: include_str!("../../frontend/public/vocab/sosa.ttl"),
-        }],
-    },
-    StdVocab {
-        id: "bag",
-        title: "3DBAG Vocabulary",
-        namespace: "https://data.3dbag.nl/def/",
-        versions: &[StdVersion {
-            version: "1.0",
-            official_name: "3DBAG Vocabulary (excerpt)",
-            date: "2024-01-01",
-            spec_url: "https://docs.3dbag.nl/",
-            status: VersionStatus::Published,
-            latest: true,
-            prior: None,
-            ttl: include_str!("../../frontend/public/vocab/bag.ttl"),
         }],
     },
     StdVocab {
@@ -600,35 +569,10 @@ const VOCABS: &[StdVocab] = &[
         }],
     },
     StdVocab {
-        id: "otl",
-        title: "Object Type Library (OTL) — excerpt",
-        namespace: "https://example.org/vocab/def/",
-        versions: &[StdVersion {
-            version: "excerpt",
-            official_name: "Object Type Library (excerpt)",
-            date: "2024-01-01",
-            spec_url: "https://example.org/vocab/",
-            status: VersionStatus::Published,
-            latest: true,
-            prior: None,
-            ttl: include_str!("../../frontend/public/vocab/otl.ttl"),
-        }],
-    },
-    StdVocab {
         id: "imbor",
         title: "CROW IMBOR Vocabulaire",
         namespace: "https://data.crow.nl/imbor/term/",
         versions: &[
-            StdVersion {
-                version: "excerpt",
-                official_name: "CROW IMBOR (excerpt)",
-                date: "2024-01-01",
-                spec_url: "https://imbor.crow.nl/",
-                status: VersionStatus::Published,
-                latest: false,
-                prior: None,
-                ttl: include_str!("../../frontend/public/vocab/imbor-def.ttl"),
-            },
             // The full IMBOR 2025 Vocabulaire, verbatim from the official
             // Linked Data release (8,949 SKOS concepts).
             StdVersion {
@@ -638,7 +582,7 @@ const VOCABS: &[StdVocab] = &[
                 spec_url: "https://github.com/Stichting-CROW/imbor/releases/tag/2025",
                 status: VersionStatus::Published,
                 latest: true,
-                prior: Some("excerpt"),
+                prior: None,
                 ttl: include_str!("../../frontend/public/vocab/imbor.ttl"),
             },
         ],

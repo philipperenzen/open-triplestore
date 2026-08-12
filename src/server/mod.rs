@@ -136,8 +136,8 @@ impl KeyExtractor for SmartIpExtractor {
 ///   credentials. The tightest option; prefer it in production.
 /// * `*` — reflect ANY origin (and the requested headers) with credentials, by mirroring
 ///   the request's `Origin` rather than the literal `*`, which the Fetch spec forbids
-///   alongside credentials. This lets a browser client served from any origin — e.g. the
-///   browser client on `http://localhost:5175` — connect to this store.
+///   alongside credentials. This lets a browser client served from any origin
+///   connect to this store.
 ///
 /// Why mirroring any origin *with credentials* is safe here — and what it depends on:
 /// this server authenticates a request from EITHER an `Authorization: Bearer <token>`

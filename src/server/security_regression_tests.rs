@@ -181,8 +181,8 @@ mod tests {
 
     #[tokio::test]
     async fn cors_wildcard_mirrors_any_origin_with_credentials() {
-        // A browser client (e.g. the browser client on http://localhost:5175) preflights a
-        // credentialed request against a store launched with CORS_ORIGINS=*. The store
+        // A browser client served from another origin preflights a credentialed
+        // request against a store launched with CORS_ORIGINS=*. The store
         // must echo that exact origin (never the literal '*') and allow credentials, or
         // the browser blocks the response. It must also reflect the requested headers —
         // including ones outside the fixed allow-list — so any-origin mode is actually
@@ -193,7 +193,7 @@ mod tests {
                 Request::builder()
                     .method(Method::OPTIONS)
                     .uri("/api/auth/me")
-                    .header(header::ORIGIN, "http://localhost:5175")
+                    .header(header::ORIGIN, "http://localhost:5173")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
                     .header(
                         header::ACCESS_CONTROL_REQUEST_HEADERS,
@@ -210,7 +210,7 @@ mod tests {
             headers
                 .get("access-control-allow-origin")
                 .and_then(|v| v.to_str().ok()),
-            Some("http://localhost:5175"),
+            Some("http://localhost:5173"),
             "wildcard CORS must mirror the caller's Origin, not the literal '*'"
         );
         assert_eq!(
