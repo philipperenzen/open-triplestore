@@ -26,7 +26,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
-- None.
+- The content-negotiated Turtle service description (`GET /` with an RDF `Accept`
+  type) counted every accessible graph with a full `count_graph()` scan; on a store
+  with a multi-million-triple graph that took tens of seconds per request. It now
+  reads the maintained O(1) per-graph count index (`graph_count_cached`), the same
+  fix the DCAT `void:triples` counts already had. Value-identical output.
+- `cleanup-containers.sh` only removed three hardcoded container names, missing the
+  project-prefixed variants other workspaces' `docker compose` runs create (e.g.
+  `<dir>-minio-1`) — the exact "container name already in use" conflicts it exists
+  to prevent. It now matches any container with a project-specific name component,
+  while deliberately never matching bare service names like `minio`, so containers
+  from unrelated projects are left alone.
 
 ### Security
 - None.
