@@ -154,7 +154,7 @@ r2d2_sqlite = { version = "0.24", features = ["bundled"] }
 ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
-lru = "0.16"
+lru = "0.18"
 jsonwebtoken = "9"
 # ES256 keypair generation for the OIDC provider (already jsonwebtoken's verifier backend).
 ring = "0.17"
