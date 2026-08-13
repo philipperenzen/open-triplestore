@@ -279,6 +279,15 @@
               </div>
               <code class="text-xs text-[var(--ink-400)] break-all">{model.id}</code>
             </div>
+            {#if $isAdmin}
+              <button
+                class="p-1.5 -mt-1 rounded-lg text-red-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50 shrink-0"
+                on:click|stopPropagation={() => deleteTarget = model}
+                aria-label={$t('pages.modelRegistry.deleteModel')}
+              >
+                <Trash2 size={14} />
+              </button>
+            {/if}
             <ChevronRight size={18} class="text-[var(--ink-300)] mt-0.5 shrink-0 group-hover:text-[var(--brand-500)] transition-colors" />
           </div>
 
@@ -314,15 +323,6 @@
             </div>
           </div>
 
-          {#if $isAdmin}
-            <button
-              class="absolute top-3 right-3 p-1.5 rounded-lg text-red-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50"
-              on:click|stopPropagation={() => deleteTarget = model}
-              aria-label={$t('pages.modelRegistry.deleteModel')}
-            >
-              <Trash2 size={14} />
-            </button>
-          {/if}
         </div>
       {/each}
     </div>
