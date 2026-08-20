@@ -54,7 +54,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "cesium": "^1.123.0",
     "codemirror": "^6.0.1",
-    "cytoscape": "^3.34.0",
+    "cytoscape": "^3.34.1",
     "cytoscape-cose-bilkent": "^4.1.0",
     "cytoscape-navigator": "^2.0.2",
     "dompurify": "^3.4.11",
