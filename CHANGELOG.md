@@ -26,14 +26,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   they point at take vocabulary-sampling slots ahead of the size heuristics.
 - Spark discovers the serving model's **context window from the gateway** when
   `LLM_CONTEXT_TOKENS` is unset — vLLM's `max_model_len` on `/v1/models`, or an
-  Ollama Modelfile `num_ctx` via `/api/show` (falling back to Ollama's 4096
-  default, since a raised `OLLAMA_CONTEXT_LENGTH` is invisible over the API) —
-  and budgets its prompt against it, instead of only against the declared knob.
-  A declared window always wins; nothing detectable leaves budgeting off as
-  before, now with a warning when the prompt is large enough that a local
-  runtime would truncate it silently. `GET /api/llm/health` reports the chat
-  model and the effective window, so a misconfigured stack is visible instead
-  of just wrong.
+  Ollama Modelfile `num_ctx` via `/api/show` — and budgets its prompt against
+  it, instead of only against the declared knob. A declared window always wins.
+  An Ollama model without a Modelfile `num_ctx` is deliberately NOT guessed at
+  (its true serving context is invisible over the API, and both possible
+  guesses hurt): the server warns once, and again per over-large prompt, that
+  `LLM_CONTEXT_TOKENS` should mirror the real `OLLAMA_CONTEXT_LENGTH`.
+  `GET /api/llm/health` reports the chat model and the effective window, so a
+  misconfigured stack is visible instead of just wrong.
 - Spark retrieval limits became knobs: `LLM_CHAT_MAX_ROUNDS` (default 3,
   clamped 1–8) and `LLM_CHAT_QUERY_MAX_SECS` (default 30, clamped 5–600) — a
   capable model on multi-part questions makes good use of more rounds, and a

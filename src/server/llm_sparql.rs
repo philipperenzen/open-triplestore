@@ -1268,27 +1268,30 @@ fn context_from_models_payload(v: &Value, model: &str) -> Option<usize> {
 }
 
 /// The serving context of an Ollama `/api/show` response: a Modelfile
-/// `num_ctx` when declared, else Ollama's own default of 4096. The server-side
-/// `OLLAMA_CONTEXT_LENGTH` override is invisible over the API, so an operator
-/// who raised it should declare `LLM_CONTEXT_TOKENS` — budgeting to the 4096
-/// floor merely trims more than needed, where assuming "unlimited" reinstates
-/// silent protocol truncation. Returns `None` for payloads that don't look
-/// like an Ollama show response at all.
+/// `num_ctx` when one is declared, `None` otherwise. Deliberately no guess
+/// for the undeclared case — Ollama's real serving context is whatever
+/// `OLLAMA_CONTEXT_LENGTH` says, which is invisible over the API, and both
+/// wrong guesses hurt (a low floor needlessly trims a raised deployment, a
+/// high one reinstates silent truncation). The caller warns instead; see
+/// [`detect_context_tokens`].
 fn context_from_ollama_show(v: &Value) -> Option<usize> {
-    if let Some(params) = v["parameters"].as_str() {
-        for line in params.lines() {
-            let mut it = line.split_whitespace();
-            if it.next() == Some("num_ctx") {
-                if let Some(n) = it.next().and_then(|s| s.parse::<usize>().ok()) {
-                    return Some(n);
-                }
+    let params = v["parameters"].as_str()?;
+    for line in params.lines() {
+        let mut it = line.split_whitespace();
+        if it.next() == Some("num_ctx") {
+            if let Some(n) = it.next().and_then(|s| s.parse::<usize>().ok()) {
+                return Some(n);
             }
         }
     }
-    ["model_info", "modelfile", "details"]
+    None
+}
+
+/// Does this payload look like an Ollama `/api/show` response at all?
+fn is_ollama_show_payload(v: &Value) -> bool {
+    ["model_info", "modelfile", "details", "parameters"]
         .iter()
         .any(|k| v.get(*k).is_some())
-        .then_some(4096)
 }
 
 /// Detected windows per `gateway|model`, probed once and remembered (including
@@ -1326,7 +1329,21 @@ async fn detect_context_tokens(base: &str, model: &str) -> Option<usize> {
     if let Ok(resp) = rb.send().await {
         if resp.status().is_success() {
             if let Ok(v) = resp.json::<Value>().await {
-                return context_from_ollama_show(&v);
+                let n = context_from_ollama_show(&v);
+                if n.is_none() && is_ollama_show_payload(&v) {
+                    // This IS Ollama, and its serving context (the
+                    // OLLAMA_CONTEXT_LENGTH default is 4096) cannot be read
+                    // over the API. Detection results are cached, so this
+                    // warns once per gateway+model, not per turn.
+                    tracing::warn!(
+                        model,
+                        "Ollama serves this model without a Modelfile num_ctx — its context \
+                         window (often 4096) is invisible over the API and the prompt may be \
+                         truncated silently; set LLM_CONTEXT_TOKENS to the real \
+                         OLLAMA_CONTEXT_LENGTH"
+                    );
+                }
+                return n;
             }
         }
     }
@@ -3952,8 +3969,8 @@ fn strip_code_fence(s: &str) -> String {
 mod tests {
     use super::{
         all_retrievals_empty, caps_for_window, context_from_models_payload,
-        context_from_ollama_show, graph_vocab_summary, iri_occurs_blocking, locate_iris_blocking,
-        mentioned_iris, render_models_section, salient_terms,
+        context_from_ollama_show, graph_vocab_summary, iri_occurs_blocking, is_ollama_show_payload,
+        locate_iris_blocking, mentioned_iris, render_models_section, salient_terms,
     };
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
@@ -4755,12 +4772,18 @@ mod tests {
         assert_eq!(context_from_models_payload(&single, "alias"), Some(8192));
         assert_eq!(context_from_models_payload(&json!({"data": []}), "m"), None);
 
-        // Ollama: a Modelfile num_ctx wins; a show-shaped payload without one
-        // reports Ollama's own 4096 default; anything else is not Ollama.
+        // Ollama: only an explicit Modelfile num_ctx counts — the serving
+        // context of an untuned model is invisible over the API, and both
+        // possible guesses hurt, so the detector warns instead of guessing.
         let tuned = json!({"details": {}, "parameters": "stop \"<|eot|>\"\nnum_ctx 16384"});
         assert_eq!(context_from_ollama_show(&tuned), Some(16384));
         let untuned = json!({"model_info": {"llama.context_length": 131072}});
-        assert_eq!(context_from_ollama_show(&untuned), Some(4096));
+        assert_eq!(context_from_ollama_show(&untuned), None);
+        assert!(
+            is_ollama_show_payload(&untuned),
+            "still recognised as Ollama"
+        );
+        assert!(!is_ollama_show_payload(&json!({"whatever": 1})));
         assert_eq!(context_from_ollama_show(&json!({"whatever": 1})), None);
     }
 
