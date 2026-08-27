@@ -135,7 +135,7 @@ pub fn insert_commit(
     );
 
     let mut lines = vec![
-        format!("    a prov:Activity, ver:Commit ;"),
+        "    a prov:Activity, ver:Commit ;".to_string(),
         format!("    ver:kind \"{}\" ;", rec.kind.as_str()),
         format!("    rdfs:comment \"{}\" ;", esc(&rec.message)),
         format!("    ver:added \"{}\"^^xsd:integer ;", rec.added),

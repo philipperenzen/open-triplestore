@@ -490,7 +490,7 @@ async fn content_glb(
         .iter()
         .map(|f| {
             let mut positions: Vec<f32> = Vec::with_capacity(f.tri_lonlath.len());
-            for triple in f.tri_lonlath.chunks_exact(3) {
+            for triple in f.tri_lonlath.as_chunks::<3>().0 {
                 let ecef = wgs84_to_ecef(triple[0], triple[1], triple[2]);
                 positions.push(ecef[0] as f32);
                 positions.push(ecef[1] as f32);
@@ -614,7 +614,7 @@ mod tests {
             .iter()
             .map(|f| {
                 let mut positions: Vec<f32> = Vec::new();
-                for triple in f.tri_lonlath.chunks_exact(3) {
+                for triple in f.tri_lonlath.as_chunks::<3>().0 {
                     let ecef = wgs84_to_ecef(triple[0], triple[1], triple[2]);
                     positions.push(ecef[0] as f32);
                     positions.push(ecef[1] as f32);
@@ -684,7 +684,7 @@ mod tests {
             .iter()
             .map(|f| {
                 let mut positions: Vec<f32> = Vec::new();
-                for triple in f.tri_lonlath.chunks_exact(3) {
+                for triple in f.tri_lonlath.as_chunks::<3>().0 {
                     let ecef = wgs84_to_ecef(triple[0], triple[1], triple[2]);
                     positions.push(ecef[0] as f32);
                     positions.push(ecef[1] as f32);

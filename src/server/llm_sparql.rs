@@ -2451,40 +2451,48 @@ async fn evidence_graphs(
     }
     // Preferred path: the text index. It is rebuilt lazily and only on demand, so
     // sync first — searching without that sees whatever was last committed, which
-    // after a fresh import is nothing.
+    // after a fresh import is nothing. The sync runs INSIDE the blocking task: a
+    // dirty index means a whole-store reindex, and running that on the async
+    // runtime would stall every in-flight request for its duration.
     #[cfg(feature = "text-search")]
-    state.sync_text_index_if_dirty();
-    let index = state.text_index.clone();
-    let search_terms = terms.clone();
-    // The same read boundary the graph filter below applies, pushed into the
-    // index instead: hits from graphs the caller cannot read are dropped by the
-    // search itself, so they never consume one of the few VOCAB_EVIDENCE_HITS
-    // slots and crowd out a subject that is actually visible.
-    let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::new(
-        in_scope.iter().cloned().collect::<HashSet<String>>(),
-    ));
-    let subjects: Vec<String> = match index {
+    let subjects: Vec<String> = match state.text_index.clone() {
         None => Vec::new(),
-        Some(index) => tokio::task::spawn_blocking(move || {
-            let mut subs: Vec<String> = Vec::new();
-            for term in search_terms {
-                // Quoted: an identifier with hyphens is several tokens to the
-                // query parser, and the unquoted form would match any of them.
-                let q = format!("\"{}\"", term.replace('"', ""));
-                let Ok(hits) = index.search(&q, None, scope.as_scope(), VOCAB_EVIDENCE_HITS) else {
-                    continue;
-                };
-                for h in hits {
-                    if !subs.contains(&h.subject) {
-                        subs.push(h.subject);
+        Some(index) => {
+            let search_terms = terms.clone();
+            // The same read boundary the graph filter below applies, pushed into
+            // the index instead: hits from graphs the caller cannot read are
+            // dropped by the search itself, so they never consume one of the few
+            // VOCAB_EVIDENCE_HITS slots and crowd out a subject that is actually
+            // visible.
+            let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::new(
+                in_scope.iter().cloned().collect::<HashSet<String>>(),
+            ));
+            let sync_state = state.clone();
+            tokio::task::spawn_blocking(move || {
+                sync_state.sync_text_index_if_dirty();
+                let mut subs: Vec<String> = Vec::new();
+                for term in search_terms {
+                    // Quoted: an identifier with hyphens is several tokens to the
+                    // query parser, and the unquoted form would match any of them.
+                    let q = format!("\"{}\"", term.replace('"', ""));
+                    let Ok(hits) = index.search(&q, None, scope.as_scope(), VOCAB_EVIDENCE_HITS)
+                    else {
+                        continue;
+                    };
+                    for h in hits {
+                        if !subs.contains(&h.subject) {
+                            subs.push(h.subject);
+                        }
                     }
                 }
-            }
-            subs
-        })
-        .await
-        .unwrap_or_default(),
+                subs
+            })
+            .await
+            .unwrap_or_default()
+        }
     };
+    #[cfg(not(feature = "text-search"))]
+    let subjects: Vec<String> = Vec::new();
 
     // Fall back to matching the literal directly when the index yields nothing —
     // it may be unavailable, not yet built, or (observed on a store whose index

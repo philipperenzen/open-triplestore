@@ -1,7 +1,6 @@
 <script>
   import { onMount } from 'svelte';
   import { t as i18nT } from 'svelte-i18n';
-  import { navigate } from '../lib/router/index.js';
   import { Link } from '../lib/router/index.js';
   import { isAuthenticated, user, isAdmin } from '../lib/stores.js';
   import {
@@ -10,8 +9,9 @@
     getDataset, adminListUsers,
     listServices, addServiceGraph, detectShapes, updateDatasetShacl,
     bulkImport, analyzeImport,
+    createDataModel, uploadDataModelVersion,
   } from '../lib/api.js';
-  import { detectRdfFormat, parseNTriplesToBindings, isValidIri, parseSparqlUpdatePreview, detectContentKindFromText, detectGraphRolesFromContent } from '../lib/rdf-utils.js';
+  import { detectRdfFormat, parseNTriplesToBindings, isValidIri, parseSparqlUpdatePreview, detectContentKindFromText, detectGraphRolesFromContent, detectOntologyInfo } from '../lib/rdf-utils.js';
   import { collectGraphIris, aggregateShapesProbe } from '../lib/shapesProbe.js';
   import SparqlEditorCM from '../components/SparqlEditorCM.svelte';
   import StepIndicator from '../components/StepIndicator.svelte';
@@ -20,6 +20,7 @@
     Upload, FileText, X, Link as LinkIcon, Terminal, Plus, ChevronRight, ChevronLeft,
     User, Building2, Database, Eye, Users, Lock, Check, AlertTriangle,
     Loader2, ExternalLink, BarChart3, RefreshCw, LayoutGrid, Zap, Target, Shield, Info, GitBranch, Tag,
+    Library, Sparkles,
   } from 'lucide-svelte';
 
   let step = 1;
@@ -181,20 +182,53 @@ INTO GRAPH <http://example.org/import/loaded>`,
   let dragOver = false;
   let browseDropdownOpen = false;
 
-  let kindWarningDismissed = false;
+  let registrySuggestionDismissed = false;
 
-  // High-confidence typed files among the current selection
-  $: highConfidenceKindFiles = files.filter(
-    f => f.detectedKind && f.detectedKind !== 'unknown' && f.detectedKind !== 'mixed' && f.detectedKindConfidence === 'high'
+  // Kinds the Model Registry accepts as first-class entries. Files detected as
+  // one of these can be diverted to the registry from inside the wizard
+  // (per-file `destination`), instead of being sent away to the /models page.
+  const REGISTRY_KINDS = new Set(['model', 'vocabulary']);
+  function isRegistryEligible(f) {
+    return !isQuadFile(f.file?.name) && REGISTRY_KINDS.has(f.detectedKind);
+  }
+  // High-confidence model/vocabulary files still headed for a dataset — the set
+  // the (non-blocking) registry suggestion offers to divert in one click.
+  $: registrySuggestible = files.filter(
+    f => isRegistryEligible(f) && f.destination !== 'registry' && f.detectedKindConfidence === 'high'
   );
-  $: dominantKind = (() => {
-    const modelCount = highConfidenceKindFiles.filter(f => f.detectedKind === 'model').length;
-    const vocabs = highConfidenceKindFiles.filter(f => f.detectedKind === 'vocabulary').length;
-    if (modelCount === 0 && vocabs === 0) return null;
-    return modelCount >= vocabs ? 'model' : 'vocabulary';
+  $: suggestionKind = (() => {
+    const models = registrySuggestible.filter(f => f.detectedKind === 'model').length;
+    const vocabs = registrySuggestible.filter(f => f.detectedKind === 'vocabulary').length;
+    if (models === 0 && vocabs === 0) return null;
+    return models >= vocabs ? 'model' : 'vocabulary';
   })();
+  // A dataset is only needed when something actually imports into one.
+  $: datasetNeeded = useSprarqlUpdate || files.some(f => f.destination !== 'registry');
   // Reset dismissal when file list changes
-  $: { files; kindWarningDismissed = false; }
+  $: { files; registrySuggestionDismissed = false; }
+
+  /** Human title from a filename: strip extension, split on -_. and capitalize. */
+  function titleFromFilename(name) {
+    const stem = String(name || '').replace(/\.[^.]+$/, '').replace(/[-_.]+/g, ' ').trim();
+    return stem.replace(/\b\w/g, c => c.toUpperCase()) || 'Untitled model';
+  }
+
+  function setFileDestination(idx, destination) {
+    files = files.map((f, i) => i === idx ? { ...f, destination } : f);
+  }
+
+  function setRegistryField(idx, field, value) {
+    files = files.map((f, i) => i === idx ? { ...f, [field]: value } : f);
+  }
+
+  /** One click on the suggestion banner: divert every suggestible file. */
+  function sendSuggestedToRegistry() {
+    files = files.map(f =>
+      isRegistryEligible(f) && f.destination !== 'registry' && f.detectedKindConfidence === 'high'
+        ? { ...f, destination: 'registry' }
+        : f
+    );
+  }
 
   // ── Step 2: owner & dataset ────────────────────────────────────────────────
   let organisations = [];
@@ -223,6 +257,10 @@ INTO GRAPH <http://example.org/import/loaded>`,
   // The bulk-import boundary admits these even when they fall outside the dataset
   // namespace, so the quad pre-flight consults them to avoid false positives.
   let registeredGraphIris = new Set();
+  // graph_iri → triple_count for the same registered graphs. Drives the smarter
+  // merge/replace UI: a target with no data yet gets no POST/PUT choice at all
+  // (they are equivalent on an empty graph), and one with data shows its size.
+  let registeredGraphCounts = new Map();
   let selectedDatasetShapesIri = null; // null=loading, ''=no shapes, string=has shapes
   let doValidate = false;
   let validationDatasetId = '';
@@ -235,9 +273,48 @@ INTO GRAPH <http://example.org/import/loaded>`,
   let fileResults = []; // { name, status: 'ok'|'error', graphIri, error? }
   // Semver bump applied when a replace import changes data (patch|minor|major).
   let versionBump = 'patch';
-  // True when at least one file replaces a graph in an existing dataset, so the
-  // upload may cut a new version (and the bump selector is relevant).
-  $: anyReplaceExisting = !useSprarqlUpdate && datasetMode !== 'new' && files.some(f => f.replace);
+
+  /** Final write-target graph IRIs for a file (rename map applied for quads). */
+  function fileEffectiveTargets(f) {
+    if (isQuadFile(f.file?.name)) {
+      return (f.detectedGraphIris || []).map((orig) => {
+        const cur = f.graphIriRenameMap?.[orig] ?? orig;
+        return (cur !== orig && isValidIri(cur)) ? cur : orig;
+      });
+    }
+    return f.graphIri ? [f.graphIri] : [];
+  }
+
+  /**
+   * Does any of this file's target graphs already hold data in the selected
+   * dataset? Only then is merge-vs-replace a real choice (and only then can a
+   * replace cut a new version). `counts` is passed in so Svelte tracks it.
+   */
+  function fileHasExistingTarget(f, counts) {
+    if (datasetMode === 'new' || !selectedDatasetId || f.destination === 'registry') return false;
+    const targets = fileEffectiveTargets(f);
+    if (f.autoSplit) {
+      // Auto-split writes {target}/{role} sub-graphs; any populated sub-graph
+      // (or the base graph itself) counts as existing.
+      return targets.some(t =>
+        [...counts].some(([g, n]) => n > 0 && (g === t || g.startsWith(t + '/')))
+      );
+    }
+    return targets.some(t => (counts.get(t) ?? 0) > 0);
+  }
+
+  /** Total triples currently stored across a file's existing target graphs. */
+  function fileExistingTripleCount(f, counts) {
+    let total = 0;
+    for (const t of fileEffectiveTargets(f)) total += counts.get(t) ?? 0;
+    return total;
+  }
+
+  // True when at least one file replaces a data-bearing graph in an existing
+  // dataset, so the upload may cut a new version (and the bump selector is
+  // relevant). Files whose targets are brand new can't produce a version.
+  $: anyReplaceExisting = !useSprarqlUpdate && datasetMode !== 'new'
+    && files.some(f => f.replace && fileHasExistingTarget(f, registeredGraphCounts));
 
   // Quad embedded-graph targets that the server's per-graph write boundary would
   // still reject (effective target not under the dataset namespace and not already
@@ -288,6 +365,8 @@ INTO GRAPH <http://example.org/import/loaded>`,
   // Aggregated over every imported graph (incl. auto-split '{target}/shapes'
   // subgraphs): { shapesDetected, totalShapeCount, shapeGraphs, suggestedDatasets }.
   let shapesDetectResult = null;
+  // True while the post-import background probe is still running.
+  let shapesProbing = false;
   let shapesLinkTargetId = ''; // dataset id to link detected shapes to
   let shapesLinking = false;
   let shapesLinkDone = false;      // a link actually succeeded
@@ -304,6 +383,11 @@ INTO GRAPH <http://example.org/import/loaded>`,
     if (useSprarqlUpdate) return sparqlUpdateText.trim().length > 0;
     if (files.length === 0) return false;
     for (const f of files) {
+      if (f.destination === 'registry') {
+        // Registry entries need a title and a version instead of a graph IRI.
+        if (!String(f.registryTitle || '').trim() || !String(f.registryVersion || '').trim()) return false;
+        continue;
+      }
       const lower = f.file.name.toLowerCase();
       const isQuad = lower.endsWith('.nq') || lower.endsWith('.trig');
       if (isQuad) {
@@ -321,6 +405,8 @@ INTO GRAPH <http://example.org/import/loaded>`,
     && ownerDatasets.some(d => d.name.toLowerCase() === newDatasetName.trim().toLowerCase());
   $: canStep2 = (() => {
     if (ownerType === 'org' && !selectedOrgId) return false;
+    // Registry-only batches pick an owner but no dataset.
+    if (!datasetNeeded) return true;
     if (datasetMode === 'new') return newDatasetName.trim().length > 0 && !datasetNameTaken;
     return !!selectedDatasetId;
   })();
@@ -569,6 +655,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
       // per-graph role badges instead of a single "Mixed" verdict for the file.
       const graphRoles = isQuad ? detectGraphRolesFromContent(f.name, content) : {};
       const hasDefaultGraphTriples = isQuad && quadFileHasDefaultGraphTriples(f.name, content);
+      const ontInfo = detectOntologyInfo(content, f.name);
       files = [...files, {
         file: f, content, format, detectedGraphIris: detected, hasDefaultGraphTriples,
         graphIri, graphIriAutoDefault, graphIriRenameMap, showPreview: false, parsedPreview,
@@ -582,6 +669,13 @@ INTO GRAPH <http://example.org/import/loaded>`,
         analyzeResult: null,
         autoSplit: false,
         replace: false,
+        // Where this file goes: into the dataset ('dataset') or registered as a
+        // model/vocabulary in the Model Registry ('registry').
+        destination: 'dataset',
+        registryTitle: titleFromFilename(f.name),
+        registryNamespace: ontInfo.ontologyIri || '',
+        registryVersion: ontInfo.version || '1.0.0',
+        registryPublic: false,
       }];
       // Mixed triple files: fetch the per-role breakdown immediately so we can
       // show specific role chips ("Model · Vocabulary · …") instead of a bare
@@ -769,6 +863,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     for (const iri of detected) graphIriRenameMap[iri] = iri;
     const graphRoles = isQuad ? detectGraphRolesFromContent(name, content) : {};
     const hasDefaultGraphTriples = isQuad ? quadFileHasDefaultGraphTriples(name, content) : false;
+    const ontInfo = detectOntologyInfo(content, name);
     files = [...files, {
       file: { name, size: content.length },
       content, format, fromUrl,
@@ -785,6 +880,11 @@ INTO GRAPH <http://example.org/import/loaded>`,
       analyzeResult: null,
       autoSplit: false,
       replace: false,
+      destination: 'dataset',
+      registryTitle: titleFromFilename(name),
+      registryNamespace: ontInfo.ontologyIri || '',
+      registryVersion: ontInfo.version || '1.0.0',
+      registryPublic: false,
     }];
     urlPreviewData = null;
     importUrl = '';
@@ -829,18 +929,22 @@ INTO GRAPH <http://example.org/import/loaded>`,
     doValidate = false;
     preValidationResult = null;
 
-    const dsId = datasetMode === 'new' ? null : selectedDatasetId;
+    const dsId = (!datasetNeeded || datasetMode === 'new') ? null : selectedDatasetId;
     // A brand-new dataset's IRI isn't known until it's created at import time;
     // namespacing for that case happens in runImport once the id exists.
-    if (!dsId) { selectedDatasetShapesIri = ''; selectedDatasetIri = ''; registeredGraphIris = new Set(); return; }
+    if (!dsId) { selectedDatasetShapesIri = ''; selectedDatasetIri = ''; registeredGraphIris = new Set(); registeredGraphCounts = new Map(); return; }
 
     loadingDatasetGraphs = true;
     // Reset up front so a previously-selected dataset's graphs don't leak into the
     // pre-flight when this fetch fails.
     registeredGraphIris = new Set();
+    registeredGraphCounts = new Map();
     try {
       const graphs = await listDatasetGraphs(dsId);
       registeredGraphIris = new Set((graphs || []).map(g => g.graph_iri).filter(Boolean));
+      registeredGraphCounts = new Map(
+        (graphs || []).filter(g => g.graph_iri).map(g => [g.graph_iri, g.triple_count ?? 0])
+      );
     } catch { /* graphs unavailable, continue */ }
     try {
       const dsDetail = await getDataset(dsId);
@@ -914,15 +1018,63 @@ INTO GRAPH <http://example.org/import/loaded>`,
     finally { validating = false; }
   }
 
+  /** Server-side model id derivation (lowercase, non-alnum → '-', collapsed). */
+  function registryIdFromTitle(title) {
+    return String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  }
+
+  /** Register one wizard file in the Model Registry: create (or reuse) the
+   *  model, then upload the file as a version. Returns a fileResults entry. */
+  async function registerInModelRegistry(f) {
+    const name = f.file.name;
+    const owner = {
+      owner_type: ownerType === 'org' ? 'organisation' : 'user',
+      owner_id: ownerType === 'org' ? selectedOrgId : currentUser?.id,
+    };
+    let modelId = '';
+    try {
+      const created = await createDataModel({
+        title: String(f.registryTitle).trim(),
+        namespace: String(f.registryNamespace || '').trim(),
+        description: null,
+        is_public: !!f.registryPublic,
+        ...owner,
+      });
+      modelId = created?.id || registryIdFromTitle(f.registryTitle);
+    } catch (e) {
+      // An existing model with this title/id is fine — upload a new version to
+      // it (the version endpoint enforces write access to that model).
+      if (/already exists/i.test(e?.message || '')) {
+        const m = /'([^']+)' already exists/.exec(e.message);
+        modelId = m?.[1] || registryIdFromTitle(f.registryTitle);
+      } else {
+        return { name, status: 'error', registry: true, error: e.message };
+      }
+    }
+    try {
+      const blob = (typeof File !== 'undefined' && f.file instanceof File)
+        ? f.file
+        : new File([f.content], name, { type: f.format?.contentType || 'text/turtle' });
+      // Response nests the record: { version: { version: "2.1.0", … }, detected, … }
+      const ver = await uploadDataModelVersion(modelId, blob, String(f.registryVersion).trim(), null, false, !!f.registryPublic);
+      const modelVersion = ver?.version?.version || (typeof ver?.version === 'string' ? ver.version : '') || String(f.registryVersion).trim();
+      return { name, status: 'ok', registry: true, modelId, modelVersion };
+    } catch (e) {
+      return { name, status: 'error', registry: true, modelId, error: e.message };
+    }
+  }
+
   async function runImport() {
     importing = true;
     importError = '';
     importResult = null;
     fileResults = [];
     importProgress = { current: 0, total: files.length, currentFile: '' };
+    const datasetFiles = files.filter(f => f.destination !== 'registry');
+    const registryBound = files.filter(f => f.destination === 'registry');
     // Lazily create the dataset only after the first successful upload so a
     // failed import doesn't leave a stranded empty dataset behind.
-    const pendingNewDataset = (datasetMode === 'new' && newDatasetName.trim())
+    const pendingNewDataset = (datasetNeeded && datasetMode === 'new' && newDatasetName.trim())
       ? {
           name: newDatasetName.trim(),
           description: newDatasetDesc.trim() || null,
@@ -949,16 +1101,30 @@ INTO GRAPH <http://example.org/import/loaded>`,
         await sparqlUpdate(sparqlUpdateText);
         importResult = { success: true, sparql: true, preview: sparqlPreview };
       } else {
-        // Single multipart POST: parsed in parallel server-side, one bulk-insert.
-        importProgress = { current: 0, total: files.length, currentFile: $i18nT('pages.import.filesCount', { values: { count: files.length } }) };
-        await ensureDataset();
+        // Model/vocabulary files bound for the Model Registry go through the
+        // registry API (create + version upload), not the dataset bulk import.
+        const registryResults = [];
+        for (const f of registryBound) {
+          importProgress = { current: registryResults.length, total: files.length, currentFile: f.file.name };
+          registryResults.push(await registerInModelRegistry(f));
+          fileResults = [...registryResults];
+        }
+
+        if (datasetFiles.length > 0) {
+          // Single multipart POST: parsed in parallel server-side, one bulk-insert.
+          importProgress = { current: registryBound.length, total: files.length, currentFile: $i18nT('pages.import.filesCount', { values: { count: datasetFiles.length } }) };
+          await ensureDataset();
+        }
         // Final safety net: re-home untouched default targets under the dataset
         // namespace. Idempotent for existing datasets (already done in goToStep3)
         // and essential for a just-created one. Without a dataset, leave targets
         // as-is (admin-only unmanaged import).
         if (selectedDatasetIri) files = namespaceTargets(files, selectedDatasetIri);
 
-        const entries = files.map((f) => {
+        // Re-filter AFTER namespaceTargets — it returns fresh file objects, so
+        // the pre-namespacing capture would send stale (un-homed) targets.
+        const dsFiles = files.filter(f => f.destination !== 'registry');
+        const entries = dsFiles.map((f) => {
           // Quad files: re-home embedded graphs to their (namespaced) rename
           // targets at write time so the server's per-graph boundary admits them.
           // Only non-identity, valid-IRI renames are sent; the rest keep their
@@ -982,31 +1148,36 @@ INTO GRAPH <http://example.org/import/loaded>`,
             graphRemap: (graphRemap && Object.keys(graphRemap).length) ? graphRemap : undefined,
           };
         });
-        const bulkRes = await bulkImport(entries, {
-          datasetId: selectedDatasetId || undefined,
-          versionBump: anyReplaceExisting ? versionBump : undefined,
-        });
+        const bulkRes = entries.length > 0
+          ? await bulkImport(entries, {
+              datasetId: selectedDatasetId || undefined,
+              versionBump: anyReplaceExisting ? versionBump : undefined,
+            })
+          : { file_results: [] };
 
         // Map server's per-file results back to the wizard's shape.
         const byName = new Map(
           (bulkRes.file_results || []).map((r) => [r.filename, r]),
         );
-        fileResults = files.map((f) => {
-          const r = byName.get(f.file.name);
-          if (!r || r.status !== 'ok') {
-            return { name: f.file.name, status: 'error', error: r?.error || 'unknown error' };
-          }
-          // Prefer the authoritative final graph the server wrote and registered;
-          // fall back to a valid rename target, then the file's own target.
-          const graphIri = (r.graph_iris || [])[0]
-            || Object.values(f.graphIriRenameMap || {}).find(v => v && isValidIri(v))
-            || f.graphIri
-            || '';
-          // Keep every graph the file produced — auto-split can route shapes
-          // into a '{target}/shapes' subgraph beyond graph_iris[0].
-          const graphIris = (r.graph_iris || []).length ? r.graph_iris : (graphIri ? [graphIri] : []);
-          return { name: f.file.name, status: 'ok', graphIri, graphIris };
-        });
+        fileResults = [
+          ...registryResults,
+          ...dsFiles.map((f) => {
+            const r = byName.get(f.file.name);
+            if (!r || r.status !== 'ok') {
+              return { name: f.file.name, status: 'error', error: r?.error || 'unknown error' };
+            }
+            // Prefer the authoritative final graph the server wrote and registered;
+            // fall back to a valid rename target, then the file's own target.
+            const graphIri = (r.graph_iris || [])[0]
+              || Object.values(f.graphIriRenameMap || {}).find(v => v && isValidIri(v))
+              || f.graphIri
+              || '';
+            // Keep every graph the file produced — auto-split can route shapes
+            // into a '{target}/shapes' subgraph beyond graph_iris[0].
+            const graphIris = (r.graph_iris || []).length ? r.graph_iris : (graphIri ? [graphIri] : []);
+            return { name: f.file.name, status: 'ok', graphIri, graphIris };
+          }),
+        ];
 
         importProgress = { current: files.length, total: files.length, currentFile: '' };
         const successFiles = fileResults.filter(r => r.status === 'ok');
@@ -1018,7 +1189,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
           count: files.length,
           successCount: successFiles.length,
           failedCount: failedFiles.length,
-          datasetId: selectedDatasetId,
+          datasetId: entries.length > 0 ? selectedDatasetId : '',
           fileResults,
           versionOutcome: bulkRes.version_outcome || null,
         };
@@ -1028,20 +1199,13 @@ INTO GRAPH <http://example.org/import/loaded>`,
           importError = $i18nT('pages.import.someFilesFailed', { values: { failed: failedFiles.length, total: files.length } });
         }
 
-        // Auto-detect SHACL shapes across ALL successfully imported graphs
-        // (every file, every graph — auto-split shapes subgraphs included).
-        if (successFiles.length > 0 && authed) {
-          const probeIris = collectGraphIris(fileResults);
-          const probes = [];
-          for (const iri of probeIris) {
-            try {
-              probes.push({ graphIri: iri, result: await detectShapes(iri) });
-            } catch (_) {
-              // non-critical — skip this graph
-            }
-          }
-          const agg = aggregateShapesProbe(probes);
-          shapesDetectResult = agg.shapesDetected ? agg : null;
+        // Auto-detect SHACL shapes across the imported graphs — in the
+        // background, AFTER the success screen is up. Probing from inside the
+        // import phase kept the wizard stuck on "Importing…" long after the
+        // data had landed (each probe is a server round-trip, and the first
+        // one right after a big write is the slowest).
+        if (successFiles.some(r => !r.registry) && authed) {
+          probeShapesInBackground(fileResults);
         }
       }
     } catch (e) {
@@ -1049,6 +1213,24 @@ INTO GRAPH <http://example.org/import/loaded>`,
     } finally {
       importing = false;
     }
+  }
+
+  /** Fire-and-forget SHACL probe over the imported graphs (success screen shows
+   *  a small spinner via `shapesProbing` until it lands). */
+  function probeShapesInBackground(frs) {
+    shapesProbing = true;
+    (async () => {
+      const probes = [];
+      for (const iri of collectGraphIris(frs)) {
+        try {
+          probes.push({ graphIri: iri, result: await detectShapes(iri) });
+        } catch (_) {
+          // non-critical — skip this graph
+        }
+      }
+      const agg = aggregateShapesProbe(probes);
+      shapesDetectResult = agg.shapesDetected ? agg : null;
+    })().catch(() => {}).finally(() => { shapesProbing = false; });
   }
 
   function resetWizard() {
@@ -1076,6 +1258,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
     selectedServiceIds = new Set();
     serviceGraphResult = null;
     shapesDetectResult = null;
+    shapesProbing = false;
     shapesLinkTargetId = '';
     shapesLinking = false;
     shapesLinkDone = false;
@@ -1571,7 +1754,63 @@ INTO GRAPH <http://example.org/import/loaded>`,
 
                     <!-- Graph IRI section -->
                     <div class="px-3 pb-3 space-y-2 border-t border-[var(--line-soft)] pt-3">
-                      {#if isQuad}
+                      {#if isRegistryEligible(f)}
+                        <!-- Destination: dataset graph vs Model Registry entry -->
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <span class="text-xs font-medium text-[var(--ink-600)] shrink-0">{$i18nT('pages.import.destinationLabel')}</span>
+                          <div class="inline-flex rounded-lg border border-[var(--line-soft)] overflow-hidden text-[0.7rem] font-medium">
+                            <button
+                              type="button"
+                              class="px-2.5 py-1 cursor-pointer transition-colors inline-flex items-center gap-1 {f.destination !== 'registry' ? 'bg-[var(--brand-500)] text-white' : 'bg-white/60 text-[var(--ink-600)] hover:bg-white'}"
+                              on:click={() => setFileDestination(i, 'dataset')}
+                            ><Database size={11} /> {$i18nT('pages.import.destDataset')}</button>
+                            <button
+                              type="button"
+                              class="px-2.5 py-1 cursor-pointer transition-colors inline-flex items-center gap-1 {f.destination === 'registry' ? 'bg-[var(--brand-500)] text-white' : 'bg-white/60 text-[var(--ink-600)] hover:bg-white'}"
+                              on:click={() => setFileDestination(i, 'registry')}
+                            ><Library size={11} /> {f.detectedKind === 'vocabulary' ? $i18nT('pages.import.destVocabularyRegistry') : $i18nT('pages.import.destModelRegistry')}</button>
+                          </div>
+                        </div>
+                      {/if}
+                      {#if f.destination === 'registry'}
+                        <!-- Registry entry details: registered via the Model Registry
+                             API at import time — no dataset graph involved. -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div class="flex items-center gap-2">
+                            <span class="text-xs font-medium text-[var(--ink-600)] shrink-0 w-14">{$i18nT('pages.import.registryTitleLabel')}</span>
+                            <input
+                              class="flex-1 text-xs {String(f.registryTitle || '').trim() ? '' : 'border-red-400'}"
+                              value={f.registryTitle}
+                              on:input={e => setRegistryField(i, 'registryTitle', e.currentTarget.value)}
+                            />
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <span class="text-xs font-medium text-[var(--ink-600)] shrink-0 w-14">{$i18nT('pages.import.registryVersionLabel')}</span>
+                            <input
+                              class="flex-1 font-mono text-xs {String(f.registryVersion || '').trim() ? '' : 'border-red-400'}"
+                              value={f.registryVersion}
+                              on:input={e => setRegistryField(i, 'registryVersion', e.currentTarget.value)}
+                            />
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <span class="text-xs font-medium text-[var(--ink-600)] shrink-0 w-14">{$i18nT('pages.import.registryNamespaceLabel')}</span>
+                          <input
+                            class="flex-1 font-mono text-xs"
+                            value={f.registryNamespace}
+                            placeholder="https://example.org/def/"
+                            on:input={e => setRegistryField(i, 'registryNamespace', e.currentTarget.value)}
+                          />
+                          <label class="flex items-center gap-1.5 text-xs text-[var(--ink-600)] shrink-0 cursor-pointer">
+                            <input type="checkbox" checked={f.registryPublic} on:change={e => setRegistryField(i, 'registryPublic', e.currentTarget.checked)} />
+                            {$i18nT('pages.import.registryPublicLabel')}
+                          </label>
+                        </div>
+                        <p class="text-[0.7rem] text-[var(--ink-500)] flex items-start gap-1.5">
+                          <Library size={11} class="shrink-0 mt-0.5 text-[var(--brand-500)]" />
+                          {$i18nT('pages.import.registryDestNote')}
+                        </p>
+                      {:else if isQuad}
                         {#if f.detectedGraphIris.length === 0}
                           <p class="text-xs text-[var(--ink-500)] italic">{$i18nT('pages.import.noGraphIrisDetected')}</p>
                         {:else}
@@ -1770,32 +2009,33 @@ INTO GRAPH <http://example.org/import/loaded>`,
                 {/each}
               </div>
 
-              <!-- Content-kind routing banner -->
-              {#if dominantKind && !kindWarningDismissed}
+              <!-- Content-kind routing suggestion: model/vocabulary files can be
+                   registered in the Model Registry right here (per-file
+                   destination) — never a detour to another page. -->
+              {#if suggestionKind && !registrySuggestionDismissed}
                 <div class="rounded-xl border p-3 flex items-start gap-3
-                  {dominantKind === 'vocabulary' ? 'border-purple-200 bg-purple-50' : 'border-amber-200 bg-amber-50'}">
-                  <AlertTriangle size={16} class="{dominantKind === 'vocabulary' ? 'text-purple-600' : 'text-amber-600'} shrink-0 mt-0.5" />
+                  {suggestionKind === 'vocabulary' ? 'border-purple-200 bg-purple-50' : 'border-blue-200 bg-blue-50'}">
+                  <Sparkles size={16} class="{suggestionKind === 'vocabulary' ? 'text-purple-600' : 'text-blue-600'} shrink-0 mt-0.5" />
                   <div class="flex-1 min-w-0 text-sm">
-                    <strong class="{dominantKind === 'vocabulary' ? 'text-purple-900' : 'text-amber-900'}">
-                      {dominantKind === 'vocabulary'
+                    <strong class="{suggestionKind === 'vocabulary' ? 'text-purple-900' : 'text-blue-900'}">
+                      {suggestionKind === 'vocabulary'
                         ? $i18nT('pages.import.looksLikeVocabulary')
                         : $i18nT('pages.import.looksLikeModel')}
                     </strong>
-                    <p class="text-xs mt-0.5 {dominantKind === 'vocabulary' ? 'text-purple-800' : 'text-amber-800'}">
-                      {dominantKind === 'vocabulary'
-                        ? $i18nT('pages.import.vocabularyRegistryHint')
-                        : $i18nT('pages.import.modelRegistryHint')}
+                    <p class="text-xs mt-0.5 {suggestionKind === 'vocabulary' ? 'text-purple-800' : 'text-blue-800'}">
+                      {$i18nT('pages.import.registrySuggestHint', { values: { count: registrySuggestible.length } })}
                     </p>
                   </div>
                   <div class="flex gap-1.5 shrink-0">
                     <button
-                      class="btn btn-sm {dominantKind === 'vocabulary' ? 'bg-purple-600 hover:bg-purple-700 text-white border-0' : 'bg-amber-600 hover:bg-amber-700 text-white border-0'}"
-                      on:click={() => navigate(dominantKind === 'vocabulary' ? '/models?kind=vocabulary' : '/models')}
+                      class="btn btn-sm {suggestionKind === 'vocabulary' ? 'bg-purple-600 hover:bg-purple-700 text-white border-0' : 'bg-blue-600 hover:bg-blue-700 text-white border-0'} inline-flex items-center gap-1.5"
+                      on:click={sendSuggestedToRegistry}
                     >
-                      {dominantKind === 'vocabulary' ? $i18nT('pages.import.goToVocabularyRegistry') : $i18nT('pages.import.goToModelRegistry')}
+                      <Library size={13} />
+                      {$i18nT('pages.import.registerInRegistryBtn', { values: { count: registrySuggestible.length } })}
                     </button>
-                    <button class="btn btn-sm btn-ghost" on:click={() => kindWarningDismissed = true}>
-                      {$i18nT('pages.import.continueAnyway')}
+                    <button class="btn btn-sm btn-ghost" on:click={() => registrySuggestionDismissed = true}>
+                      {$i18nT('pages.import.keepInDataset')}
                     </button>
                   </div>
                 </div>
@@ -1865,6 +2105,14 @@ INTO GRAPH <http://example.org/import/loaded>`,
           <div>
             <h3 class="text-base font-bold mb-3">{$i18nT('pages.import.datasetHeading')}</h3>
 
+            {#if !datasetNeeded}
+              <!-- Every file is bound for the Model Registry: the owner above
+                   owns the registered models; no dataset is involved. -->
+              <div class="p-4 rounded-xl bg-[var(--bg-accent-soft)]/60 border border-[var(--line-soft)] flex items-start gap-2.5 text-sm text-[var(--ink-600)]">
+                <Library size={16} class="text-[var(--brand-600)] shrink-0 mt-0.5" />
+                <span>{$i18nT('pages.import.registryOnlyNoDataset')}</span>
+              </div>
+            {:else}
             <!-- Mode tabs -->
             <div class="flex gap-2 mb-3">
               {#if ownerDatasets.length > 0}
@@ -1959,6 +2207,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
                 </div>
               </div>
             {/if}
+            {/if}
           </div>
 
           <div class="flex justify-between pt-2">
@@ -2041,6 +2290,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
                     <div class="mt-1.5 space-y-1 max-h-64 overflow-y-auto">
                       {#each files as f, i}
                         {@const isQuad = f.file.name.toLowerCase().endsWith('.nq') || f.file.name.toLowerCase().endsWith('.trig')}
+                        {@const hasExisting = fileHasExistingTarget(f, registeredGraphCounts)}
                         <div class="p-2 rounded-lg bg-white/60 border border-[var(--line-soft)] space-y-2">
                           <div class="flex items-center gap-2">
                             <FileText size={14} class="text-[var(--brand-500)] shrink-0" />
@@ -2049,31 +2299,52 @@ INTO GRAPH <http://example.org/import/loaded>`,
                             {#if f.format}
                               <span class="text-[0.6rem] px-1.5 py-0.5 rounded bg-[var(--bg-accent-soft)] text-[var(--brand-600)] font-medium">{f.format.label}</span>
                             {/if}
-                            <span class="text-[0.6rem] text-[var(--ink-400)] font-mono truncate max-w-[200px]" title={isQuad ? Object.values(f.graphIriRenameMap).filter(Boolean).join(', ') : f.graphIri}>
-                              → {isQuad ? Object.values(f.graphIriRenameMap).filter(Boolean).join(', ') || $i18nT('pages.import.embedded') : f.graphIri || '—'}
-                            </span>
-                          </div>
-                          <!-- Per-file write mode: merge (POST) vs replace (PUT) -->
-                          <div class="flex items-center gap-2 pl-6">
-                            <div class="inline-flex rounded-lg border border-[var(--line-soft)] overflow-hidden text-[0.7rem] font-medium">
-                              <button
-                                type="button"
-                                class="px-2.5 py-1 cursor-pointer transition-colors {!f.replace ? 'bg-[var(--brand-500)] text-white' : 'bg-white/60 text-[var(--ink-600)] hover:bg-white'}"
-                                on:click={() => setFileReplace(i, false)}
-                              >{$i18nT('pages.import.merge')}</button>
-                              <button
-                                type="button"
-                                class="px-2.5 py-1 cursor-pointer transition-colors {f.replace ? 'bg-red-500 text-white' : 'bg-white/60 text-[var(--ink-600)] hover:bg-white'}"
-                                on:click={() => setFileReplace(i, true)}
-                              >{$i18nT('pages.import.replace')}</button>
-                            </div>
-                            {#if f.replace && datasetMode !== 'new'}
-                              {@const gcount = isQuad ? (f.detectedGraphIris?.length || 1) : 1}
-                              <span class="text-[0.65rem] text-amber-700 inline-flex items-center gap-1">
-                                <Shield size={11} /> {gcount > 1 ? $i18nT('pages.import.replaceArchiveNotePlural') : $i18nT('pages.import.replaceArchiveNote')}
+                            {#if f.destination === 'registry'}
+                              <span class="text-[0.6rem] text-[var(--brand-700)] font-medium truncate max-w-[240px] inline-flex items-center gap-1" title={f.registryTitle}>
+                                <Library size={11} /> {$i18nT('pages.import.registryReviewTarget', { values: { title: f.registryTitle, version: f.registryVersion } })}
+                              </span>
+                            {:else}
+                              <span class="text-[0.6rem] text-[var(--ink-400)] font-mono truncate max-w-[200px]" title={isQuad ? Object.values(f.graphIriRenameMap).filter(Boolean).join(', ') : f.graphIri}>
+                                → {isQuad ? Object.values(f.graphIriRenameMap).filter(Boolean).join(', ') || $i18nT('pages.import.embedded') : f.graphIri || '—'}
                               </span>
                             {/if}
                           </div>
+                          {#if f.destination === 'registry'}
+                            <!-- Registry entries version through the registry — no POST/PUT choice. -->
+                          {:else if !hasExisting}
+                            <!-- Target graph(s) hold no data yet: merge and replace are
+                                 the same write, so don't ask. -->
+                            <div class="flex items-center gap-2 pl-6">
+                              <span class="text-[0.65rem] px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700 inline-flex items-center gap-1">
+                                <Plus size={10} /> {$i18nT('pages.import.newGraphBadge')}
+                              </span>
+                            </div>
+                          {:else}
+                            <!-- Per-file write mode: merge (POST) vs replace (PUT) -->
+                            <div class="flex items-center gap-2 pl-6 flex-wrap">
+                              <div class="inline-flex rounded-lg border border-[var(--line-soft)] overflow-hidden text-[0.7rem] font-medium">
+                                <button
+                                  type="button"
+                                  class="px-2.5 py-1 cursor-pointer transition-colors {!f.replace ? 'bg-[var(--brand-500)] text-white' : 'bg-white/60 text-[var(--ink-600)] hover:bg-white'}"
+                                  on:click={() => setFileReplace(i, false)}
+                                >{$i18nT('pages.import.merge')}</button>
+                                <button
+                                  type="button"
+                                  class="px-2.5 py-1 cursor-pointer transition-colors {f.replace ? 'bg-red-500 text-white' : 'bg-white/60 text-[var(--ink-600)] hover:bg-white'}"
+                                  on:click={() => setFileReplace(i, true)}
+                                >{$i18nT('pages.import.replace')}</button>
+                              </div>
+                              <span class="text-[0.65rem] text-[var(--ink-500)]">
+                                {$i18nT('pages.import.targetHasTriples', { values: { count: fileExistingTripleCount(f, registeredGraphCounts) } })}
+                              </span>
+                              {#if f.replace}
+                                {@const gcount = isQuad ? (f.detectedGraphIris?.length || 1) : 1}
+                                <span class="text-[0.65rem] text-amber-700 inline-flex items-center gap-1">
+                                  <Shield size={11} /> {gcount > 1 ? $i18nT('pages.import.replaceArchiveNotePlural') : $i18nT('pages.import.replaceArchiveNote')}
+                                </span>
+                              {/if}
+                            </div>
+                          {/if}
                         </div>
                       {/each}
                     </div>
@@ -2234,7 +2505,12 @@ INTO GRAPH <http://example.org/import/loaded>`,
                           <AlertTriangle size={14} class="text-red-500 shrink-0" />
                         {/if}
                         <span class="font-medium truncate">{fr.name}</span>
-                        {#if fr.status === 'ok' && fr.graphIri}
+                        {#if fr.status === 'ok' && fr.registry}
+                          <Link to="/models/{fr.modelId}" class="text-xs text-[var(--brand-600)] hover:underline truncate ml-auto max-w-[250px] inline-flex items-center gap-1">
+                            <Library size={12} /> {$i18nT('pages.import.registeredAs', { values: { id: fr.modelId, version: fr.modelVersion } })}
+                            <ExternalLink size={11} />
+                          </Link>
+                        {:else if fr.status === 'ok' && fr.graphIri}
                           <span class="text-xs text-[var(--ink-400)] font-mono truncate ml-auto max-w-[250px]" title={fr.graphIri}>→ {fr.graphIri}</span>
                         {/if}
                         {#if fr.status === 'error'}
@@ -2247,6 +2523,11 @@ INTO GRAPH <http://example.org/import/loaded>`,
               {/if}
 
               <!-- SHACL shapes auto-detect card -->
+              {#if shapesProbing}
+                <div class="flex items-center gap-2 text-xs text-[var(--ink-500)]">
+                  <Loader2 size={13} class="animate-spin" /> {$i18nT('pages.import.checkingShapes')}
+                </div>
+              {/if}
               {#if shapesDetectResult?.shapesDetected && !shapesLinkDone && !shapesLinkDismissed}
                 <div class="rounded-xl border border-yellow-300 bg-yellow-50 p-4 space-y-3">
                   <div class="flex items-center gap-2">

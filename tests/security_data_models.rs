@@ -296,12 +296,13 @@ async fn duplicate_upload_does_not_wipe_existing_version() {
     );
 }
 
-/// A user with no publish rights cannot reach the upload handler at all
-/// (sanity check that the route is publisher-gated, so the above admin path is
-/// the privileged one).
+/// Uploads are ownership-scoped, not publisher-gated: a signed-in user who
+/// does NOT own the model must be rejected (and nothing written). Registry
+/// writes follow the dataset rules — any account may version models it owns,
+/// while foreign models stay closed.
 #[tokio::test]
-async fn upload_requires_publisher() {
-    let state = test_state();
+async fn upload_requires_write_access_to_the_model() {
+    let (state, _admin_token, graph_iri) = model_with_draft(); // m1 owned by "adm"
     state
         .auth_db
         .create_user("u_joe", "joe", "j@t.com", "h", SystemRole::User)
@@ -309,18 +310,21 @@ async fn upload_requires_publisher() {
     let tok = mint_token("u_joe", "joe", "user");
     let body = multipart_body(
         "BNDX",
-        &[(
-            "file",
-            "text/turtle",
-            Some("m.ttl"),
-            b"<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> .",
-        )],
+        &[
+            ("version", "text/plain", None, b"2.0".as_slice()),
+            (
+                "file",
+                "text/turtle",
+                Some("m.ttl"),
+                b"<http://ex.org/s> <http://ex.org/p> <http://ex.org/o> .",
+            ),
+        ],
     );
-    let resp = test_app(state)
+    let resp = test_app(state.clone())
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/models/whatever/versions")
+                .uri("/api/models/m1/versions")
                 .header(
                     header::CONTENT_TYPE,
                     "multipart/form-data; boundary=BNDX".to_string(),
@@ -333,7 +337,26 @@ async fn upload_requires_publisher() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "non-publisher must not reach the upload handler"
+        StatusCode::UNAUTHORIZED,
+        "a user without write access to the model must not reach the upload handler"
+    );
+    // The foreign upload wrote nothing anywhere near the model's graphs.
+    let count = match state
+        .store
+        .query(&format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }}"
+        ))
+        .unwrap()
+    {
+        QueryResults::Solutions(mut sols) => sols
+            .next()
+            .and_then(|r| r.ok())
+            .and_then(|s| s.get("n").map(|v| v.to_string()))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    assert!(
+        count.starts_with("\"0\""),
+        "rejected upload must write nothing, got {count}"
     );
 }

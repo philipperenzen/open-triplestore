@@ -457,6 +457,71 @@ impl TextIndex {
             .to_string()
     }
 
+    /// Refresh the documents of exactly `graphs`: drop everything indexed under
+    /// those graph IRIs, re-read their current literal triples from the store,
+    /// and commit once. `O(size of the named graphs)` — never a full-store scan.
+    ///
+    /// This is the write-path companion to [`Self::reindex_from_store`]: a bulk
+    /// import (or Graph Store write) knows which graphs it touched, so it can
+    /// keep the index warm for the cost of the data it just wrote instead of
+    /// marking the whole index dirty and making some later query pay for a
+    /// whole-store rebuild (measured at ~10s for 670k documents — inline on the
+    /// first `CONTAINS` query after an upload).
+    ///
+    /// A graph that no longer exists (replace-then-drop, DELETE) simply
+    /// contributes zero documents — its old ones are still removed.
+    pub fn refresh_graphs(
+        &self,
+        store: &TripleStore,
+        graphs: &[String],
+    ) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+
+        if graphs.is_empty() {
+            return Ok(0);
+        }
+
+        {
+            // `graph` is a STRING field: one un-tokenized term per doc, so a
+            // term-set delete removes exactly these graphs' documents.
+            let writer = self.writer.lock().expect("index writer lock poisoned");
+            let query = TermSetQuery::new(
+                graphs
+                    .iter()
+                    .map(|g| tantivy::Term::from_field_text(self.graph_field, g)),
+            );
+            writer.delete_query(Box::new(query))?;
+        }
+
+        let mut count = 0usize;
+        for graph in graphs {
+            let Ok(g) = NamedNodeRef::new(graph) else {
+                continue;
+            };
+            let quads = store
+                .quads_for_graph(GraphNameRef::NamedNode(g))
+                .map_err(|e| TextSearchError::Store(e.to_string()))?;
+            for q in quads {
+                let oxigraph::model::NamedOrBlankNode::NamedNode(s) = &q.subject else {
+                    continue;
+                };
+                let Term::Literal(lit) = &q.object else {
+                    continue;
+                };
+                self.index_triple(s.as_str(), q.predicate.as_str(), graph, lit.value())?;
+                count += 1;
+            }
+        }
+
+        self.commit()?;
+        debug!(
+            "text index refreshed: {} graphs, {} documents",
+            graphs.len(),
+            count
+        );
+        Ok(count)
+    }
+
     /// Rebuild the index from all literal triples in the store.
     pub fn reindex_from_store(&self, store: &TripleStore) -> Result<usize, TextSearchError> {
         info!("Rebuilding text index from store");
@@ -757,6 +822,53 @@ mod tests {
         let hits = idx.search("bridge", None, GraphScope::All, 10).unwrap();
         assert_eq!(hits.len(), 1, "only the named predicate should be removed");
         assert_eq!(hits[0].predicate, "http://ex.org/comment");
+    }
+
+    #[test]
+    fn refresh_graphs_replaces_only_the_named_graphs_documents() {
+        use oxigraph::model::{Literal, NamedNode, Quad};
+
+        let dir = tempfile::tempdir().unwrap();
+        let idx = TextIndex::open(dir.path()).unwrap();
+        // Stale documents for two graphs.
+        idx.index_triple("http://ex.org/a", LABEL, "urn:g1", "old bridge")
+            .unwrap();
+        idx.index_triple("http://ex.org/b", LABEL, "urn:g2", "kept tunnel")
+            .unwrap();
+        idx.commit().unwrap();
+
+        // The store's current contents for g1 differ from what is indexed.
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .store_quad(Quad::new(
+                NamedNode::new("http://ex.org/a2").unwrap(),
+                NamedNode::new(LABEL).unwrap(),
+                Literal::new_simple_literal("new viaduct"),
+                NamedNode::new("urn:g1").unwrap(),
+            ))
+            .unwrap();
+
+        let n = idx.refresh_graphs(&store, &["urn:g1".to_string()]).unwrap();
+        assert_eq!(n, 1);
+
+        // g1's stale document is gone and its live one is searchable; g2's
+        // document was not touched.
+        assert!(idx
+            .search("bridge", None, GraphScope::All, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            idx.search("viaduct", None, GraphScope::All, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            idx.search("tunnel", None, GraphScope::All, 10)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

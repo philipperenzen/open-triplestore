@@ -1037,6 +1037,52 @@ impl TripleStore {
         Ok(quads)
     }
 
+    /// Count quads `(?s <predicate> <object>)` inside a named graph via a direct
+    /// index scan — no SPARQL parse, no query-accelerator involvement. Used by
+    /// hot probes (shape detection after an import) that must stay cheap even
+    /// while the in-memory mirror is stale and rebuilding.
+    pub fn count_pattern_in_graph(
+        &self,
+        graph_iri: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<usize, StoreError> {
+        use oxigraph::model::TermRef;
+        let g = NamedNodeRef::new(graph_iri)
+            .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
+        let p = NamedNodeRef::new(predicate)
+            .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
+        let o = NamedNodeRef::new(object)
+            .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
+        Ok(self
+            .store
+            .quads_for_pattern(
+                None,
+                Some(p),
+                Some(TermRef::NamedNode(o)),
+                Some(GraphNameRef::NamedNode(g)),
+            )
+            .count())
+    }
+
+    /// Return at most `limit` quads from a named graph.
+    ///
+    /// For prevalence-based work (content-kind classification) a bounded sample
+    /// is as good as the whole graph, and materialising a multi-million-quad
+    /// graph just to count type signals held the import request for seconds.
+    pub fn quads_for_graph_sample(
+        &self,
+        graph: GraphNameRef<'_>,
+        limit: usize,
+    ) -> Result<Vec<Quad>, StoreError> {
+        let quads = self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph))
+            .take(limit)
+            .collect::<Result<Vec<Quad>, _>>()?;
+        Ok(quads)
+    }
+
     // ── Performance optimisations ────────────────────────────────────────
 
     /// Fast count of quads in a specific graph without SPARQL overhead.
