@@ -542,7 +542,10 @@ async fn shacl_assist(
             })?;
             (
                 SHACL_EXPLAIN_SYSTEM,
-                format!("Explain these SHACL shapes:\n\n```turtle\n{ttl}\n```"),
+                format!(
+                    "Explain these SHACL shapes:\n\n```turtle\n{ttl}
+```"
+                ),
                 false,
             )
         }
@@ -551,8 +554,20 @@ async fn shacl_assist(
                 AppError::BadRequest("turtle is required for task=improve".into())
             })?;
             let desc = req.description.as_deref().unwrap_or("");
-            (SHACL_IMPROVE_SYSTEM, format!("Review these SHACL shapes and suggest improvements.{}\n\n```turtle\n{ttl}\n```{context_block}",
-                if desc.is_empty() { String::new() } else { format!(" Focus on: {desc}") }), false)
+            (
+                SHACL_IMPROVE_SYSTEM,
+                format!(
+                    "Review these SHACL shapes and suggest improvements.{}
+\n```turtle\n{ttl}
+```{context_block}",
+                    if desc.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Focus on: {desc}")
+                    }
+                ),
+                false,
+            )
         }
         _ => {
             return Err(AppError::BadRequest(
@@ -718,7 +733,8 @@ async fn nl_to_sparql(
 
         if let Err(err) = validate_sparql(&sparql) {
             let repair = format!(
-                "This SPARQL query is not valid ({err}):\n\n{sparql}\n\n\
+                "This SPARQL query is not valid ({err}):\n\n{sparql}
+\n\
                  Return a corrected, complete query. Declare every PREFIX you use. Reply with ONLY the SPARQL.",
             );
             if let Ok(fixed) =
@@ -827,7 +843,12 @@ fn hoist_misplaced_modifiers(sparql: &str) -> Option<String> {
     if !MODIFIER_KEYWORDS.iter().any(|k| upper.starts_with(k)) {
         return None;
     }
-    Some(format!("{}}}\n{}", head.trim_end(), modifiers))
+    Some(format!(
+        "{}}}
+{}",
+        head.trim_end(),
+        modifiers
+    ))
 }
 
 /// Every IRI the vocabulary sampler has described, indexed by its lowercased
@@ -1062,6 +1083,10 @@ by querying), and the API services. Query the graphs for their CONTENTS; read th
 exists on the platform. The system runs it read-only under the user's permissions and gives you the \
 result rows; you may then reply with another `SPARQL:` line if you still need different data, otherwise \
 write the final answer. Result cells may be truncated (they then end with …).\n\
+When function tools are offered to you (run_sparql, text_search, vocab_term_search), CALL them \
+instead of writing a `SPARQL:` line — arguments arrive intact, and you can mix a name lookup with \
+queries in one turn. Both protocols are otherwise identical: same read scope, same result tables, \
+same round budget.\n\
 Target graphs with `GRAPH <iri> { … }` inside WHERE — do not use FROM / FROM NAMED. Any data values you \
 present (names, counts, coordinates) MUST come from query results or the platform context, never from \
 memory: if you have not retrieved them this turn, query first.\n\
@@ -1069,6 +1094,11 @@ Query efficiently: fetch everything you need in as FEW rounds as possible (selec
 together instead of querying twice), and ALWAYS add a LIMIT (at most 50 rows come back; use LIMIT 50 \
 for listings — aggregates like COUNT need no LIMIT). When a \"Graph vocabulary\" section is provided, \
 build patterns from EXACTLY those class and property IRIs — never invent vocabulary.\n\
+Plan multi-part questions: when the question asks for several distinct things (labels AND relations \
+AND counts, or spans several models), begin your FIRST reply with a line `PLAN:` followed by one \
+numbered line per data need (at most 6, each a short phrase), then immediately your first `SPARQL:` \
+line. The platform repeats your plan back to you each round so you can work through it; questions \
+answerable with one query need no plan.\n\
 Search by name with the full-text index, not by scanning. The platform indexes every literal and \
 exposes it as a magic property: `(?s ?score) text:search (\"waalbrug\" 20) .` binds ?s to the 20 \
 best-matching subjects and ?score to their relevance, already restricted to the graphs you may read. \
@@ -1135,6 +1165,13 @@ glTF, STL, IFC, CityJSON) or asset download paths from the platform context — 
 - ```file — a file/asset card with inline preview for images, audio, video and PDF: \
 {\"label\":\"…\",\"url\":\"…\",\"filename\":\"report.pdf\"}. Use it when the answer points at a \
 downloadable file (dataset assets, model files, attachments) whose URL you retrieved.\n\
+- ```ask — a choice card that ASKS THE USER when a decision is genuinely theirs: \
+{\"question\":\"…\",\"options\":[\"…\",\"…\"]} with 2–5 short options; the user's click arrives as \
+their next message. Use it INSTEAD OF GUESSING whenever the conversation leaves a real choice open — \
+published vs unpublished-draft definitions, several entities matching an ambiguous name, which of \
+multiple datasets or graphs is meant — or when you need input you cannot retrieve. Ask one question, \
+keep the options concrete, end your reply right after the fence, and never invent a preference on \
+the user's behalf.\n\
 - ```turtle / ```json / ```xml — syntax-highlighted data snippets (not runnable). Small markdown tables \
 also render well.\n\
 - Entity links: link the key entities you name to their detail page as \
@@ -1397,6 +1434,190 @@ fn history_within_budget(history: &[ChatMessage], budget: usize) -> &[ChatMessag
         start = i;
     }
     &history[start..]
+}
+
+// ─── Native tool calling ───────────────────────────────────────────────────────
+//
+// The `SPARQL:` directive protocol exists because small local models follow a
+// single-line convention more reliably than anything else. Tool-capable models
+// (and hosted APIs) do better with the OpenAI `tools` interface: arguments
+// arrive as structured JSON instead of being fished out of prose, and the
+// model can interleave retrieval kinds (a text search, then a query). The two
+// protocols run as a HYBRID in one loop: completions are offered the tools,
+// a reply that calls them takes the native path, and a reply that writes a
+// `SPARQL:` line (or a ```sparql fence) still works exactly as before — so a
+// model that ignores the tools loses nothing. A gateway that rejects the
+// `tools` parameter outright is remembered and never offered them again.
+
+/// `LLM_CHAT_TOOLS`: "auto" (default — offer native tools, fall back
+/// transparently) or "off" (directive protocol only).
+fn chat_tools_enabled() -> bool {
+    !matches!(
+        env_nonempty("LLM_CHAT_TOOLS")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "off" | "0" | "false" | "none"
+    )
+}
+
+/// Cap on tool calls executed from one assistant turn — parallel calls beyond
+/// this are answered with an error result instead of running.
+const MAX_TOOL_CALLS_PER_ROUND: usize = 4;
+/// Row cap for the text_search tool's result table.
+const TEXT_SEARCH_TOOL_MAX_HITS: usize = 20;
+
+/// The function tools offered to the model. Kept minimal on purpose: retrieval
+/// tools only — presentation stays in the answer markdown, and asking the user
+/// is the ```ask widget (a final answer, not a callable).
+fn chat_tool_definitions() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "run_sparql",
+                "description": "Run one read-only SPARQL query against the named graphs in scope. \
+                    Target graphs with GRAPH <iri> { … } inside WHERE. Returns up to 50 result rows.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "A complete SPARQL SELECT/ASK/CONSTRUCT/DESCRIBE query."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "text_search",
+                "description": "Ranked full-text search over every literal in the readable graphs. \
+                    Use it to find entities by name or keyword when you do not know their IRI.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The word(s) to search; whole-word matching."},
+                        "limit": {"type": "integer", "description": "Max hits (default 10, max 20)."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "vocab_term_search",
+                "description": "Search the platform's installed vocabularies and registered models \
+                    for the standard class/property matching a word — returns candidate term IRIs \
+                    with labels. Use it before inventing any vocabulary IRI.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "term": {"type": "string", "description": "One word or short phrase, e.g. \"beheerobject\"."}
+                    },
+                    "required": ["term"]
+                }
+            }
+        }
+    ])
+}
+
+/// One parsed tool call from an assistant message.
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: Value,
+}
+
+/// The tool calls of an OpenAI-shaped assistant message ("arguments" is a JSON
+/// string per the spec; a gateway that inlines an object is accepted too).
+fn extract_tool_calls(message: &Value) -> Vec<ToolCall> {
+    let Some(arr) = message["tool_calls"].as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|c| {
+            let f = &c["function"];
+            let name = f["name"].as_str()?.to_string();
+            let arguments = f["arguments"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .unwrap_or_else(|| f["arguments"].clone());
+            Some(ToolCall {
+                id: c["id"].as_str().unwrap_or("call_0").to_string(),
+                name,
+                arguments,
+            })
+        })
+        .collect()
+}
+
+/// gateway|model → whether the completions endpoint accepted a `tools` array.
+/// Only negatives are learned (from a rejected request); they stick for the
+/// process lifetime so a turn never pays the failed attempt twice.
+fn tools_support_cache() -> &'static Mutex<HashMap<String, bool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tools_cache_key(model: &str) -> String {
+    format!("{}|{model}", gateway_base().trim_end_matches('/'))
+}
+
+/// A completion attempt's failure, split so tool fallback can tell "the
+/// gateway answered and said no" from "the gateway is unreachable".
+enum CompletionFailure {
+    /// HTTP status from the gateway — a `tools` rejection lands here.
+    Status(reqwest::StatusCode),
+    /// Transport / decode error; retrying without tools would not help.
+    Fatal(AppError),
+}
+
+/// Non-streaming completion returning the assistant MESSAGE object (content
+/// and/or tool_calls), optionally offering `tools`.
+async fn chat_completion_full(
+    model: &str,
+    messages: &[Value],
+    max_tokens: u32,
+    tools: Option<&Value>,
+) -> Result<Value, CompletionFailure> {
+    let mut payload = json!({
+        "model": model,
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    });
+    if let Some(t) = tools {
+        payload["tools"] = t.clone();
+        payload["tool_choice"] = json!("auto");
+    }
+    let url = format!(
+        "{}/v1/chat/completions",
+        gateway_base().trim_end_matches('/')
+    );
+    let mut rb = http()
+        .post(&url)
+        .json(&payload)
+        .timeout(chat_completion_timeout());
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    let resp = rb.send().await.map_err(|e| {
+        CompletionFailure::Fatal(AppError::Internal(format!(
+            "LLM endpoint unreachable at {url}: {e}"
+        )))
+    })?;
+    if !resp.status().is_success() {
+        return Err(CompletionFailure::Status(resp.status()));
+    }
+    let body: Value = resp.json().await.map_err(|e| {
+        CompletionFailure::Fatal(AppError::Internal(format!("invalid LLM response: {e}")))
+    })?;
+    let message = body["choices"][0]["message"].clone();
+    if message.is_null() {
+        return Ok(json!({"role": "assistant", "content": ""}));
+    }
+    Ok(message)
 }
 
 #[derive(Deserialize)]
@@ -1793,31 +2014,78 @@ fn sse_event(ev: &ChatStreamEvent) -> Result<Event, Infallible> {
     }))
 }
 
-/// One completion round: streamed (with tokens forwarded through a
-/// [`DeltaGate`]) when someone is listening AND the round may be shown live,
-/// plain otherwise. Returns the full reply text plus whether any of it was
-/// forwarded to the client live.
+/// The visible text of an assistant message value.
+fn assistant_text(message: &Value) -> String {
+    message["content"].as_str().unwrap_or("").trim().to_string()
+}
+
+/// One completion round, returned as the full assistant MESSAGE (content
+/// and/or tool_calls) plus whether any text was forwarded to the client live.
 ///
-/// `live` is false for pre-retrieval rounds. Whatever prose the model writes
-/// before its first query cannot be grounded in data — streaming it paints a
-/// confident answer the next event has to wipe, which reads as the assistant
-/// making things up and then retracting them. Buffered rounds cost nothing to
-/// correct: the user sees "thinking", then the retrieval trail, then only text
-/// that survived grounding.
-async fn next_reply(
+/// Protocol per call: with `tools` offered (and the gateway not known to
+/// reject them) the request is non-streaming — tool calls are internal rounds,
+/// and a rejection gets ONE immediate retry without tools, after which the
+/// gateway is remembered as tools-incapable so the failed attempt is never
+/// paid again. Without tools, the old behaviour holds exactly: pre-retrieval
+/// rounds are buffered (`live: false` — prose written before the data would
+/// only set up a retraction), post-retrieval rounds stream through the
+/// [`DeltaGate`].
+async fn next_assistant(
     model: &str,
     msgs: &[Value],
     sink: &EventSink,
     live: bool,
-) -> Result<(String, bool), AppError> {
+    tools: Option<&Value>,
+) -> Result<(Value, bool), AppError> {
+    let offer = tools.filter(|_| {
+        tools_support_cache()
+            .lock()
+            .unwrap()
+            .get(&tools_cache_key(model))
+            .copied()
+            .unwrap_or(true)
+    });
+    if let Some(t) = offer {
+        match chat_completion_full(model, msgs, CHAT_MAX_TOKENS, Some(t)).await {
+            Ok(m) => return Ok((m, false)),
+            Err(CompletionFailure::Fatal(e)) => return Err(e),
+            Err(CompletionFailure::Status(status)) => {
+                // The gateway answered and refused — most likely the `tools`
+                // parameter (Ollama 400s for tool-incapable models). Retry
+                // without; only when THAT succeeds is the blame pinned on
+                // tools and remembered.
+                match chat_completion_full(model, msgs, CHAT_MAX_TOKENS, None).await {
+                    Ok(m) => {
+                        tracing::info!(
+                            model,
+                            %status,
+                            "gateway rejected native tools — staying on the directive protocol"
+                        );
+                        tools_support_cache()
+                            .lock()
+                            .unwrap()
+                            .insert(tools_cache_key(model), false);
+                        return Ok((m, false));
+                    }
+                    Err(CompletionFailure::Fatal(e)) => return Err(e),
+                    Err(CompletionFailure::Status(s2)) => {
+                        return Err(AppError::Internal(format!("LLM endpoint returned {s2}")))
+                    }
+                }
+            }
+        }
+    }
     if live && sink.is_live() {
         let mut gate = DeltaGate::new();
         let text =
             chat_completion_messages_stream(model, msgs, CHAT_MAX_TOKENS, sink, &mut gate).await?;
-        Ok((text, gate.forwarded))
+        Ok((
+            json!({"role": "assistant", "content": text}),
+            gate.forwarded,
+        ))
     } else {
         let text = chat_completion_messages(model, msgs.to_vec(), CHAT_MAX_TOKENS).await?;
-        Ok((text, false))
+        Ok((json!({"role": "assistant", "content": text}), false))
     }
 }
 
@@ -1871,7 +2139,8 @@ async fn run_chat_turn(
         .unwrap_or_default();
 
     let mut system_content = format!(
-        "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{orient}{services_hint}{memory}",
+        "{CHAT_SYSTEM_PROMPT}
+\n# PLATFORM CONTEXT\n{context}{vocab}{orient}{services_hint}{memory}",
         orient = orientation.section
     );
 
@@ -1894,7 +2163,8 @@ async fn run_chat_turn(
             // drop: both are tiny and answer the question the turn is
             // actually about.
             system_content = format!(
-                "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{orient}{services_hint}{memory}",
+                "{CHAT_SYSTEM_PROMPT}
+\n# PLATFORM CONTEXT\n{context}{orient}{services_hint}{memory}",
                 orient = orientation.section
             );
         }
@@ -1933,10 +2203,13 @@ async fn run_chat_turn(
         msgs.push(json!({"role": role, "content": m.content}));
     }
 
-    // Retrieval loop: the model either answers in prose or replies `SPARQL: <query>`.
-    // Each query runs under the caller's read scope; its rows — or its error, so the
-    // model can self-repair — go back into the conversation for the next round.
+    // Retrieval loop, hybrid across two protocols: a reply may CALL the native
+    // tools (run_sparql / text_search / vocab_term_search), write a `SPARQL:`
+    // directive, or answer in prose. Each retrieval runs under the caller's
+    // read scope; its rows — or its error, so the model can self-repair — go
+    // back into the conversation for the next round.
     let mut runs: Vec<ChatQueryRun> = Vec::new();
+    let tool_defs = chat_tools_enabled().then(chat_tool_definitions);
     sink.send(ChatStreamEvent::Status {
         round: 0,
         state: "thinking",
@@ -1944,49 +2217,138 @@ async fn run_chat_turn(
     .await;
     // Pre-retrieval rounds are never streamed live (`live: false`): any prose
     // here predates the data, so showing it would only set up a retraction.
-    let (mut reply, mut forwarded) = next_reply(&model, &msgs, &sink, false).await?;
+    let (mut assistant, mut forwarded) =
+        next_assistant(&model, &msgs, &sink, false, tool_defs.as_ref()).await?;
 
-    // Retrieval nudge. The `SPARQL:` protocol sits inside a long system prompt,
+    // Retrieval nudge. The retrieval protocol sits inside a long system prompt,
     // and a model that does not follow it silently answers from the platform
     // summary or its own memory — the failure mode looks like "the assistant
-    // ignores the data". So when the opening reply asks for no query at all, ask
-    // once, in a short and explicit message. The model may decline (a conceptual
-    // question needs no data), and if it does we keep its original answer, so the
-    // nudge can only add retrieval, never take an answer away. Costs at most one
-    // extra completion per turn.
-    if extract_query_request(&reply, true).is_none() {
-        let original = (reply.clone(), forwarded);
-        msgs.push(json!({"role": "assistant", "content": reply}));
+    // ignores the data". So when the opening reply neither calls a tool nor
+    // asks for a query — and is not a legitimate ```ask question to the user —
+    // ask once, in a short and explicit message. The model may decline (a
+    // conceptual question needs no data), and if it does we keep its original
+    // answer, so the nudge can only add retrieval, never take an answer away.
+    let needs_nudge = extract_tool_calls(&assistant).is_empty() && {
+        let reply = assistant_text(&assistant);
+        extract_query_request(&reply, true).is_none() && !contains_ask_fence(&reply)
+    };
+    if needs_nudge {
+        let original = (assistant.clone(), forwarded);
+        msgs.push(json!({"role": "assistant", "content": assistant_text(&assistant)}));
         msgs.push(json!({"role": "user", "content":
             "You answered without querying the graphs. If answering my question needs data from \
-             them (any name, number, date, value or geometry), reply with EXACTLY one line: \
-             `SPARQL:` followed by a single query and nothing else. If it genuinely needs no data \
-             from the graphs, repeat your previous answer unchanged."}));
+             them (any name, number, date, value or geometry), retrieve it now: call a tool, or \
+             reply with EXACTLY one line: `SPARQL:` followed by a single query and nothing else. \
+             If it genuinely needs no data from the graphs, repeat your previous answer \
+             unchanged."}));
         sink.send(ChatStreamEvent::Status {
             round: 0,
             state: "thinking",
         })
         .await;
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink, false).await {
-            Ok(v) if extract_query_request(&v.0, true).is_some() => v,
-            // No query the second time either (or the gateway failed): the first
-            // answer was the model's real one — keep it.
-            _ => {
-                msgs.truncate(msgs.len() - 2);
-                original
-            }
-        };
+        (assistant, forwarded) =
+            match next_assistant(&model, &msgs, &sink, false, tool_defs.as_ref()).await {
+                Ok(v)
+                    if !extract_tool_calls(&v.0).is_empty()
+                        || extract_query_request(&assistant_text(&v.0), true).is_some() =>
+                {
+                    v
+                }
+                // No retrieval the second time either (or the gateway failed):
+                // the first answer was the model's real one — keep it.
+                _ => {
+                    msgs.truncate(msgs.len() - 2);
+                    original
+                }
+            };
     }
+
+    // A declared plan (the decomposition step for multi-part questions) is
+    // repeated back with every round's results so the model works through it.
+    let plan_note = extract_plan(&assistant_text(&assistant))
+        .map(|p| {
+            format!(
+                "\nYour plan:\n{p}
+Continue with the next unmet item, or write the final \
+                 answer once every item is met."
+            )
+        })
+        .unwrap_or_default();
 
     let max_rounds = chat_max_rounds();
     for round in 1..=max_rounds {
+        let remaining = max_rounds - round;
+        // On the last allowed round the follow-up completion gets no tools —
+        // withholding them forces prose the same way the directive follow-up
+        // says "do not output another SPARQL: line".
+        let next_tools = if remaining > 0 {
+            tool_defs.as_ref()
+        } else {
+            None
+        };
+
+        let calls = extract_tool_calls(&assistant);
+        if !calls.is_empty() {
+            // The streaming client hung up — stop burning completions on a
+            // turn nobody will read. (Never true for the JSON endpoint.)
+            if sink.is_closed() {
+                return Err(AppError::Internal("client disconnected".to_string()));
+            }
+            // Native round: the assistant message goes into the transcript
+            // verbatim (the tool_calls array is part of the protocol), then
+            // every call is answered with a `tool` message.
+            msgs.push(assistant.clone());
+            let total = calls.len();
+            for (i, call) in calls.into_iter().enumerate() {
+                let mut result = if i >= MAX_TOOL_CALLS_PER_ROUND {
+                    format!("Skipped: at most {MAX_TOOL_CALLS_PER_ROUND} tool calls run per round.")
+                } else {
+                    dispatch_tool_call(
+                        &state,
+                        &call,
+                        &graphs,
+                        &orientation.mentioned,
+                        caps,
+                        &sink,
+                        round,
+                        &mut runs,
+                    )
+                    .await
+                };
+                // Round budget and plan ride on the last result of the batch.
+                if i + 1 == total {
+                    result.push_str(&format!(
+                        "\n({remaining} more retrieval rounds allowed this turn.){plan_note}"
+                    ));
+                }
+                msgs.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result,
+                }));
+            }
+            sink.send(ChatStreamEvent::Status {
+                round,
+                state: "thinking",
+            })
+            .await;
+            (assistant, forwarded) =
+                match next_assistant(&model, &msgs, &sink, false, next_tools).await {
+                    Ok(v) => v,
+                    Err(_) => (
+                        json!({"role": "assistant", "content": fallback_answer(&runs)}),
+                        false,
+                    ),
+                };
+            continue;
+        }
+
         // Before anything has been retrieved a fenced ```sparql block counts as a
         // request to run it; afterwards it is a query card the user is meant to see.
+        let reply = assistant_text(&assistant);
         let Some(query) = extract_query_request(&reply, runs.is_empty()) else {
             break;
         };
-        // The streaming client hung up — stop burning completions on a turn
-        // nobody will read. (Never true for the JSON endpoint.)
         if sink.is_closed() {
             return Err(AppError::Internal("client disconnected".to_string()));
         }
@@ -1995,172 +2357,56 @@ async fn run_chat_turn(
         if forwarded {
             sink.send(ChatStreamEvent::RoundReset).await;
         }
-        // Inject any undeclared-but-known prefixes, then parse-check the model's
-        // own text BEFORE scoping: a syntax error reported against the scoped
-        // rewrite has line numbers that mean nothing to the model, which makes
-        // self-repair hopeless.
-        // Repair BEFORE the query is streamed to the client and recorded in the
-        // conversation, so the query the user sees in the retrieval trail is the
-        // query that actually runs.
-        let query = repair_sparql(finalize_sparql(&state, query).await);
         msgs.push(json!({"role": "assistant", "content": format!("SPARQL:\n{query}")}));
-        sink.send(ChatStreamEvent::Query {
+        let (ok, body) = execute_chat_query(
+            &state,
+            query,
+            &graphs,
+            &orientation.mentioned,
+            caps,
+            &sink,
             round,
-            sparql: query.clone(),
-        })
+            &mut runs,
+        )
         .await;
-        let remaining = max_rounds - round;
-        // Reject invented vocabulary BEFORE running it. Such a query is valid
-        // SPARQL and returns zero rows, which the model reports as absent data —
-        // a false negative the user cannot tell from a true one. Failing it with
-        // the offending IRIs named gives the next round something to act on.
-        // Two safeguards keep this check honest: IRIs the user pasted are never
-        // candidates (they asked about them by name — an absent one should run
-        // to an honest empty result, not an error blaming the user), and every
-        // remaining candidate is verified against the STORE, not the sampled
-        // vocabulary window (see [`absent_iris`]) — the sample-only check
-        // condemned real terms and real graph names round after round.
-        let run_result = match validate_sparql(&query) {
-            Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
-            Ok(()) => {
-                let candidates: Vec<String> = unknown_vocab_iris(&query, &known_vocab_iris())
-                    .into_iter()
-                    .filter(|iri| !orientation.mentioned.iter().any(|m| m == iri))
-                    .collect();
-                match absent_iris(&state, candidates).await {
-                    bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
-                        "these IRIs occur nowhere on this platform: {}. Do not invent IRIs — \
-                         copy them character for character from the Graph vocabulary or WHERE \
-                         THIS CONVERSATION'S NAMES OCCUR sections, or find real entities by \
-                         name with text:search.",
-                        bad.iter()
-                            .map(|b| format!("<{b}>"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))),
-                    _ => run_chat_query_timed(&state, &query, &graphs).await,
-                }
-            }
-        };
-        let follow_up = match run_result {
-            Ok(qr) => {
-                sink.send(ChatStreamEvent::QueryResult {
-                    round,
-                    ok: true,
-                    rows: Some(qr.rows.len()),
-                    truncated: qr.truncated,
-                    error: None,
-                })
-                .await;
-                let table = render_rows_for_llm(&qr);
-                // Read these BEFORE qr.rows moves into the trail below.
-                let rows_empty = qr.rows.is_empty();
-                let all_zero = all_numeric_cells_zero(&qr.rows);
-                runs.push(ChatQueryRun {
-                    sparql: query,
-                    ok: true,
-                    error: None,
-                    columns: Some(qr.columns),
-                    rows: Some(qr.rows),
-                    truncated: qr.truncated,
-                });
-                if remaining > 0 {
-                    // Steer self-repair on the two degenerate shapes a small
-                    // model reliably falls into: an empty result from guessed
-                    // vocabulary, and an aggregate of an unbound variable
-                    // (every group counts 0).
-                    let hint: String = if rows_empty {
-                        // Ground the repair in the queried graphs' REAL
-                        // vocabulary instead of exhortation: the prompt's
-                        // sampled section may not even include the graph this
-                        // query targeted.
-                        let queried = queried_graph_vocab(
-                            &state,
-                            &runs.last().map(|r| r.sparql.clone()).unwrap_or_default(),
-                            &graphs,
-                            caps,
-                        )
-                        .await;
-                        format!(
-                            "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
-                             the graph — or the graph is the wrong one. Re-check the WHERE THIS \
-                             CONVERSATION'S NAMES OCCUR and Registered models sections for the \
-                             right graph, find entities by name with text:search, and use \
-                             COUNT(*), never COUNT of a variable that is not bound in the \
-                             pattern.{queried}"
-                        )
-                    } else if all_zero {
-                        "\nHINT: every numeric value is 0 — that almost always means the \
-                         aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
-                         variable that is bound in the pattern, then retry."
-                            .to_string()
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "Query results:\n{table}{hint}\nIf you still need different data, reply with \
-                         `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
-                         write the final answer to my previous question in clear natural language, \
-                         using the presentation widgets (chart/map/card/api/csv/markdown table) \
-                         where they help; chart/map query results with the source:\"query\" form."
-                    )
-                } else {
-                    format!(
-                        "Query results:\n{table}\nWrite the final answer to my previous question \
-                         in clear natural language, using the presentation widgets where they \
-                         help. Do not output another SPARQL: line. If the results above are \
-                         empty, say you could not FIND the data — never state that something \
-                         does not exist based on an empty result — and check the PLATFORM \
-                         CONTEXT sections (Datasets, API Services, Files, Registered models) \
-                         first: if one of \
-                         those already answers the question, use it."
-                    )
-                }
-            }
-            Err(e) => {
-                let emsg = e.message();
-                sink.send(ChatStreamEvent::QueryResult {
-                    round,
-                    ok: false,
-                    rows: None,
-                    truncated: false,
-                    error: Some(emsg.clone()),
-                })
-                .await;
-                runs.push(ChatQueryRun {
-                    sparql: query,
-                    ok: false,
-                    error: Some(emsg.clone()),
-                    columns: None,
-                    rows: None,
-                    truncated: false,
-                });
-                if remaining > 0 {
-                    format!(
-                        "That query failed to run: {emsg}\n\
-                         HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
-                         inside GROUP BY; every projected variable must be bound in the pattern; \
-                         build patterns ONLY from IRIs in the Graph vocabulary and WHERE THIS \
-                         CONVERSATION'S NAMES OCCUR sections; and the \
-                         `SPARQL:` line must contain the query alone, no prose before or after. \
-                         Do NOT resend the same query unchanged.\n\
-                         Reply with `SPARQL:` and a corrected \
-                         query ({remaining} more allowed this turn), or answer without querying — \
-                         you may include the corrected query as a ```sparql block for the user to \
-                         run themselves."
-                    )
-                } else {
-                    format!(
-                        "That query failed to run: {emsg}\nAnswer my previous question as well as \
-                         you can without another query; include a corrected query as a ```sparql \
-                         block if useful. Do not output another SPARQL: line. Never state that \
-                         something does not exist because a query failed or returned nothing — \
-                         and check the PLATFORM CONTEXT sections (Datasets, API Services, \
-                         Files, Registered models) first: if one of those already answers \
-                         the question, use it."
-                    )
-                }
-            }
+        let follow_up = match (ok, remaining > 0) {
+            (true, true) => format!(
+                "{body}
+If you still need different data, reply with \
+                 `SPARQL:` and one query ({remaining} more allowed this turn). Otherwise \
+                 write the final answer to my previous question in clear natural language, \
+                 using the presentation widgets (chart/map/card/api/csv/markdown table) \
+                 where they help; chart/map query results with the source:\"query\" \
+                 form.{plan_note}"
+            ),
+            (true, false) => format!(
+                "{body}
+Write the final answer to my previous question \
+                 in clear natural language, using the presentation widgets where they \
+                 help. Do not output another SPARQL: line. If the results above are \
+                 empty, say you could not FIND the data — never state that something \
+                 does not exist based on an empty result — and check the PLATFORM \
+                 CONTEXT sections (Datasets, API Services, Files, Registered models) \
+                 first: if one of those already answers the question, use it."
+            ),
+            (false, true) => format!(
+                "{body}
+The `SPARQL:` line must contain the query alone, no prose before or \
+                 after. Reply with `SPARQL:` and a corrected \
+                 query ({remaining} more allowed this turn), or answer without querying — \
+                 you may include the corrected query as a ```sparql block for the user to \
+                 run themselves.{plan_note}"
+            ),
+            (false, false) => format!(
+                "{body}
+Answer my previous question as well as \
+                 you can without another query; include a corrected query as a ```sparql \
+                 block if useful. Do not output another SPARQL: line. Never state that \
+                 something does not exist because a query failed or returned nothing — \
+                 and check the PLATFORM CONTEXT sections (Datasets, API Services, \
+                 Files, Registered models) first: if one of those already answers \
+                 the question, use it."
+            ),
         };
         msgs.push(json!({"role": "user", "content": follow_up}));
         sink.send(ChatStreamEvent::Status {
@@ -2168,19 +2414,29 @@ async fn run_chat_turn(
             state: "thinking",
         })
         .await;
-        // Post-retrieval rounds stream live: the model now writes against real
-        // results, and a directive-shaped reply (another query request) is
-        // caught at the first token by the DeltaGate, so nothing that would be
-        // superseded reaches the client.
-        (reply, forwarded) = match next_reply(&model, &msgs, &sink, true).await {
+        // Post-retrieval rounds stream live (when no tools are in play): the
+        // model now writes against real results, and a directive-shaped reply
+        // is caught at the first token by the DeltaGate, so nothing that would
+        // be superseded reaches the client.
+        (assistant, forwarded) = match next_assistant(&model, &msgs, &sink, true, next_tools).await
+        {
             Ok(v) => v,
-            Err(_) => (fallback_answer(&runs), false),
+            Err(_) => (
+                json!({"role": "assistant", "content": fallback_answer(&runs)}),
+                false,
+            ),
         };
     }
-    // A stubborn model may still emit a *bare* directive after its last allowed
-    // round — never show that to the user; fall back to the data we did
-    // retrieve. A real answer that merely embeds a corrected query (which the
-    // failure follow-ups explicitly invite) is kept as-is.
+    let mut reply = assistant_text(&assistant);
+    // A stubborn model may still demand more retrieval after its last allowed
+    // round — a dangling tool call or a *bare* directive must never reach the
+    // user; fall back to the data we did retrieve. A real answer that merely
+    // embeds a corrected query (which the failure follow-ups explicitly
+    // invite) is kept as-is.
+    if !extract_tool_calls(&assistant).is_empty() {
+        reply = fallback_answer(&runs);
+    }
+    reply = strip_plan_block(&reply);
     if is_bare_sparql_directive(&reply) {
         reply = fallback_answer(&runs);
     }
@@ -2224,6 +2480,258 @@ async fn run_chat_turn(
         truncated,
         queries: runs,
     })
+}
+
+/// Run one model-authored query through the whole pipeline — prefix repair,
+/// parse check, the store-verified invented-IRI check (pasted IRIs exempt),
+/// scoped execution — recording the round in the trail and reporting it on the
+/// sink. Returns `(ok, body)` where `body` is the text the model gets back:
+/// the result table with the empty/all-zero repair hints, or the failure with
+/// its hint. Both retrieval protocols share this path, so the trail the user
+/// sees is identical whichever one the model spoke.
+#[allow(clippy::too_many_arguments)]
+async fn execute_chat_query(
+    state: &AppState,
+    raw: String,
+    graphs: &Arc<HashSet<String>>,
+    mentioned: &[String],
+    caps: VocabCaps,
+    sink: &EventSink,
+    round: usize,
+    runs: &mut Vec<ChatQueryRun>,
+) -> (bool, String) {
+    // Inject any undeclared-but-known prefixes, then parse-check the model's
+    // own text BEFORE scoping: a syntax error reported against the scoped
+    // rewrite has line numbers that mean nothing to the model. Repair BEFORE
+    // the query is streamed and recorded, so the query the user sees in the
+    // trail is the query that actually runs.
+    let query = repair_sparql(finalize_sparql(state, raw).await);
+    sink.send(ChatStreamEvent::Query {
+        round,
+        sparql: query.clone(),
+    })
+    .await;
+    // Reject invented vocabulary BEFORE running it (see [`absent_iris`] for
+    // why candidates are verified against the store and pasted IRIs are
+    // exempt).
+    let run_result = match validate_sparql(&query) {
+        Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
+        Ok(()) => {
+            let candidates: Vec<String> = unknown_vocab_iris(&query, &known_vocab_iris())
+                .into_iter()
+                .filter(|iri| !mentioned.iter().any(|m| m == iri))
+                .collect();
+            match absent_iris(state, candidates).await {
+                bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
+                    "these IRIs occur nowhere on this platform: {}. Do not invent IRIs — \
+                     copy them character for character from the Graph vocabulary or WHERE \
+                     THIS CONVERSATION'S NAMES OCCUR sections, or find real entities by \
+                     name with text_search.",
+                    bad.iter()
+                        .map(|b| format!("<{b}>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+                _ => run_chat_query_timed(state, &query, graphs).await,
+            }
+        }
+    };
+    match run_result {
+        Ok(qr) => {
+            sink.send(ChatStreamEvent::QueryResult {
+                round,
+                ok: true,
+                rows: Some(qr.rows.len()),
+                truncated: qr.truncated,
+                error: None,
+            })
+            .await;
+            let table = render_rows_for_llm(&qr);
+            let rows_empty = qr.rows.is_empty();
+            let all_zero = all_numeric_cells_zero(&qr.rows);
+            runs.push(ChatQueryRun {
+                sparql: query,
+                ok: true,
+                error: None,
+                columns: Some(qr.columns),
+                rows: Some(qr.rows),
+                truncated: qr.truncated,
+            });
+            // Steer self-repair on the two degenerate shapes a small model
+            // reliably falls into: an empty result from guessed vocabulary,
+            // and an aggregate of an unbound variable.
+            let hint: String = if rows_empty {
+                // Ground the repair in the queried graphs' REAL vocabulary
+                // instead of exhortation: the prompt's sampled section may not
+                // even include the graph this query targeted.
+                let queried = queried_graph_vocab(
+                    state,
+                    &runs.last().map(|r| r.sparql.clone()).unwrap_or_default(),
+                    graphs,
+                    caps,
+                )
+                .await;
+                format!(
+                    "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
+                     the graph — or the graph is the wrong one. Re-check the WHERE THIS \
+                     CONVERSATION'S NAMES OCCUR and Registered models sections for the \
+                     right graph, find entities by name with the text search, and use \
+                     COUNT(*), never COUNT of a variable that is not bound in the \
+                     pattern.{queried}"
+                )
+            } else if all_zero {
+                "\nHINT: every numeric value is 0 — that almost always means the \
+                 aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
+                 variable that is bound in the pattern, then retry."
+                    .to_string()
+            } else {
+                String::new()
+            };
+            (true, format!("Query results:\n{table}{hint}"))
+        }
+        Err(e) => {
+            let emsg = e.message();
+            sink.send(ChatStreamEvent::QueryResult {
+                round,
+                ok: false,
+                rows: None,
+                truncated: false,
+                error: Some(emsg.clone()),
+            })
+            .await;
+            runs.push(ChatQueryRun {
+                sparql: query,
+                ok: false,
+                error: Some(emsg.clone()),
+                columns: None,
+                rows: None,
+                truncated: false,
+            });
+            (
+                false,
+                format!(
+                    "That query failed to run: {emsg}
+\
+                     HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
+                     inside GROUP BY; every projected variable must be bound in the pattern; \
+                     build patterns ONLY from IRIs in the Graph vocabulary and WHERE THIS \
+                     CONVERSATION'S NAMES OCCUR sections. Do NOT resend the same query \
+                     unchanged."
+                ),
+            )
+        }
+    }
+}
+
+/// Execute one native tool call and return the result text the model sees.
+/// `run_sparql` shares the exact pipeline (and user-visible trail) of the
+/// directive protocol; the search tools answer directly from their indexes.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_tool_call(
+    state: &AppState,
+    call: &ToolCall,
+    graphs: &Arc<HashSet<String>>,
+    mentioned: &[String],
+    caps: VocabCaps,
+    sink: &EventSink,
+    round: usize,
+    runs: &mut Vec<ChatQueryRun>,
+) -> String {
+    match call.name.as_str() {
+        "run_sparql" => {
+            let raw = call.arguments["query"].as_str().unwrap_or("").trim();
+            if raw.is_empty() {
+                return "run_sparql needs a non-empty \"query\" string argument.".to_string();
+            }
+            execute_chat_query(
+                state,
+                raw.to_string(),
+                graphs,
+                mentioned,
+                caps,
+                sink,
+                round,
+                runs,
+            )
+            .await
+            .1
+        }
+        "text_search" => text_search_tool(state, &call.arguments, graphs).await,
+        "vocab_term_search" => {
+            let term = call.arguments["term"].as_str().unwrap_or("").trim();
+            if term.is_empty() {
+                return "vocab_term_search needs a non-empty \"term\" string argument.".to_string();
+            }
+            let lines = vocab_term_lines(state, &[term.to_string()], &[]).await;
+            if lines.is_empty() {
+                format!("No installed vocabulary defines a term matching \"{term}\".")
+            } else {
+                lines.join("\n")
+            }
+        }
+        other => format!(
+            "Unknown tool {other:?} — available: run_sparql, text_search, vocab_term_search."
+        ),
+    }
+}
+
+/// The `text_search` tool: ranked whole-word search over every literal in the
+/// caller's readable graphs, straight from the full-text index.
+#[cfg(feature = "text-search")]
+async fn text_search_tool(
+    state: &AppState,
+    arguments: &Value,
+    graphs: &Arc<HashSet<String>>,
+) -> String {
+    let q = arguments["query"].as_str().unwrap_or("").trim().to_string();
+    if q.is_empty() {
+        return "text_search needs a non-empty \"query\" string argument.".to_string();
+    }
+    let limit = arguments["limit"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or(10)
+        .clamp(1, TEXT_SEARCH_TOOL_MAX_HITS);
+    let Some(index) = state.text_index.clone() else {
+        return "Full-text search is not available on this platform — use run_sparql with a \
+                FILTER(CONTAINS(…)) pattern instead."
+            .to_string();
+    };
+    let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::clone(graphs));
+    let sync_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        sync_state.sync_text_index_if_dirty();
+        match index.search(&q, None, scope.as_scope(), limit) {
+            Err(e) => format!("text search failed: {e}"),
+            Ok(hits) if hits.is_empty() => {
+                format!("No literal matches \"{q}\" in the graphs you can read.")
+            }
+            Ok(hits) => {
+                let mut s = String::from("subject | predicate | graph\n");
+                for h in hits {
+                    s.push_str(&format!(
+                        "{} | {} | {}
+",
+                        h.subject, h.predicate, h.graph
+                    ));
+                }
+                s
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| "text search failed".to_string())
+}
+
+#[cfg(not(feature = "text-search"))]
+async fn text_search_tool(
+    _state: &AppState,
+    _arguments: &Value,
+    _graphs: &Arc<HashSet<String>>,
+) -> String {
+    "Full-text search is not enabled on this platform — use run_sparql with a \
+     FILTER(CONTAINS(…)) pattern instead."
+        .to_string()
 }
 
 /// True when the answer embeds data widgets but no query succeeded this turn —
@@ -2294,7 +2802,8 @@ fn fallback_answer(runs: &[ChatQueryRun]) -> String {
     } else if let Some(last) = runs.last() {
         format!(
             "I tried to answer by querying the knowledge graph, but the query did not run ({}). \
-             You can refine it here:\n\n```sparql\n{}\n```",
+             You can refine it here:\n\n```sparql\n{}
+```",
             last.error.as_deref().unwrap_or("unknown error"),
             last.sparql
         )
@@ -2634,6 +3143,19 @@ fn render_models_section(
                 }
             }
             _ => out.push_str(" — no published version readable to you"),
+        }
+        // A draft is real, readable content the owner has not published yet.
+        // Naming it as explicitly UNPUBLISHED (rather than hiding it or mixing
+        // it in) is what lets the assistant offer the draft/published choice
+        // to the user instead of silently picking one.
+        if let Some(d) = e.draft_graph_iri.as_deref() {
+            if scope.contains(d) && e.graph_iri.as_deref() != Some(d) {
+                out.push_str(&format!("; unpublished draft in graph <{d}>"));
+                if let Some(v) = e.draft_version.as_deref() {
+                    out.push_str(&format!(" (draft {v})"));
+                }
+                out.push_str(" — when both could answer, ask the user which to use");
+            }
         }
         out.push('\n');
     }
@@ -3300,12 +3822,18 @@ async fn question_orientation(
             term, h.subject, h.predicate, h.graph
         ));
     }
+    // The installed-vocabulary term index knows the STANDARD term for a plain
+    // word ("beheerobject" → the class that models it) even when no graph in
+    // scope carries it as a literal — candidate IRIs with their labels, so the
+    // model reaches for a real term instead of coining one.
+    lines.extend(vocab_term_lines(state, &name_terms, &id_terms).await);
     let section = if lines.is_empty() {
         String::new()
     } else {
         format!(
             "\n\n# WHERE THIS CONVERSATION'S NAMES OCCUR (verified in the store just now — \
-             prefer these graphs, copy these IRIs exactly)\n{}\n",
+             prefer these graphs, copy these IRIs exactly)\n{}
+",
             lines.join("\n")
         )
     };
@@ -3315,6 +3843,69 @@ async fn question_orientation(
         graphs,
         section,
     }
+}
+
+/// How many question words to look up in the vocabulary term index, and how
+/// many candidate terms each may contribute to the orientation section.
+const VOCAB_TERM_LOOKUPS: usize = 2;
+const VOCAB_TERM_HITS: usize = 3;
+
+/// Candidate standard-vocabulary terms for the question's words, from the
+/// platform's installed-vocabulary search index (the same engine behind
+/// `/api/vocab/terms/search`). Best-effort: no engine, no feature, or no hits
+/// renders nothing.
+#[cfg(feature = "vocab-search")]
+async fn vocab_term_lines(
+    state: &AppState,
+    name_terms: &[String],
+    id_terms: &[String],
+) -> Vec<String> {
+    let Some(engine) = state.vocab_engine.clone() else {
+        return Vec::new();
+    };
+    let terms: Vec<String> = name_terms
+        .iter()
+        .chain(id_terms.iter())
+        .take(VOCAB_TERM_LOOKUPS)
+        .cloned()
+        .collect();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    crate::vocab_search::routes::ensure_fresh(state).await;
+    tokio::task::spawn_blocking(move || {
+        use crate::vocab_search::corpus::TermType;
+        let mut lines: Vec<String> = Vec::new();
+        for term in terms {
+            let outcome = engine.search_terms(
+                &term,
+                &[TermType::Class, TermType::Property],
+                None,
+                &[],
+                None,
+                1,
+                VOCAB_TERM_HITS,
+            );
+            for c in outcome.results.into_iter().take(VOCAB_TERM_HITS) {
+                lines.push(format!(
+                    "- \"{}\" could be the vocabulary term {} <{}> ({} in {})",
+                    term, c.prefixed, c.iri, c.ttype, c.vocab
+                ));
+            }
+        }
+        lines
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[cfg(not(feature = "vocab-search"))]
+async fn vocab_term_lines(
+    _state: &AppState,
+    _name_terms: &[String],
+    _id_terms: &[String],
+) -> Vec<String> {
+    Vec::new()
 }
 
 /// One graph's cached vocabulary block, sampling on a cold cache — bounded by
@@ -3399,7 +3990,8 @@ async fn queried_graph_vocab(
         return String::new();
     }
     format!(
-        "\nThe queried graph(s) actually contain:\n{}\nBuild the pattern ONLY from these \
+        "\nThe queried graph(s) actually contain:\n{}
+Build the pattern ONLY from these \
          IRIs, copied exactly.",
         blocks.join("\n")
     )
@@ -3509,7 +4101,8 @@ async fn graph_vocab_context(
         return String::new();
     }
     format!(
-        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}\n",
+        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}
+",
         blocks.join("\n")
     )
 }
@@ -3889,6 +4482,96 @@ fn directive_pos(reply: &str) -> Option<usize> {
     None
 }
 
+/// True when a reply opens an ```ask fence. Asking the user IS a complete,
+/// legitimate reply — it must not be nudged into querying, and it carries no
+/// data to caveat.
+fn contains_ask_fence(reply: &str) -> bool {
+    reply.lines().any(|line| {
+        let t = line.trim_start();
+        let fence = match t.bytes().next() {
+            Some(c @ (b'`' | b'~')) => c,
+            _ => return false,
+        };
+        let run = t.bytes().take_while(|&b| b == fence).count();
+        run >= 3 && t[run..].trim().eq_ignore_ascii_case("ask")
+    })
+}
+
+/// Cap on declared plan items / their length — the plan is a working note the
+/// platform repeats back each round, not a place to store an essay.
+const PLAN_MAX_ITEMS: usize = 6;
+const PLAN_ITEM_MAX_CHARS: usize = 160;
+
+/// The numbered plan a reply declared under a line-anchored `PLAN:` — the
+/// query-decomposition step for multi-part questions. Returns the normalised
+/// item lines, or `None` when the reply declared none.
+fn extract_plan(reply: &str) -> Option<String> {
+    let mut found = false;
+    let mut items: Vec<String> = Vec::new();
+    for line in reply.lines() {
+        let t = line.trim();
+        if !found {
+            if let Some(rest) = t
+                .get(..5)
+                .filter(|head| head.eq_ignore_ascii_case("PLAN:"))
+                .map(|_| t[5..].trim())
+            {
+                found = true;
+                if !rest.is_empty() {
+                    items.push(truncate(rest, PLAN_ITEM_MAX_CHARS));
+                }
+            }
+            continue;
+        }
+        let is_item = t
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit() || c == '-' || c == '*')
+            .unwrap_or(false);
+        if !is_item {
+            break;
+        }
+        items.push(truncate(t, PLAN_ITEM_MAX_CHARS));
+        if items.len() >= PLAN_MAX_ITEMS {
+            break;
+        }
+    }
+    (found && !items.is_empty()).then(|| items.join("\n"))
+}
+
+/// Remove a `PLAN:` block from a final answer — the plan is retrieval-loop
+/// working state, already mirrored in the follow-up prompts, and showing it to
+/// the user reads as unfinished scratch work.
+fn strip_plan_block(reply: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_plan = false;
+    for line in reply.lines() {
+        let t = line.trim();
+        if !in_plan {
+            if t.get(..5)
+                .map(|head| head.eq_ignore_ascii_case("PLAN:"))
+                .unwrap_or(false)
+            {
+                in_plan = true;
+                continue;
+            }
+            out.push(line);
+            continue;
+        }
+        let is_item = t
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit() || c == '-' || c == '*')
+            .unwrap_or(false);
+        if is_item {
+            continue;
+        }
+        in_plan = false;
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
+}
+
 /// How much prose may surround a post-loop directive before the reply counts as
 /// a final answer rather than a bare query request.
 const BARE_DIRECTIVE_MAX_PROSE_CHARS: usize = 80;
@@ -3968,9 +4651,10 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        all_retrievals_empty, caps_for_window, context_from_models_payload,
-        context_from_ollama_show, graph_vocab_summary, iri_occurs_blocking, is_ollama_show_payload,
-        locate_iris_blocking, mentioned_iris, render_models_section, salient_terms,
+        all_retrievals_empty, caps_for_window, contains_ask_fence, context_from_models_payload,
+        context_from_ollama_show, extract_plan, extract_tool_calls, graph_vocab_summary,
+        iri_occurs_blocking, is_ollama_show_payload, locate_iris_blocking, mentioned_iris,
+        render_models_section, salient_terms, strip_plan_block,
     };
     use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
@@ -4101,12 +4785,16 @@ mod tests {
     #[test]
     fn fence_scan_skips_non_sparql_and_non_query_blocks() {
         // A chart widget must never be mistaken for a query request.
-        let widgets = "```chart\n{\"type\":\"bar\",\"data\":[]}\n```\n\n```json\n{\"a\":1}\n```";
+        let widgets = "```chart\n{\"type\":\"bar\",\"data\":[]}
+```\n\n```json\n{\"a\":1}
+```";
         assert!(first_sparql_fence(widgets).is_none());
         // A sparql fence holding an update is not a read query.
         assert!(first_sparql_fence("```sparql\nDROP GRAPH <urn:g>\n```").is_none());
         // The first *query* fence wins, even behind another language's block.
-        let mixed = "```json\n{}\n```\n```sparql\nASK { ?s ?p ?o }\n```";
+        let mixed = "```json\n{}
+```\n```sparql\nASK { ?s ?p ?o }
+```";
         assert_eq!(
             first_sparql_fence(mixed).as_deref(),
             Some("ASK { ?s ?p ?o }")
@@ -4117,7 +4805,9 @@ mod tests {
 
     #[test]
     fn directive_still_wins_over_a_fence() {
-        let reply = "SPARQL:\nSELECT ?a WHERE { ?a ?b ?c }\n\n```sparql\nASK { ?s ?p ?o }\n```";
+        let reply = "SPARQL:\nSELECT ?a WHERE { ?a ?b ?c }
+\n```sparql\nASK { ?s ?p ?o }
+```";
         assert_eq!(
             extract_query_request(reply, true).as_deref(),
             Some("SELECT ?a WHERE { ?a ?b ?c }")
@@ -4137,24 +4827,60 @@ mod tests {
 
     #[test]
     fn ungrounded_widgets_get_flagged_but_grounded_or_plain_answers_do_not() {
-        assert!(widgets_without_retrieval("```map\n{}\n```", &[]));
-        assert!(widgets_without_retrieval("```chart\n{}\n```", &[]));
+        assert!(widgets_without_retrieval(
+            "```map\n{}
+```",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "```chart\n{}
+```",
+            &[]
+        ));
         // A successful run this turn grounds the widget.
-        assert!(!widgets_without_retrieval("```map\n{}\n```", &[ok_run()]));
+        assert!(!widgets_without_retrieval(
+            "```map\n{}
+```",
+            &[ok_run()]
+        ));
         // Prose and non-data fences never get the caveat.
         assert!(!widgets_without_retrieval("plain prose", &[]));
-        assert!(!widgets_without_retrieval("```sparql\nASK {}\n```", &[]));
+        assert!(!widgets_without_retrieval(
+            "```sparql\nASK {}
+```",
+            &[]
+        ));
     }
 
     #[test]
     fn widget_fence_variants_the_frontend_renders_are_detected() {
         // The frontend (chatRich.js) also renders ~~~ fences, leading
         // whitespace, a space before the tag, and the geo/infocard aliases.
-        assert!(widgets_without_retrieval("```geo\n{}\n```", &[]));
-        assert!(widgets_without_retrieval("~~~chart\n{}\n~~~", &[]));
-        assert!(widgets_without_retrieval("  ``` map\n{}\n```", &[]));
-        assert!(widgets_without_retrieval("````infocard\n{}\n````", &[]));
-        assert!(widgets_without_retrieval("```info-card\n{}\n```", &[]));
+        assert!(widgets_without_retrieval(
+            "```geo\n{}
+```",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "~~~chart\n{}
+~~~",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "  ``` map\n{}
+```",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "````infocard\n{}
+````",
+            &[]
+        ));
+        assert!(widgets_without_retrieval(
+            "```info-card\n{}
+```",
+            &[]
+        ));
         // A tag that merely starts with a widget name is not a widget fence.
         assert!(!widgets_without_retrieval("```chartreuse\ncode\n```", &[]));
         // Two characters are not a fence.
@@ -4248,7 +4974,8 @@ mod tests {
     fn repairs_limit_written_inside_the_where_block() {
         // The exact shape a small model produces when told to always add a LIMIT.
         let broken = "SELECT ?g ?s ?p ?o\nWHERE {\n  GRAPH ?g {\n    ?s ?p ?o\n    \
-                      FILTER (STR(?s) = \"AB-12-345-C\" )\n  }\nLIMIT 50\n}";
+                      FILTER (STR(?s) = \"AB-12-345-C\" )\n  }
+LIMIT 50\n}";
         assert!(validate_sparql(broken).is_err());
         let fixed = repair_sparql(broken.to_string());
         assert!(validate_sparql(&fixed).is_ok(), "repaired query must parse");
@@ -4356,7 +5083,8 @@ mod tests {
         // the first prose word — every counting question burned all its rounds
         // this way.
         let with_prose = "SELECT (COUNT(?s) AS ?triplesCount) WHERE { \
-                          GRAPH <https://x.org/g> { ?s ?p ?o } }\n\n\
+                          GRAPH <https://x.org/g> { ?s ?p ?o } }
+\n\
                           This query counts the number of triples in the dataset.";
         let repaired = repair_sparql(with_prose.to_string());
         assert!(
@@ -4368,7 +5096,8 @@ mod tests {
 
         // Prose directly attached (no blank line) is cut just the same — the
         // parser's error position, not paragraph structure, decides the cut.
-        let attached = "ASK { ?s ?p ?o }\nThe pattern above checks whether any triple exists.";
+        let attached = "ASK { ?s ?p ?o }
+The pattern above checks whether any triple exists.";
         let repaired = repair_sparql(attached.to_string());
         assert_eq!(repaired, "ASK { ?s ?p ?o }");
 
@@ -4379,8 +5108,11 @@ mod tests {
 
     #[test]
     fn extracts_sparql_directive_with_fence() {
-        let q = extract_sparql_directive("SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```")
-            .expect("should detect a query");
+        let q = extract_sparql_directive(
+            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }
+```",
+        )
+        .expect("should detect a query");
         assert_eq!(q, "SELECT * WHERE { ?s ?p ?o }");
     }
 
@@ -4416,7 +5148,8 @@ mod tests {
     #[test]
     fn bare_directive_is_demoted_post_loop() {
         assert!(is_bare_sparql_directive(
-            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }\n```"
+            "SPARQL:\n```sparql\nSELECT * WHERE { ?s ?p ?o }
+```"
         ));
         assert!(is_bare_sparql_directive(
             "SPARQL: SELECT * WHERE { ?s ?p ?o }"
@@ -4429,7 +5162,8 @@ mod tests {
         // a final answer with substantial prose around it must not be demoted.
         let reply = "I could not run the query because the graph IRI was wrong. \
                      Here is a corrected version you can run yourself:\n\
-                     SPARQL:\n```sparql\nSELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }\n```\n\
+                     SPARQL:\n```sparql\nSELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }
+```\n\
                      It selects every triple in the graph you asked about.";
         assert!(!is_bare_sparql_directive(reply));
         // Plain prose (no directive at all) is never demoted either.
@@ -4457,7 +5191,10 @@ mod tests {
     #[test]
     fn strips_sparql_fence() {
         assert_eq!(
-            strip_code_fence("```sparql\nSELECT * WHERE { ?s ?p ?o }\n```"),
+            strip_code_fence(
+                "```sparql\nSELECT * WHERE { ?s ?p ?o }
+```"
+            ),
             "SELECT * WHERE { ?s ?p ?o }"
         );
     }
@@ -4469,7 +5206,13 @@ mod tests {
 
     #[test]
     fn strips_bare_fence_without_lang() {
-        assert_eq!(strip_code_fence("```\nASK {}\n```"), "ASK {}");
+        assert_eq!(
+            strip_code_fence(
+                "```\nASK {}
+```"
+            ),
+            "ASK {}"
+        );
     }
 
     #[test]
@@ -4478,12 +5221,16 @@ mod tests {
         // directive payload unfenced with a stray closing ``` after it — seen
         // live with qwen2.5:7b. The fence and trailing prose are not query text.
         assert_eq!(
-            strip_code_fence("SELECT ?x WHERE {}\n```\nYou can run this yourself."),
+            strip_code_fence(
+                "SELECT ?x WHERE {}
+```\nYou can run this yourself."
+            ),
             "SELECT ?x WHERE {}"
         );
         // Same for the extraction entry point.
         let q = extract_sparql_directive(
-            "SPARQL:\nSELECT ?x WHERE {}\n```\nYou can run this yourself.",
+            "SPARQL:\nSELECT ?x WHERE {}
+```\nYou can run this yourself.",
         )
         .expect("query before the fence is extracted");
         assert_eq!(q, "SELECT ?x WHERE {}");
@@ -4494,14 +5241,18 @@ mod tests {
         // rfind would span into a SECOND fenced block; the query ends at the
         // first closing fence.
         assert_eq!(
-            strip_code_fence("```sparql\nASK {}\n```\nand also:\n```python\nx = 1\n```"),
+            strip_code_fence(
+                "```sparql\nASK {}
+```\nand also:\n```python\nx = 1\n```"
+            ),
             "ASK {}"
         );
     }
 
     #[test]
     fn unfenced_directive_with_trailing_prose_after_fence_is_not_bare() {
-        let reply = "SPARQL:\nSELECT * WHERE { ?s ?p ?o }\n```\nThis long trailing \
+        let reply = "SPARQL:\nSELECT * WHERE { ?s ?p ?o }
+```\nThis long trailing \
                      explanation describes the query in detail and is clearly a real \
                      answer for the user rather than a bare execution directive.";
         assert!(!is_bare_sparql_directive(reply));
@@ -4727,6 +5478,8 @@ mod tests {
                 owner_id: None,
                 graph_iri: Some("urn:model:beheer".into()),
                 version: Some("1.0.0".into()),
+                draft_graph_iri: Some("urn:model:beheer-draft".into()),
+                draft_version: Some("1.1.0".into()),
             },
             ModelContextEntry {
                 title: "Private".into(),
@@ -4737,14 +5490,29 @@ mod tests {
                 owner_id: None,
                 graph_iri: Some("urn:model:private".into()),
                 version: None,
+                draft_graph_iri: None,
+                draft_version: None,
             },
         ];
-        let in_scope = vec!["urn:model:beheer".to_string()];
+        let in_scope = vec![
+            "urn:model:beheer".to_string(),
+            "urn:model:beheer-draft".to_string(),
+        ];
         let section = render_models_section(&entries, &in_scope);
         assert!(
             section.contains("\"Beheerstandaard\" (vocabulary, namespace https://data.example.nl/def/beheer#) — definitions in graph <urn:model:beheer> (version 1.0.0)"),
             "readable model must name its graph: {section}"
         );
+        assert!(
+            section.contains(
+                "; unpublished draft in graph <urn:model:beheer-draft> (draft 1.1.0) — when \
+                 both could answer, ask the user which to use"
+            ),
+            "an in-scope draft is offered as an explicit choice: {section}"
+        );
+        // Out-of-scope drafts stay invisible.
+        let published_only = render_models_section(&entries, &["urn:model:beheer".to_string()]);
+        assert!(!published_only.contains("unpublished draft"));
         assert!(
             section.contains("\"Private\" (data-model, namespace https://ex.org/def#) — no published version readable to you"),
             "unreadable graph must not be offered for querying: {section}"
@@ -4859,5 +5627,88 @@ mod tests {
             !abox.contains("DEFINES terms"),
             "instance data must not claim to define terms: {abox}"
         );
+    }
+
+    // ─── Agent tools: plan, ask, native tool calls ─────────────────────────────
+
+    #[test]
+    fn plans_are_extracted_tracked_and_stripped() {
+        let reply = "PLAN:\n1. tel de bruggen\n2. vind het zeldzame object\nSPARQL:\nSELECT ?s WHERE { ?s ?p ?o }";
+        assert_eq!(
+            extract_plan(reply).as_deref(),
+            Some("1. tel de bruggen\n2. vind het zeldzame object")
+        );
+        // Same-line first item, dash items, and the cap.
+        let inline = "PLAN: count things\n- deel twee\nrest of prose";
+        assert_eq!(
+            extract_plan(inline).as_deref(),
+            Some("count things\n- deel twee")
+        );
+        assert_eq!(extract_plan("no plan here"), None);
+        assert_eq!(extract_plan("PLAN:\nprose, not a list"), None);
+        let many = format!(
+            "PLAN:\n{}",
+            (1..=9)
+                .map(|i| format!("{i}. x"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(
+            extract_plan(&many).unwrap().lines().count(),
+            6,
+            "capped at six items"
+        );
+
+        let stripped = strip_plan_block("Answer intro.\nPLAN:\n1. a\n2. b\nThe real answer.");
+        assert_eq!(stripped, "Answer intro.\nThe real answer.");
+        assert_eq!(strip_plan_block("plain answer"), "plain answer");
+    }
+
+    #[test]
+    fn ask_fences_are_recognised_as_complete_replies() {
+        assert!(contains_ask_fence(
+            "Which one?\n```ask\n{\"question\":\"?\",\"options\":[\"a\"]}
+```"
+        ));
+        assert!(
+            contains_ask_fence(
+                "~~~ASK\n{}
+~~~"
+            ),
+            "tildes and case are fine"
+        );
+        assert!(
+            !contains_ask_fence(
+                "```sparql\nASK { ?s ?p ?o }
+```"
+            ),
+            "a SPARQL ASK is not an ask card"
+        );
+        assert!(!contains_ask_fence("plain prose about asking"));
+    }
+
+    #[test]
+    fn tool_calls_parse_from_openai_and_lenient_shapes() {
+        // Spec shape: arguments is a JSON *string*.
+        let m = json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "run_sparql", "arguments": "{\"query\":\"ASK { ?s ?p ?o }\"}"}}
+        ]});
+        let calls = extract_tool_calls(&m);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "run_sparql");
+        assert_eq!(calls[0].arguments["query"], "ASK { ?s ?p ?o }");
+        // Lenient shape: a gateway that inlines the arguments object.
+        let inline = json!({"tool_calls": [
+            {"id": "c2", "function": {"name": "text_search", "arguments": {"query": "waalbrug"}}}
+        ]});
+        assert_eq!(
+            extract_tool_calls(&inline)[0].arguments["query"],
+            "waalbrug"
+        );
+        // No calls, malformed entries: empty, never a panic.
+        assert!(extract_tool_calls(&json!({"content": "hi"})).is_empty());
+        assert!(extract_tool_calls(&json!({"tool_calls": [{"id": "x"}]})).is_empty());
     }
 }

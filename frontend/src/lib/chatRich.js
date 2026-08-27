@@ -29,6 +29,7 @@ const MAX_CHART_POINTS = 100;
 const MAX_MAP_FEATURES = 200;
 const MAX_CARD_FACTS = 24;
 const MAX_CSV_ROWS = 500;
+const MAX_ASK_OPTIONS = 5;
 const MAX_3D_MODELS = 8;
 
 /**
@@ -138,9 +139,41 @@ function specialSegment(lang, body, queryRows = null) {
       const t = parseCsv(code);
       return t.columns.length ? { kind: 'csv', ...t, raw: code } : null;
     }
+    // ask fires on the explicit fence tag only — it renders as clickable
+    // choice buttons, so untagged JSON must never accidentally become one.
+    case 'ask': {
+      const r = parseAskSpec(code);
+      return r.error
+        ? { kind: 'broken', label: 'ask', error: r.error, raw: code }
+        : { kind: 'ask', ask: r.ask };
+    }
     default:
       return null;
   }
+}
+
+/**
+ * Parse an ```ask widget: a question the assistant hands back to the user,
+ * with clickable options whose click is sent as the next user message.
+ * @returns {{ask: {question: string, options: string[]}} | {error: string}}
+ */
+export function parseAskSpec(text) {
+  let spec;
+  try {
+    spec = JSON.parse(text);
+  } catch {
+    return { error: 'invalid JSON' };
+  }
+  const question = typeof spec?.question === 'string' ? spec.question.trim() : '';
+  if (!question) return { error: 'missing "question"' };
+  const options = Array.isArray(spec.options)
+    ? spec.options
+        .filter((o) => typeof o === 'string' && o.trim())
+        .map((o) => o.trim().slice(0, 160))
+        .slice(0, MAX_ASK_OPTIONS)
+    : [];
+  if (!options.length) return { error: 'missing "options"' };
+  return { ask: { question: question.slice(0, 500), options } };
 }
 
 /** Best-effort language sniff for fences the model forgot to tag. */
