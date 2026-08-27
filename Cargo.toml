@@ -240,7 +240,7 @@ sfcgal = { version = "0.8", optional = true }
 
 # RML mapping sources
 csv = "1"
-quick-xml = "0.41"
+quick-xml = "0.42"
 
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"
