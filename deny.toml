@@ -18,6 +18,12 @@ ignore = [
     # the next Oxigraph bump.
     "RUSTSEC-2026-0194",  # quick-xml — quadratic duplicate-attribute check (via oxigraph)
     "RUSTSEC-2026-0195",  # quick-xml — NsReader namespace-decl memory-exhaustion (via oxigraph)
+    # lru < 0.18.2 unsound advisory (panic-safety in LruCache::pop). The vulnerable
+    # 0.16 line is pinned transitively by aws-sdk-s3, so bumping our own direct `lru`
+    # dep would leave the SDK's copy in the tree and the advisory can't clear until
+    # the AWS SDK upgrades. Our own uses never pop from inside code that can panic
+    # mid-callback. Revisit on the next aws-sdk bump.
+    "RUSTSEC-2026-0253",  # lru — potential use-after-free on panic in pop() (via aws-sdk-s3)
 ]
 
 [bans]
