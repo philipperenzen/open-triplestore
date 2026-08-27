@@ -33,6 +33,9 @@ use open_triplestore::server::AppState;
 struct Gateway {
     scripts: Mutex<VecDeque<String>>,
     prompts: Mutex<Vec<Value>>,
+    /// What `GET /v1/models` answers (404 when `None`) — lets a test advertise
+    /// a context window the way vLLM does, to drive the server's detection.
+    models_payload: Mutex<Option<Value>>,
 }
 
 async fn completions(State(gw): State<&'static Gateway>, Json(body): Json<Value>) -> Json<Value> {
@@ -46,6 +49,14 @@ async fn completions(State(gw): State<&'static Gateway>, Json(body): Json<Value>
     Json(json!({"choices": [{"message": {"content": reply}}]}))
 }
 
+async fn models(State(gw): State<&'static Gateway>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match gw.models_payload.lock().unwrap().clone() {
+        Some(v) => Json(v).into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Start the gateway once for the whole test binary (on its own runtime thread,
 /// so it outlives every per-test tokio runtime) and point `LLM_GATEWAY_URL` at
 /// it before any request is made.
@@ -55,6 +66,7 @@ fn gateway() -> &'static Gateway {
         let gw: &'static Gateway = Box::leak(Box::new(Gateway {
             scripts: Mutex::new(VecDeque::new()),
             prompts: Mutex::new(Vec::new()),
+            models_payload: Mutex::new(None),
         }));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -64,6 +76,7 @@ fn gateway() -> &'static Gateway {
                 tx.send(listener.local_addr().unwrap()).unwrap();
                 let app = Router::new()
                     .route("/v1/chat/completions", post(completions))
+                    .route("/v1/models", axum::routing::get(models))
                     .with_state(gw);
                 axum::serve(listener, app).await.unwrap();
             });
@@ -75,10 +88,12 @@ fn gateway() -> &'static Gateway {
 }
 
 /// One lock serialises the tests: they share the gateway's script queue and
-/// the process environment.
-fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+/// the process environment. Async (tokio) on purpose — the guard is held
+/// across the whole turn's awaits, which a std `MutexGuard` must never be
+/// (clippy `await_holding_lock`, and a panicked test would poison it).
+async fn test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
 }
 
 fn script(gw: &Gateway, replies: &[&str]) {
@@ -86,6 +101,7 @@ fn script(gw: &Gateway, replies: &[&str]) {
     s.clear();
     *s = replies.iter().map(|r| r.to_string()).collect();
     gw.prompts.lock().unwrap().clear();
+    *gw.models_payload.lock().unwrap() = None;
 }
 
 // ─── Platform fixture ──────────────────────────────────────────────────────────
@@ -168,8 +184,13 @@ fn seed_platform(state: &AppState) {
         "2026-08-27T00:00:00Z",
     )
     .unwrap();
-    registry::set_data_model_kind(&state.store, BASE, "bruggenstandaard", RegistryKind::Vocabulary)
-        .unwrap();
+    registry::set_data_model_kind(
+        &state.store,
+        BASE,
+        "bruggenstandaard",
+        RegistryKind::Vocabulary,
+    )
+    .unwrap();
     registry::insert_version(
         &state.store,
         BASE,
@@ -206,6 +227,25 @@ async fn chat_turn(state: AppState, token: &str, question: &str) -> Value {
     common::body_json(resp.into_body()).await
 }
 
+/// Like [`chat_turn`], with a request-level model override — model names key
+/// the server's per-gateway context-window cache, so a test that advertises a
+/// window uses its own model name and stays isolated from the other tests.
+async fn chat_turn_as_model(state: AppState, token: &str, model: &str, question: &str) -> Value {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/llm/chat")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(
+            json!({"messages": [{"role": "user", "content": question}], "model": model})
+                .to_string(),
+        ))
+        .unwrap();
+    let resp = common::test_app(state).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200, "chat turn must succeed");
+    common::body_json(resp.into_body()).await
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
 /// The system prompt must orient the model on what the question names: the
@@ -215,7 +255,7 @@ async fn chat_turn(state: AppState, token: &str, question: &str) -> Value {
 /// invented namespaces.
 #[tokio::test]
 async fn prompt_carries_registered_models_and_pasted_iri_locations() {
-    let _serial = test_lock();
+    let _serial = test_lock().await;
     let gw = gateway();
     script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
     let (state, token) = common::admin_state();
@@ -258,7 +298,7 @@ async fn prompt_carries_registered_models_and_pasted_iri_locations() {
 /// burned every retrieval round on false "does not exist" errors.
 #[tokio::test]
 async fn invented_iris_fail_fast_while_real_unsampled_iris_run() {
-    let _serial = test_lock();
+    let _serial = test_lock().await;
     let gw = gateway();
     script(
         gw,
@@ -298,7 +338,7 @@ async fn invented_iris_fail_fast_while_real_unsampled_iris_run() {
 /// IRI up.
 #[tokio::test]
 async fn pasted_iris_are_exempt_from_the_invented_iri_check() {
-    let _serial = test_lock();
+    let _serial = test_lock().await;
     let gw = gateway();
     script(
         gw,
@@ -323,5 +363,86 @@ async fn pasted_iris_are_exempt_from_the_invented_iri_check() {
         "a pasted IRI must run to an honest empty result, not an error: {queries:?}"
     );
     assert_eq!(queries[0]["rows"].as_array().unwrap().len(), 0);
-    assert_eq!(resp["answer"], "Daar is niets over te vinden.");
+    // An all-empty turn additionally carries the mechanical epistemic caveat —
+    // small models upgrade "not found" to "does not exist" no matter what the
+    // instructions say, so the platform states the status itself.
+    let answer = resp["answer"].as_str().unwrap();
+    assert!(
+        answer.starts_with("Daar is niets over te vinden."),
+        "the model's own answer must be kept: {answer}"
+    );
+    assert!(
+        answer.contains("not proof it does not exist"),
+        "an all-empty turn must carry the not-found caveat: {answer}"
+    );
+}
+
+/// With a context window the gateway itself advertises (vLLM-style
+/// `max_model_len` on `/v1/models`) and no `LLM_CONTEXT_TOKENS` declared, the
+/// server budgets the prompt to it: a window far too small for the vocabulary
+/// section drops that section, while the question-specific orientation
+/// survives. Uses its own model name — detection results are cached per
+/// gateway+model.
+#[tokio::test]
+async fn advertised_context_window_drives_prompt_budgeting() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    *gw.models_payload.lock().unwrap() =
+        Some(json!({"data": [{"id": "tiny-window", "max_model_len": 900}]}));
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn_as_model(
+        state,
+        &token,
+        "tiny-window",
+        "Wat weet je over http://ex.org/id/b1 ?",
+    )
+    .await;
+    assert_eq!(resp["answer"], "Dat is Brug 1.");
+
+    let prompts = gw.prompts.lock().unwrap();
+    let system = prompts[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        !system.contains("## Graph vocabulary"),
+        "a 900-token window cannot hold the vocabulary section: {}",
+        &system[..system.len().min(400)]
+    );
+    assert!(
+        system.contains("# WHERE THIS CONVERSATION'S NAMES OCCUR"),
+        "question-specific orientation survives the budget drop"
+    );
+}
+
+/// `LLM_CHAT_MAX_ROUNDS` caps the retrieval loop: with one round, a model that
+/// keeps demanding queries gets the deterministic fallback answer built from
+/// what round 1 retrieved, and only one query is recorded.
+#[tokio::test]
+async fn round_budget_knob_caps_the_retrieval_loop() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(
+        gw,
+        &[
+            "SPARQL:\nSELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }",
+            "SPARQL:\nSELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Zeldzaam> } }",
+        ],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    std::env::set_var("LLM_CHAT_MAX_ROUNDS", "1");
+    let resp = chat_turn(state, &token, "Welke bruggen zijn er?").await;
+    std::env::remove_var("LLM_CHAT_MAX_ROUNDS");
+
+    let queries = resp["queries"].as_array().unwrap();
+    assert_eq!(queries.len(), 1, "one round allowed: {queries:?}");
+    assert_eq!(queries[0]["ok"], true);
+    assert_eq!(queries[0]["rows"].as_array().unwrap().len(), 3);
+    let answer = resp["answer"].as_str().unwrap();
+    assert!(
+        answer.starts_with("Here is what the query returned"),
+        "a bare directive past the budget falls back to the retrieved data: {answer}"
+    );
 }

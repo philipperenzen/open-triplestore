@@ -613,6 +613,13 @@ pub struct LlmHealth {
     rate_limit_anon_per_min: u32,
     /// The budget that applies to THIS caller: "user" or "guest".
     caller: &'static str,
+    /// The model Spark chat completions use (`LLM_CHAT_MODEL` → `LLM_MODEL`).
+    chat_model: String,
+    /// The context window the chat budgets its prompt against: the declared
+    /// `LLM_CONTEXT_TOKENS`, else a best-effort probe of the gateway (vLLM
+    /// `max_model_len`, Ollama Modelfile `num_ctx`). `null` = no budgeting —
+    /// fine for large-context hosted APIs, risky on local runtimes.
+    context_tokens: Option<usize>,
 }
 
 /// GET /api/llm/health — is an LLM endpoint reachable from this server?
@@ -626,6 +633,8 @@ async fn llm_health(
     let gateway = gateway_base();
     let base = gateway.trim_end_matches('/');
     let cfg = llm_guard::config();
+    let chat_model = chat_model();
+    let context_tokens = resolve_context_tokens(&chat_model).await;
     let limits = |reachable: bool, detail: Option<Value>| LlmHealth {
         gateway: gateway.clone(),
         reachable,
@@ -633,6 +642,8 @@ async fn llm_health(
         rate_limit_per_min: cfg.rate_per_min,
         rate_limit_anon_per_min: cfg.rate_per_min_anon,
         caller: if user.is_some() { "user" } else { "guest" },
+        chat_model: chat_model.clone(),
+        context_tokens,
     };
     let client = http();
     for path in ["/v1/models", "/health"] {
@@ -1204,6 +1215,148 @@ fn llm_context_tokens() -> Option<usize> {
         .filter(|&n| n > 0)
 }
 
+/// How many `SPARQL:` rounds one turn may use (`LLM_CHAT_MAX_ROUNDS`, default
+/// [`MAX_CHAT_QUERY_ROUNDS`], clamped 1..=8). Three is right for a small local
+/// model — more rounds mostly buy more failed repairs — but a capable model
+/// answering multi-part questions (labels + relations + counts across two
+/// vocabularies) makes good use of four or five.
+fn chat_max_rounds() -> usize {
+    env_nonempty("LLM_CHAT_MAX_ROUNDS")
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.clamp(1, 8))
+        .unwrap_or(MAX_CHAT_QUERY_ROUNDS)
+}
+
+/// Per-round query cap in seconds (`LLM_CHAT_QUERY_MAX_SECS`, default
+/// [`CHAT_QUERY_MAX_SECS`], clamped 5..=600). The effective bound is the
+/// smaller of this and the endpoint's own query timeout — see
+/// [`run_chat_query_timed`] for why chat rounds get a tighter cap than the
+/// SPARQL endpoint. Raise it on instances where legitimate analytical
+/// questions (property paths over a large ontology) need more than 30s.
+fn chat_query_max_secs() -> u64 {
+    env_nonempty("LLM_CHAT_QUERY_MAX_SECS")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|n| n.clamp(5, 600))
+        .unwrap_or(CHAT_QUERY_MAX_SECS)
+}
+
+// ─── Context-window discovery ──────────────────────────────────────────────────
+//
+// `LLM_CONTEXT_TOKENS` is the single most consequential knob on a local
+// runtime, and the one operators forget: without it the runtime truncates an
+// over-long prompt from the top — deleting the execution protocol — and the
+// failure reads as "the assistant fabricates". When it is unset, ask the
+// gateway itself, best-effort: vLLM publishes `max_model_len` on `/v1/models`,
+// and Ollama's native `/api/show` reveals a Modelfile `num_ctx`. Detection can
+// only ever *enable* budgeting that would otherwise be off, and a declared
+// `LLM_CONTEXT_TOKENS` always wins.
+
+/// The window advertised for `model` in an OpenAI-style `/v1/models` payload.
+/// vLLM ships `max_model_len`; some gateways use `context_window` /
+/// `context_length`. Falls back to the sole entry when the id doesn't match
+/// (single-model servers often serve under an alias).
+fn context_from_models_payload(v: &Value, model: &str) -> Option<usize> {
+    let data = v.get("data")?.as_array()?;
+    let entry = data
+        .iter()
+        .find(|e| e["id"].as_str() == Some(model))
+        .or_else(|| if data.len() == 1 { data.first() } else { None })?;
+    ["max_model_len", "context_window", "context_length"]
+        .iter()
+        .find_map(|k| entry.get(*k).and_then(Value::as_u64))
+        .map(|n| n as usize)
+}
+
+/// The serving context of an Ollama `/api/show` response: a Modelfile
+/// `num_ctx` when declared, else Ollama's own default of 4096. The server-side
+/// `OLLAMA_CONTEXT_LENGTH` override is invisible over the API, so an operator
+/// who raised it should declare `LLM_CONTEXT_TOKENS` — budgeting to the 4096
+/// floor merely trims more than needed, where assuming "unlimited" reinstates
+/// silent protocol truncation. Returns `None` for payloads that don't look
+/// like an Ollama show response at all.
+fn context_from_ollama_show(v: &Value) -> Option<usize> {
+    if let Some(params) = v["parameters"].as_str() {
+        for line in params.lines() {
+            let mut it = line.split_whitespace();
+            if it.next() == Some("num_ctx") {
+                if let Some(n) = it.next().and_then(|s| s.parse::<usize>().ok()) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    ["model_info", "modelfile", "details"]
+        .iter()
+        .any(|k| v.get(*k).is_some())
+        .then_some(4096)
+}
+
+/// Detected windows per `gateway|model`, probed once and remembered (including
+/// "nothing detectable", so hosted APIs are not probed on every turn).
+fn detected_ctx_cache() -> &'static Mutex<HashMap<String, Option<usize>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<usize>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn detect_context_tokens(base: &str, model: &str) -> Option<usize> {
+    let mut rb = http()
+        .get(format!("{base}/v1/models"))
+        .timeout(Duration::from_secs(3));
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    if let Ok(resp) = rb.send().await {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<Value>().await {
+                if let Some(n) = context_from_models_payload(&v, model) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    // Ollama's native API lives on the same origin as its OpenAI compat layer.
+    // Both body keys on purpose: newer Ollama reads `model`, older `name`.
+    let mut rb = http()
+        .post(format!("{base}/api/show"))
+        .json(&json!({"model": model, "name": model}))
+        .timeout(Duration::from_secs(3));
+    if let Some(key) = api_key() {
+        rb = rb.bearer_auth(key);
+    }
+    if let Ok(resp) = rb.send().await {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<Value>().await {
+                return context_from_ollama_show(&v);
+            }
+        }
+    }
+    None
+}
+
+/// The context window to budget this turn against: the declared
+/// `LLM_CONTEXT_TOKENS` when set, else a cached best-effort probe of the
+/// gateway. `None` disables budgeting, exactly as before.
+async fn resolve_context_tokens(model: &str) -> Option<usize> {
+    if let Some(n) = llm_context_tokens() {
+        return Some(n);
+    }
+    let base = gateway_base().trim_end_matches('/').to_string();
+    let key = format!("{base}|{model}");
+    if let Some(cached) = detected_ctx_cache().lock().unwrap().get(&key) {
+        return *cached;
+    }
+    let detected = detect_context_tokens(&base, model).await;
+    if let Some(n) = detected {
+        tracing::info!(
+            model,
+            window = n,
+            "detected the LLM context window from the gateway"
+        );
+    }
+    detected_ctx_cache().lock().unwrap().insert(key, detected);
+    detected
+}
+
 /// Estimated token count for `s`. Deliberately conservative (≈3 chars/token):
 /// prompts here are dense with IRIs and tables, which tokenize far worse than
 /// prose, and over-estimating merely trims history a little sooner while
@@ -1677,7 +1830,12 @@ async fn run_chat_turn(
     let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
     let (context, service_lines) = build_platform_context(&state, user_id, &graph_list);
     let orientation = question_orientation(&state, &req.messages, &graph_list).await;
-    let vocab = graph_vocab_context(&state, &graph_list, &orientation.graphs).await;
+    // The effective context window steers both prompt budgeting and how wide
+    // the vocabulary sample may be — resolved once per turn (declared knob, or
+    // a cached gateway probe).
+    let window = resolve_context_tokens(&model).await;
+    let caps = caps_for_window(window);
+    let vocab = graph_vocab_context(&state, &graph_list, &orientation.graphs, caps).await;
     // Question-matched API services again, at the tail this time — the full
     // list is mid-prompt where small models lose it (see relevant_services_hint).
     let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
@@ -1705,7 +1863,7 @@ async fn run_chat_turn(
     // execution protocol — so an over-budget turn doesn't degrade, it flips into
     // confident fabrication. Better to forget last week's turns than the rules.
     let mut history: &[ChatMessage] = &req.messages;
-    if let Some(window) = llm_context_tokens() {
+    if let Some(window) = window {
         let budget = window.saturating_sub(CHAT_MAX_TOKENS as usize + CHAT_PROMPT_MARGIN);
         if estimate_tokens(&system_content) > budget && !vocab.is_empty() {
             // The vocabulary blocks are the largest elastic part of the system
@@ -1713,7 +1871,7 @@ async fn run_chat_turn(
             // window costs the protocol itself.
             tracing::warn!(
                 window,
-                "chat system prompt exceeds LLM_CONTEXT_TOKENS budget — dropping graph vocabulary"
+                "chat system prompt exceeds the context-window budget — dropping graph vocabulary"
             );
             // The orientation section and services hint survive the vocab
             // drop: both are tiny and answer the question the turn is
@@ -1733,6 +1891,15 @@ async fn run_chat_turn(
                 "chat history trimmed to fit the context window"
             );
         }
+    } else if estimate_tokens(&system_content) > 8_000 {
+        // No declared window and nothing detectable at the gateway, with a
+        // prompt big enough that a local runtime's silent top-truncation would
+        // delete the execution protocol. Say so where the operator can see it.
+        tracing::warn!(
+            prompt_tokens = estimate_tokens(&system_content),
+            "no LLM context window declared or detectable — a local runtime may \
+             truncate this prompt silently; set LLM_CONTEXT_TOKENS"
+        );
     }
 
     let mut msgs: Vec<Value> = Vec::with_capacity(history.len() + 1);
@@ -1794,7 +1961,8 @@ async fn run_chat_turn(
         };
     }
 
-    for round in 1..=MAX_CHAT_QUERY_ROUNDS {
+    let max_rounds = chat_max_rounds();
+    for round in 1..=max_rounds {
         // Before anything has been retrieved a fenced ```sparql block counts as a
         // request to run it; afterwards it is a query card the user is meant to see.
         let Some(query) = extract_query_request(&reply, runs.is_empty()) else {
@@ -1824,7 +1992,7 @@ async fn run_chat_turn(
             sparql: query.clone(),
         })
         .await;
-        let remaining = MAX_CHAT_QUERY_ROUNDS - round;
+        let remaining = max_rounds - round;
         // Reject invented vocabulary BEFORE running it. Such a query is valid
         // SPARQL and returns zero rows, which the model reports as absent data —
         // a false negative the user cannot tell from a true one. Failing it with
@@ -1884,19 +2052,33 @@ async fn run_chat_turn(
                     // model reliably falls into: an empty result from guessed
                     // vocabulary, and an aggregate of an unbound variable
                     // (every group counts 0).
-                    let hint = if rows_empty {
-                        "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
-                         the graph — or the graph is the wrong one. Re-check the WHERE THIS \
-                         CONVERSATION'S NAMES OCCUR and Registered models sections for the \
-                         right graph, build the pattern ONLY from exact IRIs in the Graph \
-                         vocabulary section, find entities by name with text:search (and use \
-                         COUNT(*), never COUNT of a variable that is not bound in the pattern)."
+                    let hint: String = if rows_empty {
+                        // Ground the repair in the queried graphs' REAL
+                        // vocabulary instead of exhortation: the prompt's
+                        // sampled section may not even include the graph this
+                        // query targeted.
+                        let queried = queried_graph_vocab(
+                            &state,
+                            &runs.last().map(|r| r.sparql.clone()).unwrap_or_default(),
+                            &graphs,
+                            caps,
+                        )
+                        .await;
+                        format!(
+                            "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
+                             the graph — or the graph is the wrong one. Re-check the WHERE THIS \
+                             CONVERSATION'S NAMES OCCUR and Registered models sections for the \
+                             right graph, find entities by name with text:search, and use \
+                             COUNT(*), never COUNT of a variable that is not bound in the \
+                             pattern.{queried}"
+                        )
                     } else if all_zero {
                         "\nHINT: every numeric value is 0 — that almost always means the \
                          aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
                          variable that is bound in the pattern, then retry."
+                            .to_string()
                     } else {
-                        ""
+                        String::new()
                     };
                     format!(
                         "Query results:\n{table}{hint}\nIf you still need different data, reply with \
@@ -1994,6 +2176,18 @@ async fn run_chat_turn(
              run a query to verify them.*",
         );
     }
+    // Every retrieval came back empty: whatever the model wrote, the honest
+    // reading is "not found", and a small model reliably upgrades that to
+    // "does not exist" no matter what the instructions say. State the
+    // epistemic status mechanically, in the same voice as the widget caveat.
+    // (A COUNT of zero or an ASK returning false produces a ROW, not an empty
+    // result, so real "the answer is zero/no" turns never get this.)
+    if all_retrievals_empty(&runs) {
+        reply.push_str(
+            "\n\n*No rows matched this turn's queries — the data was not found, \
+             which is not proof it does not exist.*",
+        );
+    }
 
     // Legacy single-query fields mirror the last successful round (or the last
     // attempt, so the UI can still offer "open in workspace" after a failure).
@@ -2019,6 +2213,19 @@ async fn run_chat_turn(
 /// i.e. the widget values cannot have come from the graphs.
 fn widgets_without_retrieval(answer: &str, runs: &[ChatQueryRun]) -> bool {
     answer.lines().any(opens_data_widget_fence) && !runs.iter().any(|r| r.ok)
+}
+
+/// True when at least one query ran this turn and EVERY successful one
+/// returned zero rows — the turn retrieved nothing at all.
+fn all_retrievals_empty(runs: &[ChatQueryRun]) -> bool {
+    let mut any = false;
+    for r in runs.iter().filter(|r| r.ok) {
+        any = true;
+        if r.rows.as_ref().is_none_or(|rows| !rows.is_empty()) {
+            return false;
+        }
+    }
+    any
 }
 
 /// Does this line open a data-widget fence? Mirrors the frontend fence grammar
@@ -2488,6 +2695,41 @@ fn relevant_services_hint(question: &str, services: &[String]) -> String {
 const VOCAB_GRAPH_LIMIT: usize = 12;
 const VOCAB_CLASS_LIMIT: usize = 8;
 const VOCAB_PRED_LIMIT: usize = 20;
+
+/// Vocabulary sampling caps for one turn. The defaults are sized for a small
+/// local window; a declared large window affords a wider keyhole.
+#[derive(Clone, Copy)]
+struct VocabCaps {
+    graphs: usize,
+    classes: usize,
+    predicates: usize,
+}
+
+/// Caps as a function of the effective context window. The sample is the
+/// biggest accuracy lever there is, and 8 classes + 20 predicates is a keyhole
+/// — but only a window that can actually HOLD a bigger sample should pay for
+/// one: over-filling a small window makes the budgeter drop the vocabulary
+/// section entirely, which is strictly worse than a small sample. The 32k
+/// threshold leaves a large-caps worst case (~16k estimated tokens of IRIs)
+/// comfortably inside the window next to the protocol, context and output
+/// budget. Deliberately NOT graduated further — the cache below stores
+/// rendered summaries per graph, so caps must be stable per process for
+/// prompts to stay deterministic.
+fn caps_for_window(window: Option<usize>) -> VocabCaps {
+    match window {
+        Some(w) if w >= 32_768 => VocabCaps {
+            graphs: 20,
+            classes: 16,
+            predicates: 32,
+        },
+        _ => VocabCaps {
+            graphs: VOCAB_GRAPH_LIMIT,
+            classes: VOCAB_CLASS_LIMIT,
+            predicates: VOCAB_PRED_LIMIT,
+        },
+    }
+}
+
 /// How long a sampled summary stays fresh. Vocabulary changes rarely; five
 /// minutes keeps chat turns from re-scanning while still tracking imports.
 const VOCAB_TTL: Duration = Duration::from_secs(300);
@@ -3058,11 +3300,104 @@ async fn question_orientation(
     }
 }
 
+/// One graph's cached vocabulary block, sampling on a cold cache — bounded by
+/// `deadline`, the summary cached for [`VOCAB_TTL`] either way. `None` when the
+/// deadline passed before the sample landed (the cost of an in-flight sample is
+/// already paid, so it is awaited and cached, mirroring the batch sampler).
+async fn graph_summary_cached(
+    state: &AppState,
+    graph: &str,
+    caps: VocabCaps,
+    deadline: Instant,
+) -> Option<String> {
+    if let Some((at, summary)) = vocab_cache().lock().unwrap().get(graph) {
+        if at.elapsed() < VOCAB_TTL {
+            return Some(summary.clone());
+        }
+    }
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let store = state.store.clone();
+    let g2 = graph.to_string();
+    let summary = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        tokio::task::spawn_blocking(move || {
+            graph_vocab_summary(&store, &g2, caps).unwrap_or_default()
+        }),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    vocab_cache()
+        .lock()
+        .unwrap()
+        .insert(graph.to_string(), (Instant::now(), summary.clone()));
+    Some(summary)
+}
+
+/// Time budget for enriching one zero-row repair hint with the queried graphs'
+/// real vocabulary — a human is mid-turn, so this stays well under the batch
+/// sampler's budget (and is usually a pure cache hit anyway).
+const QUERIED_VOCAB_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Vocabulary blocks for the graphs a zero-row query actually targeted, for
+/// the repair hint. The prompt's sampled section covers only `caps.graphs`
+/// graphs — the query may well have targeted one outside that window, and
+/// "re-read the vocabulary section" is then advice about a section that says
+/// nothing relevant. Sampling the queried graph on demand turns the hint into
+/// ground truth. Every `<iri>` in the query that is one of the caller's
+/// readable graphs is, in practice, a `GRAPH` target.
+async fn queried_graph_vocab(
+    state: &AppState,
+    query: &str,
+    in_scope: &HashSet<String>,
+    caps: VocabCaps,
+) -> String {
+    let mut targets: Vec<String> = Vec::new();
+    let mut rest = query;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start + 1..].find('>') else {
+            break;
+        };
+        let iri = &rest[start + 1..start + 1 + len];
+        rest = &rest[start + 1 + len + 1..];
+        if in_scope.contains(iri) && !targets.iter().any(|t| t == iri) {
+            targets.push(iri.to_string());
+            if targets.len() >= 2 {
+                break;
+            }
+        }
+    }
+    let deadline = Instant::now() + QUERIED_VOCAB_BUDGET;
+    let mut blocks: Vec<String> = Vec::new();
+    for g in &targets {
+        if let Some(s) = graph_summary_cached(state, g, caps, deadline).await {
+            if !s.is_empty() {
+                blocks.push(s);
+            }
+        }
+    }
+    if blocks.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nThe queried graph(s) actually contain:\n{}\nBuild the pattern ONLY from these \
+         IRIs, copied exactly.",
+        blocks.join("\n")
+    )
+}
+
 /// A prompt section listing sampled classes + predicates per in-scope graph
-/// (up to [`VOCAB_GRAPH_LIMIT`] graphs). Served from a TTL cache; cold graphs are
+/// (up to `caps.graphs`). Served from a TTL cache; cold graphs are
 /// sampled inside a strict time budget — on timeout the turn proceeds with
 /// whatever was sampled or already cached.
-async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[String]) -> String {
+async fn graph_vocab_context(
+    state: &AppState,
+    graphs: &[String],
+    evidence: &[String],
+    caps: VocabCaps,
+) -> String {
     // WHICH graphs get a slot matters as much as sampling them reliably. Taking
     // the first N in list order let a handful of huge derived layers (an IFC
     // import's ifcOWL lift is ~700k triples and dozens of graphs) consume every
@@ -3080,7 +3415,7 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
     // Graphs the text index proved contain something the question named go
     // FIRST — that is direct evidence of relevance, where size and list position
     // are only proxies.
-    let mentioned = graphs.len().min(VOCAB_GRAPH_LIMIT / 2);
+    let mentioned = graphs.len().min(caps.graphs / 2);
     let mut rest: Vec<&String> = graphs
         .iter()
         .skip(mentioned)
@@ -3105,7 +3440,7 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
                 .filter(|g| !evidence.contains(g)),
         )
         .chain(rest)
-        .take(VOCAB_GRAPH_LIMIT)
+        .take(caps.graphs)
         .collect();
     if wanted.is_empty() {
         return String::new();
@@ -3141,25 +3476,9 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
         let deadline = Instant::now() + VOCAB_TIME_BUDGET;
         missing.sort_by_key(|g| state.store.graph_count_cached(Some(g)));
         for g in missing {
-            if Instant::now() >= deadline {
-                break;
-            }
-            let store = state.store.clone();
-            let g2 = g.clone();
-            let Ok(Ok(summary)) = tokio::time::timeout(
-                deadline.saturating_duration_since(Instant::now()),
-                tokio::task::spawn_blocking(move || {
-                    graph_vocab_summary(&store, &g2).unwrap_or_default()
-                }),
-            )
-            .await
-            else {
+            let Some(summary) = graph_summary_cached(state, &g, caps, deadline).await else {
                 break;
             };
-            vocab_cache()
-                .lock()
-                .unwrap()
-                .insert(g.clone(), (Instant::now(), summary.clone()));
             summaries.insert(g, summary);
         }
     }
@@ -3178,9 +3497,23 @@ async fn graph_vocab_context(state: &AppState, graphs: &[String], evidence: &[St
     )
 }
 
+/// rdf:type OBJECTS that mark a graph as *defining* terms rather than holding
+/// instance data: a T-Box graph's `?s a ?x` sample yields these meta-classes,
+/// never the domain classes it defines (those sit in subject position). The
+/// distinction is exactly what the model needs when choosing between a
+/// definitions graph and an instance graph for a "what does X mean" question.
+const DEFINING_META_CLASSES: [&str; 6] = [
+    "http://www.w3.org/2002/07/owl#Class",
+    "http://www.w3.org/2000/01/rdf-schema#Class",
+    "http://www.w3.org/2002/07/owl#ObjectProperty",
+    "http://www.w3.org/2002/07/owl#DatatypeProperty",
+    "http://www.w3.org/2004/02/skos/core#Concept",
+    "http://www.w3.org/2004/02/skos/core#ConceptScheme",
+];
+
 /// Sample one graph's vocabulary into a summary block, or `None` when the graph
 /// yields nothing usable (empty, or unreadable).
-fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
+fn graph_vocab_summary(store: &TripleStore, graph: &str, caps: VocabCaps) -> Option<String> {
     // Frequency-ordered on purpose. The first cut took the first-N DISTINCT
     // IRIs in storage order — arbitrary — and on a graph with more predicates
     // than the cap it dropped exactly the ones questions hinge on (the BAG
@@ -3191,19 +3524,20 @@ fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
     // (dct:license on a root node) to the tail, which the cap then trims. The
     // GROUP BY runs against the in-memory mirror and is guarded by the
     // sampling time budget; results cache for VOCAB_TTL as before.
+    let (class_cap, pred_cap) = (caps.classes, caps.predicates);
     let classes = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_CLASS_LIMIT}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s a ?x }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {class_cap}"
         ),
-        VOCAB_CLASS_LIMIT,
+        class_cap,
     );
     let predicates = sample_distinct_iris(
         store,
         &format!(
-            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {VOCAB_PRED_LIMIT}"
+            "SELECT ?x WHERE {{ {{ SELECT ?x (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?x ?o }} }} GROUP BY ?x }} }} ORDER BY DESC(?n) LIMIT {pred_cap}"
         ),
-        VOCAB_PRED_LIMIT,
+        pred_cap,
     );
     if classes.is_empty() && predicates.is_empty() {
         return None;
@@ -3214,6 +3548,17 @@ fn graph_vocab_summary(store: &TripleStore, graph: &str) -> Option<String> {
     }
     if !predicates.is_empty() {
         s.push_str(&format!("\n  predicates: {}", predicates.join(" ")));
+    }
+    // The marker line carries no angle brackets on purpose: everything wrapped
+    // in <…> inside a cached summary is treated as a known IRI by
+    // [`known_vocab_iris`].
+    if classes
+        .iter()
+        .any(|c| DEFINING_META_CLASSES.iter().any(|m| c == &format!("<{m}>")))
+    {
+        s.push_str(
+            "\n  (this graph DEFINES terms — query it for definitions, labels and term relations)",
+        );
     }
     Some(s)
 }
@@ -3266,7 +3611,7 @@ async fn run_chat_query_timed(
     query: &str,
     graphs: &Arc<HashSet<String>>,
 ) -> Result<ChatQueryResult, AppError> {
-    let secs = state.query_timeout_secs.min(CHAT_QUERY_MAX_SECS);
+    let secs = state.query_timeout_secs.min(chat_query_max_secs());
     match tokio::time::timeout(
         Duration::from_secs(secs),
         run_chat_query(state, query, graphs),
@@ -3606,6 +3951,11 @@ fn strip_code_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        all_retrievals_empty, caps_for_window, context_from_models_payload,
+        context_from_ollama_show, graph_vocab_summary, iri_occurs_blocking, locate_iris_blocking,
+        mentioned_iris, render_models_section, salient_terms,
+    };
+    use super::{
         estimate_tokens, evidence_terms, extract_query_request, extract_sparql_directive,
         fallback_answer, find_ci, first_sparql_fence, history_within_budget,
         hoist_misplaced_modifiers, is_bare_sparql_directive, looks_like_wkt,
@@ -3614,10 +3964,6 @@ mod tests {
         validate_sparql, widgets_without_retrieval, ChatMessage, ChatQueryResult, ChatQueryRun,
         ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
         CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
-    };
-    use super::{
-        iri_occurs_blocking, locate_iris_blocking, mentioned_iris, render_models_section,
-        salient_terms,
     };
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -4387,5 +4733,108 @@ mod tests {
             "unreadable graph must not be offered for querying: {section}"
         );
         assert!(render_models_section(&[], &in_scope).is_empty());
+    }
+
+    // ─── Shortcoming follow-ups: windows, caps, honesty footer, T-Box marker ──
+
+    #[test]
+    fn context_window_is_read_from_known_gateway_payloads() {
+        // vLLM advertises max_model_len per served model.
+        let vllm = json!({"data": [
+            {"id": "meta/llama", "max_model_len": 32768},
+            {"id": "other", "max_model_len": 4096},
+        ]});
+        assert_eq!(
+            context_from_models_payload(&vllm, "meta/llama"),
+            Some(32768)
+        );
+        // No id match and more than one entry: nothing to conclude.
+        assert_eq!(context_from_models_payload(&vllm, "unknown"), None);
+        // A single-model server answers for any alias.
+        let single = json!({"data": [{"id": "served", "context_window": 8192}]});
+        assert_eq!(context_from_models_payload(&single, "alias"), Some(8192));
+        assert_eq!(context_from_models_payload(&json!({"data": []}), "m"), None);
+
+        // Ollama: a Modelfile num_ctx wins; a show-shaped payload without one
+        // reports Ollama's own 4096 default; anything else is not Ollama.
+        let tuned = json!({"details": {}, "parameters": "stop \"<|eot|>\"\nnum_ctx 16384"});
+        assert_eq!(context_from_ollama_show(&tuned), Some(16384));
+        let untuned = json!({"model_info": {"llama.context_length": 131072}});
+        assert_eq!(context_from_ollama_show(&untuned), Some(4096));
+        assert_eq!(context_from_ollama_show(&json!({"whatever": 1})), None);
+    }
+
+    #[test]
+    fn vocab_caps_widen_only_for_windows_that_can_hold_them() {
+        assert_eq!(caps_for_window(None).graphs, 12);
+        assert_eq!(caps_for_window(Some(16_384)).classes, 8);
+        let large = caps_for_window(Some(32_768));
+        assert_eq!(
+            (large.graphs, large.classes, large.predicates),
+            (20, 16, 32)
+        );
+    }
+
+    fn run_with_rows(rows: Option<Vec<Vec<String>>>, ok: bool) -> ChatQueryRun {
+        ChatQueryRun {
+            sparql: String::new(),
+            ok,
+            error: None,
+            columns: None,
+            rows,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn all_empty_footer_fires_only_when_every_retrieval_found_nothing() {
+        assert!(
+            !all_retrievals_empty(&[]),
+            "no queries → no claim to caveat"
+        );
+        assert!(all_retrievals_empty(&[run_with_rows(Some(vec![]), true)]));
+        // A COUNT of zero is a ROW — a real answer, not an empty retrieval.
+        assert!(!all_retrievals_empty(&[run_with_rows(
+            Some(vec![vec!["0".into()]]),
+            true
+        )]));
+        // Failed rounds alone carry no retrieval either way.
+        assert!(!all_retrievals_empty(&[run_with_rows(None, false)]));
+        // One failed + one empty success: still an all-empty turn.
+        assert!(all_retrievals_empty(&[
+            run_with_rows(None, false),
+            run_with_rows(Some(vec![]), true),
+        ]));
+    }
+
+    #[test]
+    fn tbox_graphs_get_the_defines_marker_and_instance_graphs_do_not() {
+        let store = crate::store::TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                r#"<http://ex.org/def#Brug> a <http://www.w3.org/2002/07/owl#Class> ;
+                     <http://www.w3.org/2000/01/rdf-schema#label> "Brug" ."#,
+                oxigraph::io::RdfFormat::Turtle,
+                Some("urn:test:defs"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"<http://ex.org/id/b1> a <http://ex.org/def#Brug> ."#,
+                oxigraph::io::RdfFormat::Turtle,
+                Some("urn:test:abox"),
+            )
+            .unwrap();
+        let caps = caps_for_window(None);
+        let defs = graph_vocab_summary(&store, "urn:test:defs", caps).unwrap();
+        assert!(
+            defs.contains("DEFINES terms"),
+            "a graph whose members are owl:Class instances defines terms: {defs}"
+        );
+        let abox = graph_vocab_summary(&store, "urn:test:abox", caps).unwrap();
+        assert!(
+            !abox.contains("DEFINES terms"),
+            "instance data must not claim to define terms: {abox}"
+        );
     }
 }

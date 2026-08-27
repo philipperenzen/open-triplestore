@@ -24,6 +24,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subjects and graphs that actually carry them. The findings ride into the prompt
   as a verified "where this conversation's names occur" section, and the graphs
   they point at take vocabulary-sampling slots ahead of the size heuristics.
+- Spark discovers the serving model's **context window from the gateway** when
+  `LLM_CONTEXT_TOKENS` is unset — vLLM's `max_model_len` on `/v1/models`, or an
+  Ollama Modelfile `num_ctx` via `/api/show` (falling back to Ollama's 4096
+  default, since a raised `OLLAMA_CONTEXT_LENGTH` is invisible over the API) —
+  and budgets its prompt against it, instead of only against the declared knob.
+  A declared window always wins; nothing detectable leaves budgeting off as
+  before, now with a warning when the prompt is large enough that a local
+  runtime would truncate it silently. `GET /api/llm/health` reports the chat
+  model and the effective window, so a misconfigured stack is visible instead
+  of just wrong.
+- Spark retrieval limits became knobs: `LLM_CHAT_MAX_ROUNDS` (default 3,
+  clamped 1–8) and `LLM_CHAT_QUERY_MAX_SECS` (default 30, clamped 5–600) — a
+  capable model on multi-part questions makes good use of more rounds, and a
+  large ontology sometimes needs more than 30s for a legitimate property path.
+- The vocabulary sample **widens with the window** (20 graphs × 16 classes +
+  32 predicates at a declared 32k+, instead of 12 × 8 + 20), each block marks
+  graphs whose members are `owl:Class`/`skos:Concept`-like as *"DEFINES terms"*
+  so the model can tell a definitions graph from an instance graph, and a
+  zero-row round's repair hint now embeds the queried graphs' **actual**
+  sampled vocabulary — ground truth instead of "re-read the section" (which
+  may not even cover the graph the query targeted).
+- A turn whose every retrieval came back empty gets a mechanical epistemic
+  caveat appended ("the data was not found, which is not proof it does not
+  exist") — small models reliably upgrade "not found" to "does not exist"
+  regardless of instructions, in whichever language they answer.
 
 ### Changed
 - None.
