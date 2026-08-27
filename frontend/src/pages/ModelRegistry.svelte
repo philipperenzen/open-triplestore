@@ -4,7 +4,7 @@
   import { navigate, Link } from '../lib/router/index.js';
   import { BookOpen, Plus, Trash2, Search, Loader2, Tag, ChevronRight, Info, ChevronDown, Globe, Lock, CheckSquare, X, User, Building2, Library } from 'lucide-svelte';
   import { listDataModels, createDataModel, deleteDataModel, listPublicUsers, listOrganisations } from '../lib/api.js';
-  import { isAdmin } from '../lib/stores.js';
+  import { isAdmin, isAuthenticated } from '../lib/stores.js';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import BulkActionBar from '../components/BulkActionBar.svelte';
   import Avatar from '../components/Avatar.svelte';
@@ -160,6 +160,10 @@
           <CheckSquare size={14} />
           {selectMode ? $t('pages.modelRegistry.cancelSelect') : $t('pages.modelRegistry.select')}
         </button>
+      {/if}
+      <!-- Any signed-in user may register a model they own (the server enforces
+           ownership + the publisher gate for public entries). -->
+      {#if $isAuthenticated}
         <button class="btn btn-primary btn-sm" on:click={() => showCreate = true}>
           <Plus size={16} />
           {$t('pages.modelRegistry.newModel')}

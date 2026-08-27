@@ -57,14 +57,54 @@ pub async fn create_data_model(
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<CreateDataModelRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if !user.is_admin() {
-        return Err(AppError::Unauthorized("Admin access required".to_string()));
+    // Any signed-in account may register a model it owns — the same rule as
+    // datasets. (This was admin-only, which contradicted the rest of the
+    // ownership model: `can_write_ontology` already lets users version their
+    // own models, and the import wizard suggests registering model files here —
+    // advice a non-admin could not follow.)
+    if !user.can_create_datasets() {
+        return Err(AppError::Unauthorized(
+            "This account is not permitted to create data models".to_string(),
+        ));
     }
     let title = body.title.trim().to_string();
     let namespace = body.namespace.trim().to_string();
     if title.is_empty() {
         return Err(AppError::BadRequest("title is required".to_string()));
     }
+
+    let is_public = body.is_public.unwrap_or(false);
+    // Default owner to the current user if none provided.
+    let owner_type = body.owner_type.as_deref().unwrap_or("user").to_string();
+    let owner_id = body
+        .owner_id
+        .clone()
+        .unwrap_or_else(|| user.user_id.clone());
+
+    // A non-admin may only create models owned by themselves or by an
+    // organisation they may act for — otherwise `owner_id` could attribute a
+    // model to a foreign principal. Public listing additionally requires
+    // publisher rights, mirroring the dataset visibility gate.
+    if !user.is_admin() {
+        let parsed_owner = crate::auth::models::OwnerType::from_str(&owner_type)
+            .ok_or_else(|| AppError::BadRequest("Invalid owner_type".to_string()))?;
+        if !state
+            .auth_db
+            .can_act_as_owner(&user.user_id, parsed_owner, &owner_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+        {
+            return Err(AppError::Unauthorized(
+                "You may only create data models owned by yourself or an organisation you belong to"
+                    .to_string(),
+            ));
+        }
+        if is_public && !user.is_publisher() {
+            return Err(AppError::Unauthorized(
+                "Publisher access is required to create a public data model".to_string(),
+            ));
+        }
+    }
+
     // Derive a URL-safe id from the title
     let id: String = title
         .to_lowercase()
@@ -83,13 +123,6 @@ pub async fn create_data_model(
     }
 
     let now = Utc::now().to_rfc3339();
-    let is_public = body.is_public.unwrap_or(false);
-    // Default owner to the current user if none provided.
-    let owner_type = body.owner_type.as_deref().unwrap_or("user").to_string();
-    let owner_id = body
-        .owner_id
-        .clone()
-        .unwrap_or_else(|| user.user_id.clone());
     registry::insert_data_model(
         &state.store,
         &state.base_url,
@@ -202,6 +235,12 @@ pub async fn update_data_model(
     if reassigning_owner && !user.is_admin() {
         return Err(AppError::Forbidden(
             "Only an administrator may change ontology ownership".to_string(),
+        ));
+    }
+    // Turning a private model public is a publish act — same gate as datasets.
+    if body.is_public == Some(true) && !existing.is_public && !user.is_publisher() {
+        return Err(AppError::Forbidden(
+            "Publisher access is required to make a data model public".to_string(),
         ));
     }
     let store = state.store.clone();

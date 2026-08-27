@@ -34,9 +34,7 @@ use crate::auth::acl_handlers;
 use crate::auth::db::AuthDb;
 use crate::auth::handlers;
 use crate::auth::jwt::JwtConfig;
-use crate::auth::middleware::{
-    endpoint_acl_guard, optional_auth, require_admin, require_auth, require_publisher,
-};
+use crate::auth::middleware::{endpoint_acl_guard, optional_auth, require_admin, require_auth};
 use crate::auth::oauth::OAuthSessions;
 use crate::auth::oauth_handlers;
 use crate::catalog::routes::catalog_routes;
@@ -1443,9 +1441,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Data-model registry — write routes.  Every successful mutation marks
     // the registry-derived vocabulary state (catalog overlay, platform
     // prefixes, term index) stale via the outermost layer below.
+    //
+    // Authorization is per handler, mirroring datasets: any signed-in account
+    // may create models it owns and version them (`can_act_as_owner` /
+    // `can_write_ontology`); publisher rights gate PUBLIC exposure
+    // (create/update with `is_public`), and destructive/lifecycle admin ops
+    // keep their admin gates. The old blanket `require_publisher` layer here
+    // made the registry read-only for regular users, which contradicted the
+    // ownership model — and the import wizard's "register this model file"
+    // path.
     let data_model_write = Router::new()
         .merge(data_model_auth_routes())
-        .route_layer(middleware::from_fn(require_publisher))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

@@ -476,21 +476,6 @@ fn enforce_write_scope_for_mutation(
     Ok(())
 }
 
-/// Middleware that requires publisher privileges (publisher, admin, or super-admin).
-/// Must be used after `require_auth`.
-pub async fn require_publisher(req: Request, next: Next) -> Result<Response, Response> {
-    let user = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Authentication required").into_response())?;
-
-    if !user.is_publisher() {
-        return Err((StatusCode::FORBIDDEN, "Publisher access required").into_response());
-    }
-
-    Ok(next.run(req).await)
-}
-
 /// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.
 ///
 /// Must be placed **after** `optional_auth` or `require_auth` so that the
