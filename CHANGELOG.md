@@ -14,7 +14,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- None.
+- Spark now orients every turn on what the question NAMES before the model writes
+  a query. The platform context lists the registered data models & vocabularies
+  with the named graph holding each one's current published definitions (so a
+  question about a registered model's classes targets the registry graph, not an
+  instance graph); IRIs the user pastes are located in the store with indexed probes
+  (which readable graphs, which triple position); and the question's identifier
+  tokens and salient words are resolved through the full-text index to the
+  subjects and graphs that actually carry them. The findings ride into the prompt
+  as a verified "where this conversation's names occur" section, and the graphs
+  they point at take vocabulary-sampling slots ahead of the size heuristics.
 
 ### Changed
 - None.
@@ -26,6 +35,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- Spark's invented-IRI check judged a query's IRIs against the sampled vocabulary
+  window (8 classes + 20 predicates per graph), so it routinely condemned REAL
+  terms — `rdfs:label` where only `rdfs:comment` made a sample, a class outside a
+  big ontology's top 8, even a legitimate named graph whose siblings were sampled
+  — burning retrieval rounds on false "does not exist" errors and steering the
+  model away from IRIs the user had pasted verbatim. Candidates are now verified
+  against the store itself (four indexed probes: subject, predicate, object,
+  named graph), and IRIs the user pasted are never rejected at all — an absent
+  one runs to an honest empty result instead of an error blaming the user.
 - The content-negotiated Turtle service description (`GET /` with an RDF `Accept`
   type) counted every accessible graph with a full `count_graph()` scan; on a store
   with a multi-million-triple graph that took tens of seconds per request. It now

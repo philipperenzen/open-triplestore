@@ -1069,6 +1069,12 @@ IRI — it is ranked and indexed, where `FILTER(CONTAINS(…))` reads every lite
 the triple patterns whose values you need (`GRAPH <g> { ?s ?p ?o }`) and `ORDER BY DESC(?score)`; on \
 its own it returns bare IRIs. It matches whole words, so search the distinctive word, not a fragment \
 of one, and if it returns nothing, say so rather than inventing a result.\n\
+Orient before you guess: the context lists Registered models & vocabularies WITH the named graph \
+holding each one's current published definitions — questions about a model's classes, properties or \
+concepts (their labels, definitions, comments, broader/narrower or subclass relations) are answered \
+by querying THAT graph, not an instance-data graph. A WHERE THIS CONVERSATION'S NAMES OCCUR section \
+is verified live against the store: prefer the graphs it names and copy its IRIs exactly. Use any \
+IRI the user pastes VERBATIM in your patterns — never retype, shorten or \"correct\" it.\n\
 Aggregate correctly: `COUNT(*)` counts rows; `COUNT(?v)` counts only rows where ?v is BOUND, so \
 counting a variable that never appears in the pattern silently yields 0 for every group. The \
 canonical per-graph triple count is: \
@@ -1144,6 +1150,23 @@ updates, or act outside this platform.";
 const MAX_DATASETS_IN_CONTEXT: usize = 60;
 const MAX_SERVICES_IN_CONTEXT: usize = 40;
 const MAX_GRAPHS_IN_CONTEXT: usize = 40;
+/// Cap for the registered models & vocabularies section of the platform context.
+const MAX_MODELS_IN_CONTEXT: usize = 20;
+/// How many user-pasted IRIs get located in the store per turn.
+const MENTIONED_IRI_LIMIT: usize = 8;
+/// How many in-scope graphs to name per located IRI.
+const MENTIONED_IRI_GRAPH_LIMIT: usize = 2;
+/// Quads scanned per triple position when locating an IRI's graphs — bounds the
+/// walk when a term occurs huge numbers of times in graphs the caller cannot read.
+const IRI_PROBE_QUAD_SCAN: usize = 256;
+/// Salient question words looked up in the full-text index per turn.
+const ANCHOR_TERM_LIMIT: usize = 4;
+/// Ranked full-text hits kept per anchored term.
+const ANCHOR_HITS_PER_TERM: usize = 3;
+/// Total term-anchor lines rendered into the prompt.
+const ANCHOR_LINE_LIMIT: usize = 8;
+/// Cap on orientation-derived graphs pushed to the front of vocabulary sampling.
+const ORIENTATION_GRAPH_LIMIT: usize = 6;
 /// Cap rows returned from a chat-issued SPARQL query (both to the model and the UI).
 const MAX_CHAT_QUERY_ROWS: usize = 50;
 /// How many `SPARQL:` rounds the model may use within one user turn. Feeding rows
@@ -1653,8 +1676,8 @@ async fn run_chat_turn(
     // graph list both truncate by position (see prioritise_graphs_for_conversation).
     let graph_list = prioritise_graphs_for_conversation(&state, user_id, &req.messages, graph_list);
     let (context, service_lines) = build_platform_context(&state, user_id, &graph_list);
-    let evidence = evidence_graphs(&state, &req.messages, &graph_list).await;
-    let vocab = graph_vocab_context(&state, &graph_list, &evidence).await;
+    let orientation = question_orientation(&state, &req.messages, &graph_list).await;
+    let vocab = graph_vocab_context(&state, &graph_list, &orientation.graphs).await;
     // Question-matched API services again, at the tail this time — the full
     // list is mid-prompt where small models lose it (see relevant_services_hint).
     let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
@@ -1673,7 +1696,8 @@ async fn run_chat_turn(
         .unwrap_or_default();
 
     let mut system_content = format!(
-        "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{services_hint}{memory}"
+        "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{vocab}{orient}{services_hint}{memory}",
+        orient = orientation.section
     );
 
     // Fit the prompt inside the declared context window, oldest history first.
@@ -1691,10 +1715,12 @@ async fn run_chat_turn(
                 window,
                 "chat system prompt exceeds LLM_CONTEXT_TOKENS budget — dropping graph vocabulary"
             );
-            // The services hint survives the vocab drop: it is tiny and answers
-            // the question the turn is actually about.
+            // The orientation section and services hint survive the vocab
+            // drop: both are tiny and answer the question the turn is
+            // actually about.
             system_content = format!(
-                "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{services_hint}{memory}"
+                "{CHAT_SYSTEM_PROMPT}\n\n# PLATFORM CONTEXT\n{context}{orient}{services_hint}{memory}",
+                orient = orientation.section
             );
         }
         let remaining = budget.saturating_sub(estimate_tokens(&system_content));
@@ -1803,20 +1829,33 @@ async fn run_chat_turn(
         // SPARQL and returns zero rows, which the model reports as absent data —
         // a false negative the user cannot tell from a true one. Failing it with
         // the offending IRIs named gives the next round something to act on.
+        // Two safeguards keep this check honest: IRIs the user pasted are never
+        // candidates (they asked about them by name — an absent one should run
+        // to an honest empty result, not an error blaming the user), and every
+        // remaining candidate is verified against the STORE, not the sampled
+        // vocabulary window (see [`absent_iris`]) — the sample-only check
+        // condemned real terms and real graph names round after round.
         let run_result = match validate_sparql(&query) {
             Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
-            Ok(()) => match unknown_vocab_iris(&query, &known_vocab_iris()) {
-                bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
-                    "these IRIs do not exist in the graphs you queried: {}. Use ONLY the IRIs \
-                     listed under \"Graph vocabulary\" — copy them character for character, \
-                     including capitalisation.",
-                    bad.iter()
-                        .map(|b| format!("<{b}>"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))),
-                _ => run_chat_query_timed(&state, &query, &graphs).await,
-            },
+            Ok(()) => {
+                let candidates: Vec<String> = unknown_vocab_iris(&query, &known_vocab_iris())
+                    .into_iter()
+                    .filter(|iri| !orientation.mentioned.iter().any(|m| m == iri))
+                    .collect();
+                match absent_iris(&state, candidates).await {
+                    bad if !bad.is_empty() => Err(AppError::BadRequest(format!(
+                        "these IRIs occur nowhere on this platform: {}. Do not invent IRIs — \
+                         copy them character for character from the Graph vocabulary or WHERE \
+                         THIS CONVERSATION'S NAMES OCCUR sections, or find real entities by \
+                         name with text:search.",
+                        bad.iter()
+                            .map(|b| format!("<{b}>"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))),
+                    _ => run_chat_query_timed(&state, &query, &graphs).await,
+                }
+            }
         };
         let follow_up = match run_result {
             Ok(qr) => {
@@ -1847,9 +1886,11 @@ async fn run_chat_turn(
                     // (every group counts 0).
                     let hint = if rows_empty {
                         "\nHINT: 0 rows usually means the pattern's vocabulary does not match \
-                         the graph. Re-read the Graph vocabulary section and build the pattern \
-                         ONLY from those exact class/property IRIs (and use COUNT(*), never \
-                         COUNT of a variable that is not bound in the pattern)."
+                         the graph — or the graph is the wrong one. Re-check the WHERE THIS \
+                         CONVERSATION'S NAMES OCCUR and Registered models sections for the \
+                         right graph, build the pattern ONLY from exact IRIs in the Graph \
+                         vocabulary section, find entities by name with text:search (and use \
+                         COUNT(*), never COUNT of a variable that is not bound in the pattern)."
                     } else if all_zero {
                         "\nHINT: every numeric value is 0 — that almost always means the \
                          aggregate counts an UNBOUND variable. Use COUNT(*) and GROUP BY a \
@@ -1871,7 +1912,8 @@ async fn run_chat_turn(
                          help. Do not output another SPARQL: line. If the results above are \
                          empty, say you could not FIND the data — never state that something \
                          does not exist based on an empty result — and check the PLATFORM \
-                         CONTEXT sections (Datasets, API Services, Files) first: if one of \
+                         CONTEXT sections (Datasets, API Services, Files, Registered models) \
+                         first: if one of \
                          those already answers the question, use it."
                     )
                 }
@@ -1899,7 +1941,8 @@ async fn run_chat_turn(
                         "That query failed to run: {emsg}\n\
                          HINT: aggregates belong in SELECT — `SELECT (MIN(?x) AS ?alias)` — never \
                          inside GROUP BY; every projected variable must be bound in the pattern; \
-                         build patterns ONLY from the Graph vocabulary section's IRIs; and the \
+                         build patterns ONLY from IRIs in the Graph vocabulary and WHERE THIS \
+                         CONVERSATION'S NAMES OCCUR sections; and the \
                          `SPARQL:` line must contain the query alone, no prose before or after. \
                          Do NOT resend the same query unchanged.\n\
                          Reply with `SPARQL:` and a corrected \
@@ -1914,7 +1957,8 @@ async fn run_chat_turn(
                          block if useful. Do not output another SPARQL: line. Never state that \
                          something does not exist because a query failed or returned nothing — \
                          and check the PLATFORM CONTEXT sections (Datasets, API Services, \
-                         Files) first: if one of those already answers the question, use it."
+                         Files, Registered models) first: if one of those already answers \
+                         the question, use it."
                     )
                 }
             }
@@ -2285,6 +2329,32 @@ fn build_platform_context(
         }
     }
 
+    // Registered data models & vocabularies. The DEFINITIONS questions are about
+    // (classes, properties, concepts — their labels, comments, broader/subclass
+    // relations) live in these registry version graphs, not in the instance
+    // graphs — and the vocabulary sampler rarely reaches them, because they are
+    // usually the LARGEST graphs in scope and the sampler prefers small ones.
+    // Asked about a registered model, Spark therefore guessed an instance graph
+    // and reported real definitions as absent. Naming each entry WITH the graph
+    // holding its current published content lets the first query hit the right
+    // graph. Visibility mirrors `/api/models` (`can_access_ontology`).
+    let visible_models: Vec<crate::data_models::registry::ModelContextEntry> =
+        crate::data_models::registry::list_models_for_context(&state.store)
+            .into_iter()
+            .filter(|e| {
+                state
+                    .auth_db
+                    .can_access_ontology(
+                        user_id,
+                        e.is_public,
+                        e.owner_type.as_deref(),
+                        e.owner_id.as_deref(),
+                    )
+                    .unwrap_or(false)
+            })
+            .collect();
+    ctx.push_str(&render_models_section(&visible_models, graphs));
+
     if !graphs.is_empty() {
         ctx.push_str(
             "\n## Named graphs in scope (wrap patterns in `GRAPH <iri> { … }`; \
@@ -2306,6 +2376,50 @@ fn build_platform_context(
     }
 
     (ctx, services)
+}
+
+/// Render the registered models & vocabularies section from already
+/// visibility-filtered entries. A model's published graph is only *named as
+/// queryable* when it is in the caller's read scope — inviting a query against
+/// an unreadable graph would just manufacture a silent-empty round.
+fn render_models_section(
+    entries: &[crate::data_models::registry::ModelContextEntry],
+    in_scope: &[String],
+) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let scope: HashSet<&str> = in_scope.iter().map(String::as_str).collect();
+    let mut out = String::from(
+        "\n## Registered models & vocabularies (a model's class/property/concept \
+         definitions, labels and relations live in the graph named here — query \
+         THAT graph for them)\n",
+    );
+    for e in entries.iter().take(MAX_MODELS_IN_CONTEXT) {
+        out.push_str(&format!(
+            "- \"{}\" ({}, namespace {})",
+            e.title,
+            e.kind.as_str(),
+            e.namespace
+        ));
+        match e.graph_iri.as_deref() {
+            Some(g) if scope.contains(g) => {
+                out.push_str(&format!(" — definitions in graph <{g}>"));
+                if let Some(v) = e.version.as_deref() {
+                    out.push_str(&format!(" (version {v})"));
+                }
+            }
+            _ => out.push_str(" — no published version readable to you"),
+        }
+        out.push('\n');
+    }
+    if entries.len() > MAX_MODELS_IN_CONTEXT {
+        out.push_str(&format!(
+            "- …and {} more.\n",
+            entries.len() - MAX_MODELS_IN_CONTEXT
+        ));
+    }
+    out
 }
 
 /// API services whose name or description shares a content word with the
@@ -2387,12 +2501,6 @@ fn vocab_cache() -> &'static Mutex<HashMap<String, (Instant, String)>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// How many graphs the text index may pull to the front of the grounding list.
-const VOCAB_EVIDENCE_GRAPHS: usize = 4;
-/// How many text hits to resolve to graphs. Small: we want the graphs a few
-/// strong matches live in, not a survey.
-const VOCAB_EVIDENCE_HITS: usize = 12;
-
 /// Terms from the question worth looking up in the text index.
 ///
 /// Identifiers are what actually locate data — an asset code like `AB-12-345-C`
@@ -2424,19 +2532,349 @@ fn evidence_terms(text: &str) -> Vec<String> {
     out
 }
 
-/// Graphs that demonstrably contain something the question named.
+/// Function words and linked-data meta-vocabulary that must never spend one of
+/// the few full-text anchor slots. The meta words ("label", "broader", …)
+/// describe the SHAPE of the requested answer, not a domain entity, and would
+/// anchor to every vocabulary graph at once. Only words of ≥5 characters reach
+/// the check, so shorter function words need no entry.
+const ANCHOR_STOPWORDS: &[&str] = &[
+    // Dutch function words
+    "andere",
+    "binnen",
+    "buiten",
+    "eerste",
+    "graag",
+    "hierin",
+    "hoeveel",
+    "kunnen",
+    "moeten",
+    "tussen",
+    "tweede",
+    "waarom",
+    "waarvan",
+    "wanneer",
+    "welke",
+    "willen",
+    "zoals",
+    "zonder",
+    "zullen",
+    // English function words
+    "about",
+    "after",
+    "again",
+    "before",
+    "between",
+    "could",
+    "every",
+    "first",
+    "other",
+    "please",
+    "second",
+    "should",
+    "their",
+    "there",
+    "these",
+    "those",
+    "using",
+    "where",
+    "which",
+    "while",
+    "within",
+    "would",
+    // Linked-data meta words
+    "broader",
+    "class",
+    "classes",
+    "comment",
+    "comments",
+    "concept",
+    "concepts",
+    "conforms",
+    "dataset",
+    "datasets",
+    "graaf",
+    "grafen",
+    "graph",
+    "graphs",
+    "instance",
+    "instances",
+    "label",
+    "labels",
+    "links",
+    "model",
+    "modellen",
+    "models",
+    "named",
+    "narrower",
+    "properties",
+    "property",
+    "queries",
+    "query",
+    "relatie",
+    "relaties",
+    "relations",
+    "sparql",
+    "transitive",
+    "triple",
+    "triples",
+    "types",
+    "value",
+    "values",
+    "vocabulaire",
+    "vocabularies",
+    "vocabulary",
+    "waarde",
+    "waarden",
+];
+
+/// Ordinary content words from the question worth anchoring in the full-text
+/// index — the complement of [`evidence_terms`]: "beheerobject" or "waalbrug"
+/// rather than identifier-shaped tokens. `exclude` (the identifier terms) and
+/// the stopword list keep the few slots for words that name DOMAIN things.
+fn salient_terms(text: &str, exclude: &[String], cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        if raw.chars().count() < 5 {
+            continue;
+        }
+        let t = raw.to_lowercase();
+        if !t.chars().any(|c| c.is_alphabetic())
+            || ANCHOR_STOPWORDS.contains(&t.as_str())
+            || exclude.iter().any(|e| e.to_lowercase().contains(&t))
+            || out.contains(&t)
+        {
+            continue;
+        }
+        out.push(t);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
+/// Absolute IRIs pasted into recent user messages, newest message first,
+/// verbatim. A pasted IRI is the strongest possible signal of what a question
+/// is about — and the one signal the literal-oriented evidence pass ignores
+/// entirely (an IRI is not a literal, so the text index never sees it).
+/// Deliberately conservative: http(s) only, no query strings (those are UI
+/// links, not RDF IRIs), punctuation and `<…>` wrapping trimmed.
+fn mentioned_iris(messages: &[ChatMessage]) -> Vec<String> {
+    const TRAILERS: &[char] = &['>', ')', ']', '"', '\'', ',', '.', ';', ':', '!', '?'];
+    let mut out: Vec<String> = Vec::new();
+    'msgs: for m in messages
+        .iter()
+        .rev()
+        .filter(|m| m.role != "assistant")
+        .take(6)
+    {
+        let mut rest = m.content.as_str();
+        while let Some(i) = rest.find("http") {
+            rest = &rest[i..];
+            if !(rest.starts_with("http://") || rest.starts_with("https://")) {
+                rest = &rest["http".len()..];
+                continue;
+            }
+            let end = rest
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | ')' | ']')
+                })
+                .unwrap_or(rest.len());
+            let iri = rest[..end].trim_end_matches(TRAILERS);
+            if iri.len() >= 12
+                && iri.len() <= 300
+                && !iri.contains('?')
+                && !out.iter().any(|o| o == iri)
+            {
+                out.push(iri.to_string());
+                if out.len() >= MENTIONED_IRI_LIMIT {
+                    break 'msgs;
+                }
+            }
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+/// Where one pasted IRI demonstrably occurs, checked against the store itself.
+struct IriLocation {
+    iri: String,
+    /// Triple position of the sighting: "subject" | "predicate" | "object".
+    role: &'static str,
+    /// Up to [`MENTIONED_IRI_GRAPH_LIMIT`] in-scope graphs containing it.
+    graphs: Vec<String>,
+    /// The IRI is itself a named graph in the caller's read scope.
+    is_named_graph: bool,
+}
+
+/// Distinct in-scope graphs among the first [`IRI_PROBE_QUAD_SCAN`] quads of a
+/// pattern probe.
+fn in_scope_graphs_of<E>(
+    quads: impl Iterator<Item = Result<oxigraph::model::Quad, E>>,
+    in_scope: &HashSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for quad in quads.take(IRI_PROBE_QUAD_SCAN).flatten() {
+        if let oxigraph::model::GraphName::NamedNode(g) = quad.graph_name {
+            let g = g.as_str();
+            if in_scope.contains(g) && !out.iter().any(|o| o == g) {
+                out.push(g.to_string());
+                if out.len() >= MENTIONED_IRI_GRAPH_LIMIT {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Locate each pasted IRI with indexed quad probes: which readable graphs hold
+/// it, and in which triple position. Everything here is bounded — three probes
+/// per IRI, each scanning at most [`IRI_PROBE_QUAD_SCAN`] quads — so a turn
+/// pays microseconds for ground truth the model otherwise guesses at.
 ///
-/// Size and list position are both proxies for "is this graph relevant", and
-/// both are wrong often enough to matter: a 74-triple asset-management graph is
-/// the whole answer to a question about an asset code, yet it competes for slots
-/// with every other small graph in the store. The text index knows which graph
-/// actually holds the literal, so ask it. Best-effort throughout — no index, no
-/// identifier-shaped terms, or no hits simply leaves the ordering as it was.
-async fn evidence_graphs(
+/// Privacy note: the rendered line for an IRI that exists only in graphs the
+/// caller cannot read is identical to the line for one that exists nowhere in
+/// scope ("occurs in no graph you can read") — this must not become an
+/// existence oracle for unreadable data.
+fn locate_iris_blocking(
+    store: &TripleStore,
+    iris: &[String],
+    in_scope: &HashSet<String>,
+) -> Vec<IriLocation> {
+    use oxigraph::model::{NamedNodeRef, NamedOrBlankNodeRef, TermRef};
+    iris.iter()
+        .map(|iri| {
+            let mut loc = IriLocation {
+                iri: iri.clone(),
+                role: "",
+                graphs: Vec::new(),
+                is_named_graph: false,
+            };
+            let Ok(node) = NamedNodeRef::new(iri.as_str()) else {
+                return loc;
+            };
+            let s = store.store();
+            loc.is_named_graph =
+                in_scope.contains(iri.as_str()) && s.contains_named_graph(node).unwrap_or(false);
+            let subj = in_scope_graphs_of(
+                s.quads_for_pattern(Some(NamedOrBlankNodeRef::NamedNode(node)), None, None, None),
+                in_scope,
+            );
+            if !subj.is_empty() {
+                loc.role = "subject";
+                loc.graphs = subj;
+                return loc;
+            }
+            let pred =
+                in_scope_graphs_of(s.quads_for_pattern(None, Some(node), None, None), in_scope);
+            if !pred.is_empty() {
+                loc.role = "predicate";
+                loc.graphs = pred;
+                return loc;
+            }
+            let obj = in_scope_graphs_of(
+                s.quads_for_pattern(None, None, Some(TermRef::NamedNode(node)), None),
+                in_scope,
+            );
+            if !obj.is_empty() {
+                loc.role = "object";
+                loc.graphs = obj;
+            }
+            loc
+        })
+        .collect()
+}
+
+/// Does this IRI occur anywhere in the store — as subject, predicate, object,
+/// or as a named graph? Four `.next()`-bounded indexed probes; no scans.
+fn iri_occurs_blocking(store: &TripleStore, iri: &str) -> bool {
+    use oxigraph::model::{NamedNodeRef, NamedOrBlankNodeRef, TermRef};
+    let Ok(node) = NamedNodeRef::new(iri) else {
+        return false;
+    };
+    let s = store.store();
+    s.quads_for_pattern(Some(NamedOrBlankNodeRef::NamedNode(node)), None, None, None)
+        .next()
+        .is_some()
+        || s.quads_for_pattern(None, Some(node), None, None)
+            .next()
+            .is_some()
+        || s.quads_for_pattern(None, None, Some(TermRef::NamedNode(node)), None)
+            .next()
+            .is_some()
+        || s.contains_named_graph(node).unwrap_or(false)
+}
+
+/// The subset of `candidates` that occurs nowhere in the store at all.
+///
+/// This is what makes the invented-IRI check safe to enforce: the sampled
+/// vocabulary is a tiny window (8 classes + 20 predicates per graph), so
+/// "absent from the sample" routinely condemned REAL terms — `rdfs:label`
+/// where only `rdfs:comment` made a sample, a class outside a big ontology's
+/// top 8, even a legitimate named graph whose siblings were sampled. Each
+/// rejection burned a retrieval round with a false "does not exist" error and
+/// steered the model away from IRIs the user had pasted verbatim. Verifying
+/// candidates against the store itself keeps the real protection — an IRI that
+/// occurs nowhere IS invented — at the cost of a few indexed probes.
+///
+/// Fail-open on runtime errors: this check exists to help retrieval, and a
+/// wrongly-run query only returns rows the caller may see anyway.
+async fn absent_iris(state: &AppState, candidates: Vec<String>) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter(|iri| !iri_occurs_blocking(&store, iri))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Everything a turn can learn about what the question NAMES, before the model
+/// writes its first query.
+struct QuestionOrientation {
+    /// IRIs pasted into recent user messages, verbatim — exempt from the
+    /// invented-IRI check (the user asked about them by name; if one is truly
+    /// absent, the honest outcome is a query that finds nothing, not an error
+    /// claiming the user invented it).
+    mentioned: Vec<String>,
+    /// Graphs that demonstrably contain something the question named, best
+    /// evidence first — they take vocabulary slots ahead of size heuristics.
+    graphs: Vec<String>,
+    /// Rendered `# WHERE THIS CONVERSATION'S NAMES OCCUR` prompt section
+    /// (empty when there is nothing to say).
+    section: String,
+}
+
+/// Ground the turn in what the question names, from three sources: IRIs the
+/// user pasted (located with indexed quad probes), identifier-shaped tokens
+/// and salient content words (both resolved through the full-text index to the
+/// subjects and graphs that actually carry them). This is the orientation the
+/// model was told to do with `text:search` and reliably skipped — done
+/// mechanically, it costs milliseconds and turns "guess a graph, get 0 rows,
+/// report the data as absent" into a first query against the right graph.
+/// Best-effort throughout: no index, no matches, or probe errors just shrink
+/// the section.
+/// A text-index hit reduced to the fields the orientation section renders.
+/// Local (rather than `text_search::index::SearchHit`) so the code compiles
+/// with the `text-search` feature off.
+struct AnchorHit {
+    subject: String,
+    predicate: String,
+    graph: String,
+}
+
+async fn question_orientation(
     state: &AppState,
     messages: &[ChatMessage],
     in_scope: &[String],
-) -> Vec<String> {
+) -> QuestionOrientation {
     let text: String = messages
         .iter()
         .rev()
@@ -2445,107 +2883,179 @@ async fn evidence_graphs(
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    let terms = evidence_terms(&text);
-    if terms.is_empty() {
-        return Vec::new();
+    let mentioned = mentioned_iris(messages);
+    // Cut pasted IRIs out of the text before tokenising — a URL shreds into
+    // meaningless tokens (the scheme, the domain) that would hijack term slots.
+    let mut prose = text.clone();
+    for iri in &mentioned {
+        prose = prose.replace(iri.as_str(), " ");
     }
-    // Preferred path: the text index. It is rebuilt lazily and only on demand, so
-    // sync first — searching without that sees whatever was last committed, which
-    // after a fresh import is nothing. The sync runs INSIDE the blocking task: a
-    // dirty index means a whole-store reindex, and running that on the async
-    // runtime would stall every in-flight request for its duration.
+    let id_terms = evidence_terms(&prose);
+    let name_terms = salient_terms(&prose, &id_terms, ANCHOR_TERM_LIMIT);
+
+    let scope_set: Arc<HashSet<String>> = Arc::new(in_scope.iter().cloned().collect());
+
+    // Pasted IRIs → authoritative store probes.
+    let locations: Vec<IriLocation> = if mentioned.is_empty() {
+        Vec::new()
+    } else {
+        let store = state.store.clone();
+        let iris = mentioned.clone();
+        let scope = Arc::clone(&scope_set);
+        tokio::task::spawn_blocking(move || locate_iris_blocking(&store, &iris, &scope))
+            .await
+            .unwrap_or_default()
+    };
+
+    // Identifier + name terms → the full-text index (whole-word, ranked, and
+    // scope-filtered by the search itself). Synced first: the index is rebuilt
+    // lazily, and searching an unsynced index right after an import sees
+    // nothing.
+    let terms: Vec<String> = id_terms.iter().chain(name_terms.iter()).cloned().collect();
+    let mut anchors: Vec<(String, AnchorHit)> = Vec::new();
     #[cfg(feature = "text-search")]
-    let subjects: Vec<String> = match state.text_index.clone() {
-        None => Vec::new(),
-        Some(index) => {
+    if !terms.is_empty() {
+        if let Some(index) = state.text_index.clone() {
+            let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::clone(&scope_set));
             let search_terms = terms.clone();
-            // The same read boundary the graph filter below applies, pushed into
-            // the index instead: hits from graphs the caller cannot read are
-            // dropped by the search itself, so they never consume one of the few
-            // VOCAB_EVIDENCE_HITS slots and crowd out a subject that is actually
-            // visible.
-            let scope = crate::text_search::index::GraphScopeOwned::Only(Arc::new(
-                in_scope.iter().cloned().collect::<HashSet<String>>(),
-            ));
             let sync_state = state.clone();
-            tokio::task::spawn_blocking(move || {
+            anchors = tokio::task::spawn_blocking(move || {
+                // Sync INSIDE the blocking task: a dirty index means a
+                // whole-store reindex, and running that on the async runtime
+                // (the old call site) stalled every in-flight request for its
+                // duration.
                 sync_state.sync_text_index_if_dirty();
-                let mut subs: Vec<String> = Vec::new();
+                let mut out: Vec<(String, AnchorHit)> = Vec::new();
                 for term in search_terms {
-                    // Quoted: an identifier with hyphens is several tokens to the
-                    // query parser, and the unquoted form would match any of them.
+                    // Quoted: an identifier with hyphens is several tokens to
+                    // the query parser, and the unquoted form matches any of them.
                     let q = format!("\"{}\"", term.replace('"', ""));
-                    let Ok(hits) = index.search(&q, None, scope.as_scope(), VOCAB_EVIDENCE_HITS)
+                    let Ok(hits) = index.search(&q, None, scope.as_scope(), ANCHOR_HITS_PER_TERM)
                     else {
                         continue;
                     };
                     for h in hits {
-                        if !subs.contains(&h.subject) {
-                            subs.push(h.subject);
+                        if !out.iter().any(|(_, e)| e.subject == h.subject) {
+                            out.push((
+                                term.clone(),
+                                AnchorHit {
+                                    subject: h.subject,
+                                    predicate: h.predicate,
+                                    graph: h.graph,
+                                },
+                            ));
                         }
                     }
                 }
-                subs
+                out
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
         }
-    };
+    }
     #[cfg(not(feature = "text-search"))]
-    let subjects: Vec<String> = Vec::new();
+    let _ = &terms;
 
-    // Fall back to matching the literal directly when the index yields nothing —
-    // it may be unavailable, not yet built, or (observed on a store whose index
-    // held 540k documents) simply not answering. A scan is the expensive way to
-    // ask this question, so it is strictly a fallback: bounded by LIMIT, by the
-    // deadline below, and by only running for identifier-shaped terms, whose
+    // Fall back to matching identifier literals directly when the index gave
+    // nothing — it may be unavailable, not yet built, or (observed on a store
+    // whose index held 540k documents) simply not answering. Strictly bounded:
+    // LIMIT, the vocab time budget, and identifier-shaped terms only, whose
     // whole point is that they match almost nothing.
-    let store = state.store.clone();
-    let sparql = if subjects.is_empty() {
-        let filters = terms
+    let mut fallback_graphs: Vec<String> = Vec::new();
+    if anchors.is_empty() && !id_terms.is_empty() {
+        let filters = id_terms
             .iter()
             .map(|t| format!("CONTAINS(STR(?o), \"{}\")", t.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" || ");
-        format!(
+        let sparql = format!(
             "SELECT DISTINCT ?g WHERE {{ GRAPH ?g {{ ?s ?p ?o . \
-             FILTER(isLiteral(?o) && ({filters})) }} }} LIMIT {VOCAB_EVIDENCE_GRAPHS}"
-        )
-    } else {
-        // One lookup for every hit at once; subject-position patterns are indexed,
-        // so this stays cheap even on a large store.
-        let values = subjects
-            .iter()
-            .take(VOCAB_EVIDENCE_HITS)
-            .map(|s| format!("<{s}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("SELECT DISTINCT ?g WHERE {{ VALUES ?s {{ {values} }} GRAPH ?g {{ ?s ?p ?o }} }}")
-    };
-    let found: Vec<String> = tokio::time::timeout(
-        VOCAB_TIME_BUDGET,
-        tokio::task::spawn_blocking(move || {
-            let mut gs = Vec::new();
-            if let Ok(QueryResults::Solutions(sols)) = store.query(&sparql) {
-                for sol in sols.flatten() {
-                    if let Some(Term::NamedNode(n)) = sol.get("g") {
-                        gs.push(n.as_str().to_string());
+             FILTER(isLiteral(?o) && ({filters})) }} }} LIMIT {ORIENTATION_GRAPH_LIMIT}"
+        );
+        let store = state.store.clone();
+        fallback_graphs = tokio::time::timeout(
+            VOCAB_TIME_BUDGET,
+            tokio::task::spawn_blocking(move || {
+                let mut gs = Vec::new();
+                if let Ok(QueryResults::Solutions(sols)) = store.query(&sparql) {
+                    for sol in sols.flatten() {
+                        if let Some(Term::NamedNode(n)) = sol.get("g") {
+                            gs.push(n.as_str().to_string());
+                        }
                     }
                 }
-            }
-            gs
-        }),
-    )
-    .await
-    .map(|r| r.unwrap_or_default())
-    .unwrap_or_default();
+                gs
+            }),
+        )
+        .await
+        .map(|r| r.unwrap_or_default())
+        .unwrap_or_default();
+    }
 
-    // Only graphs the caller may actually read.
-    found
-        .into_iter()
-        .filter(|g| in_scope.contains(g))
-        .take(VOCAB_EVIDENCE_GRAPHS)
-        .collect()
+    // Graph priority: located-IRI graphs are the strongest evidence, then the
+    // graphs the text hits live in, then the literal-scan fallback.
+    let mut graphs: Vec<String> = Vec::new();
+    let push = |g: &str, graphs: &mut Vec<String>| {
+        if graphs.len() < ORIENTATION_GRAPH_LIMIT
+            && scope_set.contains(g)
+            && !graphs.iter().any(|o| o == g)
+        {
+            graphs.push(g.to_string());
+        }
+    };
+    for loc in &locations {
+        for g in &loc.graphs {
+            push(g, &mut graphs);
+        }
+    }
+    for (_, h) in &anchors {
+        push(&h.graph, &mut graphs);
+    }
+    for g in &fallback_graphs {
+        push(g, &mut graphs);
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for loc in &locations {
+        if !loc.graphs.is_empty() {
+            let gs = loc
+                .graphs
+                .iter()
+                .map(|g| format!("<{g}>"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("- <{}> occurs as {} in {}", loc.iri, loc.role, gs));
+        } else if loc.is_named_graph {
+            lines.push(format!("- <{}> is itself a named graph", loc.iri));
+        } else {
+            lines.push(format!(
+                "- <{}> occurs in no graph you can read — if a query for it finds nothing, \
+                 say you could not find it",
+                loc.iri
+            ));
+        }
+    }
+    for (term, h) in anchors.iter().take(ANCHOR_LINE_LIMIT) {
+        lines.push(format!(
+            "- \"{}\" matches <{}> (via <{}>) in graph <{}>",
+            term, h.subject, h.predicate, h.graph
+        ));
+    }
+    let section = if lines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n# WHERE THIS CONVERSATION'S NAMES OCCUR (verified in the store just now — \
+             prefer these graphs, copy these IRIs exactly)\n{}\n",
+            lines.join("\n")
+        )
+    };
+
+    QuestionOrientation {
+        mentioned,
+        graphs,
+        section,
+    }
 }
 
 /// A prompt section listing sampled classes + predicates per in-scope graph
@@ -3105,8 +3615,12 @@ mod tests {
         ChatStreamEvent, DeltaGate, EventSink, SseLineBuffer, CHAT_CELL_MAX_CHARS,
         CHAT_TABLE_MAX_CHARS, CHAT_WKT_CELL_MAX_CHARS,
     };
+    use super::{
+        iri_occurs_blocking, locate_iris_blocking, mentioned_iris, render_models_section,
+        salient_terms,
+    };
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
@@ -3722,5 +4236,156 @@ mod tests {
         let (out, forwarded) = gate_run(&["Let me check.\n", "SPARQL: SELECT ?s WHERE {}"]).await;
         assert!(out.join("").starts_with("Let me check."));
         assert!(forwarded);
+    }
+
+    // ─── Orientation: pasted IRIs, salient terms, store probes ─────────────────
+
+    #[test]
+    fn mentioned_iris_finds_pasted_iris_verbatim() {
+        // The transcript that motivated this: IRIs pasted mid-sentence with
+        // trailing punctuation, and one wrapped in angle brackets.
+        let msgs = vec![
+            msg(
+                "user",
+                "ik zoek types uit https://data.example.nl/def/beheer/Beheerobject_BD, en \
+                 <https://data.example.nl/def/beheer/OpenTunnelbak> graag.",
+            ),
+            msg("assistant", "see http://echoed.example/from/assistant"),
+        ];
+        let iris = mentioned_iris(&msgs);
+        assert_eq!(
+            iris,
+            vec![
+                "https://data.example.nl/def/beheer/Beheerobject_BD".to_string(),
+                "https://data.example.nl/def/beheer/OpenTunnelbak".to_string(),
+            ],
+            "verbatim, punctuation trimmed, assistant text ignored"
+        );
+    }
+
+    #[test]
+    fn mentioned_iris_skips_ui_links_and_dedups() {
+        let msgs = vec![msg(
+            "user",
+            "compare https://host/resource?iri=x with https://ex.org/id/a and \
+             https://ex.org/id/a again",
+        )];
+        assert_eq!(
+            mentioned_iris(&msgs),
+            vec!["https://ex.org/id/a".to_string()],
+            "query-string URLs are UI links, not RDF IRIs; duplicates collapse"
+        );
+    }
+
+    #[test]
+    fn salient_terms_keep_domain_words_and_drop_meta_words() {
+        let iris: Vec<String> = Vec::new();
+        let terms = salient_terms(
+            "ik zoek alle beheerobject types uit de dataset met hun labels en relaties \
+             rond de waalbrug",
+            &iris,
+            4,
+        );
+        assert_eq!(
+            terms,
+            vec!["beheerobject".to_string(), "waalbrug".to_string()],
+            "function words, and meta words like types/labels/relaties/dataset, never \
+             take an anchor slot"
+        );
+        // Fragments of an identifier evidence_terms already anchors are not
+        // re-anchored as words.
+        let exclude = vec!["waalbrug-01".to_string()];
+        assert_eq!(
+            salient_terms("zoek waalbrug-01 documenten", &exclude, 4),
+            vec!["documenten".to_string()]
+        );
+    }
+
+    fn orientation_store() -> crate::store::TripleStore {
+        let store = crate::store::TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                r#"<http://ex.org/id/waalbrug> <http://ex.org/def/naam> "Waalbrug" .
+                   <http://ex.org/id/waalbrug> a <http://ex.org/def/Brug> ."#,
+                oxigraph::io::RdfFormat::Turtle,
+                Some("urn:test:bridges"),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn iri_occurrence_probes_cover_every_position_and_graphs() {
+        let store = orientation_store();
+        for real in [
+            "http://ex.org/id/waalbrug", // subject
+            "http://ex.org/def/naam",    // predicate
+            "http://ex.org/def/Brug",    // object
+            "urn:test:bridges",          // named graph
+        ] {
+            assert!(iri_occurs_blocking(&store, real), "{real} must be found");
+        }
+        assert!(!iri_occurs_blocking(&store, "http://ex.org/def/Verzonnen"));
+    }
+
+    #[test]
+    fn locating_a_pasted_iri_names_only_readable_graphs() {
+        let store = orientation_store();
+        let iris = vec![
+            "http://ex.org/id/waalbrug".to_string(),
+            "http://ex.org/def/Brug".to_string(),
+            "http://ex.org/def/Verzonnen".to_string(),
+        ];
+        let scope: HashSet<String> = ["urn:test:bridges".to_string()].into_iter().collect();
+        let locs = locate_iris_blocking(&store, &iris, &scope);
+        assert_eq!(locs[0].role, "subject");
+        assert_eq!(locs[0].graphs, vec!["urn:test:bridges".to_string()]);
+        assert_eq!(locs[1].role, "object");
+        assert!(locs[2].graphs.is_empty(), "an invented IRI locates nowhere");
+
+        // Privacy: with the graph out of scope, a real IRI looks exactly like
+        // an absent one — location must not become an existence oracle.
+        let no_scope: HashSet<String> = HashSet::new();
+        let hidden = locate_iris_blocking(&store, &iris, &no_scope);
+        assert!(hidden[0].graphs.is_empty() && !hidden[0].is_named_graph);
+    }
+
+    #[test]
+    fn models_section_names_only_readable_graphs_as_queryable() {
+        use crate::data_models::registry::ModelContextEntry;
+        use crate::kind_detector::RegistryKind;
+        let entries = vec![
+            ModelContextEntry {
+                title: "Beheerstandaard".into(),
+                namespace: "https://data.example.nl/def/beheer#".into(),
+                kind: RegistryKind::Vocabulary,
+                is_public: true,
+                owner_type: None,
+                owner_id: None,
+                graph_iri: Some("urn:model:beheer".into()),
+                version: Some("1.0.0".into()),
+            },
+            ModelContextEntry {
+                title: "Private".into(),
+                namespace: "https://ex.org/def#".into(),
+                kind: RegistryKind::DataModel,
+                is_public: false,
+                owner_type: None,
+                owner_id: None,
+                graph_iri: Some("urn:model:private".into()),
+                version: None,
+            },
+        ];
+        let in_scope = vec!["urn:model:beheer".to_string()];
+        let section = render_models_section(&entries, &in_scope);
+        assert!(
+            section.contains("\"Beheerstandaard\" (vocabulary, namespace https://data.example.nl/def/beheer#) — definitions in graph <urn:model:beheer> (version 1.0.0)"),
+            "readable model must name its graph: {section}"
+        );
+        assert!(
+            section.contains("\"Private\" (data-model, namespace https://ex.org/def#) — no published version readable to you"),
+            "unreadable graph must not be offered for querying: {section}"
+        );
+        assert!(render_models_section(&[], &in_scope).is_empty());
     }
 }

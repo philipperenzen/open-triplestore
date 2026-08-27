@@ -127,6 +127,83 @@ pub fn list_data_models(store: &TripleStore) -> Vec<DataModelRecord> {
     records
 }
 
+/// One registry entry prepared for the Spark chat's platform context: the
+/// model's human identity plus the named graph holding its current *published*
+/// content, resolved in the same query. Distinct from [`DataModelRecord`] on
+/// purpose — the prompt needs the graph IRI (which `list_data_models` discards)
+/// and none of the per-model version counting that listing pays for.
+pub struct ModelContextEntry {
+    pub title: String,
+    pub namespace: String,
+    pub kind: RegistryKind,
+    pub is_public: bool,
+    pub owner_type: Option<String>,
+    pub owner_id: Option<String>,
+    /// Named graph holding the latest published version's content, when one exists.
+    pub graph_iri: Option<String>,
+    /// That version's semver label ("2.1.0"), for prose.
+    pub version: Option<String>,
+}
+
+/// List every registered model/vocabulary with the graph of its latest
+/// published version, sorted by title so a prompt built from it is stable
+/// across turns. Visibility is NOT applied here — callers filter with
+/// `can_access_ontology`, exactly like the `/api/models` handler.
+pub fn list_models_for_context(store: &TripleStore) -> Vec<ModelContextEntry> {
+    let q = format!(
+        r#"
+        PREFIX ver: <{VER}>
+        PREFIX dct: <{DCT}>
+        PREFIX owl: <{OWL}>
+        SELECT ?m ?title ?ns ?kind ?isPublic ?ownerType ?ownerId ?graphIri ?semver WHERE {{
+          GRAPH <{REGISTRY_GRAPH}> {{
+            ?m a ver:DataModel ;
+               dct:title ?title ;
+               ver:namespace ?ns .
+            OPTIONAL {{ ?m ver:kind ?kind }}
+            OPTIONAL {{ ?m ver:isPublic ?isPublic }}
+            OPTIONAL {{ ?m ver:ownerType ?ownerType }}
+            OPTIONAL {{ ?m ver:ownerId ?ownerId }}
+            OPTIONAL {{
+              ?m ver:latestPublished ?v .
+              ?v ver:graphIri ?graphIri .
+              OPTIONAL {{ ?v owl:versionInfo ?semver }}
+            }}
+          }}
+        }}
+        "#
+    );
+    let mut out: Vec<ModelContextEntry> = Vec::new();
+    // Same fanout guard as `list_data_models`: any doubled OPTIONAL value would
+    // otherwise list the model once per combination.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(QueryResults::Solutions(solutions)) = store.query(&q) {
+        for row in solutions.flatten() {
+            let vals: Vec<Option<Term>> = row.values().to_vec();
+            let Some(m) = var_str(&vals, 0) else { continue };
+            if !seen.insert(m) {
+                continue;
+            }
+            out.push(ModelContextEntry {
+                title: var_str(&vals, 1).unwrap_or_default(),
+                namespace: var_str(&vals, 2).unwrap_or_default(),
+                kind: var_str(&vals, 3)
+                    .map(|s| RegistryKind::from_persisted(&s))
+                    .unwrap_or_default(),
+                is_public: var_str(&vals, 4)
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false),
+                owner_type: var_str(&vals, 5),
+                owner_id: var_str(&vals, 6),
+                graph_iri: var_str(&vals, 7),
+                version: var_str(&vals, 8),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.title.cmp(&b.title).then(a.namespace.cmp(&b.namespace)));
+    out
+}
+
 fn count_versions(store: &TripleStore, data_model_iri_str: &str) -> usize {
     let q = format!(
         r#"
@@ -1040,6 +1117,50 @@ mod tests {
             records.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert_eq!(records[0].id, "gr");
+    }
+
+    /// The context listing resolves each model's latest PUBLISHED graph in one
+    /// pass — that graph IRI is what lets the chat target the right graph for
+    /// "what classes does model X define" instead of guessing an instance graph.
+    #[test]
+    fn context_listing_carries_the_published_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        seed_one(&store, "gr", "2026-07-24T13:06:28Z");
+        set_data_model_kind(&store, BASE, "gr", RegistryKind::Vocabulary).unwrap();
+
+        // No published version yet: the entry lists with no graph.
+        let entries = list_models_for_context(&store);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Good Relations");
+        assert!(entries[0].graph_iri.is_none());
+        assert!(entries[0].is_public);
+
+        let ver = DataModelVersion {
+            data_model_id: "gr".into(),
+            version: "1.2.0".into(),
+            status: VersionStatus::Published,
+            graph_iri: "http://purl.org/goodrelations/v1".into(),
+            sub_graphs: Vec::new(),
+            created_at: "2026-07-24T13:06:28Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        insert_version(&store, BASE, &ver).unwrap();
+        update_latest_published(&store, BASE, "gr", "1.2.0").unwrap();
+
+        let entries = list_models_for_context(&store);
+        assert_eq!(entries.len(), 1, "still one entry per model");
+        let e = &entries[0];
+        assert_eq!(
+            e.graph_iri.as_deref(),
+            Some("http://purl.org/goodrelations/v1")
+        );
+        assert_eq!(e.version.as_deref(), Some("1.2.0"));
+        assert_eq!(e.kind, RegistryKind::Vocabulary);
+        assert_eq!(e.namespace, "http://purl.org/goodrelations/v1#");
     }
 
     /// The ordinary case keeps listing every distinct model.
