@@ -84,6 +84,10 @@ pub struct VersionOutcome {
     /// Semver of the draft created when the upload was identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_version: Option<String>,
+    /// Archive graphs the snapshot wrote (internal: lets the handler refresh the
+    /// text index for them alongside the import's own graphs).
+    #[serde(skip)]
+    pub snapshot_graphs: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -407,7 +411,7 @@ pub async fn bulk_import(
                 ds_id,
             );
             let version = crate::dataset_versions::next_semver(&existing, &archive_bump);
-            crate::dataset_versions::snapshot_as_version(
+            let record = crate::dataset_versions::snapshot_as_version(
                 &archive_store,
                 &archive_base,
                 ds_id,
@@ -421,6 +425,7 @@ pub async fn bulk_import(
             )?;
             out.changed_graphs = changed;
             out.new_version = Some(version);
+            out.snapshot_graphs = record.snapshot_graphs;
         } else if !identical.is_empty() {
             let existing = crate::dataset_versions::registry::list_versions(
                 &archive_store,
@@ -428,7 +433,7 @@ pub async fn bulk_import(
                 ds_id,
             );
             let version = crate::dataset_versions::next_semver(&existing, &archive_bump);
-            crate::dataset_versions::snapshot_as_version(
+            let record = crate::dataset_versions::snapshot_as_version(
                 &archive_store,
                 &archive_base,
                 ds_id,
@@ -439,6 +444,7 @@ pub async fn bulk_import(
                 Some("Upload identical to current data — saved as draft"),
             )?;
             out.draft_version = Some(version);
+            out.snapshot_graphs = record.snapshot_graphs;
         }
         Ok(())
     };
@@ -452,6 +458,8 @@ pub async fn bulk_import(
     let gate_db = state.auth_db.clone();
     let gate_base = state.base_url.clone();
 
+    let text_state = state.clone();
+    let text_outcome = outcome.clone();
     let mut result = tokio::task::spawn_blocking(move || {
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(gate_db.pool());
         let gate = WriteGate {
@@ -476,7 +484,26 @@ pub async fn bulk_import(
                 .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
             }),
         };
-        parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate))
+        let res = parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate));
+        if let Ok(ref r) = res {
+            // Writer-pays text-index maintenance: refresh exactly the graphs
+            // this import wrote (replace targets included — the delete+re-add
+            // is idempotent). Without this, uploaded literals were invisible to
+            // search until an unrelated write forced a whole-store rebuild onto
+            // some later query.
+            text_state.refresh_text_index_graphs(&r.graph_iris);
+            // Version-archive graphs a replace cut are cold data — index them
+            // off the request so the importer doesn't wait on their (often
+            // graph-sized) refresh too.
+            let snapshots: Vec<String> = text_outcome.lock().unwrap().snapshot_graphs.clone();
+            if !snapshots.is_empty() {
+                let bg = text_state.clone();
+                let _ = std::thread::Builder::new()
+                    .name("import-archive-index".to_string())
+                    .spawn(move || bg.refresh_text_index_graphs(&snapshots));
+            }
+        }
+        res
     })
     .await
     .map_err(|e| AppError::Internal(format!("Bulk import task failed: {e}")))?
@@ -638,80 +665,92 @@ pub async fn bulk_import(
     }
 
     // Best-effort: register newly-touched graphs against the dataset and
-    // auto-detect + store graph_role for each.
-    if let Some(ds_id) = meta.dataset_id.as_deref() {
-        let dataset_record = state.auth_db.get_dataset(ds_id).ok().flatten();
-        for file_result in &result.file_results {
-            if file_result.status != "ok" {
-                continue;
-            }
-            // Explicit role chosen by the user for this file, if any.
-            let explicit_role = meta
-                .graph_roles
-                .get(&file_result.filename)
-                .and_then(|r| crate::auth::models::GraphKind::from_str(r));
-            for iri in &file_result.graph_iris {
-                if let Err(e) = state.auth_db.add_dataset_graph(ds_id, iri) {
-                    tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to register graph in dataset");
-                    continue;
-                }
-                let role = if let Some(role) = explicit_role {
-                    // User picked a role: apply it (overrides any prior/auto value).
-                    let _ = state.auth_db.set_dataset_graph_role(ds_id, iri, Some(role));
-                    Some(role)
-                } else {
-                    // Keep a previously-stored role; otherwise auto-detect from
-                    // the stored quads.
-                    let existing = state
-                        .auth_db
-                        .list_dataset_graph_entries(ds_id)
-                        .ok()
-                        .and_then(|entries| {
-                            entries
-                                .iter()
-                                .find(|e| e.graph_iri == *iri)
-                                .and_then(|e| e.graph_role)
-                        });
-                    match existing {
-                        Some(r) => Some(r),
-                        None => detect_and_store_graph_role(&state, ds_id, iri),
+    // auto-detect + store graph_role for each. Runs on the blocking pool — role
+    // detection and the metadata rewrite read/write the store, and doing that
+    // on a runtime worker stalled every other request for the duration.
+    if let Some(ds_id) = meta.dataset_id.clone() {
+        let post_state = state.clone();
+        let post_user_id = user.user_id.clone();
+        let post_roles = meta.graph_roles.clone();
+        let ok_files: Vec<(String, Vec<String>)> = result
+            .file_results
+            .iter()
+            .filter(|fr| fr.status == "ok")
+            .map(|fr| (fr.filename.clone(), fr.graph_iris.clone()))
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let state = post_state;
+            let dataset_record = state.auth_db.get_dataset(&ds_id).ok().flatten();
+            for (filename, graph_iris) in &ok_files {
+                // Explicit role chosen by the user for this file, if any.
+                let explicit_role = post_roles
+                    .get(filename)
+                    .and_then(|r| crate::auth::models::GraphKind::from_str(r));
+                for iri in graph_iris {
+                    if let Err(e) = state.auth_db.add_dataset_graph(&ds_id, iri) {
+                        tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to register graph in dataset");
+                        continue;
                     }
-                };
-                // Uploaded SHACL: adopt the graph into the SHACL Studio Library
-                // and bind it to the dataset in the validation layer, so the
-                // shapes are immediately visible in the Studio and effective for
-                // validation. Best-effort — never fails the import.
-                if role == Some(crate::auth::models::GraphKind::Shapes) {
-                    if let Some(ds) = dataset_record.as_ref() {
-                        if let Err(e) =
-                            crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
-                                &state,
-                                ds,
-                                iri,
-                                Some(&user.user_id),
-                            )
-                        {
-                            tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to auto-register imported shapes graph in SHACL Studio");
+                    let role = if let Some(role) = explicit_role {
+                        // User picked a role: apply it (overrides any prior/auto value).
+                        let _ = state.auth_db.set_dataset_graph_role(&ds_id, iri, Some(role));
+                        Some(role)
+                    } else {
+                        // Keep a previously-stored role; otherwise auto-detect from
+                        // the stored quads.
+                        let existing = state
+                            .auth_db
+                            .list_dataset_graph_entries(&ds_id)
+                            .ok()
+                            .and_then(|entries| {
+                                entries
+                                    .iter()
+                                    .find(|e| e.graph_iri == *iri)
+                                    .and_then(|e| e.graph_role)
+                            });
+                        match existing {
+                            Some(r) => Some(r),
+                            None => detect_and_store_graph_role(&state, &ds_id, iri),
+                        }
+                    };
+                    // Uploaded SHACL: adopt the graph into the SHACL Studio Library
+                    // and bind it to the dataset in the validation layer, so the
+                    // shapes are immediately visible in the Studio and effective for
+                    // validation. Best-effort — never fails the import.
+                    if role == Some(crate::auth::models::GraphKind::Shapes) {
+                        if let Some(ds) = dataset_record.as_ref() {
+                            if let Err(e) =
+                                crate::shacl_studio::registration::auto_register_dataset_shapes_graph(
+                                    &state,
+                                    ds,
+                                    iri,
+                                    Some(&post_user_id),
+                                )
+                            {
+                                tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to auto-register imported shapes graph in SHACL Studio");
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Rewrite the DCAT metadata named graph so it reflects the newly-registered
-        // graphs (void:subset + ots:graphRole triples).
-        if let Ok(Some(ds)) = state.auth_db.get_dataset(ds_id) {
-            let entries = state
-                .auth_db
-                .list_dataset_graph_entries(ds_id)
-                .unwrap_or_default();
-            dataset_graph::write_dataset_metadata_graph(
-                &state.store,
-                &state.base_url,
-                &ds,
-                &entries,
-            );
-        }
+            // Rewrite the DCAT metadata named graph so it reflects the newly-registered
+            // graphs (void:subset + ots:graphRole triples).
+            if let Ok(Some(ds)) = state.auth_db.get_dataset(&ds_id) {
+                let entries = state
+                    .auth_db
+                    .list_dataset_graph_entries(&ds_id)
+                    .unwrap_or_default();
+                dataset_graph::write_dataset_metadata_graph(
+                    &state.store,
+                    &state.base_url,
+                    &ds,
+                    &entries,
+                );
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Import post-processing failed: {e}")))?;
     }
 
     // Surface the versioning outcome only when it actually did something.
@@ -734,9 +773,14 @@ pub async fn bulk_import(
     ))
 }
 
-/// Run `kind_detector::detect` on a graph's quads and store the inferred role.
-/// Returns the role that was stored (`None` when detection was inconclusive or
-/// the graph could not be read).
+/// Quads sampled per graph for role detection. Classification is
+/// prevalence-based, so a bounded sample decides the same verdict as the whole
+/// graph without materialising millions of quads inside the import request.
+const ROLE_DETECT_SAMPLE_QUADS: usize = 100_000;
+
+/// Run `kind_detector::detect` on a (bounded sample of a) graph's quads and
+/// store the inferred role. Returns the role that was stored (`None` when
+/// detection was inconclusive or the graph could not be read).
 pub(crate) fn detect_and_store_graph_role(
     state: &AppState,
     dataset_id: &str,
@@ -746,7 +790,10 @@ pub(crate) fn detect_and_store_graph_role(
     let graph_name = oxigraph::model::NamedNode::new(graph_iri).ok()?;
     let quads = state
         .store
-        .quads_for_graph(GraphNameRef::NamedNode(graph_name.as_ref()))
+        .quads_for_graph_sample(
+            GraphNameRef::NamedNode(graph_name.as_ref()),
+            ROLE_DETECT_SAMPLE_QUADS,
+        )
         .ok()?;
     let detected = kind_detector::detect(&quads);
     let role = detected.to_graph_role()?;

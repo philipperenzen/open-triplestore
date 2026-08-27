@@ -93,7 +93,11 @@ pub fn query_uses_text_index(sparql: &str) -> bool {
 }
 
 /// Cheap pre-check: does this query mention full-text search at all?
-fn mentions_text_search(sparql: &str) -> bool {
+///
+/// Public because the dirty-index gate treats the two index consumers
+/// differently: a `text:search` query NEEDS the index (its expansion is the
+/// result set), while `CONTAINS`/`STRSTARTS` push-down is optional.
+pub fn mentions_text_search(sparql: &str) -> bool {
     next_marker(sparql).is_some()
 }
 

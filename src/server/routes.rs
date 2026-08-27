@@ -707,8 +707,18 @@ async fn execute_update(
     .map_err(|_| AppError::BadRequest("Update execution timed out".to_string()))?
     .map_err(|e| AppError::Internal(e.to_string()))?
     .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    // Writer-pays text-index maintenance: when the update's target graphs are
+    // known, refresh exactly those; a variable-graph / default-graph / admin
+    // wildcard update falls back to the whole-index dirty flag (repaired by the
+    // background sync) because its touched set can't be enumerated here.
     #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    if requires_admin || graph_iris.is_empty() {
+        state.mark_text_dirty();
+    } else {
+        let st = state.clone();
+        let graphs = graph_iris.clone();
+        let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&graphs)).await;
+    }
 
     {
         use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
@@ -1478,12 +1488,12 @@ async fn graph_store_put(
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
+    let touched = graph.clone();
     run_store_write(&state, "graph store PUT", move || {
         store.graph_store_put(graph.as_deref(), &data, format)
     })
     .await?;
-    #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    sync_text_index_after_graph_write(&state, touched).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1512,12 +1522,12 @@ async fn graph_store_post(
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
+    let touched = graph.clone();
     run_store_write(&state, "graph store POST", move || {
         store.graph_store_post(graph.as_deref(), &data, format)
     })
     .await?;
-    #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    sync_text_index_after_graph_write(&state, touched).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1530,11 +1540,36 @@ async fn graph_store_delete(
     require_graph_write(&state, user.as_deref(), params.graph_iri())?;
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
+    let touched = graph.clone();
     run_store_write(&state, "graph store DELETE", move || {
         store.graph_store_delete(graph.as_deref())
     })
     .await?;
+    // Previously nothing invalidated the text index here, so a deleted graph's
+    // literals kept turning up in search results until an unrelated write
+    // forced a rebuild.
+    sync_text_index_after_graph_write(&state, touched).await;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Keep the text index in step with a Graph Store write, writer-pays: refresh
+/// exactly the touched graph (off the async runtime) so readers never inherit a
+/// whole-store rebuild. A default-graph write has no graph key to refresh, so
+/// that case falls back to the whole-index dirty flag (repaired by the
+/// background sync).
+async fn sync_text_index_after_graph_write(state: &AppState, graph: Option<String>) {
+    #[cfg(feature = "text-search")]
+    match graph {
+        Some(g) => {
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&[g])).await;
+        }
+        None => state.mark_text_dirty(),
+    }
+    #[cfg(not(feature = "text-search"))]
+    {
+        let _ = (state, graph);
+    }
 }
 
 // ─── Management endpoints ─────────────────────────────────────────────────────
@@ -8448,29 +8483,23 @@ pub async fn detect_shapes(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let graph_iri = &params.graph;
 
-    // Count SHACL shapes in the graph
-    let count_query = format!(
-        "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph_iri}> {{ \
-         {{ ?s a <http://www.w3.org/ns/shacl#NodeShape> }} \
-         UNION {{ ?s a <http://www.w3.org/ns/shacl#PropertyShape> }} }} }}"
-    );
-    let shape_count: usize = if let Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) =
-        state.store.query(count_query.as_str())
-    {
-        sols.next()
-            .and_then(|r| r.ok())
-            .and_then(|s| s.get("n").map(|v| v.to_string()))
-            .and_then(|s| {
-                // Oxigraph returns typed literals like `"5"^^<...integer>`
-                s.trim_matches('"')
-                    .split('"')
-                    .next()
-                    .and_then(|n| n.parse::<usize>().ok())
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // Count SHACL shapes in the graph. Direct index scans, not SPARQL: this
+    // probe runs right after an import (per uploaded graph), exactly when the
+    // in-memory query accelerator is stale — a SPARQL aggregate here used to
+    // queue behind its full rebuild.
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    let shape_count: usize = state
+        .store
+        .count_pattern_in_graph(graph_iri, RDF_TYPE, "http://www.w3.org/ns/shacl#NodeShape")
+        .unwrap_or(0)
+        + state
+            .store
+            .count_pattern_in_graph(
+                graph_iri,
+                RDF_TYPE,
+                "http://www.w3.org/ns/shacl#PropertyShape",
+            )
+            .unwrap_or(0);
 
     let shapes_detected = shape_count > 0;
 

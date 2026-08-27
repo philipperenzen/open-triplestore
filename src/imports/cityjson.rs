@@ -1112,8 +1112,13 @@ pub async fn import_cityjson_bytes(
     let _ = state.auth_db.add_dataset_graph(dataset_id, &graph);
     let _ = super::handlers::detect_and_store_graph_role(state, dataset_id, &graph);
     state.auth_db.invalidate_accessible_graphs_cache();
+    // Writer-pays text-index maintenance for exactly the produced graph.
     #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    {
+        let st = state.clone();
+        let g = graph.clone();
+        let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&[g])).await;
+    }
 
     Ok(CityJsonImportOutcome {
         asset_id,

@@ -192,8 +192,17 @@ pub async fn import_ifc_bytes(
         let _ = state.auth_db.add_dataset_graph(dataset_id, g);
     }
     state.auth_db.invalidate_accessible_graphs_cache();
+    // Writer-pays text-index maintenance for exactly the graphs this import
+    // produced (instead of a whole-store rebuild on some later query).
     #[cfg(feature = "text-search")]
-    state.mark_text_dirty();
+    {
+        let st = state.clone();
+        let mut graphs = vec![bot_graph.clone()];
+        if let Some(g) = &ifcowl_graph {
+            graphs.push(g.clone());
+        }
+        let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&graphs)).await;
+    }
 
     Ok(IfcImportOutcome {
         asset_id,

@@ -286,6 +286,11 @@ pub struct AppState {
     /// Held for the duration of a Tantivy rebuild so only one runs at a time.
     #[cfg(feature = "text-search")]
     pub text_sync_lock: Arc<std::sync::Mutex<()>>,
+    /// True while a background Tantivy rebuild thread is running — deduplicates
+    /// [`AppState::spawn_text_index_sync`] so a burst of queries starts one
+    /// thread, not one each.
+    #[cfg(feature = "text-search")]
+    pub text_bg_syncing: Arc<AtomicBool>,
     /// Vocabulary catalog (bundled LOV metadata + public registry overlay).
     pub vocab_catalog: Arc<crate::vocab_search::catalog::VocabCatalog>,
     /// Set after model/vocabulary registry mutations; vocab routes rebuild
@@ -341,6 +346,8 @@ impl AppState {
             text_dirty: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "text-search")]
             text_sync_lock: Arc::new(std::sync::Mutex::new(())),
+            #[cfg(feature = "text-search")]
+            text_bg_syncing: Arc::new(AtomicBool::new(false)),
             vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
             vocab_registry_dirty: Arc::new(AtomicBool::new(false)),
             vocab_corpus: Arc::new(std::sync::RwLock::new(None)),
@@ -410,6 +417,69 @@ impl AppState {
         }
     }
 
+    /// Run [`AppState::sync_text_index_if_dirty`] on a detached thread.
+    ///
+    /// This is how the query path reacts to a dirty index without paying for the
+    /// rebuild itself: the whole-store reindex (seconds to minutes on a large
+    /// instance) happens off the request, and the query that noticed simply runs
+    /// without the index this once. Spawns are deduplicated — a burst of queries
+    /// after a write starts one rebuild thread, not one each.
+    #[cfg(feature = "text-search")]
+    pub fn spawn_text_index_sync(&self) {
+        if !self.text_dirty.load(Ordering::Relaxed) || self.text_index.is_none() {
+            return;
+        }
+        if self
+            .text_bg_syncing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let state = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("text-index-sync".to_string())
+            .spawn(move || {
+                state.sync_text_index_if_dirty();
+                state.text_bg_syncing.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            self.text_bg_syncing.store(false, Ordering::Release);
+        }
+    }
+
+    /// Refresh the text index for exactly `graphs` — the write path's way of
+    /// keeping search warm for the cost of the data it just wrote, instead of
+    /// marking the whole index dirty and making a later query pay for a
+    /// whole-store rebuild. Blocking (Tantivy commit + a scan of the named
+    /// graphs); call it from the same `spawn_blocking` the write ran in.
+    /// Best-effort: on failure it falls back to the dirty flag so the
+    /// background rebuild eventually repairs the index.
+    #[cfg(feature = "text-search")]
+    pub fn refresh_text_index_graphs(&self, graphs: &[String]) {
+        let Some(ref idx) = self.text_index else {
+            return;
+        };
+        if graphs.is_empty() {
+            return;
+        }
+        // Serialise against full rebuilds: interleaving a targeted commit with
+        // `reindex_from_store`'s delete_all+refill would lose these documents.
+        let _guard = self
+            .text_sync_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(e) = idx.refresh_graphs(&self.store, graphs) {
+            tracing::warn!("text index graph refresh failed ({e}); falling back to full resync");
+            self.mark_text_dirty();
+        }
+    }
+
+    /// No-op without the text-search feature (so write paths can call it
+    /// unconditionally).
+    #[cfg(not(feature = "text-search"))]
+    pub fn refresh_text_index_graphs(&self, _graphs: &[String]) {}
+
     /// Apply the full-text preprocessing pipeline to an already read-scoped query.
     ///
     /// Expands the `text:search` / `ft:search` magic property and pushes
@@ -463,9 +533,24 @@ impl AppState {
         let Some(ref idx) = self.text_index else {
             return sparql.to_string();
         };
-        // A rebuild reads every literal in the store, so it is gated on the
-        // caller having established that this query can use the index.
-        self.sync_text_index_if_dirty();
+        if self.text_dirty.load(Ordering::Relaxed) {
+            if sparql_fn::mentions_text_search(sparql) {
+                // `text:search` REQUIRES the index — its expansion IS the result
+                // set — so this query waits for the sync.
+                self.sync_text_index_if_dirty();
+            } else {
+                // Substring push-down (`CONTAINS`/`STRSTARTS`) is only an
+                // accelerator: the query is fully correct evaluated plainly. A
+                // stale index must not be consulted (its candidate set could
+                // drop rows), and rebuilding here made the first such query
+                // after any write pay for a whole-store reindex — measured at
+                // ~40s on a laptop-sized store, which read as "the store is
+                // slow after an upload". Skip the push-down this once and let a
+                // background thread repair the index.
+                self.spawn_text_index_sync();
+                return sparql.to_string();
+            }
+        }
 
         let scope = scope.as_scope();
         let expanded = sparql_fn::preprocess_text_search(sparql, idx, scope);
@@ -1999,6 +2084,8 @@ pub async fn run(
         text_dirty: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "text-search")]
         text_sync_lock: Arc::new(std::sync::Mutex::new(())),
+        #[cfg(feature = "text-search")]
+        text_bg_syncing: Arc::new(AtomicBool::new(false)),
         vocab_catalog: Arc::new(crate::vocab_search::catalog::VocabCatalog::bundled()),
         // Start dirty: persisted registry entries from earlier boots become
         // visible on the first vocab request even before the boot seed chain
