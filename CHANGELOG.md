@@ -14,7 +14,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- None.
+- Spark now orients every turn on what the question NAMES before the model writes
+  a query. The platform context lists the registered data models & vocabularies
+  with the named graph holding each one's current published definitions (so a
+  question about a registered model's classes targets the registry graph, not an
+  instance graph); IRIs the user pastes are located in the store with indexed probes
+  (which readable graphs, which triple position); and the question's identifier
+  tokens and salient words are resolved through the full-text index to the
+  subjects and graphs that actually carry them. The findings ride into the prompt
+  as a verified "where this conversation's names occur" section, and the graphs
+  they point at take vocabulary-sampling slots ahead of the size heuristics.
+- Spark discovers the serving model's **context window from the gateway** when
+  `LLM_CONTEXT_TOKENS` is unset — vLLM's `max_model_len` on `/v1/models`, or an
+  Ollama Modelfile `num_ctx` via `/api/show` — and budgets its prompt against
+  it, instead of only against the declared knob. A declared window always wins.
+  An Ollama model without a Modelfile `num_ctx` is deliberately NOT guessed at
+  (its true serving context is invisible over the API, and both possible
+  guesses hurt): the server warns once, and again per over-large prompt, that
+  `LLM_CONTEXT_TOKENS` should mirror the real `OLLAMA_CONTEXT_LENGTH`.
+  `GET /api/llm/health` reports the chat model and the effective window, so a
+  misconfigured stack is visible instead of just wrong.
+- Spark retrieval limits became knobs: `LLM_CHAT_MAX_ROUNDS` (default 3,
+  clamped 1–8) and `LLM_CHAT_QUERY_MAX_SECS` (default 30, clamped 5–600) — a
+  capable model on multi-part questions makes good use of more rounds, and a
+  large ontology sometimes needs more than 30s for a legitimate property path.
+- The vocabulary sample **widens with the window** (20 graphs × 16 classes +
+  32 predicates at a declared 32k+, instead of 12 × 8 + 20), each block marks
+  graphs whose members are `owl:Class`/`skos:Concept`-like as *"DEFINES terms"*
+  so the model can tell a definitions graph from an instance graph, and a
+  zero-row round's repair hint now embeds the queried graphs' **actual**
+  sampled vocabulary — ground truth instead of "re-read the section" (which
+  may not even cover the graph the query targeted).
+- A turn whose every retrieval came back empty gets a mechanical epistemic
+  caveat appended ("the data was not found, which is not proof it does not
+  exist") — small models reliably upgrade "not found" to "does not exist"
+  regardless of instructions, in whichever language they answer.
 
 ### Changed
 - None.
@@ -26,6 +60,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- Spark's invented-IRI check judged a query's IRIs against the sampled vocabulary
+  window (8 classes + 20 predicates per graph), so it routinely condemned REAL
+  terms — `rdfs:label` where only `rdfs:comment` made a sample, a class outside a
+  big ontology's top 8, even a legitimate named graph whose siblings were sampled
+  — burning retrieval rounds on false "does not exist" errors and steering the
+  model away from IRIs the user had pasted verbatim. Candidates are now verified
+  against the store itself (four indexed probes: subject, predicate, object,
+  named graph), and IRIs the user pasted are never rejected at all — an absent
+  one runs to an honest empty result instead of an error blaming the user.
 - The content-negotiated Turtle service description (`GET /` with an RDF `Accept`
   type) counted every accessible graph with a full `count_graph()` scan; on a store
   with a multi-million-triple graph that took tens of seconds per request. It now
