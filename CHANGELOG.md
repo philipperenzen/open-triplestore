@@ -72,7 +72,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
-- None.
+- **Dependencies.** Batched the outstanding Dependabot updates — `jsonwebtoken` 11
+  (now on its pure-Rust `rust_crypto` backend; v11 ships **no** signing backend by
+  default), `quick-xml` 0.42 (names and attribute values moved from bytes to
+  `&str`), `lru` 0.18, `eslint` 10 (with `@eslint/js` 10), `maplibre-gl` 6.6,
+  `uuid`, `futures`, `thiserror`, `symphonia`, `http-body-util`,
+  `aws-smithy-http-client`, `parry3d-f64`, `cytoscape`, `globals`,
+  `swagger-ui-dist`, `@codemirror/commands`, `@testing-library/jest-dom`,
+  `@typescript-eslint/parser`, `@sveltejs/vite-plugin-svelte`,
+  `eslint-plugin-svelte`, and the SHA-pinned `Swatinem/rust-cache` action —
+  together with the code migrations they require. `svelte/no-reactive-functions`
+  is disabled (its fixer calls an API eslint 10 removed and crashes the lint run)
+  and eslint 10's new `no-useless-assignment` is staged as a warning; the stale
+  `lru` advisory ignore was dropped from `deny.toml`.
 
 ### Deprecated
 - None.
