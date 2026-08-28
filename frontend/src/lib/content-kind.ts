@@ -147,7 +147,7 @@ export async function probeContentKind(graphs: string[], signal?: AbortSignal) {
 }
 
 async function probeContentKindInner(graphs: string[], from: string, signal?: AbortSignal) {
-  let classCount = 0, propertyCount = 0, shapeCount = 0, skosSchemeCount = 0, skosConceptCount = 0, entailmentCount = 0, instanceCount = 0;
+  let classCount = 0, propertyCount = 0, shapeCount = 0, skosSchemeCount = 0, skosConceptCount = 0, entailmentCount = 0;
   {
     const combined = await sparqlQuery(`SELECT
       (COUNT(DISTINCT ?c)  AS ?classes)
@@ -177,7 +177,7 @@ async function probeContentKindInner(graphs: string[], from: string, signal?: Ab
   }
 
   // Instance count as a separate query (complex FILTER NOT EXISTS can't inline easily).
-  instanceCount = await askCount(`SELECT (COUNT(DISTINCT ?s) AS ?n) ${from} WHERE {
+  const instanceCount = await askCount(`SELECT (COUNT(DISTINCT ?s) AS ?n) ${from} WHERE {
     ?s a ?t .
     FILTER NOT EXISTS { ?s a <http://www.w3.org/2000/01/rdf-schema#Class> }
     FILTER NOT EXISTS { ?s a <http://www.w3.org/2002/07/owl#Class> }
@@ -193,9 +193,7 @@ async function probeContentKindInner(graphs: string[], from: string, signal?: Ab
   }`, signal);
 
   // Sample the top-5 instance types for display
-  let sampleTypes = [];
-  {
-    const res = await sparqlQuery(`SELECT ?t (COUNT(DISTINCT ?s) AS ?n) ${from} WHERE {
+  const sampleTypesRes = await sparqlQuery(`SELECT ?t (COUNT(DISTINCT ?s) AS ?n) ${from} WHERE {
       ?s a ?t .
       FILTER(ISIRI(?t))
       FILTER NOT EXISTS { ?s a <http://www.w3.org/2000/01/rdf-schema#Class> }
@@ -203,10 +201,9 @@ async function probeContentKindInner(graphs: string[], from: string, signal?: Ab
       FILTER NOT EXISTS { ?s a <http://www.w3.org/1999/02/22-rdf-syntax-ns#Property> }
       FILTER NOT EXISTS { ?s a <http://www.w3.org/ns/shacl#NodeShape> }
     } GROUP BY ?t ORDER BY DESC(?n) LIMIT 5`, { signal });
-    sampleTypes = (res?.results?.bindings || []).map(b => ({
-      cls: b.t?.value, count: parseInt(b.n?.value || '0', 10)
-    }));
-  }
+  const sampleTypes = (sampleTypesRes?.results?.bindings || []).map(b => ({
+    cls: b.t?.value, count: parseInt(b.n?.value || '0', 10)
+  }));
 
   const verdict = classifyVerdict({ classCount, propertyCount, shapeCount, skosSchemeCount, skosConceptCount, entailmentCount, instanceCount });
 

@@ -453,7 +453,8 @@ function normMapModels(arr) {
  */
 export function parseMapSpec(text, queryRows = null) {
   const t = String(text ?? '').trim();
-  let features = [];
+  // Assigned on both branches below; `models` keeps its [] on the plain-WKT path.
+  let features;
   let models = [];
   if (t.startsWith('{') || t.startsWith('[')) {
     const raw = lenientJsonParse(t);

@@ -105,7 +105,7 @@
   let geoStatsKey = ''; // scope signature scopeGeoStats reflects (de-dupes + races)
   let geoStatsSettledKey = ''; // scope signature whose probe has resolved
   async function loadGeoStats(k, ids) {
-    let stats = null;
+    let stats;
     try {
       stats = await getGeoStatsBatch(ids);
     } catch {

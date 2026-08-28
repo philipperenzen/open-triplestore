@@ -31,11 +31,6 @@ export default [
       'no-console': 'warn',
       // Empty catch blocks are an intentional "best-effort, ignore failure" pattern here
       'no-empty': ['error', { allowEmptyCatch: true }],
-      // New in eslint 10's recommended set; fired 37 times on pre-existing code,
-      // mostly in .svelte files where an "unused" assignment is a reactivity
-      // trigger the rule cannot see. Kept visible as a warning; triage the
-      // genuine dead stores (the .ts hits) file by file.
-      'no-useless-assignment': 'warn',
     },
   },
   {
@@ -121,6 +116,19 @@ export default [
     // are worth triaging file by file.
     files: ['**/*.svelte'],
     rules: {
+      // Off in .svelte only; stays at its recommended `error` for .js/.ts.
+      //
+      // The rule assumes a statement sequence executes once, so a value written
+      // and not read again below is dead. A `$:` block re-runs, and the idiom
+      // this codebase uses everywhere — `$: if (x !== lastX) { lastX = x; … }` —
+      // reads that write on the NEXT run, which the rule cannot see. All 28
+      // remaining hits were this shape (memo guards, run-once auth latches);
+      // acting on any of them would reintroduce the bugs three of them carry
+      // comments about (DatasetMetadataDialog, OrganisationMetadataDialog and
+      // OntologyModelViewer each document why the write sits where it does).
+      // Genuine dead stores in plain functions were fixed rather than silenced;
+      // this only gives up catching that shape inside a component.
+      'no-useless-assignment': 'off',
       'svelte/require-each-key': 'off', // 265 hits
       'svelte/prefer-svelte-reactivity': 'off', // 137 hits
       'svelte/infinite-reactive-loop': 'warn',

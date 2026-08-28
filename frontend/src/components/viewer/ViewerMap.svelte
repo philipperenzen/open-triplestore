@@ -1051,7 +1051,7 @@
         if (src) sources.add(src);
       }
       for (const src of sources) {
-        let feats = [];
+        let feats;
         try {
           feats = map.querySourceFeatures(src, { sourceLayer: OSM_BUILDING_SOURCE_LAYER });
         } catch {
