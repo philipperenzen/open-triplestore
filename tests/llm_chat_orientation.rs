@@ -46,7 +46,14 @@ async fn completions(State(gw): State<&'static Gateway>, Json(body): Json<Value>
         .unwrap()
         .pop_front()
         .unwrap_or_else(|| "I have nothing further to add.".to_string());
-    Json(json!({"choices": [{"message": {"content": reply}}]}))
+    // A script entry that is itself JSON is served as the raw assistant
+    // MESSAGE object — that is how a test scripts native tool_calls.
+    let message = if reply.trim_start().starts_with('{') {
+        serde_json::from_str(&reply).unwrap()
+    } else {
+        json!({"role": "assistant", "content": reply})
+    };
+    Json(json!({"choices": [{"message": message}]}))
 }
 
 async fn models(State(gw): State<&'static Gateway>) -> axum::response::Response {
@@ -445,4 +452,118 @@ async fn round_budget_knob_caps_the_retrieval_loop() {
         answer.starts_with("Here is what the query returned"),
         "a bare directive past the budget falls back to the retrieved data: {answer}"
     );
+}
+
+/// Native tool calling end to end: the model calls `run_sparql`, the query
+/// runs through the same pipeline (and lands in the same user-visible trail)
+/// as the directive protocol, and the tool result goes back as a `tool`
+/// message carrying the round budget.
+#[tokio::test]
+async fn native_tool_calls_drive_retrieval() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(
+        gw,
+        &[
+            r#"{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_sparql","arguments":"{\"query\":\"SELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }\"}"}}]}"#,
+            "Er zijn drie bruggen.",
+        ],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    let queries = resp["queries"].as_array().unwrap();
+    assert_eq!(
+        queries.len(),
+        1,
+        "the tool call is one trail round: {queries:?}"
+    );
+    assert_eq!(queries[0]["ok"], true);
+    assert_eq!(queries[0]["rows"].as_array().unwrap().len(), 3);
+    assert_eq!(resp["answer"], "Er zijn drie bruggen.");
+
+    let prompts = gw.prompts.lock().unwrap();
+    assert!(
+        prompts[0]["tools"].is_array(),
+        "completions are offered the native tools"
+    );
+    let follow_up = &prompts[1]["messages"];
+    let tool_msg = follow_up
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("a tool message answers the call");
+    assert_eq!(tool_msg["tool_call_id"], "call_1");
+    let content = tool_msg["content"].as_str().unwrap();
+    assert!(content.contains("Query results:"), "{content}");
+    assert!(
+        content.contains("more retrieval rounds allowed"),
+        "round budget rides on the tool result: {content}"
+    );
+}
+
+/// An ```ask fence is a complete reply — a clarifying question to the user —
+/// and must not be nudged into querying.
+#[tokio::test]
+async fn ask_fence_is_a_complete_reply_and_skips_the_nudge() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(
+        gw,
+        &["Er is een concept-versie.\n```ask\n{\"question\":\"Welke versie wil je gebruiken?\",\"options\":[\"Gepubliceerd 1.0.0\",\"Concept 1.1.0\"]}\n```"],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Wat definieert de Bruggenstandaard?").await;
+    let answer = resp["answer"].as_str().unwrap();
+    assert!(
+        answer.contains("```ask"),
+        "the ask card reaches the user: {answer}"
+    );
+    assert_eq!(
+        gw.prompts.lock().unwrap().len(),
+        1,
+        "an ask reply is final — no retrieval nudge is spent on it"
+    );
+}
+
+/// A declared PLAN is repeated back with every round's results, and never
+/// shown to the user.
+#[tokio::test]
+async fn plan_is_tracked_across_rounds_and_stripped_from_the_answer() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(
+        gw,
+        &[
+            "PLAN:\n1. tel de bruggen\n2. vind het zeldzame object\nSPARQL:\nSELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }",
+            "SPARQL:\nSELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Zeldzaam> } }",
+            "Drie bruggen en één zeldzaam object.",
+        ],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Tel de bruggen en vind het zeldzame object.").await;
+    assert_eq!(resp["queries"].as_array().unwrap().len(), 2);
+    assert_eq!(resp["answer"], "Drie bruggen en één zeldzaam object.");
+
+    let prompts = gw.prompts.lock().unwrap();
+    for i in [1, 2] {
+        let last_user = prompts[i]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user")
+            .unwrap();
+        let content = last_user["content"].as_str().unwrap();
+        assert!(
+            content.contains("Your plan:") && content.contains("tel de bruggen"),
+            "round {i} follow-up must repeat the plan: {content}"
+        );
+    }
 }

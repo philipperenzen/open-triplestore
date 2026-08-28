@@ -14,6 +14,7 @@ import {
   decorateApiLinks,
   decorateIriLinks,
   lenientJsonParse,
+  parseAskSpec,
 } from '../chatRich.js';
 
 describe('parseChatBlocks', () => {
@@ -507,5 +508,34 @@ describe('decorateIriLinks', () => {
     expect(decorateIriLinks('<pre><code>https://ex.org/x</code></pre>')).not.toContain('chat-iri-link');
     expect(decorateIriLinks('<code>SELECT ?s</code>')).not.toContain('chat-iri-link');
     expect(decorateIriLinks('<p>https://ex.org/x</p>')).not.toContain('chat-iri-link');
+  });
+});
+
+describe('parseAskSpec / ask blocks', () => {
+  it('parses a question with options and renders as an ask segment', () => {
+    const src =
+      'Which version?\n```ask\n{"question":"Welke versie wil je gebruiken?","options":["Gepubliceerd 1.0.0","Concept 1.1.0"]}\n```';
+    const segs = parseChatBlocks(src);
+    const ask = segs.find((s) => s.kind === 'ask');
+    expect(ask).toBeTruthy();
+    expect(ask.ask.question).toBe('Welke versie wil je gebruiken?');
+    expect(ask.ask.options).toEqual(['Gepubliceerd 1.0.0', 'Concept 1.1.0']);
+  });
+
+  it('caps and cleans options, and rejects broken specs', () => {
+    const many = { question: 'q', options: ['a', '', 'b', 3, 'c', 'd', 'e', 'f'] };
+    expect(parseAskSpec(JSON.stringify(many)).ask.options).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(parseAskSpec('not json').error).toBeTruthy();
+    expect(parseAskSpec('{"options":["a"]}').error).toBeTruthy();
+    expect(parseAskSpec('{"question":"q","options":[]}').error).toBeTruthy();
+    // A broken fence degrades to the broken block, never a crash.
+    const segs = parseChatBlocks('```ask\n{"question":""}\n```');
+    expect(segs[0].kind).toBe('broken');
+    expect(segs[0].label).toBe('ask');
+  });
+
+  it('never fires on untagged JSON', () => {
+    const segs = parseChatBlocks('```\n{"question":"q","options":["a"]}\n```');
+    expect(segs.some((s) => s.kind === 'ask')).toBe(false);
   });
 });

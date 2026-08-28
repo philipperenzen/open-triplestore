@@ -143,6 +143,12 @@ pub struct ModelContextEntry {
     pub graph_iri: Option<String>,
     /// That version's semver label ("2.1.0"), for prose.
     pub version: Option<String>,
+    /// Named graph of the latest DRAFT version, when one exists — unreviewed
+    /// content, surfaced so an assistant can offer it as an explicit choice
+    /// rather than silently mixing it with published definitions.
+    pub draft_graph_iri: Option<String>,
+    /// The draft's semver label.
+    pub draft_version: Option<String>,
 }
 
 /// List every registered model/vocabulary with the graph of its latest
@@ -155,7 +161,7 @@ pub fn list_models_for_context(store: &TripleStore) -> Vec<ModelContextEntry> {
         PREFIX ver: <{VER}>
         PREFIX dct: <{DCT}>
         PREFIX owl: <{OWL}>
-        SELECT ?m ?title ?ns ?kind ?isPublic ?ownerType ?ownerId ?graphIri ?semver WHERE {{
+        SELECT ?m ?title ?ns ?kind ?isPublic ?ownerType ?ownerId ?graphIri ?semver ?draftIri ?draftVer WHERE {{
           GRAPH <{REGISTRY_GRAPH}> {{
             ?m a ver:DataModel ;
                dct:title ?title ;
@@ -168,6 +174,11 @@ pub fn list_models_for_context(store: &TripleStore) -> Vec<ModelContextEntry> {
               ?m ver:latestPublished ?v .
               ?v ver:graphIri ?graphIri .
               OPTIONAL {{ ?v owl:versionInfo ?semver }}
+            }}
+            OPTIONAL {{
+              ?m ver:latestDraft ?d .
+              ?d ver:graphIri ?draftIri .
+              OPTIONAL {{ ?d owl:versionInfo ?draftVer }}
             }}
           }}
         }}
@@ -197,6 +208,8 @@ pub fn list_models_for_context(store: &TripleStore) -> Vec<ModelContextEntry> {
                 owner_id: var_str(&vals, 6),
                 graph_iri: var_str(&vals, 7),
                 version: var_str(&vals, 8),
+                draft_graph_iri: var_str(&vals, 9),
+                draft_version: var_str(&vals, 10),
             });
         }
     }
@@ -1161,6 +1174,32 @@ mod tests {
         assert_eq!(e.version.as_deref(), Some("1.2.0"));
         assert_eq!(e.kind, RegistryKind::Vocabulary);
         assert_eq!(e.namespace, "http://purl.org/goodrelations/v1#");
+        assert!(e.draft_graph_iri.is_none(), "no draft yet");
+
+        // A newer draft rides along without displacing the published graph.
+        let draft = DataModelVersion {
+            data_model_id: "gr".into(),
+            version: "1.3.0".into(),
+            status: VersionStatus::Draft,
+            graph_iri: "urn:draft:gr-1.3.0".into(),
+            sub_graphs: Vec::new(),
+            created_at: "2026-07-25T09:00:00Z".into(),
+            created_by: None,
+            derived_from: None,
+            notes: None,
+            branch: None,
+            sub_graph_status: Vec::new(),
+        };
+        insert_version(&store, BASE, &draft).unwrap();
+        update_latest_draft(&store, BASE, "gr", "1.3.0").unwrap();
+        let e = &list_models_for_context(&store)[0];
+        assert_eq!(
+            e.graph_iri.as_deref(),
+            Some("http://purl.org/goodrelations/v1"),
+            "published stays"
+        );
+        assert_eq!(e.draft_graph_iri.as_deref(), Some("urn:draft:gr-1.3.0"));
+        assert_eq!(e.draft_version.as_deref(), Some("1.3.0"));
     }
 
     /// The ordinary case keeps listing every distinct model.

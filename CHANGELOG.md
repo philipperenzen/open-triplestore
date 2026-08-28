@@ -49,6 +49,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caveat appended ("the data was not found, which is not proof it does not
   exist") — small models reliably upgrade "not found" to "does not exist"
   regardless of instructions, in whichever language they answer.
+- **Spark speaks native tool calling** where the model supports it: every
+  completion offers `run_sparql`, `text_search` and `vocab_term_search` as
+  OpenAI-style function tools, running through the exact same scoped pipeline
+  and user-visible trail as the `SPARQL:` directive protocol, which keeps
+  working unchanged — the two run as a hybrid in one loop, so a model that
+  ignores tools loses nothing. A gateway that rejects the `tools` parameter is
+  retried without them once and remembered. `LLM_CHAT_TOOLS=off` disables.
+- **Spark asks instead of guessing**: a new ```ask answer widget renders a
+  question with clickable options (the click arrives as the user's next
+  message), the system prompt instructs the model to use it whenever a real
+  choice is open — and the platform context now lists in-scope **unpublished
+  draft versions** of registered models as exactly that, so "published or
+  draft?" becomes such a question instead of a silent guess.
+- **Spark plans multi-part questions**: the model may declare a short `PLAN:`
+  (one line per data need) with its first retrieval; the server repeats the
+  plan back with every round's results and strips it from the final answer —
+  long questions get worked through instead of half-answered.
+- **Question words resolve against the installed vocabularies**: orientation
+  now also consults the vocabulary term index (the engine behind
+  `/api/vocab/terms/search`), so a plain word arrives with candidate standard
+  term IRIs and labels before the model can coin one.
 
 ### Changed
 - None.

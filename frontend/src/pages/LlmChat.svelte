@@ -671,6 +671,7 @@
                 on:runApi={(e) => attachRun(msg, e.detail)}
                 on:openInSparql={(e) => openInSparql(e.detail)}
                 on:openResource={(e) => openResource(e.detail?.iri)}
+                on:askChoice={(e) => send(e.detail)}
               />
             </div>
             {#if msg.stopped}
