@@ -1031,7 +1031,7 @@ INTO GRAPH <http://example.org/import/loaded>`,
       owner_type: ownerType === 'org' ? 'organisation' : 'user',
       owner_id: ownerType === 'org' ? selectedOrgId : currentUser?.id,
     };
-    let modelId = '';
+    let modelId;
     try {
       const created = await createDataModel({
         title: String(f.registryTitle).trim(),

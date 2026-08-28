@@ -82,9 +82,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `@typescript-eslint/parser`, `@sveltejs/vite-plugin-svelte`,
   `eslint-plugin-svelte`, and the SHA-pinned `Swatinem/rust-cache` action —
   together with the code migrations they require. `svelte/no-reactive-functions`
-  is disabled (its fixer calls an API eslint 10 removed and crashes the lint run)
-  and eslint 10's new `no-useless-assignment` is staged as a warning; the stale
-  `lru` advisory ignore was dropped from `deny.toml`.
+  is disabled (its fixer calls an API eslint 10 removed and crashes the lint run);
+  the stale `lru` advisory ignore was dropped from `deny.toml`.
+- **Lint.** eslint 10's new `no-useless-assignment` now runs at its recommended
+  `error` severity for `.js`/`.ts`, and the nine genuine dead stores it found —
+  five in `.js`/`.ts`, four in plain helper functions inside components — are
+  gone. It is off for `.svelte`: the rule assumes statements run once, so it
+  cannot see that `$: if (x !== lastX) { lastX = x; … }` reads its own write on
+  the next run, and all 28 remaining hits were that shape.
 
 ### Deprecated
 - None.

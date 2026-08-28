@@ -156,10 +156,8 @@ function locateParseError(text: string, e: any): { from: number; to: number; det
   const lm = /line\s+(\d+)/i.exec(msg);
   const line = lm ? parseInt(lm[1], 10) : 1;
   // Pull the human-readable tail (jison/sparqljs prefix the message with a code snippet).
-  let detail = '';
   const m = msg.match(/(Expecting[\s\S]*|Unexpected[\s\S]*|Lexical error[\s\S]*|Unknown prefix[\s\S]*)/i);
-  if (m) detail = m[1];
-  else detail = msg.split('\n').filter((l) => l.trim() && !/\^/.test(l)).pop() || msg;
+  let detail = m ? m[1] : msg.split('\n').filter((l) => l.trim() && !/\^/.test(l)).pop() || msg;
   detail = detail.replace(/\s+/g, ' ').trim();
   if (detail.length > 180) detail = detail.slice(0, 177) + '…';
   return { ...lineRange(text, line), detail };
