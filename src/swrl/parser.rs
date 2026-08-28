@@ -31,7 +31,7 @@ pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
             Ok(Event::Eof) => break,
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let local_name = local_name(e.name().as_ref());
-                let attrs = collect_attrs(&reader, e);
+                let attrs = collect_attrs(e);
 
                 match local_name.as_str() {
                     "Imp" | "DLSafeRule" | "Rule" => {
@@ -172,13 +172,11 @@ pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
                     _ => {}
                 }
             }
-            Ok(Event::Text(ref e)) => {
+            Ok(Event::Text(e)) => {
                 // Handle literal text content
-                if let Ok(text) = e.decode().map_err(|_| ()).and_then(|s| {
-                    quick_xml::escape::unescape(&s)
-                        .map(|u| u.into_owned())
-                        .map_err(|_| ())
-                }) {
+                if let Ok(text) =
+                    quick_xml::escape::unescape(&e.into_inner()).map(|u| u.into_owned())
+                {
                     let text = text.to_string();
                     if !text.trim().is_empty() {
                         // Update the last literal arg with its value
@@ -415,23 +413,17 @@ fn update_last_literal(atom: &mut AtomBuilder, text: &str) {
     }
 }
 
-fn local_name(bytes: &[u8]) -> String {
-    let full = String::from_utf8_lossy(bytes);
-    full.rsplit_once(':')
+fn local_name(name: &str) -> String {
+    name.rsplit_once(':')
         .map(|(_, local)| local.to_string())
-        .unwrap_or_else(|| full.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
-fn collect_attrs(
-    reader: &Reader<&[u8]>,
-    e: &quick_xml::events::BytesStart,
-) -> std::collections::HashMap<String, String> {
+fn collect_attrs(e: &quick_xml::events::BytesStart) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for attr in e.attributes().flatten() {
-        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-        if let Ok(val) =
-            attr.decoded_and_normalized_value(quick_xml::XmlVersion::Explicit1_0, reader.decoder())
-        {
+        let key = attr.key.as_ref().to_string();
+        if let Ok(val) = attr.normalized_value(quick_xml::XmlVersion::Explicit1_0) {
             map.insert(key, val.to_string());
         }
     }

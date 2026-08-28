@@ -154,9 +154,13 @@ r2d2_sqlite = { version = "0.24", features = ["bundled"] }
 ipnet = "2"
 
 # LRU cache for property path memoisation (W4-22)
-lru = "0.16"
-jsonwebtoken = "9"
-# ES256 keypair generation for the OIDC provider (already jsonwebtoken's verifier backend).
+lru = "0.18"
+# v11 ships no crypto backend by default — `rust_crypto` selects the pure-Rust
+# one (hmac/sha2/p256/…, all already in the tree via webauthn/openidconnect);
+# the alternative `aws_lc_rs` would add a C/cmake build dependency.
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+# ES256 keypair generation for the OIDC provider (also rustls's crypto backend
+# in this tree; no longer jsonwebtoken's, which moved off ring in v10).
 ring = "0.17"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "v5"] }
@@ -240,7 +244,7 @@ sfcgal = { version = "0.8", optional = true }
 
 # RML mapping sources
 csv = "1"
-quick-xml = "0.41"
+quick-xml = "0.42"
 
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"

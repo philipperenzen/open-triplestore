@@ -31,6 +31,11 @@ export default [
       'no-console': 'warn',
       // Empty catch blocks are an intentional "best-effort, ignore failure" pattern here
       'no-empty': ['error', { allowEmptyCatch: true }],
+      // New in eslint 10's recommended set; fired 37 times on pre-existing code,
+      // mostly in .svelte files where an "unused" assignment is a reactivity
+      // trigger the rule cannot see. Kept visible as a warning; triage the
+      // genuine dead stores (the .ts hits) file by file.
+      'no-useless-assignment': 'warn',
     },
   },
   {
@@ -119,7 +124,11 @@ export default [
       'svelte/require-each-key': 'off', // 265 hits
       'svelte/prefer-svelte-reactivity': 'off', // 137 hits
       'svelte/infinite-reactive-loop': 'warn',
-      'svelte/no-reactive-functions': 'warn',
+      // Off, not warn: the rule's suggestion fixer still calls
+      // SourceCode#isSpaceBetweenTokens, which eslint 10 removed, so any report
+      // crashes the whole lint run (eslint-plugin-svelte ≤ 3.23.0). Restore to
+      // 'warn' once the plugin ships an eslint-10-compatible fixer.
+      'svelte/no-reactive-functions': 'off',
       'svelte/no-immutable-reactive-statements': 'warn',
       'svelte/no-dom-manipulating': 'warn',
       'svelte/no-reactive-reassign': 'warn',
