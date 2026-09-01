@@ -516,16 +516,51 @@ fn evaluate_node_constraint(
                     n
                 ));
             }
-            StringFacet::Pattern(pat, _flags)
-                // Simple substring match for basic patterns; full regex
-                // support would require adding the `regex` crate as a dependency.
-                if !lexical.contains(pat.as_str()) => {
-                    return ShExStatus::NonConformant(format!(
-                        "Pattern '{}' did not match: {}",
-                        pat, lexical
-                    ));
+            StringFacet::Pattern(pat, flags) => {
+                // A real regex. This was `lexical.contains(pat)` — a substring
+                // test — on the stated grounds that regex "would require adding
+                // the `regex` crate", which has been a direct dependency all
+                // along. Substring matching gets both directions wrong:
+                // `^[0-9]{4}$` rejected the conforming "1234", and `^abc`
+                // accepted "xxabcxx". The flags were discarded too.
+                match compile_pattern(pat, flags.as_deref()) {
+                    Ok(re) => {
+                        if !re.is_match(&lexical) {
+                            return ShExStatus::NonConformant(format!(
+                                "Pattern '{}' did not match: {}",
+                                pat, lexical
+                            ));
+                        }
+                    }
+                    // An uncompilable pattern is a schema error, not a licence
+                    // to accept every value.
+                    Err(e) => {
+                        return ShExStatus::NonConformant(format!(
+                            "Pattern '{pat}' is not a valid regular expression: {e}"
+                        ));
+                    }
                 }
+            }
             _ => {}
+        }
+    }
+
+    // Numeric facets. These were declared, parsed into the schema type and then
+    // never evaluated — `ex:age xsd:integer MININCLUSIVE 0` accepted -5.
+    if !nc.numeric_facets.is_empty() {
+        match lexical.parse::<f64>() {
+            Ok(value) => {
+                for facet in &nc.numeric_facets {
+                    if let Some(msg) = numeric_facet_violation(facet, value, &lexical) {
+                        return ShExStatus::NonConformant(msg);
+                    }
+                }
+            }
+            Err(_) => {
+                return ShExStatus::NonConformant(format!(
+                    "Value {lexical} is not numeric, but the shape declares numeric facets"
+                ));
+            }
         }
     }
 
@@ -535,6 +570,55 @@ fn evaluate_node_constraint(
     }
 
     ShExStatus::Conformant
+}
+
+/// Compile a ShEx `PATTERN` with its flag string.
+///
+/// ShEx flags follow XPath/XML Schema: `i` case-insensitive, `s` dot-matches-all,
+/// `m` multi-line, `x` extended (whitespace-insensitive). They map directly onto
+/// `regex`'s inline flags.
+fn compile_pattern(pattern: &str, flags: Option<&str>) -> Result<regex::Regex, regex::Error> {
+    let supported: String = flags
+        .unwrap_or("")
+        .chars()
+        .filter(|c| matches!(c, 'i' | 's' | 'm' | 'x'))
+        .collect();
+    if supported.is_empty() {
+        regex::Regex::new(pattern)
+    } else {
+        regex::Regex::new(&format!("(?{supported}){pattern}"))
+    }
+}
+
+/// Check one numeric facet, returning a message when it is violated.
+fn numeric_facet_violation(facet: &NumericFacet, value: f64, lexical: &str) -> Option<String> {
+    match facet {
+        NumericFacet::MinInclusive(n) if value < *n => {
+            Some(format!("Value {value} is below minInclusive {n}"))
+        }
+        NumericFacet::MaxInclusive(n) if value > *n => {
+            Some(format!("Value {value} is above maxInclusive {n}"))
+        }
+        NumericFacet::MinExclusive(n) if value <= *n => {
+            Some(format!("Value {value} is not above minExclusive {n}"))
+        }
+        NumericFacet::MaxExclusive(n) if value >= *n => {
+            Some(format!("Value {value} is not below maxExclusive {n}"))
+        }
+        NumericFacet::TotalDigits(n) => {
+            let digits = lexical.chars().filter(|c| c.is_ascii_digit()).count();
+            (digits > *n).then(|| format!("Value {lexical} has {digits} digits, more than {n}"))
+        }
+        NumericFacet::FractionDigits(n) => {
+            let fraction = lexical
+                .split_once('.')
+                .map(|(_, f)| f.chars().filter(|c| c.is_ascii_digit()).count())
+                .unwrap_or(0);
+            (fraction > *n)
+                .then(|| format!("Value {lexical} has {fraction} fraction digits, more than {n}"))
+        }
+        _ => None,
+    }
 }
 
 /// Extract the lexical form from an RDF term string.
@@ -594,5 +678,126 @@ mod tests {
             extract_lexical("<http://example.org/>"),
             "<http://example.org/>"
         );
+    }
+
+    /// PATTERN is a regular expression, not a substring test.
+    ///
+    /// It was `lexical.contains(pat)`, which got both directions wrong: the
+    /// anchored `^[0-9]{4}$` REJECTED the conforming "1234" (the pattern text
+    /// does not occur inside the value), and `^abc` ACCEPTED "xxabcxx".
+    #[test]
+    fn pattern_facet_is_a_real_regex() {
+        let store = TripleStore::in_memory().unwrap();
+        let anchored = NodeConstraint {
+            string_facets: vec![StringFacet::Pattern("^[0-9]{4}$".to_string(), None)],
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                evaluate_node_constraint(&store, "\"1234\"", &anchored),
+                ShExStatus::Conformant
+            ),
+            "a conforming value must match its anchored pattern"
+        );
+        assert!(
+            matches!(
+                evaluate_node_constraint(&store, "\"12345\"", &anchored),
+                ShExStatus::NonConformant(_)
+            ),
+            "anchoring must be honoured"
+        );
+
+        let prefix = NodeConstraint {
+            string_facets: vec![StringFacet::Pattern("^abc".to_string(), None)],
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                evaluate_node_constraint(&store, "\"xxabcxx\"", &prefix),
+                ShExStatus::NonConformant(_)
+            ),
+            "a leading anchor must reject a mid-string occurrence"
+        );
+    }
+
+    /// The `i` flag was parsed and then discarded.
+    #[test]
+    fn pattern_flags_are_applied() {
+        let store = TripleStore::in_memory().unwrap();
+        let nc = NodeConstraint {
+            string_facets: vec![StringFacet::Pattern(
+                "^abc$".to_string(),
+                Some("i".to_string()),
+            )],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate_node_constraint(&store, "\"ABC\"", &nc),
+            ShExStatus::Conformant
+        ));
+    }
+
+    /// An uncompilable pattern is a schema error, never a licence to accept
+    /// every value.
+    #[test]
+    fn an_invalid_pattern_does_not_accept_everything() {
+        let store = TripleStore::in_memory().unwrap();
+        let nc = NodeConstraint {
+            string_facets: vec![StringFacet::Pattern("[unclosed".to_string(), None)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate_node_constraint(&store, "\"anything\"", &nc),
+            ShExStatus::NonConformant(_)
+        ));
+    }
+
+    /// Numeric facets were declared in the schema type, parsed nowhere and
+    /// evaluated nowhere — so a range constraint accepted any value.
+    #[test]
+    fn numeric_facets_are_enforced() {
+        let store = TripleStore::in_memory().unwrap();
+        let nc = NodeConstraint {
+            numeric_facets: vec![
+                NumericFacet::MinInclusive(0.0),
+                NumericFacet::MaxInclusive(120.0),
+            ],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate_node_constraint(&store, "\"42\"", &nc),
+            ShExStatus::Conformant
+        ));
+        assert!(
+            matches!(
+                evaluate_node_constraint(&store, "\"-5\"", &nc),
+                ShExStatus::NonConformant(_)
+            ),
+            "a value below minInclusive must be rejected"
+        );
+        assert!(
+            matches!(
+                evaluate_node_constraint(&store, "\"200\"", &nc),
+                ShExStatus::NonConformant(_)
+            ),
+            "a value above maxInclusive must be rejected"
+        );
+    }
+
+    #[test]
+    fn fraction_and_total_digits_are_enforced() {
+        let store = TripleStore::in_memory().unwrap();
+        let nc = NodeConstraint {
+            numeric_facets: vec![NumericFacet::FractionDigits(2)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate_node_constraint(&store, "\"1.25\"", &nc),
+            ShExStatus::Conformant
+        ));
+        assert!(matches!(
+            evaluate_node_constraint(&store, "\"1.2345\"", &nc),
+            ShExStatus::NonConformant(_)
+        ));
     }
 }
