@@ -49,6 +49,68 @@ fn graph_uri(g: &str) -> String {
     format!("/store?graph={}", url_encode(g))
 }
 
+// ── Graph Store HTTP Protocol — a rejected PUT must not destroy the graph ─────
+
+/// A PUT whose body fails to parse must leave the target graph exactly as it
+/// was. The implementation used to `clear_graph()` first and only then parse, so
+/// one syntax error returned 4xx *and* left the graph empty with nothing to
+/// replace it — silent, unrecoverable data loss on a request the server itself
+/// rejected.
+#[tokio::test]
+async fn gsp_put_with_malformed_body_leaves_graph_intact() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let g = graph_uri("http://example.org/atomic");
+
+    let (st, ..) = send(
+        &app,
+        Method::PUT,
+        g.clone(),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://ex/keep> <http://ex/p> <http://ex/o> .",
+    )
+    .await;
+    assert!(st.is_success(), "seed PUT => {st}");
+
+    // Truncated Turtle: the object and terminating '.' are missing.
+    let (st, ..) = send(
+        &app,
+        Method::PUT,
+        g.clone(),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://ex/broken> <http://ex/p> ",
+    )
+    .await;
+    assert!(
+        st.is_client_error(),
+        "a malformed PUT body must be rejected, got {st}"
+    );
+
+    let (st, body, _) = send(
+        &app,
+        Method::GET,
+        g.clone(),
+        Some(&token),
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "GET after rejected PUT => {st}");
+    assert!(
+        body.contains("keep"),
+        "a rejected PUT must not clear the graph; graph is now: {body:?}"
+    );
+    assert!(
+        !body.contains("broken"),
+        "no part of the rejected body may be applied: {body:?}"
+    );
+}
+
 // ── Graph Store HTTP Protocol — PUT replaces, POST merges (cx-11) ──────────────
 
 #[tokio::test]

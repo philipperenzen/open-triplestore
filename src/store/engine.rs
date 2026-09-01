@@ -706,8 +706,25 @@ impl TripleStore {
             return Ok(());
         }
 
-        // Materialise quads (embedded graph names from NQuads/TriG are preserved;
-        // triple formats land in the default graph). Parse errors are propagated.
+        let quads = self.parse_quads(reader, format, base_iri, to_graph)?;
+        self.insert_quads_and_reindex(quads, to_graph)
+    }
+
+    /// Parse `reader` into quads, retargeting them into `to_graph` when one is
+    /// given and applying the durable blank-node policy.
+    ///
+    /// Split out of [`Self::load_reader_with_base`] so a caller that must not
+    /// mutate the store until the input is known-good — Graph Store PUT, which
+    /// replaces a graph — can parse first and only then clear.
+    fn parse_quads(
+        &self,
+        reader: impl BufRead,
+        format: RdfFormat,
+        base_iri: Option<&str>,
+        to_graph: Option<&str>,
+    ) -> Result<Vec<Quad>, StoreError> {
+        // Embedded graph names from NQuads/TriG are preserved; triple formats
+        // land in the default graph. Parse errors are propagated.
         let mut quads: Vec<Quad> = Self::parser_for(format, base_iri)?
             .for_reader(reader)
             .map(|r| r.map_err(|e| StoreError::Parse(e.to_string())))
@@ -725,8 +742,15 @@ impl TripleStore {
                 .collect();
         }
 
-        // Apply the durable blank-node policy, then bulk-load.
-        let quads = self.apply_blank_node_mode(quads);
+        Ok(self.apply_blank_node_mode(quads))
+    }
+
+    /// Bulk-insert already-parsed quads and run the post-write index bookkeeping.
+    fn insert_quads_and_reindex(
+        &self,
+        quads: Vec<Quad>,
+        to_graph: Option<&str>,
+    ) -> Result<(), StoreError> {
         let mut loader = self.store.bulk_loader();
         loader.load_quads(quads)?;
         loader.commit()?; // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
@@ -870,7 +894,6 @@ impl TripleStore {
         data: &str,
         format: RdfFormat,
     ) -> Result<(), StoreError> {
-        // Clear existing graph first
         let graph_name = match graph_iri {
             Some(iri) => GraphNameRef::NamedNode(
                 NamedNodeRef::new(iri)
@@ -878,10 +901,16 @@ impl TripleStore {
             ),
             None => GraphNameRef::DefaultGraph,
         };
-        self.store.clear_graph(graph_name)?;
 
-        // Load new data (load_reader rebuilds graph index)
-        self.load_str(data, format, graph_iri)
+        // Parse BEFORE clearing. Clearing first meant a malformed body destroyed
+        // the graph and then failed to replace it: the caller got a 4xx while the
+        // graph was left empty, with no way to recover it. PUT is a replace, so
+        // the body is already fully in memory — materialising the quads costs
+        // nothing extra and makes the replace all-or-nothing.
+        let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
+
+        self.store.clear_graph(graph_name)?;
+        self.insert_quads_and_reindex(quads, graph_iri)
     }
 
     /// Graph Store Protocol: POST (merge into) a named graph.
