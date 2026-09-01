@@ -486,3 +486,88 @@ fn rml_referencing_object_map_join_is_gap() {
         }
     }
 }
+
+// A quoted CSV field containing a newline must produce a correctly escaped
+// literal, not break the whole mapping.
+//
+// Literals were serialised by hand-escaping only `\` and `"`, leaving raw
+// newlines, carriage returns and tabs in the generated Turtle. Turtle's
+// STRING_LITERAL_QUOTE forbids those, so ONE multi-line source value made the
+// entire document unparseable and `execute` failed with "Failed to load
+// generated triples" — not a skipped row, the whole batch.
+#[test]
+fn rml_literal_with_newline_does_not_break_the_mapping() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "notes.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/note/{id}" .
+      ex:POM rr:predicate ex:body ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "body" ."#;
+    // Row 2's body spans two lines inside quotes, and row 3 carries a tab.
+    let csv = "id,body\n1,plain\n2,\"first line\nsecond line\"\n3,\"has\ttab\"\n";
+    let (store, n) = run_rml(mapping, &[("notes.csv", csv)]);
+
+    assert_eq!(
+        n, 3,
+        "every row must be mapped, not just the ones without control characters"
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?b WHERE { <http://example.org/note/2> ex:body ?b }"
+        )
+        .as_deref(),
+        Some("\"first line\\nsecond line\""),
+        "the newline must be escaped, and the value preserved"
+    );
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?b WHERE { <http://example.org/note/1> ex:body ?b }"
+        )
+        .as_deref(),
+        Some("\"plain\""),
+        "neighbouring rows must be unaffected"
+    );
+}
+
+// A reference-derived IRI whose value is not a valid IRI must skip that term,
+// not emit invalid Turtle that fails the whole batch.
+//
+// `rr:termType rr:IRI` on an `rml:reference` interpolated the raw cell value
+// between angle brackets with no validation or encoding, so a value with a
+// space produced an unparseable document and a value containing `>` could
+// close the IRI and inject further triples.
+#[test]
+fn rml_invalid_iri_reference_skips_the_term_not_the_batch() {
+    let mapping = r#"
+      ex:M a rr:TriplesMap ;
+        rml:logicalSource ex:Src ; rr:subjectMap ex:Subj ;
+        rr:predicateObjectMap ex:POM .
+      ex:Src rml:source "links.csv" ; rml:referenceFormulation ql:CSV .
+      ex:Subj rr:template "http://example.org/link/{id}" .
+      ex:POM rr:predicate ex:target ; rr:objectMap ex:Obj .
+      ex:Obj rml:reference "target" ; rr:termType rr:IRI ."#;
+    let csv = "id,target\n1,http://example.org/ok\n2,not a valid iri\n";
+    let (store, _n) = run_rml(mapping, &[("links.csv", csv)]);
+
+    assert_eq!(
+        first(
+            &store,
+            "SELECT ?t WHERE { <http://example.org/link/1> ex:target ?t }"
+        )
+        .as_deref(),
+        Some("<http://example.org/ok>"),
+        "the valid row must still be mapped"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT ?t WHERE { <http://example.org/link/2> ex:target ?t }"
+        ),
+        0,
+        "the unrepresentable IRI must be skipped"
+    );
+}
