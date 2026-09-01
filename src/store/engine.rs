@@ -399,8 +399,11 @@ impl TripleStore {
         if let Some(cached) = self.query_cache.get(sparql) {
             return Ok(cached);
         }
+        // Snapshot the generation BEFORE evaluating: a write that commits while
+        // this query runs must invalidate the result, not be stamped onto it.
+        let gen = self.query_cache.generation();
         let results = self.query_uncached(sparql)?;
-        Ok(self.query_cache.put(sparql, results))
+        Ok(self.query_cache.put(sparql, gen, results))
     }
 
     /// The evaluation pipeline behind [`Self::query`], without the result cache.
