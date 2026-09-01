@@ -912,7 +912,7 @@ fn analyze_update_graph_access(update: &spargebra::Update) -> UpdateGraphAccess 
 /// path scopes to (see [`execute_query`]). Used to authorize the read
 /// (`WHERE`/`USING`) side of SPARQL UPDATEs so a writer cannot copy data out of
 /// graphs they cannot read.
-fn accessible_read_graphs(
+pub(crate) fn accessible_read_graphs(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
 ) -> Result<std::collections::HashSet<String>, AppError> {

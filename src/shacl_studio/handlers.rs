@@ -1440,7 +1440,17 @@ async fn resolve_scope(
         }
         return Ok(graphs);
     }
-    Ok(vec![])
+    // No scope named. This used to return an empty list, which `values_clause`
+    // turned into "no GRAPH wrapper at all" — so introspection ran over the
+    // union graph and any authenticated caller could enumerate every tenant's
+    // classes, properties and datatypes. Default to exactly what the caller can
+    // read over /sparql instead.
+    let mut graphs: Vec<String> = crate::server::routes::accessible_read_graphs(state, Some(user))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?
+        .into_iter()
+        .collect();
+    graphs.sort();
+    Ok(graphs)
 }
 
 pub async fn model_context(
@@ -1497,7 +1507,19 @@ pub async fn derive_shapes(
                 ));
             }
         }
-        body.graphs.clone()
+        if body.graphs.is_empty() {
+            // Neither a dataset nor any graph named: fall back to the caller's
+            // readable set rather than the whole store (see `resolve_scope`).
+            let mut graphs: Vec<String> =
+                crate::server::routes::accessible_read_graphs(&state, Some(&user))
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?
+                    .into_iter()
+                    .collect();
+            graphs.sort();
+            graphs
+        } else {
+            body.graphs.clone()
+        }
     };
     let targets = body.target_classes.clone();
     let store = state.store.clone();
