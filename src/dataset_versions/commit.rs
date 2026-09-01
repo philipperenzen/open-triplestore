@@ -121,6 +121,29 @@ async fn run_validation(
         .map_err(|e| AppError::Internal(format!("bad validator response: {e}")))
 }
 
+/// Refuse a commit target graph that belongs to another dataset or to the
+/// system. Both commit branches register the caller-supplied graph and then
+/// `graph_store_put` (replace) it, so an unchecked graph name is a whole-graph
+/// overwrite of whoever owns it. Admins are unrestricted, matching the same
+/// gate on the import and mapping-execution paths in `server::routes`.
+fn authorize_target_graph(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    dataset_id: &str,
+    graph_iri: &str,
+) -> Result<(), AppError> {
+    if user.is_admin() {
+        return Ok(());
+    }
+    crate::auth::dataset_graph::authorize_dataset_graph_target(
+        &state.auth_db,
+        &state.base_url,
+        dataset_id,
+        graph_iri,
+    )
+    .map_err(AppError::Forbidden)
+}
+
 /// POST /api/datasets/validate-and-commit
 pub async fn validate_and_commit(
     State(state): State<AppState>,
@@ -196,6 +219,11 @@ pub async fn validate_and_commit(
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("{}/dataset/{}/graph/imported", state.base_url, ds_id));
+            // A brand-new dataset may not claim a graph another dataset already
+            // owns: the graph is REPLACED by the graph_store_put below, so
+            // without this the "create a dataset, name someone else's graph"
+            // path is a whole-graph overwrite.
+            authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
             state
                 .auth_db
                 .add_dataset_graph(&ds_id, &graph_iri)
@@ -231,6 +259,12 @@ pub async fn validate_and_commit(
                 }),
             };
             if !registered.contains(&graph_iri) {
+                // The caller-supplied graph was accepted verbatim, registered to
+                // this dataset, and then REPLACED by the graph_store_put below —
+                // the register-then-overwrite bypass that every other write path
+                // gates. `can_write_dataset` above only proves the caller owns
+                // *this* dataset, not that the graph is theirs to claim.
+                authorize_target_graph(&state, &user, &ds_id, &graph_iri)?;
                 state
                     .auth_db
                     .add_dataset_graph(&ds_id, &graph_iri)
