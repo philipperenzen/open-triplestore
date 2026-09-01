@@ -282,11 +282,14 @@ pub async fn validate_and_commit(
     // 3. Enforce the dataset's effective shapes (Studio write-gates + bindings
     // + legacy shacl_on_write) so a commit cannot bypass graph-attached shapes,
     // even if it passed the request-supplied shapes above.
+    // The commit below is a graph_store_put, i.e. a replace — so the payload is
+    // the graph's whole future state.
     crate::server::routes::validate_on_write(
         &state,
         Some(&graph_iri),
         &data_ttl,
         RdfFormat::Turtle,
+        crate::shacl_studio::gate::WriteMode::Replace,
     )?;
 
     // 4. Import (replace) the validated data into the target graph.

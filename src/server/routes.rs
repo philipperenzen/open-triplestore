@@ -1322,6 +1322,7 @@ pub(crate) fn validate_on_write(
     graph_iri: Option<&str>,
     data: &str,
     format: oxigraph::io::RdfFormat,
+    mode: crate::shacl_studio::gate::WriteMode,
 ) -> Result<(), AppError> {
     let iri = match graph_iri {
         Some(iri) => iri,
@@ -1343,6 +1344,7 @@ pub(crate) fn validate_on_write(
             iri,
             data,
             format,
+            mode,
         ) {
             return Err(AppError::ValidationFailed(report));
         }
@@ -1365,9 +1367,22 @@ pub(crate) fn validate_on_write(
         }
     };
 
-    // Load incoming data into a temporary in-memory store for validation
+    // Stage the graph's FUTURE contents in a temporary store. For a merge that
+    // is the existing graph plus the payload: validating the payload alone let
+    // a POST adding a second `ex:name` pass `sh:maxCount 1`, and rejected a POST
+    // that supplied one property with `sh:minCount 1` on all the others.
     let temp = crate::store::TripleStore::in_memory()
         .map_err(|e| AppError::Internal(format!("Failed to create temp store: {e}")))?;
+    if mode == crate::shacl_studio::gate::WriteMode::Merge {
+        let existing = state
+            .store
+            .dump(oxigraph::io::RdfFormat::Turtle, Some(iri))
+            .map_err(|e| AppError::Internal(format!("Failed to read existing graph: {e}")))?;
+        let existing = String::from_utf8(existing)
+            .map_err(|_| AppError::Internal("Existing graph is not valid UTF-8".to_string()))?;
+        temp.load_str(&existing, oxigraph::io::RdfFormat::Turtle, graph_iri)
+            .map_err(|e| AppError::Internal(format!("Failed to stage existing graph: {e}")))?;
+    }
     temp.load_str(data, format, graph_iri)
         .map_err(|e| AppError::BadRequest(format!("Failed to parse incoming data: {e}")))?;
 
@@ -1500,7 +1515,13 @@ async fn graph_store_put(
     let data = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::BadRequest("Invalid UTF-8".to_string()))?;
 
-    validate_on_write(&state, params.graph_iri(), &data, format)?;
+    validate_on_write(
+        &state,
+        params.graph_iri(),
+        &data,
+        format,
+        crate::shacl_studio::gate::WriteMode::Replace,
+    )?;
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
@@ -1534,7 +1555,13 @@ async fn graph_store_post(
     let data = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::BadRequest("Invalid UTF-8".to_string()))?;
 
-    validate_on_write(&state, params.graph_iri(), &data, format)?;
+    validate_on_write(
+        &state,
+        params.graph_iri(),
+        &data,
+        format,
+        crate::shacl_studio::gate::WriteMode::Merge,
+    )?;
 
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());

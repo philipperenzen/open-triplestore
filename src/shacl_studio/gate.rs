@@ -21,6 +21,38 @@ use super::models::{SeverityThreshold, TargetKind, ValidationPipeline};
 use super::models::{ResultsTarget, WriteTarget};
 use super::store::ShaclStudioStore;
 
+/// How the incoming data will be applied to the target graph.
+///
+/// Validation must see the graph as it will be AFTER the write. Validating the
+/// payload in isolation is only correct for a replace: for a merge it is wrong
+/// in both directions — a POST adding a second `ex:name` passes `sh:maxCount 1`
+/// because the temp store holds only the new value, and a POST supplying one
+/// missing property is rejected by `sh:minCount 1` on every property the
+/// payload does not repeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteMode {
+    /// PUT — the payload replaces the graph, so it is the whole future state.
+    Replace,
+    /// POST — the payload is merged, so the future state is existing + payload.
+    Merge,
+}
+
+/// Copy the target graph's current contents into the throwaway store, so a
+/// merge is validated against the state the write will actually produce.
+fn seed_existing_graph(
+    main_store: &TripleStore,
+    temp: &TripleStore,
+    graph_iri: &str,
+) -> Result<(), ValidationReport> {
+    let bytes = main_store
+        .dump(RdfFormat::Turtle, Some(graph_iri))
+        .map_err(|e| gate_error(format!("reading existing graph <{graph_iri}>: {e}")))?;
+    let ttl = String::from_utf8(bytes)
+        .map_err(|e| gate_error(format!("graph <{graph_iri}> is not valid UTF-8: {e}")))?;
+    temp.load_str(&ttl, RdfFormat::Turtle, Some(graph_iri))
+        .map_err(|e| gate_error(format!("staging existing graph <{graph_iri}>: {e}")))
+}
+
 /// A gate that could not be evaluated blocks the write.
 ///
 /// Every failure below used to return `Ok(())` — "let the write through" — so a
@@ -71,6 +103,7 @@ pub fn check_write_gates(
     graph_iri: &str,
     data: &str,
     format: RdfFormat,
+    mode: WriteMode,
 ) -> Result<(), ValidationReport> {
     // The legacy per-dataset `shacl_on_write` gate is handled separately by
     // `validate_on_write` on this path, so it is excluded here.
@@ -83,8 +116,12 @@ pub fn check_write_gates(
         return Ok(());
     }
 
-    // Build a temp store: incoming data + the shapes (copied from the live store).
+    // Build a temp store: the graph's future contents + the shapes (copied from
+    // the live store).
     let temp = TripleStore::in_memory().map_err(|e| gate_error(format!("temp store: {e}")))?;
+    if mode == WriteMode::Merge {
+        seed_existing_graph(main_store, &temp, graph_iri)?;
+    }
     if temp.load_str(data, format, Some(graph_iri)).is_err() {
         // Malformed data — let the normal write path surface the parse error.
         // Safe to pass: the write itself will fail on the same parse.
