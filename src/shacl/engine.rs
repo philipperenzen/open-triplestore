@@ -191,6 +191,14 @@ pub fn infer(
     // the store. Once a whole round adds zero triples we are at the fixed point.
     // This both terminates early — instead of always running the full iteration
     // cap whenever any rule has a focus node — and reports an accurate count.
+    // SHACL-AF rules materialise into the data graph they infer over. With
+    // several data graphs there is no single "the" graph, so those keep the
+    // historical default-graph behaviour rather than silently picking one.
+    let target_graph: Option<&str> = match data_graphs {
+        [one] => Some(one.as_str()),
+        _ => None,
+    };
+
     for iteration in 0..100 {
         let before = store.len().map_err(|e| e.to_string())?;
 
@@ -198,7 +206,7 @@ pub fn infer(
             let focus_nodes = resolve_rule_targets(store, targets, data_graphs);
 
             for focus_node in &focus_nodes {
-                apply_rule(store, focus_node, rule_type, rule_body)?;
+                apply_rule(store, focus_node, rule_type, rule_body, target_graph)?;
             }
         }
 
@@ -1079,6 +1087,7 @@ fn apply_rule(
     focus_node: &str,
     rule_type: &RuleType,
     rule_body: &str,
+    target_graph: Option<&str>,
 ) -> Result<(), String> {
     let update = match rule_type {
         RuleType::SparqlRule => {
@@ -1086,17 +1095,34 @@ fn apply_rule(
             // form (`CONSTRUCT { t } WHERE { p }`) or the convenience
             // `INSERT { t } WHERE { p }` form — both materialise into the store.
             let bound = rule_body.replace("$this", &format!("<{}>", focus_node));
-            construct_to_update(&bound)
+            let update = construct_to_update(&bound);
+            // `WITH <g>` makes <g> the update's default graph, so the template
+            // materialises INTO the data graph rather than beside it. Without
+            // this the INSERT had no GRAPH clause at all, so inferred triples
+            // landed in the store's default graph — outside every registered,
+            // ACL'd, dataset-owned graph, invisible to the very data graph the
+            // rule was inferring over.
+            match target_graph {
+                Some(g) => format!("WITH <{g}> {update}"),
+                None => update,
+            }
         }
         RuleType::TripleRule => {
             // `$this` (from `sh:this`, mapped in `load_rules`) binds to the focus.
             let body = rule_body.replace("$this", &format!("<{}>", focus_node));
-            format!("INSERT DATA {{ {} }}", body)
+            // INSERT DATA takes no WITH clause, so name the graph inline.
+            match target_graph {
+                Some(g) => format!("INSERT DATA {{ GRAPH <{g}> {{ {body} }} }}"),
+                None => format!("INSERT DATA {{ {} }}", body),
+            }
         }
     };
-    if let Err(e) = store.update(&update) {
-        warn!("SHACL rule application error: {}", e);
-    }
+    // An erroring rule used to be logged and swallowed, so `infer` reported
+    // success with 0 inferred triples whether the rules ran or every one of them
+    // failed to parse. Surface it: the caller decides.
+    store
+        .update(&update)
+        .map_err(|e| format!("SHACL rule application failed ({update}): {e}"))?;
     Ok(())
 }
 

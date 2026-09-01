@@ -8340,10 +8340,35 @@ async fn text_search_reindex(
     let _ = &state;
     #[cfg(feature = "text-search")]
     {
-        if let Some(ref idx) = state.text_index {
-            let count = idx
-                .reindex_from_store(&state.store)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+        if state.text_index.is_some() {
+            // A whole-store rebuild takes seconds to minutes, and the text_search
+            // module's own contract says it must never be called straight from an
+            // async task — this handler did exactly that, pinning a Tokio worker
+            // for the duration. It also skipped `text_sync_lock`, so a manual
+            // reindex could run concurrently with the background auto-sync and the
+            // two would delete each other's documents.
+            let st = state.clone();
+            let count = tokio::task::spawn_blocking(move || {
+                let idx = st.text_index.as_ref().expect("checked above");
+                let _guard = st
+                    .text_sync_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Clear the dirty mark before the rebuild, so a write landing
+                // mid-rebuild leaves the index dirty afterwards rather than
+                // having its mark erased (mirrors sync_text_index_if_dirty).
+                st.text_dirty
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                let res = idx.reindex_from_store(&st.store);
+                if res.is_err() {
+                    st.text_dirty
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                res
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("reindex task panicked: {e}")))?
+            .map_err(|e| AppError::Internal(e.to_string()))?;
             return Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({ "indexed": count })),
