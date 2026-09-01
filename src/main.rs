@@ -544,6 +544,7 @@ async fn main() -> anyhow::Result<()> {
         cli.registry_url,
         cli.registry_token,
         cli.data_dir.clone(),
+        db_path.clone(),
         #[cfg(feature = "text-search")]
         text_index,
         #[cfg(feature = "vocab-search")]

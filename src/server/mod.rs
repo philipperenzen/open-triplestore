@@ -1960,6 +1960,13 @@ pub async fn run(
     registry_token: String,
     // Data directory — vocab corpus cache + term index live under it.
     data_dir: std::path::PathBuf,
+    // The identity DB file main.rs actually opened (`--db-path`, else
+    // `<data-dir>/auth.db`). The backup subsystem must copy THIS file: it used
+    // to re-derive the path from AUTH_DB_PATH with a different default
+    // (`data/auth.sqlite`), so on any install that did not set that variable the
+    // scheduled backup opened a file that does not exist and failed — after
+    // writing the RDF dump, leaving no manifest and only a warn! line.
+    db_path: std::path::PathBuf,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
     #[cfg(feature = "vocab-search")] vocab_engine: Option<
         Arc<crate::vocab_search::index::VocabSearchEngine>,
@@ -1970,8 +1977,7 @@ pub async fn run(
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
         let dir = std::env::var("BACKUP_DIR").unwrap_or_else(|_| "data/backups".to_string());
-        let sqlite =
-            std::env::var("AUTH_DB_PATH").unwrap_or_else(|_| "data/auth.sqlite".to_string());
+        let sqlite = db_path.clone();
         let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1980,20 +1986,16 @@ pub async fn run(
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        // Initialize backup encryption key (auto-generates if not present)
+        // Resolve the operator-supplied age recipient. A failure here is FATAL:
+        // continuing with `encrypt = true` and no key produced a manager whose
+        // every run failed inside maybe_encrypt, so "encrypted backups are on"
+        // and "no backup has ever succeeded" looked identical from the outside.
         let key_path = if encrypt {
-            let default_path = std::path::PathBuf::from("data/backup_key.age");
             let key_file = std::env::var("BACKUP_ENCRYPT_KEY_PATH")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| default_path);
-            match crate::backup::init_backup_encryption(&key_file) {
-                Ok(path) => path,
-                Err(e) => {
-                    tracing::error!("Failed to initialize backup encryption: {}", e);
-                    None
-                }
-            }
+                .unwrap_or_else(|| data_dir.join("backup_key.age"));
+            crate::backup::init_backup_encryption(&key_file)?
         } else {
             None
         };
@@ -2003,9 +2005,17 @@ pub async fn run(
                 "Backup encryption is disabled. Recommended if data/ is not on an encrypted volume — set BACKUP_ENCRYPT=true"
             );
         }
+        if !sqlite.exists() {
+            // Not fatal (the DB is created on first open), but the operator
+            // should see it rather than discover it at restore time.
+            tracing::warn!(
+                "backup: identity DB {} does not exist yet; backups will include it once it does",
+                sqlite.display()
+            );
+        }
         match crate::backup::BackupManager::new(
             std::path::PathBuf::from(&dir),
-            std::path::PathBuf::from(&sqlite),
+            sqlite,
             store.clone(),
             audit.clone(),
             retention,

@@ -35,61 +35,43 @@ pub struct BackupManifest {
     pub encrypted: bool,
 }
 
-/// Initialize backup encryption with automatic key generation.
-/// If BACKUP_ENCRYPT_KEY_PATH doesn't exist, generates a new age X25519 keypair
-/// and writes the public key to the path with 0o600 permissions.
+/// Resolve the age recipient used to encrypt backups.
+///
+/// The recipient must be supplied by the operator at `BACKUP_ENCRYPT_KEY_PATH`.
+/// This deliberately does NOT generate one: it used to, by calling
+/// `Identity::generate()`, writing only `to_public()` and letting the identity
+/// drop at the end of the scope. The private half was never printed or
+/// persisted, so every backup written under that recipient was encrypted to a
+/// key that existed nowhere — unrecoverable the moment it was needed, with the
+/// failure invisible until a restore was attempted. Refusing to start is the
+/// only honest behaviour: an operator who wants encryption must run
+/// `age-keygen` and keep the identity somewhere the server cannot lose it.
 pub fn init_backup_encryption(key_path: &Path) -> anyhow::Result<Option<PathBuf>> {
     #[cfg(feature = "backup-encrypt")]
     {
-        if key_path.exists() {
-            // Key already exists, just return the path
-            let key_content = fs::read_to_string(key_path).with_context(|| {
-                format!("read existing age recipient key {}", key_path.display())
-            })?;
-            key_content
-                .trim()
-                .parse::<age::x25519::Recipient>()
-                .map_err(|e: &str| {
-                    anyhow::anyhow!("invalid age recipient in {}: {}", key_path.display(), e)
-                })?;
-            tracing::info!(
-                "Using existing backup encryption key at {}",
+        if !key_path.exists() {
+            anyhow::bail!(
+                "BACKUP_ENCRYPT=true but no age recipient exists at {}. Generate a keypair with \
+                 `age-keygen -o backup-identity.txt`, store that identity file somewhere safe and \
+                 OUTSIDE the data directory, then write its public line (age1…) to {}. Set \
+                 BACKUP_DECRYPT_IDENTITY_PATH to the identity file to allow automated restore.",
+                key_path.display(),
                 key_path.display()
             );
-            Ok(Some(key_path.to_path_buf()))
-        } else {
-            // Generate new keypair
-            let identity = age::x25519::Identity::generate();
-            let recipient = identity.to_public();
-            let key_str = recipient.to_string();
-
-            // Write public key with secure permissions
-            fs::create_dir_all(key_path.parent().unwrap_or_else(|| Path::new(".")))?;
-            let mut file = File::create(key_path)?;
-            file.write_all(key_str.as_bytes())?;
-            file.write_all(b"\n")?;
-            drop(file);
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
-            }
-
-            let display_key = if key_str.len() > 16 {
-                format!("{}...", &key_str[..16])
-            } else {
-                key_str.clone()
-            };
-            tracing::info!(
-                "Generated new backup encryption key at {} (recipient: {})",
-                key_path.display(),
-                display_key
-            );
-            tracing::warn!("⚠️  Store the private key securely outside this directory: age-keygen");
-
-            Ok(Some(key_path.to_path_buf()))
         }
+        let key_content = fs::read_to_string(key_path)
+            .with_context(|| format!("read existing age recipient key {}", key_path.display()))?;
+        key_content
+            .trim()
+            .parse::<age::x25519::Recipient>()
+            .map_err(|e: &str| {
+                anyhow::anyhow!("invalid age recipient in {}: {}", key_path.display(), e)
+            })?;
+        tracing::info!(
+            "Using backup encryption recipient at {}",
+            key_path.display()
+        );
+        Ok(Some(key_path.to_path_buf()))
     }
     #[cfg(not(feature = "backup-encrypt"))]
     {
@@ -319,6 +301,74 @@ impl BackupManager {
     }
 }
 
+/// Decrypt both halves of an age-encrypted backup with the operator's identity
+/// from `BACKUP_DECRYPT_IDENTITY_PATH`.
+fn decrypt_backup_pair(
+    id: &str,
+    rdf_raw: &[u8],
+    sqlite_raw: &[u8],
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    #[cfg(feature = "backup-encrypt")]
+    {
+        use std::io::Read;
+
+        let identity_path = std::env::var("BACKUP_DECRYPT_IDENTITY_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "backup {id} is age-encrypted; set BACKUP_DECRYPT_IDENTITY_PATH to the age \
+                     identity file (the private half from `age-keygen`) to restore it. The server \
+                     stores only the recipient, never the identity."
+                )
+            })?;
+        let identity_text = fs::read_to_string(&identity_path)
+            .with_context(|| format!("read age identity {identity_path}"))?;
+        // An age-keygen file carries `# public key:` comment lines around the
+        // AGE-SECRET-KEY line; take the first parseable identity.
+        let identity: age::x25519::Identity = identity_text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .find_map(|l| l.parse().ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no AGE-SECRET-KEY found in {identity_path}; expected an \
+                                 `age-keygen` identity file"
+                )
+            })?;
+
+        let decrypt = |data: &[u8], what: &str| -> anyhow::Result<Vec<u8>> {
+            let decryptor = age::Decryptor::new(data)
+                .with_context(|| format!("read age header of the {what} of backup {id}"))?;
+            let mut reader = decryptor
+                .decrypt(std::iter::once(&identity as &dyn age::Identity))
+                .with_context(|| {
+                    format!(
+                        "decrypt the {what} of backup {id} — the identity in {identity_path} does \
+                         not match the recipient it was encrypted to"
+                    )
+                })?;
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out)?;
+            Ok(out)
+        };
+
+        Ok((
+            decrypt(rdf_raw, "RDF dump")?,
+            decrypt(sqlite_raw, "SQLite DB")?,
+        ))
+    }
+    #[cfg(not(feature = "backup-encrypt"))]
+    {
+        let _ = (rdf_raw, sqlite_raw);
+        anyhow::bail!(
+            "backup {id} is age-encrypted but this binary was built without the \
+             `backup-encrypt` feature; rebuild with --features backup-encrypt to restore it"
+        )
+    }
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
@@ -448,8 +498,12 @@ fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
 ///
 /// Offline operation for the `--restore` CLI path: the server must not be serving
 /// and the identity DB must be closed (its file is atomically replaced).
-/// Age-encrypted backups are not restored automatically — the system keeps only
-/// the public recipient, so decrypt them with your age identity first.
+///
+/// An age-encrypted backup is decrypted in-process when
+/// `BACKUP_DECRYPT_IDENTITY_PATH` points at the age identity file (the private
+/// half produced by `age-keygen`). The server never stores that identity — only
+/// the recipient it encrypts to — so restoring an encrypted backup is an
+/// explicit operator action with the key they kept.
 pub fn restore_backup(
     backup_dir: &Path,
     id: &str,
@@ -473,15 +527,13 @@ pub fn restore_backup(
     {
         anyhow::bail!("backup {id} failed checksum verification; refusing to restore");
     }
-    if manifest.encrypted {
-        anyhow::bail!(
-            "backup {id} is age-encrypted; automated restore of encrypted backups is not \
-             supported (only the public recipient is stored). Decrypt {} and {} with your age \
-             identity (`age -d -i <key>`) and restore the plaintext files manually.",
-            manifest.rdf_path,
-            manifest.sqlite_path
-        );
-    }
+    // Decrypt before anything is replaced: a missing or wrong identity must fail
+    // while the live store is still intact.
+    let (rdf_raw, sqlite_raw) = if manifest.encrypted {
+        decrypt_backup_pair(id, &rdf_raw, &sqlite_raw)?
+    } else {
+        (rdf_raw, sqlite_raw)
+    };
 
     // ── RDF: clear the store, then stream the gzipped N-Quads dump back in. ──
     store
@@ -617,6 +669,102 @@ mod tests {
             store.len().unwrap(),
             2,
             "store must match the restored backup snapshot"
+        );
+    }
+
+    /// An encrypted backup must be recoverable with the operator's identity.
+    ///
+    /// It was not: `init_backup_encryption` generated a keypair, wrote only
+    /// `to_public()` and dropped the identity, so backups were encrypted to a
+    /// key that existed nowhere — and `restore_backup` refused encrypted
+    /// archives outright. Both halves are fixed here: the recipient must be
+    /// supplied, and restore decrypts with `BACKUP_DECRYPT_IDENTITY_PATH`.
+    #[cfg(feature = "backup-encrypt")]
+    #[test]
+    fn encrypted_backup_round_trips_with_the_operator_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let sqlite_path = dir.path().join("auth.sqlite");
+        let auth_db = Arc::new(AuthDb::open(&sqlite_path).unwrap());
+        let audit = Arc::new(AuditLogger::new(auth_db.pool()));
+
+        use age::secrecy::ExposeSecret;
+
+        // The operator's keypair: identity kept, recipient handed to the server.
+        let identity = age::x25519::Identity::generate();
+        let identity_path = dir.path().join("identity.txt");
+        fs::write(
+            &identity_path,
+            format!(
+                "# created by the test\n# public key: {}\n{}\n",
+                identity.to_public(),
+                identity.to_string().expose_secret()
+            ),
+        )
+        .unwrap();
+        let recipient_path = dir.path().join("backup_key.age");
+        fs::write(&recipient_path, format!("{}\n", identity.to_public())).unwrap();
+
+        let key_path = init_backup_encryption(&recipient_path)
+            .unwrap()
+            .expect("an existing recipient must be accepted");
+
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "@prefix ex: <http://example.org/> . ex:a ex:b ex:c . ex:d ex:e ex:f .",
+                RdfFormat::Turtle,
+                None,
+            )
+            .unwrap();
+
+        let mgr = BackupManager::new(
+            backup_dir.clone(),
+            sqlite_path.clone(),
+            store.clone(),
+            audit,
+            7,
+            true,
+            Some(key_path),
+        )
+        .unwrap();
+        let manifest = mgr.run_once().unwrap();
+        assert!(manifest.encrypted, "backup must be encrypted");
+
+        store
+            .update("INSERT DATA { <http://example.org/x> <http://example.org/y> <http://example.org/z> }")
+            .unwrap();
+        assert_eq!(store.len().unwrap(), 3);
+
+        std::env::set_var("BACKUP_DECRYPT_IDENTITY_PATH", &identity_path);
+        let restored = restore_backup(&backup_dir, &manifest.id, &store, &sqlite_path).unwrap();
+        std::env::remove_var("BACKUP_DECRYPT_IDENTITY_PATH");
+
+        assert_eq!(restored.id, manifest.id);
+        assert_eq!(
+            store.len().unwrap(),
+            2,
+            "an encrypted backup must restore to its snapshot"
+        );
+    }
+
+    /// Encryption must not silently invent a key nobody holds: with no
+    /// recipient file, initialisation fails instead of generating one whose
+    /// private half is discarded.
+    #[cfg(feature = "backup-encrypt")]
+    #[test]
+    fn missing_recipient_is_an_error_not_a_generated_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.age");
+        let err = init_backup_encryption(&missing)
+            .expect_err("a missing recipient must be refused, not generated");
+        assert!(
+            err.to_string().contains("age-keygen"),
+            "the error must tell the operator how to create one: {err}"
+        );
+        assert!(
+            !missing.exists(),
+            "no key file may be created as a side effect"
         );
     }
 
