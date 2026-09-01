@@ -662,7 +662,7 @@ async fn execute_query(
 /// graph IRIs. `require_graph_write` is called for each one so that the
 /// graph-level ACL is enforced for SPARQL UPDATE the same way it is for
 /// the Graph Store Protocol PUT/POST/DELETE endpoints.
-async fn execute_update(
+pub(crate) async fn execute_update(
     state: &AppState,
     user: Option<&AuthenticatedUser>,
     update: &str,

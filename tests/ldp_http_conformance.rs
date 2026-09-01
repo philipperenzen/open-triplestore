@@ -14,6 +14,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use common::*;
+use oxigraph::sparql::QueryResults;
 use tower::ServiceExt as _;
 
 async fn send(
@@ -51,6 +52,80 @@ async fn post_member(app: &Router, token: &str, slug: &str) -> (StatusCode, Head
     )
     .await;
     (st, h)
+}
+
+/// LDP PATCH takes an arbitrary SPARQL UPDATE body. It used to run that body
+/// verbatim via `store.update()`, so any authenticated caller — every test in
+/// this file uses an admin token, which hid it — could `DROP ALL` or delete
+/// another tenant's named graph, bypassing every per-graph ACL. PATCH now goes
+/// through the same gate as `POST /sparql`, which admin-gates all-graph and
+/// variable-graph operations.
+#[tokio::test]
+async fn ldp_patch_cannot_drop_all_as_non_admin() {
+    let (state, admin) = admin_state();
+    state
+        .auth_db
+        .create_user(
+            "mallory",
+            "mallory",
+            "mallory@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let mallory = mint_token("mallory", "mallory", "user");
+    let app = test_app(state.clone());
+
+    let (st, _) = post_member(&app, &admin, "victim").await;
+    assert_eq!(st, StatusCode::CREATED, "seed member");
+
+    let before = state.store.query("SELECT * WHERE { ?s ?p ?o }").is_ok();
+    assert!(before, "store is queryable before the PATCH");
+
+    // A whole-store wipe, in both the all-graph and variable-graph forms.
+    for evil in [
+        "DROP ALL",
+        "DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }",
+    ] {
+        let (st, _, body) = send(
+            &app,
+            Method::PATCH,
+            "/ldp/c1/victim",
+            Some(&mallory),
+            &[("Content-Type", "application/sparql-update")],
+            evil,
+        )
+        .await;
+        assert!(
+            st == StatusCode::FORBIDDEN || st == StatusCode::UNAUTHORIZED,
+            "non-admin PATCH `{evil}` must be refused, got {st}: {body}"
+        );
+    }
+
+    // The store still holds the member's triples: a refused PATCH must not have
+    // deleted anything.
+    let survived = matches!(
+        state
+            .store
+            .query("ASK { <http://example.org/x> <http://example.org/p> \"v\" }"),
+        Ok(QueryResults::Boolean(true))
+    );
+    assert!(survived, "a refused PATCH must not delete store contents");
+
+    let (st, ..) = send(
+        &app,
+        Method::GET,
+        "/ldp/c1/victim",
+        Some(&admin),
+        &[("Accept", "text/turtle")],
+        "",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "member must survive the refused PATCHes"
+    );
 }
 
 // POST to a container creates a member and returns 201 with a Location header.

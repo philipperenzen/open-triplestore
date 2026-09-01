@@ -4,10 +4,12 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::container::{self, ContainerType};
+use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
 
 // ─── Link header values ────────────────────────────────────────────────────────
@@ -791,6 +793,7 @@ pub async fn ldp_put(
 /// `Content-Type` must be `application/sparql-update`.
 pub async fn ldp_patch(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
@@ -836,8 +839,17 @@ pub async fn ldp_patch(
         Err(_) => return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response(),
     };
 
-    if let Err(e) = state.store.update(sparql) {
-        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    // Route through the same gate as POST /sparql instead of running the body
+    // verbatim. The body is arbitrary attacker-controlled SPARQL UPDATE: run
+    // unguarded it let any authenticated caller `DROP ALL` or delete another
+    // tenant's named graph, bypassing every per-graph ACL. `execute_update`
+    // enforces the API-token write scope, admin-gates variable-graph/SERVICE and
+    // all-graph operations, and checks read+write permission on every ground
+    // graph the update touches — and it audits and records provenance.
+    if let Err(e) =
+        crate::server::routes::execute_update(&state, Some(&user), sparql, Some("LDP PATCH")).await
+    {
+        return e.into_response();
     }
 
     // Return 204 with new ETag
