@@ -15,6 +15,37 @@ use crate::store::TripleStore;
 
 use super::bindings;
 use super::models::{SeverityThreshold, TargetKind, ValidationPipeline};
+
+/// A gate that could not be evaluated blocks the write.
+///
+/// Every failure below used to return `Ok(())` — "let the write through" — so a
+/// temp store that would not allocate, a shape graph that failed to copy, or a
+/// SHACL engine error silently disabled validation for that request. The write
+/// then landed unvalidated and nothing anywhere said so, which is the one
+/// outcome a write gate must never produce. Since the gate signals rejection
+/// with a `ValidationReport`, an infrastructure failure is reported as a
+/// non-conforming report naming the reason, so the caller's existing 422 path
+/// carries it to the client.
+fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
+    use crate::shacl::report::{Severity, ValidationResult};
+    let message = format!(
+        "SHACL write gate could not be evaluated, so the write was refused: {reason}. This is a \
+         server-side failure, not a data problem — the write was not applied."
+    );
+    ValidationReport {
+        conforms: false,
+        results: vec![ValidationResult {
+            severity: Severity::Violation,
+            focus_node: String::new(),
+            path: None,
+            value: None,
+            source_shape: String::new(),
+            source_constraint: "gate-evaluation-failure".to_string(),
+            message,
+        }],
+        results_count: 1,
+    }
+}
 // Only the test `pipe()` builder constructs these write-target fields.
 #[cfg(test)]
 use super::models::{ResultsTarget, WriteTarget};
@@ -52,15 +83,13 @@ pub fn check_write_gates(
     }
 
     // Build a temp store: incoming data + the shapes (copied from the live store).
-    let temp = match TripleStore::in_memory() {
-        Ok(t) => t,
-        Err(_) => return Ok(()), // never block a write on our own infra hiccup
-    };
+    let temp = TripleStore::in_memory().map_err(|e| gate_error(format!("temp store: {e}")))?;
     if temp.load_str(data, format, Some(graph_iri)).is_err() {
         // Malformed data — let the normal write path surface the parse error.
+        // Safe to pass: the write itself will fail on the same parse.
         return Ok(());
     }
-    copy_shape_graphs(main_store, &temp, &needed_graphs);
+    copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
     evaluate_gates(&temp, studio, &gates, graph_iri)
 }
@@ -103,14 +132,12 @@ pub fn check_import_gates(
         return Ok(());
     }
 
-    let temp = match TripleStore::in_memory() {
-        Ok(t) => t,
-        Err(_) => return Ok(()), // never block a write on our own infra hiccup
-    };
-    let graph = match NamedNode::new(graph_iri) {
-        Ok(g) => GraphName::NamedNode(g),
-        Err(_) => return Ok(()), // unaddressable graph — nothing to gate against
-    };
+    let temp = TripleStore::in_memory().map_err(|e| gate_error(format!("temp store: {e}")))?;
+    let graph = GraphName::NamedNode(NamedNode::new(graph_iri).map_err(|e| {
+        gate_error(format!(
+            "target graph <{graph_iri}> is not a valid IRI: {e}"
+        ))
+    })?);
     // Insert the parsed quads directly (no serialise/re-parse round trip, which
     // would also relabel blank nodes), re-homed under the target graph.
     let rehomed: Vec<Quad> = quads
@@ -124,13 +151,9 @@ pub fn check_import_gates(
             )
         })
         .collect();
-    if temp
-        .bulk_insert_quads(rehomed, &[graph_iri.to_string()])
-        .is_err()
-    {
-        return Ok(());
-    }
-    copy_shape_graphs(main_store, &temp, &needed_graphs);
+    temp.bulk_insert_quads(rehomed, &[graph_iri.to_string()])
+        .map_err(|e| gate_error(format!("staging the incoming quads: {e}")))?;
+    copy_shape_graphs(main_store, &temp, &needed_graphs)?;
 
     evaluate_gates(&temp, studio, &gates, graph_iri)
 }
@@ -247,14 +270,24 @@ fn needed_shape_graphs(studio: &ShaclStudioStore, gates: &GateSet) -> BTreeSet<S
 }
 
 /// Copy each shape graph from the live store into the throwaway store.
-fn copy_shape_graphs(main_store: &TripleStore, temp: &TripleStore, graphs: &BTreeSet<String>) {
+///
+/// A shape graph that fails to copy would leave the gate validating against
+/// *missing* shapes — which conforms trivially, i.e. silently no gate at all.
+fn copy_shape_graphs(
+    main_store: &TripleStore,
+    temp: &TripleStore,
+    graphs: &BTreeSet<String>,
+) -> Result<(), ValidationReport> {
     for g in graphs {
-        if let Ok(bytes) = main_store.dump(RdfFormat::Turtle, Some(g)) {
-            if let Ok(ttl) = String::from_utf8(bytes) {
-                let _ = temp.load_str(&ttl, RdfFormat::Turtle, Some(g));
-            }
-        }
+        let bytes = main_store
+            .dump(RdfFormat::Turtle, Some(g))
+            .map_err(|e| gate_error(format!("reading shape graph <{g}>: {e}")))?;
+        let ttl = String::from_utf8(bytes)
+            .map_err(|e| gate_error(format!("shape graph <{g}> is not valid UTF-8: {e}")))?;
+        temp.load_str(&ttl, RdfFormat::Turtle, Some(g))
+            .map_err(|e| gate_error(format!("loading shape graph <{g}>: {e}")))?;
     }
+    Ok(())
 }
 
 /// Run every gate source against the prepared temp store. Returns the first
@@ -292,7 +325,10 @@ fn evaluate_gates(
             false,
         ) {
             Ok(outcome) if !outcome.passes => return Err(outcome.report),
-            _ => {}
+            Ok(_) => {}
+            // `_ => {}` used to swallow this arm, so an engine error read as a
+            // pass and the gate quietly stopped gating.
+            Err(e) => return Err(gate_error(format!("pipeline '{}': {e}", p.id))),
         }
     }
 
@@ -307,7 +343,8 @@ fn evaluate_gates(
             false,
         ) {
             Ok(outcome) if !outcome.passes => return Err(outcome.report),
-            _ => {}
+            Ok(_) => {}
+            Err(e) => return Err(gate_error(format!("validation-layer binding: {e}"))),
         }
     }
 
@@ -315,10 +352,12 @@ fn evaluate_gates(
     // run against the dataset's configured shapes graph, failing on
     // `!conforms`.
     if let Some(shapes_graph) = &gates.legacy_shapes_graph {
-        if let Ok(report) = crate::shacl::validate(temp, shapes_graph, &data_graphs) {
-            if !report.conforms {
-                return Err(report);
-            }
+        // `if let Ok(..)` dropped the error case, so a failing engine run meant
+        // "no violations" and the write sailed through ungated.
+        let report = crate::shacl::validate(temp, shapes_graph, &data_graphs)
+            .map_err(|e| gate_error(format!("dataset shapes graph <{shapes_graph}>: {e}")))?;
+        if !report.conforms {
+            return Err(report);
         }
     }
 
@@ -410,6 +449,52 @@ mod tests {
             kind: TargetKind::Dataset,
             id: id.into(),
         }
+    }
+
+    /// A gate that cannot be evaluated must BLOCK the write, not wave it
+    /// through. Every infrastructure failure in this module used to return
+    /// `Ok(())`, so a shape graph that would not copy silently validated the
+    /// incoming data against no shapes at all — which conforms trivially.
+    #[test]
+    fn a_shape_graph_that_cannot_be_copied_blocks_the_write() {
+        let main = TripleStore::in_memory().unwrap();
+        let temp = TripleStore::in_memory().unwrap();
+        let mut needed = BTreeSet::new();
+        needed.insert("not a valid iri".to_string());
+
+        let err = copy_shape_graphs(&main, &temp, &needed)
+            .expect_err("an uncopyable shape graph must not be treated as 'no shapes'");
+        assert!(
+            !err.conforms,
+            "the gate must report a non-conforming outcome"
+        );
+        assert_eq!(err.results[0].source_constraint, "gate-evaluation-failure");
+        assert!(
+            err.results[0].message.contains("was not applied"),
+            "the message must make clear the write did not land: {}",
+            err.results[0].message
+        );
+    }
+
+    /// A shape graph that copies cleanly leaves the gate free to run.
+    #[test]
+    fn copying_a_real_shape_graph_succeeds() {
+        let main = TripleStore::in_memory().unwrap();
+        main.load_str(
+            "<http://ex/S> a <http://www.w3.org/ns/shacl#NodeShape> .",
+            RdfFormat::Turtle,
+            Some("urn:shapes:ok"),
+        )
+        .unwrap();
+        let temp = TripleStore::in_memory().unwrap();
+        let mut needed = BTreeSet::new();
+        needed.insert("urn:shapes:ok".to_string());
+
+        assert!(copy_shape_graphs(&main, &temp, &needed).is_ok());
+        assert!(
+            temp.len().unwrap() > 0,
+            "shapes must land in the temp store"
+        );
     }
 
     #[test]
