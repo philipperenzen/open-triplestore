@@ -7,6 +7,14 @@
 //! - SameIndividualAtom / DifferentIndividualsAtom
 //! - BuiltinAtom (math, string, comparison)
 //! - Variables and individual references
+//!
+//! The ad-hoc text form ([`parse_swrl_text`], `A(?x) ^ B(?x,?y) -> C(?y)`) is a
+//! convenience shorthand, not a second serialization of the same model. Two
+//! limits follow from [`parse_single_atom`]: every predicate is taken verbatim
+//! as an IRI, so bare names become relative IRIs and the generated SPARQL will
+//! not parse — write them out in full; and every two-argument atom becomes an
+//! ObjectPropertyAtom, so `swrlb:` builtins cannot be expressed in the text form
+//! at all. Use the OWL/XML form for any rule with a builtin.
 
 use quick_xml::events::Event;
 use quick_xml::Reader;

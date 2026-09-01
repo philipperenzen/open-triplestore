@@ -8442,8 +8442,23 @@ fn default_max_iterations() -> usize {
 #[cfg(feature = "swrl")]
 async fn swrl_execute(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<SwrlExecuteRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Rule execution INSERTs derived triples into `target_graph` — previously
+    // with no authorization at all (the handler took no `AuthenticatedUser`), so
+    // any caller could materialise arbitrary triples into any graph, including
+    // the shared `urn:entailment:*` graphs and other tenants'. Mirrors
+    // `/api/reasoning/materialize` above; as there, a `None` target means the
+    // default graph, which carries the write-scope check but no per-graph ACL.
+    require_graph_write(&state, Some(&user), body.target_graph.as_deref()).map_err(|e| {
+        let status = match &e {
+            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            _ => StatusCode::FORBIDDEN,
+        };
+        (status, e.message())
+    })?;
+
     let rules = match body.format.as_str() {
         "xml" => crate::swrl::parser::parse_swrl(&body.rules)
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?,
