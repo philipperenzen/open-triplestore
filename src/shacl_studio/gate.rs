@@ -16,6 +16,11 @@ use crate::store::TripleStore;
 use super::bindings;
 use super::models::{SeverityThreshold, TargetKind, ValidationPipeline};
 
+// Only the test `pipe()` builder constructs these write-target fields.
+#[cfg(test)]
+use super::models::{ResultsTarget, WriteTarget};
+use super::store::ShaclStudioStore;
+
 /// A gate that could not be evaluated blocks the write.
 ///
 /// Every failure below used to return `Ok(())` — "let the write through" — so a
@@ -46,10 +51,6 @@ fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
         results_count: 1,
     }
 }
-// Only the test `pipe()` builder constructs these write-target fields.
-#[cfg(test)]
-use super::models::{ResultsTarget, WriteTarget};
-use super::store::ShaclStudioStore;
 
 /// Returns `Err(report)` with the first failing gate's report when the incoming
 /// data would violate a gating pipeline **or** a validation-layer binding that
