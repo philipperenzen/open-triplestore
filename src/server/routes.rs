@@ -1136,15 +1136,31 @@ async fn graph_store_get(
     });
 
     // Graph-level access control: check visibility before serving graph data.
-    if let Some(iri) = params.graph_iri() {
-        let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
-        if !is_admin {
-            let user_id = user.as_deref().map(|u| u.user_id.as_str());
-            let allowed = check_graph_read_access(&state, user_id, iri)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            if !allowed {
+    let is_admin = user.as_deref().map(|u| u.is_admin()).unwrap_or(false);
+    match params.graph_iri() {
+        Some(iri) => {
+            if !is_admin {
+                let allowed = check_graph_read_access(&state, user.as_deref(), iri)
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                if !allowed {
+                    return Err(AppError::Unauthorized(
+                        "Access denied to this graph".to_string(),
+                    ));
+                }
+            }
+        }
+        // The default graph. This branch used to skip the check entirely, so
+        // `GET /store` dumped it to any caller. No per-graph ACL covers the
+        // default graph, and the SPARQL path never exposes it either (queries
+        // are scoped with FROM/FROM NAMED over the caller's accessible named
+        // graphs), so a bare dump was the one way to read it. It holds LDP
+        // resources and anything loaded without a target graph — admin-only.
+        None => {
+            if !is_admin {
                 return Err(AppError::Unauthorized(
-                    "Access denied to this graph".to_string(),
+                    "Reading the default graph requires admin privileges; name a graph with \
+                     ?graph=<iri> instead"
+                        .to_string(),
                 ));
             }
         }
@@ -1792,7 +1808,7 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 /// - All other graphs are checked against dataset-graph access control.
 fn check_graph_read_access(
     state: &AppState,
-    user_id: Option<&str>,
+    user: Option<&AuthenticatedUser>,
     iri: &str,
 ) -> anyhow::Result<bool> {
     // Block all system graphs for non-admins.
@@ -1800,9 +1816,13 @@ fn check_graph_read_access(
         return Ok(false);
     }
 
-    // Dataset graphs: check against accessible graph IRIs.
-    let cached_graphs = state.auth_db.get_accessible_graph_iris_cached(user_id)?;
-    Ok(cached_graphs.0.contains(iri))
+    // Use the same set the SPARQL path scopes to: dataset-derived visibility
+    // MERGED with explicit `graph_acl` read grants. Consulting only the former
+    // meant one grant behaved differently depending on the protocol — rows over
+    // /sparql, 401 over /store — though docs/security.md promises both.
+    let accessible =
+        accessible_read_graphs(state, user).map_err(|e| anyhow::anyhow!(e.message()))?;
+    Ok(accessible.contains(iri))
 }
 
 // ─── Triple Browsing API ──────────────────────────────────────────────────────

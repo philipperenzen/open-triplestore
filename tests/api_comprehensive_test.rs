@@ -1137,7 +1137,16 @@ mod graph_store {
     }
 
     #[tokio::test]
-    async fn get_default_graph_empty() {
+    /// Reading the default graph is admin-only.
+    ///
+    /// This used to assert that an ANONYMOUS `GET /store?default` returned 200:
+    /// the handler only ran its ACL check when a `?graph=` was named, so the
+    /// default graph — which no per-graph ACL covers, and which holds LDP
+    /// resources and anything loaded without a target graph — was dumped to any
+    /// caller. The SPARQL path never exposed it (queries are scoped with
+    /// FROM/FROM NAMED over accessible named graphs), so this was the only way
+    /// to read it.
+    async fn get_default_graph_requires_admin() {
         let resp = test_app(test_state())
             .oneshot(
                 Request::builder()
@@ -1148,7 +1157,29 @@ mod graph_store {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "an anonymous default-graph dump must be refused"
+        );
+
+        let (state, token) = admin_state();
+        let resp = test_app(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/store?default")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "an admin may still read the default graph"
+        );
     }
 
     #[tokio::test]
