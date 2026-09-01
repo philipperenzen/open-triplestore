@@ -64,9 +64,11 @@ rust:
     - rustup component add rustfmt clippy
   script:
     - cargo fmt --all --check
-    - cargo clippy --all-targets --all-features
+    # `--workspace`: without it cargo selects only the root package, so the
+    # `opengraph` member is neither linted nor test-compiled (see ci.yml).
+    - cargo clippy --workspace --all-targets --all-features -- -D warnings
     - cargo build --all-features --locked
-    - cargo test --all-features --locked
+    - cargo test --workspace --all-features --locked
 
 # ── Performance-regression GATE (mirrors .github/workflows/perf.yml) ──────────
 # Subset Criterion bench + a comparison against the committed baseline. Runs on

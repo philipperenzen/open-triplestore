@@ -68,14 +68,18 @@ jobs:
       # (plugins/api / plugins/hello, src/plugins.rs) — is exercised on every CI run,
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
+      # `--workspace` is load-bearing: without it cargo selects only the root
+      # package, so the `opengraph` member was never linted or test-compiled. Its
+      # test module had been broken (a stale oxigraph `on_store` signature) for
+      # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
 
       - name: Build
         run: cargo build --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
 
       - name: Test
-        run: cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo test --workspace --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression

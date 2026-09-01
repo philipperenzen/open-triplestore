@@ -1484,7 +1484,7 @@ mod tests {
             SparqlEvaluator::new()
                 .parse_query(sparql)
                 .unwrap()
-                .on_store(store)
+                .on_store(&store)
                 .execute()
                 .unwrap(),
         )
