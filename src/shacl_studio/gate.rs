@@ -21,6 +21,19 @@ use super::models::{SeverityThreshold, TargetKind, ValidationPipeline};
 use super::models::{ResultsTarget, WriteTarget};
 use super::store::ShaclStudioStore;
 
+/// The stores and configuration every gate lookup needs.
+///
+/// These four travel together through `discover_gates`, `check_write_gates` and
+/// `check_import_gates`; bundling them keeps those signatures readable (and
+/// under clippy's argument-count limit) as gates gain parameters of their own.
+#[derive(Clone, Copy)]
+pub struct GateContext<'a> {
+    pub main_store: &'a TripleStore,
+    pub auth_db: &'a AuthDb,
+    pub studio: &'a ShaclStudioStore,
+    pub base_url: &'a str,
+}
+
 /// How the incoming data will be applied to the target graph.
 ///
 /// Validation must see the graph as it will be AFTER the write. Validating the
@@ -96,15 +109,18 @@ fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
 ///    at the default `Violation` threshold, so graph-attached shapes travel
 ///    with the graph and are enforced wherever it is mounted.
 pub fn check_write_gates(
-    main_store: &TripleStore,
-    auth_db: &AuthDb,
-    studio: &ShaclStudioStore,
-    base_url: &str,
+    ctx: GateContext<'_>,
     graph_iri: &str,
     data: &str,
     format: RdfFormat,
     mode: WriteMode,
 ) -> Result<(), ValidationReport> {
+    let GateContext {
+        main_store,
+        auth_db,
+        studio,
+        base_url,
+    } = ctx;
     // The legacy per-dataset `shacl_on_write` gate is handled separately by
     // `validate_on_write` on this path, so it is excluded here.
     let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, false);
@@ -137,14 +153,16 @@ pub fn check_write_gates(
 /// (graph- and dataset-level) and the owning dataset's legacy `shacl_on_write`
 /// shapes graph. Metadata lookups only — no quad scans, no temp store — so
 /// large imports with no gates configured (the common case) pay near-nothing.
-pub fn import_gates_apply(
-    main_store: &TripleStore,
-    auth_db: &AuthDb,
-    studio: &ShaclStudioStore,
-    base_url: &str,
-    graph_iri: &str,
-) -> bool {
-    !discover_gates(main_store, auth_db, studio, base_url, graph_iri, true).is_empty()
+pub fn import_gates_apply(ctx: GateContext<'_>, graph_iri: &str) -> bool {
+    !discover_gates(
+        ctx.main_store,
+        ctx.auth_db,
+        ctx.studio,
+        ctx.base_url,
+        graph_iri,
+        true,
+    )
+    .is_empty()
 }
 
 /// Quad-based write gate for bulk import: validates `quads` (re-homed into
@@ -154,13 +172,16 @@ pub fn import_gates_apply(
 /// `validate_on_write` but bulk import must enforce itself). `Err` carries the
 /// first failing gate's report.
 pub fn check_import_gates(
-    main_store: &TripleStore,
-    auth_db: &AuthDb,
-    studio: &ShaclStudioStore,
-    base_url: &str,
+    ctx: GateContext<'_>,
     graph_iri: &str,
     quads: &[Quad],
 ) -> Result<(), ValidationReport> {
+    let GateContext {
+        main_store,
+        auth_db,
+        studio,
+        base_url,
+    } = ctx;
     let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, true);
     if gates.is_empty() {
         return Ok(());
@@ -437,6 +458,21 @@ fn pipeline_covers_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bundle the four shared handles the gate functions take.
+    fn ctx<'a>(
+        store: &'a TripleStore,
+        auth: &'a AuthDb,
+        studio: &'a ShaclStudioStore,
+        base: &'a str,
+    ) -> GateContext<'a> {
+        GateContext {
+            main_store: store,
+            auth_db: auth,
+            studio,
+            base_url: base,
+        }
+    }
     use crate::auth::models::{OwnerType, Visibility};
     use crate::shacl_studio::models::ValidationTarget;
 
@@ -628,27 +664,25 @@ mod tests {
 
         // No binding yet: nothing applies, nothing is checked.
         assert!(!import_gates_apply(
-            &store, &auth, &studio, base, DATA_GRAPH
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH
         ));
         check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(false),
         )
         .expect("no gates → no rejection");
 
         bindings::add_binding(&store, DATA_GRAPH, &set.graph_iri).unwrap();
-        assert!(import_gates_apply(&store, &auth, &studio, base, DATA_GRAPH));
+        assert!(import_gates_apply(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH
+        ));
 
         // Missing ex:name violates sh:minCount 1 → rejected with a report.
         let report = check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(false),
         )
@@ -662,10 +696,7 @@ mod tests {
 
         // Conforming data passes.
         check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(true),
         )
@@ -683,27 +714,24 @@ mod tests {
         p.shape_graph_ids = vec![set.id.clone()];
         studio.insert_pipeline(&p).unwrap();
 
-        assert!(import_gates_apply(&store, &auth, &studio, base, DATA_GRAPH));
+        assert!(import_gates_apply(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH
+        ));
         assert!(
-            !import_gates_apply(&store, &auth, &studio, base, "urn:data:uncovered"),
+            !import_gates_apply(ctx(&store, &auth, &studio, base), "urn:data:uncovered"),
             "pipeline scope must not leak to other graphs"
         );
 
         let report = check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(false),
         )
         .unwrap_err();
         assert!(!report.conforms);
         check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(true),
         )
@@ -731,28 +759,26 @@ mod tests {
 
         // shacl_on_write off → no gate.
         assert!(!import_gates_apply(
-            &store, &auth, &studio, base, DATA_GRAPH
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH
         ));
 
         auth.update_dataset_shacl("d1", true, Some(SHAPES_GRAPH))
             .unwrap();
-        assert!(import_gates_apply(&store, &auth, &studio, base, DATA_GRAPH));
+        assert!(import_gates_apply(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH
+        ));
 
         let report = check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(false),
         )
         .unwrap_err();
         assert!(!report.conforms);
         check_import_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             &person_quads(true),
         )
@@ -761,13 +787,11 @@ mod tests {
         // Graph Store path (`check_write_gates`) intentionally excludes the
         // legacy gate — `validate_on_write` runs it separately there.
         check_write_gates(
-            &store,
-            &auth,
-            &studio,
-            base,
+            ctx(&store, &auth, &studio, base),
             DATA_GRAPH,
             "<http://example.org/p1> a <http://example.org/Person> .",
             RdfFormat::Turtle,
+            WriteMode::Replace,
         )
         .expect("legacy gate must not double-fire on the GSP path");
     }

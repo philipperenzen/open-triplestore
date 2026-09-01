@@ -307,22 +307,21 @@ fn decrypt_backup_pair(
     id: &str,
     rdf_raw: &[u8],
     sqlite_raw: &[u8],
+    identity_path: Option<&Path>,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     #[cfg(feature = "backup-encrypt")]
     {
         use std::io::Read;
 
-        let identity_path = std::env::var("BACKUP_DECRYPT_IDENTITY_PATH")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "backup {id} is age-encrypted; set BACKUP_DECRYPT_IDENTITY_PATH to the age \
-                     identity file (the private half from `age-keygen`) to restore it. The server \
-                     stores only the recipient, never the identity."
-                )
-            })?;
-        let identity_text = fs::read_to_string(&identity_path)
+        let identity_path = identity_path.ok_or_else(|| {
+            anyhow::anyhow!(
+                "backup {id} is age-encrypted; set BACKUP_DECRYPT_IDENTITY_PATH to the age \
+                 identity file (the private half from `age-keygen`) to restore it. The server \
+                 stores only the recipient, never the identity."
+            )
+        })?;
+        let identity_path = identity_path.display();
+        let identity_text = fs::read_to_string(identity_path.to_string())
             .with_context(|| format!("read age identity {identity_path}"))?;
         // An age-keygen file carries `# public key:` comment lines around the
         // AGE-SECRET-KEY line; take the first parseable identity.
@@ -361,7 +360,7 @@ fn decrypt_backup_pair(
     }
     #[cfg(not(feature = "backup-encrypt"))]
     {
-        let _ = (rdf_raw, sqlite_raw);
+        let _ = (rdf_raw, sqlite_raw, identity_path);
         anyhow::bail!(
             "backup {id} is age-encrypted but this binary was built without the \
              `backup-encrypt` feature; rebuild with --features backup-encrypt to restore it"
@@ -499,16 +498,21 @@ fn validate_backup_file_name(name: &str) -> anyhow::Result<()> {
 /// Offline operation for the `--restore` CLI path: the server must not be serving
 /// and the identity DB must be closed (its file is atomically replaced).
 ///
-/// An age-encrypted backup is decrypted in-process when
-/// `BACKUP_DECRYPT_IDENTITY_PATH` points at the age identity file (the private
-/// half produced by `age-keygen`). The server never stores that identity — only
-/// the recipient it encrypts to — so restoring an encrypted backup is an
-/// explicit operator action with the key they kept.
+/// An age-encrypted backup is decrypted in-process when `identity_path` names
+/// the age identity file (the private half produced by `age-keygen`); the
+/// `--restore` CLI passes `BACKUP_DECRYPT_IDENTITY_PATH`. The server never
+/// stores that identity — only the recipient it encrypts to — so restoring an
+/// encrypted backup is an explicit operator action with the key they kept.
+///
+/// The path is a parameter rather than an env lookup so this stays a pure
+/// function: reading it here would force every test to mutate the process
+/// environment, which races other tests in the same binary.
 pub fn restore_backup(
     backup_dir: &Path,
     id: &str,
     store: &TripleStore,
     target_sqlite: &Path,
+    identity_path: Option<&Path>,
 ) -> anyhow::Result<BackupManifest> {
     validate_backup_id(id)?;
     let dir = backup_dir.join(id);
@@ -530,7 +534,7 @@ pub fn restore_backup(
     // Decrypt before anything is replaced: a missing or wrong identity must fail
     // while the live store is still intact.
     let (rdf_raw, sqlite_raw) = if manifest.encrypted {
-        decrypt_backup_pair(id, &rdf_raw, &sqlite_raw)?
+        decrypt_backup_pair(id, &rdf_raw, &sqlite_raw, identity_path)?
     } else {
         (rdf_raw, sqlite_raw)
     };
@@ -663,7 +667,8 @@ mod tests {
         assert_eq!(store.len().unwrap(), 3);
 
         // Restoring returns the store to the 2-quad snapshot.
-        let restored = restore_backup(&backup_dir, &manifest.id, &store, &sqlite_path).unwrap();
+        let restored =
+            restore_backup(&backup_dir, &manifest.id, &store, &sqlite_path, None).unwrap();
         assert_eq!(restored.id, manifest.id);
         assert_eq!(
             store.len().unwrap(),
@@ -736,9 +741,14 @@ mod tests {
             .unwrap();
         assert_eq!(store.len().unwrap(), 3);
 
-        std::env::set_var("BACKUP_DECRYPT_IDENTITY_PATH", &identity_path);
-        let restored = restore_backup(&backup_dir, &manifest.id, &store, &sqlite_path).unwrap();
-        std::env::remove_var("BACKUP_DECRYPT_IDENTITY_PATH");
+        let restored = restore_backup(
+            &backup_dir,
+            &manifest.id,
+            &store,
+            &sqlite_path,
+            Some(identity_path.as_path()),
+        )
+        .unwrap();
 
         assert_eq!(restored.id, manifest.id);
         assert_eq!(

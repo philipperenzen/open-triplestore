@@ -462,26 +462,17 @@ pub async fn bulk_import(
     let text_outcome = outcome.clone();
     let mut result = tokio::task::spawn_blocking(move || {
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(gate_db.pool());
+        let gate_ctx = crate::shacl_studio::gate::GateContext {
+            main_store: &gate_store,
+            auth_db: &gate_db,
+            studio: &studio,
+            base_url: &gate_base,
+        };
         let gate = WriteGate {
-            applies: Box::new(|g| {
-                crate::shacl_studio::gate::import_gates_apply(
-                    &gate_store,
-                    &gate_db,
-                    &studio,
-                    &gate_base,
-                    g,
-                )
-            }),
+            applies: Box::new(|g| crate::shacl_studio::gate::import_gates_apply(gate_ctx, g)),
             check: Box::new(|g, quads| {
-                crate::shacl_studio::gate::check_import_gates(
-                    &gate_store,
-                    &gate_db,
-                    &studio,
-                    &gate_base,
-                    g,
-                    quads,
-                )
-                .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
+                crate::shacl_studio::gate::check_import_gates(gate_ctx, g, quads)
+                    .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
             }),
         };
         let res = parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate));

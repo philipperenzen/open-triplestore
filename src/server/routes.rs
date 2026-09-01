@@ -1336,16 +1336,15 @@ pub(crate) fn validate_on_write(
     // during the transition.
     {
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(state.auth_db.pool());
-        if let Err(report) = crate::shacl_studio::gate::check_write_gates(
-            &state.store,
-            &state.auth_db,
-            &studio,
-            &state.base_url,
-            iri,
-            data,
-            format,
-            mode,
-        ) {
+        let ctx = crate::shacl_studio::gate::GateContext {
+            main_store: &state.store,
+            auth_db: &state.auth_db,
+            studio: &studio,
+            base_url: &state.base_url,
+        };
+        if let Err(report) =
+            crate::shacl_studio::gate::check_write_gates(ctx, iri, data, format, mode)
+        {
             return Err(AppError::ValidationFailed(report));
         }
     }

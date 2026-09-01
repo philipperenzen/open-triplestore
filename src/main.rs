@@ -115,8 +115,9 @@ struct Cli {
     promote_super_admin: Option<String>,
 
     /// Restore the store + identity DB from a backup id (in BACKUP_DIR, default
-    /// {data-dir}/backups), REPLACING current data, then exit. Encrypted backups
-    /// must be decrypted manually first.
+    /// {data-dir}/backups), REPLACING current data, then exit. For an encrypted
+    /// backup, set BACKUP_DECRYPT_IDENTITY_PATH to your `age-keygen` identity
+    /// file — the server stores only the recipient, never the identity.
     #[arg(long, value_name = "BACKUP_ID")]
     restore: Option<String>,
 
@@ -317,9 +318,16 @@ async fn main() -> anyhow::Result<()> {
             .db_path
             .clone()
             .unwrap_or_else(|| cli.data_dir.join("auth.db"));
+        // Only needed for an age-encrypted backup; the server never holds this
+        // identity, so restoring one is an explicit operator action.
+        let identity = std::env::var("BACKUP_DECRYPT_IDENTITY_PATH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
         info!("Restoring backup {id} from {}…", backup_dir.display());
         let store = store::TripleStore::open(&cli.data_dir)?;
-        let manifest = backup::restore_backup(&backup_dir, id, &store, &target_sqlite)?;
+        let manifest =
+            backup::restore_backup(&backup_dir, id, &store, &target_sqlite, identity.as_deref())?;
         info!(
             "Restored backup {} ({} quads). Restart without --restore to run the server.",
             manifest.id, manifest.rdf_quad_count
