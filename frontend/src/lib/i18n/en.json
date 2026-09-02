@@ -1928,6 +1928,8 @@
       "predicateIri": "Predicate IRI",
       "objectValue": "Object value",
       "objectValueHint": "(IRI or literal)",
+      "dataGraphIri": "Data graph IRI",
+      "dataGraphIriHint": "The graph the labelled triple lives in",
       "labelGraphIri": "Label Graph IRI",
       "labelGraphIriHint": "(virtual named graph; control access via Graph ACL)",
       "tripleEmpty1": "No triple security labels.",

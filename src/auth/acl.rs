@@ -225,10 +225,22 @@ pub fn filter_quad_indices_by_label(
         gs
     };
 
-    // Short-circuit: no labels in these graphs → return all
-    let has_labels = auth_db
-        .has_triple_security_labels(&unique_graphs)
-        .unwrap_or(false);
+    // Short-circuit: no labels in these graphs → return all.
+    //
+    // A DB error must NOT read as "no labels exist": that turned a transient
+    // lookup failure into "return every quad", i.e. the cell-level filter
+    // failing open. `check_endpoint_acl` already fails closed on the same class
+    // of failure; match it.
+    let has_labels = match auth_db.has_triple_security_labels(&unique_graphs) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                "triple-label lookup failed ({e}); withholding all quads rather than \
+                 serving them unfiltered"
+            );
+            return Vec::new();
+        }
+    };
     if !has_labels {
         return (0..quads.len()).collect();
     }
@@ -245,9 +257,18 @@ pub fn filter_quad_indices_by_label(
         })
         .collect();
 
-    let labelled = auth_db
-        .get_labels_for_quads(&quad_tuples)
-        .unwrap_or_default();
+    // Same reasoning as above: an empty denial set from an ERROR would return
+    // everything, including the quads the labels exist to withhold.
+    let labelled = match auth_db.get_labels_for_quads(&quad_tuples) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                "triple-label resolution failed ({e}); withholding all quads rather than \
+                 serving them unfiltered"
+            );
+            return Vec::new();
+        }
+    };
 
     // Build a set of (quad_index, label_graph_iri) pairs that are denied
     let denied: std::collections::HashSet<usize> = labelled

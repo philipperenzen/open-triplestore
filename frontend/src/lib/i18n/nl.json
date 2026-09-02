@@ -1928,6 +1928,8 @@
       "predicateIri": "Predicaat-IRI",
       "objectValue": "Objectwaarde",
       "objectValueHint": "(IRI of literal)",
+      "dataGraphIri": "IRI van de datagraaf",
+      "dataGraphIriHint": "De graaf waarin de gelabelde triple staat",
       "labelGraphIri": "Label-graaf-IRI",
       "labelGraphIriHint": "(virtuele benoemde graaf; beheer toegang via graaf-ACL)",
       "tripleEmpty1": "Geen triple-beveiligingslabels.",

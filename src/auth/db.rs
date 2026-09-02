@@ -15,6 +15,41 @@ type AccessibleGraphs = (HashSet<String>, HashSet<String>);
 
 use super::models::*;
 
+/// Which position a triple-security-label term occupies, since an object may be
+/// a literal while a subject or predicate may not.
+#[derive(Clone, Copy)]
+enum TermPosition {
+    Iri,
+    Object,
+}
+
+/// Render a caller-supplied term in N-Triples syntax.
+///
+/// Triple security labels are matched against keys built by splitting an
+/// N-Triples serialisation, so the stored values must be in that same form.
+/// Callers send bare IRIs (`http://ex/s`) or bare literal text; an already
+/// canonical value (`<…>`, `"…"`, `_:b0`) is passed through unchanged so
+/// re-canonicalising is idempotent.
+fn canonical_term(value: &str, position: TermPosition) -> String {
+    let v = value.trim();
+    if v.is_empty() {
+        return v.to_string();
+    }
+    // Already an N-Triples term.
+    if (v.starts_with('<') && v.ends_with('>')) || v.starts_with('"') || v.starts_with("_:") {
+        return v.to_string();
+    }
+    match position {
+        TermPosition::Iri => format!("<{v}>"),
+        TermPosition::Object => match oxigraph::model::NamedNode::new(v) {
+            // A well-formed absolute IRI is an IRI object.
+            Ok(n) => n.to_string(),
+            // Otherwise it is literal text.
+            Err(_) => oxigraph::model::Literal::new_simple_literal(v).to_string(),
+        },
+    }
+}
+
 /// Helper to read a User from a row (columns per USER_COLS: id, username, email, password_hash, role, is_active, created_at, updated_at, is_public, avatar_key, can_publish, display_name, bio, website, phone, organization, email_verified, totp_enabled).
 /// Escape SQLite `LIKE` wildcards (`%`, `_`) in a literal prefix so folder paths
 /// containing them cannot widen a `LIKE prefix || '/%'` match. Pair with `ESCAPE '\'`.
@@ -1086,6 +1121,21 @@ impl AuthDb {
             "ALTER TABLE datasets ADD COLUMN version_notes TEXT",
             "ALTER TABLE datasets ADD COLUMN spatial TEXT",
             "ALTER TABLE datasets ADD COLUMN landing_page TEXT",
+            // Triple security labels were stored as callers sent them (bare
+            // `http://ex/s`) while the filter matches N-Triples terms
+            // (`<http://ex/s>`), so no label ever matched. Canonicalise the
+            // existing rows; new ones are canonicalised on write. Guarded on
+            // NOT LIKE so it is idempotent.
+            "UPDATE triple_security_labels SET subject_iri = '<' || subject_iri || '>' \
+             WHERE subject_iri NOT LIKE '<%' AND subject_iri NOT LIKE '_:%'",
+            "UPDATE triple_security_labels SET predicate_iri = '<' || predicate_iri || '>' \
+             WHERE predicate_iri NOT LIKE '<%'",
+            // Objects that look like absolute IRIs become IRI terms; anything
+            // else is left for the operator, since guessing a literal's
+            // datatype/language from bare text would be worse than a no-match.
+            "UPDATE triple_security_labels SET object_value = '<' || object_value || '>' \
+             WHERE object_value NOT LIKE '<%' AND object_value NOT LIKE '\"%' \
+               AND object_value NOT LIKE '_:%' AND object_value LIKE '%://%'",
             // Organisation Linked Data / FOAF / vCard metadata fields
             "ALTER TABLE organisations ADD COLUMN homepage TEXT",
             "ALTER TABLE organisations ADD COLUMN identifier TEXT",
@@ -5377,6 +5427,16 @@ impl AuthDb {
         graph_iri: &str,
         label_graph_iri: &str,
     ) -> anyhow::Result<TripleSecurityLabel> {
+        // Canonicalise to N-Triples term syntax before storing. The filter that
+        // reads these rows builds its lookup keys by splitting an N-Triples
+        // line, so its subject is `<http://ex/s>` — while callers naturally
+        // send a bare `http://ex/s` (the repo's own API test does). Exact SQL
+        // equality between the two never matched, which made the whole
+        // cell-level security feature a silent no-op.
+        let subject_iri = &canonical_term(subject_iri, TermPosition::Iri);
+        let predicate_iri = &canonical_term(predicate_iri, TermPosition::Iri);
+        let object_value = &canonical_term(object_value, TermPosition::Object);
+
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(

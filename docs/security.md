@@ -22,7 +22,9 @@ Grant a principal access to a specific named graph at one of three levels: `read
 
 ## Triple Security Labels
 
-For cell-level security, individual triples (matched by subject, predicate, and object) can be assigned to a **label graph**. The triple is then visible only to principals who can read that label graph via the Named-Graph ACL. When a graph carries security labels, both Graph Store downloads and SPARQL results are filtered per caller; admins bypass filtering. Managed at `/api/admin/acl/triples`.
+For cell-level security, individual triples (matched by subject, predicate, and object) can be assigned to a **label graph**. The triple is then visible only to principals who can read that label graph via the Named-Graph ACL; admins bypass filtering. Managed at `/api/admin/acl/triples`.
+
+> **Scope.** Labels are applied on **Graph Store reads** (`GET /store?graph=…`). SPARQL results are **not** filtered by triple label — scope sensitive data with a named graph and a Named-Graph ACL if it must be unreachable over `/sparql` as well. (This page previously claimed both paths were filtered; only the Graph Store path is.)
 
 ## Audit Log
 
