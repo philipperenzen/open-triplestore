@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.6.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -69,7 +69,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
 | **SPARQL 1.2** | RDF-star embedded triples |
 | **GeoSPARQL 1.1** | All 30 OGC requirements — Simple Features, Egenhofer, RCC8, constructive & metric functions |
-| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey + all ~80 RL rules; external reasoner bridge for full tableau ([docs](docs/owl2-dl.md)) |
+| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
 | **LDP 1.0** | Basic, Direct, Indirect Containers; NonRDFSource; PATCH with SPARQL Update; Prefer header ([docs](docs/ldp.md)) |
 | **RBAC auth** | `super_admin` › `admin` › `user` role hierarchy; JWT access + refresh tokens; long-lived API keys |
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
@@ -748,7 +748,7 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs all ~80 OWL 2 RL forward-chaining rules plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` allows plugging in a full tableau reasoner (HermiT, Pellet, ELK) for ABox completion.
+Native OWL 2 DL support runs all ~80 OWL 2 RL forward-chaining rules plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
 
 ```bash
 # Query with OWL 2 DL entailment

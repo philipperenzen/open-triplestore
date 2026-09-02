@@ -155,3 +155,60 @@ async fn rebuilt_graph_shrinks_when_a_premise_is_removed() {
         "the reported count must be exactly what the rebuilt graph holds"
     );
 }
+
+/// `?entailment=owl2-dl` is advertised in the OpenAPI spec and docs/owl2-dl.md,
+/// but the entailment match had no arm for it: the value fell through to
+/// `None`, the query ran with no entailment graph at all, and the client got a
+/// 200 with the un-entailed answer. Now it selects `urn:entailment:owl2-dl`
+/// exactly as the other regimes select theirs.
+#[cfg(feature = "owl2-dl")]
+#[tokio::test]
+async fn entailment_owl2_dl_selects_the_dl_graph() {
+    let (state, token) = admin_state();
+    state
+        .store
+        .load_str(
+            "<urn:e:s> <urn:e:p> <urn:e:o> .",
+            oxigraph::io::RdfFormat::Turtle,
+            Some("urn:entailment:owl2-dl"),
+        )
+        .unwrap();
+    let ask = |regime: Option<&str>| {
+        let app = test_app(state.clone());
+        let token = token.clone();
+        let q = url_encode("ASK { <urn:e:s> <urn:e:p> <urn:e:o> }");
+        let uri = match regime {
+            Some(r) => format!("/sparql?query={q}&entailment={r}"),
+            None => format!("/sparql?query={q}"),
+        };
+        async move {
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header(header::ACCEPT, "application/sparql-results+json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let v = body_json(resp.into_body()).await;
+            v["boolean"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("not an ASK result: {v}"))
+        }
+    };
+    let baseline = ask(None).await;
+    assert!(
+        ask(Some("owl2-dl")).await,
+        "owl2-dl must fold the DL entailment graph into the query"
+    );
+    assert_eq!(
+        ask(Some("owl2-ql")).await,
+        baseline,
+        "another regime must not pull in the DL graph"
+    );
+}

@@ -561,6 +561,10 @@ async fn execute_query(
             "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH),
             "owl2-el" => Some(crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH),
             "owl2-ql" => Some(crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH),
+            // Advertised in the OpenAPI spec and in docs/owl2-dl.md, but this
+            // arm was missing: `?entailment=owl2-dl` fell through to `_ => None`
+            // and the query silently ran with no entailment graph at all.
+            "owl2-dl" => Some(crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH),
             _ => None,
         };
         if let Some(iri) = graph_iri {
@@ -8285,8 +8289,31 @@ async fn reasoning_materialize(
         }
         #[cfg(feature = "owl2-dl")]
         "owl2-dl" => {
-            use crate::reasoning::owl2_dl::{ExternalReasonerBridge, NativeTableauStub};
-            let bridge = ExternalReasonerBridge::new(Box::new(NativeTableauStub));
+            use crate::reasoning::owl2_dl::{
+                ExternalReasoner, ExternalReasonerBridge, NativeTableauStub,
+            };
+            // The external bridge is reachable only through configuration:
+            // `OTS_EXTERNAL_REASONER=konclude` (binary from
+            // `OTS_EXTERNAL_REASONER_BIN`, else `Konclude` on PATH). Unset means
+            // the native stub — RL plus the DL extension rules. This used to
+            // hard-code the stub, so the documented bridge could not be used over
+            // HTTP no matter how the server was configured.
+            let reasoner: Box<dyn ExternalReasoner> = match std::env::var("OTS_EXTERNAL_REASONER")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "konclude" => {
+                    let k = crate::reasoning::konclude_bridge::KoncludeReasoner::new();
+                    Box::new(match std::env::var("OTS_EXTERNAL_REASONER_BIN") {
+                        Ok(bin) if !bin.trim().is_empty() => k.with_binary(bin.trim()),
+                        _ => k,
+                    })
+                }
+                _ => Box::new(NativeTableauStub),
+            };
+            let bridge = ExternalReasonerBridge::new(reasoner);
             Some(
                 bridge
                     .materialize(&state.store, &_sources, &target)
