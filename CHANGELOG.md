@@ -14,6 +14,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Layered-graph roles.** `GraphKind` now covers the whole one-graph-per-role
+  convention — `instances`, `model` (alias `ontology`), `vocabulary`, `shapes`,
+  `domain-values`, `linkset`, `provenance`, `catalog`, plus the orthogonal
+  `entailment` and `system` — declarable per dataset, per graph and in seed
+  bundle manifests, and inferred on import for alignment-only, PROV-O, DCAT/VoID
+  and bare-SKOS-collection graphs. Domain-neutral by construction: the roles
+  are NEN 2660-2's layers, but nothing in them is BIM-specific.
 - `OTS_EXTERNAL_REASONER=konclude` / `OTS_EXTERNAL_REASONER_BIN` select the
   external OWL 2 DL reasoner bridge (experimental). It was previously
   unreachable: the materialiser hard-coded the native stub.
@@ -131,6 +138,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **An unknown graph role is a 400.** Setting a dataset's or graph's role to
+  a misspelled value used to fold to "no role" and silently clear it with a 200.
 - **Data-model version gates answer 403, not 401,** to an authenticated
   non-admin (publish, deprecate, sub-graph transitions).
 - **The in-app docs viewer surfaces every guide** — 18 were in the repository

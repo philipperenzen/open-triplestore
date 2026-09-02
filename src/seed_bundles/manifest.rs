@@ -29,7 +29,8 @@
 //!
 //! [[datasets.graphs]]
 //! iri = "https://example.org/my/model"
-//! role = "model"                   # instances | model | vocabulary | shapes | …
+//! role = "model"                   # instances | model (ontology) | vocabulary | shapes |
+//!                                  # domain-values | linkset | provenance | catalog
 //! file = "model.ttl"               # omit for graphs fed by a quads payload
 //!
 //! [[datasets.quads]]

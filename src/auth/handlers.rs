@@ -424,7 +424,7 @@ pub struct CreateDatasetRequest {
     #[serde(alias = "conforms_to_ontology")]
     pub conforms_to_model: Option<String>,
     pub conforms_to_version: Option<String>,
-    /// Optional role classification: "instances" | "model" | "vocabulary" | "shapes" | "entailment" | "system"
+    /// Optional role classification: "instances" | "model" | "vocabulary" | "shapes" | "domain-values" | "linkset" | "provenance" | "catalog" | "entailment" | "system"
     pub graph_role: Option<String>,
 }
 
@@ -459,6 +459,28 @@ pub struct DatasetShaclRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct GraphIriRequest {
     pub graph_iri: String,
+}
+
+/// Parse an optional graph-role string. An unknown value is a 400: it used to
+/// fold to `None`, so a typo (or a role the server did not know yet) silently
+/// CLEARED the graph's role with a 200.
+fn parse_graph_role(raw: Option<&str>) -> Result<Option<GraphKind>, (StatusCode, String)> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(r) => GraphKind::from_str(r).map(Some).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown graph role '{r}'; expected one of {}",
+                    GraphKind::ALL
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        }),
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -3700,7 +3722,7 @@ pub async fn create_dataset(
     // Human-readable, unique slug id → IRI `{base}/dataset/{id}` reads semantically
     // (e.g. `…/dataset/bridge-inventory`) instead of exposing a raw UUID.
     let id = unique_dataset_slug(&db, &req.name);
-    let graph_role = req.graph_role.as_deref().and_then(GraphKind::from_str);
+    let graph_role = parse_graph_role(req.graph_role.as_deref())?;
     let dataset = db
         .create_dataset(
             &id,
@@ -4318,7 +4340,7 @@ pub async fn patch_dataset_graph_role(
         db.set_dataset_graph_private(&dataset_id, &req.graph_iri, private)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     } else {
-        let graph_role = req.graph_role.as_deref().and_then(GraphKind::from_str);
+        let graph_role = parse_graph_role(req.graph_role.as_deref())?;
         db.set_dataset_graph_role(&dataset_id, &req.graph_iri, graph_role)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -4808,7 +4830,7 @@ pub async fn update_dataset_role(
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
 
-    let graph_role = req["graph_role"].as_str().and_then(GraphKind::from_str);
+    let graph_role = parse_graph_role(req["graph_role"].as_str())?;
 
     db.update_dataset_role(&dataset_id, graph_role)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

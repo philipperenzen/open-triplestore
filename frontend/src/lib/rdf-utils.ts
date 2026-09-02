@@ -867,18 +867,35 @@ export function detectContentKindFromText(
 export type ContentKind = 'model' | 'vocabulary' | 'shapes' | 'entailment' | 'instances' | 'mixed' | 'unknown';
 
 // ── Graph role display + normalization ─────────────────────────────────────────
-// Canonical graph-role tokens are those stored by the backend `GraphKind`:
-//   'instances' | 'model' | 'vocabulary' | 'shapes' | 'entailment' | 'system'
+// Canonical graph-role tokens are those stored by the backend `GraphKind`
+// (src/auth/models.rs — `graphRoles.parity.test.ts` keeps the two in step):
+//   'instances' | 'model' | 'vocabulary' | 'shapes' | 'domain-values' |
+//   'linkset' | 'provenance' | 'catalog' | 'entailment' | 'system'
 // The UI historically used a few divergent spellings ('instance', the legacy
-// 'abox'/'tbox') — these helpers fold everything onto the canonical token so a
-// badge always renders with a matching label and CSS class.
-export type GraphRole = 'instances' | 'model' | 'vocabulary' | 'shapes' | 'entailment' | 'system';
+// 'abox'/'tbox', the convention's 'ontology') — these helpers fold everything
+// onto the canonical token so a badge always renders with a matching label and
+// CSS class.
+export type GraphRole =
+  | 'instances'
+  | 'model'
+  | 'vocabulary'
+  | 'shapes'
+  | 'domain-values'
+  | 'linkset'
+  | 'provenance'
+  | 'catalog'
+  | 'entailment'
+  | 'system';
 
 export const GRAPH_ROLE_LABELS: Record<GraphRole, string> = {
   instances: 'Instances',
   model: 'Model',
   vocabulary: 'Vocabulary',
   shapes: 'Shapes',
+  'domain-values': 'Domain values',
+  linkset: 'Linkset',
+  provenance: 'Provenance',
+  catalog: 'Catalog',
   entailment: 'Entailment',
   system: 'System',
 };
@@ -892,12 +909,25 @@ export function normalizeGraphRole(role: string | null | undefined): GraphRole |
     case 'abox':
       return 'instances';
     case 'model':
+    case 'ontology':
     case 'tbox':
       return 'model';
     case 'vocabulary':
+    case 'vocab':
       return 'vocabulary';
     case 'shapes':
       return 'shapes';
+    case 'domain-values':
+    case 'domain_values':
+    case 'domainvalues':
+      return 'domain-values';
+    case 'linkset':
+      return 'linkset';
+    case 'provenance':
+      return 'provenance';
+    case 'catalog':
+    case 'catalogue':
+      return 'catalog';
     case 'entailment':
       return 'entailment';
     case 'system':

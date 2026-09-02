@@ -674,9 +674,13 @@ pub async fn bulk_import(
             let dataset_record = state.auth_db.get_dataset(&ds_id).ok().flatten();
             for (filename, graph_iris) in &ok_files {
                 // Explicit role chosen by the user for this file, if any.
-                let explicit_role = post_roles
-                    .get(filename)
-                    .and_then(|r| crate::auth::models::GraphKind::from_str(r));
+                let explicit_role = post_roles.get(filename).and_then(|r| {
+                    let role = crate::auth::models::GraphKind::from_str(r);
+                    if role.is_none() {
+                        tracing::warn!(dataset = %ds_id, file = %filename, role = %r, "unknown graph role ignored");
+                    }
+                    role
+                });
                 for iri in graph_iris {
                     if let Err(e) = state.auth_db.add_dataset_graph(&ds_id, iri) {
                         tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to register graph in dataset");

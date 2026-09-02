@@ -15,7 +15,7 @@ Datasets serve as the organizational unit for:
 
 ## Dataset Graphs & Roles
 
-Within each dataset, graphs are organized by **role**, indicating their purpose and content type. The store recognises six role strings — `instances`, `model`, `vocabulary`, `shapes`, `entailment` and `system` — aligned to the Description-Logic *boxes*:
+Within each dataset, graphs are organized by **role**, indicating their purpose and content type. The store recognises ten role strings — the three Description-Logic *boxes* `instances`, `model`, `vocabulary`; the orthogonal `shapes` and `entailment`; the layered-convention roles `domain-values`, `linkset`, `provenance`, `catalog`; and the internal `system`:
 
 | Role | Purpose | Content Type | Queryable | Editable | Description |
 |---|---|---|---|---|---|
@@ -25,11 +25,16 @@ Within each dataset, graphs are organized by **role**, indicating their purpose 
 | **shapes** | SHACL Shapes Graph | Shape definitions for validation | ✓ | ✓ | Contains SHACL NodeShapes and PropertyShapes for validating data. Used by SHACL validation engine when `shacl_on_write` is enabled. |
 | **entailment** | Inferred / Derived Data | Computed triples from reasoning | ✓ | ✗ | Contains triples derived by the reasoning engine (OWL 2 RL, RDFS, etc.). Read-only; automatically populated from the schema (Model + Vocabulary) plus instances. |
 | **system** | Internal / System Metadata | Configuration and metadata | ✓ | ✗ | Reserved for system use (RML mappings metadata, dataset configuration, internal bookkeeping). Read-only for end users. |
+| `domain-values` | Code lists | SKOS collections / enumerations | ✅ | ✅ | The values an instance property may take (enumerations, code lists, units) — the *domain values* layer of NEN 2660-2, kept apart from the concept vocabulary so it can be versioned and validated separately |
+| `linkset` | Alignments | `owl:sameAs`, `skos:*Match` | ✅ | ✅ | Mappings between this dataset's resources and another dataset or vocabulary; one graph per alignment keeps the mapping's provenance and lifecycle independent of both ends |
+| `provenance` | PROV-O records | `prov:Activity`, `prov:Entity`, `prov:Agent` | ✅ | ✅ | Who produced what, when and from which sources; the commit log (`urn:system:commit-log`) is the platform's own provenance graph |
+| `catalog` | DCAT / VoID | `dcat:Dataset`, `dcat:Distribution`, `void:Dataset` | ✅ | ✅ | Metadata describing datasets and distributions, as served at `/.well-known/void` |
 
 ### Notes on Graph Roles
 
 - **Three first-class layers**: `model`, `vocabulary` and `instances` are the three primary layers; `shapes` and `entailment` are orthogonal roles and `system` is internal. A single upload that mixes them can be **auto-split** into one graph per role on import (see [Import Auto-Detection](/docs/import)).
-- **Legacy aliases**: the older role names `tbox` (Terminological Box) and `abox` (Assertion Box) are still accepted on input as aliases — `tbox` for `model` and `abox` for `instances` — but the canonical strings are `model`, `vocabulary` and `instances`. Note that `tbox` historically lumped properties together with classes; properties now belong to the `vocabulary` role.
+- **The layered convention**: one graph per role — `model` (the convention calls it *ontology*, accepted as an alias), `vocabulary`, `shapes`, `domain-values`, `instances`, `linkset`, `provenance`, `catalog`. Roles are *declared* (dataset API, seed-bundle manifest); the import auto-detector *infers* them from content where the signal is unambiguous (typed shapes, rules, classes, concepts, PROV records, DCAT records, `owl:sameAs`/SKOS-mapping-only graphs, bare SKOS collections), and a declared role always wins.
+- **Legacy aliases**: the older role names `tbox` (Terminological Box) and `abox` (Assertion Box) are still accepted on input as aliases — `tbox` for `model` and `abox` for `instances` — but the canonical strings are `model`, `vocabulary` and `instances`. An unknown role string is a 400, not a silent reset. Note that `tbox` historically lumped properties together with classes; properties now belong to the `vocabulary` role.
 - **Multiple graphs per role**: Datasets can contain multiple graphs with the same role (e.g., multiple instance graphs for different data subsets).
 - **Entailment is computed**: The `entailment` graph is automatically populated by the reasoning engine and cannot be directly written to.
 - **System is reserved**: The `system` role is reserved for internal metadata and should not be modified by end users.
