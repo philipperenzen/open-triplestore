@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Constraint-specification importers, IDS first.** `POST
+  /api/shacl/import/ids` turns a buildingSMART IDS 1.0 document into SHACL
+  Core shapes over the IFC RDF this store emits, optionally creating the
+  shape graph in SHACL Studio; `GET /api/shacl/importers` lists the formats.
+  The importer interface is generic — the next domain's format is a new
+  implementation, not a new endpoint.
 - **LDES publishing and client sync.** Any dataset can be published as a
   Linked Data Event Stream (`PUT /api/datasets/:id/ldes`): every write becomes
   entity-level version-object members with tombstones for deletions,

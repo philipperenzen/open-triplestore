@@ -44,6 +44,7 @@ mod shaclc;
 #[cfg(feature = "shex")]
 mod shex;
 mod sparql;
+mod spec_import;
 mod storage;
 mod store;
 mod svc_registry;

@@ -64,6 +64,7 @@ pub mod shaclc;
 #[cfg(feature = "shex")]
 pub mod shex;
 pub mod sparql;
+pub mod spec_import;
 pub mod storage;
 pub mod store;
 pub mod svc_registry;

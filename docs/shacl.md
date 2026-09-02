@@ -344,3 +344,32 @@ schema:PersonShape
         sh:message "schema:email must be a valid email address"
     ] .
 ```
+
+## Importing constraint specifications (IDS)
+
+Domain exchange requirements often arrive in their own format. The
+specification importers turn such a document into a SHACL shape graph that
+lives in SHACL Studio like any other. The interface is generic (a format id,
+bytes in, Turtle and a report out); buildingSMART **IDS 1.0** is the first
+implementation.
+
+```bash
+curl http://localhost:7878/api/shacl/importers                       # registered formats
+curl -X POST 'http://localhost:7878/api/shacl/import/ids?create=true' \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/xml' \
+  --data-binary @requirements.ids
+```
+
+Without `create=true` the response carries the Turtle and the report only.
+Each `ids:specification` becomes a node shape targeting the entity's ifcOWL
+class over the RDF the built-in IFC importer emits (`props:<Pset>_<Name>`
+properties, `props:ifcName`/`props:ifcGuid` attributes, BOT containment for
+`partOf`). Applicability facets beyond the entity become an "applies" shape
+combined with the "requires" shape as `sh:or ( [ sh:not applies ] requires )`
+— SHACL Core throughout. Value restrictions map to `sh:hasValue`, `sh:in`,
+`sh:pattern`, bounds and lengths; cardinality to `sh:minCount 1` /
+`sh:maxCount 0`. Whatever cannot be expressed per node (a specification's
+"at least one such entity must exist"), or relies on a convention the IFC
+importer does not populate (classification, material, predefined types,
+attributes other than Name/GlobalId), is listed under `warnings`.
+
