@@ -1779,3 +1779,43 @@ Every claim surface now states what the code and tests prove:
 Not done in Phase 4: the OWL 2 RL Table 8 rules, EL equivalentClass /
 TransitiveProperty, SHACL-AF custom components and R2RML joins are documented
 gaps, not implemented — they are roadmap work, not claims fixes.
+
+## Addendum — Phase 5 (Stage 1 foundation), 2026-09-02
+
+Full suite on the final tree: 2826 passed, 0 failed, 4 ignored.
+
+Every roadmap capability was built domain-neutral; BIM/infra is the first
+payload, not the design centre.
+
+- **5.1 Graph roles:** `GraphKind` covers the whole one-graph-per-role
+  convention (`domain-values`, `linkset`, `provenance`, `catalog` added;
+  `ontology` is an alias of `model`); the import detector infers the new roles
+  from content; unknown roles are a 400 (they used to silently clear the role);
+  the frontend's role vocabulary is pinned to the Rust enum.
+- **5.2 TBox/ABox:** `GET /api/datasets/:id/conformance` resolves a dataset's
+  layer (graphs by role, conformed model version, bound shapes, derived
+  reasoning sources / validation shapes). Found and fixed on the way:
+  `POST /api/reasoning/materialize` ignored `source_graphs` *and* its rules
+  read only the unnamed default graph, so dataset data was invisible to
+  reasoning. Scopes are now applied at the store level (`USING` datasets on
+  every rule); `"dataset"` reasons over exactly the conformance layer.
+- **5.3 Versions:** diff (`…/diff/:other` or `live`), delete (published →
+  409 unless forced), retention GC; snapshot/branch/restore stream in batches;
+  restore is atomic (staging graph + one `MOVE`) and refreshes the text index.
+- **5.4 Commit log:** Graph Store writes, bulk imports, every version
+  operation and backup restores are recorded (kinds `graph-store`, `import`,
+  `backup`); listings now return `affected_graphs`. Also fixed: a multipart
+  `meta` part after `dataset_id` discarded the dataset.
+- **5.5 Benchmark mechanism:** seed bundles ship `[[data_models]]`,
+  `conforms_to` and `shape_graphs`. `examples/seed-bundles/layered-reference`
+  + `tests/layered_bundle_e2e.rs` prove the Stage-1 exit criterion in CI:
+  load a layered bundle, classify instances against the model layer, validate
+  with SHACL through the bound shapes, see `dct:conformsTo` in DCAT.
+
+**Not done — needs a decision:** the *real-data* run (NEN 2660-2 + IMBOR
+object-type library). `examples/seed-bundles/nen2660-imbor` is scaffolded
+with a `fetch.sh`, but the RDF is not vendored and downloading it was not
+started without permission. The NEN 2660-2 file names follow the publisher's
+`data/` layout (nl-digigo/nen2660, gh-pages) and should be confirmed on the
+downloads page; the IMBOR object-type library ships inside a release ZIP
+whose asset URL must be supplied.
