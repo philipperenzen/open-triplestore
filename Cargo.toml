@@ -131,6 +131,8 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
+# Needed only to name `Iri` in the federation service-handler trait; already in the tree.
+oxiri = "0.2.11"
 spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable

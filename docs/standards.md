@@ -14,7 +14,7 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | SPARQL 1.1 Query | SELECT, ASK, CONSTRUCT, DESCRIBE | Full² |
 | SPARQL 1.1 Update | INSERT, DELETE, LOAD, CLEAR, COPY, WITH/USING | Full |
 | SPARQL 1.1 Graph Store HTTP | Named-graph CRUD over HTTP | Full |
-| SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | **Disabled by design³** |
+| SPARQL 1.1 Federated Query (`SERVICE`) | Remote query | Partial³ — off by default; per-endpoint allowlist |
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
 | SPARQL 1.2 (WD) | Triple terms, accessor functions | Partial¹ |
 | RDFS | subClass/subProperty/domain/range inference | Full |
@@ -101,10 +101,14 @@ behavior and will flip green when the limitation is resolved.
 2. **Zero-length property paths.** `:x :p* ?y` does not yield a constant start node
    `:x` when `:x` is absent from the data (oxigraph behavior; the ALP algebra would
    include it).
-3. **Federation/`SERVICE` is intentionally disabled** as an SSRF mitigation
-   (`without_service_handler()`); a `SERVICE` clause errors rather than reaching
-   the network. The service description therefore does not advertise
-   `sd:BasicFederatedQuery`.
+3. **Federation/`SERVICE` is off by default** as an SSRF mitigation and can be
+   enabled per endpoint: `OTS_REMOTE_ALLOWLIST` lists the URL prefixes the
+   server may contact; a `SERVICE` naming anything else errors (or yields no
+   rows under `SERVICE SILENT`). Every call has a timeout and a row cap
+   (`OTS_SERVICE_MAX_ROWS`). Without an allowlist the service description does
+   not advertise `sd:BasicFederatedQuery`; with one it does. Not supported:
+   `SERVICE ?var` (a variable endpoint) and pushing local bindings to the
+   remote — each SERVICE is evaluated as a stand-alone query and joined locally.
 4. **OWL 2 DL** reasoning is RL-based forward-chaining plus DL-syntax extension
    rules (hasSelf, disjointUnion, NegativePropertyAssertion, hasKey, cardinality).
    Full DL tableau (consistency detection, profile validation, nominal/datatype

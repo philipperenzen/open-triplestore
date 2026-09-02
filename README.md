@@ -68,7 +68,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
 | **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
-| **SPARQL federation** | `SERVICE` is disabled by design (SSRF mitigation) and not advertised in the service description — a `SERVICE` clause errors rather than reaching the network |
+| **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out and row-capped, and the service description advertises federation only when an allowlist exists |
 | **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, WKT and GML literals, CRS transform for the built-in CRS set. Not implemented: the geodesic metric family, `aggUnion`, GeoJSON literals ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
 | **LDP 1.0** | Basic, Direct, Indirect Containers; NonRDFSource; PATCH with SPARQL Update; Prefer header ([docs](docs/ldp.md)) |

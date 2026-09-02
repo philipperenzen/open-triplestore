@@ -282,6 +282,9 @@ See [rml.md](rml.md) for the full RML guide.
 | `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is honoured for rate limiting, e.g. `10.0.0.0/8,172.16.0.0/12`. Leave empty when not behind a proxy. |
 | `OTS_EXTERNAL_REASONER` | *(unset)* | `konclude` routes `owl2-dl` materialisation through an external tableau reasoner after the native rules (experimental; see [owl2-dl.md](owl2-dl.md)). Unset: native rules only. |
 | `OTS_EXTERNAL_REASONER_BIN` | `Konclude` | Path to the reasoner binary when `OTS_EXTERNAL_REASONER` is set. |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URL prefixes the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). List origins with their trailing slash, e.g. `https://sparql.example.org/`. |
+| `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
+| `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call; a larger remote result is truncated. |
 | `ENDPOINT_ACL_ENFORCE` | `true` | Enforce endpoint ACL rules. Set to `false` to disable enforcement entirely — an escape hatch for a misfiring rule (see [security.md](security.md#endpoint-acl)), not a normal setting. |
 | `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL and import quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |

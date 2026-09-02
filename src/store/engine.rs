@@ -374,6 +374,10 @@ impl TripleStore {
         // (oxigraph 0.5 moved the explicit `without_service_handler` toggle behind the
         // `http-client` feature, so there is nothing to call when it is disabled.)
         let mut opts = SparqlEvaluator::new();
+        // SPARQL federation: every `SERVICE` goes through the allowlisted
+        // handler (crate::sparql::federation) — no allowlist, no network.
+        opts =
+            opts.with_default_service_handler(crate::sparql::federation::AllowlistedServiceHandler);
 
         // Register all GeoSPARQL functions
         for (iri, handler) in geo_fns::all_functions() {

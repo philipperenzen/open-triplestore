@@ -1834,8 +1834,12 @@ async fn service_description_handler(
         })
         .collect();
 
-    let desc =
-        service_description::generate(default_graph_count, &named_graph_counts, &dataset_descs);
+    let desc = service_description::generate(
+        default_graph_count,
+        &named_graph_counts,
+        &dataset_descs,
+        crate::remote::enabled(),
+    );
 
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], desc).into_response())
 }
