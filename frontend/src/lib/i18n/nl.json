@@ -1849,7 +1849,7 @@
       "providerType": "Providertype",
       "providerTypeOidc": "Algemene OIDC",
       "providerTypeAzure": "Azure AD / Entra ID",
-      "providerTypeSaml": "SAML 2.0",
+      "providerTypeSaml": "SAML 2.0 (experimenteel)",
       "clientId": "Client-ID",
       "clientIdPlaceholder": "Applicatie-(client-)ID",
       "clientSecret": "Client-secret",

@@ -171,7 +171,7 @@ Delivering straight to recipient MXes needs a host with outbound port 25 and pro
 ### Native (requires Rust 1.94.1+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
-**libxmlsec1** for the `saml` feature in `--features full`. On Debian/Ubuntu:
+**libxmlsec1** only for the experimental `saml` feature (not in `full`; see docs/auth.md). On Debian/Ubuntu:
 `apt-get install libgeos-dev libxmlsec1-dev`; on macOS: `brew install geos libxmlsec1`.
 
 ```bash

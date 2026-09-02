@@ -19,7 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # The `--features full,test-utils,backup-encrypt,alerting` debug build of every test binary fills the runner's small
+  # The `--features full,saml,test-utils,backup-encrypt,alerting` debug build of every test binary fills the runner's small
   # disk ("No space left on device"; the "ld terminated with signal 7 [Bus error]"
   # crash is the same thing — a bus error from mmap on a full disk). Shrink target/:
   # line-tables-only debuginfo (keeps file:line in backtraces) and no incremental
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reclaim ~25 GB of preinstalled tooling the Rust build doesn't need, so the
-      # `--features full,test-utils,backup-encrypt,alerting` build of all test binaries doesn't run the disk out.
+      # `--features full,saml,test-utils,backup-encrypt,alerting` build of all test binaries doesn't run the disk out.
       - name: Free up disk space
         run: |
           df -h /
@@ -73,13 +73,13 @@ jobs:
       # test module had been broken (a stale oxigraph `on_store` signature) for
       # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
 
       - name: Build
-        run: cargo build --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked
 
       - name: Test
-        run: cargo test --workspace --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
@@ -102,7 +102,7 @@ jobs:
           set -o pipefail
           count_passed() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}'; }
 
-          files_out=$(cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked --test 'security_*' 2>&1)
+          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked --test 'security_*' 2>&1)
           echo "$files_out"
           files_passed=$(count_passed "$files_out")
           echo "==> tests/security_*.rs passed: $files_passed"
@@ -111,7 +111,7 @@ jobs:
             exit 1
           fi
 
-          named_out=$(cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked security 2>&1)
+          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked security 2>&1)
           echo "$named_out"
           named_passed=$(count_passed "$named_out")
           echo "==> security-named tests passed across all binaries: $named_passed"
@@ -171,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Reclaim ~25 GB of preinstalled tooling so the `--features full,test-utils,backup-encrypt,alerting` conformance
+      # Reclaim ~25 GB of preinstalled tooling so the `--features full,saml,test-utils,backup-encrypt,alerting` conformance
       # test binaries don't run the disk out (see the backend job).
       - name: Free up disk space
         run: |
@@ -193,7 +193,7 @@ jobs:
       # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
       # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
       - name: Run conformance tests
-        run: cargo test --features full,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
   frontend:
     name: Frontend (lint, test, build)
