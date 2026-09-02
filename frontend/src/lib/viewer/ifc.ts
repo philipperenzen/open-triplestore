@@ -197,7 +197,10 @@ function assembleParsed(msg: {
     (g.userData as { guidRanges?: GuidRange[] }).guidRanges = b.ranges;
     if (b.bvh) {
       try {
-        (g as unknown as { boundsTree: MeshBVH }).boundsTree = MeshBVH.deserialize(b.bvh, g, {
+        (g as unknown as { boundsTree: MeshBVH }).boundsTree = MeshBVH.deserialize(
+          b.bvh as unknown as Parameters<typeof MeshBVH.deserialize>[0],
+          g,
+          {
           setIndex: false, // indirect build — the index was never modified
         });
       } catch {

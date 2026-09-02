@@ -216,6 +216,13 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # `tsc --noEmit` over src/. Until this step existed no compiler ever ran:
+      # eslint's `no-undef` is disabled for .ts on the grounds that "TypeScript
+      # already checks", so a typo'd identifier reached production as a runtime
+      # `undefined`. The backlog was cleared when the gate was added.
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Test
         run: npm run test
 

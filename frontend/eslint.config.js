@@ -39,9 +39,11 @@ export default [
     // tier of code (much of it added with the 3D/CityJSON/IFC work) escaped the
     // linter entirely. Parse them with the TS parser and lint with the base
     // rules. `no-undef` is turned OFF here on the @typescript-eslint project's
-    // own recommendation — TypeScript's compiler already checks for undefined
-    // identifiers, and the base rule misfires on type references and ambient
-    // declarations. `no-unused-vars` stays a (non-failing) warning.
+    // own recommendation — TypeScript's compiler checks for undefined
+    // identifiers (`npm run typecheck`, a CI gate; before that script existed
+    // no compiler ever ran and this comment was a promise nothing kept), and
+    // the base rule misfires on type references and ambient declarations.
+    // `no-unused-vars` stays a (non-failing) warning.
     files: ['**/*.ts'],
     languageOptions: {
       parser: tsParser,
