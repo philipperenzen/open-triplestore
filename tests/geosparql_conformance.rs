@@ -2059,3 +2059,109 @@ fn geold_gml_literal_supported() {
         eq
     );
 }
+
+// ─── CRS harmonisation between operands ──────────────────────────────────────
+
+// GeoSPARQL requires a binary function's operands to be in a common CRS. Both
+// `<crs>` prefixes used to be stripped and thrown away, so a query mixing
+// RD New (metres) with CRS84 (degrees) compared incompatible numbers and
+// returned a confident `false` — a silently wrong spatial filter.
+//
+// Rijksmuseum, Amsterdam: RD New (121_800, 487_400) is CRS84 (4.885, 52.360).
+#[test]
+fn binary_predicates_harmonise_operand_crs() {
+    let s = ts();
+    let rd_point =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+    // A CRS84 box comfortably around the same place.
+    let wgs_box =
+        "\"POLYGON((4.80 52.30, 4.95 52.30, 4.95 52.42, 4.80 52.42, 4.80 52.30))\"^^geo:wktLiteral";
+
+    let within = geof_opt(&s, &format!("geof:sfWithin({rd_point}, {wgs_box})")).unwrap_or_default();
+    assert!(
+        within.contains("true"),
+        "an RD New point inside a CRS84 box must be within it once the operands are \
+         harmonised, got {within:?}"
+    );
+
+    let intersects =
+        geof_opt(&s, &format!("geof:sfIntersects({wgs_box}, {rd_point})")).unwrap_or_default();
+    assert!(
+        intersects.contains("true"),
+        "harmonisation must work with the operands the other way round, got {intersects:?}"
+    );
+}
+
+// Same-CRS operands are untouched — harmonisation must not disturb the ordinary
+// case, including two geometries sharing a CRS this build cannot reproject.
+#[test]
+fn same_crs_operands_are_not_reprojected() {
+    let s = ts();
+    let a =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+    let b =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+    let eq = geof_opt(&s, &format!("geof:sfEquals({a}, {b})")).unwrap_or_default();
+    assert!(
+        eq.contains("true"),
+        "identical RD New points are equal, got {eq:?}"
+    );
+
+    // An unsupported CRS shared by both operands is still a meaningful
+    // comparison — no transform is needed, so it must not go unbound.
+    let c = "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(1 2)\"^^geo:wktLiteral";
+    let d = "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(1 2)\"^^geo:wktLiteral";
+    let eq2 = geof_opt(&s, &format!("geof:sfEquals({c}, {d})")).unwrap_or_default();
+    assert!(
+        eq2.contains("true"),
+        "two geometries in the same (unsupported) CRS still compare, got {eq2:?}"
+    );
+}
+
+// Mixing a CRS this build cannot reproject with a different one yields unbound,
+// rather than a comparison of incompatible coordinates.
+#[test]
+fn unreprojectable_crs_pair_is_unbound_not_wrong() {
+    let s = ts();
+    let lambert93 =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral";
+    let wgs = "\"POINT(2.35 48.85)\"^^geo:wktLiteral";
+    let r = geof_opt(&s, &format!("geof:sfIntersects({lambert93}, {wgs})"));
+    assert!(
+        r.is_none() || !r.as_deref().unwrap_or("").contains("true"),
+        "an unreprojectable CRS pair must not produce a confident answer, got {r:?}"
+    );
+}
+
+// A constructive function's result must stay in its operand's CRS.
+//
+// The result was serialised as bare WKT with the prefix dropped, so
+// `geof:getSRID(geof:buffer("<…/28992> POINT(…)", 10))` reported CRS84 —
+// relabelling RD New metres as degrees, and making the result unusable as an
+// operand for anything else.
+#[test]
+fn constructive_functions_preserve_the_operand_crs() {
+    let s = ts();
+    let rd =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:buffer({rd}, 10))")).unwrap_or_default();
+    assert!(
+        srid.contains("28992"),
+        "a buffer of an RD New geometry stays in RD New, got {srid:?}"
+    );
+
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:envelope({rd}))")).unwrap_or_default();
+    assert!(
+        srid.contains("28992"),
+        "an envelope keeps the operand CRS, got {srid:?}"
+    );
+
+    // A geometry with no CRS prefix keeps GeoSPARQL's CRS84 default.
+    let plain = "\"POINT(4.885 52.360)\"^^geo:wktLiteral";
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:envelope({plain}))")).unwrap_or_default();
+    assert!(
+        srid.contains("CRS84") || srid.contains("4326"),
+        "an unprefixed geometry stays at the CRS84 default, got {srid:?}"
+    );
+}

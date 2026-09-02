@@ -13,6 +13,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **GeoSPARQL binary functions now harmonise their operands' coordinate
+  reference systems.** Both `<crs>` prefixes were previously stripped and
+  discarded, so a query mixing RD New (EPSG:28992, metres) with CRS84 (degrees)
+  compared incompatible numbers and returned a confident `false`. The second
+  operand is transformed into the first's CRS; when the two name different CRS
+  and either is one this build cannot reproject, the result is now unbound
+  rather than wrong. **This changes results for existing mixed-CRS data** — for
+  the better, but re-check any saved query or shape that relied on the previous
+  behaviour.
+- **Constructive GeoSPARQL functions keep their operand's CRS.** `geof:buffer`,
+  `geof:envelope`, `geof:boundary`, `geof:convexHull`, `geof:intersection`,
+  `geof:union`, `geof:difference` and `geof:symDifference` emitted bare WKT with
+  the prefix dropped, so `geof:getSRID(geof:buffer(<RD New geometry>, 10))`
+  reported CRS84 — relabelling metres as degrees and making the result unusable
+  as an operand.
+
 ### Added
 - Spark now orients every turn on what the question NAMES before the model writes
   a query. The platform context lists the registered data models & vocabularies
