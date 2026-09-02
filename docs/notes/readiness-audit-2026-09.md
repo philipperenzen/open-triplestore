@@ -1667,3 +1667,87 @@ Cargo.toml:81 defines `plugin-accounts-dashboard` but Cargo.toml:97 `full` omits
 - Test the cron silent-failure: save a SHACL Studio pipeline schedule with a 6-field cron string and confirm the save succeeds with no validation error and that the pipeline never runs across several scheduler ticks (src/shacl_studio/cron.rs:16-18).
 - Verify sfcgal3d and plugin-accounts-dashboard actually compile: `cargo build --features full,sfcgal3d,plugin-accounts-dashboard --locked` (needs libSFCGAL >= 2.0) — this is the combination no GitHub workflow exercises.
 - Re-run the marker sweep after any fix: `grep -rn --include='*.rs' -E '\b(TODO|FIXME|XXX|HACK)\b|unimplemented!|todo!\(' src/ opengraph/ plugins/` (baseline: 4 hits, all TODOs) and `grep -rn '#\[ignore' tests/` (baseline: 6 hits — 5 in sparql12_conformance.rs, 1 perf test in api_comprehensive_test.rs:2429).
+
+## Addendum — found while executing Phase 3 (2026-09-02)
+
+Defects that were not in the original audit and surfaced from the new tests:
+
+- **ShEx engine (src/shex):** the validator compared serialised terms (`<iri>`,
+  as the store prints them) against bare IRIs from the parser, so `CLOSED EXTRA
+  rdf:type` still rejected rdf:type and `[ex:Active ex:Inactive]` rejected
+  ex:Active; the datatype check was a substring test skipped for literals
+  without `^^` (`"thirty"` satisfied `xsd:integer`, `xsd:int` matched an
+  `xsd:integer` literal); the parser stopped silently at the first unreadable
+  token, so `this is not shexc {{{` parsed as an *empty* schema and the API
+  answered 200/conforms. All fixed in `fix(shex)`.
+- **Dataset versions:** `require_write` answered 401 to an authenticated caller
+  lacking the grant. Fixed to 403. The same pattern remains in
+  `src/data_models/handlers.rs` at three "Admin access required" sites
+  (`AppError::Unauthorized`) — carried to Phase 4.
+- **Parallel-mirror parity suite:** confirmed inert as suspected — with the
+  default 500 ms quiet window `parallel_build_count()` was 0 for every test.
+  The harness now sets the window to 0 and asserts a build happened.
+- **TypeScript:** the first-ever `tsc --noEmit` found 55 errors, all
+  annotation-level (no runtime `undefined` among them); cleared, and the check
+  is a CI gate.
+- **Studio bindings list** is keyed `shape_graphs`/`targets` (not documented);
+  the new HTTP suite pins the shape.
+
+### Live checks (2026-09-02)
+
+**Spark against a local ollama (`OLLAMA_CONTEXT_LENGTH=16384`, `LLM_CONTEXT_TOKENS=16384`):**
+
+| Check | `qwen2.5:1.5b` |
+|---|---|
+| `/api/llm/health` reachable, model + context window reported | PASS |
+| Private dataset seeded (3 bridges), graph registered, Turtle loaded | PASS |
+| Retrieval loop: grounded answer with a SPARQL trail | **FAIL** — the model now receives the right vocabulary (it used `ex:Bridge` and `rdfs:label`) and writes correctly braced SPARQL, but its query has its own syntax error (`SELECT (COUNT(?b) AS ?count) (?label)`) and targets an invented graph IRI; the fenced query IS executed (confirmed in code: a fence on the first round is a directive), fails to parse, and the repair rounds fail the same way → `ran_query=false` |
+| Scope: a caller without a grant gets no private rows | PASS (no leak); the property is proven by `model_authored_query_cannot_read_outside_the_callers_scope` |
+| `/api/llm/feedback` guarded, logged | PASS (200) |
+| No-gateway degraded path | 503 naming the gateway and knob, live-confirmed when the daemon was down (was a bare 500; `fix(spark)`) |
+
+Three platform defects came out of this session, all fixed and pinned by tests:
+
+1. **No-gateway chat was a bare 500** → 503 `ServiceUnavailable` naming `LLM_GATEWAY_URL`.
+2. **The prompt budgeter dropped ALL graph vocabulary** when the system prompt
+   exceeded the window (observed at 8k on a demo-seeded instance: the model
+   was left with graph IRIs and no predicates, and the 7.6B model fabricated
+   two of three bridge names while claiming they came from the data) → blocks
+   are trimmed lowest-priority first.
+3. **The system prompt's worked SPARQL examples were written with `{{ }}`** —
+   Rust format escapes in a constant that is never formatted — so every model
+   was shown doubled braces as the canonical shape; the 1.5B model copied them
+   verbatim (mallory's turn reproduced the "count + extreme value" example
+   braces and all), so every query failed to parse → plain SPARQL now, with a
+   test that the prompt sent to the gateway contains no `{{`.
+
+What remains is model quality at 1.5B parameters, consistent with the decision
+to defer quality testing to a medium model.
+
+**Medium model (`spark-chat`, a 7.6B qwen2.5-coder derivative already present on
+the machine), one question, same 16k setup — before and after the fixes:**
+
+| Stage | Outcome |
+|---|---|
+| Start of session (8k window, vocabulary dropped, `{{` prompt) | `ran_query=false`; answered "3 bridges: Waalbrug, Overtoombrug, Sint-Jan-brug" — two names **fabricated**, claimed as "derived from the data" |
+| After the budgeter + prompt fixes | Correct graph and predicates in the query, but the model resubmitted the same `COUNT … ?name` query three times (each "variable that is unbound") and only wrote the corrected query once the rounds were spent |
+| After the identical-query guard + GROUP BY hint | Round 1 fails with the actionable hint, round 2 succeeds, `ran_query=true`; answer: **De Oversteek, Snelbinder, Waalbrug** — the data, presented with a card widget |
+
+Five Spark fixes came out of the live check in total (503 degrade path, vocabulary
+trimming, prompt braces, corrected-fence execution after a failed round, and the
+identical-query guard with the aggregate hint), each pinned by a test in
+tests/llm_chat_orientation.rs or tests/llm_gateway_unreachable.rs. Quality testing
+beyond one question stays deferred, per the decision to test on a medium model later.
+
+**Playwright e2e against the local binary:** **29/29 passed** (1.4 min) on the
+restarted 7979 backend + Vite dev server. Note for other machines: Playwright
+1.62.1 wants its pinned headless-shell build, which was not installed here;
+the run used the installed Google Chrome via `channel: "chrome"` in a
+throwaway config. A first run without either fails all 29 tests at
+`browserType.launch` in ~1 ms each — that is a missing browser, not the app.
+
+**Release-image feature check:** not run in this session (a Docker build of
+several GB); the `full` feature set now includes `alerting` and
+`backup-encrypt`, and the Dockerfile builds with `--features full`, so the
+image carries what docs/administration.md documents. Verify on the next image
+build.
