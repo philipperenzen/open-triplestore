@@ -14,6 +14,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `OTS_EXTERNAL_REASONER=konclude` / `OTS_EXTERNAL_REASONER_BIN` select the
+  external OWL 2 DL reasoner bridge (experimental). It was previously
+  unreachable: the materialiser hard-coded the native stub.
 - Spark now orients every turn on what the question NAMES before the model writes
   a query. The platform context lists the registered data models & vocabularies
   with the named graph holding each one's current published definitions (so a
@@ -72,6 +75,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **ShEx and SWRL are graded Partial** in docs/standards.md, with the covered
+  constructs listed; both now have semantic conformance suites instead of
+  route-liveness smokes.
 - **Dependencies.** Batched the outstanding Dependabot updates — `jsonwebtoken` 11
   (now on its pure-Rust `rust_crypto` backend; v11 ships **no** signing backend by
   default), `quick-xml` 0.42 (names and attribute values moved from bytes to
@@ -110,6 +116,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **LDP:** an ETag read from `GET` now satisfies `If-Match` on `PUT`/`PATCH`
+  (GET hashed the re-serialised body while writes compared against the raw
+  DESCRIBE hash, so every documented read→modify→write round trip ended in
+  412); `HEAD` returns exactly GET's headers; `/ldp/constraints` — advertised
+  as `constrainedBy` on every response — is served; and `POST` honours
+  `Link: <ldp:DirectContainer>; rel="type"` (and Basic/Indirect), so Direct and
+  Indirect containers can be created over HTTP.
+- **`?entailment=owl2-dl` is honoured.** It was advertised in the OpenAPI spec
+  but had no arm in the entailment match, so the query silently ran with no
+  entailment graph.
+- **ShEx:** CLOSED/EXTRA and value sets compared serialised terms with bare
+  IRIs and never matched; the datatype check was a substring test skipped for
+  simple literals (`"thirty"` satisfied `xsd:integer`); an unparseable schema
+  parsed as an *empty* schema and validated everything with a 200. All fixed;
+  semantics are pinned by a new conformance suite.
+- **Cesium viewer works air-gapped:** the engine's runtime assets are served
+  from the application's own bundle instead of a CDN pinned 21 minor versions
+  behind the bundled library.
+- **`guest` was missing from the frontend role list**, so a guest user's role
+  select rendered blank; a parity test now reads the Rust enum.
+- **Dataset versions answered 401 to an authenticated caller lacking write
+  rights;** it is now 403, so clients no longer treat a missing grant as a
+  session expiry.
 - Spark's invented-IRI check judged a query's IRIs against the sampled vocabulary
   window (8 classes + 20 predicates per graph), so it routinely condemned REAL
   terms — `rdfs:label` where only `rdfs:comment` made a sample, a class outside a

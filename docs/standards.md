@@ -27,8 +27,10 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource | Full |
 | DCAT 2 | Dataset catalogue description | Full |
 | RML / R2RML | CSV/JSON/XML → RDF mapping | Full⁹ |
-| JWT / OAuth 2.0 / OIDC / SAML 2.0 | Authentication | Full |
-| ShEx / SWRL | Shape Expressions / Horn-clause rules | Full |
+| JWT / OAuth 2.0 / OIDC | Authentication | Full |
+| SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image; the ACS handler has a known request-ID validation defect, so no login can currently succeed. See [auth.md](auth.md). |
+| ShEx | Shape Expressions (ShExC) | Partial — node kinds, datatypes with lexical checks, string/numeric facets, value sets, cardinalities, EachOf/OneOf, inverse constraints, CLOSED/EXTRA, shape references; no semantic actions, imports or annotations. Semantics pinned by `tests/shex_conformance.rs`. |
+| SWRL | Horn-clause rules | Partial — class/property atoms and the built-ins in `src/swrl`; an unsupported built-in is a hard error rather than a silently dropped filter. Semantics pinned by `tests/swrl_conformance.rs`. |
 
 ## Conformance test suites
 
