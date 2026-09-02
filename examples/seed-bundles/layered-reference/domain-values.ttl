@@ -1,0 +1,8 @@
+@prefix exd:  <https://example.org/layered/values/> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+# A bare value list (no concept scheme): the status an asset may have.
+exd:StatusValues a skos:Collection ; skos:prefLabel "Status values"@en ;
+    skos:member exd:in-service, exd:out-of-service .
+exd:in-service     skos:prefLabel "in service"@en ; skos:notation "IN" .
+exd:out-of-service skos:prefLabel "out of service"@en ; skos:notation "OUT" .

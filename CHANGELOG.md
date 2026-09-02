@@ -14,6 +14,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Seed bundles ship the model layer.** A manifest can declare
+  `[[data_models]]` (registered with one published version), a dataset's
+  `conforms_to`, and `shape_graphs` that are registered in the SHACL Studio
+  library and bound to the dataset. `examples/seed-bundles/layered-reference`
+  exercises the whole layered convention end to end (classification against
+  the model layer, SHACL validation through the bound shapes) and is run in
+  CI; `examples/seed-bundles/nen2660-imbor` carries the Dutch standards on the
+  same mechanism with a `fetch.sh` for the (non-vendored) RDF.
 - **Dataset version retention:** `GET …/versions/:a/diff/:b` (or `…/diff/live`)
   reports the per-graph triple delta; `DELETE …/versions/:ver` reclaims a
   version's snapshot graphs (published ones need deprecating first, or
@@ -150,6 +158,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **The commit log covers every data mutation.** It claimed to, and
+  `GET /api/datasets/:id/commits` presented it as the dataset's history, but
+  Graph Store PUT/POST/DELETE, bulk imports, every dataset-version operation
+  (cut, publish, deprecate, restore, delete, GC, branch) and backup restores
+  left no trace. Each records a `prov:Activity` now, with actor, affected
+  graphs and counts where known; new kinds `graph-store`, `import`, `backup`.
 - **Version restore is atomic and streams.** Restore cleared the live graph
   *before* copying the snapshot back (a window in which the dataset's graph
   was simply gone), snapshot/branch/restore materialised every quad of every
@@ -158,12 +172,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one `MOVE`, and the index is refreshed for the restored graphs.
 - **Reasoning could not see dataset data.** `POST /api/reasoning/materialize`
   parsed `source_graphs` and ignored it, and every regime's rules read only
-- **The commit log covers every data mutation.** It claimed to, and
-  `GET /api/datasets/:id/commits` presented it as the dataset's history, but
-  Graph Store PUT/POST/DELETE, bulk imports, every dataset-version operation
-  (cut, publish, deprecate, restore, delete, GC, branch) and backup restores
-  left no trace. Each records a `prov:Activity` now, with actor, affected
-  graphs and counts where known; new kinds `graph-store`, `import`, `backup`.
   the unnamed default graph — so a dataset's named graphs were invisible to
   materialisation however the endpoint was called. Scopes are now applied at
   the store level (a `USING` dataset on every rule): `dataset`, explicit

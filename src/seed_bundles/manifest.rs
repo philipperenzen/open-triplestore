@@ -53,7 +53,7 @@ use serde::Deserialize;
 use crate::auth::models::{GraphKind, Visibility};
 use crate::saved_queries::models::CreateSavedQueryRequest;
 
-use super::{Bundle, BundleDataset, BundleGraph, Fmt, OrgSpec, QuadsPayload};
+use super::{Bundle, BundleDataModel, BundleDataset, BundleGraph, Fmt, OrgSpec, QuadsPayload};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +64,11 @@ struct ManifestDoc {
     organisation: OrgDoc,
     #[serde(default)]
     datasets: Vec<DatasetDoc>,
+    /// Reference models (RDFS/OWL classes, SKOS vocabularies, value lists)
+    /// registered in the data-model registry, so datasets can declare
+    /// `conforms_to` them.
+    #[serde(default)]
+    data_models: Vec<DataModelDoc>,
     /// `[prefixes]` table: prefix label → namespace IRI, seeded into the
     /// server's prefix registry (label/IRI validation happens at apply time).
     #[serde(default)]
@@ -94,6 +99,45 @@ struct DatasetDoc {
     quads: Vec<QuadsDoc>,
     #[serde(default)]
     saved_queries: Vec<SavedQueryDoc>,
+    /// The reference model this dataset conforms to (`dct:conformsTo`):
+    /// `{ model = "<data model id>", version = "<version>" }`. The version
+    /// defaults to the model's latest published one.
+    #[serde(default)]
+    conforms_to: Option<ConformsToDoc>,
+    /// Graph IRIs holding SHACL shapes (declared above, or pre-existing) to
+    /// register in the SHACL Studio library and bind to this dataset, so
+    /// validation applies them without any further set-up.
+    #[serde(default)]
+    shape_graphs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConformsToDoc {
+    model: String,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+/// A reference model shipped by the bundle: one registry entry with one
+/// published version whose first graph is the version's base graph and the
+/// rest its sub-graphs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataModelDoc {
+    id: String,
+    title: String,
+    namespace: String,
+    #[serde(default)]
+    description: Option<String>,
+    /// `model` (classes) or `vocabulary` (properties / SKOS). Default `model`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Version label; default `1.0.0`.
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    graphs: Vec<GraphDoc>,
 }
 
 #[derive(Deserialize)]
@@ -151,31 +195,7 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
                 .with_context(|| format!("dataset '{}': unknown visibility '{v}'", ds.slug))?,
         };
 
-        let mut graphs = Vec::with_capacity(ds.graphs.len());
-        for g in ds.graphs {
-            let role = match g.role.as_deref() {
-                None => None,
-                Some(r) => Some(
-                    GraphKind::from_str(r)
-                        .with_context(|| format!("graph <{}>: unknown role '{r}'", g.iri))?,
-                ),
-            };
-            let data = match g.file.as_deref() {
-                None => None,
-                Some(file) => {
-                    let path = resolve_payload(dir, file)?;
-                    let fmt = graph_fmt(&path, g.format.as_deref())?;
-                    let data = std::fs::read_to_string(&path)
-                        .with_context(|| format!("reading payload {path:?}"))?;
-                    Some((Cow::Owned(data), fmt))
-                }
-            };
-            graphs.push(BundleGraph {
-                iri: g.iri,
-                role,
-                data,
-            });
-        }
+        let graphs = resolve_graphs(dir, ds.graphs, &format!("dataset '{}'", ds.slug))?;
 
         let mut quads = Vec::with_capacity(ds.quads.len());
         for q in ds.quads {
@@ -214,6 +234,52 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
             graphs,
             quads,
             saved_queries,
+            conforms_to: ds.conforms_to.map(|c| (c.model, c.version)),
+            shape_graphs: ds.shape_graphs,
+        });
+    }
+
+    let mut data_models = Vec::with_capacity(doc.data_models.len());
+
+    for dm in doc.data_models {
+        let kind = match dm
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("model") | Some("data-model") | Some("ontology") => {
+                crate::kind_detector::RegistryKind::DataModel
+            }
+
+            Some("vocabulary") | Some("vocab") => crate::kind_detector::RegistryKind::Vocabulary,
+
+            Some("shapes") => crate::kind_detector::RegistryKind::Shapes,
+
+            Some(other) => bail!("data model '{}': unknown kind '{other}'", dm.id),
+        };
+
+        if dm.graphs.is_empty() {
+            bail!("data model '{}' declares no graphs", dm.id);
+        }
+
+        let graphs = resolve_graphs(dir, dm.graphs, &format!("data model '{}'", dm.id))?;
+
+        data_models.push(BundleDataModel {
+            id: dm.id,
+
+            title: dm.title,
+
+            namespace: dm.namespace,
+
+            description: dm.description,
+
+            kind,
+
+            version: dm.version.unwrap_or_else(|| "1.0.0".to_string()),
+
+            graphs,
         });
     }
 
@@ -227,12 +293,47 @@ pub fn parse_bundle(dir: &Path) -> anyhow::Result<Bundle> {
         },
         datasets,
         prefixes: doc.prefixes,
+        data_models,
     })
 }
 
 /// Resolve a payload path relative to the bundle directory, rejecting absolute
 /// paths and `..` components so a manifest cannot read files outside its own
 /// bundle (a seed dir may be operator-writable but the manifest untrusted).
+/// Resolve `[[…graphs]]` entries: role strings and payload files.
+fn resolve_graphs(
+    dir: &Path,
+    docs: Vec<GraphDoc>,
+    owner: &str,
+) -> anyhow::Result<Vec<BundleGraph>> {
+    let mut graphs = Vec::with_capacity(docs.len());
+    for g in docs {
+        let role = match g.role.as_deref() {
+            None => None,
+            Some(r) => Some(
+                GraphKind::from_str(r)
+                    .with_context(|| format!("{owner}: graph <{}>: unknown role '{r}'", g.iri))?,
+            ),
+        };
+        let data = match g.file.as_deref() {
+            None => None,
+            Some(file) => {
+                let path = resolve_payload(dir, file)?;
+                let fmt = graph_fmt(&path, g.format.as_deref())?;
+                let data = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading payload {path:?}"))?;
+                Some((Cow::Owned(data), fmt))
+            }
+        };
+        graphs.push(BundleGraph {
+            iri: g.iri,
+            role,
+            data,
+        });
+    }
+    Ok(graphs)
+}
+
 fn resolve_payload(dir: &Path, file: &str) -> anyhow::Result<PathBuf> {
     let rel = Path::new(file);
     if rel.is_absolute() || rel.components().any(|c| !matches!(c, Component::Normal(_))) {
