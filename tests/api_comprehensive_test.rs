@@ -2121,28 +2121,47 @@ mod rml {
 
     #[tokio::test]
     async fn rml_preview() {
-        let preview_body = serde_json::json!({
-            "mapping": SIMPLE_RML,
-            "sources": {
-                "data.csv": "id,name\n1,Alice\n2,Bob"
-            }
-        });
+        // The handler takes MULTIPART: a `mapping` part plus one part per named
+        // source. This test used to post JSON and assert "2xx or 4xx" — which the
+        // resulting 415 satisfied — so the endpoint had no effective coverage and
+        // a total regression would have gone unnoticed.
+        let boundary = "ots-rml-preview-boundary";
+        let csv = "id,name\n1,Alice\n2,Bob\n";
+        let body = format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"mapping\"\r\n\r\n{m}\r\n\
+             --{b}\r\nContent-Disposition: form-data; name=\"data.csv\"; filename=\"data.csv\"\r\n\
+             Content-Type: text/csv\r\n\r\n{c}\r\n--{b}--\r\n",
+            b = boundary,
+            m = SIMPLE_RML,
+            c = csv
+        );
         let resp = test_app(test_state())
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/rml/preview")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::to_string(&preview_body).unwrap()))
+                    .header(
+                        header::CONTENT_TYPE,
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
                     .unwrap(),
             )
             .await
             .unwrap();
-        // Preview is unauthenticated; expect 200 with triples or 400 on format mismatch
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "a well-formed preview request succeeds"
+        );
+        let json = body_json(resp.into_body()).await;
         assert!(
-            resp.status().is_success() || resp.status().is_client_error(),
-            "RML preview must return 2xx or 4xx, got {}",
-            resp.status()
+            json["triples_count"].as_u64().unwrap_or(0) >= 2,
+            "two rows must yield triples: {json}"
+        );
+        assert!(
+            json["turtle"].as_str().unwrap_or("").contains("Alice"),
+            "the dry-run Turtle carries the mapped values: {json}"
         );
     }
 }

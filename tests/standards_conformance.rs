@@ -1192,10 +1192,18 @@ async fn shex_validation_endpoint() {
         )
         .await
         .unwrap();
-    assert!(
-        resp.status() == StatusCode::OK || resp.status() == StatusCode::BAD_REQUEST,
-        "ShEx validate endpoint must respond, got {}",
-        resp.status()
+    // The schema parses and the focus node has no ex:name, so the report is a
+    // real non-conformance — not merely "the route answered". Full semantics
+    // live in tests/shex_conformance.rs; this pins the wiring end to end.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a parseable schema validates"
+    );
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(
+        body["conforms"], false,
+        "a focus node with no ex:name must not conform: {body}"
     );
 }
 
@@ -1219,14 +1227,12 @@ async fn swrl_execute_endpoint_wired() {
         )
         .await
         .unwrap();
-    assert_ne!(
+    // `{}` lacks the required `rules` field, so the exact answer is the JSON
+    // extractor's 422 — not just "anything but 404/500". Rule semantics live in
+    // tests/swrl_conformance.rs.
+    assert_eq!(
         resp.status(),
-        StatusCode::NOT_FOUND,
-        "SWRL route must be mounted"
-    );
-    assert!(
-        resp.status() != StatusCode::INTERNAL_SERVER_ERROR,
-        "SWRL endpoint must handle the request gracefully, got {}",
-        resp.status()
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a body without `rules` is rejected by the extractor"
     );
 }

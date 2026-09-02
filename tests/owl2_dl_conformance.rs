@@ -64,7 +64,14 @@ fn count_in_tg(store: &TripleStore) -> usize {
 #[test]
 fn dl_empty_store_ok() {
     let store = TripleStore::in_memory().unwrap();
-    assert!(Owl2DLReasoner::new(&store).materialize().is_ok());
+    let report = Owl2DLReasoner::new(&store)
+        .materialize()
+        .expect("an empty store is trivially consistent");
+    assert_eq!(report.regime, "owl2-dl");
+    assert_eq!(
+        report.triples_added, 0,
+        "nothing can be derived from nothing"
+    );
 }
 
 #[test]
@@ -399,7 +406,12 @@ fn dl_negative_object_assertion_ok() {
               owl:targetIndividual ex:bob .
     "#,
     );
-    assert!(Owl2DLReasoner::new(&store).materialize().is_ok());
+    // The violated counterpart asserts `Err(Inconsistency)`; this one must run
+    // to completion AND produce a report, not merely fail to error.
+    let report = Owl2DLReasoner::new(&store)
+        .materialize()
+        .expect("an unviolated negative assertion is consistent");
+    assert_eq!(report.regime, "owl2-dl");
 }
 
 #[test]
@@ -450,7 +462,12 @@ fn dl_negative_assertion_different_target_ok() {
         ex:alice ex:hates ex:carol .
     "#,
     );
-    assert!(Owl2DLReasoner::new(&store).materialize().is_ok());
+    // The violated counterpart asserts `Err(Inconsistency)`; this one must run
+    // to completion AND produce a report, not merely fail to error.
+    let report = Owl2DLReasoner::new(&store)
+        .materialize()
+        .expect("an unviolated negative assertion is consistent");
+    assert_eq!(report.regime, "owl2-dl");
 }
 
 // ═══════════════════════════════════════════════════════════

@@ -466,12 +466,26 @@ fn rml_referencing_object_map_join_is_gap() {
       ex:PSubj rr:template "http://example.org/p/{id}" .
       ex:NamePOM rr:predicate foaf:name ; rr:objectMap ex:NameObj .
       ex:NameObj rml:reference "name" ."#;
+    // Control: the same two maps WITHOUT the referencing object map parse fine, so
+    // an Err below is attributable to the join and not to an unrelated parser
+    // regression. (The Err arm used to be empty, so any parse failure at all —
+    // including one that broke every mapping — made this test pass.)
+    let control = mapping
+        .replace("rr:objectMap ex:ParentObj", "rr:objectMap ex:ParentConst")
+        .replace(
+            "ex:ParentObj rr:parentTriplesMap ex:Parent ;\n        rr:joinCondition ex:Join .",
+            "ex:ParentConst rr:constant ex:p .",
+        );
+    parse_rml(&format!("{PFX}{control}")).expect("the mapping without the join must parse");
     // The referencing object map has no template/reference/constant, so the engine
     // either fails to parse the mapping OR produces no joined triple — both confirm
     // the gap. (Neither outcome is a join.)
     let m = parse_rml(&format!("{PFX}{mapping}"));
     match m {
-        Err(_) => { /* gap: referencing object map not parseable */ }
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(!msg.is_empty(), "a rejected join mapping must say why");
+        }
         Ok(m) => {
             let mut src = HashMap::new();
             src.insert("c.csv".to_string(), "id,pid\n1,10\n".to_string());
