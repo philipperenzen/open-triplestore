@@ -50,7 +50,9 @@ fn require_write(state: &AppState, ds: &Dataset, uid: &str) -> Result<(), AppErr
     {
         Ok(())
     } else {
-        Err(AppError::Unauthorized(
+        // 403, not 401: the caller IS authenticated, they just lack the right.
+        // A 401 here made clients treat "no write grant" as a session expiry.
+        Err(AppError::Forbidden(
             "Write access to this dataset required".to_string(),
         ))
     }
