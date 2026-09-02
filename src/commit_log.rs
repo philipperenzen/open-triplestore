@@ -30,6 +30,12 @@ pub enum CommitKind {
     Dataset,
     Sparql,
     Shapes,
+    /// A Graph Store Protocol PUT / POST / DELETE.
+    GraphStore,
+    /// A bulk import (files → dataset graphs).
+    Import,
+    /// A backup restore — the whole store was replaced.
+    Backup,
 }
 
 impl CommitKind {
@@ -40,7 +46,41 @@ impl CommitKind {
             CommitKind::Dataset => "dataset",
             CommitKind::Sparql => "sparql",
             CommitKind::Shapes => "shapes",
+            CommitKind::GraphStore => "graph-store",
+            CommitKind::Import => "import",
+            CommitKind::Backup => "backup",
         }
+    }
+}
+
+/// Record a commit for a write made outside the model / vocabulary / shape
+/// editors. Best-effort: a failure is logged and never fails the write the
+/// caller already made. The module doc promised "every data mutation"; until
+/// this existed, Graph Store writes, imports, dataset versioning and backup
+/// restores left no trace, while `GET /api/datasets/:id/commits` presented the
+/// log as the dataset's history.
+#[allow(clippy::too_many_arguments)]
+pub fn record(
+    store: &TripleStore,
+    base_url: &str,
+    kind: CommitKind,
+    message: impl Into<String>,
+    actor_user_id: Option<&str>,
+    subject_iri: Option<String>,
+    affected_graphs: Vec<String>,
+    added: usize,
+    removed: usize,
+    version: Option<String>,
+) {
+    let mut rec = CommitRecord::new(kind, message);
+    rec.actor_iri = actor_user_id.map(|u| format!("{}/users/{u}", base_url.trim_end_matches('/')));
+    rec.subject_iri = subject_iri;
+    rec.affected_graphs = affected_graphs;
+    rec.added = added;
+    rec.removed = removed;
+    rec.version = version;
+    if let Err(e) = insert_commit(store, base_url, &rec) {
+        tracing::warn!("failed to record {} commit: {e}", rec.kind.as_str());
     }
 }
 
@@ -292,6 +332,7 @@ pub fn list_commits(
         OPTIONAL { ?c ver:revision ?rev }
         OPTIONAL { ?c ver:kind ?kind }
         OPTIONAL { ?c ver:metadata ?meta }
+        OPTIONAL { ?c ver:affectedGraph ?ag }
     "#;
 
     let where_block = where_lines.join("\n            ");
@@ -304,12 +345,14 @@ pub fn list_commits(
         PREFIX prov: <{PROV}>
         PREFIX rdfs: <{RDFS}>
         SELECT DISTINCT ?c ?created ?actor ?msg ?subject ?version ?branch ?added ?removed ?parent ?rev ?kind ?meta
+               (GROUP_CONCAT(DISTINCT STR(?ag); separator=" ") AS ?graphs)
         WHERE {{
           GRAPH <{COMMIT_GRAPH}> {{
             {where_block}
             {optionals}
           }}
         }}
+        GROUP BY ?c ?created ?actor ?msg ?subject ?version ?branch ?added ?removed ?parent ?rev ?kind ?meta
         ORDER BY DESC(?created)
         {limit_clause}
         "#
@@ -336,6 +379,9 @@ pub fn list_commits(
                 Some("dataset") => CommitKind::Dataset,
                 Some("sparql") => CommitKind::Sparql,
                 Some("shapes") => CommitKind::Shapes,
+                Some("graph-store") => CommitKind::GraphStore,
+                Some("import") => CommitKind::Import,
+                Some("backup") => CommitKind::Backup,
                 _ => CommitKind::DataModel,
             };
             let metadata =
@@ -351,9 +397,17 @@ pub fn list_commits(
                 message: g("msg").unwrap_or_default(),
                 metadata,
                 subject_iri: g("subject"),
-                // Not projected in listings (the dataset scope filters on the
-                // stored triples directly); kept on the struct for writes.
-                affected_graphs: Vec::new(),
+                // Collapsed into one row per commit by the GROUP_CONCAT above;
+                // this used to be left empty on every listing, so the field
+                // the API documents was never populated on read.
+                affected_graphs: g("graphs")
+                    .map(|v| {
+                        v.split(' ')
+                            .filter(|x| !x.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 version: g("version"),
                 branch: g("branch"),
                 added: g("added").and_then(|s| s.parse().ok()).unwrap_or(0),

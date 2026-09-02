@@ -155,8 +155,16 @@ pub async fn bulk_import(
                     .await
                     .map_err(|e| AppError::BadRequest(format!("meta read error: {e}")))?;
                 if !txt.trim().is_empty() {
+                    // A `meta` part replaces the whole struct; a `dataset_id`
+                    // part sent BEFORE it used to be silently discarded, so the
+                    // import then ran without a dataset (graphs unregistered,
+                    // no commit). Keep it unless the JSON sets its own.
+                    let earlier_dataset = meta.dataset_id.take();
                     meta = serde_json::from_str(&txt)
                         .map_err(|e| AppError::BadRequest(format!("Invalid meta JSON: {e}")))?;
+                    if meta.dataset_id.is_none() {
+                        meta.dataset_id = earlier_dataset;
+                    }
                 }
             }
             "dataset_id" => {
@@ -728,6 +736,37 @@ pub async fn bulk_import(
                     }
                 }
             }
+            // Commit trail for the import: files → dataset graphs. Imports used
+            // to leave no trace, while `GET …/commits` presented the log as the
+            // dataset's complete history.
+            let imported: Vec<String> = ok_files
+                .iter()
+                .flat_map(|(_, g)| g.iter().cloned())
+                .collect();
+            let added: usize = imported
+                .iter()
+                .filter_map(|g| state.store.graph_count_cached(Some(g)))
+                .sum();
+            crate::commit_log::record(
+                &state.store,
+                &state.base_url,
+                crate::commit_log::CommitKind::Import,
+                format!(
+                    "Imported {} file(s) into {} graph(s)",
+                    ok_files.len(),
+                    imported.len()
+                ),
+                Some(&post_user_id),
+                Some(format!(
+                    "{}/dataset/{}",
+                    state.base_url.trim_end_matches('/'),
+                    ds_id
+                )),
+                imported,
+                added,
+                0,
+                None,
+            );
 
             // Rewrite the DCAT metadata named graph so it reflects the newly-registered
             // graphs (void:subset + ots:graphRole triples).

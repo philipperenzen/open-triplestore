@@ -158,6 +158,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one `MOVE`, and the index is refreshed for the restored graphs.
 - **Reasoning could not see dataset data.** `POST /api/reasoning/materialize`
   parsed `source_graphs` and ignored it, and every regime's rules read only
+- **The commit log covers every data mutation.** It claimed to, and
+  `GET /api/datasets/:id/commits` presented it as the dataset's history, but
+  Graph Store PUT/POST/DELETE, bulk imports, every dataset-version operation
+  (cut, publish, deprecate, restore, delete, GC, branch) and backup restores
+  left no trace. Each records a `prov:Activity` now, with actor, affected
+  graphs and counts where known; new kinds `graph-store`, `import`, `backup`.
   the unnamed default graph — so a dataset's named graphs were invisible to
   materialisation however the endpoint was called. Scopes are now applied at
   the store level (a `USING` dataset on every rule): `dataset`, explicit

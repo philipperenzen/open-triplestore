@@ -559,6 +559,24 @@ pub fn restore_backup(
     fs::rename(&tmp, target_sqlite)
         .with_context(|| format!("replace identity DB at {}", target_sqlite.display()))?;
 
+    // A restore replaces the whole store: the one mutation that must appear in
+    // the trail, since every earlier entry describes data that no longer exists.
+    crate::commit_log::record(
+        store,
+        "urn:ots:backup",
+        crate::commit_log::CommitKind::Backup,
+        format!(
+            "Restored backup {} (created {}, {} quads)",
+            manifest.id, manifest.created_at, manifest.rdf_quad_count
+        ),
+        None,
+        Some("urn:ots:store".to_string()),
+        Vec::new(),
+        manifest.rdf_quad_count,
+        0,
+        None,
+    );
+
     Ok(manifest)
 }
 
@@ -660,6 +678,22 @@ mod tests {
 
     /// Restore round-trip: take a backup, mutate the store, restore — the store
     /// must return to the backup snapshot (checksums are verified first).
+    /// Quads outside the commit log: a restore records itself in the trail of
+    /// the restored store, and that entry must not count as restored data.
+    fn data_quads(store: &TripleStore) -> usize {
+        store
+            .store()
+            .quads_for_pattern(None, None, None, None)
+            .filter_map(Result::ok)
+            .filter(|q| match &q.graph_name {
+                oxigraph::model::GraphName::NamedNode(n) => {
+                    n.as_str() != crate::commit_log::COMMIT_GRAPH
+                }
+                _ => true,
+            })
+            .count()
+    }
+
     #[test]
     fn restore_round_trips_unencrypted_backup() {
         let dir = tempfile::tempdir().unwrap();
@@ -695,14 +729,23 @@ mod tests {
         store
             .update("INSERT DATA { <http://example.org/x> <http://example.org/y> <http://example.org/z> }")
             .unwrap();
-        assert_eq!(store.len().unwrap(), 3);
+        assert_eq!(data_quads(&store), 3);
 
         // Restoring returns the store to the 2-quad snapshot.
         let restored =
             restore_backup(&backup_dir, &manifest.id, &store, &sqlite_path, None).unwrap();
         assert_eq!(restored.id, manifest.id);
+        // The restore itself is in the trail of the restored store.
+        let trail = crate::commit_log::list_commits(
+            &store,
+            &crate::commit_log::CommitScope::Subject("urn:ots:store".to_string()),
+            &crate::commit_log::CommitQuery::default(),
+        );
+        assert_eq!(trail.len(), 1, "a backup restore is a recorded mutation");
+        assert_eq!(trail[0].kind, crate::commit_log::CommitKind::Backup);
+        assert_eq!(trail[0].added, manifest.rdf_quad_count);
         assert_eq!(
-            store.len().unwrap(),
+            data_quads(&store),
             2,
             "store must match the restored backup snapshot"
         );
@@ -770,7 +813,7 @@ mod tests {
         store
             .update("INSERT DATA { <http://example.org/x> <http://example.org/y> <http://example.org/z> }")
             .unwrap();
-        assert_eq!(store.len().unwrap(), 3);
+        assert_eq!(data_quads(&store), 3);
 
         let restored = restore_backup(
             &backup_dir,
@@ -783,7 +826,7 @@ mod tests {
 
         assert_eq!(restored.id, manifest.id);
         assert_eq!(
-            store.len().unwrap(),
+            data_quads(&store),
             2,
             "an encrypted backup must restore to its snapshot"
         );

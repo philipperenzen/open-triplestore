@@ -239,6 +239,13 @@ pub async fn create_version(
     }
     // Re-test this dataset's saved queries against the new version (background).
     crate::saved_queries::testing::spawn_version_tests(&state, &id, &body.version);
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&record.version),
+        format!("Cut version {}", record.version),
+    );
     Ok((StatusCode::CREATED, Json(record)))
 }
 
@@ -332,6 +339,13 @@ pub async fn publish_version(
     .map_err(AppError::from)?;
     registry::update_latest_published(&state.store, &state.base_url, &id, &ver)
         .map_err(AppError::from)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&ver),
+        format!("Published version {ver}"),
+    );
     Ok(Json(json!({ "status": "published", "version": ver })))
 }
 
@@ -358,6 +372,13 @@ pub async fn deprecate_version(
         VersionStatus::Deprecated,
     )
     .map_err(AppError::from)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&ver),
+        format!("Deprecated version {ver}"),
+    );
     Ok(Json(json!({ "status": "deprecated", "version": ver })))
 }
 
@@ -400,6 +421,13 @@ pub async fn restore_version(
         Ok(_) => {}
         Err(e) => tracing::warn!("failed to restore validation bindings for {id} v{ver}: {e}"),
     }
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&ver),
+        format!("Restored version {ver}"),
+    );
     Ok(Json(json!({ "restored": restored, "version": ver })))
 }
 
@@ -510,7 +538,53 @@ pub async fn create_branch(
         branch: Some(branch),
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        Some(&record.version),
+        format!("Branched {} from {}", record.version, body.from_version),
+    );
     Ok((StatusCode::CREATED, Json(record)))
+}
+
+/// Commit-trail entry for a version operation, scoped to the dataset's
+/// registered graphs (so `GET …/commits` lists it) plus the version's snapshot
+/// graphs when it has any. Best-effort.
+fn version_commit(
+    state: &AppState,
+    user_id: &str,
+    dataset_id: &str,
+    version: Option<&str>,
+    message: String,
+) {
+    let mut affected = state
+        .auth_db
+        .list_dataset_graphs(dataset_id)
+        .unwrap_or_default();
+    if let Some(v) = version {
+        if let Some(rec) = registry::get_version(&state.store, &state.base_url, dataset_id, v) {
+            affected.extend(rec.snapshot_graphs.iter().cloned());
+        }
+    }
+    affected.sort();
+    affected.dedup();
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::Dataset,
+        message,
+        Some(user_id),
+        Some(format!(
+            "{}/dataset/{}",
+            state.base_url.trim_end_matches('/'),
+            dataset_id
+        )),
+        affected,
+        0,
+        0,
+        version.map(str::to_string),
+    );
 }
 
 // ─── Retention: delete / diff / gc ────────────────────────────────────────────
@@ -572,6 +646,13 @@ pub async fn delete_version(
         })));
     }
     let dropped = purge_version(&state, &id, &record)?;
+    version_commit(
+        &state,
+        &user.user_id,
+        &id,
+        None,
+        format!("Deleted version {ver}"),
+    );
     Ok(Json(json!({ "deleted": ver, "graphs_dropped": dropped })))
 }
 
@@ -674,6 +755,19 @@ pub async fn gc_versions(
     for v in candidates.into_iter().skip(body.keep) {
         purge_version(&state, &id, &v)?;
         deleted.push(v.version);
+    }
+    if !deleted.is_empty() {
+        version_commit(
+            &state,
+            &user.user_id,
+            &id,
+            None,
+            format!(
+                "Garbage-collected {} version(s): {}",
+                deleted.len(),
+                deleted.join(", ")
+            ),
+        );
     }
     Ok(Json(json!({ "kept": body.keep, "deleted": deleted })))
 }

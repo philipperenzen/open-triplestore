@@ -1506,6 +1506,11 @@ async fn graph_store_put(
     body: Bytes,
 ) -> Result<Response, AppError> {
     require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let commit_graph = params.graph_iri().map(str::to_string);
+    let before = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
 
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -1534,6 +1539,27 @@ async fn graph_store_put(
     })
     .await?;
     sync_text_index_after_graph_write(&state, touched).await;
+    // Commit trail: Graph Store writes left no trace, while the dataset's
+    // history endpoint presented the commit log as complete.
+    let after = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::GraphStore,
+        format!(
+            "Graph Store PUT {}",
+            commit_graph.as_deref().unwrap_or("default graph")
+        ),
+        user.as_deref().map(|u| u.user_id.as_str()),
+        None,
+        commit_graph.iter().cloned().collect(),
+        after,
+        before,
+        None,
+    );
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1546,6 +1572,11 @@ async fn graph_store_post(
     body: Bytes,
 ) -> Result<Response, AppError> {
     require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let commit_graph = params.graph_iri().map(str::to_string);
+    let before = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
 
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -1574,6 +1605,27 @@ async fn graph_store_post(
     })
     .await?;
     sync_text_index_after_graph_write(&state, touched).await;
+    // Commit trail: Graph Store writes left no trace, while the dataset's
+    // history endpoint presented the commit log as complete.
+    let after = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::GraphStore,
+        format!(
+            "Graph Store POST {}",
+            commit_graph.as_deref().unwrap_or("default graph")
+        ),
+        user.as_deref().map(|u| u.user_id.as_str()),
+        None,
+        commit_graph.iter().cloned().collect(),
+        after.saturating_sub(before),
+        0,
+        None,
+    );
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1584,6 +1636,11 @@ async fn graph_store_delete(
     Query(params): Query<GraphStoreParams>,
 ) -> Result<Response, AppError> {
     require_graph_write(&state, user.as_deref(), params.graph_iri())?;
+    let commit_graph = params.graph_iri().map(str::to_string);
+    let before = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
@@ -1595,6 +1652,27 @@ async fn graph_store_delete(
     // literals kept turning up in search results until an unrelated write
     // forced a rebuild.
     sync_text_index_after_graph_write(&state, touched).await;
+    // Commit trail: Graph Store writes left no trace, while the dataset's
+    // history endpoint presented the commit log as complete.
+    let after = commit_graph
+        .as_deref()
+        .and_then(|g| state.store.graph_count_cached(Some(g)))
+        .unwrap_or(0);
+    crate::commit_log::record(
+        &state.store,
+        &state.base_url,
+        crate::commit_log::CommitKind::GraphStore,
+        format!(
+            "Graph Store DELETE {}",
+            commit_graph.as_deref().unwrap_or("default graph")
+        ),
+        user.as_deref().map(|u| u.user_id.as_str()),
+        None,
+        commit_graph.iter().cloned().collect(),
+        0,
+        before.saturating_sub(after),
+        None,
+    );
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
