@@ -1,0 +1,67 @@
+name: Nightly (ignored tests)
+
+# `#[ignore]`d tests run in no other job — not CI, not the Makefile, not any
+# script — so an ignore is effectively a delete that still looks like a test.
+# Five SPARQL-1.2 conformance tests sat ignored long enough that their stated
+# reason had gone stale in both directions: some had started passing, and one
+# asserted the OPPOSITE of what the engine now does.
+#
+# This job runs them nightly and does NOT gate anything: an ignored test is
+# ignored because it is slow or environment-sensitive, and failing the branch on
+# it would just push people to delete it. The point is that the set stays
+# visible.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ignored:
+    name: Ignored tests (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Report, never block.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Reclaim preinstalled tooling: the full-feature test build is large.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libgeos-dev lld libxml2-dev libxmlsec1-dev
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: Run ignored tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace \
+            --features full,test-utils,backup-encrypt,alerting,plugin-hello \
+            --locked -- --ignored --nocapture 2>&1 | tee ignored.log
+
+      # Surface the current ignore set in the job summary, so growth is visible
+      # even on a green run.
+      - name: Summarise the ignore set
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          {
+            echo "## Ignored tests"
+            echo
+            echo '```'
+            grep -rn '#\[ignore' tests/ src/ opengraph/ || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -59,13 +59,17 @@ docker run --rm -v "$PWD:/app" -v ots_target:/app/target -w /app ots-builder \
 These were surfaced by the conformance suites above. Tracked tests pin current
 behavior and will flip green when the limitation is resolved.
 
-1. **RDF-star vs RDF 1.2.** The engine (oxigraph 0.4) implements the RDF-star CG
-   model — quoted triples `<< s p o >>` usable in subject **and** object position.
-   The newer RDF 1.2 / SPARQL 1.2 *triple-term* surface syntax `<<( s p o )>>`
-   with `rdf:reifies` and `{| |}` annotations is **not** supported.
+1. **RDF 1.2, not RDF-star CG.** The engine (oxigraph 0.5) implements the
+   **RDF 1.2 / SPARQL 1.2** model: a *triple term* `<<( s p o )>>` in **object
+   position only**, attached through `rdf:reifies`, plus `{| |}` annotation
+   syntax. `<< s p o >>` is reifier shorthand — it mints a reifier and does not
+   assert the base triple. The reifier is an ordinary IRI/blank node, so
+   `isTRIPLE` is false for it and true for the triple term it points at.
+   Code written against the older RDF-star CG model (quoted triples usable in
+   subject position) needs updating; see `tests/sparql12_conformance.rs`.
 2. **Zero-length property paths.** `:x :p* ?y` does not yield a constant start node
    `:x` when `:x` is absent from the data (oxigraph behavior; the ALP algebra would
-   include it). Tracked as an ignored test.
+   include it).
 3. **Federation/`SERVICE` is intentionally disabled** as an SSRF mitigation
    (`without_service_handler()`); a `SERVICE` clause errors rather than reaching
    the network.
