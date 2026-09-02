@@ -116,6 +116,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Spark keeps vocabulary at small context windows.** When the system prompt
+  exceeded the declared window the budgeter dropped *every* graph-vocabulary
+  block, so the model was left with graph IRIs and no predicates — and
+  invented them, or fabricated an answer outright (observed live at an 8k
+  window on a demo-seeded instance). Blocks are now trimmed one graph at a
+  time, lowest priority first, so the conversation's own graphs stay described.
 - **Spark degrades cleanly without a gateway:** an unreachable or failing
   `LLM_GATEWAY_URL` is now a 503 naming the endpoint and the knob, on the chat
   and feedback paths alike; it was a bare 500 "Internal server error".

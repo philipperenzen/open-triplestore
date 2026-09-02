@@ -2174,7 +2174,7 @@ async fn run_chat_turn(
     // a cached gateway probe).
     let window = resolve_context_tokens(&model).await;
     let caps = caps_for_window(window);
-    let vocab = graph_vocab_context(&state, &graph_list, &orientation.graphs, caps).await;
+    let vocab_blocks = graph_vocab_context(&state, &graph_list, &orientation.graphs, caps).await;
     // Question-matched API services again, at the tail this time — the full
     // list is mid-prompt where small models lose it (see relevant_services_hint).
     let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
@@ -2192,11 +2192,18 @@ async fn run_chat_turn(
         })
         .unwrap_or_default();
 
-    let mut system_content = format!(
-        "{CHAT_SYSTEM_PROMPT}
+    // The system prompt with the first `n` vocabulary blocks; everything else
+    // in it is fixed for the turn.
+    let compose = |vocab_kept: usize| {
+        format!(
+            "{CHAT_SYSTEM_PROMPT}
 \n# PLATFORM CONTEXT\n{context}{vocab}{orient}{services_hint}{memory}",
-        orient = orientation.section
-    );
+            vocab = vocab_section(&vocab_blocks[..vocab_kept]),
+            orient = orientation.section
+        )
+    };
+    let mut kept = vocab_blocks.len();
+    let mut system_content = compose(kept);
 
     // Fit the prompt inside the declared context window, oldest history first.
     // A runtime that truncates silently cuts the START of the prompt — i.e. the
@@ -2205,21 +2212,25 @@ async fn run_chat_turn(
     let mut history: &[ChatMessage] = &req.messages;
     if let Some(window) = window {
         let budget = window.saturating_sub(CHAT_MAX_TOKENS as usize + CHAT_PROMPT_MARGIN);
-        if estimate_tokens(&system_content) > budget && !vocab.is_empty() {
-            // The vocabulary blocks are the largest elastic part of the system
-            // prompt. Dropping them costs answer quality; overflowing the
-            // window costs the protocol itself.
+        // The vocabulary blocks are the largest elastic part of the system
+        // prompt, and they are in priority order (the conversation's graphs
+        // first), so trim from the END one graph at a time until the prompt
+        // fits. This used to be all-or-nothing: one block over budget dropped
+        // EVERY block, and the model — left with graph IRIs but no vocabulary
+        // — invented predicates and reported data as absent, or fabricated an
+        // answer outright (observed live at an 8k window on a demo-seeded
+        // instance). The orientation section and services hint always
+        // survive: both are tiny and answer the question the turn is about.
+        while estimate_tokens(&system_content) > budget && kept > 0 {
+            kept -= 1;
+            system_content = compose(kept);
+        }
+        if kept < vocab_blocks.len() {
             tracing::warn!(
                 window,
-                "chat system prompt exceeds the context-window budget — dropping graph vocabulary"
-            );
-            // The orientation section and services hint survive the vocab
-            // drop: both are tiny and answer the question the turn is
-            // actually about.
-            system_content = format!(
-                "{CHAT_SYSTEM_PROMPT}
-\n# PLATFORM CONTEXT\n{context}{orient}{services_hint}{memory}",
-                orient = orientation.section
+                kept,
+                dropped = vocab_blocks.len() - kept,
+                "chat system prompt exceeds the context-window budget — trimmed graph vocabulary, lowest-priority graphs first"
             );
         }
         let remaining = budget.saturating_sub(estimate_tokens(&system_content));
@@ -4060,7 +4071,7 @@ async fn graph_vocab_context(
     graphs: &[String],
     evidence: &[String],
     caps: VocabCaps,
-) -> String {
+) -> Vec<String> {
     // WHICH graphs get a slot matters as much as sampling them reliably. Taking
     // the first N in list order let a handful of huge derived layers (an IFC
     // import's ifcOWL lift is ~700k triples and dozens of graphs) consume every
@@ -4106,7 +4117,7 @@ async fn graph_vocab_context(
         .take(caps.graphs)
         .collect();
     if wanted.is_empty() {
-        return String::new();
+        return Vec::new();
     }
     let mut summaries: HashMap<String, String> = HashMap::new();
     let mut missing: Vec<String> = Vec::new();
@@ -4145,18 +4156,23 @@ async fn graph_vocab_context(
             summaries.insert(g, summary);
         }
     }
-    let blocks: Vec<&str> = wanted
+    // In priority order: the prompt budgeter trims from the END of this list.
+    wanted
         .iter()
         .filter_map(|g| summaries.get(*g))
-        .map(String::as_str)
-        .filter(|s| !s.is_empty())
-        .collect();
+        .filter(|summary| !summary.is_empty())
+        .cloned()
+        .collect()
+}
+
+/// The system prompt's vocabulary section for `blocks` (in priority order);
+/// empty when there are none.
+fn vocab_section(blocks: &[String]) -> String {
     if blocks.is_empty() {
         return String::new();
     }
     format!(
-        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}
-",
+        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}\n",
         blocks.join("\n")
     )
 }

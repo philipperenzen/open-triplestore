@@ -752,3 +752,87 @@ async fn model_authored_query_cannot_read_outside_the_callers_scope() {
         "the secret reached the answer or its retrieval trail: {resp}"
     );
 }
+
+/// A window too small for ALL the vocabulary must not drop ALL of it: blocks
+/// are in priority order and are trimmed from the end until the prompt fits.
+/// This used to be all-or-nothing — one block over budget dropped every block,
+/// which is how a demo-seeded instance at an 8k window handed the model graph
+/// IRIs with no vocabulary and got invented predicates and fabricated answers
+/// back. The test measures the real prompt, then advertises a window that fits
+/// all blocks but the last.
+#[tokio::test]
+async fn small_context_window_trims_vocabulary_lowest_priority_first() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+    const HEADER: &str = "## Graph vocabulary";
+    let section = |system: &str| -> String {
+        let start = system.find(HEADER).expect("a vocabulary section");
+        let rest = &system[start..];
+        let end = rest[1..].find("\n# ").map(|i| i + 1).unwrap_or(rest.len());
+        rest[..end].to_string()
+    };
+    // The server's estimator (chars / 3 + 1) and reserve (CHAT_MAX_TOKENS 3072
+    // + CHAT_PROMPT_MARGIN 2048); if those move, this test says so.
+    let tokens = |s: &str| s.chars().count() / 3 + 1;
+    const RESERVE: usize = 3072 + 2048;
+    let question = "Wat weet je over de Bruggen dataset?";
+
+    // Measure the full prompt at a comfortable window (below 32k, so the
+    // sampling caps are the same as for the small one).
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    *gw.models_payload.lock().unwrap() =
+        Some(json!({"data": [{"id": "measure-window", "max_model_len": 30000}]}));
+    chat_turn_as_model(state.clone(), &token, "measure-window", question).await;
+    let full = {
+        let prompts = gw.prompts.lock().unwrap();
+        prompts[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let full_section = section(&full);
+    let block_count = full_section.matches("\n- <").count();
+    assert_eq!(
+        block_count, 2,
+        "both seeded graphs are described: {full_section}"
+    );
+    let last_start = full_section.rfind("\n- <").unwrap();
+    let last_block = &full_section[last_start..];
+    let iri_of = |block: &str| {
+        let s = block.find("- <").unwrap() + 3;
+        block[s..s + block[s..].find('>').unwrap()].to_string()
+    };
+    let last_iri = iri_of(last_block);
+    let first_iri = iri_of(&full_section);
+    assert_ne!(first_iri, last_iri);
+
+    // A window that fits everything except (half of) the last block.
+    let window = tokens(&full) - tokens(last_block) / 2 + RESERVE;
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    *gw.models_payload.lock().unwrap() =
+        Some(json!({"data": [{"id": "trim-window", "max_model_len": window}]}));
+    let resp = chat_turn_as_model(state, &token, "trim-window", question).await;
+    assert_eq!(resp["answer"], "Dat is Brug 1.");
+    let prompts = gw.prompts.lock().unwrap();
+    let system = prompts[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        tokens(system) <= window - RESERVE,
+        "the trimmed prompt fits the budget"
+    );
+    let trimmed = section(system);
+    assert_eq!(
+        trimmed.matches("\n- <").count(),
+        1,
+        "exactly the last block is dropped, not the whole section: {trimmed}"
+    );
+    assert!(
+        trimmed.contains(&format!("- <{first_iri}>")),
+        "the higher-priority graph keeps its vocabulary: {trimmed}"
+    );
+    assert!(
+        !trimmed.contains(&format!("- <{last_iri}>")),
+        "the lowest-priority graph is the one trimmed: {trimmed}"
+    );
+}

@@ -182,6 +182,17 @@ that was tried and this knob; `GET /api/llm/health` keeps reporting
 `reachable: false`. (They used to answer a bare 500 "Internal server error",
 indistinguishable from a crash.)
 
+Budgeting at small windows: the reserve for the answer (3072 tokens) and the
+prompt margin (2048) come off the window first, so an 8k window leaves about 3k
+tokens for the system prompt and history — tight for a demo-seeded instance.
+When the prompt does not fit, the graph-vocabulary blocks are trimmed one graph
+at a time, lowest priority first (the conversation's own graphs are described
+last to go); a `WARN` line reports how many were kept. Prefer a 16k window or
+larger for local models, and make sure the *server's* context
+(`OLLAMA_CONTEXT_LENGTH`, or a Modelfile `num_ctx`) is at least as large — a
+server that truncates from the top deletes Spark's execution protocol, and the
+model then answers from its own knowledge while claiming the data said so.
+
 **Why `LLM_CONTEXT_TOKENS` exists next to `OLLAMA_CONTEXT_LENGTH`.** They size two different things in two different processes: `OLLAMA_CONTEXT_LENGTH` (or a Modelfile `num_ctx`) is the *server's* context — how many tokens Ollama actually processes before cutting; `LLM_CONTEXT_TOKENS` is the *client's* budget — what this store assumes while trimming its own prompt. The store cannot read the server's setting over the API, so when both apply they must agree; a compose file can feed both from one shared variable. With vLLM no client knob is needed at all — it advertises `max_model_len` and detection picks it up automatically; the same goes for any gateway whose `/v1/models` carries a `context_window`/`context_length` field.
 
 **Which model.** Spark is the most demanding task on the platform: a long system
