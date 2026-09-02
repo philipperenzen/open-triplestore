@@ -494,6 +494,23 @@ fn enforce_write_scope_for_mutation(
 // Axum middleware: the error type must itself be a `Response`, so the
 // `Err` variant is inherently response-sized. Boxing it would only move
 // the allocation without changing the signature the framework requires.
+
+/// Whether the endpoint ACL is enforced. `ENDPOINT_ACL_ENFORCE=false` (or `0`)
+/// turns it off. Read once — this sits on every request.
+fn endpoint_acl_enforced() -> bool {
+    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENFORCED.get_or_init(|| {
+        !matches!(
+            std::env::var("ENDPOINT_ACL_ENFORCE")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "false" | "0" | "no" | "off"
+        )
+    })
+}
+
 #[allow(clippy::result_large_err)]
 pub async fn endpoint_acl_guard(
     State(auth_db): State<Arc<AuthDb>>,
@@ -501,6 +518,14 @@ pub async fn endpoint_acl_guard(
     req: Request,
     next: Next,
 ) -> Result<Response, Response> {
+    // Escape hatch for an operator whose rule misfires. Enforcement is ON by
+    // default (secure by default); this exists because the guard now covers
+    // every authenticated route rather than the six `/api/browse/*` ones it was
+    // mounted on before, so a bad rule has a much larger blast radius.
+    if !endpoint_acl_enforced() {
+        return Ok(next.run(req).await);
+    }
+
     let user = req.extensions().get::<AuthenticatedUser>().cloned();
     let method = req.method().as_str().to_uppercase();
     let path = req.uri().path().to_string();

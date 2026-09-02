@@ -830,6 +830,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/oauth/authorize",
             post(crate::auth::oidc_provider::authorize),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
@@ -883,6 +887,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -891,6 +899,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let auth_protected_routes = Router::new()
         .route("/api/auth/me", get(handlers::me).put(handlers::update_me))
         .route("/api/me/dataset-usage", get(handlers::my_dataset_usage))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -957,11 +969,19 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             delete(crate::auth::oidc_provider::admin_delete_client),
         )
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // Spark chat history + user memory (strictly per-user, so auth required).
     let llm_history_routes = llm_history::llm_history_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -978,6 +998,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .put(handlers::update_organisation)
                 .delete(handlers::delete_organisation),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1009,6 +1033,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/organisations/:org_id/groups/:group_id/members/:user_id",
             delete(handlers::remove_group_member),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1026,6 +1054,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/users/:user_id",
             get(handlers::get_user).delete(handlers::delete_user),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1073,6 +1105,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .post(handlers::add_service_graph)
                 .delete(handlers::remove_service_graph),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1102,6 +1138,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/grants/:principal_type/:principal_id",
             delete(handlers::revoke_dataset_grant),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1139,6 +1179,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // for logged-out visitors, exactly like its graphs/viewer-feed. Write
         // handlers demand a user themselves via require_user(); per-asset
         // visibility (Asset.public) is enforced in the handlers.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .layer(DefaultBodyLimit::max(routes::ASSET_MAX_BYTES + 1024 * 1024))
         .with_state(state.clone());
@@ -1151,6 +1195,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/services/:service_slug/sparql",
             get(routes::dataset_sparql_query).post(routes::dataset_sparql_post),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
@@ -1160,6 +1208,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // User avatar — upload requires auth, download is public
     let avatar_routes = Router::new()
         .route("/api/users/me/avatar", put(handlers::upload_user_avatar))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1181,6 +1233,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/organisations/:org_id/banner-preset",
             put(handlers::set_org_banner_preset),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1218,6 +1274,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/download",
             get(routes::download_asset_public),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1258,6 +1318,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/shacl/dataset-shape-graphs",
             get(routes::list_accessible_shape_graphs),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1287,24 +1351,40 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
     // Vocabulary install (copies a vocabulary from the bundled LOV corpus
     // into the model registry) — admin only.
     let vocab_service_admin_routes = crate::vocab_search::routes::vocab_admin_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // SHACL Studio: shape graphs (Library), pipelines, runs, model-context, derive.
     let studio_auth = crate::shacl_studio::routes::studio_auth_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // SHACL Studio (optional auth) — the form-manifest is anonymous-readable
     // for public datasets and auth-gated otherwise (enforced inside the handler).
     let studio_optional = crate::shacl_studio::routes::studio_optional_auth_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1318,6 +1398,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/mappings/execute",
             post(routes::execute_rml_mapping),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1358,6 +1442,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("vary"),
@@ -1372,6 +1460,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .with_state(state.clone());
@@ -1383,6 +1475,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: bulk_import_rate_conf,
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
         .with_state(state.clone());
@@ -1394,6 +1490,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state.clone());
@@ -1409,6 +1509,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/metadata",
             axum::routing::get(routes::asset_metadata),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1417,6 +1521,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(linked_data::dereference_routes())
         .merge(linked_data::well_known_routes())
         .merge(linked_data::well_known_org_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1429,12 +1537,20 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Reasoning routes (always compiled; feature gates are inside the handler)
     let reasoning_api_routes = Router::new()
         .merge(routes::reasoning_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // Data-model registry — public read routes
     let data_model_read = Router::new()
         .merge(data_model_public_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1452,6 +1568,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // path.
     let data_model_write = Router::new()
         .merge(data_model_auth_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1462,12 +1582,20 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Dataset versioning — public read routes (visibility scoped via optional_auth)
     let dataset_version_read = Router::new()
         .merge(dataset_version_public_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
     // Dataset versioning — write routes (per-dataset write checks inside handlers)
     let dataset_version_write = Router::new()
         .merge(dataset_version_auth_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1480,6 +1608,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1487,6 +1619,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // checked inside the handlers).
     let saved_query_write = Router::new()
         .merge(saved_query_auth_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1506,6 +1642,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         use crate::ldp::ldp_routes;
         Router::new()
             .merge(ldp_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
             .with_state(state.clone())
     };
@@ -1539,6 +1679,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             delete(acl_handlers::delete_triple_security_label),
         )
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1555,6 +1699,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .delete(oauth_handlers::admin_delete_provider),
         )
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1590,6 +1738,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // In-app documentation API (optional auth; admin-only docs filtered + admin
     // CRUD enforced in-handler).
     let docs_routes = crate::docs::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1643,6 +1795,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(
             Router::new()
                 .merge(catalog_routes())
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    endpoint_acl_guard,
+                ))
                 .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
                 .with_state(state.clone()),
         );
@@ -1653,6 +1809,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     router = router.merge(
         Router::new()
             .merge(crate::ogcapi::ogcapi_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
             .with_state(state.clone()),
     );
@@ -1662,6 +1822,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     {
         let tiles3d_routes = Router::new()
             .merge(crate::tiles3d::tiles3d_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
             .with_state(state.clone());
         router = router.merge(tiles3d_routes);
@@ -1677,6 +1841,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     {
         let shex_auth_routes = Router::new()
             .merge(routes::shex_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
             .with_state(state.clone());
         router = router.merge(shex_auth_routes);
@@ -1687,6 +1855,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     {
         let swrl_auth_routes = Router::new()
             .merge(routes::swrl_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
             .with_state(state.clone());
         router = router.merge(swrl_auth_routes);
@@ -1702,6 +1874,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // operations are hidden from anonymous callers, and Admin operations from non-admins.
     let openapi_doc_route = Router::new()
         .route("/api-docs/openapi.json", get(openapi::openapi_json_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
     router = router.merge(openapi_doc_route);

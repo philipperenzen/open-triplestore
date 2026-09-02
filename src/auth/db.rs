@@ -5065,6 +5065,40 @@ impl AuthDb {
     }
 
     /// Fetch all endpoint ACL rules relevant to a given user (by user id, role, org memberships, group memberships).
+    /// Endpoint ACL rules that apply to an ANONYMOUS caller.
+    ///
+    /// Anonymous rules use the reserved principal `('role', 'public')`. The
+    /// table's CHECK constraint allows only user/organisation/group/role, and
+    /// `public` is not a `SystemRole`, so the pair is unambiguous and needs no
+    /// table rebuild to introduce.
+    ///
+    /// Without this, `check_endpoint_acl` had no rules to evaluate for an
+    /// unauthenticated request and simply allowed it — so a rule aimed at
+    /// anonymous access did nothing, on exactly the `optional_auth` routes where
+    /// anonymous access is what an operator wants to restrict.
+    pub fn get_endpoint_acl_rules_for_public(&self) -> anyhow::Result<Vec<EndpointAclRule>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
+             FROM endpoint_acl WHERE principal_type='role' AND principal_id='public'
+             ORDER BY priority DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(EndpointAclRule {
+                id: row.get(0)?,
+                principal_type: row.get(1)?,
+                principal_id: row.get(2)?,
+                path_pattern: row.get(3)?,
+                http_methods: row.get(4)?,
+                effect: row.get(5)?,
+                priority: row.get(6)?,
+                created_at: row.get(7)?,
+                created_by: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn get_endpoint_acl_rules_for_user(
         &self,
         user_id: &str,
