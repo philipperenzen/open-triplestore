@@ -13,6 +13,24 @@ Datasets can be snapshotted into immutable versions, organised on branches, and 
 
 Each version records who created it, an optional note, and its source-graph mapping. Download any version's data (content-negotiated, defaulting to TriG) at `/api/datasets/{id}/versions/{version}/data`.
 
+## Retention: diff, delete, garbage-collect
+
+Every version snapshots the dataset's graphs, so each replace-import that is
+versioned keeps a full copy of the changed graphs. Three endpoints keep that
+under control:
+
+| Call | Effect |
+|---|---|
+| `GET /api/datasets/:id/versions/:a/diff/:b` | Per-graph triple delta from `a` to `b` (`added`/`removed`, plus totals). `b` may be `live` to compare a version with the dataset's current graphs. |
+| `DELETE /api/datasets/:id/versions/:ver` | Removes the version, its snapshot graphs and its version-scoped validation graph. A **published** version answers 409 — deprecate it first — unless `?force=true`. |
+| `POST /api/datasets/:id/versions/gc` with `{"keep": N}` | Deletes all but the newest `N` non-published versions. Published versions are never collected. |
+
+Restore is atomic per graph: the snapshot is copied into a staging graph and
+swapped into place with one `MOVE`, so readers never see a live graph empty or
+half-written, and the full-text index is refreshed for the restored graphs.
+Snapshot, branch and restore stream their copies in batches rather than
+holding every quad in memory.
+
 ## Branches
 
 Branches let you fork a version line to develop changes in parallel — for example a `staging` branch alongside `main`. List and create branches at `/api/datasets/{id}/branches`, specifying the branch name and the version it forks from.

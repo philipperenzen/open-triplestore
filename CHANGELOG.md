@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Dataset version retention:** `GET …/versions/:a/diff/:b` (or `…/diff/live`)
+  reports the per-graph triple delta; `DELETE …/versions/:ver` reclaims a
+  version's snapshot graphs (published ones need deprecating first, or
+  `?force=true`); `POST …/versions/gc` keeps the newest N non-published
+  versions. Previously every versioned re-import retained a full copy with no
+  way to delete it.
 - **Conformance layer (TBox/ABox separation).** `GET /api/datasets/:id/conformance`
   resolves a dataset's graphs by role, the model version it declares
   conformance to (`conforms_to_model`/`conforms_to_version`, published as
@@ -144,6 +150,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Version restore is atomic and streams.** Restore cleared the live graph
+  *before* copying the snapshot back (a window in which the dataset's graph
+  was simply gone), snapshot/branch/restore materialised every quad of every
+  graph in memory first, and the full-text index was never refreshed after a
+  restore. Copies now stream in batches, restore swaps a staging graph in with
+  one `MOVE`, and the index is refreshed for the restored graphs.
 - **Reasoning could not see dataset data.** `POST /api/reasoning/materialize`
   parsed `source_graphs` and ignored it, and every regime's rules read only
   the unnamed default graph — so a dataset's named graphs were invisible to

@@ -273,3 +273,218 @@ async fn versions_require_write_on_the_dataset() {
         "nothing was created: {v}"
     );
 }
+
+// ─── Retention: delete / diff / gc (5.3) ──────────────────────────────────────
+
+async fn cut(app: &Router, token: &str, ds: &str, ver: &str) -> Value {
+    let (st, v, txt) = req(
+        app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions"),
+        token,
+        json!({ "version": ver }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "cut {ver}: {txt}");
+    v
+}
+
+async fn versions(app: &Router, token: &str, ds: &str) -> Vec<String> {
+    let (_, v, _) = req(
+        app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/versions"),
+        token,
+        Value::Null,
+    )
+    .await;
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["version"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A published version is refused (409) until deprecated; deleting drops the
+/// snapshot graphs — the copies that N re-imports used to retain N times over
+/// with no way to reclaim them.
+#[tokio::test]
+async fn deleting_a_version_drops_its_snapshots_and_refuses_published_ones() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let ds = dataset_with_graph(&state, &app, &token).await;
+    let v = cut(&app, &token, &ds, "1.0.0").await;
+    let snapshot = v["snapshot_graphs"][0].as_str().unwrap().to_string();
+    assert_eq!(count(&state, &snapshot), 2);
+
+    req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.0.0/publish"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/{ds}/versions/1.0.0"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "published versions are protected: {txt}"
+    );
+    assert_eq!(count(&state, &snapshot), 2, "nothing was dropped");
+
+    req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.0.0/deprecate"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    let (st, v, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/datasets/{ds}/versions/1.0.0"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(
+        v["graphs_dropped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g == &snapshot),
+        "{txt}"
+    );
+    assert_eq!(
+        count(&state, &snapshot),
+        0,
+        "the snapshot graph is reclaimed"
+    );
+    assert!(
+        versions(&app, &token, &ds).await.is_empty(),
+        "the version is gone from the registry"
+    );
+    assert_eq!(count(&state, G), 2, "the live graph is untouched");
+}
+
+#[tokio::test]
+async fn diff_between_versions_and_against_live() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let ds = dataset_with_graph(&state, &app, &token).await;
+    cut(&app, &token, &ds, "1.0.0").await;
+    state
+        .store
+        .load_str(
+            "<urn:vds:c> <urn:vds:p> \"three\" .",
+            RdfFormat::Turtle,
+            Some(G),
+        )
+        .unwrap();
+    cut(&app, &token, &ds, "1.1.0").await;
+
+    let (st, d, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/versions/1.0.0/diff/1.1.0"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(d["added"], 1, "{txt}");
+    assert_eq!(d["removed"], 0, "{txt}");
+    assert_eq!(d["graphs"][0]["source_graph"], G);
+    let (_, back, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/versions/1.1.0/diff/1.0.0"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        (back["added"].as_u64(), back["removed"].as_u64()),
+        (Some(0), Some(1)),
+        "the reverse diff mirrors it"
+    );
+
+    // Against the live graph: drop one triple after 1.1.0 was cut.
+    state
+        .store
+        .update(&format!(
+            "DELETE DATA {{ GRAPH <{G}> {{ <urn:vds:a> <urn:vds:p> \"one\" }} }}"
+        ))
+        .unwrap();
+    let (st, d, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/versions/1.1.0/diff/live"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(
+        (d["added"].as_u64(), d["removed"].as_u64()),
+        (Some(0), Some(1)),
+        "{txt}"
+    );
+}
+
+#[tokio::test]
+async fn gc_keeps_the_newest_drafts_and_never_a_published_version() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let ds = dataset_with_graph(&state, &app, &token).await;
+    cut(&app, &token, &ds, "1.0.0").await;
+    req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/1.0.0/publish"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    for v in ["1.0.1", "1.0.2", "1.0.3"] {
+        cut(&app, &token, &ds, v).await;
+    }
+    let (st, r, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/datasets/{ds}/versions/gc"),
+        &token,
+        json!({ "keep": 1 }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let mut deleted: Vec<String> = r["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
+    deleted.sort();
+    assert_eq!(
+        deleted,
+        vec!["1.0.1", "1.0.2"],
+        "the two oldest drafts go: {txt}"
+    );
+    let mut left = versions(&app, &token, &ds).await;
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["1.0.0", "1.0.3"],
+        "the published version and the newest draft stay"
+    );
+}

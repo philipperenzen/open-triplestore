@@ -16,7 +16,7 @@ use crate::server::AppState;
 
 use super::models::{
     CreateDatasetBranchRequest, CreateDatasetVersionRequest, DatasetBranchInfo, DatasetVersion,
-    UpdateDatasetVersionRequest, VersionDataParams, VersionStatus,
+    GcDatasetVersionsRequest, UpdateDatasetVersionRequest, VersionDataParams, VersionStatus,
 };
 use super::{registry, snapshot};
 
@@ -378,6 +378,10 @@ pub async fn restore_version(
         ));
     }
     let restored = snapshot::restore(&state.store, &record.source_map).map_err(AppError::from)?;
+    // The full-text index followed writes but never a restore, so searches kept
+    // answering from the pre-restore content.
+    #[cfg(feature = "text-search")]
+    state.refresh_text_index_graphs(&restored);
     // Ensure restored graphs are registered to the dataset.
     for g in &restored {
         let _ = state.auth_db.add_dataset_graph(&id, g);
@@ -507,4 +511,169 @@ pub async fn create_branch(
     };
     registry::insert_version(&state.store, &state.base_url, &record).map_err(AppError::from)?;
     Ok((StatusCode::CREATED, Json(record)))
+}
+
+// ─── Retention: delete / diff / gc ────────────────────────────────────────────
+
+/// Drop a version's snapshot graphs and its version-scoped validation graph,
+/// then its registry triples. Returns the graphs dropped.
+fn purge_version(
+    state: &AppState,
+    dataset_id: &str,
+    record: &DatasetVersion,
+) -> Result<Vec<String>, AppError> {
+    let mut dropped: Vec<String> = record.snapshot_graphs.clone();
+    dropped.push(crate::shacl_studio::bindings::version_validation_graph(
+        &state.base_url,
+        dataset_id,
+        &record.version,
+    ));
+    let refs: Vec<&str> = dropped.iter().map(String::as_str).collect();
+    state
+        .store
+        .bulk_delete_graphs(&refs)
+        .map_err(AppError::from)?;
+    registry::delete_version(&state.store, &state.base_url, dataset_id, &record.version)
+        .map_err(AppError::from)?;
+    Ok(dropped)
+}
+
+fn dataset_or_404(state: &AppState, id: &str) -> Result<Dataset, AppError> {
+    state
+        .auth_db
+        .get_dataset(id)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("Dataset '{id}' not found")))
+}
+
+/// `DELETE /api/datasets/:id/versions/:ver[?force=true]` — remove a version
+/// and reclaim its snapshot graphs. Every replace-import used to leave a full
+/// copy of each changed graph behind with no way to delete it, so N re-imports
+/// retained N copies. A published version is refused (409) unless forced:
+/// deprecate it first.
+pub async fn delete_version(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((id, ver)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, AppError> {
+    let ds = dataset_or_404(&state, &id)?;
+    require_write(&state, &ds, &user.user_id)?;
+    let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
+        .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    let force = q
+        .get("force")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if record.status == VersionStatus::Published && !force {
+        return Err(AppError::Conflict(json!({
+            "error": "version is published; deprecate it first, or pass ?force=true",
+            "version": ver,
+        })));
+    }
+    let dropped = purge_version(&state, &id, &record)?;
+    Ok(Json(json!({ "deleted": ver, "graphs_dropped": dropped })))
+}
+
+/// `GET /api/datasets/:id/versions/:ver/diff/:other` — the per-graph triple
+/// delta from `ver` to `other`, where `other` is another version or `live`
+/// (the dataset's current graphs). `added`/`removed` are counted from `ver`'s
+/// point of view. There was no way to see what changed between two versions
+/// short of exporting both.
+pub async fn diff_versions(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path((id, ver, other)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let ds = dataset_or_404(&state, &id)?;
+    let uid = user.as_ref().map(|Extension(u)| u.user_id.as_str());
+    require_read(&state, &ds, uid)?;
+    let from = registry::get_version(&state.store, &state.base_url, &id, &ver)
+        .ok_or_else(|| AppError::NotFound(format!("Version '{ver}' not found")))?;
+    // (source graph, graph holding the "to" side)
+    let to_side: Vec<(String, String)> = if other == "live" {
+        from.source_map
+            .iter()
+            .map(|m| (m.source_graph.clone(), m.source_graph.clone()))
+            .collect()
+    } else {
+        let to = registry::get_version(&state.store, &state.base_url, &id, &other)
+            .ok_or_else(|| AppError::NotFound(format!("Version '{other}' not found")))?;
+        to.source_map
+            .iter()
+            .map(|m| (m.source_graph.clone(), m.snapshot_graph.clone()))
+            .collect()
+    };
+    let delta =
+        |a: &[String], b: &[String]| crate::data_models::diff::triple_delta(&state.store, a, b);
+    let (mut added, mut removed) = (0usize, 0usize);
+    let mut graphs = Vec::new();
+    for m in &from.source_map {
+        let to_graph = to_side
+            .iter()
+            .find(|(src, _)| *src == m.source_graph)
+            .map(|(_, g)| g.clone());
+        let (a, r) = match &to_graph {
+            Some(g) => delta(
+                std::slice::from_ref(&m.snapshot_graph),
+                std::slice::from_ref(g),
+            ),
+            None => delta(std::slice::from_ref(&m.snapshot_graph), &[]),
+        };
+        added += a;
+        removed += r;
+        graphs.push(json!({
+            "source_graph": m.source_graph,
+            "added": a,
+            "removed": r,
+            "missing_on_other_side": to_graph.is_none(),
+        }));
+    }
+    for (src, g) in &to_side {
+        if !from.source_map.iter().any(|m| m.source_graph == *src) {
+            let (a, r) = delta(&[], std::slice::from_ref(g));
+            added += a;
+            removed += r;
+            graphs.push(json!({ "source_graph": src, "added": a, "removed": r, "missing_on_other_side": false, "only_on_other_side": true }));
+        }
+    }
+    Ok(Json(json!({
+        "dataset_id": id,
+        "from": ver,
+        "to": other,
+        "added": added,
+        "removed": removed,
+        "graphs": graphs,
+    })))
+}
+
+/// `POST /api/datasets/:id/versions/gc` — retention. Keeps the newest `keep`
+/// non-published versions and deletes the rest (snapshots included).
+/// Published versions are never collected; deprecate and delete them
+/// explicitly.
+pub async fn gc_versions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+    Json(body): Json<GcDatasetVersionsRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let ds = dataset_or_404(&state, &id)?;
+    require_write(&state, &ds, &user.user_id)?;
+    let mut candidates: Vec<DatasetVersion> =
+        registry::list_versions(&state.store, &state.base_url, &id)
+            .into_iter()
+            .filter(|v| v.status != VersionStatus::Published)
+            .collect();
+    // Newest first; the version label breaks ties within one timestamp.
+    candidates.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.version.cmp(&a.version))
+    });
+    let mut deleted = Vec::new();
+    for v in candidates.into_iter().skip(body.keep) {
+        purge_version(&state, &id, &v)?;
+        deleted.push(v.version);
+    }
+    Ok(Json(json!({ "kept": body.keep, "deleted": deleted })))
 }
