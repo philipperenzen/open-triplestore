@@ -1939,7 +1939,9 @@ pub async fn publish_version(
     Path((id, ver)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     if !user.is_admin() {
-        return Err(AppError::Unauthorized("Admin access required".to_string()));
+        // 403, not 401: the caller is authenticated and merely lacks the role;
+        // a 401 made clients treat "not an admin" as a session expiry.
+        return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
@@ -2027,7 +2029,9 @@ pub async fn deprecate_version(
     Path((id, ver)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     if !user.is_admin() {
-        return Err(AppError::Unauthorized("Admin access required".to_string()));
+        // 403, not 401: the caller is authenticated and merely lacks the role;
+        // a 401 made clients treat "not an admin" as a session expiry.
+        return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
@@ -2080,7 +2084,9 @@ async fn transition_sub_graph(
         .ok_or_else(|| AppError::NotFound(format!("Data model '{id}' not found")))?;
     if require_admin {
         if !user.is_admin() {
-            return Err(AppError::Unauthorized("Admin access required".to_string()));
+            // 403, not 401: the caller is authenticated and merely lacks the role;
+            // a 401 made clients treat "not an admin" as a session expiry.
+            return Err(AppError::Forbidden("Admin access required".to_string()));
         }
     } else if !state
         .auth_db

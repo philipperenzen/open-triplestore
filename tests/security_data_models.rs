@@ -360,3 +360,37 @@ async fn upload_requires_write_access_to_the_model() {
         "rejected upload must write nothing, got {count}"
     );
 }
+
+/// Publishing or deprecating a data-model version is admin-gated. The gate
+/// answered 401 `Unauthorized` — which means "not authenticated" and which
+/// clients treat as a session expiry — to a logged-in user who merely lacks the
+/// role. It is 403 now, like the dataset-version gate.
+#[tokio::test]
+async fn version_lifecycle_admin_gate_is_forbidden_not_unauthorized() {
+    let (state, _admin, _base) = model_with_draft();
+    state
+        .auth_db
+        .create_user("mallory", "mallory", "m@t.com", "hash", SystemRole::User)
+        .unwrap();
+    let mallory = mint_token("mallory", "mallory", "user");
+    let app = test_app(state);
+    for action in ["publish", "deprecate"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/models/m1/versions/1.0/{action}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {mallory}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{action}: an authenticated non-admin is forbidden, not unauthenticated"
+        );
+    }
+}
