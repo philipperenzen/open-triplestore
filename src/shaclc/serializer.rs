@@ -95,15 +95,14 @@ fn emit_property(
     prefixes: &[(String, String)],
     out: &mut String,
 ) -> Result<(), String> {
-    let get = |pred: &str| -> Vec<String> {
-        let q = if prop_node.starts_with("_:") {
-            // blank node — use a different query approach
-            format!("SELECT ?o WHERE {{ GRAPH <{graph}> {{ {prop_node} <{pred}> ?o }} }}")
-        } else {
-            format!("SELECT ?o WHERE {{ GRAPH <{graph}> {{ <{prop_node}> <{pred}> ?o }} }}")
-        };
-        query_objects(store, &q)
-    };
+    // Look the property shape's attributes up by TERM, never by building a
+    // SPARQL string. Interpolating a blank node as `_:bN` into a query makes it
+    // an existential VARIABLE, not a reference to the stored node — so the
+    // pattern matched every subject in the graph and each blank-node property
+    // shape (the standard `sh:property [ … ]` idiom) drew an arbitrary path,
+    // datatype and cardinality from whichever property shape happened to match
+    // first. The round-trip test used a single-property shape, so it never fired.
+    let get = |pred: &str| -> Vec<String> { objects_of(store, graph, prop_node, pred) };
 
     let paths = get(&format!("{SH}path"));
     let path = match paths.first() {
@@ -157,6 +156,58 @@ fn emit_property(
 
     out.push_str(" ;\n");
     Ok(())
+}
+
+/// Objects of `subject <predicate> ?o` in `graph`, looked up through the quad
+/// index so the subject is matched as a TERM.
+///
+/// `subject` is the same string form `query_objects` produces: an IRI, or a
+/// blank node written `_:label`. Resolving it through SPARQL is what broke
+/// blank-node property shapes — see `emit_property`.
+fn objects_of(store: &TripleStore, graph: &str, subject: &str, predicate: &str) -> Vec<String> {
+    use oxigraph::model::{
+        BlankNode, GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, Term,
+    };
+
+    let bnode;
+    let named;
+    let subject_ref: NamedOrBlankNodeRef = match subject.strip_prefix("_:") {
+        Some(label) => {
+            bnode = match BlankNode::new(label) {
+                Ok(b) => b,
+                Err(_) => return Vec::new(),
+            };
+            NamedOrBlankNodeRef::BlankNode(bnode.as_ref())
+        }
+        None => {
+            named = match NamedNode::new(subject) {
+                Ok(n) => n,
+                Err(_) => return Vec::new(),
+            };
+            NamedOrBlankNodeRef::NamedNode(named.as_ref())
+        }
+    };
+    let (Ok(pred), Ok(g)) = (NamedNodeRef::new(predicate), NamedNodeRef::new(graph)) else {
+        return Vec::new();
+    };
+
+    store
+        .store()
+        .quads_for_pattern(
+            Some(subject_ref),
+            Some(pred),
+            None,
+            Some(GraphNameRef::NamedNode(g)),
+        )
+        .flatten()
+        .filter_map(|q| match q.object {
+            Term::NamedNode(n) => Some(n.as_str().to_string()),
+            Term::BlankNode(b) => Some(format!("_:{}", b.as_str())),
+            Term::Literal(l) => Some(l.value().to_string()),
+            #[cfg(feature = "rdf-12")]
+            Term::Triple(_) => None,
+        })
+        .collect()
 }
 
 /// Run a SELECT query and collect the first binding of each solution.
