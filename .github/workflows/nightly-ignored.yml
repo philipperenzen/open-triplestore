@@ -49,7 +49,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --workspace \
-            --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello \
+            --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard \
             --locked -- --ignored --nocapture 2>&1 | tee ignored.log
 
       # Surface the current ignore set in the job summary, so growth is visible

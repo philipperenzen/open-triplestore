@@ -73,13 +73,13 @@ jobs:
       # test module had been broken (a stale oxigraph `on_store` signature) for
       # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard -- -D warnings
 
       - name: Build
-        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
 
       - name: Test
-        run: cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
@@ -102,7 +102,7 @@ jobs:
           set -o pipefail
           count_passed() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}'; }
 
-          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked --test 'security_*' 2>&1)
+          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked --test 'security_*' 2>&1)
           echo "$files_out"
           files_passed=$(count_passed "$files_out")
           echo "==> tests/security_*.rs passed: $files_passed"
@@ -111,7 +111,7 @@ jobs:
             exit 1
           fi
 
-          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello --locked security 2>&1)
+          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked security 2>&1)
           echo "$named_out"
           named_passed=$(count_passed "$named_out")
           echo "==> security-named tests passed across all binaries: $named_passed"
