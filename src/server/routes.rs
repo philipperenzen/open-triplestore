@@ -8219,6 +8219,20 @@ async fn reasoning_materialize(
     // an explicit grant or admin).
     require_graph_write(&state, Some(&user), Some(target.as_str()))?;
 
+    // Entailment graphs are derived data and must be rebuilt from scratch each
+    // run. Materialisation only ever INSERTed, so after a source triple was
+    // deleted or edited its stale consequences stayed in `urn:entailment:*`
+    // forever — and were still folded into every `?entailment=` query. Only the
+    // server-owned entailment namespace is cleared: a caller may legitimately
+    // target one of their own graphs, and clearing that would destroy data.
+    if target.starts_with("urn:entailment:") {
+        let clear = format!("CLEAR SILENT GRAPH <{target}>");
+        state
+            .store
+            .update(&clear)
+            .map_err(|e| AppError::Internal(format!("clearing <{target}>: {e}")))?;
+    }
+
     // Bound concurrent expensive operations so a burst of reasoning calls can't
     // occupy every Tokio worker and starve the runtime (held until handler return).
     let _permit = state

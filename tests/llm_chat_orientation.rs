@@ -567,3 +567,118 @@ async fn plan_is_tracked_across_rounds_and_stripped_from_the_answer() {
         );
     }
 }
+
+// ─── Saved-query repair: never persist a revision that does not parse ─────────
+
+/// `…/repair` with `save: true` handed the model's output straight to
+/// `add_revision`, which performs no SPARQL check, and then promoted it to the
+/// query's live head — so a bad repair replaced a broken query with a broken
+/// query that was now also the saved one. It also ran outside the LLM guard,
+/// so it spent completions with no rate limit, screening or log row.
+#[tokio::test]
+async fn saved_query_repair_refuses_to_persist_unparseable_output() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let (state, token) = common::admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "d-repair",
+            "Repair",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+
+    // Seed a saved query.
+    let original = "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1";
+    let create = Request::builder()
+        .method(Method::POST)
+        .uri("/api/datasets/d-repair/api-services")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(
+            json!({ "name": "Q1", "slug": "q1", "sparql": original }).to_string(),
+        ))
+        .unwrap();
+    let resp = common::test_app(state.clone())
+        .oneshot(create)
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create saved query: {}",
+        resp.status()
+    );
+
+    let repair = |body: Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/datasets/d-repair/api-services/q1/repair")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let head = |state: &AppState| {
+        open_triplestore::saved_queries::store::SavedQueryStore::new(state.auth_db.pool())
+            .get_by_slug(
+                open_triplestore::saved_queries::models::QueryScope::Dataset,
+                "d-repair",
+                "q1",
+            )
+            .unwrap()
+            .unwrap()
+            .sparql
+            .unwrap_or_default()
+    };
+
+    // The model returns garbage. With save:true that must be refused, and the
+    // query's head must be untouched.
+    script(gw, &["this is not a SPARQL query at all {{{"]);
+    let resp = common::test_app(state.clone())
+        .oneshot(repair(json!({ "save": true, "error": "boom" })))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unparseable repair must not be saved"
+    );
+    assert_eq!(
+        head(&state),
+        original,
+        "the live revision must be untouched"
+    );
+
+    // Without save, the suggestion is returned but flagged.
+    script(gw, &["still not sparql"]);
+    let resp = common::test_app(state.clone())
+        .oneshot(repair(json!({ "save": false, "error": "boom" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp.into_body()).await;
+    assert_eq!(body["valid"], false, "{body}");
+    assert!(body["parseError"].is_string(), "{body}");
+
+    // A parseable repair with save:true becomes the new head.
+    let fixed = "SELECT ?s WHERE { ?s a ?t } LIMIT 5";
+    script(gw, &[fixed]);
+    let resp = common::test_app(state.clone())
+        .oneshot(repair(json!({ "save": true, "error": "boom" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp.into_body()).await;
+    assert_eq!(body["valid"], true, "{body}");
+    assert!(body["savedRevision"].is_number(), "{body}");
+    assert_eq!(
+        head(&state),
+        fixed,
+        "a valid repair is promoted to the head"
+    );
+}

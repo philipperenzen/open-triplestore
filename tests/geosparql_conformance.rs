@@ -1886,8 +1886,10 @@ fn geos_cx_geosparql11_function_gaps() {
     }
 }
 
-// geof:transform reprojects between EPSG:28992 / 4326 / 3857. The Waalbrug tracé point
-// in RD New transforms to a plausible WGS84 lon/lat near Nijmegen (~5.86, ~51.85).
+// geof:transform reprojects between EPSG:28992 / CRS84 / 4326 / 3857. The Waalbrug
+// tracé point in RD New transforms to a plausible WGS84 lon/lat near Nijmegen
+// (~5.86, ~51.85). CRS84 is the lon/lat form; see the EPSG:4326 test below for
+// the authority's lat/lon order.
 #[test]
 fn geos_cx_transform_rd_to_wgs84() {
     let s = ts();
@@ -1895,7 +1897,7 @@ fn geos_cx_transform_rd_to_wgs84() {
         "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)\"^^geo:wktLiteral";
     let out = geof_opt(
         &s,
-        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
+        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>)"),
     )
     .unwrap_or_default();
     assert!(out.contains("POINT"), "expected a WKT point, got {:?}", out);
@@ -2163,5 +2165,67 @@ fn constructive_functions_preserve_the_operand_crs() {
     assert!(
         srid.contains("CRS84") || srid.contains("4326"),
         "an unprefixed geometry stays at the CRS84 default, got {srid:?}"
+    );
+}
+
+// ─── EPSG:4326 authority axis order ───────────────────────────────────────────
+
+// GeoSPARQL: a WKT literal's coordinates are in the order its CRS prescribes.
+// The OGC registry defines EPSG:4326 as (lat, lon); only CRS84 (and the
+// unprefixed default) are (lon, lat). Both were read as lon/lat, so every
+// authority-ordered geometry was transposed — a point in the Netherlands
+// (lat 52, lon 5) landed in the Gulf of Guinea (lat 5, lon 52).
+#[test]
+fn epsg4326_literal_is_read_in_lat_lon_order() {
+    let s = ts();
+    // The same place, written both ways.
+    let authority =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(52.360 4.885)\"^^geo:wktLiteral";
+    let crs84 = "\"POINT(4.885 52.360)\"^^geo:wktLiteral";
+    let eq = geof_opt(&s, &format!("geof:sfEquals({authority}, {crs84})")).unwrap_or_default();
+    assert!(
+        eq.contains("true"),
+        "EPSG:4326 (lat lon) and CRS84 (lon lat) forms of one point must be equal, got {eq:?}"
+    );
+
+    // And a transposed reading must NOT be equal: the authority form's lat/lon
+    // is not the CRS84 form's lon/lat.
+    let swapped = "\"POINT(52.360 4.885)\"^^geo:wktLiteral";
+    let ne = geof_opt(&s, &format!("geof:sfEquals({authority}, {swapped})")).unwrap_or_default();
+    assert!(
+        ne.contains("false"),
+        "reading EPSG:4326 as lon/lat would have made these equal, got {ne:?}"
+    );
+}
+
+// Transforming INTO EPSG:4326 emits the authority's (lat, lon) order.
+#[test]
+fn transform_into_epsg4326_emits_lat_lon() {
+    let s = ts();
+    let rd =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)\"^^geo:wktLiteral";
+    let out = geof_opt(
+        &s,
+        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
+    )
+    .unwrap_or_default();
+    let inner = out
+        .split_once("POINT(")
+        .and_then(|(_, r)| r.split_once(')'))
+        .map(|(c, _)| c.to_string())
+        .unwrap_or_default();
+    let nums: Vec<f64> = inner
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .collect();
+    assert_eq!(nums.len(), 2, "two coords, got {inner:?}");
+    let (first, second) = (nums[0], nums[1]);
+    assert!(
+        (first - 51.85).abs() < 0.1 && (second - 5.86).abs() < 0.1,
+        "EPSG:4326 output must be (lat lon), got ({first} {second})"
+    );
+    assert!(
+        out.contains("EPSG/0/4326"),
+        "the output must carry the EPSG:4326 prefix it was transformed into: {out}"
     );
 }

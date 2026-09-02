@@ -118,6 +118,8 @@ impl<'a> Owl2DLReasoner<'a> {
     pub fn materialize(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         info!("OWL 2 DL materialization → <{}>", self.target_graph);
+        // Report the delta this run produced, not the graph's final size.
+        let initial = count_graph(self.store, &self.target_graph)?;
 
         // ── Step 1: RL rules ──────────────────────────────────────────────────
         let rl_report = super::owl2_rl::Owl2RLReasoner::new(self.store)
@@ -163,7 +165,7 @@ impl<'a> Owl2DLReasoner<'a> {
         let total_triples = count_graph(self.store, &self.target_graph)?;
         Ok(ReasoningReport {
             regime: "owl2-dl".to_string(),
-            triples_added: total_triples,
+            triples_added: total_triples.saturating_sub(initial),
             iterations: rl_report.iterations + dl_iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
@@ -527,6 +529,8 @@ impl ExternalReasonerBridge {
         target_graph: &str,
     ) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
+        // Report the delta this run produced, not the graph's final size.
+        let initial = count_graph(store, target_graph)?;
 
         // ── Step 1: Run the native DL reasoner ───────────────────────────────
         let native_report = Owl2DLReasoner::new(store)
@@ -581,7 +585,7 @@ impl ExternalReasonerBridge {
 
         Ok(ReasoningReport {
             regime: format!("owl2-dl({})", self.reasoner.name()),
-            triples_added: count,
+            triples_added: count.saturating_sub(initial),
             iterations: native_report.iterations + 1,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: target_graph.to_string(),

@@ -1015,7 +1015,7 @@ fn trim_at_parse_error(sparql: &str) -> Option<String> {
 /// Parse-check a query string with the same grammar the engine uses, returning the
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
-fn validate_sparql(sparql: &str) -> Result<(), String> {
+pub(crate) fn validate_sparql(sparql: &str) -> Result<(), String> {
     spargebra::SparqlParser::new()
         .parse_query(sparql)
         .map(|_| ())
@@ -1029,9 +1029,35 @@ fn validate_sparql(sparql: &str) -> Result<(), String> {
 /// without that route simply reject it and the UI ignores the result — the core AI
 /// features work regardless. Proxied so the browser only talks to its own origin.
 async fn forward_feedback(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    headers: HeaderMap,
     Json(signal): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    // Same gate as every other endpoint that reaches the gateway. This one had
+    // none: it forwarded an arbitrary caller-supplied JSON body to the gateway
+    // with the server's API key attached, unauthenticated, unlimited and
+    // unlogged — an open relay to `/v1/signals`. The signal's free-text fields
+    // are screened, since they are what a training pipeline ingests.
+    let user = user.map(|Extension(u)| u);
+    let ip = client_ip(&headers, None);
+    let texts: Vec<(&str, &str)> = signal
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter_map(Value::as_str)
+        .map(|s| ("user", s))
+        .collect();
+    let preview = texts.first().map(|(_, s)| *s).unwrap_or("");
+    guard_gate(
+        &state,
+        "feedback",
+        user.as_ref(),
+        ip.as_deref(),
+        texts.clone(),
+        preview,
+    )?;
+
     let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
     let mut rb = http().post(&url).json(&signal);
     if let Some(key) = api_key() {
@@ -1041,11 +1067,18 @@ async fn forward_feedback(
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
-    let ok = resp.status().is_success();
-    let body: Value = resp
-        .json()
-        .await
-        .unwrap_or_else(|_| json!({"accepted": ok}));
+    let status = resp.status();
+    let ok = status.is_success();
+    // A gateway without `/v1/signals` answers 404; that used to be reported as
+    // a delivered signal because the body was parsed without checking the
+    // status. Say what happened instead.
+    let body: Value = if ok {
+        resp.json()
+            .await
+            .unwrap_or_else(|_| json!({"accepted": true}))
+    } else {
+        json!({ "accepted": false, "status": status.as_u16() })
+    };
     Ok(Json(body))
 }
 
@@ -1772,7 +1805,7 @@ fn validate_chat_request(req: &ChatRequest) -> Result<(), AppError> {
 /// Blocked requests land in the request log right here, so the admin log shows
 /// them even though no LLM call ever happened. Returns the guard flag to carry
 /// into the final log row (set when something was flagged but allowed).
-fn guard_gate<'a>(
+pub(crate) fn guard_gate<'a>(
     state: &AppState,
     endpoint: &'static str,
     user: Option<&AuthenticatedUser>,

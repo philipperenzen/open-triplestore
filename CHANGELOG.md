@@ -13,23 +13,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- **GeoSPARQL binary functions now harmonise their operands' coordinate
-  reference systems.** Both `<crs>` prefixes were previously stripped and
-  discarded, so a query mixing RD New (EPSG:28992, metres) with CRS84 (degrees)
-  compared incompatible numbers and returned a confident `false`. The second
-  operand is transformed into the first's CRS; when the two name different CRS
-  and either is one this build cannot reproject, the result is now unbound
-  rather than wrong. **This changes results for existing mixed-CRS data** — for
-  the better, but re-check any saved query or shape that relied on the previous
-  behaviour.
-- **Constructive GeoSPARQL functions keep their operand's CRS.** `geof:buffer`,
-  `geof:envelope`, `geof:boundary`, `geof:convexHull`, `geof:intersection`,
-  `geof:union`, `geof:difference` and `geof:symDifference` emitted bare WKT with
-  the prefix dropped, so `geof:getSRID(geof:buffer(<RD New geometry>, 10))`
-  reported CRS84 — relabelling metres as degrees and making the result unusable
-  as an operand.
-
 ### Added
 - Spark now orients every turn on what the question NAMES before the model writes
   a query. The platform context lists the registered data models & vocabularies
@@ -107,6 +90,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gone. It is off for `.svelte`: the rule assumes statements run once, so it
   cannot see that `$: if (x !== lastX) { lastX = x; … }` reads its own write on
   the next run, and all 28 remaining hits were that shape.
+- **SAML 2.0 is now marked experimental and excluded from the `full` feature**
+  (and so from the published image). The ACS handler has never been verified
+  against a real IdP and has a known request-ID validation defect that makes
+  every login fail; rather than ship a provider type that cannot work, it is
+  gated behind an explicit `--features saml` build and labelled experimental in
+  the admin UI. OIDC is unaffected. CI still compiles the feature.
+- **The default Cargo feature set is now `full`.** A plain `cargo build`
+  previously produced a binary with none of the optional standards compiled in,
+  while the README's native install path told you to build exactly that way.
+- **The `alerting` and `backup-encrypt` features are now part of `full`**, so
+  the documented `ALERT_*` and `BACKUP_ENCRYPT` knobs work in the published
+  image instead of being silently ignored.
 
 ### Deprecated
 - None.
@@ -135,6 +130,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to prevent. It now matches any container with a project-specific name component,
   while deliberately never matching bare service names like `minio`, so containers
   from unrelated projects are left alone.
+- **A `geo:wktLiteral` prefixed with EPSG:4326 is now read in the authority's
+  `(latitude, longitude)` axis order**, as GeoSPARQL prescribes; only the
+  unprefixed default and `OGC/1.3/CRS84` are `(longitude, latitude)`. Both were
+  treated as lon/lat, which transposed every authority-ordered geometry.
+  `geof:transform` into EPSG:4326 likewise emits lat/lon, and results that
+  default to WGS84 lon/lat now carry the CRS84 URI rather than the EPSG one.
+  **This changes results for data that carries the EPSG:4326 prefix but was
+  written lon/lat in violation of the spec** — a common real-world mistake. If
+  your data does that, relabel it CRS84 (or drop the prefix); the store now
+  believes the prefix.
+- **GeoSPARQL binary functions now harmonise their operands' coordinate
+  reference systems.** Both `<crs>` prefixes were previously stripped and
+  discarded, so a query mixing RD New (EPSG:28992, metres) with CRS84 (degrees)
+  compared incompatible numbers and returned a confident `false`. The second
+  operand is transformed into the first's CRS; when the two name different CRS
+  and either is one this build cannot reproject, the result is now unbound
+  rather than wrong. **This changes results for existing mixed-CRS data** — for
+  the better, but re-check any saved query or shape that relied on the previous
+  behaviour.
+- **Constructive GeoSPARQL functions keep their operand's CRS.** `geof:buffer`,
+  `geof:envelope`, `geof:boundary`, `geof:convexHull`, `geof:intersection`,
+  `geof:union`, `geof:difference` and `geof:symDifference` emitted bare WKT with
+  the prefix dropped, so `geof:getSRID(geof:buffer(<RD New geometry>, 10))`
+  reported CRS84 — relabelling metres as degrees and making the result unusable
+  as an operand.
 
 ### Security
 - None.

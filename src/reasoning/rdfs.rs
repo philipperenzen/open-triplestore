@@ -73,6 +73,10 @@ impl<'a> RdfsMaterializer<'a> {
     pub fn materialize(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         let mut iterations = 0usize;
+        // `triples_added` must be the delta this run produced, not the graph's
+        // size afterwards — reporting the size meant a second run that inferred
+        // nothing still claimed thousands of "added" triples.
+        let initial = count_graph(self.store, &self.target_graph)?;
 
         info!("RDFS materialization → <{}>", self.target_graph);
 
@@ -124,7 +128,7 @@ impl<'a> RdfsMaterializer<'a> {
 
         Ok(ReasoningReport {
             regime: "rdfs".to_string(),
-            triples_added: final_count,
+            triples_added: final_count.saturating_sub(initial),
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
@@ -167,11 +171,21 @@ impl<'a> RdfsMaterializer<'a> {
     // ─── Rule rdfs5: subPropertyOf transitivity ───────────────────────────────
 
     fn apply_rdfs5(&self) -> Result<(), ReasoningError> {
+        // Both legs must also be read from the target graph — the derived
+        // `subPropertyOf` triples land there, so a rule that only reads the
+        // default graph never sees its own previous round's output. The
+        // fixed-point loop then converged after one step and a chain
+        // p ⊑ q ⊑ r ⊑ s never produced p ⊑ s. Mirrors `apply_rdfs11`, which
+        // already reads both.
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
-               WHERE  {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q .
-                         ?q <{RDFS_SUB_PROPERTY_OF}> ?r .
-                         FILTER(?p != ?r) }}"#,
+               WHERE  {{
+                   {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }}
+                   UNION {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }} }}
+                   {{ ?q <{RDFS_SUB_PROPERTY_OF}> ?r }}
+                   UNION {{ GRAPH <{tg}> {{ ?q <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
+                   FILTER(?p != ?r)
+               }}"#,
             tg = self.target_graph
         );
         self.store.update(&q)?;

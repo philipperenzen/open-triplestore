@@ -550,6 +550,23 @@ async fn repair_core(
     body: RepairBody,
 ) -> Result<Json<Value>, AppError> {
     let u = check_write(state, user, scope, owner_id)?;
+    // The same gate every other LLM-spending endpoint passes: the per-principal
+    // rate limit, screening of the caller-supplied text, and a request-log row.
+    // This route had none, so it spent completions outside the budget the admin
+    // telemetry reports. `error` and `schema_hint` are the free text the caller
+    // controls; the SPARQL itself is data.
+    let error_text = body.error.clone().unwrap_or_default();
+    let hint_text = body.schema_hint.clone().unwrap_or_default();
+    let guard_flag = crate::server::llm_sparql::guard_gate(
+        state,
+        "repair",
+        Some(u),
+        None,
+        [("user", error_text.as_str()), ("user", hint_text.as_str())],
+        &error_text,
+    )?;
+    let start = std::time::Instant::now();
+
     let store = store_of(state);
     let sq = store
         .get_by_slug(scope, owner_id, slug)
@@ -575,7 +592,44 @@ async fn repair_core(
         body.schema_hint.as_deref(),
         body.model.as_deref(),
     )
-    .await?;
+    .await;
+
+    {
+        use crate::server::llm_guard::{question_preview, record, LlmLogEntry};
+        let mut entry = LlmLogEntry::new("repair");
+        entry.user_id = Some(u.user_id.clone());
+        entry.guard_flag = guard_flag;
+        entry.duration_ms = Some(start.elapsed().as_millis() as i64);
+        entry.prompt_chars = Some((broken.chars().count() + error.chars().count()) as i64);
+        entry.question_preview = question_preview(&error);
+        match &res {
+            Ok(r) => {
+                entry.model = Some(r.model.clone());
+                entry.answer_chars = Some(r.sparql.chars().count() as i64);
+            }
+            Err(e) => {
+                entry.status = "error";
+                entry.error = Some(e.message().chars().take(300).collect());
+            }
+        }
+        record(&state.auth_db.pool(), entry);
+    }
+    let res = res?;
+
+    // Never persist a revision that does not parse. The model's output went
+    // straight into `add_revision`, which performs no SPARQL check, and then
+    // became the query's live head — so a bad repair replaced a broken query
+    // with a broken query that was now also the saved one. The chat path
+    // validates model-written SPARQL before running it; the saved path must be
+    // at least as careful before WRITING it.
+    let parse_error = crate::server::llm_sparql::validate_sparql(&res.sparql).err();
+    if body.save {
+        if let Some(e) = &parse_error {
+            return Err(AppError::BadRequest(format!(
+                "the repaired query does not parse and was not saved: {e}"
+            )));
+        }
+    }
     let mut saved_revision = None;
     if body.save {
         let rev = store
@@ -605,6 +659,8 @@ async fn repair_core(
     Ok(Json(json!({
         "sparql": res.sparql,
         "model": res.model,
+        "valid": parse_error.is_none(),
+        "parseError": parse_error,
         "savedRevision": saved_revision,
     })))
 }

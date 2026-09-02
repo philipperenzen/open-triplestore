@@ -137,7 +137,13 @@ Signed-in users keep their conversations: the sidebar lists past chats (newest f
 
 ## Safety guard
 
-Every LLM-backed request passes a guard before any completion is spent:
+Every LLM-backed request passes a guard before any completion is spent — the
+chat and streaming endpoints, NL→SPARQL, the SHACL assistant, the saved-query
+`…/repair` route and the `/api/llm/feedback` relay. The one LLM route outside
+it is `GET /api/llm/health`: a reachability probe that spends no completion and
+carries no caller text, which the UI polls every 30 s, so it sits under the
+per-IP request governor shared with `/sparql` rather than the per-principal
+LLM budget below.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

@@ -73,6 +73,8 @@ impl<'a> El2Classifier<'a> {
     pub fn classify(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         let mut iterations = 0usize;
+        // Report the delta this run produced, not the graph's final size.
+        let initial = count_graph(self.store, &self.target_graph)?;
 
         info!("OWL 2 EL classification → <{}>", self.target_graph);
 
@@ -116,7 +118,7 @@ impl<'a> El2Classifier<'a> {
 
         Ok(ReasoningReport {
             regime: "owl2-el".to_string(),
-            triples_added: final_count,
+            triples_added: final_count.saturating_sub(initial),
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
