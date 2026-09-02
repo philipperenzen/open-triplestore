@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
-// Only `AlertManager::send_direct` is used by the server binary; the rest of the
-// alerting API is exercised by the library surface/tests.
+// `send_direct` (targeted saved-query notifications) and `dispatch` (the ops
+// webhook/SMTP fan-out, raised on scheduled-backup failure) are both used by the
+// server binary. The allow covers the remaining constructors, which the library
+// surface and tests exercise.
 #[allow(dead_code)]
 mod alerting;
 mod assets;

@@ -597,6 +597,15 @@ pub fn spawn_scheduler(
     object_store: Option<Arc<crate::storage::ObjectStore>>,
 ) {
     tokio::spawn(async move {
+        // A silently failing backup is the worst kind: nothing looks wrong
+        // until a restore is needed. Every failure below therefore raises an
+        // operational alert as well as logging — `AlertConfig::from_env` is a
+        // no-op when neither ALERT_WEBHOOK_URL nor ALERT_SMTP_* is configured,
+        // so this costs nothing when alerting is off.
+        let alerts = crate::alerting::AlertManager::new(
+            crate::alerting::AlertConfig::from_env(),
+            mgr.audit.clone(),
+        );
         let interval = std::time::Duration::from_secs(interval_hours.max(1) * 3600);
         loop {
             tokio::time::sleep(interval).await;
@@ -609,14 +618,36 @@ pub fn spawn_scheduler(
                     if let Some(ref obj) = object_store {
                         if let Err(e) = maybe_upload_to_s3(obj, &mgr, &m.id).await {
                             tracing::warn!("backup: S3 upload failed: {}", e);
+                            alerts
+                                .dispatch(backup_alert("backup_upload_failed", &e.to_string()))
+                                .await;
                         }
                     }
                 }
-                Ok(Err(e)) => tracing::warn!("backup: failed: {}", e),
-                Err(e) => tracing::warn!("backup: task join error: {}", e),
+                Ok(Err(e)) => {
+                    tracing::warn!("backup: failed: {}", e);
+                    alerts
+                        .dispatch(backup_alert("backup_failed", &e.to_string()))
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!("backup: task join error: {}", e);
+                    alerts
+                        .dispatch(backup_alert("backup_failed", &e.to_string()))
+                        .await;
+                }
             }
         }
     });
+}
+
+fn backup_alert(kind: &str, error: &str) -> crate::alerting::Alert {
+    crate::alerting::Alert {
+        severity: crate::alerting::AlertSeverity::Critical,
+        kind: kind.to_string(),
+        message: format!("Scheduled backup did not complete: {error}"),
+        context: serde_json::json!({ "error": error }),
+    }
 }
 
 #[cfg(test)]
