@@ -2,6 +2,11 @@
 //!
 //! Generates RDF (Turtle) describing the capabilities of this SPARQL endpoint,
 //! per the W3C SPARQL 1.1 Service Description specification.
+//!
+//! `sd:BasicFederatedQuery` is deliberately NOT advertised: `SERVICE` is
+//! disabled as an SSRF mitigation (`without_service_handler()`), so a
+//! federating client that planned calls against this endpoint would fail on
+//! every one of them. The description says what works.
 
 /// Generate a SPARQL Service Description as Turtle.
 ///
@@ -59,7 +64,7 @@ pub fn generate(
         <http://www.w3.org/ns/formats/RDF_XML> ,
         <http://www.w3.org/ns/formats/N-Quads> ,
         <http://www.w3.org/ns/formats/TriG> ;
-    sd:feature sd:UnionDefaultGraph, sd:BasicFederatedQuery ;
+    sd:feature sd:UnionDefaultGraph ;
     sd:extensionFunction
 "#,
     );

@@ -658,6 +658,12 @@ async fn service_description_advertises_capabilities() {
         txt.contains("sd:Service"),
         "must advertise an sd:Service: {txt}"
     );
+    // `SERVICE` is disabled by design (SSRF), so advertising basic federated
+    // query made federating clients plan calls that always failed.
+    assert!(
+        !txt.contains("BasicFederatedQuery"),
+        "must not advertise federation the endpoint refuses: {txt}"
+    );
     assert!(
         txt.contains("SPARQL11Query"),
         "must advertise SPARQL 1.1 Query"
