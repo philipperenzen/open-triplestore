@@ -3,9 +3,12 @@
   "default_tolerance_ratio": 1.15,
   "tolerances": {
     "concurrent_": 1.5,
+    "insert_": 1.5,
     "query_alternative_path/10000": 1.5,
     "query_group_concat/": 1.35,
-    "query_simple_lookup/100000": 1.45
+    "query_simple_lookup/100000": 1.45,
+    "shacl_validate_": 1.5,
+    "update_": 1.5
   },
   "small_benchmark_ns": 1000,
   "small_benchmark_tolerance": 1.35,
@@ -17,7 +20,7 @@
     "command": "cargo bench --bench performance --features full",
     "criterion_metric": "median.point_estimate",
     "unit": "ns",
-    "note": "Absolute perf numbers for tracking, and the tolerance map the gate reads. The PR gate compares a change against its merge base (both benched in one job), not against these numbers — runner hardware changes under a stored baseline (this file moved ~33% when the runner went from EPYC 7763 to Xeon 6973P-C). Refresh ONLY via the perf-baseline workflow (version tag or manual dispatch) — never edit by hand or from a PR run."
+    "note": "Absolute perf numbers for tracking, and the tolerance map the gate reads. The PR gate compares a change against its merge base (both benched in one job), not against these numbers \u2014 runner hardware changes under a stored baseline (this file moved ~33% when the runner went from EPYC 7763 to Xeon 6973P-C). Refresh ONLY via the perf-baseline workflow (version tag or manual dispatch) \u2014 never edit by hand or from a PR run."
   },
   "benchmarks": {
     "concurrent_mixed/4r_1w": 5834151.4,
