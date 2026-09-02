@@ -364,7 +364,11 @@ fn pattern_has_sum_or_avg(p: &GraphPattern) -> bool {
         GraphPattern::Join { left, right }
         | GraphPattern::LeftJoin { left, right, .. }
         | GraphPattern::Union { left, right }
-        | GraphPattern::Minus { left, right } => {
+        | GraphPattern::Minus { left, right }
+        // LATERAL (SPARQL 1.2 / sep-0006) is enabled in this build; it used to
+        // fall into the `_ => false` arm, so a SUM/AVG inside a lateral
+        // sub-select escaped the fidelity guard.
+        | GraphPattern::Lateral { left, right } => {
             pattern_has_sum_or_avg(left) || pattern_has_sum_or_avg(right)
         }
         // Bgp / Path / Values carry no aggregates.

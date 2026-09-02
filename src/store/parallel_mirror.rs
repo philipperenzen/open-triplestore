@@ -230,7 +230,6 @@ impl ParallelMirror {
 
     /// Number of full (re)builds performed since construction. Diagnostics, and the
     /// hook the regression test uses to prove a write burst does not thrash rebuilds.
-    #[cfg(test)]
     pub fn build_count(&self) -> usize {
         self.inner.build_count.load(Ordering::Relaxed)
     }
@@ -244,8 +243,7 @@ impl ParallelMirror {
 
     /// Override the rebuild quiet period (ms) — used by tests to drive the debounce
     /// deterministically without touching the process-wide environment variable.
-    #[cfg(test)]
-    fn set_rebuild_quiet_ms(&self, ms: u64) {
+    pub fn set_rebuild_quiet_ms(&self, ms: u64) {
         self.inner.rebuild_quiet_ms.store(ms, Ordering::Relaxed);
     }
 

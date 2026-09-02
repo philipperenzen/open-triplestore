@@ -311,6 +311,24 @@ impl TripleStore {
         self
     }
 
+    /// Override the parallel mirror's rebuild quiet period (builder style;
+    /// tests). `0` rebuilds eagerly on the first query after a write.
+    ///
+    /// The parity suite needs this: every test loads data and queries within
+    /// microseconds, well inside the default 500 ms quiet window, so the mirror
+    /// declined to build and BOTH sides of every "parity" assertion were the
+    /// persistent store — the suite compared the engine against itself.
+    pub fn with_parallel_rebuild_quiet_ms(self, ms: u64) -> Self {
+        self.parallel_mirror.set_rebuild_quiet_ms(ms);
+        self
+    }
+
+    /// How many times the parallel mirror has been (re)built. Tests use it to
+    /// prove the mirror was consulted rather than silently bypassed.
+    pub fn parallel_build_count(&self) -> usize {
+        self.parallel_mirror.build_count()
+    }
+
     /// Record a write: invalidate the in-memory mirror (mark for rebuild) and the
     /// result cache (bump its generation). Called by every mutating path so reads
     /// never see stale derived state.
