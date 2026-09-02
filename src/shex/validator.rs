@@ -247,10 +247,14 @@ fn evaluate_shape(
         // CLOSED check: all unconsumed triples must have predicates in EXTRA
         if closed {
             for (i, (pred, _)) in outgoing.iter().enumerate() {
-                if !consumed.contains(&i) && !extra.contains(pred) {
+                // Outgoing predicates are serialised terms (`<iri>`) while EXTRA
+                // entries come from the parser bare, so `extra.contains(pred)`
+                // never matched: `CLOSED EXTRA rdf:type` still rejected rdf:type
+                // (and the message doubled the brackets).
+                if !consumed.contains(&i) && !extra.iter().any(|e| bare(e) == bare(pred)) {
                     return ShExStatus::NonConformant(format!(
                         "CLOSED shape violation: unexpected predicate <{}>",
-                        pred
+                        bare(pred)
                     ));
                 }
             }
@@ -313,6 +317,10 @@ fn evaluate_triple_expr(
             );
             let pred_bare = predicate.trim_start_matches('<').trim_end_matches('>');
             let mut match_count = 0;
+            // The first value-constraint rejection, so a cardinality failure can
+            // say WHY a candidate did not count: "found 0 but minimum is 1" on
+            // its own hid every datatype, facet and value-set reason behind it.
+            let mut rejected: Option<String> = None;
 
             for (i, (p, obj)) in outgoing.iter().enumerate() {
                 let p_clean = p.trim_start_matches('<').trim_end_matches('>');
@@ -323,6 +331,8 @@ fn evaluate_triple_expr(
                         if matches!(obj_status, ShExStatus::Conformant) {
                             match_count += 1;
                             consumed.insert(i);
+                        } else if let ShExStatus::NonConformant(why) = obj_status {
+                            rejected.get_or_insert(why);
                         }
                     } else {
                         match_count += 1;
@@ -333,8 +343,11 @@ fn evaluate_triple_expr(
 
             // Check cardinality
             if match_count < *min {
+                let why = rejected
+                    .map(|w| format!(" (a candidate value was rejected: {w})"))
+                    .unwrap_or_default();
                 return ShExStatus::NonConformant(format!(
-                    "Cardinality violation for <{}>: found {} but minimum is {}",
+                    "Cardinality violation for <{}>: found {} but minimum is {}{why}",
                     predicate, match_count, min
                 ));
             }
@@ -478,15 +491,28 @@ fn evaluate_node_constraint(
         }
     }
 
-    // Datatype check
+    // Datatype check: the literal's datatype must be exactly the required IRI
+    // and its lexical form valid for it. This used to be
+    // `focus_node.contains(dt)` — a substring test, and one skipped entirely
+    // for literals without an explicit `^^` — so `"thirty"` satisfied
+    // `xsd:integer` and an `xsd:integer` literal satisfied `xsd:int`.
     if let Some(ref dt) = nc.datatype {
-        if focus_node.contains("^^") {
-            let dt_clean = dt.trim_start_matches('<').trim_end_matches('>');
-            if !focus_node.contains(dt_clean) {
+        let required = bare(dt);
+        match literal_parts(focus_node) {
+            None => {
                 return ShExStatus::NonConformant(format!(
-                    "Expected datatype <{}> but got: {}",
-                    dt, focus_node
+                    "Expected a literal of datatype <{required}> but got: {focus_node}"
                 ));
+            }
+            Some((lexical, actual)) => {
+                if actual != required {
+                    return ShExStatus::NonConformant(format!(
+                        "Expected datatype <{required}> but got <{actual}>: {focus_node}"
+                    ));
+                }
+                if let Some(msg) = lexical_violation(required, &lexical) {
+                    return ShExStatus::NonConformant(msg);
+                }
             }
         }
     }
@@ -564,8 +590,15 @@ fn evaluate_node_constraint(
         }
     }
 
-    // Value set check
-    if !nc.values.is_empty() && !nc.values.contains(&focus_node.to_string()) {
+    // Value set check. Set members come from the parser bare; the candidate is
+    // the serialised term (`<iri>`), so a plain `contains` never matched an IRI
+    // and `[ex:Active ex:Inactive]` rejected ex:Active.
+    if !nc.values.is_empty()
+        && !nc
+            .values
+            .iter()
+            .any(|v| v == focus_node || bare(v) == bare(focus_node))
+    {
         return ShExStatus::NonConformant(format!("Value {} not in allowed set", focus_node));
     }
 
@@ -619,6 +652,56 @@ fn numeric_facet_violation(facet: &NumericFacet, value: f64, lexical: &str) -> O
         }
         _ => None,
     }
+}
+
+/// An IRI without its angle brackets (serialised terms carry them; parsed
+/// schema IRIs do not).
+fn bare(term: &str) -> &str {
+    term.trim_start_matches('<').trim_end_matches('>')
+}
+
+/// `(lexical form, datatype IRI)` of a serialised literal — `xsd:string` for a
+/// simple literal, `rdf:langString` for a language-tagged one — or `None` when
+/// the term is not a literal at all.
+fn literal_parts(term: &str) -> Option<(String, String)> {
+    let rest = term.strip_prefix('"')?;
+    let end = rest.rfind('"')?;
+    let lexical = rest[..end].to_string();
+    let tail = &rest[end + 1..];
+    let datatype = if let Some(dt) = tail.strip_prefix("^^") {
+        bare(dt).to_string()
+    } else if tail.starts_with('@') {
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".to_string()
+    } else {
+        "http://www.w3.org/2001/XMLSchema#string".to_string()
+    };
+    Some((lexical, datatype))
+}
+
+/// Whether `lexical` is a valid form for the XSD numeric/boolean datatypes the
+/// validator understands; other datatypes are accepted as typed.
+fn lexical_violation(datatype: &str, lexical: &str) -> Option<String> {
+    let local = datatype.strip_prefix("http://www.w3.org/2001/XMLSchema#")?;
+    let unsigned = lexical.strip_prefix(['+', '-']).unwrap_or(lexical);
+    let valid = match local {
+        "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
+        | "positiveInteger" | "nonPositiveInteger" | "negativeInteger" | "unsignedLong"
+        | "unsignedInt" | "unsignedShort" | "unsignedByte" => {
+            !unsigned.is_empty() && unsigned.bytes().all(|b| b.is_ascii_digit())
+        }
+        "decimal" => {
+            unsigned != "."
+                && !unsigned.is_empty()
+                && unsigned.matches('.').count() <= 1
+                && unsigned.chars().all(|c| c.is_ascii_digit() || c == '.')
+        }
+        "double" | "float" => {
+            lexical.parse::<f64>().is_ok() || matches!(lexical, "INF" | "-INF" | "NaN")
+        }
+        "boolean" => matches!(lexical, "true" | "false" | "1" | "0"),
+        _ => true,
+    };
+    (!valid).then(|| format!("\"{lexical}\" is not a valid lexical form for xsd:{local}"))
 }
 
 /// Extract the lexical form from an RDF term string.

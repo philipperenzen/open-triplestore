@@ -178,6 +178,19 @@ impl<'a> ShExParser<'a> {
             });
         }
 
+        // Unconsumed input is a syntax error, not trailing noise. The shape loop
+        // stops at the first token it cannot read, so "this is not shexc {{{"
+        // used to parse as an EMPTY schema — every focus node conformed and the
+        // HTTP API answered 200 — and a shape after a typo silently vanished.
+        self.skip_ws();
+        if self.pos < self.input.len() {
+            let tail: String = self.remaining().chars().take(40).collect();
+            return Err(format!(
+                "Unexpected input at position {}: {tail:?}",
+                self.pos
+            ));
+        }
+
         Ok(ShExSchema {
             prefixes: self.prefixes.clone(),
             base,
