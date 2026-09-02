@@ -621,6 +621,86 @@ impl TripleStore {
     /// only the graphs listed in `affected_iris` are re-counted.  When
     /// `full_rebuild` is true (e.g. CLEAR ALL / DROP ALL) a full rebuild is
     /// still performed.
+    /// Run an update whose `WHERE` clauses read ONLY the union of `scope`: a
+    /// SPARQL `USING` dataset is set on every DELETE/INSERT operation that does
+    /// not declare one (`GRAPH <g>` patterns are unaffected). Without a scope
+    /// the rules of the reasoners read the *unnamed default graph* only, which
+    /// made every named graph — every dataset — invisible to
+    /// `POST /api/reasoning/materialize`; this is how a reasoner materialises
+    /// over a selected layer (a dataset's own graphs plus the model version it
+    /// conforms to) instead of the whole store.
+    pub fn update_scoped(&self, sparql: &str, scope: &[String]) -> Result<(), StoreError> {
+        let mut parsed = spargebra::SparqlParser::new()
+            .parse_update(sparql)
+            .map_err(|e| StoreError::Parse(format!("scoped update: {e}")))?;
+        let default = Self::scope_graphs(scope)?;
+        for op in &mut parsed.operations {
+            if let spargebra::GraphUpdateOperation::DeleteInsert { using, .. } = op {
+                if using.is_none() {
+                    *using = Some(spargebra::algebra::QueryDataset {
+                        default: default.clone(),
+                        named: None,
+                    });
+                }
+            }
+        }
+        let targets = Self::static_update_targets(sparql);
+        self.query_options()
+            .for_update(parsed)
+            .on_store(&self.store)
+            .execute()?;
+        match targets {
+            Some(targets) => self
+                .graph_index
+                .recount_specific_graphs(&self.store, &targets),
+            None => self.graph_index.rebuild(&self.store),
+        }
+        self.note_write();
+        Ok(())
+    }
+
+    /// The read-only counterpart of [`update_scoped`](Self::update_scoped): a
+    /// query without its own `FROM` clauses evaluated against the union of
+    /// `scope` as its default graph. Uncached.
+    pub fn query_scoped(
+        &self,
+        sparql: &str,
+        scope: &[String],
+    ) -> Result<QueryResults<'static>, StoreError> {
+        let mut parsed = spargebra::SparqlParser::new()
+            .parse_query(sparql)
+            .map_err(|e| StoreError::Parse(format!("scoped query: {e}")))?;
+        let ds = spargebra::algebra::QueryDataset {
+            default: Self::scope_graphs(scope)?,
+            named: None,
+        };
+        match &mut parsed {
+            spargebra::Query::Select { dataset, .. }
+            | spargebra::Query::Construct { dataset, .. }
+            | spargebra::Query::Describe { dataset, .. }
+            | spargebra::Query::Ask { dataset, .. } => {
+                if dataset.is_none() {
+                    *dataset = Some(ds);
+                }
+            }
+        }
+        Ok(self
+            .query_options()
+            .for_query(parsed)
+            .on_store(&self.store)
+            .execute()?)
+    }
+
+    fn scope_graphs(scope: &[String]) -> Result<Vec<oxigraph::model::NamedNode>, StoreError> {
+        scope
+            .iter()
+            .map(|g| {
+                oxigraph::model::NamedNode::new(g.as_str())
+                    .map_err(|e| StoreError::Parse(format!("scope graph <{g}>: {e}")))
+            })
+            .collect()
+    }
+
     pub fn update_targeted(
         &self,
         sparql: &str,
@@ -1786,5 +1866,93 @@ mod tests {
             None,
             "parse miss → rebuild"
         );
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::TripleStore;
+    use oxigraph::io::RdfFormat;
+    use oxigraph::sparql::QueryResults;
+
+    fn ask(store: &TripleStore, q: &str) -> bool {
+        matches!(store.query(q), Ok(QueryResults::Boolean(true)))
+    }
+
+    /// The rules of the reasoners are `INSERT … WHERE` updates whose WHERE
+    /// reads the default graph; scoped, that default graph is the union of the
+    /// given graphs and nothing else.
+    #[test]
+    fn scoped_update_reads_only_the_scope() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "<urn:a> <urn:p> <urn:b> .",
+                RdfFormat::Turtle,
+                Some("urn:g1"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                "<urn:c> <urn:p> <urn:d> .",
+                RdfFormat::Turtle,
+                Some("urn:g2"),
+            )
+            .unwrap();
+        store
+            .load_str("<urn:e> <urn:p> <urn:f> .", RdfFormat::Turtle, None)
+            .unwrap();
+        let rule = "INSERT { GRAPH <urn:t> { ?s <urn:q> ?o } } WHERE { ?s <urn:p> ?o }";
+        store.update_scoped(rule, &["urn:g1".to_string()]).unwrap();
+        assert!(ask(
+            &store,
+            "ASK { GRAPH <urn:t> { <urn:a> <urn:q> <urn:b> } }"
+        ));
+        assert!(
+            !ask(&store, "ASK { GRAPH <urn:t> { <urn:c> <urn:q> <urn:d> } }"),
+            "a graph outside the scope must not be read"
+        );
+        assert!(
+            !ask(&store, "ASK { GRAPH <urn:t> { <urn:e> <urn:q> <urn:f> } }"),
+            "the unnamed default graph is outside an explicit scope"
+        );
+        // Unscoped: the historical behaviour — the default graph only.
+        store.update(rule).unwrap();
+        assert!(ask(
+            &store,
+            "ASK { GRAPH <urn:t> { <urn:e> <urn:q> <urn:f> } }"
+        ));
+        assert!(!ask(
+            &store,
+            "ASK { GRAPH <urn:t> { <urn:c> <urn:q> <urn:d> } }"
+        ));
+    }
+
+    #[test]
+    fn scoped_query_sees_the_scope_as_its_default_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "<urn:a> <urn:p> <urn:b> .",
+                RdfFormat::Turtle,
+                Some("urn:g1"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                "<urn:c> <urn:p> <urn:d> .",
+                RdfFormat::Turtle,
+                Some("urn:g2"),
+            )
+            .unwrap();
+        let q = "ASK { <urn:c> <urn:p> <urn:d> }";
+        assert!(matches!(
+            store.query_scoped(q, &["urn:g2".to_string()]),
+            Ok(QueryResults::Boolean(true))
+        ));
+        assert!(matches!(
+            store.query_scoped(q, &["urn:g1".to_string()]),
+            Ok(QueryResults::Boolean(false))
+        ));
     }
 }

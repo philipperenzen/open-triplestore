@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Conformance layer (TBox/ABox separation).** `GET /api/datasets/:id/conformance`
+  resolves a dataset's graphs by role, the model version it declares
+  conformance to (`conforms_to_model`/`conforms_to_version`, published as
+  `dct:conformsTo`), its bound shape graphs, and the derived
+  `reasoning_sources` / `validation_shapes`. `POST /api/reasoning/materialize`
+  takes `"dataset"` to reason over exactly that layer.
 - **Layered-graph roles.** `GraphKind` now covers the whole one-graph-per-role
   convention — `instances`, `model` (alias `ontology`), `vocabulary`, `shapes`,
   `domain-values`, `linkset`, `provenance`, `catalog`, plus the orthogonal
@@ -138,6 +144,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Reasoning could not see dataset data.** `POST /api/reasoning/materialize`
+  parsed `source_graphs` and ignored it, and every regime's rules read only
+  the unnamed default graph — so a dataset's named graphs were invisible to
+  materialisation however the endpoint was called. Scopes are now applied at
+  the store level (a `USING` dataset on every rule): `dataset`, explicit
+  `source_graphs` (read-checked per graph), or the default graph as before.
 - **An unknown graph role is a 400.** Setting a dataset's or graph's role to
   a misspelled value used to fold to "no role" and silently clear it with a 200.
 - **Data-model version gates answer 403, not 401,** to an authenticated

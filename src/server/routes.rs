@@ -8195,8 +8195,14 @@ pub fn reasoning_routes() -> Router<AppState> {
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 struct MaterializeRequest {
     regime: String,
+    /// Graphs the rules may read. Omitted (and no `dataset`): the unnamed
+    /// default graph only — the historical behaviour.
     source_graphs: Option<Vec<String>>,
     target_graph: Option<String>,
+    /// Reason over this dataset's conformance layer: its data-bearing graphs
+    /// plus the model version it conforms to (`GET …/conformance`). Any
+    /// `source_graphs` are added on top.
+    dataset: Option<String>,
 }
 
 /// POST /api/reasoning/materialize — run an entailment regime.
@@ -8245,7 +8251,61 @@ async fn reasoning_materialize(
         .await
         .map_err(|_| AppError::Internal("Server overloaded".to_string()))?;
     // Extract source_graphs unconditionally so the struct field is always read.
-    let _sources = body.source_graphs.unwrap_or_default();
+    // The graphs the rules may read. `source_graphs` used to be parsed and then
+    // ignored — every regime materialised over the unnamed default graph, so a
+    // dataset's named graphs were invisible to this endpoint however it was
+    // called. Scoped now: a dataset's conformance layer, explicit graphs the
+    // caller may read, or (neither given) the default graph as before.
+    let sources: Option<Vec<String>> = if let Some(ds_id) = body.dataset.as_deref() {
+        let ds = state
+            .auth_db
+            .get_dataset(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+        let visible = state
+            .auth_db
+            .can_access_dataset(Some(&user.user_id), &ds)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        if !visible {
+            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
+        }
+        let mut layer = crate::conformance::resolve(&state, &ds).reasoning_sources;
+        for g in body.source_graphs.clone().unwrap_or_default() {
+            if !check_graph_read_access(&state, Some(&user), &g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), &g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+            if !layer.contains(&g) {
+                layer.push(g);
+            }
+        }
+        Some(layer)
+    } else if let Some(explicit) = body.source_graphs.clone() {
+        for g in &explicit {
+            if !check_graph_read_access(&state, Some(&user), g)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                && !crate::conformance::model_graph_readable(&state, Some(&user.user_id), g)
+            {
+                return Err(AppError::Forbidden(format!("no read access to <{g}>")));
+            }
+        }
+        Some(explicit)
+    } else {
+        None
+    };
+    let _sources: Vec<String> = sources.clone().unwrap_or_default();
+    // Apply the scope to whichever reasoner the regime selects.
+    macro_rules! scoped {
+        ($m:expr) => {{
+            let m = $m;
+            match &sources {
+                Some(s) => m.with_sources(s.clone()),
+                None => m,
+            }
+        }};
+    }
     // Silence unused-variable warnings for the case where no reasoning feature is
     // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
     let _ = (&state, &target);
@@ -8255,7 +8315,10 @@ async fn reasoning_materialize(
     let report: Option<crate::reasoning::ReasoningReport> = match body.regime.as_str() {
         #[cfg(feature = "rdfs-entailment")]
         "rdfs" => {
-            let m = crate::reasoning::rdfs::RdfsMaterializer::with_target(&state.store, &target);
+            let m = scoped!(crate::reasoning::rdfs::RdfsMaterializer::with_target(
+                &state.store,
+                &target
+            ));
             Some(
                 m.materialize()
                     .map_err(|e| AppError::Internal(e.to_string()))?,
@@ -8264,7 +8327,8 @@ async fn reasoning_materialize(
         #[cfg(feature = "owl2-rl")]
         "owl2-rl" => {
             let m =
-                crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store).with_target(&target);
+                scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
+                    .with_target(&target));
             Some(
                 m.materialize()
                     .map_err(|e| AppError::Internal(e.to_string()))?,
@@ -8273,7 +8337,8 @@ async fn reasoning_materialize(
         #[cfg(feature = "owl2-el")]
         "owl2-el" => {
             let m =
-                crate::reasoning::owl2_el::El2Classifier::new(&state.store).with_target(&target);
+                scoped!(crate::reasoning::owl2_el::El2Classifier::new(&state.store)
+                    .with_target(&target));
             Some(
                 m.classify()
                     .map_err(|e| AppError::Internal(e.to_string()))?,
@@ -8281,7 +8346,9 @@ async fn reasoning_materialize(
         }
         #[cfg(feature = "owl2-ql")]
         "owl2-ql" => {
-            let rw = crate::reasoning::owl2_ql::QLQueryRewriter::new(&state.store);
+            let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
+                &state.store
+            ));
             Some(
                 rw.materialize_tbox()
                     .map_err(|e| AppError::Internal(e.to_string()))?,
@@ -8332,6 +8399,8 @@ async fn reasoning_materialize(
                 "iterations": r.iterations,
                 "elapsed_ms": r.elapsed_ms,
                 "target_graph": r.target_graph,
+                // The graphs the rules read (null: the unnamed default graph).
+                "sources": sources,
             })),
         )
             .into_response()),

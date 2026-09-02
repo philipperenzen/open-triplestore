@@ -84,15 +84,56 @@ const MAX_ITERATIONS: usize = 500;
 pub struct Owl2RLReasoner<'a> {
     store: &'a TripleStore,
     target_graph: String,
+    /// When set, the rules read ONLY these graphs (plus the target graph).
+    /// Without it they read the unnamed default graph, as they always did.
+    sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
 }
 
 impl<'a> Owl2RLReasoner<'a> {
+    /// Restrict the rules to `sources` (plus the target graph). Without a
+    /// scope the rules read the unnamed default graph only, so a dataset's
+    /// named graphs — and the model version it conforms to — were invisible to
+    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// from `source_graphs` or the dataset's conformance layer.
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    fn scope(&self) -> Option<Vec<String>> {
+        self.sources.as_ref().map(|s| {
+            let mut g = s.clone();
+            if !g.contains(&self.target_graph) {
+                g.push(self.target_graph.clone());
+            }
+            g
+        })
+    }
+
+    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.update_scoped(sparql, &scope),
+            None => self.store.update(sparql),
+        }
+    }
+
+    fn run_query(
+        &self,
+        sparql: &str,
+    ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.query_scoped(sparql, &scope),
+            None => self.store.query(sparql),
+        }
+    }
+
     pub fn new(store: &'a TripleStore) -> Self {
         Self {
             store,
             target_graph: OWL2_RL_ENTAILMENT_GRAPH.to_string(),
+            sources: None,
             detect_inconsistency: true,
         }
     }
@@ -234,7 +275,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?x <{OWL_SAME_AS}> ?y . FILTER(?x != ?y) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -245,7 +286,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?x <{OWL_SAME_AS}> ?y . ?y <{OWL_SAME_AS}> ?z . FILTER(?x != ?z) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -257,7 +298,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(?s != ?sp) FILTER(?p != <{OWL_SAME_AS}>) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -269,7 +310,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(?p != ?pp) FILTER(isIRI(?pp)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -280,7 +321,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?o <{OWL_SAME_AS}> ?op . ?s ?p ?o . FILTER(?o != ?op) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -310,7 +351,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -321,7 +362,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p <{RDFS_RANGE}> ?c . ?x ?p ?y . FILTER(isIRI(?y) || isBlank(?y)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -333,7 +374,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?x ?p ?y1 . ?x ?p ?y2 . FILTER(?y1 != ?y2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -345,7 +386,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?x1 ?p ?y . ?x2 ?p ?y . FILTER(?x1 != ?x2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -367,7 +408,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p <{RDF_TYPE}> <{OWL_SYMMETRIC_PROP}> . ?x ?p ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -390,7 +431,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?x ?p ?y . ?y ?p ?z . FILTER(?x != ?z) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -401,7 +442,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . ?x ?p1 ?y . FILTER(?p1 != ?p2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -412,7 +453,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p1 <{OWL_INVERSE_OF}> ?p2 . ?x ?p1 ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -423,7 +464,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p1 <{OWL_INVERSE_OF}> ?p2 . ?x ?p2 ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -443,7 +484,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -464,7 +505,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -514,7 +555,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?u <{RDF_TYPE}> ?x }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -526,7 +567,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?u ?p ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -563,7 +604,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -579,7 +620,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q1)?;
+        self.run_update(&q1)?;
         // Rest element(s)
         let q2 = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> ?cm }} }}
@@ -592,7 +633,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q2)?;
+        self.run_update(&q2)?;
         Ok(())
     }
 
@@ -608,7 +649,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -621,7 +662,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?u ?p ?v . ?v <{RDF_TYPE}> ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -633,7 +674,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?x <{OWL_ON_PROPERTY}> ?p . ?u ?p ?v }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -647,7 +688,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(isIRI(?v) || isBlank(?v)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -659,7 +700,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?u <{RDF_TYPE}> ?x }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -671,7 +712,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?u ?p ?y }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -709,7 +750,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -765,7 +806,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -784,7 +825,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -812,7 +853,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -831,7 +872,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -842,7 +883,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?c1 <{OWL_EQUIV_CLASS}> ?c2 . ?x <{RDF_TYPE}> ?c1 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -853,7 +894,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?c1 <{OWL_EQUIV_CLASS}> ?c2 . ?x <{RDF_TYPE}> ?c2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -870,7 +911,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -906,7 +947,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(?c1 != ?c3) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -917,7 +958,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?c1 <{OWL_EQUIV_CLASS}> ?c2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -930,7 +971,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(?c1 != ?c2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -943,7 +984,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(?p1 != ?p3) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -954,7 +995,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p1 <{OWL_EQUIV_PROP}> ?p2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -967,7 +1008,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          FILTER(?p1 != ?p2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -978,7 +1019,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p <{RDFS_DOMAIN}> ?c1 . ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -989,7 +1030,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p2 <{RDFS_DOMAIN}> ?c . ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1000,7 +1041,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p <{RDFS_RANGE}> ?c1 . ?c1 <{RDFS_SUB_CLASS_OF}> ?c2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1011,7 +1052,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE  {{ ?p2 <{RDFS_RANGE}> ?c . ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1025,7 +1066,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . FILTER(?c1 != ?c2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1039,7 +1080,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?y1 <{RDFS_SUB_CLASS_OF}> ?y2 . FILTER(?c1 != ?c2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1053,7 +1094,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?p1 <{RDFS_SUB_PROPERTY_OF}> ?p2 . FILTER(?c1 != ?c2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1067,7 +1108,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?y1 <{RDFS_SUB_CLASS_OF}> ?y2 . FILTER(?c1 != ?c2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1081,7 +1122,7 @@ impl<'a> Owl2RLReasoner<'a> {
                          ?p2 <{RDFS_SUB_PROPERTY_OF}> ?p1 . FILTER(?c1 != ?c2) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1095,7 +1136,7 @@ impl<'a> Owl2RLReasoner<'a> {
                WHERE {{ ?c <{RDF_TYPE}> <{OWL_CLASS}> }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1110,7 +1151,7 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -1125,14 +1166,14 @@ impl<'a> Owl2RLReasoner<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
     // ─── Helper ───────────────────────────────────────────────────────────────
 
     fn ask(&self, sparql: &str) -> Result<bool, ReasoningError> {
-        match self.store.query(sparql)? {
+        match self.run_query(sparql)? {
             oxigraph::sparql::QueryResults::Boolean(b) => Ok(b),
             _ => Ok(false),
         }

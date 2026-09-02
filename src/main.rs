@@ -14,6 +14,7 @@ mod auth;
 mod backup;
 mod catalog;
 mod commit_log;
+mod conformance;
 mod data_models;
 mod dataset_versions;
 mod dcat;

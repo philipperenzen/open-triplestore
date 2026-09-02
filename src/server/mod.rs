@@ -1086,6 +1086,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .delete(handlers::remove_dataset_graph),
         )
         .route(
+            "/api/datasets/:dataset_id/conformance",
+            get(crate::conformance::get_dataset_conformance),
+        )
+        .route(
             "/api/datasets/:dataset_id/commits",
             get(handlers::list_dataset_commits),
         )

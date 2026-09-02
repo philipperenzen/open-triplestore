@@ -13,8 +13,25 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 Reasoning is triggered via `POST /api/reasoning/materialize` with a JSON body:
 
 ```json
-{ "regime": "rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl", "target_graph": "<optional IRI>" }
+{
+  "regime": "rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl",
+  "target_graph": "<optional IRI>",
+  "dataset": "<optional dataset id>",
+  "source_graphs": ["<optional graph IRIs>"]
+}
 ```
+
+**What the rules read.** With `dataset`, the reasoner works on that dataset's
+*conformance layer* — its data-bearing graphs (instances, model, vocabulary,
+domain values, linksets, unclassified) plus the graphs of the model version it
+declares conformance to — and nothing else; `GET /api/datasets/:id/conformance`
+shows exactly that set. With `source_graphs`, the listed graphs (each must be
+readable by the caller); with `dataset` *and* `source_graphs`, both. With
+neither, the rules read the unnamed default graph only, as they historically
+did — which means a dataset's named graphs are invisible to an unscoped run,
+so pass `dataset` for anything loaded through the dataset APIs. The scope is
+applied at the store level (a `USING` dataset on every rule), so all regimes
+behave the same.
 
 The response is a count of the inferred triples added. Query the current status of all entailment graphs via `GET /api/reasoning/status`.
 

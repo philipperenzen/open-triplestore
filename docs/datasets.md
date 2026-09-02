@@ -30,6 +30,32 @@ Within each dataset, graphs are organized by **role**, indicating their purpose 
 | `provenance` | PROV-O records | `prov:Activity`, `prov:Entity`, `prov:Agent` | ✅ | ✅ | Who produced what, when and from which sources; the commit log (`urn:system:commit-log`) is the platform's own provenance graph |
 | `catalog` | DCAT / VoID | `dcat:Dataset`, `dcat:Distribution`, `void:Dataset` | ✅ | ✅ | Metadata describing datasets and distributions, as served at `/.well-known/void` |
 
+### The conformance layer (TBox / ABox)
+
+An instance dataset says which model it conforms to with `conforms_to_model`
+(a data-model id) and, optionally, `conforms_to_version` (else the model's
+latest published version). The DCAT catalogue publishes this as
+`dct:conformsTo`, and `GET /api/datasets/:id/conformance` resolves the whole
+layer:
+
+```json
+{
+  "dataset_id": "bridges",
+  "dataset_role": "instances",
+  "graphs": [{ "graph_iri": "…/bridges/instances", "role": "instances" }],
+  "conforms_to_model": { "id": "nen2660", "version": "2.0", "graph_iri": "…", "sub_graphs": [] },
+  "shape_graphs": [{ "id": "…", "name": "…", "graph_iri": "…" }],
+  "reasoning_sources": ["…/bridges/instances", "…/data-model/nen2660/version/2.0"],
+  "validation_shapes": ["…"]
+}
+```
+
+`reasoning_sources` is what `POST /api/reasoning/materialize` reads when called
+with `"dataset": "bridges"`; `validation_shapes` is what validation applies
+(dataset-level and inherited per-graph bindings). A declared model that cannot
+be resolved is reported in `unresolved_model` rather than silently ignored. The
+layer is domain-neutral: a model is whatever the data-model registry holds.
+
 ### Notes on Graph Roles
 
 - **Three first-class layers**: `model`, `vocabulary` and `instances` are the three primary layers; `shapes` and `entailment` are orthogonal roles and `system` is internal. A single upload that mixes them can be **auto-split** into one graph per role on import (see [Import Auto-Detection](/docs/import)).

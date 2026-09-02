@@ -92,15 +92,56 @@ const MAX_ITERATIONS: usize = 500;
 pub struct Owl2DLReasoner<'a> {
     store: &'a TripleStore,
     target_graph: String,
+    /// When set, the rules read ONLY these graphs (plus the target graph).
+    /// Without it they read the unnamed default graph, as they always did.
+    sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
 }
 
 impl<'a> Owl2DLReasoner<'a> {
+    /// Restrict the rules to `sources` (plus the target graph). Without a
+    /// scope the rules read the unnamed default graph only, so a dataset's
+    /// named graphs — and the model version it conforms to — were invisible to
+    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// from `source_graphs` or the dataset's conformance layer.
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    fn scope(&self) -> Option<Vec<String>> {
+        self.sources.as_ref().map(|s| {
+            let mut g = s.clone();
+            if !g.contains(&self.target_graph) {
+                g.push(self.target_graph.clone());
+            }
+            g
+        })
+    }
+
+    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.update_scoped(sparql, &scope),
+            None => self.store.update(sparql),
+        }
+    }
+
+    fn run_query(
+        &self,
+        sparql: &str,
+    ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.query_scoped(sparql, &scope),
+            None => self.store.query(sparql),
+        }
+    }
+
     pub fn new(store: &'a TripleStore) -> Self {
         Self {
             store,
             target_graph: OWL2_DL_ENTAILMENT_GRAPH.to_string(),
+            sources: None,
             detect_inconsistency: true,
         }
     }
@@ -200,7 +241,7 @@ impl<'a> Owl2DLReasoner<'a> {
              }}"
         );
 
-        let pairs = match self.store.query(&select_q)? {
+        let pairs = match self.run_query(&select_q)? {
             oxigraph::sparql::QueryResults::Solutions(sols) => sols
                 .flatten()
                 .filter_map(|s| {
@@ -225,7 +266,7 @@ impl<'a> Owl2DLReasoner<'a> {
                  WHERE {{ {{ ?x <{RDF_TYPE}> <{c}> }} UNION {{ GRAPH <{tg}> {{ ?x <{RDF_TYPE}> <{c}> }} }} \
                           FILTER(isIRI(?x)) }}"
             );
-            self.store.update(&q)?;
+            self.run_update(&q)?;
         }
         Ok(())
     }
@@ -243,7 +284,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?ci)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-disjoint-union-pairwise`: Members of a `owl:disjointUnionOf` list
@@ -263,7 +304,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?cj)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-negative-object-assertion` (consistency check): Raises
@@ -279,7 +320,7 @@ impl<'a> Owl2DLReasoner<'a> {
                ?s ?p ?o . \
              }}"
         );
-        match self.store.query(&q)? {
+        match self.run_query(&q)? {
             oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::Inconsistency(
                 "NegativeObjectPropertyAssertion violated: an asserted triple contradicts a \
                  declared owl:NegativePropertyAssertion"
@@ -301,7 +342,7 @@ impl<'a> Owl2DLReasoner<'a> {
                ?s ?p ?v . \
              }}"
         );
-        match self.store.query(&q)? {
+        match self.run_query(&q)? {
             oxigraph::sparql::QueryResults::Boolean(true) => Err(ReasoningError::Inconsistency(
                 "NegativeDataPropertyAssertion violated: an asserted triple contradicts a \
                  declared owl:NegativePropertyAssertion"
@@ -330,7 +371,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?y)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-has-key` (2-key): Same as `dl-has-key-one` but for key lists of
@@ -356,7 +397,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?y)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-min-cardinality`: Records a minCardinality obligation in the
@@ -373,7 +414,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?x)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-cardinality`: Records an exactCardinality obligation.  The
@@ -390,7 +431,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?x)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-min-qualified-cardinality`: Records a minQualifiedCardinality
@@ -407,7 +448,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?x)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// `dl-qualified-cardinality`: Records an exactQualifiedCardinality
@@ -424,7 +465,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(isIRI(?x)) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 
     /// TG-aware `cax-sco`: Like the RL rule, but also reads `rdfs:subClassOf` and
@@ -444,7 +485,7 @@ impl<'a> Owl2DLReasoner<'a> {
                FILTER(?c1 != ?c2) \
              }}"
         );
-        self.store.update(&q).map_err(Into::into)
+        self.run_update(&q).map_err(Into::into)
     }
 }
 
@@ -533,9 +574,16 @@ impl ExternalReasonerBridge {
         let initial = count_graph(store, target_graph)?;
 
         // ── Step 1: Run the native DL reasoner ───────────────────────────────
-        let native_report = Owl2DLReasoner::new(store)
-            .with_target(target_graph)
-            .materialize()?;
+        let native_report = {
+            let m = Owl2DLReasoner::new(store).with_target(target_graph);
+            // The same scope the native rules read: the caller's layer, not the store.
+            if source_graphs.is_empty() {
+                m
+            } else {
+                m.with_sources(source_graphs.to_vec())
+            }
+        }
+        .materialize()?;
 
         // ── Step 2: Optionally call the external reasoner ────────────────────
         if self.reasoner.name() != "native-dl-stub" {
