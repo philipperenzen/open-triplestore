@@ -67,8 +67,9 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | Feature | Detail |
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
-| **SPARQL 1.2** | RDF-star embedded triples |
-| **GeoSPARQL 1.1** | All 30 OGC requirements — Simple Features, Egenhofer, RCC8, constructive & metric functions |
+| **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
+| **SPARQL federation** | `SERVICE` is disabled by design (SSRF mitigation) and not advertised in the service description — a `SERVICE` clause errors rather than reaching the network |
+| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, WKT and GML literals, CRS transform for the built-in CRS set. Not implemented: the geodesic metric family, `aggUnion`, GeoJSON literals ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
 | **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
 | **LDP 1.0** | Basic, Direct, Indirect Containers; NonRDFSource; PATCH with SPARQL Update; Prefer header ([docs](docs/ldp.md)) |
 | **RBAC auth** | `super_admin` › `admin` › `user` role hierarchy; JWT access + refresh tokens; long-lived API keys |
@@ -477,7 +478,18 @@ the live prefix.cc for labels the local tiers don't know (cached in
 
 ## GeoSPARQL 1.1
 
-All 30 OGC requirements via GEOS bindings.
+Topological relations (Simple Features, Egenhofer, RCC8) and `geof:relate` with
+DE-9IM patterns; distance, area, buffer and the other constructive functions;
+WKT and GML geometry literals — all via GEOS. `geof:transform` converts between
+the built-in CRSs (RD New, CRS84, EPSG:4326 in authority axis order, Web
+Mercator), and binary predicates harmonise their operands' CRSs.
+
+**Not implemented:** the geodesic *metric* family (`geof:metricDistance` and
+friends), `geof:aggUnion`, GeoJSON/KML/DGGS literals and the Query Rewrite
+Extension; `geof:distance` is planar in the CRS units. (Earlier versions of this
+README claimed "all 30 OGC requirements" — that number was the test file's own
+numbering, not the OGC conformance classes. The honest grade is *Partial*; see
+[docs/standards.md](docs/standards.md).)
 
 ```sparql
 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
@@ -748,7 +760,7 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs all ~80 OWL 2 RL forward-chaining rules plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
+Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (the equality, property, class and schema families — the Table 8 datatype rules `dt-*` are not implemented) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
 
 ```bash
 # Query with OWL 2 DL entailment

@@ -18,15 +18,17 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | SPARQL 1.1 Service Description | Capability advertisement | Full |
 | SPARQL 1.2 (WD) | Triple terms, accessor functions | Partial¹ |
 | RDFS | subClass/subProperty/domain/range inference | Full |
-| OWL 2 QL / EL / RL | Profile reasoning (materialised) | Full |
+| OWL 2 QL | Profile reasoning (materialised) | Full |
+| OWL 2 EL | Profile reasoning (materialised) | Partial¹¹ |
+| OWL 2 RL | Profile reasoning (materialised) | Partial¹¹ |
 | OWL 2 DL | Description-logic expressivity | Partial⁴ |
 | GeoSPARQL 1.1 | Spatial RDF, relation/metric functions | Partial⁵ |
 | SHACL Core | Structural constraint validation | Full⁶ |
-| SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Full⁷ |
-| SHACL-C | Compact-syntax parser/serializer | Full⁸ |
+| SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
+| SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource | Full |
 | DCAT 2 | Dataset catalogue description | Full |
-| RML / R2RML | CSV/JSON/XML → RDF mapping | Full⁹ |
+| RML / R2RML | CSV/JSON/XML → RDF mapping | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image; the ACS handler has a known request-ID validation defect, so no login can currently succeed. See [auth.md](auth.md). |
 | ShEx | Shape Expressions (ShExC) | Partial — node kinds, datatypes with lexical checks, string/numeric facets, value sets, cardinalities, EachOf/OneOf, inverse constraints, CLOSED/EXTRA, shape references; no semantic actions, imports or annotations. Semantics pinned by `tests/shex_conformance.rs`. |
@@ -101,35 +103,49 @@ behavior and will flip green when the limitation is resolved.
    include it).
 3. **Federation/`SERVICE` is intentionally disabled** as an SSRF mitigation
    (`without_service_handler()`); a `SERVICE` clause errors rather than reaching
-   the network.
+   the network. The service description therefore does not advertise
+   `sd:BasicFederatedQuery`.
 4. **OWL 2 DL** reasoning is RL-based forward-chaining plus DL-syntax extension
    rules (hasSelf, disjointUnion, NegativePropertyAssertion, hasKey, cardinality).
    Full DL tableau (consistency detection, profile validation, nominal/datatype
    reasoning) requires the external reasoner bridge (e.g. Konclude).
-5. **GeoSPARQL 1.1:** WKT geometries; the full topology family (sf/eh/rcc8);
-   `geof:relate` with DE-9IM patterns; distance, area, buffer, getSRID, and the
-   constructive functions are supported. **Not yet implemented (feature gaps):**
-   `geof:metricDistance` / `metricArea` (need a geodesic library), `geof:transform`
-   (needs CRS reprojection / PROJ), `geof:aggUnion` (needs SPARQL aggregate support),
-   and **GML** / **GeoJSON** geometry literals (WKT only). `geof:distance` is planar
-   (CRS units), not geodetic.
+5. **GeoSPARQL 1.1:** WKT and GML geometry literals; the full topology family
+   (sf/eh/rcc8); `geof:relate` with DE-9IM patterns; distance, area, buffer,
+   getSRID and the constructive functions; `geof:transform` between the built-in
+   CRSs (RD New, CRS84, EPSG:4326 in authority axis order, Web Mercator), and
+   binary predicates harmonise their operands' CRSs. **Not implemented:** the
+   geodesic *metric* family (`geof:metricDistance`, `metricArea`, …),
+   `geof:aggUnion`, GeoJSON/KML/DGGS literals, and the Query Rewrite Extension.
+   `geof:distance` is planar (CRS units), not geodetic.
 6. **SHACL Core** — *fixed.* Blank-node property shapes (`sh:property [ … ]`, the
    standard idiom) are now enforced: the loader dereferences blank nodes through the
    raw quad index rather than via invalid `<_:bn>` SPARQL. Applies to SHACL-on-write
    too.
-7. **SHACL Advanced** — *fixed.* `sh:qualifiedValueShape` counting is correct
-   (class checks are scoped to the data graphs), and aggregate `sh:sparql` node
-   constraints fire (`$this` is pre-bound via `VALUES` + `FROM <data-graph>` rather
-   than textual IRI substitution).
+7. **SHACL Advanced** — SPARQL-based targets (`sh:target` with `sh:select`),
+   SPARQL constraints (`sh:sparql` with `sh:select`; `$this` is pre-bound via
+   `VALUES` + `FROM <data-graph>`), rules, and `sh:qualifiedValueShape` counting
+   work. **Not implemented:** custom constraint components
+   (`sh:ConstraintComponent` / `sh:parameter` validators), `sh:ask`-based
+   constraints, and rule `sh:condition` / `sh:order`. The W3C corpus score
+   compares `sh:conforms` and the focus-node multiset, not result component
+   IRIs, paths or values.
 8. **SHACL-C** is a pragmatic subset: `[min..max]` counts, `closed`, and `// "msg"`
-   messages; the parser is lenient on unrecognized trailing input.
-9. **RML** — *fixed.* Inline blank-node term maps (`rr:subjectMap [ … ]`, multiple
-   `rr:predicateObjectMap [ … ]`) now parse correctly; `rr:class` is read from the
-   subjectMap (R2RML); object `rr:constant` IRIs infer the IRI term type. Remaining
-   gap: referencing object maps (`rr:parentTriplesMap` joins).
+   messages. The parser rejects unrecognized trailing input (it used to discard it
+   silently, which could empty a shape graph on upload with a 200).
+9. **RML / R2RML** — CSV/JSON/XML *file* sources with template/reference/constant
+   term maps, datatype and language tags, `rr:class`, and inline blank-node term
+   maps. **Not implemented:** SQL logical tables (`rr:logicalTable`,
+   `rr:sqlQuery`) and referencing object maps (`rr:parentTriplesMap` joins); a
+   predicate-object map honours its first predicate map and first object map
+   only.
 10. **Zero-length property paths:** `:x :p* ?y` includes start nodes present in the
     data; the pure ALP edge of a *constant* start node absent from the graph is an
     oxigraph-evaluator divergence.
+11. **OWL 2 RL / EL:** RL materialises the equality, property, class and schema
+    rule families; the Table 8 datatype rules (`dt-type1/2`, `dt-eq`, `dt-diff`,
+    `dt-not-type`) are not implemented. EL does not apply `owl:equivalentClass`
+    or `owl:TransitiveProperty` — use RL where those matter. Both are pinned by
+    `tests/owl2_rl_conformance.rs` / `tests/owl2_el_conformance.rs`.
 
 Related guides: [OWL Reasoning](/docs/reasoning), [SHACL Validation](/docs/shacl),
 [GeoSPARQL](/docs/geosparql), [Performance](/docs/performance),
