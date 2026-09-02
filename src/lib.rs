@@ -51,6 +51,7 @@ pub mod netutil;
 pub mod ogcapi;
 pub mod plugins;
 pub mod prefixes;
+pub mod property_states;
 pub mod provenance;
 pub mod reasoning;
 pub mod remote;

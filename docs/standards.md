@@ -26,6 +26,7 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | SHACL Core | Structural constraint validation | Full⁶ |
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
 | SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
+| OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
 | buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification/material/predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). |
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, entity-level version objects, tombstones, an incremental client; no retention policies, `tree:shape` or spatial/substring fragmentations. See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource | Full |

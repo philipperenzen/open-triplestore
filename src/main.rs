@@ -31,6 +31,7 @@ mod netutil;
 mod ogcapi;
 mod plugins;
 mod prefixes;
+mod property_states;
 mod provenance;
 mod reasoning;
 mod remote;

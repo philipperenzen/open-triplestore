@@ -29,6 +29,39 @@ Within each dataset, graphs are organized by **role**, indicating their purpose 
 | `linkset` | Alignments | `owl:sameAs`, `skos:*Match` | ✅ | ✅ | Mappings between this dataset's resources and another dataset or vocabulary; one graph per alignment keeps the mapping's provenance and lifecycle independent of both ends |
 | `provenance` | PROV-O records | `prov:Activity`, `prov:Entity`, `prov:Agent` | ✅ | ✅ | Who produced what, when and from which sources; the commit log (`urn:system:commit-log`) is the platform's own provenance graph |
 
+### Time-evolving properties (OPM profile)
+
+A property whose value changes over time — a load rating, a firmware
+version, a measured weight — can be recorded as a chain of states instead
+of overwritten:
+
+```bash
+curl -X POST http://localhost:7878/api/datasets/<id>/properties/state \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"entity": "https://example.org/bridge/b1", "property": "https://example.org/loadRating",
+       "value": "45", "valid_from": "2026-01-01", "reliability": "confirmed", "note": "inspection"}'
+```
+
+The data graph (the dataset's instances graph, or `graph`) always holds the
+current value as a plain triple — SPARQL, SHACL and reasoning see nothing
+new — while the dataset's states graph (`urn:ots:property-states:<id>`,
+registered with the `provenance` role on first use) accumulates
+`opm:PropertyState`s with `schema:value`, `ots:validFrom`,
+`prov:generatedAtTime`, `prov:wasAttributedTo`, an optional OPM reliability
+class (`assumed` / `confirmed` / `derived`) and a note; the newest is
+`opm:CurrentPropertyState`, the rest `opm:OutdatedPropertyState`. Values are
+typed from the string (boolean, integer, decimal, else string) unless
+`datatype` (an XSD type or `iri`) or `language` says otherwise. Each state
+is a commit in the dataset's history.
+
+```
+GET /api/datasets/<id>/properties/history?entity=…&property=…   # newest first
+GET /api/datasets/<id>/properties/as-of?entity=…&property=…&at=2026-03-01
+```
+
+Domain vocabularies — a material passport, a clinical record — supply the
+property IRIs; the mechanism knows none of them.
+
 ### Provenance (PROV-O)
 
 `GET /api/datasets/:id/provenance` returns the dataset's trail as plain

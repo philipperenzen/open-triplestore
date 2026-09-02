@@ -14,6 +14,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Time-evolving properties (OPM profile).** `POST
+  /api/datasets/:id/properties/state` records a property value as an
+  `opm:PropertyState` (valid-from, recording time, agent, reliability, note)
+  in the dataset's provenance-role states graph while keeping the current
+  value as a plain triple in the data graph; `…/properties/history` and
+  `…/properties/as-of` read the chain. Domain-neutral — material passports
+  and clinical records supply the property IRIs.
 - **Constraint-specification importers, IDS first.** `POST
   /api/shacl/import/ids` turns a buildingSMART IDS 1.0 document into SHACL
   Core shapes over the IFC RDF this store emits, optionally creating the
