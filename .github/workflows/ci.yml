@@ -229,6 +229,17 @@ jobs:
       - name: Build
         run: npm run build
 
+  docs-parity:
+    name: Conformance table is generated, not hand-maintained
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The README / docs/standards.md table is written by this script from the
+      # test suites; a stale table (counts that no longer match the code) fails.
+      - name: Check the conformance table
+        run: python3 scripts/conformance_table.py --check
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest

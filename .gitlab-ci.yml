@@ -70,6 +70,15 @@ rust:
     - cargo build --all-features --locked
     - cargo test --workspace --all-features --locked
 
+# ── Conformance table parity (mirrors the GitHub docs-parity job) ────────────
+# README.md / docs/standards.md carry a table generated from the test suites;
+# a stale one fails here.
+docs-parity:
+  stage: check
+  image: python:3-slim
+  script:
+    - python3 scripts/conformance_table.py --check
+
 # ── Performance-regression GATE (mirrors .github/workflows/perf.yml) ──────────
 # Subset Criterion bench + a comparison against the committed baseline. Runs on
 # merge requests and on pushes to main/develop/release/*. Sample sizes are
