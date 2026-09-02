@@ -75,6 +75,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **Standards grades now match the code.** GeoSPARQL 1.1 (no geodesic
+  metric family, `aggUnion`, GeoJSON literals or Query Rewrite Extension),
+  OWL 2 RL (no Table 8 datatype rules), OWL 2 EL (`owl:equivalentClass` and
+  `owl:TransitiveProperty` not applied), RML/R2RML (file sources only, no
+  joins, first predicate/object map only), SHACL-AF (no custom constraint
+  components, `sh:ask`, rule `sh:condition`/`sh:order`) and SHACL-C (subset)
+  are graded *Partial* with the gaps listed. The README's "all 30 OGC
+  requirements" and "all ~80 OWL 2 RL rules" are gone.
+- **The conformance table is generated** from the test suites
+  (`scripts/conformance_table.py`, checked in CI on GitHub and GitLab) and
+  states per row whether a vendored corpus or a spec-derived suite runs.
+- **The service description no longer advertises `sd:BasicFederatedQuery`**,
+  since `SERVICE` is disabled by design.
+- `plugin-accounts-dashboard` is compiled in GitHub CI; a per-feature
+  availability matrix lives in docs/build-features.md.
 - **ShEx and SWRL are graded Partial** in docs/standards.md, with the covered
   constructs listed; both now have semantic conformance suites instead of
   route-liveness smokes.
@@ -116,6 +131,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Data-model version gates answer 403, not 401,** to an authenticated
+  non-admin (publish, deprecate, sub-graph transitions).
+- **The in-app docs viewer surfaces every guide** — 18 were in the repository
+  but never registered (every OWL 2 guide, LDP, RML, SPARQL 1.2, plugins, …);
+  a unit test now keeps the registry complete.
+- docs/sparql-12.md documented a builder API and a crate version that do not
+  exist; docs/triplestore-comparison.md claimed the full W3C SPARQL 1.1
+  corpus runs in CI; several guides still said Oxigraph 0.4. Corrected.
 - **Spark no longer re-runs a query that already failed this turn.** The
   repeat is recorded in the retrieval trail with its own error, the store is
   not consulted, and the model is told the query was not run. The parser's

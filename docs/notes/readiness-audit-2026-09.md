@@ -1751,3 +1751,31 @@ several GB); the `full` feature set now includes `alerting` and
 `backup-encrypt`, and the Dockerfile builds with `--features full`, so the
 image carries what docs/administration.md documents. Verify on the next image
 build.
+
+## Addendum — Phase 4 (claims parity), 2026-09-02
+
+Every claim surface now states what the code and tests prove:
+
+- **Generated conformance table** (`scripts/conformance_table.py`, CI-checked
+  on both pipelines) replaces the hand-maintained ones in README.md and
+  docs/standards.md. Static `#[test]` counts were verified equal to the runtime
+  counts for all 52 suites before trusting them. The table names the basis per
+  row: two vendored corpora (W3C SHACL Core, OGC GeoSPARQL validator shapes),
+  everything else spec-derived.
+- **Grades corrected:** GeoSPARQL, OWL 2 RL, OWL 2 EL, RML/R2RML, SHACL-AF and
+  SHACL-C are *Partial* with the concrete gaps listed; each was re-verified in
+  the code before downgrading (and footnote 5 was stale the other way: GML
+  literals and `geof:transform` exist).
+- **Federation:** `sd:BasicFederatedQuery` removed from the service description
+  (test-pinned); README says `SERVICE` is disabled by design.
+- **Stale docs:** SPARQL 1.2 guide (nonexistent builder API, unpublished
+  crate version), comparison footnote, Oxigraph 0.4 references, the demo-guide
+  link, the W3C script's download claim (dead code removed).
+- **Build matrix:** docs/build-features.md; `plugin-accounts-dashboard` now
+  compiled by GitHub CI; Dockerfile comment no longer lists SAML.
+- **Docs viewer:** 18 guides registered, parity test added.
+- **401→403** in data_models (3 sites), test-pinned.
+
+Not done in Phase 4: the OWL 2 RL Table 8 rules, EL equivalentClass /
+TransitiveProperty, SHACL-AF custom components and R2RML joins are documented
+gaps, not implemented — they are roadmap work, not claims fixes.
