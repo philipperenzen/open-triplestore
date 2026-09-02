@@ -331,6 +331,35 @@ fn emit_dataset_entry(
             writeln!(out, "    dct:publisher <{group_uri}> ;").unwrap();
         }
     }
+    // PROV-O: the module declared the prov prefix and emitted no PROV triple.
+    // Attribute the dataset to its owner and point at the activity that last
+    // changed it (the newest commit touching any of its graphs); the full
+    // trail is at /api/datasets/{id}/provenance.
+    writeln!(
+        out,
+        "    prov:wasAttributedTo <{}> ;",
+        crate::provenance::owner_iri(base_url, ds)
+    )
+    .unwrap();
+    if let Ok(graphs) = auth_db.list_dataset_graphs(&ds.id) {
+        let latest = crate::commit_log::list_commits(
+            store,
+            &crate::commit_log::CommitScope::Graphs(graphs),
+            &crate::commit_log::CommitQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
+        );
+        if let Some(c) = latest.first() {
+            writeln!(
+                out,
+                "    prov:wasGeneratedBy <{}/commit/{}> ;",
+                base_url.trim_end_matches('/'),
+                c.commit_id
+            )
+            .unwrap();
+        }
+    }
 
     // Per-graph VoID statistics + role-typed subsets
     let graph_entries = auth_db

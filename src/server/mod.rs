@@ -1090,6 +1090,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::conformance::get_dataset_conformance),
         )
         .route(
+            "/api/datasets/:dataset_id/provenance",
+            get(crate::provenance::get_dataset_provenance),
+        )
+        .route(
             "/api/datasets/:dataset_id/commits",
             get(handlers::list_dataset_commits),
         )
