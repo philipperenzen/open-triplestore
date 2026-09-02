@@ -913,3 +913,41 @@ async fn corrected_fence_after_a_failed_round_is_executed() {
         "the rows of the corrected query reach the model: {third}"
     );
 }
+
+/// A query identical to one that already failed this turn is not run again:
+/// it fails identically, and re-running it only burns a retrieval round. Live,
+/// a 7.6B model resubmitted the same broken query three times despite the
+/// follow-up saying not to. The repeat is recorded in the trail with its own
+/// error, the store is not consulted, and the model is told in so many words.
+/// The failing query is the exact shape both models produced — an aggregate
+/// projected next to an ungrouped variable — so this also pins the actionable
+/// hint attached to the parser's "variable that is unbound" message.
+#[tokio::test]
+async fn identical_failed_query_is_not_rerun() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let broken = "SPARQL:\nSELECT (COUNT(?s) AS ?c) ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }";
+    script(gw, &[broken, broken, "Ik kon de vraag niet beantwoorden."]);
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    let queries = resp["queries"].as_array().expect("retrieval trail");
+    assert_eq!(queries.len(), 2, "both attempts are in the trail: {resp}");
+    let first = queries[0]["error"].as_str().unwrap_or("");
+    assert!(
+        first.contains("GROUP BY"),
+        "the unbound-variable parse error carries an actionable hint: {first}"
+    );
+    let second = queries[1]["error"].as_str().unwrap_or("");
+    assert!(
+        second.contains("SAME query") && second.contains(first.split(" — ").next().unwrap()),
+        "the repeat is refused with the original error quoted: {second}"
+    );
+    let prompts = gw.prompts.lock().unwrap();
+    let third = prompts[2].to_string();
+    assert!(
+        third.contains("was not run") && third.contains("SAME query"),
+        "the model is told the repeat was not run: {third}"
+    );
+}

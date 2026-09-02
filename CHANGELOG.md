@@ -116,6 +116,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Spark no longer re-runs a query that already failed this turn.** The
+  repeat is recorded in the retrieval trail with its own error, the store is
+  not consulted, and the model is told the query was not run. The parser's
+  "variable that is unbound" message — an aggregate projected next to an
+  ungrouped variable, the exact failure two local models produced — now
+  carries an actionable GROUP BY hint.
 - **Spark runs a corrected query after a failed round.** A ```sparql fence
   counted as a query only while no round had been *attempted*; after a failed
   round the repair prompt invites "a corrected query as a fence", and models

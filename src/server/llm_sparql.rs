@@ -2582,11 +2582,40 @@ async fn execute_chat_query(
         sparql: query.clone(),
     })
     .await;
+    // A query identical to one that already failed this turn fails identically.
+    // Running it again burns a retrieval round for nothing — a 7.6B model
+    // resubmitted the same broken query three times live, despite the follow-up
+    // saying not to — so record it, skip the store, and make the repeat itself
+    // the error the model has to react to.
+    if let Some(prev) = runs.iter().find(|r| !r.ok && r.sparql == query) {
+        let emsg = format!(
+            "this is the SAME query that already failed this turn, and it fails the same \
+             way: {}. Change the query, or answer without it.",
+            prev.error.clone().unwrap_or_default()
+        );
+        sink.send(ChatStreamEvent::QueryResult {
+            round,
+            ok: false,
+            rows: None,
+            truncated: false,
+            error: Some(emsg.clone()),
+        })
+        .await;
+        runs.push(ChatQueryRun {
+            sparql: query,
+            ok: false,
+            error: Some(emsg.clone()),
+            columns: None,
+            rows: None,
+            truncated: false,
+        });
+        return (false, format!("That query was not run: {emsg}"));
+    }
     // Reject invented vocabulary BEFORE running it (see [`absent_iris`] for
     // why candidates are verified against the store and pasted IRIs are
     // exempt).
     let run_result = match validate_sparql(&query) {
-        Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
+        Err(parse_err) => Err(AppError::BadRequest(parse_error_message(&parse_err))),
         Ok(()) => {
             let candidates: Vec<String> = unknown_vocab_iris(&query, &known_vocab_iris())
                 .into_iter()
@@ -4532,6 +4561,23 @@ fn first_sparql_fence(reply: &str) -> Option<String> {
         rest = &body[end + 3..];
     }
     None
+}
+
+/// The parser's message, plus an actionable hint for the failure both a 1.5B
+/// and a 7.6B model produced live: an aggregate projected next to a plain
+/// variable with no GROUP BY. Oxigraph reports that as "The SELECT contains a
+/// variable that is unbound", which the models could not act on — they resent
+/// the query unchanged.
+fn parse_error_message(parse_err: &str) -> String {
+    let mut msg = format!("invalid SPARQL: {parse_err}");
+    if parse_err.contains("variable that is unbound") {
+        msg.push_str(
+            " — a SELECT that contains an aggregate (COUNT/MIN/MAX/SUM/AVG) may project \
+             ONLY aggregates and GROUP BY variables: add `GROUP BY ?var` for each plain \
+             variable you project, or drop the aggregate.",
+        );
+    }
+    msg
 }
 
 /// Does this text contain a SPARQL *read* query form? Updates are never run
