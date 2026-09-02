@@ -93,6 +93,20 @@ asset-archive     = ["dep:zip"]              # ZIP entry count + uncompressed si
 asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
+## The feature set a plain `cargo build` produces.
+##
+## `full`, so the README's native build path yields the binary its Highlights
+## table describes. With no `default` key at all — the previous state — a plain
+## `cargo build --release` compiled none of RDF 1.2, the OWL 2 profiles, LDP,
+## ShEx, SWRL, text/vocab search, SAML or 3D geometry, while the README told
+## users to build exactly that way and then start the server. Docker and CI pass
+## explicit feature lists, so only the documented native path was affected.
+##
+## `--no-default-features` gets the minimal core (SPARQL 1.1 + GeoSPARQL 2D over
+## the Oxigraph engine); CI compiles that configuration so its `#[cfg(not(...))]`
+## fallbacks keep building.
+default         = ["full"]
+
 ## All extensions enabled.
 ##
 ## `backup-encrypt` and `alerting` are included: docs/administration.md
