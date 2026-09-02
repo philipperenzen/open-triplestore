@@ -485,16 +485,6 @@ fn enforce_write_scope_for_mutation(
     Ok(())
 }
 
-/// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.
-///
-/// Must be placed **after** `optional_auth` or `require_auth` so that the
-/// `AuthenticatedUser` extension is populated.  If the DB contains no rules
-/// that match the current request, access is allowed (fail-open, with role
-/// middleware still applying separately).
-// Axum middleware: the error type must itself be a `Response`, so the
-// `Err` variant is inherently response-sized. Boxing it would only move
-// the allocation without changing the signature the framework requires.
-
 /// Whether the endpoint ACL is enforced. `ENDPOINT_ACL_ENFORCE=false` (or `0`)
 /// turns it off. Read once — this sits on every request.
 fn endpoint_acl_enforced() -> bool {
@@ -511,6 +501,15 @@ fn endpoint_acl_enforced() -> bool {
     })
 }
 
+/// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.
+///
+/// Must be placed **after** `optional_auth` or `require_auth` so that the
+/// `AuthenticatedUser` extension is populated.  If the DB contains no rules
+/// that match the current request, access is allowed (fail-open, with role
+/// middleware still applying separately).
+// Axum middleware: the error type must itself be a `Response`, so the
+// `Err` variant is inherently response-sized. Boxing it would only move
+// the allocation without changing the signature the framework requires.
 #[allow(clippy::result_large_err)]
 pub async fn endpoint_acl_guard(
     State(auth_db): State<Arc<AuthDb>>,
