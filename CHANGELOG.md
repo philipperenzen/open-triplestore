@@ -116,6 +116,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Spark's system prompt taught doubled braces.** The worked SPARQL examples
+  in the prompt were written `WHERE {{ GRAPH <g> {{ … }} }}` — a Rust format
+  escape in a constant that is never formatted — so models saw that as the
+  canonical query shape. Small models copied it verbatim, every query failed
+  to parse, and the turn ended with `ran_query=false` and the broken query as
+  the answer. The examples are plain SPARQL now, and a test asserts the prompt
+  sent to the gateway contains no `{{`.
 - **Spark keeps vocabulary at small context windows.** When the system prompt
   exceeded the declared window the budgeter dropped *every* graph-vocabulary
   block, so the model was left with graph IRIs and no predicates — and

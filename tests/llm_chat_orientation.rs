@@ -836,3 +836,32 @@ async fn small_context_window_trims_vocabulary_lowest_priority_first() {
         "the lowest-priority graph is the one trimmed: {trimmed}"
     );
 }
+
+/// The system prompt's example queries must be SPARQL, not Rust format-string
+/// escapes. `CHAT_SYSTEM_PROMPT` is a plain constant interpolated as a VALUE,
+/// yet its examples were written `WHERE {{ GRAPH <g> {{ … }} }}` — so every
+/// model was shown doubled braces as the canonical shape. Small models copy
+/// them verbatim, every query fails to parse, the repair rounds fail the same
+/// way, and the turn ends with `ran_query=false` and the broken query as the
+/// answer (observed live with qwen2.5:1.5b once the vocabulary fit the window).
+#[tokio::test]
+async fn system_prompt_examples_are_sparql_not_format_escapes() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+    chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    let prompts = gw.prompts.lock().unwrap();
+    let system = prompts[0]["messages"][0]["content"].as_str().unwrap();
+    for esc in ["{{", "}}"] {
+        if let Some(i) = system.find(esc) {
+            let lo = i.saturating_sub(80);
+            let hi = (i + 80).min(system.len());
+            panic!(
+                "the prompt teaches doubled braces ({esc}) — a format escape, not SPARQL: …{}…",
+                &system[lo..hi]
+            );
+        }
+    }
+}

@@ -1169,10 +1169,10 @@ canonical per-graph triple count is: \
 Sanity-check aggregates before presenting them: an all-zero result almost always means a wrong \
 variable, not empty graphs — re-query, don't chart it.\n\
 Worked patterns — adapt the IRIs from the Graph vocabulary section, never invent them:\n\
-count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE {{ \
-GRAPH <g> {{ ?b a <Class> ; <yearPredicate> ?year }} }}`\n\
-mappable rows: `SELECT ?el ?label ?wkt WHERE {{ GRAPH <g> {{ ?el rdfs:label ?label ; \
-geo:hasGeometry/geo:asWKT ?wkt }} }} LIMIT 50` — then present with a source:\"query\" map.\n\n\
+count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE { \
+GRAPH <g> { ?b a <Class> ; <yearPredicate> ?year } }`\n\
+mappable rows: `SELECT ?el ?label ?wkt WHERE { GRAPH <g> { ?el rdfs:label ?label ; \
+geo:hasGeometry/geo:asWKT ?wkt } } LIMIT 50` — then present with a source:\"query\" map.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
