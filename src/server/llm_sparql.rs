@@ -509,7 +509,7 @@ async fn shacl_assist(
         "shacl",
         user.as_ref(),
         ip.as_deref(),
-        [description.as_str()],
+        [("user", description.as_str())],
         &description,
     )?;
     let start = Instant::now();
@@ -716,7 +716,7 @@ async fn nl_to_sparql(
         "sparql",
         user.as_ref(),
         ip.as_deref(),
-        [req.question.as_str()],
+        [("user", req.question.as_str())],
         &req.question,
     )?;
     let start = Instant::now();
@@ -1777,7 +1777,10 @@ fn guard_gate<'a>(
     endpoint: &'static str,
     user: Option<&AuthenticatedUser>,
     ip: Option<&str>,
-    texts: impl IntoIterator<Item = &'a str>,
+    // `(role, content)` for EVERY message — the guard decides which checks
+    // apply to which roles. Passing a pre-filtered subset is what let a
+    // client-labelled "assistant" message escape the size caps and blocklist.
+    texts: impl IntoIterator<Item = (&'a str, &'a str)>,
     preview_src: &str,
 ) -> Result<Option<String>, AppError> {
     let blocked = |flag: String, err: AppError| {
@@ -1825,14 +1828,17 @@ fn guard_gate<'a>(
     Ok(verdict.flag)
 }
 
-/// The user-typed content of a chat request: every user-role message. The
-/// assistant's own replies are echoed back by the client each turn and must
-/// not trip the phrase checks.
-fn user_texts(req: &ChatRequest) -> impl Iterator<Item = &str> {
+/// Every message in a chat request, as `(role, content)`.
+///
+/// This used to drop `assistant` messages before the guard saw them. The client
+/// submits the whole transcript on each turn, so that let a caller exempt
+/// unlimited content from the size caps and the blocklist just by labelling it
+/// `"assistant"`. The guard now receives everything and decides per check which
+/// roles a given rule applies to.
+fn guarded_texts(req: &ChatRequest) -> impl Iterator<Item = (&str, &str)> {
     req.messages
         .iter()
-        .filter(|m| m.role != "assistant")
-        .map(|m| m.content.as_str())
+        .map(|m| (m.role.as_str(), m.content.as_str()))
 }
 
 fn last_user_text(req: &ChatRequest) -> &str {
@@ -1898,7 +1904,7 @@ async fn llm_chat(
         "chat",
         user.as_ref(),
         ip.as_deref(),
-        user_texts(&req),
+        guarded_texts(&req),
         last_user_text(&req),
     )?;
     let preview = llm_guard::question_preview(last_user_text(&req));
@@ -1952,7 +1958,7 @@ async fn llm_chat_stream(
         "chat_stream",
         user.as_ref(),
         ip.as_deref(),
-        user_texts(&req),
+        guarded_texts(&req),
         last_user_text(&req),
     )?;
     let preview = llm_guard::question_preview(last_user_text(&req));
