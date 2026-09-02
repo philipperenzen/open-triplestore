@@ -49,11 +49,14 @@
 
   const dispatch = createEventDispatcher();
 
-  // Cesium fetches its workers / glsl / Assets relative to CESIUM_BASE_URL; we
-  // point it at the matching CDN build so static assets resolve with no bundler
-  // configuration.
-  const CESIUM_VERSION = '1.123.0';
-  const CESIUM_BASE_URL = `https://cdn.jsdelivr.net/npm/cesium@${CESIUM_VERSION}/Build/Cesium/`;
+  // Cesium fetches its workers / glsl / Assets relative to CESIUM_BASE_URL. They
+  // are served from this app's own origin under /cesium/ — copied out of the
+  // installed `cesium` package by the `cesiumAssets` plugin in vite.config.js —
+  // so the runtime files always match the bundled engine and the viewer works
+  // air-gapped. This used to point at a CDN pinned to 1.123.0 while npm had
+  // resolved 1.144.0: the 1.144 engine fetched 1.123 workers, and any
+  // deployment without internet access got no globe at all.
+  const CESIUM_BASE_URL = '/cesium/';
   // Token-free Esri World Imagery — the same source the 2D map viewer uses — so
   // the satellite base never depends on a Cesium Ion token.
   const ESRI_IMAGERY =
