@@ -116,6 +116,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Spark runs a corrected query after a failed round.** A ```sparql fence
+  counted as a query only while no round had been *attempted*; after a failed
+  round the repair prompt invites "a corrected query as a fence", and models
+  that took that path (a 1.5B and a 7.6B one, live) got a query card instead
+  of results and answered from memory. A fence is now executed as long as no
+  round has *succeeded* — the rule's own stated rationale — within the
+  existing per-turn round cap.
 - **Spark's system prompt taught doubled braces.** The worked SPARQL examples
   in the prompt were written `WHERE {{ GRAPH <g> {{ … }} }}` — a Rust format
   escape in a constant that is never formatted — so models saw that as the

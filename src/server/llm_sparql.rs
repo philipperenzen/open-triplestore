@@ -2408,10 +2408,16 @@ Continue with the next unmet item, or write the final \
             continue;
         }
 
-        // Before anything has been retrieved a fenced ```sparql block counts as a
-        // request to run it; afterwards it is a query card the user is meant to see.
+        // Until a round has SUCCEEDED a fenced ```sparql block counts as a request
+        // to run it; once rows are in it is a query card the user is meant to see.
+        // The gate used to be `runs.is_empty()`, which also barred the corrected
+        // fence that the repair prompt itself invites after a FAILED round —
+        // models that took that path (a 1.5B and a 7.6B one, live) got a card
+        // instead of results and answered from memory. The per-turn round cap
+        // still bounds how many attempts this can cost.
         let reply = assistant_text(&assistant);
-        let Some(query) = extract_query_request(&reply, runs.is_empty()) else {
+        let nothing_retrieved_yet = !runs.iter().any(|r| r.ok);
+        let Some(query) = extract_query_request(&reply, nothing_retrieved_yet) else {
             break;
         };
         if sink.is_closed() {
@@ -4509,8 +4515,9 @@ fn extract_query_request(reply: &str, allow_fence: bool) -> Option<String> {
 /// the `SPARQL:` execution marker. Read strictly, that reply retrieves nothing:
 /// the turn ends, the fence renders as a query card, and the model then answers
 /// from memory. Treating the fence as a directive is only safe while nothing has
-/// been retrieved yet this turn (see [`chat_query_request`]) — once rows are in,
-/// a fenced query is a *presented* query card and must stay one.
+/// been retrieved yet this turn — i.e. no round has succeeded; a failed round
+/// retrieved nothing — because once rows are in, a fenced query is a
+/// *presented* query card and must stay one.
 fn first_sparql_fence(reply: &str) -> Option<String> {
     let mut rest = reply;
     while let Some(open) = rest.find("```") {

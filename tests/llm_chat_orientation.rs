@@ -865,3 +865,51 @@ async fn system_prompt_examples_are_sparql_not_format_escapes() {
         }
     }
 }
+
+/// After a FAILED round nothing has been retrieved, so a corrected query the
+/// model writes as a ```sparql fence must be run, not shown as a card. The
+/// repair prompt itself invites "a corrected query as a ```sparql block", and
+/// both a 1.5B and a 7.6B model took that path live: round 1 failed on a
+/// syntax error, round 2 was prose plus a *correct* fenced query, and the turn
+/// ended with `ran_query=false` and an answer from memory. The fence gate was
+/// `runs.is_empty()`; its own rationale — "only safe while nothing has been
+/// retrieved yet" — is `!runs.iter().any(|r| r.ok)`.
+#[tokio::test]
+async fn corrected_fence_after_a_failed_round_is_executed() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let broken = "SPARQL:\nSELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> ";
+    let corrected =
+        "SELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }";
+    let fence_reply = format!(
+        "That query was malformed. Here is the corrected one:\n```sparql\n{corrected}\n```\n"
+    );
+    script(
+        gw,
+        &[
+            broken,
+            &fence_reply,
+            "Er zijn 3 bruggen: Brug 1, Brug 2 en Brug 3.",
+        ],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    assert_eq!(
+        resp["ran_query"], true,
+        "the corrected fence must be executed after the failed round: {resp}"
+    );
+    assert_eq!(resp["sparql"].as_str(), Some(corrected));
+    let prompts = gw.prompts.lock().unwrap();
+    assert!(
+        prompts.len() >= 3,
+        "three completions: broken query, corrected fence, grounded answer ({})",
+        prompts.len()
+    );
+    let third = prompts[2].to_string();
+    assert!(
+        third.contains("http://ex.org/id/b1") && third.contains("http://ex.org/id/b3"),
+        "the rows of the corrected query reach the model: {third}"
+    );
+}
