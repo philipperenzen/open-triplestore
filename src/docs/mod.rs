@@ -499,6 +499,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 106,
     },
     Builtin {
+        slug: "ldes",
+        title: "Linked Data Event Streams (LDES)",
+        category: "API & Operations",
+        body: include_str!("../../docs/ldes.md"),
+        admin_only: false,
+        sort: 115,
+    },
+    Builtin {
         slug: "ldp",
         title: "Linked Data Platform (LDP) 1.0",
         category: "API & Operations",

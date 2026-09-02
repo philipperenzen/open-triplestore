@@ -644,6 +644,33 @@ impl AuthDb {
             CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
             -- ── Endpoint ACL ────────────────────────────────────────────────
+            -- LDES (Linked Data Event Streams): per-dataset stream config,
+            -- the append-only member log, and the client's sync bookmarks.
+            CREATE TABLE IF NOT EXISTS ldes_streams (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                page_size INTEGER NOT NULL DEFAULT 100,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ldes_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id TEXT NOT NULL,
+                entity_iri TEXT NOT NULL,
+                graph_iri TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                ntriples TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ldes_members_ds ON ldes_members(dataset_id, id);
+            CREATE TABLE IF NOT EXISTS ldes_sync_state (
+                dataset_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                last_timestamp TEXT,
+                members_applied INTEGER NOT NULL DEFAULT 0,
+                synced_at TEXT,
+                PRIMARY KEY (dataset_id, source_url)
+            );
+
             CREATE TABLE IF NOT EXISTS endpoint_acl (
                 id TEXT PRIMARY KEY,
                 principal_type TEXT NOT NULL CHECK(principal_type IN ('user','organisation','group','role')),

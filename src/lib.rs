@@ -44,6 +44,7 @@ pub mod geo;
 pub mod ifc;
 pub mod imports;
 pub mod kind_detector;
+pub mod ldes;
 #[cfg(feature = "ldp")]
 pub mod ldp;
 pub mod netutil;

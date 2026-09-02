@@ -24,6 +24,7 @@ mod geo;
 mod ifc;
 mod imports;
 mod kind_detector;
+mod ldes;
 #[cfg(feature = "ldp")]
 mod ldp;
 mod netutil;

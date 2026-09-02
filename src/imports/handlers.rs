@@ -736,6 +736,14 @@ pub async fn bulk_import(
                     }
                 }
             }
+            // LDES: an import (re)publishes every entity it loaded.
+            {
+                let graphs: Vec<String> = ok_files
+                    .iter()
+                    .flat_map(|(_, g)| g.iter().cloned())
+                    .collect();
+                crate::ldes::capture::publish_all(&state, &ds_id, &graphs);
+            }
             // Commit trail for the import: files → dataset graphs. Imports used
             // to leave no trace, while `GET …/commits` presented the log as the
             // dataset's complete history.

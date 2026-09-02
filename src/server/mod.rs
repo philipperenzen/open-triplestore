@@ -1094,6 +1094,15 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::provenance::get_dataset_provenance),
         )
         .route(
+            "/api/datasets/:dataset_id/ldes",
+            get(crate::ldes::publish::get_stream).put(crate::ldes::publish::put_stream),
+        )
+        .route(
+            "/api/datasets/:dataset_id/ldes/nodes/:n",
+            get(crate::ldes::publish::get_node),
+        )
+        .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
+        .route(
             "/api/datasets/:dataset_id/commits",
             get(handlers::list_dataset_commits),
         )

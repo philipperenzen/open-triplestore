@@ -700,6 +700,13 @@ pub(crate) async fn execute_update(
     let effective = effective_str.to_string();
     let store = state.store.clone();
     let affected = graph_iris.clone();
+    let ldes_before = {
+        let st = state.clone();
+        let gs = graph_iris.clone();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
     tokio::time::timeout(
         timeout,
@@ -724,6 +731,11 @@ pub(crate) async fn execute_update(
         let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&graphs)).await;
     }
 
+    {
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
+            .await;
+    }
     {
         use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
         let mut b = AuditEventBuilder::new(AuditEventType::SparqlUpdate, AuditOutcome::Success)
@@ -1511,6 +1523,15 @@ async fn graph_store_put(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
+    // LDES change capture: the entity index before the write (empty unless
+    // the graph belongs to a dataset that publishes a stream).
+    let ldes_before = {
+        let st = state.clone();
+        let gs: Vec<String> = commit_graph.iter().cloned().collect();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
 
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -1539,6 +1560,11 @@ async fn graph_store_put(
     })
     .await?;
     sync_text_index_after_graph_write(&state, touched).await;
+    {
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
+            .await;
+    }
     // Commit trail: Graph Store writes left no trace, while the dataset's
     // history endpoint presented the commit log as complete.
     let after = commit_graph
@@ -1577,6 +1603,15 @@ async fn graph_store_post(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
+    // LDES change capture: the entity index before the write (empty unless
+    // the graph belongs to a dataset that publishes a stream).
+    let ldes_before = {
+        let st = state.clone();
+        let gs: Vec<String> = commit_graph.iter().cloned().collect();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
 
     let content_type = headers
         .get(CONTENT_TYPE)
@@ -1605,6 +1640,11 @@ async fn graph_store_post(
     })
     .await?;
     sync_text_index_after_graph_write(&state, touched).await;
+    {
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
+            .await;
+    }
     // Commit trail: Graph Store writes left no trace, while the dataset's
     // history endpoint presented the commit log as complete.
     let after = commit_graph
@@ -1641,6 +1681,15 @@ async fn graph_store_delete(
         .as_deref()
         .and_then(|g| state.store.graph_count_cached(Some(g)))
         .unwrap_or(0);
+    // LDES change capture: the entity index before the write (empty unless
+    // the graph belongs to a dataset that publishes a stream).
+    let ldes_before = {
+        let st = state.clone();
+        let gs: Vec<String> = commit_graph.iter().cloned().collect();
+        tokio::task::spawn_blocking(move || crate::ldes::capture::before(&st, &gs))
+            .await
+            .unwrap_or_default()
+    };
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
@@ -1652,6 +1701,11 @@ async fn graph_store_delete(
     // literals kept turning up in search results until an unrelated write
     // forced a rebuild.
     sync_text_index_after_graph_write(&state, touched).await;
+    {
+        let st = state.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
+            .await;
+    }
     // Commit trail: Graph Store writes left no trace, while the dataset's
     // history endpoint presented the commit log as complete.
     let after = commit_graph
