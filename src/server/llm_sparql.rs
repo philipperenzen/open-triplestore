@@ -108,6 +108,15 @@ fn env_nonempty(key: &str) -> Option<String> {
 /// would open a new connection (TCP + TLS handshake) for every completion —
 /// with up to four completions per chat turn that handshake tax is pure added
 /// latency. One pooled client keeps the connection to the gateway alive.
+// Gateway failures — unreachable, or answering with a non-2xx — are 503
+// `ServiceUnavailable`, never 500: the LLM tier is an optional, operator-
+// configured dependency, and `/api/llm/health` already reports it as
+// `reachable: false`. The chat endpoints used to answer a bare "Internal server
+// error" for the same condition, which read as a crash rather than "no gateway".
+/// What to do about an unreachable gateway; appended to every 503.
+const GATEWAY_HINT: &str =
+    "set LLM_GATEWAY_URL to a reachable OpenAI-compatible endpoint (see docs/spark.md)";
+
 fn http() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
     HTTP.get_or_init(|| {
@@ -145,13 +154,14 @@ pub(crate) async fn chat_completion(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -210,13 +220,14 @@ pub(crate) async fn chat_completion_messages(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -385,13 +396,14 @@ async fn chat_completion_messages_stream(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -1063,10 +1075,11 @@ async fn forward_feedback(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     let status = resp.status();
     let ok = status.is_success();
     // A gateway without `/v1/signals` answers 404; that used to be reported as
@@ -1636,8 +1649,8 @@ async fn chat_completion_full(
         rb = rb.bearer_auth(key);
     }
     let resp = rb.send().await.map_err(|e| {
-        CompletionFailure::Fatal(AppError::Internal(format!(
-            "LLM endpoint unreachable at {url}: {e}"
+        CompletionFailure::Fatal(AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
         )))
     })?;
     if !resp.status().is_success() {
@@ -2108,7 +2121,9 @@ async fn next_assistant(
                     }
                     Err(CompletionFailure::Fatal(e)) => return Err(e),
                     Err(CompletionFailure::Status(s2)) => {
-                        return Err(AppError::Internal(format!("LLM endpoint returned {s2}")))
+                        return Err(AppError::ServiceUnavailable(format!(
+                            "LLM gateway returned {s2}"
+                        )))
                     }
                 }
             }

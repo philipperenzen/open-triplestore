@@ -176,6 +176,12 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 | `LLM_CHAT_QUERY_MAX_SECS` | Per-round SPARQL cap in seconds (default `30`, clamped 5–600); the effective bound is the smaller of this and the endpoint's own query timeout. Raise it where legitimate analytical questions (property paths over a large ontology) need more. |
 | `LLM_CHAT_TOOLS` | `auto` (default): offer the native function tools on every completion and fall back to the `SPARQL:` directive transparently — a gateway that rejects the `tools` parameter is remembered per model. `off`: directive protocol only. Tool rounds are not token-streamed; with tools active the answer arrives when the turn completes. |
 
+When the gateway is unreachable, or answers with a non-2xx status, the chat
+endpoints return **503 Service Unavailable** with a message naming the endpoint
+that was tried and this knob; `GET /api/llm/health` keeps reporting
+`reachable: false`. (They used to answer a bare 500 "Internal server error",
+indistinguishable from a crash.)
+
 **Why `LLM_CONTEXT_TOKENS` exists next to `OLLAMA_CONTEXT_LENGTH`.** They size two different things in two different processes: `OLLAMA_CONTEXT_LENGTH` (or a Modelfile `num_ctx`) is the *server's* context — how many tokens Ollama actually processes before cutting; `LLM_CONTEXT_TOKENS` is the *client's* budget — what this store assumes while trimming its own prompt. The store cannot read the server's setting over the API, so when both apply they must agree; a compose file can feed both from one shared variable. With vLLM no client knob is needed at all — it advertises `max_model_len` and detection picks it up automatically; the same goes for any gateway whose `/v1/models` carries a `context_window`/`context_length` field.
 
 **Which model.** Spark is the most demanding task on the platform: a long system

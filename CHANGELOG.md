@@ -116,6 +116,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Spark degrades cleanly without a gateway:** an unreachable or failing
+  `LLM_GATEWAY_URL` is now a 503 naming the endpoint and the knob, on the chat
+  and feedback paths alike; it was a bare 500 "Internal server error".
 - **LDP:** an ETag read from `GET` now satisfies `If-Match` on `PUT`/`PATCH`
   (GET hashed the re-serialised body while writes compared against the raw
   DESCRIBE hash, so every documented read→modify→write round trip ended in

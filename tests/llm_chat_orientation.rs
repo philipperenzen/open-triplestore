@@ -682,3 +682,73 @@ async fn saved_query_repair_refuses_to_persist_unparseable_output() {
         "a valid repair is promoted to the head"
     );
 }
+
+/// Spark's stated security property — a model-authored query must not read
+/// outside the caller's graphs — had no test. The model is scripted to query a
+/// graph the caller has no grant on. Whatever rows come back are exactly what
+/// reaches the model in the next request (and the answer's retrieval trail), so
+/// nothing sent to the gateway may carry the secret. The admin control proves
+/// the same scripted query DOES surface the value when the graph is in scope —
+/// i.e. the test can tell a leak from a query that merely failed.
+#[tokio::test]
+async fn model_authored_query_cannot_read_outside_the_callers_scope() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    const SECRET: &str = "urn:secret:graph";
+    const VALUE: &str = "TOP-SECRET-42";
+    let query = format!("SPARQL:\nSELECT ?o WHERE {{ GRAPH <{SECRET}> {{ ?s ?p ?o }} }}");
+
+    let (state, admin) = common::admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "dsecret",
+            "Secret",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("dsecret", SECRET).unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{SECRET}> {{ <urn:s:x> <urn:s:p> \"{VALUE}\" }} }}"
+        ))
+        .unwrap();
+    state
+        .auth_db
+        .create_user(
+            "alice",
+            "alice",
+            "alice@t.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let alice = common::mint_token("alice", "alice", "user");
+
+    // Control: in scope for the admin, the value reaches the model.
+    script(gw, &[&query, "Noted."]);
+    let resp = chat_turn(state.clone(), &admin, "What is in the secret graph?").await;
+    let sent = serde_json::to_string(&*gw.prompts.lock().unwrap()).unwrap();
+    assert!(
+        sent.contains(VALUE) || resp.to_string().contains(VALUE),
+        "control: an in-scope query must surface the value to the model: {resp}"
+    );
+
+    // A caller without a grant: the same query surfaces nothing, anywhere.
+    script(gw, &[&query, "Noted."]);
+    let resp = chat_turn(state, &alice, "What is in the secret graph?").await;
+    let sent = serde_json::to_string(&*gw.prompts.lock().unwrap()).unwrap();
+    assert!(
+        !sent.contains(VALUE),
+        "the secret reached the model in a gateway request: {sent}"
+    );
+    assert!(
+        !resp.to_string().contains(VALUE),
+        "the secret reached the answer or its retrieval trail: {resp}"
+    );
+}
