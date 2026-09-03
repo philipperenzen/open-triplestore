@@ -8428,6 +8428,8 @@ pub(crate) fn run_regime(
 ) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
     let _sources: Vec<String> = sources.clone().unwrap_or_default();
     // Apply the scope to whichever reasoner the regime selects.
+    // Unused when every regime feature is off (`--no-default-features`).
+    #[allow(unused_macros)]
     macro_rules! scoped {
         ($m:expr) => {{
             let m = $m;

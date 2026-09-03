@@ -1980,3 +1980,17 @@ the identity-database pool opened eight connections at once, each running
   and reports each HTTP step, for a rerun on an amd64 host or with a "main"
   build.
 
+**Verification (2026-09-03):** full workspace suite on the final Phase 7 tree:
+2867 passed, 1 failed, 4 ignored across 80 binaries — the failure a
+pre-existing race in the guest-capability policy unit tests (process-wide
+`OTS_GUEST_CAPABILITIES` set and cleared by interleaved tests), serialised in
+`d32092d` and reverified; the affected binary then 873/0. `cargo check
+--no-default-features` builds (the container ZIP codec and the regime
+dispatch are gated cleanly). fmt/clippy clean at every commit; the generated
+conformance table regenerated for the nine new test binaries. Frontend gate
+and Playwright e2e not re-run: no frontend change in Phase 7.
+
+**Open after Phase 7:** the Fuseki comparison column; the GWSW export URL;
+CB'23 / SNOMED as bundles of licensed data the operator supplies. Everything
+else in the plan's seven phases is implemented, tested and documented.
+
