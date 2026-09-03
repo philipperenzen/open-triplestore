@@ -365,6 +365,12 @@ impl TripleStore {
         self
     }
 
+    /// Rebuild the in-memory query accelerator if writes have gone quiet and it
+    /// is stale (see `ParallelMirror::ensure_fresh`); cheap when nothing changed.
+    pub fn accelerator_tick(&self) {
+        self.parallel_mirror.ensure_fresh(&self.store);
+    }
+
     /// How many times the parallel mirror has been (re)built. Tests use it to
     /// prove the mirror was consulted rather than silently bypassed.
     pub fn parallel_build_count(&self) -> usize {

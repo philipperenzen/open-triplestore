@@ -287,6 +287,17 @@ impl ParallelMirror {
 
     /// Get warm shards, (re)building from `store` if dirty, or `None` if the store
     /// is empty or larger than the cap.
+    /// Keep the mirror fresh without waiting for a query: if writes have gone
+    /// quiet and the copies are stale, start (or perform) the rebuild now. Called
+    /// from a periodic server task, so the first query after a write burst does
+    /// not pay for — or wait out — the rebuild.
+    pub fn ensure_fresh(&self, store: &Store) {
+        if !self.inner.enabled || !self.inner.dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.get_or_build(store);
+    }
+
     fn get_or_build(&self, store: &Store) -> Option<Arc<ParallelStore>> {
         // Fast path: a CLEAN state is authoritative in both directions — `Some` is
         // the warm mirror, and `None` means "deliberately off for this state" (empty
@@ -888,6 +899,27 @@ mod stale_read_tests {
         assert!(
             mirror.get_or_build(&store).is_none(),
             "dirty + build lock held = a rebuild is running: no stale shards"
+        );
+    }
+
+    /// A stale mirror with writes gone quiet is rebuilt by `ensure_fresh`
+    /// without any query asking for it.
+    #[test]
+    fn ensure_fresh_rebuilds_a_quiet_dirty_mirror() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(mirror.get_or_build(&store).is_some());
+        let builds = mirror.inner.build_count.load(Ordering::Relaxed);
+        mirror.mark_dirty();
+        mirror.ensure_fresh(&store);
+        assert_eq!(mirror.inner.build_count.load(Ordering::Relaxed), builds + 1);
+        assert!(!mirror.inner.dirty.load(Ordering::Acquire));
+        mirror.ensure_fresh(&store);
+        assert_eq!(
+            mirror.inner.build_count.load(Ordering::Relaxed),
+            builds + 1,
+            "clean: no rebuild"
         );
     }
 

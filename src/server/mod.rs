@@ -2380,6 +2380,21 @@ pub async fn run(
     if let Some(keys) = state.oidc_provider.clone() {
         crate::federation::init(keys, &state.base_url);
     }
+    // Keep the in-memory query accelerator fresh: after a write burst goes
+    // quiet, rebuild it in the background instead of making the next
+    // aggregate query wait for — or run without — it.
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_millis(500));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                every.tick().await;
+                let s = st.clone();
+                let _ = tokio::task::spawn_blocking(move || s.store.accelerator_tick()).await;
+            }
+        });
+    }
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.
