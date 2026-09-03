@@ -526,6 +526,60 @@ streaming and are unaffected by the size. Grouped-aggregate shard decomposition
 (§3 — `AVG`→merge `SUM`+`COUNT`) brings this down sharply for datasets *within* the
 in-memory mirror cap, but this 100M tier exceeds it and runs on the persistent store.
 
+#### OTL-scale benchmark — asset-shaped data, deep SHACL, concurrent writers (2026-09)
+
+The tiers above measure generic shapes. This tier measures what an object-type
+library deployment does: `N` assets typed against 40 object types with six
+typed properties, a part-of link and a location — ~9 quads per asset — in one
+named graph on the persistent store; six query shapes with the **result cache
+off** (`OTS_QUERY_CACHE=false`, so every number is an evaluation); SHACL over
+every asset against six property shapes (datatype, minCount, class, pattern,
+`sh:in`, bounds); and a 20-second phase of 4 writers inserting 500-quad
+batches next to 4 readers doing lookups. Harness:
+[`examples/scale_otl.rs`](../examples/scale_otl.rs) (`SCALE_DUMP=<file>` keeps
+the generated Turtle so another store can load the same data;
+[`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) loads it
+into Apache Jena Fuseki in Docker and times the same queries over HTTP).
+Apple M-series laptop, release build.
+
+| | 100k assets (0.9M quads) | 1M assets (9M quads) | Fuseki TDB2, 0.9M quads (HTTP)² |
+|---|--:|--:|--:|
+| Bulk load | 138k quads/s | 83k quads/s (109 s) | —² |
+| lookup (one asset) | 0.07 ms | 0.07 ms | —² |
+| 2-way join, 10k rows | 72 ms | 51 ms | —² |
+| filter + count (scan) | 29 ms | 250 ms | —² |
+| group by + avg (41 groups) | 1.18 s | 9.5 s | —² |
+| property path `partOf+` | 0.08 ms | 0.07 ms | —² |
+| `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
+| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 118 s (76k quads/s) | — |
+| 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+
+² Not completed. The `stain/jena-fuseki` Docker image is amd64-only (emulated
+on an arm64 host, so its numbers would not be comparable), and the Apache Jena
+Fuseki 6.2 webapp distribution run natively answered the data load with 401
+even with a permissive Shiro configuration. `scripts/scale_compare_fuseki.sh`
+supports both modes and reports every HTTP step; rerun it on an amd64 host, or
+with a Fuseki "main" (no-UI) build, to fill this column.
+
+**What the benchmark found.** The first run wrote 2 000 quads in the 20-second
+mixed phase with a write p95 of 22 s: every load into a named graph ended with
+a full recount of that graph to refresh the count index, so a 500-quad insert
+into a 900k-quad graph cost a 900k-quad scan, and four writers serialised on
+it. The index is now bumped by the batch's exact new-quad count (duplicates
+and already-stored quads excluded with point lookups); the same phase then
+wrote 900 000+ quads (43–46k/s, p95 71–79 ms across runs) with readers at 2 ms p95 — a 430×
+throughput difference from one write-side `O(graph)` step. Bulk load rose
+from 77k to 111k quads/s for the same reason.
+
+**What it did not find.** Nothing in this tier suggests the backend is the
+limit: reads stay lock-free under writes, SHACL scales linearly with the
+number of targets, and the persistent store's load rate holds at 9M quads.
+The one visible cost is `COUNT(*)` inside a `GRAPH` block (306 ms, a scan):
+the O(1) fast-count applies to the bare default-graph pattern only. Per the
+readiness plan, the trigger for evaluating another backend is deep SHACL over
+tens of millions of quads *with concurrent writers* exceeding a single node;
+at this tier the store is well inside that envelope.
+
 **Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
 100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
 termination). Full scans grow linearly (~60 ms per 1M triples). RocksDB load is

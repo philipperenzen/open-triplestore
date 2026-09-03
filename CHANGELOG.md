@@ -14,6 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OTL-scale benchmark.** `examples/scale_otl.rs` generates asset-shaped
+  data at scale and measures load, six query shapes (cache off), SHACL over
+  every asset and a concurrent writers-plus-readers phase;
+  `scripts/scale_compare_fuseki.sh` loads the same data into Fuseki. Results
+  and the write-side finding it produced are in docs/performance.md.
 - **Federated access control.** With `OTS_REMOTE_AUTH=assert` an instance
   calling an allowlisted peer for a user (`SERVICE`, LDES sync) sends a
   five-minute ES256 identity assertion signed with its OIDC-provider key;

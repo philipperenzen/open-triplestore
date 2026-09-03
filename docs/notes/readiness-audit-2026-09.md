@@ -1906,3 +1906,77 @@ amended commit). Full workspace suite on the final Phase 6 tree
 generated conformance table was regenerated for the five new test binaries.
 No frontend change in this phase, so the frontend gate and e2e were not
 re-run.
+
+## Addendum — Phase 7 (Stage 3 platform parity), 2026-09-03
+
+Open items from earlier phases closed first: the real-data NEN 2660-2 / IMBOR
+run (`426d7e1`, see the Phase 5 addendum) and the release-image check. The
+image builds (`docker build`, 35 min, 262 MB), boots, and ships `full`
+including backup-encrypt and alerting as docs/build-features.md states; the
+boot log exposed two defects, both fixed (`77517f4`): `BACKUP_DIR` defaulted
+to the working-directory-relative `data/backups`, unwritable in the image, so
+unattended backups were silently disabled on every default deployment; and
+the identity-database pool opened eight connections at once, each running
+`journal_mode=WAL`, logging a spurious "database is locked" ERROR at boot.
+
+- **7.2 DCAT-AP / DCAT-AP-NL** (`77fa22e`). The catalogue is built as an RDF
+  graph and serialised per request; user-supplied values are terms, malformed
+  IRIs are dropped with a warning (they used to be interpolated into Turtle).
+  `DCAT_PROFILE=dcat-ap|dcat-ap-nl` adds the profiles' mandatory properties;
+  the served AP-NL document is validated in `tests/dcat_ap_http.rs` against
+  SHACL shapes encoding the mandatory-property tables. VoID statistics cover
+  named graphs (they reported 0 distinct subjects for a store whose data sat
+  in named graphs) and are cached in the store until the next write instead
+  of three DISTINCT scans per anonymous request. LDES streams and per-graph
+  downloads are distributions; `dcat:hasVersion`/`dcat:version` come from the
+  version registry.
+- **7.5 RDF Patch** (`ee48275`). Version diffs served as RDF Patch; patches
+  applied atomically per dataset as one commit (registered graphs only, no
+  blank-node deletes, TA aborts).
+- **7.3 Per-dataset entailment** (`256f9c7`). Regime + materialisation mode
+  per dataset, rebuilt after every write path into the dataset's own
+  entailment graph; queries opt in with `entailment_dataset`. Found on the
+  way: `POST /sparql` dropped the entailment parameters entirely.
+- **7.1 Containers / ICDD** (`12aa7a1`). Profile-neutral container import
+  and export with ICDD Part 1 first; documents → assets, linksets/payloads →
+  role-typed graphs, index → catalogue graph; the export re-imports.
+- **7.4 Domain starter profiles** (`b6ca9c5`). A FHIR-shaped clinical bundle
+  loaded in CI proves the layered convention is domain-neutral; GWSW is a
+  scaffold (its Turtle export is not fetchable without a portal session);
+  CB'23 material passports and SNOMED CT are licensed or not published as
+  RDF by their owners — documented as "bundle what you are entitled to".
+- **7.7 Federated access control** (`e1ee6ba`). Signed five-minute ES256
+  identity assertions between instances (`OTS_REMOTE_AUTH=assert`), verified
+  by trusted peers against the issuer's JWKS with the peer's `BASE_URL` as
+  audience (`OTS_TRUSTED_ISSUERS`), provisioned as read-only federated users
+  with organisation memberships from the assertion's `org:` groups, then
+  authorised locally. Found on the way: the write-scope guard treated every
+  POST as a mutation, locking read-scoped API tokens out of the SPARQL
+  Protocol's POST query form; and a query with `SERVICE` was served from the
+  result cache regardless of the caller's identity — federated queries now
+  bypass it.
+- **Scale finding** (`3145f8e`, from 7.6). Every load into a named graph
+  ended with a full recount of that graph — O(graph) per write. The
+  benchmark measured a 500-quad insert into a 900k-quad graph at seconds, and
+  four concurrent writers managed 2 000 quads in 20 s next to readers. The
+  index is now bumped by the batch's exact new-quad count.
+- **7.6 Scale benchmark** (`examples/scale_otl.rs`, `scripts/scale_compare_fuseki.sh`;
+  numbers in docs/performance.md). OTL-shaped data on the persistent store,
+  result cache off. 100k assets / 0.9M quads: load 138k quads/s; lookup
+  0.07 ms, 2-way join (10k rows) 72 ms, filter scan 29 ms, group-by 1.2 s,
+  path 0.08 ms, `COUNT(*)` in `GRAPH` 237 ms; SHACL over every asset with six
+  property shapes 10.8 s; 4 writers + 4 readers for 20 s: 46k quads/s written
+  (p95 71 ms) with 10.6k reads/s (p95 1.6 ms). 1M assets / 9M quads: load
+  83k quads/s (109 s); lookup 0.07 ms, join 51 ms, filter 250 ms, group-by
+  9.5 s, path 0.07 ms, count 2.1 s; SHACL 118 s (76k quads/s); mixed phase
+  34k quads/s written (p95 122 ms) with 5.7k reads/s (p95 3.1 ms). The one
+  visible cost is `COUNT(*)` inside a `GRAPH` block (a scan; the O(1)
+  fast-count covers only the bare default-graph pattern). The plan's trigger
+  for evaluating another backend — deep SHACL over tens of millions of quads
+  with concurrent writers exceeding a single node — is not reached at this
+  tier. **Open:** the Fuseki comparison column — the Docker image is
+  amd64-only and the Fuseki 6.2 webapp run natively refused the unauthenticated
+  load (401) even with a permissive Shiro file; the script supports both modes
+  and reports each HTTP step, for a rerun on an amd64 host or with a "main"
+  build.
+
