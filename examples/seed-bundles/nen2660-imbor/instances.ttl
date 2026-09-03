@@ -1,0 +1,24 @@
+# Sample beheerobjecten for the IMBOR 2025 object-type library: three trees
+# (IMBOR "Boom", imbor:83a942f7-…), each with two Kern-shaped properties —
+# "boomkroonvolume eindbeeld" (xsd:decimal, m³) and "kiemjaar" (xsd:gYear).
+# boom-3 carries its kiemjaar as a plain string, which the Kern property
+# shape (sh:datatype xsd:gYear) must report.
+@prefix imbor: <https://data.crow.nl/imbor/def/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex: <https://example.org/imbor-sample/> .
+
+ex:boom-1 a imbor:83a942f7-5291-42f0-afb1-9a57d0fb2f15 ;
+    rdfs:label "Boom 1 — plataan, Waalkade"@nl ;
+    imbor:6ddefdf8-acfe-49c8-9f08-b7636570f0be "120.5"^^xsd:decimal ;
+    imbor:39231ace-3d00-4bcc-b4db-31dbb2c0bb6f "1975"^^xsd:gYear .
+
+ex:boom-2 a imbor:83a942f7-5291-42f0-afb1-9a57d0fb2f15 ;
+    rdfs:label "Boom 2 — linde, Kronenburgerpark"@nl ;
+    imbor:6ddefdf8-acfe-49c8-9f08-b7636570f0be "64"^^xsd:decimal ;
+    imbor:39231ace-3d00-4bcc-b4db-31dbb2c0bb6f "1998"^^xsd:gYear .
+
+ex:boom-3 a imbor:83a942f7-5291-42f0-afb1-9a57d0fb2f15 ;
+    rdfs:label "Boom 3 — es, Goffertpark (planted violation)"@nl ;
+    imbor:6ddefdf8-acfe-49c8-9f08-b7636570f0be "30"^^xsd:decimal ;
+    imbor:39231ace-3d00-4bcc-b4db-31dbb2c0bb6f "1998" .

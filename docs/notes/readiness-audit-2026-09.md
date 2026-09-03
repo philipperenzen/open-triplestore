@@ -1812,8 +1812,19 @@ payload, not the design centre.
   load a layered bundle, classify instances against the model layer, validate
   with SHACL through the bound shapes, see `dct:conformsTo` in DCAT.
 
-**Not done — needs a decision:** the *real-data* run (NEN 2660-2 + IMBOR
-object-type library). `examples/seed-bundles/nen2660-imbor` is scaffolded
+**Closed 2026-09-03:** the *real-data* run. `fetch.sh` now downloads the four
+NEN 2660-2 files (the SKOS terms file is `nen2660-skos.ttl`, not `-term`) and
+the IMBOR 2025 Linked Data release ZIP (4.3 MB; Kern 2.7 MB with the object
+types as `rdfs:Class` + `sh:NodeShape`, domain values, reference models,
+materials addendum); the manifest maps them to model / domain-values graphs
+and binds Kern as the shape graph; `instances.ttl` ships three IMBOR trees with
+one planted datatype violation. `tests/nen2660_imbor_bundle.rs` runs the
+Stage-1 benchmark on that data — model layer loaded (>50k Kern triples),
+conformance resolved, RDFS classification to Vegetatieobject, SHACL through
+IMBOR's implicit class targets finding exactly boom-3, DCAT advertising the
+model version — in ~63 s, and skips (green) when the payload is absent, so
+CI needs no download. *Originally:* the real-data run (NEN 2660-2 + IMBOR
+object-type library) needed a decision. `examples/seed-bundles/nen2660-imbor` is scaffolded
 with a `fetch.sh`, but the RDF is not vendored and downloading it was not
 started without permission. The NEN 2660-2 file names follow the publisher's
 `data/` layout (nl-digigo/nen2660, gh-pages) and should be confirmed on the
