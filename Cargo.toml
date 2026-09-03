@@ -162,7 +162,7 @@ jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 # ES256 keypair generation for the OIDC provider (also rustls's crypto backend
 # in this tree; no longer jsonwebtoken's, which moved off ring in v10).
 ring = "0.17"
-argon2 = "0.5"
+argon2 = "0.6"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Kept in lockstep with `hkdf` (below): both ride the RustCrypto `digest` 0.11
