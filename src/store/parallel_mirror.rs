@@ -432,27 +432,45 @@ impl ParallelMirror {
     /// rebuilds again. Clearing after the publish (the old order) erased that
     /// mark and served a silently stale mirror until the write after it.
     fn build_and_publish(&self, store: &Store, total: usize) -> Option<Arc<ParallelStore>> {
-        self.inner.dirty.store(false, Ordering::Release);
+        // The mirror stays *dirty* for the whole build, so `get_or_build` answers
+        // None (the persistent store serves the query) instead of the previous
+        // snapshot. Clearing the flag up front, as this used to, handed every
+        // reader the pre-write copy for the seconds a rebuild takes — a SHACL run
+        // right after an import mixed stale and fresh answers and reported
+        // violations that did not exist, or none at all.
+        let write_mark = self.inner.last_write_ms.load(Ordering::Acquire);
         let built = build_from_store(store, self.inner.shard_count)
             .map(Arc::new)
             .zip(build_full_store(store).map(Arc::new));
         let Some((ps, full)) = built else {
             // Build error: leave the previous state untouched and stay dirty.
-            self.inner.dirty.store(true, Ordering::Release);
             return None;
         };
-        *self.inner.shards.write().ok()? = Some(ps.clone());
-        *self.inner.full.write().ok()? = Some(full);
-        self.inner.built_len.store(total, Ordering::Release);
-        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
-        // Built successfully (under cap): re-arm the over-cap warning so a later
-        // growth back over the cap is surfaced again.
-        self.inner.over_cap_warned.store(false, Ordering::Release);
+        self.publish(ps.clone(), full, total, write_mark);
         debug!(
             "parallel mirror built: {total} triples ({} shards + 1 full copy)",
             self.inner.shard_count
         );
         Some(ps)
+    }
+
+    /// Install freshly built copies. The mirror is marked clean only if no
+    /// write landed since `write_mark` was taken at the start of the build;
+    /// otherwise it stays dirty and the next quiet window rebuilds again.
+    fn publish(&self, ps: Arc<ParallelStore>, full: Arc<Store>, total: usize, write_mark: u64) {
+        if let Ok(mut shards) = self.inner.shards.write() {
+            *shards = Some(ps);
+        }
+        if let Ok(mut f) = self.inner.full.write() {
+            *f = Some(full);
+        }
+        self.inner.built_len.store(total, Ordering::Release);
+        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
+        // Built successfully (under cap): re-arm the over-cap warning so a later
+        // growth back over the cap is surfaced again.
+        self.inner.over_cap_warned.store(false, Ordering::Release);
+        let unchanged = self.inner.last_write_ms.load(Ordering::Acquire) == write_mark;
+        self.inner.dirty.store(!unchanged, Ordering::Release);
     }
 
     /// Try to answer `sparql` from the **unsharded** in-memory copy — the path for
@@ -808,5 +826,71 @@ mod tests {
             .try_full_query(&store, q, SparqlEvaluator::new)
             .is_some());
         assert_eq!(mirror.build_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod stale_read_tests {
+    use super::*;
+    use oxigraph::model::{NamedNode, Quad};
+
+    fn store_with(n: usize) -> Store {
+        let store = Store::new().unwrap();
+        for i in 0..n {
+            store
+                .insert(&Quad::new(
+                    NamedNode::new_unchecked(format!("urn:s{i}")),
+                    NamedNode::new_unchecked("urn:p"),
+                    NamedNode::new_unchecked("urn:o"),
+                    oxigraph::model::GraphName::DefaultGraph,
+                ))
+                .unwrap();
+        }
+        store
+    }
+
+    /// While a rebuild holds the build lock and the mirror is dirty, a query
+    /// must fall back to the persistent store — never read the old snapshot.
+    #[test]
+    fn a_build_in_progress_hands_out_no_snapshot() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(
+            mirror.get_or_build(&store).is_some(),
+            "first build (inline) publishes"
+        );
+        mirror.mark_dirty();
+        let _building = mirror.inner.build_lock.lock().unwrap();
+        assert!(
+            mirror.get_or_build(&store).is_none(),
+            "dirty + build lock held = a rebuild is running: no stale shards"
+        );
+    }
+
+    /// Publishing clears the dirty flag only when nothing was written during
+    /// the build; a write that landed meanwhile keeps the mirror dirty.
+    #[test]
+    fn publish_stays_dirty_when_a_write_landed_during_the_build() {
+        let store = store_with(5);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        let ps = Arc::new(build_from_store(&store, 2).unwrap());
+        let full = Arc::new(build_full_store(&store).unwrap());
+        let mark = mirror.inner.last_write_ms.load(Ordering::Acquire);
+        mirror.publish(ps.clone(), full.clone(), 5, mark);
+        assert!(
+            !mirror.inner.dirty.load(Ordering::Acquire),
+            "no write during the build: clean"
+        );
+        // A write during the build bumps the write mark past `mark`.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        mirror.mark_dirty();
+        let mark_before_second_build = mark;
+        mirror.publish(ps, full, 5, mark_before_second_build);
+        assert!(
+            mirror.inner.dirty.load(Ordering::Acquire),
+            "a write landed during the build: still dirty"
+        );
     }
 }

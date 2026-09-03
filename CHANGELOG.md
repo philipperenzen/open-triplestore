@@ -234,6 +234,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Stale reads during a query-accelerator rebuild.** The in-memory mirror
+  marked itself clean before its new copies existed, so for the seconds a
+  rebuild takes after a write burst every accelerated query read the
+  pre-write snapshot while others read the store — a SHACL run right after
+  an import reported violations that did not exist, then none at all. The
+  mirror now stays dirty until the copies are published, is unavailable (not
+  stale) while building, and stays dirty if a write lands during the build.
 - **The commit log covers every data mutation.** It claimed to, and
   `GET /api/datasets/:id/commits` presented it as the dataset's history, but
   Graph Store PUT/POST/DELETE, bulk imports, every dataset-version operation
