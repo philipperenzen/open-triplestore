@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **RDF Patch.** A version diff is served as an RDF Patch document
+  (`?format=rdf-patch` or `Accept: application/rdf-patch`), and `POST
+  /api/datasets/:id/patch` applies a patch atomically to the dataset's
+  registered graphs as one commit.
+- **Image defaults.** `BACKUP_DIR` now defaults to `<data-dir>/backups`
+  instead of the working-directory-relative `data/backups`, which was
+  unwritable in the Docker image and silently disabled unattended backups;
+  the identity database pool opens its connections on demand, removing a
+  spurious "database is locked" error from every boot log.
 - **DCAT-AP / DCAT-AP-NL catalogue.** `DCAT_PROFILE=dcat-ap|dcat-ap-nl`
   adds the application-profile properties (typed publisher agents,
   identifiers, language, file-type and media-type on distributions, the

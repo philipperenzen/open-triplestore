@@ -338,8 +338,12 @@ impl AuthDb {
                 "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
             )
         });
+        // Open one connection eagerly, the rest on demand: `build` used to open
+        // all eight at once, each running `journal_mode=WAL`, and the boot log
+        // carried a spurious "r2d2: database is locked" ERROR from the losers.
         let pool = r2d2::Pool::builder()
             .max_size(8)
+            .min_idle(Some(1))
             .build(manager)
             .map_err(|e| anyhow::anyhow!("Pool build failed: {}", e))?;
         let db = Self {

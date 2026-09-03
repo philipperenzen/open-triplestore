@@ -2181,7 +2181,7 @@ pub async fn run(
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
-        let dir = std::env::var("BACKUP_DIR").unwrap_or_else(|_| "data/backups".to_string());
+        let dir = default_backup_dir(&data_dir);
         let sqlite = db_path.clone();
         let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
             .ok()
@@ -2662,5 +2662,33 @@ mod panic_safety_net_tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         // Generic message only — the panic payload is never leaked to the client.
         assert_eq!(body.as_ref(), b"Internal server error");
+    }
+}
+
+/// Where backups go: `BACKUP_DIR`, else `<data-dir>/backups`. The default used
+/// to be the *relative* `data/backups`, resolved against the working directory
+/// — in the Docker image that is `/app`, root-owned and read-only for the
+/// service user, so unattended backups were silently disabled on every
+/// default deployment ("backup: disabled — init failed: create backup dir").
+pub(crate) fn default_backup_dir(data_dir: &std::path::Path) -> String {
+    std::env::var("BACKUP_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| data_dir.join("backups").to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod backup_dir_tests {
+    #[test]
+    fn backup_dir_defaults_under_the_data_dir() {
+        std::env::remove_var("BACKUP_DIR");
+        let d = super::default_backup_dir(std::path::Path::new("/data"));
+        assert_eq!(d, "/data/backups");
+        std::env::set_var("BACKUP_DIR", "/mnt/backups");
+        assert_eq!(
+            super::default_backup_dir(std::path::Path::new("/data")),
+            "/mnt/backups"
+        );
+        std::env::remove_var("BACKUP_DIR");
     }
 }
