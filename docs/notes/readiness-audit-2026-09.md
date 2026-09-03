@@ -2043,3 +2043,7 @@ quads (p95 144 ms) vs 31 500 (p95 1.6 s), reads 2 266/s (p95 2.8 ms) vs
 `COUNT(*)` inside `GRAPH`, SHACL engine throughput, graph clear/replace
 cost, and the 200 MB request-body limit on `/store`.
 
+**Verification after the comparison work (2026-09-03, evening):** full
+workspace suite on the final tree — 2872 passed, 0 failed, 4 ignored across
+80 binaries; fmt and clippy clean at every commit.
+
