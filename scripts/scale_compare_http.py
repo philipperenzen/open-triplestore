@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--readers", type=int, default=4)
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--skip-load", action="store_true")
+    ap.add_argument("--settle", type=int, default=0, help="seconds to wait after the load before timing queries (lets a background accelerator build finish)")
     a = ap.parse_args()
     auth = {"Authorization": f"Bearer {a.token}"} if a.token else {}
 
@@ -75,7 +76,11 @@ def main():
             sys.exit(2)
     else:
         load_s = None
+    if a.settle > 0:
+        print(f"  settling {a.settle}s", file=sys.stderr)
+        time.sleep(a.settle)
     n = int(json.loads(query(f"SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH <{G}> {{ ?s ?p ?o }} }}"))["results"]["bindings"][0]["c"]["value"])
+    result["settle_seconds"] = a.settle
     result["quads"] = n
     if load_s is not None:
         result["load"] = {"seconds": round(load_s, 2), "quads_per_s": round(n / load_s)}

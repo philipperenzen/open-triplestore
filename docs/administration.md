@@ -289,6 +289,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
 | `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
 | `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
+| `OTS_MAX_UPLOAD_MB` | 512 (Graph Store), 1024 (bulk import) | Request-body limit for RDF uploads; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
 | `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URL prefixes the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). List origins with their trailing slash, e.g. `https://sparql.example.org/`. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
 | `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call; a larger remote result is truncated. |

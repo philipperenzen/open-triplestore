@@ -1550,7 +1550,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(512)))
         .with_state(state.clone());
 
     // Bulk multi-file import (authentication required)
@@ -1565,7 +1565,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(1024)))
         .with_state(state.clone());
 
     // Batch SPARQL UPDATE routes (authentication required)
@@ -2750,4 +2750,18 @@ mod backup_dir_tests {
         );
         std::env::remove_var("BACKUP_DIR");
     }
+}
+
+/// Request-body limit for RDF uploads (Graph Store writes, bulk imports):
+/// `OTS_MAX_UPLOAD_MB` when set, else `default_mb`. Uploads are buffered and
+/// parsed into a temporary store before they replace anything, so the limit
+/// bounds memory as well as wire size; the 50 MB the Graph Store routes used
+/// to have rejected a 226 MB dataset that loaded fine in five appends.
+fn upload_limit_bytes(default_mb: usize) -> usize {
+    let mb = std::env::var("OTS_MAX_UPLOAD_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(default_mb);
+    mb.saturating_mul(1024 * 1024)
 }
