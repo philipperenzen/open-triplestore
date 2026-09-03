@@ -35,6 +35,7 @@ pub mod backup;
 pub mod catalog;
 pub mod commit_log;
 pub mod conformance;
+pub mod containers;
 pub mod data_models;
 pub mod dataset_versions;
 pub mod dcat;

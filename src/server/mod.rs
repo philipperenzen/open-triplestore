@@ -1123,6 +1123,14 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
         )
         .route(
+            "/api/datasets/:dataset_id/containers/import",
+            post(crate::containers::import_container),
+        )
+        .route(
+            "/api/datasets/:dataset_id/containers/export",
+            get(crate::containers::export_container),
+        )
+        .route(
             "/api/datasets/:dataset_id/commits",
             get(handlers::list_dataset_commits),
         )

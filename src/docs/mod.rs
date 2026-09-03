@@ -507,6 +507,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 115,
     },
     Builtin {
+        slug: "containers",
+        title: "Linked-document containers (ICDD)",
+        category: "API & Operations",
+        body: include_str!("../../docs/containers.md"),
+        admin_only: false,
+        sort: 114,
+    },
+    Builtin {
         slug: "ldp",
         title: "Linked Data Platform (LDP) 1.0",
         category: "API & Operations",
