@@ -301,17 +301,29 @@ pub fn evaluate_constraint(
                     continue;
                 };
                 let regex_flags = flags.as_deref().unwrap_or("");
-                // Escape BOTH backslash and quote: a trailing `\` would otherwise
-                // escape the closing quote and corrupt the query (and `\d`-style
-                // regex escapes need `\\` in the SPARQL string literal anyway).
-                let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-                let query = format!(
-                    "ASK {{ FILTER(REGEX(\"{}\", \"{}\", \"{}\")) }}",
-                    esc(&value),
-                    esc(pattern),
-                    regex_flags.replace(['\\', '"'], "")
-                );
-                if let Ok(oxigraph::sparql::QueryResults::Boolean(matches)) = store.query(&query) {
+                // Compiled once per (pattern, flags) per thread; this used to
+                // run a SPARQL `ASK { FILTER(REGEX(…)) }` — parse, plan, regex
+                // compile, execute — for every single value.
+                let matches = match cached_regex_match(pattern, regex_flags, &value) {
+                    Some(m) => m,
+                    None => {
+                        // Escape BOTH backslash and quote: a trailing `\` would otherwise
+                        // escape the closing quote and corrupt the query (and `\d`-style
+                        // regex escapes need `\\` in the SPARQL string literal anyway).
+                        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+                        let query = format!(
+                            "ASK {{ FILTER(REGEX(\"{}\", \"{}\", \"{}\")) }}",
+                            esc(&value),
+                            esc(pattern),
+                            regex_flags.replace(['\\', '"'], "")
+                        );
+                        match store.query(&query) {
+                            Ok(oxigraph::sparql::QueryResults::Boolean(m)) => m,
+                            _ => true,
+                        }
+                    }
+                };
+                {
                     if !matches {
                         results.push(mk(
                             Some(value.clone()),
@@ -1240,6 +1252,63 @@ fn subclass_closure(
         c.insert(key, arc.clone());
     });
     arc
+}
+
+/// `sh:pattern` via a per-thread cache of compiled regexes, with the XPath
+/// flags SPARQL's REGEX accepts (`i`, `s`, `m`, `x`, `q`). `None` when the
+/// pattern or flags are outside what the regex crate handles the same way —
+/// the caller then falls back to the SPARQL evaluation, which is exact.
+fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static REGEXES: RefCell<HashMap<(String, String), Option<regex::Regex>>> =
+            RefCell::new(HashMap::new());
+    }
+    let key = (pattern.to_string(), flags.to_string());
+    if let Some(hit) = REGEXES.with(|c| c.borrow().get(&key).cloned()) {
+        return hit.map(|re| re.is_match(value));
+    }
+    let mut literal = false;
+    let mut ok = true;
+    let mut b = regex::RegexBuilder::new(pattern);
+    for f in flags.chars() {
+        match f {
+            'i' => {
+                b.case_insensitive(true);
+            }
+            's' => {
+                b.dot_matches_new_line(true);
+            }
+            'm' => {
+                b.multi_line(true);
+            }
+            'x' => {
+                b.ignore_whitespace(true);
+            }
+            'q' => literal = true,
+            _ => ok = false,
+        }
+    }
+    let built = if !ok {
+        None
+    } else if literal {
+        regex::RegexBuilder::new(&regex::escape(pattern))
+            .case_insensitive(flags.contains('i'))
+            .size_limit(1 << 20)
+            .build()
+            .ok()
+    } else {
+        b.size_limit(1 << 20).build().ok()
+    };
+    REGEXES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 1024 {
+            c.clear();
+        }
+        c.insert(key, built.clone());
+    });
+    built.map(|re| re.is_match(value))
 }
 
 /// SHACL instance check with subclass closure: `term rdf:type/rdfs:subClassOf* class`.
