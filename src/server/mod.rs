@@ -478,6 +478,46 @@ impl AppState {
     #[cfg(not(feature = "text-search"))]
     pub fn refresh_text_index_graphs(&self, _graphs: &[String]) {}
 
+    /// Maintain the text index for a write whose exact inserted and deleted
+    /// quads are known: add and remove just those documents instead of
+    /// re-indexing every literal of the affected graphs (which made each
+    /// write cost O(graph)). Falls back to a graph refresh on error.
+    #[cfg(feature = "text-search")]
+    pub fn text_index_apply_delta(
+        &self,
+        inserted: &[oxigraph::model::Quad],
+        deleted: &[oxigraph::model::Quad],
+        graphs: &[String],
+    ) {
+        let Some(ref idx) = self.text_index else {
+            return;
+        };
+        if inserted.is_empty() && deleted.is_empty() {
+            return;
+        }
+        let _guard = self
+            .text_sync_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let r = idx
+            .remove_quads(deleted)
+            .and_then(|_| idx.index_quads(inserted));
+        if let Err(e) = r {
+            tracing::warn!("text index incremental update failed ({e}); refreshing the graphs");
+            drop(_guard);
+            self.refresh_text_index_graphs(graphs);
+        }
+    }
+
+    #[cfg(not(feature = "text-search"))]
+    pub fn text_index_apply_delta(
+        &self,
+        _inserted: &[oxigraph::model::Quad],
+        _deleted: &[oxigraph::model::Quad],
+        _graphs: &[String],
+    ) {
+    }
+
     /// Apply the full-text preprocessing pipeline to an already read-scoped query.
     ///
     /// Expands the `text:search` / `ft:search` magic property and pushes

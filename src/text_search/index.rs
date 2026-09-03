@@ -523,6 +523,67 @@ impl TextIndex {
     }
 
     /// Rebuild the index from all literal triples in the store.
+    /// Index the literal-object triples among `quads` (IRI subjects in named
+    /// graphs) — the incremental counterpart of [`Self::refresh_graphs`] for a
+    /// write whose new quads are known exactly.
+    pub fn index_quads(&self, quads: &[oxigraph::model::Quad]) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphName, NamedOrBlankNode, Term};
+        let mut count = 0usize;
+        for q in quads {
+            let (NamedOrBlankNode::NamedNode(s), Term::Literal(lit), GraphName::NamedNode(g)) =
+                (&q.subject, &q.object, &q.graph_name)
+            else {
+                continue;
+            };
+            self.index_triple(s.as_str(), q.predicate.as_str(), g.as_str(), lit.value())?;
+            count += 1;
+        }
+        if count > 0 {
+            self.commit()?;
+        }
+        Ok(count)
+    }
+
+    /// Remove the documents of `quads` (exact subject + predicate + graph +
+    /// literal match), for a write whose deleted quads are known exactly.
+    pub fn remove_quads(&self, quads: &[oxigraph::model::Quad]) -> Result<usize, TextSearchError> {
+        use oxigraph::model::{GraphName, NamedOrBlankNode, Term};
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        let mut count = 0usize;
+        {
+            let writer = self.writer.lock().expect("index writer lock poisoned");
+            for q in quads {
+                let (NamedOrBlankNode::NamedNode(s), Term::Literal(lit), GraphName::NamedNode(g)) =
+                    (&q.subject, &q.object, &q.graph_name)
+                else {
+                    continue;
+                };
+                let must = |field, text: &str| -> (Occur, Box<dyn Query>) {
+                    (
+                        Occur::Must,
+                        Box::new(TermQuery::new(
+                            tantivy::Term::from_field_text(field, text),
+                            IndexRecordOption::Basic,
+                        )),
+                    )
+                };
+                let query = BooleanQuery::new(vec![
+                    must(self.uri_field, s.as_str()),
+                    must(self.predicate_field, q.predicate.as_str()),
+                    must(self.graph_field, g.as_str()),
+                    must(self.text_raw_field, lit.value()),
+                ]);
+                writer.delete_query(Box::new(query))?;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.commit()?;
+        }
+        Ok(count)
+    }
+
     pub fn reindex_from_store(&self, store: &TripleStore) -> Result<usize, TextSearchError> {
         info!("Rebuilding text index from store");
 

@@ -768,28 +768,36 @@ pub(crate) async fn execute_update(
             .unwrap_or_default()
     };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
-    tokio::time::timeout(
+    let delta = tokio::time::timeout(
         timeout,
         tokio::task::spawn_blocking(move || {
-            store.update_targeted(&effective, &affected, requires_admin)
+            store.update_targeted_delta(&effective, &affected, requires_admin)
         }),
     )
     .await
     .map_err(|_| AppError::BadRequest("Update execution timed out".to_string()))?
     .map_err(|e| AppError::Internal(e.to_string()))?
     .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    // Writer-pays text-index maintenance: when the update's target graphs are
-    // known, refresh exactly those; a variable-graph / default-graph / admin
-    // wildcard update falls back to the whole-index dirty flag (repaired by the
-    // background sync) because its touched set can't be enumerated here.
+    // Writer-pays text-index maintenance: a ground update (INSERT DATA /
+    // DELETE DATA) knows its exact quads, so just those documents change;
+    // any other update with known target graphs refreshes exactly those; a
+    // variable-graph / default-graph / admin wildcard update falls back to
+    // the whole-index dirty flag (repaired by the background sync) because its
+    // touched set can't be enumerated here.
     #[cfg(feature = "text-search")]
     if requires_admin || graph_iris.is_empty() {
         state.mark_text_dirty();
     } else {
         let st = state.clone();
         let graphs = graph_iris.clone();
-        let _ = tokio::task::spawn_blocking(move || st.refresh_text_index_graphs(&graphs)).await;
+        let _ = tokio::task::spawn_blocking(move || match delta {
+            Some((inserted, deleted)) => st.text_index_apply_delta(&inserted, &deleted, &graphs),
+            None => st.refresh_text_index_graphs(&graphs),
+        })
+        .await;
     }
+    #[cfg(not(feature = "text-search"))]
+    let _ = delta;
 
     {
         let st = state.clone();
@@ -1703,11 +1711,22 @@ async fn graph_store_post(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
-    run_store_write(&state, "graph store POST", move || {
-        store.graph_store_post(graph.as_deref(), &data, format)
+    let inserted = run_store_write(&state, "graph store POST", move || {
+        store.graph_store_post_delta(graph.as_deref(), &data, format)
     })
     .await?;
-    sync_text_index_after_graph_write(&state, touched).await;
+    // The appended quads are known exactly: index just those documents
+    // instead of re-indexing every literal of the graph.
+    match touched {
+        Some(g) => {
+            let st = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                st.text_index_apply_delta(&inserted, &[], std::slice::from_ref(&g))
+            })
+            .await;
+        }
+        None => sync_text_index_after_graph_write(&state, None).await,
+    }
     {
         let st = state.clone();
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();

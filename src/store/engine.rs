@@ -180,6 +180,14 @@ impl GraphIndex {
         *self.counts.entry(key).or_insert(0) += delta;
     }
 
+    /// Adjust `graph`'s count by a signed delta (a ground update whose effect
+    /// on the graph is known exactly). Never goes below zero.
+    fn adjust(&self, graph_iri: Option<&str>, delta: i64) {
+        let key = graph_iri.map(str::to_string);
+        let mut e = self.counts.entry(key).or_insert(0);
+        *e = (*e as i64 + delta).max(0) as usize;
+    }
+
     fn recount_specific_graphs(&self, store: &Store, graph_iris: &[Option<String>]) {
         for graph_iri in graph_iris {
             match graph_iri {
@@ -220,6 +228,9 @@ fn sparql_uses_service(sparql: &str) -> bool {
         .windows(7)
         .any(|w| w.eq_ignore_ascii_case(b"SERVICE"))
 }
+
+/// The exact effect of a ground write: `(inserted, deleted)` quads.
+pub type QuadDelta = (Vec<Quad>, Vec<Quad>);
 
 /// Whole-store VoID statistics (see [`TripleStore::void_stats`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -802,24 +813,141 @@ impl TripleStore {
         affected_iris: &[String],
         full_rebuild: bool,
     ) -> Result<(), StoreError> {
+        self.update_targeted_delta(sparql, affected_iris, full_rebuild)
+            .map(|_| ())
+    }
+
+    /// As [`Self::update_targeted`], returning the exact `(inserted, deleted)`
+    /// quads when the update is ground (`INSERT DATA` / `DELETE DATA` only),
+    /// so derived indexes can be maintained incrementally; `None` otherwise.
+    pub fn update_targeted_delta(
+        &self,
+        sparql: &str,
+        affected_iris: &[String],
+        full_rebuild: bool,
+    ) -> Result<Option<QuadDelta>, StoreError> {
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
         debug!("Executing targeted update: {}", &sparql[..prefix_end]);
+        // A ground update (INSERT DATA / DELETE DATA only) has an exactly
+        // knowable effect per graph: count it before executing and adjust the
+        // index afterwards, instead of rescanning every affected graph — that
+        // recount made a 500-quad insert into a 900k-quad graph cost a
+        // 900k-quad scan (the HTTP write stall the scale benchmark measured).
+        let exact = if full_rebuild {
+            None
+        } else {
+            self.ground_update_delta(sparql)
+        };
         self.query_options()
             .parse_update(sparql)?
             .on_store(&self.store)
             .execute()?;
-        if full_rebuild || affected_iris.is_empty() {
-            self.graph_index.rebuild(&self.store);
-        } else {
-            let graphs: Vec<Option<String>> =
-                affected_iris.iter().map(|s| Some(s.clone())).collect();
-            self.graph_index
-                .recount_specific_graphs(&self.store, &graphs);
+        let mut result = None;
+        match exact {
+            Some((deltas, inserted, deleted)) if !affected_iris.is_empty() => {
+                result = Some((inserted, deleted));
+                for (graph, delta) in deltas {
+                    let known = self.graph_index.get_count(graph.as_deref()).is_some();
+                    if known {
+                        self.graph_index.adjust(graph.as_deref(), delta);
+                    } else {
+                        self.graph_index
+                            .recount_specific_graphs(&self.store, std::slice::from_ref(&graph));
+                    }
+                }
+            }
+            _ => {
+                if full_rebuild || affected_iris.is_empty() {
+                    self.graph_index.rebuild(&self.store);
+                } else {
+                    let graphs: Vec<Option<String>> =
+                        affected_iris.iter().map(|s| Some(s.clone())).collect();
+                    self.graph_index
+                        .recount_specific_graphs(&self.store, &graphs);
+                }
+            }
         }
         self.note_write();
-        Ok(())
+        Ok(result)
+    }
+
+    /// For an update made only of `INSERT DATA` / `DELETE DATA`, the exact
+    /// per-graph change it will make (duplicates and no-ops excluded, ground
+    /// quads checked against the store). `None` for anything else.
+    /// spargebra's graph name → oxrdf's (None for a blank-node graph name,
+    /// which a ground update cannot name deterministically).
+    fn oxrdf_graph_name(g: &spargebra::term::GraphName) -> Option<GraphName> {
+        match g {
+            spargebra::term::GraphName::NamedNode(n) => {
+                Some(GraphName::NamedNode(NamedNode::new_unchecked(n.as_str())))
+            }
+            spargebra::term::GraphName::DefaultGraph => Some(GraphName::DefaultGraph),
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn ground_update_delta(
+        &self,
+        sparql: &str,
+    ) -> Option<(Vec<(Option<String>, i64)>, Vec<Quad>, Vec<Quad>)> {
+        use spargebra::GraphUpdateOperation;
+        let parsed = spargebra::SparqlParser::new().parse_update(sparql).ok()?;
+        let mut deltas: std::collections::HashMap<Option<String>, i64> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        let mut inserted: Vec<Quad> = Vec::new();
+        let mut deleted: Vec<Quad> = Vec::new();
+        for op in &parsed.operations {
+            match op {
+                GraphUpdateOperation::InsertData { data } => {
+                    for q in data {
+                        let quad = Quad::new(
+                            q.subject.clone(),
+                            q.predicate.clone(),
+                            q.object.clone(),
+                            Self::oxrdf_graph_name(&q.graph_name)?,
+                        );
+                        let key = match &quad.graph_name {
+                            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+                            GraphName::DefaultGraph => None,
+                            GraphName::BlankNode(_) => return None,
+                        };
+                        let fresh_bnode = matches!(quad.subject, NamedOrBlankNode::BlankNode(_))
+                            || matches!(quad.object, Term::BlankNode(_));
+                        if fresh_bnode
+                            || (seen.insert(quad.clone())
+                                && !self.store.contains(quad.as_ref()).ok()?)
+                        {
+                            *deltas.entry(key).or_insert(0) += 1;
+                            inserted.push(quad);
+                        }
+                    }
+                }
+                GraphUpdateOperation::DeleteData { data } => {
+                    for q in data {
+                        let quad = Quad::new(
+                            NamedOrBlankNode::NamedNode(q.subject.clone()),
+                            q.predicate.clone(),
+                            Term::from(q.object.clone()),
+                            Self::oxrdf_graph_name(&q.graph_name)?,
+                        );
+                        let key = match &quad.graph_name {
+                            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+                            GraphName::DefaultGraph => None,
+                            GraphName::BlankNode(_) => return None,
+                        };
+                        if seen.insert(quad.clone()) && self.store.contains(quad.as_ref()).ok()? {
+                            *deltas.entry(key).or_insert(0) -= 1;
+                            deleted.push(quad);
+                        }
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some((deltas.into_iter().collect(), inserted, deleted))
     }
 
     /// Execute multiple SPARQL UPDATE statements in a single batch.
@@ -903,7 +1031,20 @@ impl TripleStore {
         }
 
         let quads = self.parse_quads(reader, format, base_iri, to_graph)?;
-        self.insert_quads_and_reindex(quads, to_graph)
+        self.insert_quads_and_reindex(quads, to_graph).map(|_| ())
+    }
+
+    /// As [`Self::load_str`] into a named graph, returning the quads that were
+    /// actually new (so callers can update derived indexes incrementally).
+    pub fn load_str_delta(
+        &self,
+        data: &str,
+        format: RdfFormat,
+        to_graph: &str,
+    ) -> Result<Vec<Quad>, StoreError> {
+        let reader = BufReader::new(data.as_bytes());
+        let quads = self.parse_quads(reader, format, None, Some(to_graph))?;
+        self.insert_quads_and_reindex(quads, Some(to_graph))
     }
 
     /// Parse `reader` into quads, retargeting them into `to_graph` when one is
@@ -946,22 +1087,22 @@ impl TripleStore {
         &self,
         quads: Vec<Quad>,
         to_graph: Option<&str>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Vec<Quad>, StoreError> {
         // A graph-targeted load knows exactly how many quads are new (duplicates
         // within the batch and quads already stored do not count), so the graph
         // index is bumped by that number. Recounting the graph after every load
         // made each write O(graph): under the scale benchmark a 500-quad insert
         // into a 900k-quad graph took seconds, and concurrent writers stalled.
-        let new_quads = if to_graph.is_some() {
+        let new_quads: Option<Vec<Quad>> = if to_graph.is_some() {
             let mut seen: std::collections::HashSet<&Quad> =
                 std::collections::HashSet::with_capacity(quads.len());
-            let mut n = 0usize;
+            let mut fresh = Vec::new();
             for q in &quads {
                 if seen.insert(q) && !self.store.contains(q.as_ref())? {
-                    n += 1;
+                    fresh.push(q.clone());
                 }
             }
-            Some(n)
+            Some(fresh)
         } else {
             None
         };
@@ -970,22 +1111,26 @@ impl TripleStore {
         loader.commit()?; // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
 
         info!("Data loaded successfully");
-        match (to_graph, new_quads) {
-            (Some(g), Some(n)) => {
+        let delta = match (to_graph, new_quads) {
+            (Some(g), Some(fresh)) => {
                 if self.graph_index.get_count(Some(g)).is_some() {
-                    self.graph_index.add(Some(g), n);
+                    self.graph_index.add(Some(g), fresh.len());
                 } else {
                     self.graph_index
                         .recount_specific_graphs(&self.store, &[Some(g.to_string())]);
                 }
+                fresh
             }
-            _ => self.graph_index.rebuild(&self.store),
-        }
+            _ => {
+                self.graph_index.rebuild(&self.store);
+                Vec::new()
+            }
+        };
         self.spatial_index.mark_dirty();
         #[cfg(feature = "geometry3d")]
         self.spatial_index_3d.mark_dirty();
         self.note_write();
-        Ok(())
+        Ok(delta)
     }
 
     /// Load RDF data from a file, auto-detecting format from extension.
@@ -1121,7 +1266,7 @@ impl TripleStore {
         let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
 
         self.store.clear_graph(graph_name)?;
-        self.insert_quads_and_reindex(quads, graph_iri)
+        self.insert_quads_and_reindex(quads, graph_iri).map(|_| ())
     }
 
     /// Graph Store Protocol: POST (merge into) a named graph.
@@ -1132,6 +1277,20 @@ impl TripleStore {
         format: RdfFormat,
     ) -> Result<(), StoreError> {
         self.load_str(data, format, graph_iri)
+    }
+
+    /// As [`Self::graph_store_post`], returning the quads that were new when
+    /// the target is a named graph (empty for the default graph).
+    pub fn graph_store_post_delta(
+        &self,
+        graph_iri: Option<&str>,
+        data: &str,
+        format: RdfFormat,
+    ) -> Result<Vec<Quad>, StoreError> {
+        match graph_iri {
+            Some(g) => self.load_str_delta(data, format, g),
+            None => self.load_str(data, format, None).map(|_| Vec::new()),
+        }
     }
 
     /// Graph Store Protocol: DELETE a named graph.
