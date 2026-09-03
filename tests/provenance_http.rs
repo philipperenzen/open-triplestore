@@ -161,20 +161,17 @@ async fn commits_generate_graph_entities_and_the_dataset_has_a_prov_trail() {
     // 4. DCAT attributes the dataset and names its last activity.
     let (st, void) = text(&app, Method::GET, "/.well-known/void", None, None, "").await;
     assert_eq!(st, StatusCode::OK);
-    // The dataset's own block starts with its IRI on a line of its own; the
-    // catalogue's `dcat:dataset <…>` reference comes first and must be skipped.
-    let block = void
-        .split(&format!("<http://localhost:7878/dataset/{id}>\n"))
-        .nth(1)
-        .expect("dataset block in catalogue");
-    let block = &block[..block.find(" .\n").unwrap_or(block.len())];
+    let cat = open_triplestore::store::TripleStore::in_memory().unwrap();
+    cat.load_str(&void, oxigraph::io::RdfFormat::Turtle, Some("urn:cat"))
+        .expect("catalogue is valid Turtle");
+    let ask_cat = |q: &str| matches!(cat.query(q), Ok(QueryResults::Boolean(true)));
     assert!(
-        block.contains("prov:wasAttributedTo <http://localhost:7878/user/adm>"),
-        "{block}"
+        ask_cat(&format!("ASK {{ GRAPH <urn:cat> {{ <http://localhost:7878/dataset/{id}> <http://www.w3.org/ns/prov#wasAttributedTo> <http://localhost:7878/user/adm> }} }}")),
+        "{void}"
     );
     assert!(
-        block.contains("prov:wasGeneratedBy <http://localhost:7878/commit/"),
-        "{block}"
+        ask_cat(&format!("ASK {{ GRAPH <urn:cat> {{ <http://localhost:7878/dataset/{id}> <http://www.w3.org/ns/prov#wasGeneratedBy> ?c . FILTER(STRSTARTS(STR(?c), \"http://localhost:7878/commit/\")) }} }}")),
+        "{void}"
     );
 
     // 5. A stranger cannot read a private dataset's trail.

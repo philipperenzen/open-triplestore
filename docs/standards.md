@@ -30,7 +30,7 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification/material/predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). |
 | LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, entity-level version objects, tombstones, an incremental client; no retention policies, `tree:shape` or spatial/substring fragmentations. See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource | Full |
-| DCAT 2 | Dataset catalogue description | Full |
+| DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Partial — DCAT 3 catalogue with VoID statistics; `DCAT_PROFILE` adds the AP/AP-NL mandatory properties (typed agents, identifiers, language, file types, data services, EU-authority statuses); no `dcat:CatalogRecord`, no temporal coverage, and the official DCAT-AP SHACL suite is not run in CI. See [dcat.md](dcat.md). |
 | RML / R2RML | CSV/JSON/XML → RDF mapping | Partial⁹ |
 | JWT / OAuth 2.0 / OIDC | Authentication | Full |
 | SAML 2.0 | Authentication | Experimental — not in the `full` feature or the published image; the ACS handler has a known request-ID validation defect, so no login can currently succeed. See [auth.md](auth.md). |

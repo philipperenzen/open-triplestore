@@ -14,6 +14,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **DCAT-AP / DCAT-AP-NL catalogue.** `DCAT_PROFILE=dcat-ap|dcat-ap-nl`
+  adds the application-profile properties (typed publisher agents,
+  identifiers, language, file-type and media-type on distributions, the
+  SPARQL endpoint as a `dcat:DataService`, EU-authority status values); the
+  catalogue is now built as an RDF graph and serialised per request, so
+  user-supplied values can no longer corrupt it, VoID statistics cover named
+  graphs and are cached until the next write, and LDES streams are advertised
+  as distributions. Catalogue metadata comes from `CATALOG_*` variables.
 - **Time-evolving properties (OPM profile).** `POST
   /api/datasets/:id/properties/state` records a property value as an
   `opm:PropertyState` (valid-from, recording time, agent, reliability, note)

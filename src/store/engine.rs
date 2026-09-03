@@ -205,6 +205,16 @@ impl GraphIndex {
 }
 
 /// The core triple store engine wrapping Oxigraph with GeoSPARQL extensions.
+/// Whole-store VoID statistics (see [`TripleStore::void_stats`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoidStats {
+    pub triples: usize,
+    pub distinct_subjects: usize,
+    pub distinct_predicates: usize,
+    pub distinct_objects: usize,
+    pub named_graphs: usize,
+}
+
 #[derive(Clone)]
 pub struct TripleStore {
     store: Arc<Store>,
@@ -223,6 +233,9 @@ pub struct TripleStore {
     /// Memoises small query results (invalidated on every write); a repeated query
     /// is answered without re-evaluation. See [`QueryCache`].
     query_cache: QueryCache,
+    /// VoID statistics for the whole store, keyed by the write generation
+    /// they were computed at (see [`TripleStore::void_stats`]).
+    void_stats_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, VoidStats)>>>,
     /// Blank-node durability policy applied on import. Defaults to
     /// [`BlankNodeMode::Preserve`] (opt into durability via
     /// [`TripleStore::with_blank_node_mode`]).
@@ -265,6 +278,7 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
@@ -285,6 +299,7 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
@@ -367,6 +382,57 @@ impl TripleStore {
     }
 
     /// Build query options with all registered custom functions (GeoSPARQL, RDF 1.2, etc.).
+    /// The store's write generation: bumped on every mutation. Lets read-side
+    /// caches key on "has anything changed" instead of rescanning per request.
+    pub fn write_generation(&self) -> u64 {
+        self.query_cache.generation()
+    }
+
+    /// Whole-store VoID statistics over default *and* named graphs, cached
+    /// until the next write. The DCAT catalogue used to run three DISTINCT
+    /// scans over the default graph only on every anonymous request — and
+    /// report 0 distinct subjects for a store whose data sits in named graphs.
+    pub fn void_stats(&self) -> VoidStats {
+        let generation = self.write_generation();
+        if let Ok(guard) = self.void_stats_cache.lock() {
+            if let Some((g, stats)) = guard.as_ref() {
+                if *g == generation {
+                    return *stats;
+                }
+            }
+        }
+        let count = |q: &str| -> usize {
+            match self.query(q) {
+                Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => sols
+                    .next()
+                    .and_then(|r| r.ok())
+                    .and_then(|r| match r.get(0) {
+                        Some(oxigraph::model::Term::Literal(l)) => l.value().parse().ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+                _ => 0,
+            }
+        };
+        let stats = VoidStats {
+            triples: self.len().unwrap_or(0),
+            distinct_subjects: count(
+                "SELECT (COUNT(DISTINCT ?s) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            ),
+            distinct_predicates: count(
+                "SELECT (COUNT(DISTINCT ?p) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            ),
+            distinct_objects: count(
+                "SELECT (COUNT(DISTINCT ?o) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            ),
+            named_graphs: self.named_graphs().map(|g| g.len()).unwrap_or(0),
+        };
+        if let Ok(mut guard) = self.void_stats_cache.lock() {
+            *guard = Some((generation, stats));
+        }
+        stats
+    }
+
     pub(crate) fn query_options(&self) -> SparqlEvaluator {
         // SPARQL federation (`SERVICE`) stays disabled: oxigraph is built without the
         // `http-client` feature, so there is no HTTP service handler and `SERVICE`/`LOAD`

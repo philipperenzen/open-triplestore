@@ -282,6 +282,11 @@ See [rml.md](rml.md) for the full RML guide.
 | `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is honoured for rate limiting, e.g. `10.0.0.0/8,172.16.0.0/12`. Leave empty when not behind a proxy. |
 | `OTS_EXTERNAL_REASONER` | *(unset)* | `konclude` routes `owl2-dl` materialisation through an external tableau reasoner after the native rules (experimental; see [owl2-dl.md](owl2-dl.md)). Unset: native rules only. |
 | `OTS_EXTERNAL_REASONER_BIN` | `Konclude` | Path to the reasoner binary when `OTS_EXTERNAL_REASONER` is set. |
+| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
+| `CATALOG_TITLE` / `CATALOG_DESCRIPTION` | instance defaults | The `dcat:Catalog` metadata. |
+| `CATALOG_PUBLISHER_URI` / `CATALOG_PUBLISHER_NAME` / `CATALOG_PUBLISHER_IDENTIFIER` | `<base>/publisher` | The catalogue's publishing agent. |
+| `CATALOG_LANGUAGE` | `ENG` (`NLD` under dcat-ap-nl) | ISO 639-3 code for the catalogue language. |
+| `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
 | `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URL prefixes the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). List origins with their trailing slash, e.g. `https://sparql.example.org/`. |
 | `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
 | `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call; a larger remote result is truncated. |
