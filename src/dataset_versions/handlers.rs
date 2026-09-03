@@ -670,11 +670,28 @@ pub async fn delete_version(
 /// (the dataset's current graphs). `added`/`removed` are counted from `ver`'s
 /// point of view. There was no way to see what changed between two versions
 /// short of exporting both.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DiffParams {
+    /// `rdf-patch` for the diff as an RDF Patch document (also via
+    /// `Accept: application/rdf-patch`).
+    pub format: Option<String>,
+}
+
 pub async fn diff_versions(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
     Path((id, ver, other)): Path<(String, String, String)>,
-) -> Result<impl IntoResponse, AppError> {
+    axum::extract::Query(params): axum::extract::Query<DiffParams>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, AppError> {
+    let want_patch = params
+        .format
+        .as_deref()
+        .is_some_and(|f| f.eq_ignore_ascii_case("rdf-patch"))
+        || headers
+            .get(axum::http::header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|a| a.contains("rdf-patch"));
     let ds = dataset_or_404(&state, &id)?;
     let uid = user.as_ref().map(|Extension(u)| u.user_id.as_str());
     require_read(&state, &ds, uid)?;
@@ -694,6 +711,48 @@ pub async fn diff_versions(
             .map(|m| (m.source_graph.clone(), m.snapshot_graph.clone()))
             .collect()
     };
+    if want_patch {
+        // (target = the live source graph, from = the version's snapshot, to = the other side)
+        let mut mappings: Vec<(String, Option<String>, Option<String>)> = from
+            .source_map
+            .iter()
+            .map(|m| {
+                let to_graph = to_side
+                    .iter()
+                    .find(|(src, _)| *src == m.source_graph)
+                    .map(|(_, g)| g.clone());
+                (
+                    m.source_graph.clone(),
+                    Some(m.snapshot_graph.clone()),
+                    to_graph,
+                )
+            })
+            .collect();
+        for (src, g) in &to_side {
+            if !from.source_map.iter().any(|m| m.source_graph == *src) {
+                mappings.push((src.clone(), None, Some(g.clone())));
+            }
+        }
+        let dataset_iri = format!("{}/dataset/{}", state.base_url.trim_end_matches('/'), id);
+        let text = crate::rdf_patch::generate(
+            &state.store,
+            &[
+                ("dataset", dataset_iri.as_str()),
+                ("from", ver.as_str()),
+                ("to", other.as_str()),
+            ],
+            &mappings,
+        );
+        return Ok((
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                crate::rdf_patch::MEDIA_TYPE,
+            )],
+            text,
+        )
+            .into_response());
+    }
     let delta =
         |a: &[String], b: &[String]| crate::data_models::diff::triple_delta(&state.store, a, b);
     let (mut added, mut removed) = (0usize, 0usize);
@@ -734,7 +793,8 @@ pub async fn diff_versions(
         "added": added,
         "removed": removed,
         "graphs": graphs,
-    })))
+    }))
+    .into_response())
 }
 
 /// `POST /api/datasets/:id/versions/gc` — retention. Keeps the newest `keep`

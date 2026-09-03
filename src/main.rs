@@ -33,6 +33,7 @@ mod plugins;
 mod prefixes;
 mod property_states;
 mod provenance;
+mod rdf_patch;
 mod reasoning;
 mod remote;
 mod rml;

@@ -40,3 +40,42 @@ Branches let you fork a version line to develop changes in parallel — for exam
 Mint a tokenised share link to grant read access to a dataset (or a specific version) without requiring the recipient to sign in. Links can be revoked at any time. This is the simplest way to hand a colleague or external reviewer a private dataset without changing its visibility or creating an account.
 
 See also: [Datasets](/docs/datasets) and [Model & Vocabulary Versioning](/docs/models).
+
+## RDF Patch
+
+Any version diff is available as an [RDF Patch](https://afs.github.io/rdf-delta/rdf-patch.html)
+document — one transaction of `A`/`D` quads against the dataset's live graph
+IRIs that transforms the version into the other side:
+
+```bash
+curl -H 'Accept: application/rdf-patch' \
+  http://localhost:7878/api/datasets/<id>/versions/1.0.0/diff/live
+```
+
+```
+H id <urn:uuid:…> .
+H dataset <http://localhost:7878/dataset/assets> .
+H from "1.0.0" .
+H to "live" .
+TX .
+D <https://example.org/asset/b2> <https://example.org/status> "planned" <https://example.org/assets/instances> .
+A <https://example.org/asset/b2> <https://example.org/status> "in-service" <https://example.org/assets/instances> .
+TC .
+```
+
+A patch applies to a dataset atomically, as one commit in its history:
+
+```bash
+curl -X POST http://localhost:7878/api/datasets/<id>/patch \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/rdf-patch' \
+  --data-binary @changes.rdfp
+```
+
+Supported: `H`, one `TX`…`TC` (or `TA`, which applies nothing), `PA`/`PD`
+prefixes, `A`/`D` with a graph term — a dataset patch may only touch the
+dataset's registered graphs, so triples without a graph are refused. The
+patch runs as one SPARQL Update (`INSERT DATA` / `DELETE DATA` blocks in
+the patch's order), so deleting a triple with a blank node is refused, and
+the write is captured by the dataset's LDES stream and text index like any
+other.
+

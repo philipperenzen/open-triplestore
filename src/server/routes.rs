@@ -1735,7 +1735,7 @@ async fn graph_store_delete(
 /// whole-store rebuild. A default-graph write has no graph key to refresh, so
 /// that case falls back to the whole-index dirty flag (repaired by the
 /// background sync).
-async fn sync_text_index_after_graph_write(state: &AppState, graph: Option<String>) {
+pub(crate) async fn sync_text_index_after_graph_write(state: &AppState, graph: Option<String>) {
     #[cfg(feature = "text-search")]
     match graph {
         Some(g) => {

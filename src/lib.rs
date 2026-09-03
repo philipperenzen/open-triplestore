@@ -53,6 +53,7 @@ pub mod plugins;
 pub mod prefixes;
 pub mod property_states;
 pub mod provenance;
+pub mod rdf_patch;
 pub mod reasoning;
 pub mod remote;
 pub mod rml;

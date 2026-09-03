@@ -26,7 +26,13 @@ const INSTANCES: &str = "https://example.org/imbor-sample/instances";
 const BOOM: &str = "https://data.crow.nl/imbor/def/83a942f7-5291-42f0-afb1-9a57d0fb2f15";
 const VEGETATIEOBJECT: &str = "https://data.crow.nl/imbor/def/761406d1-87bc-4dc1-b1b7-bd3bb7ab54a7";
 
-async fn req(app: &Router, method: Method, uri: &str, token: &str, body: Value) -> (StatusCode, Value, String) {
+async fn req(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value, String) {
     let mut b = Request::builder()
         .method(method)
         .uri(uri)
@@ -72,17 +78,44 @@ async fn nen2660_imbor_bundle_classifies_and_validates_real_data() {
     assert!(nen > 200, "NEN 2660-2 RDFS loaded ({nen} triples)");
 
     // 2. The sample dataset conforms to the IMBOR model version and binds Kern as its shapes.
-    let (st, layer, txt) = req(&app, Method::GET, "/api/datasets/imbor-sample-assets/conformance", &token, Value::Null).await;
+    let (st, layer, txt) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/imbor-sample-assets/conformance",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(layer["conforms_to_model"]["id"], "imbor-otl", "{txt}");
     assert_eq!(layer["conforms_to_model"]["version"], "2025", "{txt}");
-    let shapes: Vec<&str> = layer["validation_shapes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    let shapes: Vec<&str> = layer["validation_shapes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
     assert_eq!(shapes, vec![KERN], "{txt}");
-    let sources: Vec<&str> = layer["reasoning_sources"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-    assert!(sources.contains(&INSTANCES) && sources.contains(&KERN), "{txt}");
+    let sources: Vec<&str> = layer["reasoning_sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        sources.contains(&INSTANCES) && sources.contains(&KERN),
+        "{txt}"
+    );
 
     // 3. Classification: every Boom is a Vegetatieobject through IMBOR's subClassOf.
-    let (st, report, txt) = req(&app, Method::POST, "/api/reasoning/materialize", &token, json!({ "regime": "rdfs", "dataset": "imbor-sample-assets" })).await;
+    let (st, report, txt) = req(
+        &app,
+        Method::POST,
+        "/api/reasoning/materialize",
+        &token,
+        json!({ "regime": "rdfs", "dataset": "imbor-sample-assets" }),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     let tg = report["target_graph"].as_str().unwrap().to_string();
     let ask = |q: &str| matches!(state.store.query(q), Ok(QueryResults::Boolean(true)));
@@ -92,20 +125,48 @@ async fn nen2660_imbor_bundle_classifies_and_validates_real_data() {
             "{t} is a Vegetatieobject via the model layer: {txt}"
         );
     }
-    assert!(ask(&format!("ASK {{ GRAPH <{INSTANCES}> {{ ?t a <{BOOM}> }} }}")));
+    assert!(ask(&format!(
+        "ASK {{ GRAPH <{INSTANCES}> {{ ?t a <{BOOM}> }} }}"
+    )));
 
     // 4. Validation through the bound IMBOR shapes finds the planted violation only.
-    let (st, vreport, txt) = req(&app, Method::POST, "/api/datasets/imbor-sample-assets/validate", &token, Value::Null).await;
+    let (st, vreport, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/imbor-sample-assets/validate",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
-    let report = if vreport["report"].is_object() { &vreport["report"] } else { &vreport };
-    assert_eq!(report["conforms"], false, "boom-3 violates a Kern property shape: {txt}");
-    assert!(txt.contains("imbor-sample/boom-3"), "the report names the offending tree: {txt}");
-    assert!(!txt.contains("imbor-sample/boom-1"), "boom-1 conforms: {txt}");
+    let report = if vreport["report"].is_object() {
+        &vreport["report"]
+    } else {
+        &vreport
+    };
+    assert_eq!(
+        report["conforms"], false,
+        "boom-3 violates a Kern property shape: {txt}"
+    );
+    assert!(
+        txt.contains("imbor-sample/boom-3"),
+        "the report names the offending tree: {txt}"
+    );
+    assert!(
+        !txt.contains("imbor-sample/boom-1"),
+        "boom-1 conforms: {txt}"
+    );
 
     // 5. The catalogue advertises the conformance to the IMBOR model version.
     let resp = app
         .clone()
-        .oneshot(Request::builder().method(Method::GET).uri("/.well-known/void").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/.well-known/void")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

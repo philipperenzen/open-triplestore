@@ -1115,6 +1115,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             get(crate::property_states::as_of),
         )
         .route(
+            "/api/datasets/:dataset_id/patch",
+            post(crate::rdf_patch::apply_patch_handler),
+        )
+        .route(
             "/api/datasets/:dataset_id/commits",
             get(handlers::list_dataset_commits),
         )
