@@ -631,6 +631,10 @@ pub async fn endpoint_acl_guard(
 
 #[cfg(test)]
 mod role_policy_tests {
+    /// `OTS_GUEST_CAPABILITIES` is process-wide; the tests below set and clear
+    /// it, so they must not interleave (they used to race and fail spuriously).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     fn principal(role: SystemRole) -> AuthenticatedUser {
@@ -648,6 +652,7 @@ mod role_policy_tests {
     /// them ordered rather than racing other tests in the same binary.
     #[test]
     fn guest_capabilities_clamp_the_resolved_principal() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Default: a guest reads and nothing else, even arriving on a session
         // that would otherwise carry full authority.
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
@@ -688,6 +693,7 @@ mod role_policy_tests {
     /// the authentication path did not already grant.
     #[test]
     fn clamping_never_adds_authority() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("OTS_GUEST_CAPABILITIES", "all");
         let mut p = principal(SystemRole::Guest);
         p.write_access = false;
