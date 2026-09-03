@@ -234,6 +234,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Query performance at scale.** Graph-scoped grouped aggregates — the form
+  every HTTP query takes after ACL scoping — now run on the sharded,
+  multi-core path (the planner refused any `GRAPH` pattern); `COUNT(*)`
+  inside `GRAPH <g>` / `GRAPH ?g` is answered from the count index instead of
+  a scan; the accelerator's RAM-aware cap works on macOS. `sh:class` checks
+  use a cached subclass closure instead of one SPARQL `ASK` per value node.
+  Large graph clears run in chunked transactions. `OTS_MAX_UPLOAD_MB`
+  replaces the fixed 50 MB / 200 MB upload limits (defaults 512 MB / 1 GB).
 - **Write throughput at scale.** Three per-write costs proportional to the
   size of the written graph or store are gone: the count index no longer
   rescans a graph after every load or ground update, the text index no

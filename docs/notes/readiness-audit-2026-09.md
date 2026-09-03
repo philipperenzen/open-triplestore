@@ -2047,3 +2047,28 @@ cost, and the 200 MB request-body limit on `/store`.
 workspace suite on the final tree — 2872 passed, 0 failed, 4 ignored across
 80 binaries; fmt and clippy clean at every commit.
 
+### Closing the comparison's open targets (2026-09-03, late)
+
+An in-process probe (`examples/scale_probe.rs`) on the 100k-asset data
+located each cost before it was fixed:
+
+- **Grouped aggregates** (`a990852`). The same group-by with `AVG` took
+  974 ms inside `GRAPH <g>` and 85 ms without the wrapper: the shard planner
+  refused every `GRAPH` pattern, so the multi-core path never saw a query
+  that arrived over HTTP (all of which are graph-scoped). Constant-graph
+  patterns are now shardable; the parity suite pins the merge. On this
+  16 GiB Mac the accelerator's RAM-aware cap also fell back to its 2M floor
+  (no cgroup files, no `/proc/meminfo`), keeping it off for the 9M-quad
+  tier; it now asks `sysctl` for the memory size.
+- **`COUNT(*)` in `GRAPH`** (`a990852`): 285 ms (`<g>`) / 570 ms (`?g`) at
+  900k quads → answered from the count index, `FROM NAMED` respected.
+- **SHACL `sh:class`** (`bdaf971`): one SPARQL `ASK` with a property path
+  per value node → a subclass closure cached per class, thread and write
+  generation, with the node's types from the quad index.
+- **Graph clear** (`fa49b0d`): `Store::clear_graph` 32 s for 900k quads;
+  collecting the quads and deleting them in 50k-quad transactions 22 s (the
+  same RocksDB work, no graph-sized write batch). Not transformative; noted.
+- **Upload limit** (`ad3d2d7`): the Graph Store routes capped bodies at
+  50 MB (the bulk import at 200 MB); `OTS_MAX_UPLOAD_MB`, defaults 512 MB /
+  1 GB, documented with its memory implication.
+
