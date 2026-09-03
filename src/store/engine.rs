@@ -173,6 +173,13 @@ impl GraphIndex {
     /// index (a full rebuild only enumerates graphs in `named_graphs()`, so an
     /// emptied implicit graph drops out). Otherwise the per-graph counts and
     /// `cached_named_graph_count` would drift after a `DELETE` empties a graph.
+    /// Add `delta` new quads to `graph`'s count (a graph-targeted load whose
+    /// new-quad count is known exactly), instead of rescanning the graph.
+    fn add(&self, graph_iri: Option<&str>, delta: usize) {
+        let key = graph_iri.map(str::to_string);
+        *self.counts.entry(key).or_insert(0) += delta;
+    }
+
     fn recount_specific_graphs(&self, store: &Store, graph_iris: &[Option<String>]) {
         for graph_iri in graph_iris {
             match graph_iri {
@@ -205,13 +212,6 @@ impl GraphIndex {
 }
 
 /// The core triple store engine wrapping Oxigraph with GeoSPARQL extensions.
-/// Whole-store VoID statistics (see [`TripleStore::void_stats`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct VoidStats {
-    pub triples: usize,
-    pub distinct_subjects: usize,
-    pub distinct_predicates: usize,
-    pub distinct_objects: usize,
 /// Does the query text mention `SERVICE` (case-insensitively)? A false positive
 /// only costs a cache miss.
 fn sparql_uses_service(sparql: &str) -> bool {
@@ -221,6 +221,13 @@ fn sparql_uses_service(sparql: &str) -> bool {
         .any(|w| w.eq_ignore_ascii_case(b"SERVICE"))
 }
 
+/// Whole-store VoID statistics (see [`TripleStore::void_stats`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoidStats {
+    pub triples: usize,
+    pub distinct_subjects: usize,
+    pub distinct_predicates: usize,
+    pub distinct_objects: usize,
     pub named_graphs: usize,
 }
 
@@ -493,6 +500,12 @@ impl TripleStore {
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
     pub fn query(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
+        // A federated query is never cached: its SERVICE part reads a remote
+        // whose data and whose view of *this caller's identity* the local write
+        // generation knows nothing about.
+        if sparql_uses_service(sparql) {
+            return self.query_uncached(sparql);
+        }
         // Result cache: a repeated, *deterministic* query is answered from a small
         // LRU keyed by the (already ACL-scoped) query string and invalidated on
         // every write — so a hit is the exact result the engine would compute.
@@ -500,12 +513,6 @@ impl TripleStore {
             return Ok(cached);
         }
         // Snapshot the generation BEFORE evaluating: a write that commits while
-        // A federated query is never cached: its SERVICE part reads a remote
-        // whose data and whose view of *this caller's identity* the local write
-        // generation knows nothing about.
-        if sparql_uses_service(sparql) {
-            return self.query_uncached(sparql);
-        }
         // this query runs must invalidate the result, not be stamped onto it.
         let gen = self.query_cache.generation();
         let results = self.query_uncached(sparql)?;
@@ -940,24 +947,39 @@ impl TripleStore {
         quads: Vec<Quad>,
         to_graph: Option<&str>,
     ) -> Result<(), StoreError> {
+        // A graph-targeted load knows exactly how many quads are new (duplicates
+        // within the batch and quads already stored do not count), so the graph
+        // index is bumped by that number. Recounting the graph after every load
+        // made each write O(graph): under the scale benchmark a 500-quad insert
+        // into a 900k-quad graph took seconds, and concurrent writers stalled.
+        let new_quads = if to_graph.is_some() {
+            let mut seen: std::collections::HashSet<&Quad> =
+                std::collections::HashSet::with_capacity(quads.len());
+            let mut n = 0usize;
+            for q in &quads {
+                if seen.insert(q) && !self.store.contains(q.as_ref())? {
+                    n += 1;
+                }
+            }
+            Some(n)
+        } else {
+            None
+        };
         let mut loader = self.store.bulk_loader();
         loader.load_quads(quads)?;
         loader.commit()?; // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
 
         info!("Data loaded successfully");
-        // When all data was forced into a single target graph (the Graph Store
-        // PUT/POST path, and every per-graph seed/audit/shape re-PUT at boot),
-        // ONLY that graph changed — recount just it instead of rebuilding the
-        // whole index. A full rebuild walks and counts every named graph,
-        // including a dataset's multi-million-triple `…/ifcowl` lift, so doing it
-        // per re-PUT turned each idempotent boot PUT into a full-store scan. With
-        // no target graph the input may name several graphs (NQuads/TriG), so the
-        // full rebuild stays.
-        match to_graph {
-            Some(g) => self
-                .graph_index
-                .recount_specific_graphs(&self.store, &[Some(g.to_string())]),
-            None => self.graph_index.rebuild(&self.store),
+        match (to_graph, new_quads) {
+            (Some(g), Some(n)) => {
+                if self.graph_index.get_count(Some(g)).is_some() {
+                    self.graph_index.add(Some(g), n);
+                } else {
+                    self.graph_index
+                        .recount_specific_graphs(&self.store, &[Some(g.to_string())]);
+                }
+            }
+            _ => self.graph_index.rebuild(&self.store),
         }
         self.spatial_index.mark_dirty();
         #[cfg(feature = "geometry3d")]
@@ -1953,6 +1975,51 @@ mod tests {
             t("this is not a valid update"),
             None,
             "parse miss → rebuild"
+        );
+    }
+}
+
+#[cfg(test)]
+mod graph_index_increment_tests {
+    use super::*;
+
+    /// Two loads into one graph — with duplicates inside a batch and quads
+    /// already stored — leave the index equal to a real recount, without a
+    /// graph scan per load.
+    #[test]
+    fn graph_targeted_loads_bump_the_index_exactly() {
+        let store = TripleStore::in_memory().unwrap();
+        let g = "urn:inc";
+        store
+            .load_str(
+                "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 . <urn:a> <urn:p> 1 .",
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(g)), Some(2));
+        let scans_before = store.graph_index.scan_count();
+        store
+            .load_str(
+                "<urn:b> <urn:p> 2 . <urn:c> <urn:p> 3 .",
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+        assert_eq!(
+            store.graph_count_cached(Some(g)),
+            Some(3),
+            "one new quad, one duplicate"
+        );
+        assert_eq!(
+            store.graph_index.scan_count(),
+            scans_before,
+            "no graph scan for a known graph"
+        );
+        assert_eq!(
+            store.count_graph(Some(g)).unwrap(),
+            3,
+            "the index agrees with a real count"
         );
     }
 }
