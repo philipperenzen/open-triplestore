@@ -52,6 +52,10 @@ pub struct AuthExt {
     pub org_group_prefix: String,
     /// JSON map `{ "<claim value>": "super_admin"|"admin"|"user" }` (P2-1).
     pub role_claim_map: Option<String>,
+    /// Peer instances whose identity assertions are accepted
+    /// (`OTS_TRUSTED_ISSUERS`), each verified against its own JWKS with this
+    /// instance's `BASE_URL` as the audience. See `crate::federation`.
+    pub trusted_issuers: Vec<OidcVerifier>,
 }
 
 impl AuthExt {
@@ -65,6 +69,7 @@ impl AuthExt {
             groups_claim: "groups".to_string(),
             org_group_prefix: "org:".to_string(),
             role_claim_map: None,
+            trusted_issuers: Vec::new(),
         }
     }
 
@@ -129,6 +134,29 @@ impl AuthExt {
             Some(iss) => Some(OidcVerifier::new(iss, audience)),
             None => None,
         };
+        let base_url = std::env::var("BASE_URL")
+            .ok()
+            .map(|b| b.trim().trim_end_matches('/').to_string())
+            .filter(|b| !b.is_empty());
+        let trusted_issuers = crate::federation::trusted_issuers()
+            .into_iter()
+            .filter(|iss| {
+                if !is_secure_idp_url(iss) {
+                    tracing::error!(
+                        "OTS_TRUSTED_ISSUERS entry '{iss}' is not https (and not loopback) — ignored"
+                    );
+                    return false;
+                }
+                if base_url.is_none() {
+                    tracing::error!(
+                        "OTS_TRUSTED_ISSUERS is set but BASE_URL is not — federated assertions \
+                         cannot be audience-checked and are refused"
+                    );
+                }
+                true
+            })
+            .map(|iss| OidcVerifier::new(iss, base_url.clone()))
+            .collect();
         Self {
             oidc,
             accept_legacy_tokens,
@@ -137,6 +165,7 @@ impl AuthExt {
             groups_claim,
             org_group_prefix,
             role_claim_map,
+            trusted_issuers,
         }
     }
 }

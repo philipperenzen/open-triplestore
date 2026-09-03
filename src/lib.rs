@@ -42,6 +42,7 @@ pub mod dcat;
 pub mod docs;
 pub mod email;
 pub mod entailment;
+pub mod federation;
 pub mod geo;
 pub mod ifc;
 pub mod imports;

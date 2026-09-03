@@ -14,6 +14,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Federated access control.** With `OTS_REMOTE_AUTH=assert` an instance
+  calling an allowlisted peer for a user (`SERVICE`, LDES sync) sends a
+  five-minute ES256 identity assertion signed with its OIDC-provider key;
+  with `OTS_TRUSTED_ISSUERS` a peer accepts such assertions after verifying
+  them against the issuer's JWKS and audience, provisions a read-only
+  federated user with organisation memberships from the assertion's `org:`
+  groups, and authorises locally as for any user.
+- **Domain starter profiles.** `examples/seed-bundles/clinical-reference`
+  (a FHIR-shaped record model, loaded in CI) proves the layered convention is
+  domain-neutral next to `layered-reference` and the real-data
+  `nen2660-imbor`; a `gwsw` scaffold for RIONED's urban-water ontology.
+- **Linked-document containers, ICDD first.** `POST
+  /api/datasets/:id/containers/import` unpacks an ISO 21597-1 container:
+  documents become assets, linksets and payload triples become role-typed
+  graphs, the index becomes a catalogue graph; `GET …/containers/export`
+  packages a dataset as one. The container mechanism is profile-neutral.
 - **Per-dataset entailment.** `PUT /api/datasets/:id/entailment` selects a
   regime (rdfs, owl2-rl/el/ql/dl) and a mode; `materialize` rebuilds the
   dataset's own entailment graph after every write over its conformance

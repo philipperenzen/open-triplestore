@@ -22,6 +22,7 @@ mod dcat;
 mod docs;
 mod email;
 mod entailment;
+mod federation;
 mod geo;
 mod ifc;
 mod imports;

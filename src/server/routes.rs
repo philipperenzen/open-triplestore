@@ -653,7 +653,10 @@ async fn execute_query(
     let (ct_tx, ct_rx) = oneshot::channel::<Result<&'static str, AppError>>();
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
 
+    let federated_identity = user.and_then(|u| crate::federation::identity_for(state, &u.user_id));
     tokio::task::spawn_blocking(move || {
+        // SERVICE clauses evaluated inside this query act for the caller.
+        let _identity = crate::federation::IdentityGuard::set(federated_identity);
         let results = match store.query(&effective_query_str) {
             Ok(r) => r,
             Err(e) => {

@@ -116,17 +116,25 @@ where
 }
 
 /// `POST` a SPARQL query to `endpoint` (SPARQL 1.1 Protocol, direct POST) and
-/// return the body as `application/sparql-results+json` text.
-pub fn post_sparql_blocking(endpoint: &str, query: &str) -> Result<String, RemoteError> {
+/// return the body as `application/sparql-results+json` text, optionally as
+/// the bearer of `bearer` (a federation identity assertion).
+pub fn post_sparql_blocking_with_auth(
+    endpoint: &str,
+    query: &str,
+    bearer: Option<&str>,
+) -> Result<String, RemoteError> {
     if !is_allowed(endpoint) {
         return Err(RemoteError::NotAllowed(endpoint.to_string()));
     }
     let endpoint = endpoint.to_string();
     let query = query.to_string();
+    let bearer = bearer.map(str::to_string);
     blocking(async move {
-        let resp = client()
-            .post(&endpoint)
-            .timeout(timeout())
+        let mut req = client().post(&endpoint).timeout(timeout());
+        if let Some(b) = &bearer {
+            req = req.bearer_auth(b);
+        }
+        let resp = req
             .header("Content-Type", "application/sparql-query")
             .header("Accept", "application/sparql-results+json")
             .body(query)
@@ -154,14 +162,24 @@ pub fn post_sparql_blocking(endpoint: &str, query: &str) -> Result<String, Remot
 /// `(content-type, body)`.
 #[allow(dead_code)] // the LDES client (6.1) is its caller; the binary sees it before then
 pub fn get_rdf_blocking(url: &str) -> Result<(String, String), RemoteError> {
+    get_rdf_blocking_with_auth(url, crate::federation::assertion_for(url).as_deref())
+}
+
+pub fn get_rdf_blocking_with_auth(
+    url: &str,
+    bearer: Option<&str>,
+) -> Result<(String, String), RemoteError> {
     if !is_allowed(url) {
         return Err(RemoteError::NotAllowed(url.to_string()));
     }
     let url = url.to_string();
+    let bearer = bearer.map(str::to_string);
     blocking(async move {
-        let resp = client()
-            .get(&url)
-            .timeout(timeout())
+        let mut req = client().get(&url).timeout(timeout());
+        if let Some(b) = &bearer {
+            req = req.bearer_auth(b);
+        }
+        let resp = req
             .header(
                 "Accept",
                 "text/turtle, application/n-triples;q=0.9, application/ld+json;q=0.8",

@@ -217,6 +217,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 14,
     },
     Builtin {
+        slug: "federation",
+        title: "Federated access control",
+        category: "Security",
+        body: include_str!("../../docs/federation.md"),
+        admin_only: false,
+        sort: 116,
+    },
+    Builtin {
         slug: "versioning",
         title: "Dataset Versioning & Sharing",
         category: "Concepts",
@@ -499,20 +507,20 @@ const BUILTINS: &[Builtin] = &[
         sort: 106,
     },
     Builtin {
-        slug: "ldes",
-        title: "Linked Data Event Streams (LDES)",
-        category: "API & Operations",
-        body: include_str!("../../docs/ldes.md"),
-        admin_only: false,
-        sort: 115,
-    },
-    Builtin {
         slug: "containers",
         title: "Linked-document containers (ICDD)",
         category: "API & Operations",
         body: include_str!("../../docs/containers.md"),
         admin_only: false,
         sort: 114,
+    },
+    Builtin {
+        slug: "ldes",
+        title: "Linked Data Event Streams (LDES)",
+        category: "API & Operations",
+        body: include_str!("../../docs/ldes.md"),
+        admin_only: false,
+        sort: 115,
     },
     Builtin {
         slug: "ldp",

@@ -32,8 +32,12 @@ pub enum FederationError {
 }
 
 /// The default service handler: allowlist, timeout, row cap.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AllowlistedServiceHandler;
+#[derive(Debug, Clone, Default)]
+pub struct AllowlistedServiceHandler {
+    /// The identity the query acts for (captured on the request thread), for
+    /// federation assertions towards the remote.
+    pub identity: Option<std::sync::Arc<crate::federation::Identity>>,
+}
 
 impl DefaultServiceHandler for AllowlistedServiceHandler {
     type Error = FederationError;
@@ -54,7 +58,9 @@ impl DefaultServiceHandler for AllowlistedServiceHandler {
             base_iri: base_iri.cloned(),
         }
         .to_string();
-        let body = crate::remote::post_sparql_blocking(endpoint, &query)?;
+        let bearer = crate::federation::assertion_for_identity(endpoint, self.identity.as_ref());
+        let body =
+            crate::remote::post_sparql_blocking_with_auth(endpoint, &query, bearer.as_deref())?;
         let parsed = QueryResultsParser::from_format(QueryResultsFormat::Json)
             .for_reader(body.as_bytes())
             .map_err(|e| FederationError::Parse {

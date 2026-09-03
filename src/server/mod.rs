@@ -2337,6 +2337,9 @@ pub async fn run(
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
+    if let Some(keys) = state.oidc_provider.clone() {
+        crate::federation::init(keys, &state.base_url);
+    }
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.

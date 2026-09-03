@@ -308,7 +308,9 @@ pub async fn sync_handler(
         body.graph_iri.clone(),
     );
     let uid = user.user_id.clone();
+    let federated_identity = crate::federation::identity_for(&state, &user.user_id);
     let report = tokio::task::spawn_blocking(move || {
+        let _identity = crate::federation::IdentityGuard::set(federated_identity);
         let before = super::capture::before(&st, std::slice::from_ref(&graph));
         let r = sync(&st, &url, &ds_id, &graph);
         super::capture::after(&st, before);

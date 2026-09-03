@@ -212,6 +212,15 @@ pub struct VoidStats {
     pub distinct_subjects: usize,
     pub distinct_predicates: usize,
     pub distinct_objects: usize,
+/// Does the query text mention `SERVICE` (case-insensitively)? A false positive
+/// only costs a cache miss.
+fn sparql_uses_service(sparql: &str) -> bool {
+    sparql
+        .as_bytes()
+        .windows(7)
+        .any(|w| w.eq_ignore_ascii_case(b"SERVICE"))
+}
+
     pub named_graphs: usize,
 }
 
@@ -442,8 +451,11 @@ impl TripleStore {
         let mut opts = SparqlEvaluator::new();
         // SPARQL federation: every `SERVICE` goes through the allowlisted
         // handler (crate::sparql::federation) — no allowlist, no network.
-        opts =
-            opts.with_default_service_handler(crate::sparql::federation::AllowlistedServiceHandler);
+        opts = opts.with_default_service_handler(
+            crate::sparql::federation::AllowlistedServiceHandler {
+                identity: crate::federation::current_identity(),
+            },
+        );
 
         // Register all GeoSPARQL functions
         for (iri, handler) in geo_fns::all_functions() {
@@ -488,6 +500,12 @@ impl TripleStore {
             return Ok(cached);
         }
         // Snapshot the generation BEFORE evaluating: a write that commits while
+        // A federated query is never cached: its SERVICE part reads a remote
+        // whose data and whose view of *this caller's identity* the local write
+        // generation knows nothing about.
+        if sparql_uses_service(sparql) {
+            return self.query_uncached(sparql);
+        }
         // this query runs must invalidate the result, not be stamped onto it.
         let gen = self.query_cache.generation();
         let results = self.query_uncached(sparql)?;
