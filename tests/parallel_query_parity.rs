@@ -530,3 +530,25 @@ fn parity_holds_across_shard_counts() {
         assert_eq!(got, expected, "diverged at {shards} shards");
     }
 }
+
+/// A grouped aggregate inside `GRAPH <g> { … }` — how every HTTP query
+/// arrives after ACL scoping — is decomposed across the shards and merges to
+/// exactly the single-store answer (the planner used to refuse any GRAPH
+/// pattern, so the sharded path never saw the aggregates it exists for).
+#[test]
+fn parity_group_by_avg_inside_graph() {
+    let data = persons_measure(4_000, G, XSD_DEC, |i| format!("{}.25", i % 97));
+    let query = format!(
+        "SELECT ?t (COUNT(?p) AS ?c) (AVG(?m) AS ?a) WHERE {{ GRAPH <{G}> {{ ?p <{EX}type> ?t ; <{EX}m> ?m }} }} GROUP BY ?t"
+    );
+    assert!(
+        opengraph::parallel::is_decomposable(&query),
+        "a constant-graph GRAPH pattern must be shardable"
+    );
+    assert_parity(&data, &query);
+    // …and a variable graph name stays with the engine (it may join across shards).
+    let var_graph = format!(
+        "SELECT ?t (COUNT(?p) AS ?c) WHERE {{ GRAPH ?g {{ ?p <{EX}type> ?t }} }} GROUP BY ?t"
+    );
+    assert!(!opengraph::parallel::is_decomposable(&var_graph));
+}

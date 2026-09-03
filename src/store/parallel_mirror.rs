@@ -553,6 +553,29 @@ fn detect_memory_limit_bytes() -> Option<u64> {
             }
         }
     }
+    // macOS has no /proc: ask sysctl for the physical memory size, so the
+    // RAM-aware cap applies on developer machines too (it used to fall back to
+    // the 2M floor there, keeping the accelerator off above it).
+    #[cfg(target_os = "macos")]
+    {
+        let mut size: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let name = std::ffi::CString::new("hw.memsize").expect("static name");
+        // SAFETY: sysctlbyname writes at most `len` bytes into `size`, whose
+        // address and size we pass; no other pointers are involved.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                &mut size as *mut u64 as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && size > 0 {
+            return Some(size);
+        }
+    }
     // No cgroup limit (or unconstrained) → total system RAM.
     if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
         for line in s.lines() {

@@ -600,17 +600,45 @@ impl TripleStore {
             } => (pattern, dataset),
             _ => return None,
         };
-        let var_name = count_star_var(pattern)?;
-        // The single graph the count applies to (the query's default graph).
-        let graph: Option<String> = match dataset {
-            None => None,
-            Some(ds) => match ds.default.as_slice() {
-                // `FROM NAMED` with no `FROM` empties the default graph → not us.
-                [] if ds.named.is_some() => return None,
-                [] => None,
-                [g] => Some(g.as_str().to_string()),
-                _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
-            },
+        let (var_name, scope) = count_star_var(pattern)?;
+        let named_in_dataset = |g: &str| -> bool {
+            match dataset.as_ref().and_then(|ds| ds.named.as_ref()) {
+                Some(named) => named.iter().any(|n| n.as_str() == g),
+                None => true,
+            }
+        };
+        let count = match scope {
+            // `{ ?s ?p ?o }` — the query's default graph.
+            CountScope::Default => {
+                let graph: Option<String> = match dataset {
+                    None => None,
+                    Some(ds) => match ds.default.as_slice() {
+                        [] if ds.named.is_some() => return None,
+                        [] => None,
+                        [g] => Some(g.as_str().to_string()),
+                        _ => return None, // multiple FROM → RDF-merge dedup, can't sum counts
+                    },
+                };
+                self.graph_count_cached(graph.as_deref())
+                    .or_else(|| self.count_graph(graph.as_deref()).ok())?
+            }
+            // `GRAPH <g> { ?s ?p ?o }` — one named graph, if it is in the dataset.
+            CountScope::Named(g) => {
+                if named_in_dataset(&g) {
+                    self.graph_count_cached(Some(&g))
+                        .or_else(|| self.count_graph(Some(&g)).ok())?
+                } else {
+                    0
+                }
+            }
+            // `GRAPH ?g { ?s ?p ?o }` — every named graph in the dataset.
+            CountScope::AnyNamed => self
+                .graph_index
+                .all_entries()
+                .into_iter()
+                .filter(|(k, _)| k.as_deref().is_some_and(&named_in_dataset))
+                .map(|(_, c)| c)
+                .sum(),
         };
         let count = self
             .graph_count_cached(graph.as_deref())
@@ -1660,41 +1688,77 @@ pub fn detect_format_from_path(path: &Path) -> Result<RdfFormat, StoreError> {
 
 /// If `pattern` is `SELECT (COUNT(*) AS ?v)` over a single full-scan triple
 /// pattern, return the projected variable name `v`; otherwise `None`.
-fn count_star_var(pattern: &GraphPattern) -> Option<String> {
+/// What a `COUNT(*)` full scan ranges over.
+enum CountScope {
+    Default,
+    Named(String),
+    AnyNamed,
+}
+
+fn count_star_var(pattern: &GraphPattern) -> Option<(String, CountScope)> {
     if let GraphPattern::Project { inner, variables } = pattern {
-        if variables.len() == 1 && is_count_star_full_scan(inner) {
-            return Some(variables[0].as_str().to_string());
+        if variables.len() == 1 {
+            if let Some(scope) = count_star_scope(inner) {
+                return Some((variables[0].as_str().to_string(), scope));
+            }
         }
     }
     None
 }
 
-/// `Extend(Group([], [COUNT(*)]), full-scan BGP)` — the algebra a global
-/// `(COUNT(*) AS ?v)` parses to (the Extend aliases the aggregate result).
-fn is_count_star_full_scan(p: &GraphPattern) -> bool {
+fn count_star_scope(p: &GraphPattern) -> Option<CountScope> {
     match p {
         GraphPattern::Extend {
-            inner, expression, ..
-        } => matches!(expression, Expression::Variable(_)) && is_count_star_full_scan(inner),
+            inner,
+            expression: Expression::Variable(_),
+            ..
+        } => count_star_scope(inner),
         GraphPattern::Group {
             inner,
             variables,
             aggregates,
         } => {
-            variables.is_empty()
-                && aggregates.len() == 1
-                && matches!(
+            if !variables.is_empty()
+                || aggregates.len() != 1
+                || !matches!(
                     &aggregates[0].1,
                     AggregateExpression::CountSolutions { distinct: false }
                 )
-                && is_full_scan_bgp(inner)
+            {
+                return None;
+            }
+            full_scan_scope(inner)
         }
-        _ => false,
+        _ => None,
     }
 }
 
-/// A single triple pattern whose subject, predicate and object are three
-/// *distinct* variables (`{ ?s ?p ?o }`) — a true full scan.
+/// `{ ?s ?p ?o }`, `GRAPH <g> { ?s ?p ?o }` or `GRAPH ?g { ?s ?p ?o }` — and
+/// nothing else in the pattern.
+fn full_scan_scope(p: &GraphPattern) -> Option<CountScope> {
+    match p {
+        GraphPattern::Bgp { .. } if is_full_scan_bgp(p) => Some(CountScope::Default),
+        GraphPattern::Graph { name, inner } if is_full_scan_bgp(inner) => match name {
+            NamedNodePattern::NamedNode(n) => Some(CountScope::Named(n.as_str().to_string())),
+            NamedNodePattern::Variable(v) => {
+                // Only when ?g is not one of the triple's own variables.
+                if let GraphPattern::Bgp { patterns } = inner.as_ref() {
+                    let tp = &patterns[0];
+                    let used = |t: &TermPattern| matches!(t, TermPattern::Variable(x) if x == v);
+                    if used(&tp.subject)
+                        || used(&tp.object)
+                        || matches!(&tp.predicate, NamedNodePattern::Variable(x) if x == v)
+                    {
+                        return None;
+                    }
+                }
+                Some(CountScope::AnyNamed)
+            }
+        },
+        _ => None,
+    }
+}
+
 fn is_full_scan_bgp(p: &GraphPattern) -> bool {
     matches!(p, GraphPattern::Bgp { patterns } if patterns.len() == 1 && all_distinct_vars(&patterns[0]))
 }
@@ -2159,6 +2223,88 @@ mod graph_index_increment_tests {
         assert_eq!(store.graph_count_cached(Some(g)), Some(2));
         let scans_before = store.graph_index.scan_count();
         store
+#[cfg(test)]
+mod fast_count_scope_tests {
+    use super::*;
+    use oxigraph::sparql::QueryResults;
+
+    fn count(store: &TripleStore, q: &str) -> Option<i64> {
+        match store.query(q).ok()? {
+            QueryResults::Solutions(mut s) => s.next()?.ok()?.get(0).and_then(|t| match t {
+                Term::Literal(l) => l.value().parse().ok(),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// `COUNT(*)` over `GRAPH <g>` / `GRAPH ?g` is answered from the count
+    /// index — exact, and without a scan — and respects `FROM NAMED`.
+    #[test]
+    fn graph_scoped_counts_come_from_the_index() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update("INSERT DATA { GRAPH <urn:a> { <urn:s> <urn:p> 1, 2, 3 } GRAPH <urn:b> { <urn:s> <urn:p> 4 } <urn:d> <urn:p> 5 }")
+            .unwrap();
+        let scans = store.graph_index.scan_count();
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:a> { ?s ?p ?o } }"
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:b> { ?s ?p ?o } }"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }"
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) FROM NAMED <urn:b> WHERE { GRAPH ?g { ?s ?p ?o } }"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) FROM NAMED <urn:b> WHERE { GRAPH <urn:a> { ?s ?p ?o } }"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:none> { ?s ?p ?o } }"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            store.graph_index.scan_count(),
+            scans,
+            "no graph scan for any of them"
+        );
+        // A count that binds the graph variable inside the triple is not a full scan.
+        assert_eq!(
+            count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?g ?p ?o } }"
+            ),
+            Some(0)
+        );
+    }
+}
+
             .load_str(
                 "<urn:b> <urn:p> 2 . <urn:c> <urn:p> 3 .",
                 RdfFormat::Turtle,
