@@ -234,6 +234,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Write throughput at scale.** Three per-write costs proportional to the
+  size of the written graph or store are gone: the count index no longer
+  rescans a graph after every load or ground update, the text index no
+  longer drops and re-indexes every literal of the graph after every write,
+  and incremental writes no longer commit the text index per request. On a
+  900k-quad graph the concurrent-write phase of the scale benchmark went
+  from 2 000 to 900 000+ quads in 20 s in-process, and over HTTP from 3 500
+  to the level of Apache Jena Fuseki on the same machine (docs/performance.md).
 - **Stale reads during a query-accelerator rebuild.** The in-memory mirror
   marked itself clean before its new copies existed, so for the seconds a
   rebuild takes after a write burst every accelerated query read the

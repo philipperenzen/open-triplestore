@@ -1994,3 +1994,52 @@ and Playwright e2e not re-run: no frontend change in Phase 7.
 CB'23 / SNOMED as bundles of licensed data the operator supplies. Everything
 else in the plan's seven phases is implemented, tested and documented.
 
+### Found by the like-for-like HTTP comparison (2026-09-03, evening)
+
+Measuring Open Triplestore the way Fuseki is measured — over HTTP, result
+cache off — exposed what the in-process harness could not:
+
+- **Two more O(graph) steps per write** (`3c11e3f`). After every SPARQL
+  Update the store recounted each affected graph, and after every update or
+  Graph Store append the text index dropped and re-indexed every literal of
+  the graph. Four writers managed 3 500 quads in 20 s against a 900k-quad
+  graph (write p95 23 s) while the same phase in-process wrote 900 000.
+  Ground updates and appends now know their exact quads: the graph index is
+  adjusted by the delta and the text index adds/removes just those documents.
+- **Stale reads while the query accelerator rebuilds** (mirror fix). The
+  in-memory mirror cleared its dirty flag before its new copies existed, so
+  during a rebuild every accelerated query read the pre-write snapshot while
+  the rest read the store. A SHACL pipeline run straight after the write phase
+  reported 532 violations, the next 0 in two milliseconds, the following runs
+  the correct 360. The mirror now stays dirty until published and is
+  unavailable, not stale, while building.
+- **A Tantivy commit per write** (`35f5c62`). With the two steps above gone,
+  a single-request probe still showed ~83 ms for an insert carrying a
+  literal against ~6 ms for one without: every incremental write committed
+  the text index and reloaded its reader, serialised across writers, capping
+  the HTTP write rate near 2.5k quads/s while the store did 46k/s in-process.
+  Incremental writes now leave their documents pending; the next search
+  commits them, so a search still sees every write that preceded it.
+- Also observed, not yet addressed: a Graph Store `DELETE` of a 900k-quad
+  graph takes ~31 s, and a replace `PUT` over an existing 900k-quad graph
+  ~41 s against ~16 s into an empty graph.
+- Jena's `shacl` CLI validates the same 100k-asset data and shapes in 3.5 s
+  where the platform's engine takes ~10.7 s (in-process and over HTTP alike):
+  a 3× gap on this shape set, recorded in docs/performance.md as an open
+  optimisation target.
+
+**Comparison result (final build, over HTTP, same machine, cache off):**
+100k assets / 0.9M quads — load 18.7 s vs Fuseki 8.2 s (into an empty graph;
+the platform parses into a temporary store first and indexes literals);
+lookup 0.9 vs 3.1 ms; join 92 vs 79 ms; filter 32 vs 46 ms; group-by 1.36 s
+vs 0.38 s; path 1.3 vs 3.2 ms; count-in-graph 119 vs 144 ms; 20 s of 4
+writers + 4 readers: 565 000 quads written (p95 110 ms) vs 49 000 (p95
+947 ms), reads 2 094/s (p95 3.1 ms) vs 832/s (p95 10.4 ms); SHACL 10.6 s
+(pipeline) vs Jena CLI 3.5 s. 1M assets / 9M quads — load 104 s vs 105 s;
+lookup 0.9 vs 5.0 ms; join 78 vs 109 ms; filter 342 vs 341 ms; group-by
+11.6 s vs 5.3 s; path 1.0 vs 6.5 ms; count 2.7 s vs 1.7 s; mixed 356 000
+quads (p95 144 ms) vs 31 500 (p95 1.6 s), reads 2 266/s (p95 2.8 ms) vs
+421/s (p95 21 ms). Open targets from it: grouped aggregates and
+`COUNT(*)` inside `GRAPH`, SHACL engine throughput, graph clear/replace
+cost, and the 200 MB request-body limit on `/store`.
+
