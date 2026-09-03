@@ -1,0 +1,30 @@
+# GWSW (Gegevenswoordenboek Stedelijk Water, Stichting RIONED) — scaffold.
+# The GWSW ontology is published as linked data at https://data.gwsw.nl/ and
+# as downloads through the GWSW apps portal (https://apps.gwsw.nl/); there is
+# no stable direct RDF URL to fetch without a portal session, so this bundle
+# expects the "GWSW Totaal" Turtle export next to this manifest as
+# gwsw-totaal.ttl (run ./fetch.sh with GWSW_TTL_URL set to the download you
+# obtained). Until then it is skipped at boot with a warning, like any bundle
+# whose payloads are missing. The GWSW 2.0 model is built on NEN 2660-2, so
+# it slots in beside examples/seed-bundles/nen2660-imbor.
+
+id = "gwsw"
+opt_out_env = "SEED_GWSW"
+
+[organisation]
+slug = "rioned"
+name = "Stichting RIONED"
+description = "GWSW — the Dutch urban water data dictionary and ontology."
+
+[[data_models]]
+id = "gwsw"
+title = "GWSW ontologie"
+namespace = "https://data.gwsw.nl/1.6/totaal/"
+kind = "model"
+version = "1.6"
+description = "GWSW Totaal: the object types, properties and value lists of the Dutch urban water dictionary (RDFS/OWL/SKOS/SHACL in one graph)."
+
+[[data_models.graphs]]
+iri = "https://data.gwsw.nl/1.6/totaal/"
+role = "model"
+file = "gwsw-totaal.ttl"

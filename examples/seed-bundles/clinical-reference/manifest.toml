@@ -1,0 +1,64 @@
+# Clinical reference bundle — the same layered convention as layered-reference
+# and nen2660-imbor, in a different domain: a FHIR-flavoured record model
+# (Patient, Encounter, Observation) with a SKOS code list, a value set, SHACL
+# shapes and a few records, one of which is deliberately incomplete. Nothing
+# in the platform knows this domain; it is a manifest and six Turtle files.
+# Replace the payloads with the FHIR RDF ontology and SNOMED CT (licensed —
+# not vendored) and the mechanism is unchanged.
+#
+# Loaded by tests/clinical_bundle_e2e.rs on every CI run.
+
+id = "clinical-reference"
+opt_out_env = "SEED_CLINICAL_REFERENCE"
+
+[organisation]
+slug = "clinical-reference"
+name = "Clinical Reference"
+description = "Owns the clinical-record reference dataset and its model."
+
+[[data_models]]
+id = "clinical-record-model"
+title = "Clinical record model"
+namespace = "https://example.org/clinical/def#"
+kind = "model"
+version = "1.0.0"
+description = "Patient, Encounter and Observation as resources (FHIR-shaped); the observation code list and the status value set ride along as sub-graphs."
+
+[[data_models.graphs]]
+iri = "https://example.org/clinical/model"
+role = "model"
+file = "model.ttl"
+
+[[data_models.graphs]]
+iri = "https://example.org/clinical/vocabulary"
+role = "vocabulary"
+file = "vocabulary.ttl"
+
+[[data_models.graphs]]
+iri = "https://example.org/clinical/domain-values"
+role = "domain-values"
+file = "domain-values.ttl"
+
+[[datasets]]
+slug = "clinical-records"
+name = "Clinical records"
+description = "Two patients, one encounter, three observations; one observation lacks its value, so validation has something to say."
+visibility = "public"
+conforms_to = { model = "clinical-record-model", version = "1.0.0" }
+shape_graphs = ["https://example.org/clinical/shapes"]
+
+[[datasets.graphs]]
+iri = "https://example.org/clinical/instances"
+role = "instances"
+file = "instances.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/clinical/shapes"
+role = "shapes"
+file = "shapes.ttl"
+
+[[datasets.saved_queries]]
+name = "Observations per patient"
+slug = "observations-per-patient"
+description = "Every observation with its code and value, per patient."
+sparql = "PREFIX ex: <https://example.org/clinical/def#>\nSELECT ?patient ?obs ?code ?value WHERE { GRAPH <https://example.org/clinical/instances> { ?obs a ex:Observation ; ex:subject ?patient ; ex:code ?code . OPTIONAL { ?obs ex:value ?value } } } ORDER BY ?patient ?obs"

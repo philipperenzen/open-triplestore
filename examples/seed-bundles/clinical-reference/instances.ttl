@@ -1,0 +1,20 @@
+@prefix ex: <https://example.org/clinical/def#> .
+@prefix code: <https://example.org/clinical/code/> .
+@prefix st: <https://example.org/clinical/status/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix p: <https://example.org/clinical/record/> .
+
+p:patient-1 a ex:Patient ; ex:birthDate "1975-04-12"^^xsd:date .
+p:patient-2 a ex:Patient ; ex:birthDate "1990-11-30"^^xsd:date .
+p:encounter-1 a ex:Encounter ; ex:subject p:patient-1 ; ex:status st:final .
+
+p:obs-1 a ex:Observation ; ex:subject p:patient-1 ; ex:encounter p:encounter-1 ;
+    ex:code code:body-weight ; ex:value "82.4"^^xsd:decimal ; ex:unit "kg" ; ex:status st:final ;
+    ex:effective "2026-08-01T09:15:00Z"^^xsd:dateTime .
+p:obs-2 a ex:Observation ; ex:subject p:patient-1 ; ex:encounter p:encounter-1 ;
+    ex:code code:heart-rate ; ex:value "68"^^xsd:decimal ; ex:unit "/min" ; ex:status st:final ;
+    ex:effective "2026-08-01T09:16:00Z"^^xsd:dateTime .
+# obs-3 has no value — the planted violation.
+p:obs-3 a ex:Observation ; ex:subject p:patient-2 ;
+    ex:code code:body-height ; ex:unit "cm" ; ex:status st:preliminary ;
+    ex:effective "2026-08-02T14:00:00Z"^^xsd:dateTime .
