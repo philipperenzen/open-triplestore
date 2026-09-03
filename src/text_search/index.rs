@@ -136,6 +136,10 @@ pub struct TextIndex {
     /// term (`MAX_TOKEN_LEN`), which makes `text_raw` an incomplete view of the
     /// store and disables substring push-down.
     raw_complete: AtomicBool,
+    /// Documents added or deleted since the last commit (incremental writes
+    /// defer their commit to the next search or refresh — one Tantivy commit
+    /// per request cost ~75 ms and serialised concurrent writers).
+    pending_commit: std::sync::atomic::AtomicBool,
 }
 
 /// The schema every index built by this module uses.
@@ -212,6 +216,7 @@ impl TextIndex {
             reader,
             writer: Arc::new(Mutex::new(writer)),
             raw_complete: AtomicBool::new(true),
+            pending_commit: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -296,6 +301,7 @@ impl TextIndex {
         scope: GraphScope<'_>,
         limit: usize,
     ) -> Result<Vec<SearchHit>, TextSearchError> {
+        self.commit_pending()?;
         use tantivy::collector::TopDocs;
         use tantivy::query::QueryParser;
 
@@ -346,6 +352,7 @@ impl TextIndex {
         case: MatchCase,
         scope: GraphScope<'_>,
     ) -> Result<SubstringCandidates, TextSearchError> {
+        self.commit_pending()?;
         use tantivy::collector::TopDocs;
 
         let incomplete = SubstringCandidates {
@@ -539,7 +546,7 @@ impl TextIndex {
             count += 1;
         }
         if count > 0 {
-            self.commit()?;
+            self.pending_commit.store(true, Ordering::Release);
         }
         Ok(count)
     }
@@ -579,9 +586,23 @@ impl TextIndex {
             }
         }
         if count > 0 {
-            self.commit()?;
+            self.pending_commit.store(true, Ordering::Release);
         }
         Ok(count)
+    }
+
+    /// Commit documents deferred by [`Self::index_quads`] / [`Self::remove_quads`],
+    /// if any. Called before every search, so a search always sees the writes
+    /// that preceded it; the cost lands on one reader instead of every writer.
+    pub fn commit_pending(&self) -> Result<bool, TextSearchError> {
+        if !self.pending_commit.swap(false, Ordering::AcqRel) {
+            return Ok(false);
+        }
+        if let Err(e) = self.commit() {
+            self.pending_commit.store(true, Ordering::Release);
+            return Err(e);
+        }
+        Ok(true)
     }
 
     pub fn reindex_from_store(&self, store: &TripleStore) -> Result<usize, TextSearchError> {
