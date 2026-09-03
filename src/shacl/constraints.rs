@@ -1186,9 +1186,64 @@ fn subject_predicate_objects(
 // Term classification & comparison
 // ---------------------------------------------------------------------------
 
+/// The classes whose `rdfs:subClassOf*` closure reaches `class_iri` (the
+/// class itself included), computed once per thread, class and store write
+/// generation. `sh:class` used to run one `ASK` with a property path per
+/// *value node* — 100 000 SPARQL evaluations for 100 000 assets with a
+/// `partOf` value — which was most of a large validation's wall clock.
+fn subclass_closure(
+    store: &TripleStore,
+    class_iri: &str,
+    data_graphs: &[String],
+) -> std::sync::Arc<std::collections::HashSet<String>> {
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    type Key = (u64, u64, String, String);
+    thread_local! {
+        static CLOSURES: RefCell<HashMap<Key, Arc<HashSet<String>>>> = RefCell::new(HashMap::new());
+    }
+    let key: Key = (
+        store.cache_id(),
+        store.write_generation(),
+        data_graphs.join("\u{1f}"),
+        class_iri.to_string(),
+    );
+    if let Some(hit) = CLOSURES.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let query = format!(
+        "SELECT DISTINCT ?c WHERE {{ {} }}",
+        super::engine::graph_scoped(
+            data_graphs,
+            &format!(
+                "?c <{RDFS_SUBCLASS}>* <{}>",
+                crate::store::escape_sparql_iri(class_iri)
+            )
+        )
+    );
+    let mut set: HashSet<String> = HashSet::new();
+    set.insert(class_iri.to_string());
+    if let Ok(oxigraph::sparql::QueryResults::Solutions(sols)) = store.query(&query) {
+        for sol in sols.flatten() {
+            if let Some(Term::NamedNode(c)) = sol.get("c") {
+                set.insert(c.as_str().to_string());
+            }
+        }
+    }
+    let arc = Arc::new(set);
+    CLOSURES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 4096 {
+            c.clear();
+        }
+        c.insert(key, arc.clone());
+    });
+    arc
+}
+
 /// SHACL instance check with subclass closure: `term rdf:type/rdfs:subClassOf* class`.
-/// Literals are never instances; blank-node focus types are resolved through the
-/// raw quad index (SPARQL cannot re-address a stored blank node).
+/// The node's types come from the quad index; the closure is cached per class.
 fn is_instance_of(
     store: &TripleStore,
     term: &Term,
@@ -1196,58 +1251,16 @@ fn is_instance_of(
     data_graphs: &[String],
 ) -> bool {
     match term {
-        Term::Literal(_) => false,
-        Term::NamedNode(nn) => {
-            let query = format!(
-                "ASK {{ {} }}",
-                super::engine::graph_scoped(
-                    data_graphs,
-                    &format!(
-                        "<{}> <{RDF_TYPE}>/<{RDFS_SUBCLASS}>* <{}>",
-                        crate::store::escape_sparql_iri(nn.as_str()),
-                        crate::store::escape_sparql_iri(class_iri)
-                    )
-                )
-            );
-            matches!(
-                store.query(&query),
-                Ok(oxigraph::sparql::QueryResults::Boolean(true))
-            )
-        }
-        Term::BlankNode(_) => {
-            // Types of the blank node, then subclass closure per type.
-            for ty in step(store, term, RDF_TYPE, false, data_graphs) {
-                if let Term::NamedNode(ty_nn) = ty {
-                    if ty_nn.as_str() == class_iri {
-                        return true;
-                    }
-                    let query = format!(
-                        "ASK {{ {} }}",
-                        super::engine::graph_scoped(
-                            data_graphs,
-                            &format!(
-                                "<{}> <{RDFS_SUBCLASS}>* <{}>",
-                                crate::store::escape_sparql_iri(ty_nn.as_str()),
-                                crate::store::escape_sparql_iri(class_iri)
-                            )
-                        )
-                    );
-                    if matches!(
-                        store.query(&query),
-                        Ok(oxigraph::sparql::QueryResults::Boolean(true))
-                    ) {
-                        return true;
-                    }
-                }
-            }
-            false
+        Term::NamedNode(_) | Term::BlankNode(_) => {
+            let closure = subclass_closure(store, class_iri, data_graphs);
+            step(store, term, RDF_TYPE, false, data_graphs)
+                .into_iter()
+                .any(|ty| matches!(&ty, Term::NamedNode(n) if closure.contains(n.as_str())))
         }
         _ => false,
     }
 }
 
-/// String representation for sh:minLength/maxLength/pattern: literals by lexical
-/// form, IRIs by IRI string; blank nodes have none (and always violate).
 fn string_repr(term: &Term) -> Option<String> {
     match term {
         Term::NamedNode(nn) => Some(nn.as_str().to_string()),
