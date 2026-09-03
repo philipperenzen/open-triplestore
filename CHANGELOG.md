@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Per-dataset entailment.** `PUT /api/datasets/:id/entailment` selects a
+  regime (rdfs, owl2-rl/el/ql/dl) and a mode; `materialize` rebuilds the
+  dataset's own entailment graph after every write over its conformance
+  layer; queries opt in with `?entailment_dataset=<id>` — now honoured on
+  `POST /sparql` too (query parameters and form fields), where the
+  entailment parameters used to be dropped.
 - **RDF Patch.** A version diff is served as an RDF Patch document
   (`?format=rdf-patch` or `Accept: application/rdf-patch`), and `POST
   /api/datasets/:id/patch` applies a patch atomically to the dataset's

@@ -314,6 +314,11 @@ WHERE {{
         .store
         .update(&update)
         .map_err(|e| bad(format!("state update failed: {e}")))?;
+    {
+        let st = state.clone();
+        let g = vec![data_graph.clone()];
+        let _ = tokio::task::spawn_blocking(move || crate::entailment::after_write(&st, &g)).await;
+    }
     crate::commit_log::record(
         &state.store,
         &state.base_url,

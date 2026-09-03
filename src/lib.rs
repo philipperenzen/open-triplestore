@@ -40,6 +40,7 @@ pub mod dataset_versions;
 pub mod dcat;
 pub mod docs;
 pub mod email;
+pub mod entailment;
 pub mod geo;
 pub mod ifc;
 pub mod imports;

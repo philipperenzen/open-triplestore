@@ -398,16 +398,15 @@ pub async fn restore_version(
             "Version has no graph mapping to restore".to_string(),
         ));
     }
-    let ldes_before = crate::ldes::capture::before(
-        &state,
-        &record
-            .source_map
-            .iter()
-            .map(|m| m.source_graph.clone())
-            .collect::<Vec<_>>(),
-    );
+    let restored_graphs: Vec<String> = record
+        .source_map
+        .iter()
+        .map(|m| m.source_graph.clone())
+        .collect();
+    let ldes_before = crate::ldes::capture::before(&state, &restored_graphs);
     let restored = snapshot::restore(&state.store, &record.source_map).map_err(AppError::from)?;
     crate::ldes::capture::after(&state, ldes_before);
+    crate::entailment::after_write(&state, &restored_graphs);
     // The full-text index followed writes but never a restore, so searches kept
     // answering from the pre-restore content.
     #[cfg(feature = "text-search")]

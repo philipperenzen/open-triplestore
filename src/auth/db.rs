@@ -675,6 +675,16 @@ impl AuthDb {
                 PRIMARY KEY (dataset_id, source_url)
             );
 
+            -- Per-dataset entailment: selected regime, materialisation mode, last run.
+            CREATE TABLE IF NOT EXISTS dataset_entailment (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                regime TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'materialize',
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT,
+                last_triples INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS endpoint_acl (
                 id TEXT PRIMARY KEY,
                 principal_type TEXT NOT NULL CHECK(principal_type IN ('user','organisation','group','role')),

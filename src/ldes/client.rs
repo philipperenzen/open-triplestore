@@ -312,6 +312,7 @@ pub async fn sync_handler(
         let before = super::capture::before(&st, std::slice::from_ref(&graph));
         let r = sync(&st, &url, &ds_id, &graph);
         super::capture::after(&st, before);
+        crate::entailment::after_write(&st, std::slice::from_ref(&graph));
         if let Ok(r) = &r {
             crate::commit_log::record(
                 &st.store,

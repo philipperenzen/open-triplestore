@@ -743,6 +743,7 @@ pub async fn bulk_import(
                     .flat_map(|(_, g)| g.iter().cloned())
                     .collect();
                 crate::ldes::capture::publish_all(&state, &ds_id, &graphs);
+                crate::entailment::after_write(&state, &graphs);
             }
             // Commit trail for the import: files → dataset graphs. Imports used
             // to leave no trace, while `GET …/commits` presented the log as the

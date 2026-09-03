@@ -37,6 +37,38 @@ The response is a count of the inferred triples added. Query the current status 
 
 For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
 
+## Per-dataset entailment: selectable regime, materialisation toggle
+
+A dataset can select its own regime and keep it materialised:
+
+```bash
+curl -X PUT http://localhost:7878/api/datasets/<id>/entailment \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"regime": "rdfs", "mode": "materialize"}'
+```
+
+In `materialize` mode the regime runs at once and again after every write
+to one of the dataset's graphs (Graph Store, SPARQL Update, imports, restores,
+patches, LDES syncs, property states), over the dataset's conformance layer
+— instance, model, vocabulary, domain-value and linkset graphs — into the
+dataset's own entailment graph `urn:entailment:<regime>:<id>`. The graph is
+rebuilt, not appended to, so consequences of deleted data disappear, and no
+two datasets share inferred triples. `mode: off` clears it.
+
+Queries opt in per request:
+
+```
+GET /sparql?query=…&entailment_dataset=<id>            # the configured regime
+GET /sparql?query=…&entailment_dataset=<id>&entailment=owl2-rl
+POST /sparql  (application/sparql-query with the same query parameters,
+               or application/x-www-form-urlencoded fields)
+```
+
+`GET /api/datasets/<id>/entailment` reports the regime, mode, graph and the
+last run. The global `?entailment=<regime>` (the shared
+`urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
+keeps working unchanged.
+
 ## SWRL rules
 
 Beyond the standard profiles, SWRL (Semantic Web Rule Language) Horn-clause rules derive new triples from custom *antecedent → consequent* patterns — useful for domain logic that doesn't fit an OWL profile. Submit rules to `POST /api/swrl/execute`.

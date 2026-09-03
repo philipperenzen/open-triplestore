@@ -537,6 +537,7 @@ pub async fn apply_patch_handler(
         let before = crate::ldes::capture::before(&st, &gs);
         st.store.update(&update_text).map_err(|e| e.to_string())?;
         crate::ldes::capture::after(&st, before);
+        crate::entailment::after_write(&st, &gs);
         Ok(())
     })
     .await

@@ -20,6 +20,7 @@ mod dataset_versions;
 mod dcat;
 mod docs;
 mod email;
+mod entailment;
 mod geo;
 mod ifc;
 mod imports;

@@ -88,6 +88,9 @@ pub struct SparqlQueryParams {
     pub query: Option<String>,
     /// Entailment regime: "rdfs", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl"
     pub entailment: Option<String>,
+    /// A dataset whose own entailment graph (`urn:entailment:<regime>:<id>`)
+    /// joins the query; the regime defaults to the dataset's configured one.
+    pub entailment_dataset: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -148,6 +151,7 @@ async fn sparql_query_get(
         &query,
         accept,
         params.entailment.as_deref(),
+        params.entailment_dataset.as_deref(),
     )
     .await
 }
@@ -160,6 +164,7 @@ async fn sparql_query_get(
 async fn sparql_post(
     State(state): State<AppState>,
     user: Option<Extension<AuthenticatedUser>>,
+    Query(url_params): Query<SparqlQueryParams>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
@@ -185,7 +190,15 @@ async fn sparql_post(
 
     if content_type.starts_with("application/sparql-query") {
         // Direct query in body
-        execute_query(&state, user.as_deref(), &body_str, accept, None).await
+        execute_query(
+            &state,
+            user.as_deref(),
+            &body_str,
+            accept,
+            url_params.entailment.as_deref(),
+            url_params.entailment_dataset.as_deref(),
+        )
+        .await
     } else if content_type.starts_with("application/sparql-update") {
         // Updates require authentication
         if user.is_none() {
@@ -209,8 +222,17 @@ async fn sparql_post(
             .find(|(k, _)| k == "update")
             .map(|(_, v)| v.as_str());
 
+        // Entailment selection: form fields first, then the URL's query parameters.
+        let field = |name: &str| {
+            params
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        let ent = field("entailment").or(url_params.entailment.as_deref());
+        let ent_ds = field("entailment_dataset").or(url_params.entailment_dataset.as_deref());
         if let Some(q) = query {
-            execute_query(&state, user.as_deref(), q, accept, None).await
+            execute_query(&state, user.as_deref(), q, accept, ent, ent_ds).await
         } else if let Some(u) = update {
             if user.is_none() {
                 return Err(AppError::Unauthorized(
@@ -469,6 +491,7 @@ async fn execute_query(
     query: &str,
     accept: &str,
     entailment: Option<&str>,
+    entailment_dataset: Option<&str>,
 ) -> Result<Response, AppError> {
     debug!("Executing query, Accept: {}", accept);
 
@@ -553,27 +576,61 @@ async fn execute_query(
     #[cfg(not(feature = "text-search"))]
     let query = scoped_query.as_deref().unwrap_or(query);
 
-    // Entailment regime: inject FROM <urn:entailment:...> if requested
-    let entailment_query: String;
-    let query = if let Some(regime) = entailment {
-        let graph_iri = match regime {
-            "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH),
-            "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH),
-            "owl2-el" => Some(crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH),
-            "owl2-ql" => Some(crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH),
+    // Entailment: a dataset's own entailment graph (`entailment_dataset`, regime
+    // from the parameter or the dataset's configuration), else the shared
+    // `urn:entailment:<regime>` graph, joins the default graph via FROM.
+    let entailment_graph: Option<String> = if let Some(ds_id) = entailment_dataset {
+        let ds = state
+            .auth_db
+            .get_dataset(ds_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound(format!("Dataset '{ds_id}' not found")))?;
+        if !state
+            .auth_db
+            .can_access_dataset(user_id, &ds)
+            .unwrap_or(false)
+        {
+            return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
+        }
+        // The regime: the parameter, else the dataset's configuration. A dataset
+        // with no regime configured makes the parameter a no-op, so a client can
+        // always send it.
+        let regime = match entailment {
+            Some(r) => Some(r.to_string()),
+            None => crate::entailment::config(&state.auth_db, ds_id)
+                .ok()
+                .flatten()
+                .map(|c| c.regime),
+        };
+        match regime {
+            Some(r) if !crate::entailment::REGIMES.contains(&r.as_str()) => {
+                return Err(AppError::BadRequest(format!(
+                    "unknown entailment regime `{r}`"
+                )));
+            }
+            Some(r) => Some(crate::entailment::dataset_entailment_graph(&r, ds_id)),
+            None => None,
+        }
+    } else if let Some(regime) = entailment {
+        match regime {
+            "rdfs" => Some(crate::reasoning::common::RDFS_ENTAILMENT_GRAPH.to_string()),
+            "owl2-rl" => Some(crate::reasoning::common::OWL2_RL_ENTAILMENT_GRAPH.to_string()),
+            "owl2-el" => Some(crate::reasoning::common::OWL2_EL_ENTAILMENT_GRAPH.to_string()),
+            "owl2-ql" => Some(crate::reasoning::common::OWL2_QL_ENTAILMENT_GRAPH.to_string()),
             // Advertised in the OpenAPI spec and in docs/owl2-dl.md, but this
             // arm was missing: `?entailment=owl2-dl` fell through to `_ => None`
             // and the query silently ran with no entailment graph at all.
-            "owl2-dl" => Some(crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH),
+            "owl2-dl" => Some(crate::reasoning::common::OWL2_DL_ENTAILMENT_GRAPH.to_string()),
             _ => None,
-        };
-        if let Some(iri) = graph_iri {
-            entailment_query =
-                inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
-            &entailment_query as &str
-        } else {
-            query
         }
+    } else {
+        None
+    };
+    let entailment_query: String;
+    let query = if let Some(iri) = entailment_graph {
+        entailment_query =
+            inject_from_clauses(query, &format!("FROM <{iri}>\nFROM NAMED <{iri}>\n"));
+        &entailment_query as &str
     } else {
         query
     };
@@ -733,8 +790,12 @@ pub(crate) async fn execute_update(
 
     {
         let st = state.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
-            .await;
+        let ent_graphs: Vec<String> = graph_iris.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
     }
     {
         use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
@@ -1562,8 +1623,12 @@ async fn graph_store_put(
     sync_text_index_after_graph_write(&state, touched).await;
     {
         let st = state.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
-            .await;
+        let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
     }
     // Commit trail: Graph Store writes left no trace, while the dataset's
     // history endpoint presented the commit log as complete.
@@ -1642,8 +1707,12 @@ async fn graph_store_post(
     sync_text_index_after_graph_write(&state, touched).await;
     {
         let st = state.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
-            .await;
+        let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
     }
     // Commit trail: Graph Store writes left no trace, while the dataset's
     // history endpoint presented the commit log as complete.
@@ -1703,8 +1772,12 @@ async fn graph_store_delete(
     sync_text_index_after_graph_write(&state, touched).await;
     {
         let st = state.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::ldes::capture::after(&st, ldes_before))
-            .await;
+        let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::ldes::capture::after(&st, ldes_before);
+            crate::entailment::after_write(&st, &ent_graphs);
+        })
+        .await;
     }
     // Commit trail: Graph Store writes left no trace, while the dataset's
     // history endpoint presented the commit log as complete.
@@ -8341,6 +8414,112 @@ struct MaterializeRequest {
     dataset: Option<String>,
 }
 
+/// Run `regime` over `sources` (None = the whole store) into `target`.
+/// Shared by `POST /api/reasoning/materialize` and the per-dataset
+/// materialisation (`crate::entailment`).
+pub(crate) fn run_regime(
+    state: &AppState,
+    regime: &str,
+    sources: Option<Vec<String>>,
+    target: &str,
+) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
+    let _sources: Vec<String> = sources.clone().unwrap_or_default();
+    // Apply the scope to whichever reasoner the regime selects.
+    macro_rules! scoped {
+        ($m:expr) => {{
+            let m = $m;
+            match &sources {
+                Some(s) => m.with_sources(s.clone()),
+                None => m,
+            }
+        }};
+    }
+    // Silence unused-variable warnings for the case where no reasoning feature is
+    // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
+    let _ = (&state, target);
+
+    // Match returns Some(report) for a recognised regime or None for an unknown one.
+    // Both branches are always present in the match so no unreachable-code warning fires.
+    let report: Option<crate::reasoning::ReasoningReport> = match regime {
+        #[cfg(feature = "rdfs-entailment")]
+        "rdfs" => {
+            let m = scoped!(crate::reasoning::rdfs::RdfsMaterializer::with_target(
+                &state.store,
+                target
+            ));
+            Some(
+                m.materialize()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-rl")]
+        "owl2-rl" => {
+            let m =
+                scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
+                    .with_target(target));
+            Some(
+                m.materialize()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-el")]
+        "owl2-el" => {
+            let m = scoped!(
+                crate::reasoning::owl2_el::El2Classifier::new(&state.store).with_target(target)
+            );
+            Some(
+                m.classify()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-ql")]
+        "owl2-ql" => {
+            let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
+                &state.store
+            ));
+            Some(
+                rw.materialize_tbox()
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        #[cfg(feature = "owl2-dl")]
+        "owl2-dl" => {
+            use crate::reasoning::owl2_dl::{
+                ExternalReasoner, ExternalReasonerBridge, NativeTableauStub,
+            };
+            // The external bridge is reachable only through configuration:
+            // `OTS_EXTERNAL_REASONER=konclude` (binary from
+            // `OTS_EXTERNAL_REASONER_BIN`, else `Konclude` on PATH). Unset means
+            // the native stub — RL plus the DL extension rules. This used to
+            // hard-code the stub, so the documented bridge could not be used over
+            // HTTP no matter how the server was configured.
+            let reasoner: Box<dyn ExternalReasoner> = match std::env::var("OTS_EXTERNAL_REASONER")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "konclude" => {
+                    let k = crate::reasoning::konclude_bridge::KoncludeReasoner::new();
+                    Box::new(match std::env::var("OTS_EXTERNAL_REASONER_BIN") {
+                        Ok(bin) if !bin.trim().is_empty() => k.with_binary(bin.trim()),
+                        _ => k,
+                    })
+                }
+                _ => Box::new(NativeTableauStub),
+            };
+            let bridge = ExternalReasonerBridge::new(reasoner);
+            Some(
+                bridge
+                    .materialize(&state.store, &_sources, target)
+                    .map_err(|e| AppError::Internal(e.to_string()))?,
+            )
+        }
+        _ => None,
+    };
+    Ok(report)
+}
+
 /// POST /api/reasoning/materialize — run an entailment regime.
 async fn reasoning_materialize(
     State(state): State<AppState>,
@@ -8431,100 +8610,7 @@ async fn reasoning_materialize(
     } else {
         None
     };
-    let _sources: Vec<String> = sources.clone().unwrap_or_default();
-    // Apply the scope to whichever reasoner the regime selects.
-    macro_rules! scoped {
-        ($m:expr) => {{
-            let m = $m;
-            match &sources {
-                Some(s) => m.with_sources(s.clone()),
-                None => m,
-            }
-        }};
-    }
-    // Silence unused-variable warnings for the case where no reasoning feature is
-    // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, &target);
-
-    // Match returns Some(report) for a recognised regime or None for an unknown one.
-    // Both branches are always present in the match so no unreachable-code warning fires.
-    let report: Option<crate::reasoning::ReasoningReport> = match body.regime.as_str() {
-        #[cfg(feature = "rdfs-entailment")]
-        "rdfs" => {
-            let m = scoped!(crate::reasoning::rdfs::RdfsMaterializer::with_target(
-                &state.store,
-                &target
-            ));
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        #[cfg(feature = "owl2-rl")]
-        "owl2-rl" => {
-            let m =
-                scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
-                    .with_target(&target));
-            Some(
-                m.materialize()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        #[cfg(feature = "owl2-el")]
-        "owl2-el" => {
-            let m =
-                scoped!(crate::reasoning::owl2_el::El2Classifier::new(&state.store)
-                    .with_target(&target));
-            Some(
-                m.classify()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        #[cfg(feature = "owl2-ql")]
-        "owl2-ql" => {
-            let rw = scoped!(crate::reasoning::owl2_ql::QLQueryRewriter::new(
-                &state.store
-            ));
-            Some(
-                rw.materialize_tbox()
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        #[cfg(feature = "owl2-dl")]
-        "owl2-dl" => {
-            use crate::reasoning::owl2_dl::{
-                ExternalReasoner, ExternalReasonerBridge, NativeTableauStub,
-            };
-            // The external bridge is reachable only through configuration:
-            // `OTS_EXTERNAL_REASONER=konclude` (binary from
-            // `OTS_EXTERNAL_REASONER_BIN`, else `Konclude` on PATH). Unset means
-            // the native stub — RL plus the DL extension rules. This used to
-            // hard-code the stub, so the documented bridge could not be used over
-            // HTTP no matter how the server was configured.
-            let reasoner: Box<dyn ExternalReasoner> = match std::env::var("OTS_EXTERNAL_REASONER")
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "konclude" => {
-                    let k = crate::reasoning::konclude_bridge::KoncludeReasoner::new();
-                    Box::new(match std::env::var("OTS_EXTERNAL_REASONER_BIN") {
-                        Ok(bin) if !bin.trim().is_empty() => k.with_binary(bin.trim()),
-                        _ => k,
-                    })
-                }
-                _ => Box::new(NativeTableauStub),
-            };
-            let bridge = ExternalReasonerBridge::new(reasoner);
-            Some(
-                bridge
-                    .materialize(&state.store, &_sources, &target)
-                    .map_err(|e| AppError::Internal(e.to_string()))?,
-            )
-        }
-        _ => None,
-    };
+    let report = run_regime(&state, &body.regime, sources.clone(), &target)?;
 
     match report {
         Some(r) => Ok((
