@@ -28,8 +28,11 @@ use crate::auth::models::{Dataset, GraphKind};
 use crate::server::AppState;
 
 /// Hard caps against archive bombs.
+#[cfg(feature = "asset-archive")]
 const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(feature = "asset-archive")]
 const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+#[cfg(feature = "asset-archive")]
 const MAX_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
