@@ -1,6 +1,5 @@
 pub mod engine;
 pub mod parallel_mirror;
-pub mod path_cache;
 pub mod query_cache;
 pub mod recovery;
 

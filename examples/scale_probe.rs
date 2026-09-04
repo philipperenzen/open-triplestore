@@ -101,13 +101,30 @@ fn main() {
         store
             .load_str(&shapes, RdfFormat::Turtle, Some("urn:shapes"))
             .expect("shapes");
-        for i in 0..2 {
+        // Runs 0 and 1 start right after the shapes load, so the accelerator is
+        // dirty and the engine reads one RocksDB snapshot. Run 2 waits for the
+        // background tick to publish a clean RAM copy and reads that instead —
+        // the two data paths a server run can take.
+        for i in 0..3 {
+            if i == 2 {
+                let builds = store.parallel_build_count();
+                let t = Instant::now();
+                while store.parallel_build_count() == builds && t.elapsed().as_secs() < 120 {
+                    store.accelerator_tick();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                println!(
+                    "mirror rebuilt for run 2: {} (waited {:.1}s)",
+                    store.parallel_build_count() > builds,
+                    t.elapsed().as_secs_f64()
+                );
+            }
             let t = Instant::now();
             let r =
                 open_triplestore::shacl::engine::validate(&store, "urn:shapes", &[G.to_string()])
                     .expect("shacl");
             println!(
-                "SHACL run {i}: {:.1}s ({} results)",
+                "SHACL run {i}: {:.2}s ({} results)",
                 t.elapsed().as_secs_f64(),
                 r.results.len()
             );
