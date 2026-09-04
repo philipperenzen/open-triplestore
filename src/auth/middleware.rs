@@ -238,6 +238,9 @@ async fn resolve_oidc_token(
 /// A peer's identity assertion: verified against the peer's JWKS with this
 /// instance as audience, provisioned as a read-only federated user whose
 /// organisation memberships follow the assertion's `org:` groups.
+// The Err is a ready-made axum `Response` on the cold (rejection) path, as in
+// the sibling resolvers.
+#[allow(clippy::result_large_err)]
 async fn resolve_federated_token(
     auth_ext: &AuthExt,
     auth_db: &Arc<AuthDb>,
