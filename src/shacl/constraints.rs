@@ -167,7 +167,7 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 if !view.is_instance_of(v, class_iri) {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:class <{}>", class_iri),
                         format!("Value does not have class <{}>", class_iri),
@@ -189,7 +189,7 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !ok {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:datatype <{}>", dt_iri),
                         format!("Value has wrong datatype, expected <{}>", dt_iri),
@@ -216,7 +216,7 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !is_valid {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:nodeKind {:?}", expected),
                         format!("Value does not match expected node kind {:?}", expected),
@@ -253,13 +253,13 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 // sh:minLength applies to the string representation of the value:
                 // literals by lexical form, IRIs by IRI string; blank nodes always violate.
-                let ok = match string_repr(&v) {
+                let ok = match string_repr(v) {
                     Some(s) => s.chars().count() >= *min_len,
                     None => false,
                 };
                 if !ok {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:minLength {}", min_len),
                         format!("Value length is less than minimum {}", min_len),
@@ -270,13 +270,13 @@ pub(crate) fn evaluate_constraint_with_values(
 
         Constraint::MaxLength(max_len) => {
             for v in values.iter() {
-                let ok = match string_repr(&v) {
+                let ok = match string_repr(v) {
                     Some(s) => s.chars().count() <= *max_len,
                     None => false,
                 };
                 if !ok {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:maxLength {}", max_len),
                         format!("Value length exceeds maximum {}", max_len),
@@ -303,9 +303,9 @@ pub(crate) fn evaluate_constraint_with_values(
             }
             for v in values.iter().take(MAX_PATTERN_VALUES) {
                 // Blank nodes always violate sh:pattern (SHACL §4.4.2).
-                let Some(value) = string_repr(&v) else {
+                let Some(value) = string_repr(v) else {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:pattern \"{}\"", pattern),
                         format!("Value does not match pattern \"{}\"", pattern),
@@ -363,10 +363,10 @@ pub(crate) fn evaluate_constraint_with_values(
             for v in values.iter() {
                 if !allowed.iter().any(|a| a == v) {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         "sh:in".to_string(),
-                        format!("Value \"{}\" is not in the allowed list", display_term(&v)),
+                        format!("Value \"{}\" is not in the allowed list", display_term(v)),
                     ));
                 }
             }
@@ -407,7 +407,7 @@ pub(crate) fn evaluate_constraint_with_values(
                 };
                 if !lang_ok {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         "sh:languageIn".to_string(),
                         "Language tag not in allowed list".to_string(),
@@ -514,16 +514,12 @@ pub(crate) fn evaluate_constraint_with_values(
         // incomparable types, IRIs and blank nodes all violate (SHACL §4.3).
         Constraint::MinExclusive(bound) => {
             for v in values.iter() {
-                if !matches!(compare_terms(&v, bound), Some(Ordering::Greater)) {
+                if !matches!(compare_terms(v, bound), Some(Ordering::Greater)) {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:minExclusive {}", display_term(bound)),
-                        format!(
-                            "Value {} is not > {}",
-                            display_term(&v),
-                            display_term(bound)
-                        ),
+                        format!("Value {} is not > {}", display_term(v), display_term(bound)),
                     ));
                 }
             }
@@ -532,16 +528,16 @@ pub(crate) fn evaluate_constraint_with_values(
         Constraint::MinInclusive(bound) => {
             for v in values.iter() {
                 if !matches!(
-                    compare_terms(&v, bound),
+                    compare_terms(v, bound),
                     Some(Ordering::Greater | Ordering::Equal)
                 ) {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:minInclusive {}", display_term(bound)),
                         format!(
                             "Value {} is not >= {}",
-                            display_term(&v),
+                            display_term(v),
                             display_term(bound)
                         ),
                     ));
@@ -551,16 +547,12 @@ pub(crate) fn evaluate_constraint_with_values(
 
         Constraint::MaxExclusive(bound) => {
             for v in values.iter() {
-                if !matches!(compare_terms(&v, bound), Some(Ordering::Less)) {
+                if !matches!(compare_terms(v, bound), Some(Ordering::Less)) {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:maxExclusive {}", display_term(bound)),
-                        format!(
-                            "Value {} is not < {}",
-                            display_term(&v),
-                            display_term(bound)
-                        ),
+                        format!("Value {} is not < {}", display_term(v), display_term(bound)),
                     ));
                 }
             }
@@ -569,16 +561,16 @@ pub(crate) fn evaluate_constraint_with_values(
         Constraint::MaxInclusive(bound) => {
             for v in values.iter() {
                 if !matches!(
-                    compare_terms(&v, bound),
+                    compare_terms(v, bound),
                     Some(Ordering::Less | Ordering::Equal)
                 ) {
                     results.push(mk(
-                        Some(display_term(&v)),
+                        Some(display_term(v)),
                         path_str(),
                         format!("sh:maxInclusive {}", display_term(bound)),
                         format!(
                             "Value {} is not <= {}",
-                            display_term(&v),
+                            display_term(v),
                             display_term(bound)
                         ),
                     ));
@@ -693,10 +685,10 @@ pub(crate) fn evaluate_constraint_with_values(
             for value in values.iter() {
                 // The value must NOT conform; zero inner violations → violation.
                 let inner_violations =
-                    validate_inline_shape(view, shapes, &value, inner_shape, severity);
+                    validate_inline_shape(view, shapes, value, inner_shape, severity);
                 if inner_violations.is_empty() {
                     results.push(mk(
-                        Some(display_term(&value)),
+                        Some(display_term(value)),
                         path_str(),
                         "sh:not".to_string(),
                         "Value conforms to sh:not shape (must not conform)".to_string(),
@@ -710,11 +702,11 @@ pub(crate) fn evaluate_constraint_with_values(
             // value that fails any of them.
             for value in values.iter() {
                 let fails = inner_shapes.iter().any(|inner| {
-                    !validate_inline_shape(view, shapes, &value, inner, severity).is_empty()
+                    !validate_inline_shape(view, shapes, value, inner, severity).is_empty()
                 });
                 if fails {
                     results.push(mk(
-                        Some(display_term(&value)),
+                        Some(display_term(value)),
                         path_str(),
                         "sh:and".to_string(),
                         "Value does not conform to all sh:and shapes".to_string(),
@@ -727,11 +719,11 @@ pub(crate) fn evaluate_constraint_with_values(
             // Every value must conform to at least one inner shape.
             for value in values.iter() {
                 let any_conforms = inner_shapes.iter().any(|inner| {
-                    validate_inline_shape(view, shapes, &value, inner, severity).is_empty()
+                    validate_inline_shape(view, shapes, value, inner, severity).is_empty()
                 });
                 if !any_conforms {
                     results.push(mk(
-                        Some(display_term(&value)),
+                        Some(display_term(value)),
                         path_str(),
                         "sh:or".to_string(),
                         "Value does not conform to any sh:or shape".to_string(),
@@ -746,12 +738,12 @@ pub(crate) fn evaluate_constraint_with_values(
                 let conforming_count = inner_shapes
                     .iter()
                     .filter(|inner| {
-                        validate_inline_shape(view, shapes, &value, inner, severity).is_empty()
+                        validate_inline_shape(view, shapes, value, inner, severity).is_empty()
                     })
                     .count();
                 if conforming_count != 1 {
                     results.push(mk(
-                        Some(display_term(&value)),
+                        Some(display_term(value)),
                         path_str(),
                         "sh:xone".to_string(),
                         format!(
@@ -768,10 +760,10 @@ pub(crate) fn evaluate_constraint_with_values(
             // Each value node must conform to the referenced shape; one
             // violation per non-conforming value (sh:node, SHACL §4.6.3).
             for value in values.iter() {
-                let inner = validate_inline_shape(view, shapes, &value, ref_shape, severity);
+                let inner = validate_inline_shape(view, shapes, value, ref_shape, severity);
                 if !inner.is_empty() {
                     results.push(mk(
-                        Some(display_term(&value)),
+                        Some(display_term(value)),
                         path_str(),
                         format!("sh:node <{}>", ref_shape.iri),
                         format!("Value does not conform to shape <{}>", ref_shape.iri),
@@ -1081,9 +1073,9 @@ fn cached_regex_match(pattern: &str, flags: &str, value: &str) -> Option<bool> {
     use std::sync::Arc;
     // pattern -> flags -> compiled regex; nested so a lookup borrows the &strs
     // it has instead of allocating a key tuple per value node.
+    type RegexCache = HashMap<String, HashMap<String, Option<Arc<regex::Regex>>>>;
     thread_local! {
-        static REGEXES: RefCell<HashMap<String, HashMap<String, Option<Arc<regex::Regex>>>>> =
-            RefCell::new(HashMap::new());
+        static REGEXES: RefCell<RegexCache> = RefCell::new(HashMap::new());
     }
     if let Some(hit) = REGEXES.with(|c| c.borrow().get(pattern).and_then(|m| m.get(flags)).cloned())
     {

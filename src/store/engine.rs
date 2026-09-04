@@ -280,15 +280,11 @@ pub struct TripleStore {
     /// generation they were discovered at. Every `query_options()` used to walk
     /// the whole store's `rdf:type` index for them — a RocksDB snapshot plus a
     /// prefix scan per SPARQL query, 12% of a large SHACL run's CPU.
-    shacl_functions: std::sync::Arc<
-        std::sync::Mutex<
-            Option<(
-                u64,
-                std::sync::Arc<Vec<(NamedNode, crate::shacl::sparql_functions::FnHandler)>>,
-            )>,
-        >,
-    >,
+    shacl_functions: std::sync::Arc<std::sync::Mutex<Option<(u64, ShaclFunctions)>>>,
 }
+
+/// The `sh:SPARQLFunction` handlers discovered at one write generation.
+type ShaclFunctions = Arc<Vec<(NamedNode, crate::shacl::sparql_functions::FnHandler)>>;
 
 /// Brackets one write to the store (see [`TripleStore::begin_write`]). Dropping
 /// it records the write's end on every return path, including errors.
@@ -440,7 +436,7 @@ impl TripleStore {
 
     /// The `sh:SPARQLFunction` handlers defined in the store, discovered once per
     /// write generation.
-    fn shacl_functions(&self) -> Arc<Vec<(NamedNode, crate::shacl::sparql_functions::FnHandler)>> {
+    fn shacl_functions(&self) -> ShaclFunctions {
         let gen = self.write_generation();
         if let Ok(guard) = self.shacl_functions.lock() {
             if let Some((g, fns)) = guard.as_ref() {

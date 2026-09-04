@@ -116,9 +116,12 @@ pub(crate) struct DataView<'a> {
 /// is present only when its scan completed within the budget, and is then
 /// authoritative for that graph and predicate; anything else falls through to
 /// the raw source.
+/// `predicate -> node -> neighbours` for one data graph.
+type Adjacency = HashMap<String, HashMap<Term, Vec<Term>>>;
+
 struct RunIndex {
-    fwd: Vec<HashMap<String, HashMap<Term, Vec<Term>>>>,
-    inv: Vec<HashMap<String, HashMap<Term, Vec<Term>>>>,
+    fwd: Vec<Adjacency>,
+    inv: Vec<Adjacency>,
 }
 
 /// When and how large the run index may be. Read from the environment once
@@ -431,7 +434,8 @@ impl<'a> DataView<'a> {
         pairs.sort();
         let graph_count = self.graphs.len();
         // (pair, graph) -> adjacency, or None when the budget ran out.
-        let built: Vec<((String, bool), usize, Option<HashMap<Term, Vec<Term>>>)> = pairs
+        type Built = ((String, bool), usize, Option<HashMap<Term, Vec<Term>>>);
+        let built: Vec<Built> = pairs
             .par_iter()
             .flat_map_iter(|pair| (0..graph_count).map(move |gi| (pair.clone(), gi)))
             .map(|((pred, inverse), gi)| {
@@ -445,8 +449,7 @@ impl<'a> DataView<'a> {
             tracing::debug!("SHACL run index dropped: a write overlapped its scans");
             return;
         }
-        let mut fwd: Vec<HashMap<String, HashMap<Term, Vec<Term>>>> =
-            (0..graph_count).map(|_| HashMap::new()).collect();
+        let mut fwd: Vec<Adjacency> = (0..graph_count).map(|_| HashMap::new()).collect();
         let mut inv = fwd.clone();
         let mut dropped = Vec::new();
         for ((pred, inverse), gi, map) in built {
@@ -496,7 +499,7 @@ impl<'a> DataView<'a> {
         let mut n = 0usize;
         let mut push = |subject: Term, object: Term| -> bool {
             n += 1;
-            if n % 1024 == 0
+            if n.is_multiple_of(1024)
                 && used.fetch_add(1024, std::sync::atomic::Ordering::Relaxed) + 1024 > budget
             {
                 return false;
