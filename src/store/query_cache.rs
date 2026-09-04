@@ -133,10 +133,14 @@ impl QueryCache {
 
     /// Bump the generation so every existing entry is treated as stale. Called on
     /// every write to the store. O(1).
+    ///
+    /// The generation advances even when the result cache is disabled: it is the
+    /// store's public write generation (`TripleStore::write_generation`), which
+    /// keys the VoID statistics and the SHACL run state. Gating it on `enabled`
+    /// (as this used to) froze every one of those caches at generation 0 under
+    /// `OTS_QUERY_CACHE=false`, so they served stale data across writes.
     pub fn invalidate(&self) {
-        if self.inner.enabled {
-            self.inner.generation.fetch_add(1, Ordering::Release);
-        }
+        self.inner.generation.fetch_add(1, Ordering::Release);
     }
 
     /// Return a *fresh* (current-generation) cached result, or `None`.
@@ -360,6 +364,19 @@ mod tests {
         assert!(
             matches!(cache.get(q), Some(QueryResults::Boolean(true))),
             "an uncontended result must still be cached"
+        );
+    }
+
+    #[test]
+    fn generation_advances_with_the_cache_disabled() {
+        let cache = QueryCache::new(false, 8, 8);
+        assert_eq!(cache.generation(), 0);
+        cache.invalidate();
+        cache.invalidate();
+        assert_eq!(
+            cache.generation(),
+            2,
+            "the write generation is not a cache feature"
         );
     }
 }
