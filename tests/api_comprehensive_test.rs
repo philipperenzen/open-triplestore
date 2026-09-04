@@ -1408,9 +1408,15 @@ mod graph_store {
     #[tokio::test]
     async fn payload_too_large_returns_413() {
         let (state, token) = admin_state();
-        // Generate ~52 MB of data — exceeds the 50 MB body limit
-        let big_body = vec![b'a'; 52 * 1024 * 1024];
-        let resp = test_app(state)
+        // The Graph Store body limit is `OTS_MAX_UPLOAD_MB` (default 512 MB),
+        // read when the router is built. Pin it to 1 MB for this app only —
+        // the variable is set just around the build so no other router in
+        // this binary picks it up — and send a body over that.
+        std::env::set_var("OTS_MAX_UPLOAD_MB", "1");
+        let app = test_app(state);
+        std::env::remove_var("OTS_MAX_UPLOAD_MB");
+        let big_body = vec![b'a'; 2 * 1024 * 1024];
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
@@ -1425,7 +1431,7 @@ mod graph_store {
         assert_eq!(
             resp.status(),
             StatusCode::PAYLOAD_TOO_LARGE,
-            "52 MB body must return 413"
+            "a body over the configured limit must return 413"
         );
     }
 }
