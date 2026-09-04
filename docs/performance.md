@@ -584,7 +584,7 @@ pipeline over HTTP.
 | `COUNT(*)` inside `GRAPH` | 0.7 ms | 144 ms |
 | 4 writers + 4 readers, 20 s: quads written | 736 000 (36.8k/s), write p95 85 ms | 49 000 (2.45k/s), write p95 947 ms |
 | same phase: reads | 2 616/s, read p95 2.5 ms | 832/s, read p95 10.4 ms |
-| SHACL, every asset, 6 property shapes | __SNAP_HTTP__ right after the load, 0.64–0.76 s once the accelerator has published³ (Studio pipeline over HTTP; in-process 1.1–1.3 s / 0.72 s) | 3.5 s (Jena `shacl` CLI) |
+| SHACL, every asset, 6 property shapes | 1.3–2.0 s right after the load, 0.64–0.93 s once the accelerator has published³ (Studio pipeline over HTTP; in-process 1.1–1.3 s / 0.72 s) | 3.5 s (Jena `shacl` CLI) |
 
 ¹ Into an empty graph. The platform's Graph Store `PUT` parses the payload
 into a temporary store first (so a malformed body cannot empty the graph) and
@@ -625,8 +625,8 @@ structural: Open Triplestore sustains 11–15× Fuseki's write throughput at a
 tenth of its write latency while serving 3–6× its read rate at a quarter to
 a ninth of its read latency. SHACL, the one target the first comparison
 left open, was then profiled and the engine rebuilt (see below): the same
-validation now takes 0.64–0.76 s over HTTP once the accelerator has
-published its RAM copy and __SNAP_HTTP__ right after a load, against
+validation now takes 0.64–0.93 s over HTTP once the accelerator has
+published its RAM copy and 1.3–2.0 s right after a load, against
 Jena's 3.5 s.
 
 ³ A validation reads one data source for its whole run: the query

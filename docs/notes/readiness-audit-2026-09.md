@@ -2166,8 +2166,8 @@ them):
 |---|--:|--:|
 | in-process, right after a load (RocksDB snapshot) | 9.5–10.5 s | 1.1–1.3 s |
 | in-process, accelerator published (RAM copy) | — | 0.72 s |
-| Studio pipeline over HTTP, right after a load | 6.9–9.4 s | __SNAP_HTTP__ |
-| Studio pipeline over HTTP, accelerator published | — | 0.64–0.76 s |
+| Studio pipeline over HTTP, right after a load | 6.9–9.4 s | 1.3–2.0 s |
+| Studio pipeline over HTTP, accelerator published | — | 0.64–0.93 s |
 | Jena `shacl` CLI, same shapes and data | 3.5 s | 3.5 s |
 
 Over HTTP the "right after a load" figure includes the accelerator's
