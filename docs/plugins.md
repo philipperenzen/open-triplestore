@@ -139,7 +139,7 @@ A domain profile is a bundle, not a code change. The repository ships:
 | `layered-reference` | asset registry (toy) | vendored; loaded in CI by `tests/layered_bundle_e2e.rs` |
 | `clinical-reference` | clinical records (FHIR-shaped, LOINC-like codes) | vendored; loaded in CI by `tests/clinical_bundle_e2e.rs` |
 | `nen2660-imbor` | Dutch infrastructure (NEN 2660-2 + IMBOR 2025) | fetched by `fetch.sh` (public downloads); the real-data Stage-1 benchmark |
-| `gwsw` | Dutch urban water (GWSW, RIONED) | scaffold — the Turtle export must be obtained from the GWSW portal |
+| `gwsw` | Dutch urban water (GWSW Totaal 1.7.0, RIONED) | `fetch.sh` downloads the CC0 Turtle export from data.gwsw.nl |
 
 CB'23 (material passports) and clinical terminologies such as SNOMED CT are
 licensed or not published as RDF by their owners; write a manifest like the

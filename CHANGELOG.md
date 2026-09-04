@@ -29,7 +29,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Domain starter profiles.** `examples/seed-bundles/clinical-reference`
   (a FHIR-shaped record model, loaded in CI) proves the layered convention is
   domain-neutral next to `layered-reference` and the real-data
-  `nen2660-imbor`; a `gwsw` scaffold for RIONED's urban-water ontology.
+  `nen2660-imbor`; `gwsw` for RIONED's urban-water ontology (GWSW Totaal 1.7.0, fetched from data.gwsw.nl).
 - **Linked-document containers, ICDD first.** `POST
   /api/datasets/:id/containers/import` unpacks an ISO 21597-1 container:
   documents become assets, linksets and payload triples become role-typed
