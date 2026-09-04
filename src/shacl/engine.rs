@@ -59,28 +59,38 @@ pub fn validate(
     // parallel, so the fan-out below takes no lock and runs no SPARQL.
     let mut view = DataView::new(store, data_graphs);
     view.prepare(&shapes);
-    debug!("SHACL data source: {}", view.source_kind());
 
     // `shapes_slice` is a shared immutable reference passed into parallel closures so
     // that logical constraint operators (sh:not, sh:and, sh:or, sh:xone, sh:node,
     // sh:qualifiedValueShape) can look up sibling shapes by IRI.
     let shapes_slice: &[Shape] = &shapes;
-    let view = &view;
 
     // Targets first, per shape in parallel.
-    let targeted: Vec<(&Shape, Vec<Term>)> = shapes_slice
-        .par_iter()
-        .filter(|shape| !shape.deactivated)
-        .map(|shape| {
-            let focus_nodes = resolve_targets(view, shape);
-            debug!(
-                "Shape <{}> has {} target nodes",
-                shape.iri,
-                focus_nodes.len()
-            );
-            (shape, focus_nodes)
-        })
-        .collect();
+    let targeted: Vec<(&Shape, Vec<Term>)> = {
+        let view = &view;
+        shapes_slice
+            .par_iter()
+            .filter(|shape| !shape.deactivated)
+            .map(|shape| {
+                let focus_nodes = resolve_targets(view, shape);
+                debug!(
+                    "Shape <{}> has {} target nodes",
+                    shape.iri,
+                    focus_nodes.len()
+                );
+                (shape, focus_nodes)
+            })
+            .collect()
+    };
+    // Sized by the real focus counts: one scan per (graph, shape predicate)
+    // when the run is large enough for hash lookups to beat index seeks.
+    view.build_index(shapes_slice, &targeted);
+    debug!(
+        "SHACL data source: {} (run index: {})",
+        view.source_kind(),
+        view.has_index()
+    );
+    let view = &view;
 
     // Evaluate shapes and focus nodes in parallel using rayon. Each shape is
     // independent — the evaluator only reads the shared view.
@@ -1898,5 +1908,89 @@ mod tests {
         let after = validate(&store, "urn:shapes", &graphs).unwrap();
         assert_eq!(after.results_count, 1, "{:?}", after.results);
         assert!(after.results[0].focus_node.contains("bob"));
+    }
+
+    /// The run index (adjacency built from one scan per shape predicate) is a
+    /// pure cache: a run forced to build it reports exactly what a run forced
+    /// to answer every probe from the store reports, on a multi-graph fixture
+    /// with every path form and a property-pair constraint.
+    #[test]
+    fn run_index_is_invisible_in_the_report() {
+        use super::super::view::{set_index_policy_override, IndexPolicy};
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:datatype xsd:string ] ,
+                            [ sh:path [ sh:inversePath ex:partOf ] ; sh:maxCount 1 ] ,
+                            [ sh:path ( ex:partOf ex:name ) ; sh:minCount 1 ] ,
+                            [ sh:path [ sh:alternativePath ( ex:name ex:code ) ] ; sh:minCount 2 ] ,
+                            [ sh:path [ sh:zeroOrMorePath ex:partOf ] ; sh:class ex:T ] ,
+                            [ sh:path ex:low ; sh:lessThan ex:high ] .
+        "#;
+        let g1 = "http://example.org/g1";
+        let g2 = "http://example.org/g2";
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:a a ex:T ; ex:name "a" ; ex:code "A" ; ex:partOf ex:root ; ex:low 1 ; ex:high 2 .
+                   ex:b a ex:T ; ex:name "b" ; ex:partOf ex:root ; ex:low 5 ; ex:high 2 .
+                   ex:root a ex:T ; ex:name "root" .
+                   ex:c a ex:T ; ex:partOf ex:root, ex:a ."#,
+                RdfFormat::Turtle,
+                Some(g1),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:d a ex:T ; ex:name "d" ; ex:code "D" ; ex:partOf ex:e .
+                   ex:e ex:name "e" .
+                   ex:root ex:partOf ex:d ."#,
+                RdfFormat::Turtle,
+                Some(g2),
+            )
+            .unwrap();
+        let graphs = vec![g1.to_string(), g2.to_string()];
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| {
+                    format!(
+                        "{} | {} | {:?} | {:?}",
+                        x.focus_node, x.source_constraint, x.path, x.value
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: usize::MAX,
+            max_quads: 0,
+        }));
+        let without = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: 0,
+            max_quads: usize::MAX,
+        }));
+        let with = validate(&store, "urn:shapes", &graphs).unwrap();
+        // A budget too small for every pair: some pairs indexed, the rest raw.
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: 0,
+            max_quads: 1,
+        }));
+        let partial = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(None);
+        assert!(!without.conforms, "fixture has violations");
+        assert!(without.results_count >= 4, "{:?}", summary(&without));
+        assert_eq!(summary(&with), summary(&without));
+        assert_eq!(summary(&partial), summary(&without));
     }
 }

@@ -24,7 +24,7 @@
 //! and no SPARQL is evaluated on the per-focus-node path at all. SPARQL-based
 //! constraints (`sh:sparql`) and SPARQL targets keep reading the live store.
 
-use super::shapes::{Constraint, Shape, Target};
+use super::shapes::{Constraint, PropertyPath, Shape, Target};
 use crate::store::TripleStore;
 use oxigraph::model::{
     GraphName, GraphNameRef, NamedNode, NamedNodeRef, NamedOrBlankNodeRef, Term, TermRef,
@@ -102,6 +102,71 @@ pub(crate) struct DataView<'a> {
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
+    /// Per-run adjacency for the shape predicates, built for the snapshot and
+    /// live sources when the run is large enough to pay for it (see
+    /// [`RunIndex`]). `None` on the mirror source, whose probes are RAM lookups.
+    index: Option<RunIndex>,
+}
+
+/// Adjacency lists for the predicates the run's shapes traverse, one scan per
+/// (data graph, predicate) over the run's snapshot: `fwd[g][p][s] = objects`
+/// and `inv[g][p][o] = subjects`. Answers a probe with one hash lookup instead
+/// of a RocksDB prefix seek plus four term decodes, which at 600 000 probes per
+/// run is the difference between a 2.3 s and a sub-second validation. A pair
+/// is present only when its scan completed within the budget, and is then
+/// authoritative for that graph and predicate; anything else falls through to
+/// the raw source.
+struct RunIndex {
+    fwd: Vec<HashMap<String, HashMap<Term, Vec<Term>>>>,
+    inv: Vec<HashMap<String, HashMap<Term, Vec<Term>>>>,
+}
+
+/// When and how large the run index may be. Read from the environment once
+/// per run: `OTS_SHACL_RUN_INDEX_MIN_PROBES` (build only when the run will
+/// make at least this many probes, default 20 000) and
+/// `OTS_SHACL_RUN_INDEX_MAX_QUADS` (total quads the index may hold; default
+/// derived from the memory limit like the accelerator's cap, 1M when the
+/// limit is unknown, never below 250k or above 8M).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IndexPolicy {
+    pub min_probes: usize,
+    pub max_quads: usize,
+}
+
+impl IndexPolicy {
+    pub(crate) fn from_env() -> Self {
+        let min_probes = std::env::var("OTS_SHACL_RUN_INDEX_MIN_PROBES")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(20_000);
+        let max_quads = std::env::var("OTS_SHACL_RUN_INDEX_MAX_QUADS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or_else(|| {
+                crate::store::parallel_mirror::detect_memory_limit_bytes()
+                    .map(|b| (b / 8 / 300) as usize)
+                    .unwrap_or(1_000_000)
+                    .clamp(250_000, 8_000_000)
+            });
+        Self {
+            min_probes,
+            max_quads,
+        }
+    }
+}
+
+thread_local! {
+    /// Test hook: overrides [`IndexPolicy::from_env`] for runs started on this
+    /// thread, so a test can force the index on (or off) without touching the
+    /// process environment.
+    static INDEX_POLICY_OVERRIDE: std::cell::Cell<Option<IndexPolicy>> = const { std::cell::Cell::new(None) };
+}
+
+/// Force the run-index policy for validations started on the current thread
+/// (`None` restores the environment-derived policy). Test hook.
+#[cfg(test)]
+pub(crate) fn set_index_policy_override(policy: Option<IndexPolicy>) {
+    INDEX_POLICY_OVERRIDE.with(|c| c.set(policy));
 }
 
 // Every rayon worker shares one view. The RocksDB readable transaction is
@@ -143,7 +208,18 @@ impl<'a> DataView<'a> {
             raw,
             graphs,
             classes: HashMap::new(),
+            index: None,
         }
+    }
+
+    /// Whether the run reads the accelerator's RAM copy.
+    pub(crate) fn is_mirror(&self) -> bool {
+        matches!(self.raw, RawSource::Mirror(_))
+    }
+
+    /// Whether a run index was built (diagnostics).
+    pub(crate) fn has_index(&self) -> bool {
+        self.index.is_some()
     }
 
     pub(crate) fn source_kind(&self) -> &'static str {
@@ -183,6 +259,9 @@ impl<'a> DataView<'a> {
         inverse: bool,
         sel: GraphSel,
     ) -> Vec<Term> {
+        if let Some(hit) = self.step_indexed(from, predicate, inverse, sel) {
+            return hit;
+        }
         let Ok(pred) = NamedNodeRef::new(predicate) else {
             return Vec::new();
         };
@@ -284,6 +363,160 @@ impl<'a> DataView<'a> {
             }
         });
         out
+    }
+
+    /// Answer a step from the run index when it holds the (graph, predicate)
+    /// pair(s) the selection needs; `None` means "ask the raw source".
+    fn step_indexed(
+        &self,
+        from: &Term,
+        predicate: &str,
+        inverse: bool,
+        sel: GraphSel,
+    ) -> Option<Vec<Term>> {
+        let ix = self.index.as_ref()?;
+        let maps = if inverse { &ix.inv } else { &ix.fwd };
+        match sel {
+            GraphSel::One(i) => {
+                let m = maps.get(i)?.get(predicate)?;
+                Some(m.get(from).cloned().unwrap_or_default())
+            }
+            GraphSel::All => {
+                if !maps.iter().all(|g| g.contains_key(predicate)) {
+                    return None;
+                }
+                let mut out = Vec::new();
+                for g in maps {
+                    if let Some(v) = g.get(predicate).and_then(|m| m.get(from)) {
+                        out.extend(v.iter().cloned());
+                    }
+                }
+                Some(out)
+            }
+        }
+    }
+
+    /// Build the run index for the predicates `shapes` traverse, sized by the
+    /// targets already resolved: skipped on the mirror source, below the
+    /// policy's probe threshold, or (on the live memory source) when a write
+    /// overlaps the scans. Each (graph, predicate, direction) pair is one scan;
+    /// pairs that would push the index over its quad budget are dropped and
+    /// answered from the raw source instead.
+    pub(crate) fn build_index(&mut self, shapes: &[Shape], targeted: &[(&Shape, Vec<Term>)]) {
+        if self.is_mirror() {
+            return;
+        }
+        let policy = INDEX_POLICY_OVERRIDE
+            .with(|c| c.get())
+            .unwrap_or_else(IndexPolicy::from_env);
+        let _ = shapes;
+        let mut pairs: HashSet<(String, bool)> = HashSet::new();
+        let mut probes: usize = 0;
+        for (shape, focus) in targeted {
+            let mut own: HashSet<(String, bool)> = HashSet::new();
+            collect_shape_predicates(shape, &mut own);
+            probes = probes.saturating_add(focus.len().saturating_mul(own.len()));
+            pairs.extend(own);
+        }
+        if pairs.is_empty() || probes < policy.min_probes {
+            return;
+        }
+        let gen_before = self.store.write_generation();
+        if !self.consistent_source() && self.store.writes_in_flight() > 0 {
+            return;
+        }
+        let used = std::sync::atomic::AtomicUsize::new(0);
+        let budget = policy.max_quads;
+        let mut pairs: Vec<(String, bool)> = pairs.into_iter().collect();
+        pairs.sort();
+        let graph_count = self.graphs.len();
+        // (pair, graph) -> adjacency, or None when the budget ran out.
+        let built: Vec<((String, bool), usize, Option<HashMap<Term, Vec<Term>>>)> = pairs
+            .par_iter()
+            .flat_map_iter(|pair| (0..graph_count).map(move |gi| (pair.clone(), gi)))
+            .map(|((pred, inverse), gi)| {
+                let map = self.scan_pair(&pred, inverse, gi, &used, budget);
+                ((pred, inverse), gi, map)
+            })
+            .collect();
+        if !self.consistent_source()
+            && (self.store.write_generation() != gen_before || self.store.writes_in_flight() > 0)
+        {
+            tracing::debug!("SHACL run index dropped: a write overlapped its scans");
+            return;
+        }
+        let mut fwd: Vec<HashMap<String, HashMap<Term, Vec<Term>>>> =
+            (0..graph_count).map(|_| HashMap::new()).collect();
+        let mut inv = fwd.clone();
+        let mut dropped = Vec::new();
+        for ((pred, inverse), gi, map) in built {
+            match map {
+                Some(m) => {
+                    let target = if inverse { &mut inv[gi] } else { &mut fwd[gi] };
+                    target.insert(pred, m);
+                }
+                None => dropped.push(format!("{}{pred}", if inverse { "^" } else { "" })),
+            }
+        }
+        if !dropped.is_empty() {
+            dropped.sort();
+            dropped.dedup();
+            tracing::info!(
+                "SHACL run index: {} quads held; over the {budget}-quad budget, answered from the store instead: {}",
+                used.load(std::sync::atomic::Ordering::Relaxed),
+                dropped.join(", ")
+            );
+        }
+        self.index = Some(RunIndex { fwd, inv });
+    }
+
+    /// Whether every read of the run sees one snapshot (mirror copy or RocksDB
+    /// transaction). The live memory source snapshots per call.
+    fn consistent_source(&self) -> bool {
+        !matches!(self.raw, RawSource::Live(_))
+    }
+
+    /// One `?s <pred> ?o` scan of graph `gi`, into `subject -> objects`
+    /// (`inverse`: `object -> subjects`). `None` once the shared quad budget is
+    /// exhausted — the partial map is discarded.
+    fn scan_pair(
+        &self,
+        predicate: &str,
+        inverse: bool,
+        gi: usize,
+        used: &std::sync::atomic::AtomicUsize,
+        budget: usize,
+    ) -> Option<HashMap<Term, Vec<Term>>> {
+        let Ok(pred) = NamedNodeRef::new(predicate) else {
+            // Not an IRI: no quad can carry it; an empty, authoritative map.
+            return Some(HashMap::new());
+        };
+        let graph = self.graph_ref(gi);
+        let mut map: HashMap<Term, Vec<Term>> = HashMap::new();
+        let mut n = 0usize;
+        for q in self
+            .raw
+            .quads_for_pattern(None, Some(pred), None, Some(graph))
+            .flatten()
+        {
+            n += 1;
+            if n % 1024 == 0
+                && used.fetch_add(1024, std::sync::atomic::Ordering::Relaxed) + 1024 > budget
+            {
+                return None;
+            }
+            let subject = match q.subject {
+                oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
+                oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
+            };
+            if inverse {
+                map.entry(q.object).or_default().push(subject);
+            } else {
+                map.entry(subject).or_default().push(q.object);
+            }
+        }
+        used.fetch_add(n % 1024, std::sync::atomic::Ordering::Relaxed);
+        Some(map)
     }
 
     // ------------------------------------------------------------------
@@ -486,5 +719,77 @@ fn collect_constraint_classes(
             }
         }
         _ => {}
+    }
+}
+
+/// Every (predicate, inverse) pair a shape's paths and property-pair
+/// constraints step through, nested shapes included. `rdf:type` steps for
+/// classes are served by the class sets, not the index.
+fn collect_shape_predicates(shape: &Shape, out: &mut HashSet<(String, bool)>) {
+    for c in &shape.constraints {
+        collect_constraint_predicates(c, out);
+    }
+    for ps in &shape.property_shapes {
+        collect_path_predicates(&ps.path, false, out);
+        for c in &ps.constraints {
+            collect_constraint_predicates(c, out);
+        }
+    }
+}
+
+fn collect_constraint_predicates(constraint: &Constraint, out: &mut HashSet<(String, bool)>) {
+    match constraint {
+        Constraint::Equals(p)
+        | Constraint::Disjoint(p)
+        | Constraint::LessThan(p)
+        | Constraint::LessThanOrEquals(p) => {
+            out.insert((p.clone(), false));
+        }
+        Constraint::Not(s) | Constraint::Node(s) => collect_shape_predicates(s, out),
+        Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
+            for s in v {
+                collect_shape_predicates(s, out);
+            }
+        }
+        Constraint::QualifiedValueShape {
+            shape,
+            sibling_shapes,
+            ..
+        } => {
+            collect_shape_predicates(shape, out);
+            for s in sibling_shapes {
+                collect_shape_predicates(s, out);
+            }
+        }
+        Constraint::Property(ps) => {
+            collect_path_predicates(&ps.path, false, out);
+            for c in &ps.constraints {
+                collect_constraint_predicates(c, out);
+            }
+        }
+        Constraint::Expression { path, checks, .. } => {
+            collect_path_predicates(path, false, out);
+            for c in checks {
+                collect_constraint_predicates(c, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_path_predicates(path: &PropertyPath, inverse: bool, out: &mut HashSet<(String, bool)>) {
+    match path {
+        PropertyPath::Predicate(p) => {
+            out.insert((p.clone(), inverse));
+        }
+        PropertyPath::Inverse(inner) => collect_path_predicates(inner, !inverse, out),
+        PropertyPath::Sequence(parts) | PropertyPath::Alternative(parts) => {
+            for p in parts {
+                collect_path_predicates(p, inverse, out);
+            }
+        }
+        PropertyPath::ZeroOrMore(inner)
+        | PropertyPath::OneOrMore(inner)
+        | PropertyPath::ZeroOrOne(inner) => collect_path_predicates(inner, inverse, out),
     }
 }

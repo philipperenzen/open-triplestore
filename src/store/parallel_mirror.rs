@@ -602,7 +602,7 @@ fn env_rebuild_quiet_ms() -> u64 {
 /// matters for the flap), else total system RAM. Returns `None` when neither can
 /// be read (e.g. on non-Linux hosts), where the caller falls back to the fixed
 /// floor.
-fn detect_memory_limit_bytes() -> Option<u64> {
+pub(crate) fn detect_memory_limit_bytes() -> Option<u64> {
     // cgroup v2 (Docker default on modern hosts): a numeric byte limit, or the
     // literal "max" when unconstrained.
     if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {

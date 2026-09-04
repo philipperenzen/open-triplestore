@@ -2105,3 +2105,72 @@ Every query is now ahead of Fuseki at both tiers; SHACL is the one target
 left open (the remaining cost has not been profiled). The whole set is in
 `docs/performance.md`.
 
+### SHACL: profiled and rebuilt (2026-09-04)
+
+The one open target was profiled on the real run (`/usr/bin/sample` on the
+in-process probe, 100k assets, six property shapes, 0.9M quads; call trees
+resolved against the stripped binary by disassembling the hot offsets):
+
+- **73% of worker CPU** inside `TripleStore::query`, called once per (focus
+  node, property path) — 600 000 SPARQL round trips per run. Each one:
+  three `spargebra` parses (the accelerator's classifier, its `SUM`/`AVG`
+  check, the evaluator), a fresh `SparqlEvaluator` with ~40 custom-function
+  registrations plus a **store-wide `rdf:type` scan for `sh:SPARQLFunction`
+  definitions** (12.6% on its own), the optimiser and plan compile, a clone
+  of the function registry, and a result-cache mutex acquired twice for a
+  cache that could never hit (every query string is unique). The data read
+  was ~4% of it.
+- **25% waiting on mutexes**: ~1.3M RocksDB snapshot create/release calls
+  per run (one per query, one per `sh:class` probe), each under RocksDB's
+  `DBImpl::mutex_`, plus the process-wide result-cache lock.
+- **Every constraint re-fetched its value nodes** — 15 fetches per focus
+  node for 6 paths — through a per-thread LRU keyed by strings that
+  re-parsed N-Triples on every hit.
+- **The accelerator was dirty for the whole run** (the shapes load right
+  before validation marks it), and the workers that won `build_lock`'s
+  `try_lock` each ran a full `Store::len()` scan before declining (9% of a
+  sample across seven threads) while the rebuild thread starved on `lock()`.
+
+What changed (`4d50f0b`, `3538690`, the run index, and the tests that pin
+them):
+
+- One data source per run (`src/shacl/view.rs`): the accelerator's clean RAM
+  copy when published (a peek — never a rebuild), else one RocksDB readable
+  transaction (a single snapshot, no locks, writers never blocked), else the
+  live memory store. Value nodes are resolved natively from the quad index
+  for every path form — per data graph with cross-graph dedup for IRI focus
+  nodes, the semantics of the per-graph `UNION` query this replaces — and
+  fetched once per (focus node, property shape). `sh:targetClass`,
+  `sh:targetSubjectsOf`/`ObjectsOf` and `sh:class` come from per-run class
+  closures and instance sets computed in parallel up front. On the snapshot
+  path a per-run adjacency for the shape predicates (one scan per data graph
+  and predicate, budgeted by `OTS_SHACL_RUN_INDEX_MAX_QUADS`) turns each
+  probe into a hash lookup. No SPARQL runs on the per-focus-node path;
+  `sh:sparql` constraints and SPARQL targets still read the live store.
+- Store: writes are bracketed (`begin_write()` guard) so the mirror is
+  marked stale before the mutation and again after the index work, and a
+  build overlapping a write is never published clean; `write_generation()`
+  advances with the result cache off (it was frozen at 0 under
+  `OTS_QUERY_CACHE=false`, the comparison's setting); a pending rebuild makes
+  queries decline before the lock; `sh:SPARQLFunction` discovery is cached
+  per write generation for every SPARQL query, not just SHACL.
+- Result changes, each pinned by a test: a `+` path whose focus lies on a
+  cycle yields the focus (SPARQL semantics; the old native walk never
+  emitted it); `sh:class` and `sh:targetClass` both count instances typed
+  through an anonymous subclass; an invalid IRI among the data graphs skips
+  only that graph instead of voiding the run; result order is unspecified.
+  The W3C SHACL core ratchet and every SHACL, Studio, bundle and pipeline
+  suite are unchanged (22 targets, 242 tests).
+
+| SHACL, 100k assets, six property shapes | before | after |
+|---|--:|--:|
+| in-process, right after a load (RocksDB snapshot) | 9.5–10.5 s | __SNAP_INPROC__ |
+| in-process, accelerator published (RAM copy) | — | 0.72 s |
+| Studio pipeline over HTTP, right after a load | 6.9–9.4 s | __SNAP_HTTP__ |
+| Studio pipeline over HTTP, accelerator published | — | 0.64–0.76 s |
+| Jena `shacl` CLI, same shapes and data | 3.5 s | 3.5 s |
+
+Over HTTP the "right after a load" figure includes the accelerator's
+background rebuild competing for a core. The GWSW bundle, the other open
+item, now fetches RIONED's CC0 Totaal export (`178e870`).
+

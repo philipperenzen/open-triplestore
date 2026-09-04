@@ -234,6 +234,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **SHACL validation at scale.** The engine ran one full SPARQL round trip
+  per focus node and property path (three parses, a fresh evaluator with
+  forty custom-function registrations and a store-wide `sh:SPARQLFunction`
+  scan, a plan compile, a result-cache mutex that never hit) and took a
+  RocksDB snapshot per probe under the database's global mutex; every
+  constraint re-fetched its value nodes through a per-thread string cache.
+  A validation now opens one data source for the whole run — the query
+  accelerator's clean in-memory copy when one is published, else one RocksDB
+  snapshot, else the live memory store — resolves value nodes natively from
+  the quad index for every path form (fetched once per focus node and
+  property shape), resolves targets and `sh:class` from per-run class sets,
+  and on the snapshot path builds a per-run adjacency for the shape
+  predicates (`OTS_SHACL_RUN_INDEX_MIN_PROBES`, `OTS_SHACL_RUN_INDEX_MAX_QUADS`).
+  No SPARQL runs on the per-focus-node path; `sh:sparql` constraints and
+  SPARQL targets still read the live store. Result changes, all pinned by
+  tests: a `+` path whose focus lies on a cycle yields the focus (SPARQL
+  semantics; the old native walk for blank-node focus nodes never emitted
+  it); `sh:class` and `sh:targetClass` both count instances typed through an
+  anonymous subclass; an invalid IRI among a run's data graphs skips only
+  that graph instead of voiding every target and value; result order within
+  a report is unspecified. `write_generation()` now advances with the result
+  cache disabled, every write is bracketed so the accelerator cannot publish
+  a copy built during a write, and a pending accelerator rebuild no longer
+  lets queries starve it with full-store `len()` scans.
 - **Query performance at scale.** Graph-scoped grouped aggregates — the form
   every HTTP query takes after ACL scoping — now run on the sharded,
   multi-core path (the planner refused any `GRAPH` pattern); `COUNT(*)`
