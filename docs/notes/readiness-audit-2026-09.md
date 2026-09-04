@@ -2071,4 +2071,37 @@ located each cost before it was fixed:
 - **Upload limit** (`ad3d2d7`): the Graph Store routes capped bodies at
   50 MB (the bulk import at 200 MB); `OTS_MAX_UPLOAD_MB`, defaults 512 MB /
   1 GB, documented with its memory implication.
+- **SHACL `sh:pattern`** (`89db9ac`): the `sh:class` fix left the 100k run
+  at 12.0 s because the real cost was elsewhere — every `sh:pattern` check
+  ran a SPARQL `ASK { FILTER(REGEX(...)) }` per value node. The pattern is
+  now compiled once per thread (flags `i`/`s`/`m`/`x`/`q` honoured, size
+  limit, the SPARQL form kept as the fallback when the regex crate rejects
+  the pattern). In-process: 12.0 s → 9.5–9.8 s for 100k assets against six
+  property shapes; the W3C SHACL core suite is unchanged.
+- **Accelerator rebuild trigger** (`2301d76`): over HTTP the grouped
+  aggregate still took 1.04–1.30 s when measured right after a load,
+  although the in-process probe answered it in 72 ms. The mirror was only
+  rebuilt by the next query that arrived after the write-quiet window, so
+  the first aggregates after an import ran on RocksDB. A 500 ms server tick
+  now rebuilds a quiet, dirty mirror; with a 60 s settle after the load the
+  same query takes 64 ms over HTTP.
+
+Re-measured over HTTP on 2026-09-04 with the final binary (same harness,
+same files, accelerator settled; Fuseki 6.2 main / TDB2 from the first run):
+
+| Over HTTP | before | after | Fuseki |
+|---|--:|--:|--:|
+| 100k: group by with `AVG` | 1.36 s | 64 ms | 377 ms |
+| 100k: `COUNT(*)` in `GRAPH` | 119 ms | 0.7 ms | 144 ms |
+| 100k: 2-way join / scan | 92 / 32 ms | 26 / 8 ms | 79 / 46 ms |
+| 100k: 20 s mixed, quads written | 565 000 | 736 000 | 49 000 |
+| 100k: SHACL, six property shapes | 10.6 s | 6.9–9.4 s | 3.5 s (CLI) |
+| 1M: group by with `AVG` | 11.6 s | 0.52 s | 5.3 s |
+| 1M: `COUNT(*)` in `GRAPH` | 2.7 s | 0.5 ms | 1.7 s |
+| 1M: 2-way join / scan | 78 / 342 ms | 31 / 50 ms | 109 / 341 ms |
+| 1M: 20 s mixed, quads written | 356 000 | 365 500 | 31 500 |
+
+Every query is now ahead of Fuseki at both tiers; SHACL is the one target
+left open (the remaining cost has not been profiled). The whole set is in
+`docs/performance.md`.
 

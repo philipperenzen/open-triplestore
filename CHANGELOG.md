@@ -238,8 +238,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every HTTP query takes after ACL scoping — now run on the sharded,
   multi-core path (the planner refused any `GRAPH` pattern); `COUNT(*)`
   inside `GRAPH <g>` / `GRAPH ?g` is answered from the count index instead of
-  a scan; the accelerator's RAM-aware cap works on macOS. `sh:class` checks
-  use a cached subclass closure instead of one SPARQL `ASK` per value node.
+  a scan; the accelerator's RAM-aware cap works on macOS, and a background
+  tick rebuilds it once writes go quiet instead of waiting for the next
+  query to pay for the rebuild. `sh:class` checks use a cached subclass
+  closure instead of one SPARQL `ASK` per value node, and `sh:pattern`
+  compiles each regex once per thread instead of running a SPARQL `ASK`
+  per value.
   Large graph clears run in chunked transactions. `OTS_MAX_UPLOAD_MB`
   replaces the fixed 50 MB / 200 MB upload limits (defaults 512 MB / 1 GB).
 - **Write throughput at scale.** Three per-write costs proportional to the

@@ -575,50 +575,58 @@ pipeline over HTTP.
 
 | 100k assets, 0.9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
 |---|--:|--:|
-| Load (Graph Store PUT, 23 MB Turtle) | 18.7 s (48k quads/s)¹ | 8.2 s (109k quads/s) |
-| Lookup of one asset | 0.9 ms | 3.1 ms |
-| 2-way join, 10k rows | 92 ms | 79 ms |
-| Filter and count (scan) | 32 ms | 46 ms |
-| Group by with average, 41 groups | 1.36 s | 377 ms |
-| Property path `partOf+` | 1.3 ms | 3.2 ms |
-| `COUNT(*)` inside `GRAPH` | 119 ms | 144 ms |
-| 4 writers + 4 readers, 20 s: quads written | 565 000 (28.3k/s), write p95 110 ms | 49 000 (2.45k/s), write p95 947 ms |
-| same phase: reads | 2 094/s, read p95 3.1 ms | 832/s, read p95 10.4 ms |
-| SHACL, every asset, 6 property shapes | 10.6 s (Studio pipeline over HTTP; 10.8 s in-process) | 3.5 s (Jena `shacl` CLI) |
+| Load (Graph Store PUT, 23 MB Turtle) | 15.0 s (60k quads/s)¹ | 8.2 s (109k quads/s) |
+| Lookup of one asset | 0.7 ms | 3.1 ms |
+| 2-way join, 10k rows | 26 ms | 79 ms |
+| Filter and count (scan) | 8 ms | 46 ms |
+| Group by with average, 41 groups | 64 ms | 377 ms |
+| Property path `partOf+` | 0.7 ms | 3.2 ms |
+| `COUNT(*)` inside `GRAPH` | 0.7 ms | 144 ms |
+| 4 writers + 4 readers, 20 s: quads written | 736 000 (36.8k/s), write p95 85 ms | 49 000 (2.45k/s), write p95 947 ms |
+| same phase: reads | 2 616/s, read p95 2.5 ms | 832/s, read p95 10.4 ms |
+| SHACL, every asset, 6 property shapes | 6.9–9.4 s (Studio pipeline over HTTP, three runs; 9.5 s in-process) | 3.5 s (Jena `shacl` CLI) |
 
 ¹ Into an empty graph. The platform's Graph Store `PUT` parses the payload
 into a temporary store first (so a malformed body cannot empty the graph) and
-indexes every literal for full-text search; Fuseki does neither. Replacing an
-existing 900k-quad graph took 41 s and deleting one 34–60 s — a graph clear
-walks every quad through RocksDB — noted as open work.
+indexes every literal for full-text search; Fuseki does neither. A graph
+clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
+36 s with the chunked clear (before it, 34–60 s for 900k quads).
 
 | 1M assets, 9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
 |---|--:|--:|
-| Load (five 45 MB appends² / one PUT) | 104 s (86k quads/s) | 105 s (85k quads/s) |
-| Lookup of one asset | 0.9 ms | 5.0 ms |
-| 2-way join, 10k rows | 78 ms | 109 ms |
-| Filter and count (scan) | 342 ms | 341 ms |
-| Group by with average, 41 groups | 11.6 s | 5.3 s |
-| Property path `partOf+` | 1.0 ms | 6.5 ms |
-| `COUNT(*)` inside `GRAPH` | 2.7 s | 1.7 s |
-| 4 writers + 4 readers, 20 s: quads written | 356 000 (17.8k/s), write p95 144 ms | 31 500 (1.6k/s), write p95 1.6 s |
-| same phase: reads | 2 266/s, read p95 2.8 ms | 421/s, read p95 21 ms |
+| Load (five 45 MB appends² / one PUT) | 110 s (82k quads/s) | 105 s (85k quads/s) |
+| Lookup of one asset | 1.2 ms | 5.0 ms |
+| 2-way join, 10k rows | 31 ms | 109 ms |
+| Filter and count (scan) | 50 ms | 341 ms |
+| Group by with average, 41 groups | 0.52 s | 5.3 s |
+| Property path `partOf+` | 0.8 ms | 6.5 ms |
+| `COUNT(*)` inside `GRAPH` | 0.5 ms | 1.7 s |
+| 4 writers + 4 readers, 20 s: quads written | 365 500 (18.3k/s), write p95 139 ms | 31 500 (1.6k/s), write p95 1.6 s |
+| same phase: reads | 2 623/s, read p95 2.4 ms | 421/s, read p95 21 ms |
 
-² The `/store` routes accept bodies up to 200 MB; the 226 MB file was
-appended in five chunks (`POST`, incremental index maintenance), which is
-also how a client would stream a large import.
+² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_MB` (default
+512 MB); the 226 MB file was appended in five 45 MB chunks (`POST`,
+incremental index maintenance), which is also how a client would stream a
+large import. Both tables were taken after a settle (60 s and 150 s) so the
+in-memory query accelerator had been rebuilt — a background tick does that
+once writes go quiet; measured immediately after the 9M-quad import the
+group-by ran on RocksDB at about 11 s.
 
-**Reading the comparison.** Load rates are level. On point reads and
-property paths Open Triplestore answers in about a millisecond where Fuseki
-takes 3–6 ms; on the two heavy aggregates Fuseki is faster — group-by with
-`AVG` over every asset by 2× at 9M quads, `COUNT(*)` inside a `GRAPH` block
-by 1.6× — and those are the next optimisation targets (the O(1) fast-count
-covers only the bare default-graph pattern). Under concurrent writes the
-difference is structural: with the write path fixed, Open Triplestore
-sustains 11× Fuseki's write throughput at a tenth of its write latency while
-serving 2.5–5× its read rate at a third to a seventh of its read latency.
-Jena's SHACL validator is 3× faster than the platform's engine on this shape
-set (3.5 s vs 10.6 s at 100k assets) — recorded as an open target.
+**Reading the comparison.** Load rates are level at 9M quads; at the small
+tier Fuseki loads faster because its `PUT` neither stages the payload nor
+indexes literals for text search. Every query is faster on Open Triplestore
+at both tiers: point reads and property paths in about a millisecond where
+Fuseki takes 3–6 ms, the join and the scan by 3–7×, and the two aggregates
+the first run lost by an order of magnitude — group-by with `AVG` over
+every asset 64 ms vs 377 ms at 0.9M quads and 0.52 s vs 5.3 s at 9M (the
+sharded, multi-core path), `COUNT(*)` inside `GRAPH` 0.7 ms vs 144 ms and
+0.5 ms vs 1.7 s (the count index). Under concurrent writes the difference is
+structural: Open Triplestore sustains 11–15× Fuseki's write throughput at a
+tenth of its write latency while serving 3–6× its read rate at a quarter to
+a ninth of its read latency. Jena's SHACL validator remains faster than the
+platform's engine on this shape set (3.5 s vs 6.9–9.4 s at 100k assets,
+down from 10.6 s after the `sh:class` and `sh:pattern` fixes) — the one
+target still open; the remaining cost has not been profiled.
 
 **What the comparison found in the platform** — three per-write costs
 proportional to graph or store size, all fixed on the way: the count index
@@ -642,9 +650,10 @@ from 77k to 111k quads/s for the same reason.
 **What it did not find.** Nothing in this tier suggests the backend is the
 limit: reads stay lock-free under writes, SHACL scales linearly with the
 number of targets, and the persistent store's load rate holds at 9M quads.
-The one visible cost is `COUNT(*)` inside a `GRAPH` block (306 ms, a scan):
-the O(1) fast-count applies to the bare default-graph pattern only. Per the
-readiness plan, the trigger for evaluating another backend is deep SHACL over
+The one visible cost at the time was `COUNT(*)` inside a `GRAPH` block
+(306 ms, a scan); it is now answered from the count index like the bare
+default-graph form. Per the readiness plan, the trigger for evaluating
+another backend is deep SHACL over
 tens of millions of quads *with concurrent writers* exceeding a single node;
 at this tier the store is well inside that envelope.
 
