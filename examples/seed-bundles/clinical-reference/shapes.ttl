@@ -1,0 +1,14 @@
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex: <https://example.org/clinical/def#> .
+@prefix st: <https://example.org/clinical/status/> .
+
+ex:ObservationShape a sh:NodeShape ; sh:targetClass ex:Observation ;
+    sh:property [ sh:path ex:subject ; sh:minCount 1 ; sh:maxCount 1 ; sh:class ex:Patient ] ,
+                [ sh:path ex:code ; sh:minCount 1 ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] ,
+                [ sh:path ex:value ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:decimal ] ,
+                [ sh:path ex:status ; sh:minCount 1 ; sh:in ( st:registered st:preliminary st:final st:amended ) ] ,
+                [ sh:path ex:effective ; sh:maxCount 1 ; sh:datatype xsd:dateTime ] .
+
+ex:PatientShape a sh:NodeShape ; sh:targetClass ex:Patient ;
+    sh:property [ sh:path ex:birthDate ; sh:maxCount 1 ; sh:datatype xsd:date ] .

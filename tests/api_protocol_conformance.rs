@@ -49,6 +49,68 @@ fn graph_uri(g: &str) -> String {
     format!("/store?graph={}", url_encode(g))
 }
 
+// ── Graph Store HTTP Protocol — a rejected PUT must not destroy the graph ─────
+
+/// A PUT whose body fails to parse must leave the target graph exactly as it
+/// was. The implementation used to `clear_graph()` first and only then parse, so
+/// one syntax error returned 4xx *and* left the graph empty with nothing to
+/// replace it — silent, unrecoverable data loss on a request the server itself
+/// rejected.
+#[tokio::test]
+async fn gsp_put_with_malformed_body_leaves_graph_intact() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let g = graph_uri("http://example.org/atomic");
+
+    let (st, ..) = send(
+        &app,
+        Method::PUT,
+        g.clone(),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://ex/keep> <http://ex/p> <http://ex/o> .",
+    )
+    .await;
+    assert!(st.is_success(), "seed PUT => {st}");
+
+    // Truncated Turtle: the object and terminating '.' are missing.
+    let (st, ..) = send(
+        &app,
+        Method::PUT,
+        g.clone(),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://ex/broken> <http://ex/p> ",
+    )
+    .await;
+    assert!(
+        st.is_client_error(),
+        "a malformed PUT body must be rejected, got {st}"
+    );
+
+    let (st, body, _) = send(
+        &app,
+        Method::GET,
+        g.clone(),
+        Some(&token),
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "GET after rejected PUT => {st}");
+    assert!(
+        body.contains("keep"),
+        "a rejected PUT must not clear the graph; graph is now: {body:?}"
+    );
+    assert!(
+        !body.contains("broken"),
+        "no part of the rejected body may be applied: {body:?}"
+    );
+}
+
 // ── Graph Store HTTP Protocol — PUT replaces, POST merges (cx-11) ──────────────
 
 #[tokio::test]
@@ -454,4 +516,71 @@ async fn shacl_on_write_accepts_conforming() {
         Some("text/turtle"), None,
         "<http://example.org/p2> a <http://example.org/Person> ; <http://example.org/name> \"Bob\" .").await;
     assert!(st.is_success(), "conforming write must succeed, got {st}");
+}
+
+/// A POST merges, so the gate must validate the graph's POST-MERGE state.
+///
+/// Validation staged only the request payload, so `sh:minCount 1` was evaluated
+/// against a node stripped of every property the payload did not repeat. Adding
+/// one property to a node that already conforms was therefore REJECTED — the
+/// gate blocked a write that produces a conforming graph.
+#[tokio::test]
+async fn shacl_on_write_post_merge_sees_existing_triples() {
+    let (app, token) = app_with_shacl_on_write().await;
+
+    // Seed a conforming person.
+    let (st, ..) = send(
+        &app,
+        Method::PUT,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://example.org/p3> a <http://example.org/Person> ; \
+         <http://example.org/name> \"Ada\" .",
+    )
+    .await;
+    assert!(st.is_success(), "seed PUT must succeed, got {st}");
+
+    // Merge an extra property onto the SAME node. The payload restates the
+    // type — so the shape's targetClass matches inside the staged graph — but
+    // not ex:name, which already lives in the store. The merged graph conforms;
+    // the payload alone does not.
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://example.org/p3> a <http://example.org/Person> ; \
+         <http://example.org/nickname> \"A\" .",
+    )
+    .await;
+    assert!(
+        st.is_success(),
+        "merging a property onto an already-conforming node must be allowed, got {st}: {body}"
+    );
+}
+
+/// The merge gate must still REJECT a payload that makes the graph violate.
+#[tokio::test]
+async fn shacl_on_write_post_merge_still_rejects_violations() {
+    let (app, token) = app_with_shacl_on_write().await;
+    // A brand-new Person with no ex:name — nothing in the store supplies it.
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://example.org/p4> a <http://example.org/Person> .",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a merge that introduces a violation must still be rejected, got {st}: {body}"
+    );
 }

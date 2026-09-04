@@ -64,9 +64,20 @@ rust:
     - rustup component add rustfmt clippy
   script:
     - cargo fmt --all --check
-    - cargo clippy --all-targets --all-features
+    # `--workspace`: without it cargo selects only the root package, so the
+    # `opengraph` member is neither linted nor test-compiled (see ci.yml).
+    - cargo clippy --workspace --all-targets --all-features -- -D warnings
     - cargo build --all-features --locked
-    - cargo test --all-features --locked
+    - cargo test --workspace --all-features --locked
+
+# ── Conformance table parity (mirrors the GitHub docs-parity job) ────────────
+# README.md / docs/standards.md carry a table generated from the test suites;
+# a stale one fails here.
+docs-parity:
+  stage: check
+  image: python:3-slim
+  script:
+    - python3 scripts/conformance_table.py --check
 
 # ── Performance-regression GATE (mirrors .github/workflows/perf.yml) ──────────
 # Subset Criterion bench + a comparison against the committed baseline. Runs on
@@ -114,16 +125,16 @@ perf:
     # base, change, base, change — alternating, not two-and-two: a runner drifts
     # over the hour this takes, so consecutive halves are not comparable.
     - git checkout --detach "$BASE"
-    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - mv target/criterion target/criterion-base-1
     - git checkout --detach "$HEAD"
-    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - mv target/criterion target/criterion-head-1
     - git checkout --detach "$BASE"
-    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - mv target/criterion target/criterion-base-2
     - git checkout --detach "$HEAD"
-    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - mv target/criterion target/criterion-head-2
     - python3 scripts/perf_regression.py compare --before target/criterion-base-1 --before target/criterion-base-2 --after target/criterion-head-1 --after target/criterion-head-2 --baseline benches/perf_baseline.json --github-summary
 
@@ -155,9 +166,9 @@ perf-baseline:
     # gated benchmarks are baselined under gate conditions rather than full-suite
     # ones (see the same two steps in .github/workflows/perf-baseline.yml for why).
     - cargo bench --bench performance --features full
-    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - cp -r target/criterion target/criterion-pass1
-    - cargo bench --bench performance --features full -- 'query|path|geosparql'
+    - cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
     - python3 scripts/perf_regression.py update --criterion-dir target/criterion-pass1 --criterion-dir target/criterion --out benches/perf_baseline.json --runner "gitlab-ci/$CI_RUNNER_DESCRIPTION" --keep-tolerances
   artifacts:
     paths:

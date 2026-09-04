@@ -281,4 +281,19 @@ fn w3c_shacl_core_suite() {
         "KNOWN_FAILURES entries now pass — remove them to ratchet forward:\n  {}",
         unexpected_passes.join("\n  ")
     );
+    // A floor as well as a ratchet. The runner turns an unreadable or
+    // unparseable file into a silent `Skip`, so a Turtle-parser regression
+    // would have turned all 113 files into skips and still passed the two
+    // asserts above. 97 pass today; 90 leaves headroom for suite churn.
+    assert!(
+        pass >= 90,
+        "only {pass} W3C SHACL core cases passed (floor 90); skips: {}",
+        skip.len()
+    );
+    assert!(
+        skip.len() <= 20,
+        "{} cases were skipped (ceiling 20) — a parse/load regression turns passes into skips:\n  {}",
+        skip.len(),
+        skip.join("\n  ")
+    );
 }

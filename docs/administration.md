@@ -280,6 +280,20 @@ See [rml.md](rml.md) for the full RML guide.
 | `SERVE_FRONTEND` | `true` | Serve the bundled web UI (frontend SPA) at `/`. Set `false` for a headless, API-only server — SPARQL, Graph Store and REST endpoints are unaffected. Also the `--serve-frontend` CLI flag. |
 | `CORS_ORIGINS` | *(empty — same-origin only)* | Comma-separated allowed origins, e.g. `https://app.example.com,https://www.example.com` |
 | `TRUSTED_PROXY_CIDRS` | *(empty — direct TCP IP)* | Comma-separated CIDRs of reverse proxies whose `X-Forwarded-For` is honoured for rate limiting, e.g. `10.0.0.0/8,172.16.0.0/12`. Leave empty when not behind a proxy. |
+| `OTS_EXTERNAL_REASONER` | *(unset)* | `konclude` routes `owl2-dl` materialisation through an external tableau reasoner after the native rules (experimental; see [owl2-dl.md](owl2-dl.md)). Unset: native rules only. |
+| `OTS_EXTERNAL_REASONER_BIN` | `Konclude` | Path to the reasoner binary when `OTS_EXTERNAL_REASONER` is set. |
+| `DCAT_PROFILE` | `dcat` | Catalogue application profile: `dcat`, `dcat-ap` or `dcat-ap-nl` (see [dcat.md](dcat.md)). |
+| `CATALOG_TITLE` / `CATALOG_DESCRIPTION` | instance defaults | The `dcat:Catalog` metadata. |
+| `CATALOG_PUBLISHER_URI` / `CATALOG_PUBLISHER_NAME` / `CATALOG_PUBLISHER_IDENTIFIER` | `<base>/publisher` | The catalogue's publishing agent. |
+| `CATALOG_LANGUAGE` | `ENG` (`NLD` under dcat-ap-nl) | ISO 639-3 code for the catalogue language. |
+| `CATALOG_LICENSE` | unset | Licence IRI for the catalogue and for distributions of datasets without one. |
+| `OTS_REMOTE_AUTH` | unset | `assert` mints a signed identity assertion for allowlisted peers when acting for a user (see [federation.md](federation.md)). |
+| `OTS_TRUSTED_ISSUERS` | unset | Comma-separated peer base URLs whose identity assertions are accepted (needs `BASE_URL`). |
+| `OTS_MAX_UPLOAD_MB` | 512 (Graph Store), 1024 (bulk import) | Request-body limit for RDF uploads; bodies are buffered and parsed before they replace anything, so this also bounds memory per request. Larger datasets: append in chunks or use the bulk import. |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Comma-separated URL prefixes the server may contact on a user's behalf: SPARQL federation (`SERVICE <endpoint>`) and LDES client sync. Unset or empty: no outbound requests at all (a `SERVICE` clause errors). List origins with their trailing slash, e.g. `https://sparql.example.org/`. |
+| `OTS_REMOTE_TIMEOUT_SECS` | `10` | Timeout per outbound request. |
+| `OTS_SERVICE_MAX_ROWS` | `10000` | Row cap per `SERVICE` call; a larger remote result is truncated. |
+| `ENDPOINT_ACL_ENFORCE` | `true` | Enforce endpoint ACL rules. Set to `false` to disable enforcement entirely — an escape hatch for a misfiring rule (see [security.md](security.md#endpoint-acl)), not a normal setting. |
 | `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL and import quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |
 | `SPARQL_QUERY_TIMEOUT_SECS` | `30` | Per-query/update execution timeout in seconds |
@@ -292,7 +306,8 @@ See [rml.md](rml.md) for the full RML guide.
 | `BACKUP_RETENTION_COUNT` | `7` | Number of backups to retain |
 | `BACKUP_SCHEDULE_HOURS` | `24` | Hours between scheduled backups |
 | `BACKUP_ENCRYPT` | `false` | Encrypt backups with `age` X25519 (requires the `backup-encrypt` build feature) |
-| `BACKUP_ENCRYPT_KEY_PATH` | `data/backup_key.age` | Path to the backup encryption key (auto-generated if absent) |
+| `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File holding the `age` X25519 **recipient** (public `age1…` line). Operator-supplied — the server refuses to start if `BACKUP_ENCRYPT=true` and this is absent. |
+| `BACKUP_DECRYPT_IDENTITY_PATH` | *(unset)* | `age-keygen` identity file, used only by `--restore` to decrypt an encrypted backup. Never needed by the running server. |
 | `AUDIT_PSEUDONYMISE_AFTER_DAYS` | `365` | GDPR/AVG: pseudonymise audit rows older than this |
 | `TEXT_SEARCH_DIR` | `<data-dir>/tantivy` | Tantivy full-text index directory (requires the `text-search` build feature) |
 | `SMTP_HOST` / `SMTP_*` | *(unset — account email is written to the server log)* | Outbound account email (verification, password reset, reminders) — see [auth.md](auth.md#email-delivery-configuration); the compose stack bundles an optional Postfix relay (`--profile mail`) |
@@ -385,7 +400,8 @@ The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
 | `BACKUP_RETENTION_COUNT` | `7` | Number of snapshots to keep |
 | `BACKUP_SCHEDULE_HOURS` | `24` | Cron interval |
 | `BACKUP_ENCRYPT` | `false` | Enable `age` X25519 encryption (requires `--features backup-encrypt`) |
-| `BACKUP_ENCRYPT_KEY_PATH` | — | Path to a file containing one X25519 recipient |
+| `BACKUP_ENCRYPT_KEY_PATH` | `<data-dir>/backup_key.age` | File containing one X25519 recipient. Required when `BACKUP_ENCRYPT=true` — never auto-generated |
+| `BACKUP_DECRYPT_IDENTITY_PATH` | — | Identity file for `--restore` of an encrypted backup |
 | `BACKUP_S3_ENABLED` | `false` | Mirror each snapshot to the configured ObjectStore |
 
 **Admin endpoints** (`super_admin` only):
@@ -393,10 +409,38 @@ The backup subsystem produces a snapshot every `BACKUP_SCHEDULE_HOURS` hours
 - `GET /api/admin/backup` — list manifests
 - `POST /api/admin/backup/{id}/verify` — recompute and compare checksums
 
-Restore is **out of scope for the API** — it is a destructive operation that
-should be performed manually: stop the server, replace `auth.sqlite` with the
-backup file (decrypting with `age` first if applicable), then re-import the
-N-Quads dump into a freshly-initialised RocksDB store.
+Restore is **out of scope for the API** — it is destructive and replaces the
+identity DB file, so it runs offline through the CLI with the server stopped:
+
+```bash
+open-triplestore --restore <backup-id> --data-dir ./data
+```
+
+Checksums are verified before anything is touched, so a corrupt backup aborts
+without destroying the live store.
+
+#### Encrypted backups
+
+`BACKUP_ENCRYPT=true` requires an **operator-supplied** recipient — the server
+will not start without one, and deliberately does not generate one:
+
+```bash
+age-keygen -o backup-identity.txt        # keep this file OFF the server
+grep 'public key' backup-identity.txt    # → age1…
+printf 'age1…\n' > /secure/backup_key.age
+```
+
+Point `BACKUP_ENCRYPT_KEY_PATH` at the recipient file. To restore, give the
+CLI the identity you kept:
+
+```bash
+BACKUP_DECRYPT_IDENTITY_PATH=/secure/backup-identity.txt \
+  open-triplestore --restore <backup-id> --data-dir ./data
+```
+
+The server stores only the recipient, never the identity — so automatic
+crash-recovery (`STORE_AUTO_RECOVER`) cannot restore an encrypted backup and
+says so loudly rather than starting empty.
 
 ### Alerting
 

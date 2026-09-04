@@ -13,12 +13,61 @@ Reasoning can be applied to materialise inferred triples across all named graphs
 Reasoning is triggered via `POST /api/reasoning/materialize` with a JSON body:
 
 ```json
-{ "regime": "rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl", "target_graph": "<optional IRI>" }
+{
+  "regime": "rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl",
+  "target_graph": "<optional IRI>",
+  "dataset": "<optional dataset id>",
+  "source_graphs": ["<optional graph IRIs>"]
+}
 ```
+
+**What the rules read.** With `dataset`, the reasoner works on that dataset's
+*conformance layer* — its data-bearing graphs (instances, model, vocabulary,
+domain values, linksets, unclassified) plus the graphs of the model version it
+declares conformance to — and nothing else; `GET /api/datasets/:id/conformance`
+shows exactly that set. With `source_graphs`, the listed graphs (each must be
+readable by the caller); with `dataset` *and* `source_graphs`, both. With
+neither, the rules read the unnamed default graph only, as they historically
+did — which means a dataset's named graphs are invisible to an unscoped run,
+so pass `dataset` for anything loaded through the dataset APIs. The scope is
+applied at the store level (a `USING` dataset on every rule), so all regimes
+behave the same.
 
 The response is a count of the inferred triples added. Query the current status of all entailment graphs via `GET /api/reasoning/status`.
 
-For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql` to a SPARQL request.
+For OWL 2 QL you can rewrite a query against the schema instead of materialising — `POST /api/reasoning/rewrite` returns the expanded SPARQL. You can also fold an entailment graph into a single query by adding `?entailment=rdfs|owl2-rl|owl2-el|owl2-ql|owl2-dl` to a SPARQL request.
+
+## Per-dataset entailment: selectable regime, materialisation toggle
+
+A dataset can select its own regime and keep it materialised:
+
+```bash
+curl -X PUT http://localhost:7878/api/datasets/<id>/entailment \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"regime": "rdfs", "mode": "materialize"}'
+```
+
+In `materialize` mode the regime runs at once and again after every write
+to one of the dataset's graphs (Graph Store, SPARQL Update, imports, restores,
+patches, LDES syncs, property states), over the dataset's conformance layer
+— instance, model, vocabulary, domain-value and linkset graphs — into the
+dataset's own entailment graph `urn:entailment:<regime>:<id>`. The graph is
+rebuilt, not appended to, so consequences of deleted data disappear, and no
+two datasets share inferred triples. `mode: off` clears it.
+
+Queries opt in per request:
+
+```
+GET /sparql?query=…&entailment_dataset=<id>            # the configured regime
+GET /sparql?query=…&entailment_dataset=<id>&entailment=owl2-rl
+POST /sparql  (application/sparql-query with the same query parameters,
+               or application/x-www-form-urlencoded fields)
+```
+
+`GET /api/datasets/<id>/entailment` reports the regime, mode, graph and the
+last run. The global `?entailment=<regime>` (the shared
+`urn:entailment:<regime>` graphs filled by `POST /api/reasoning/materialize`)
+keeps working unchanged.
 
 ## SWRL rules
 

@@ -25,7 +25,7 @@ const triple = (predicate: string, object: object) => ({
 });
 
 beforeAll(() => {
-  addMessages('en', en as Record<string, unknown>);
+  addMessages('en', en as unknown as Parameters<typeof addMessages>[1]);
   init({ fallbackLocale: 'en', initialLocale: 'en' });
 });
 

@@ -350,11 +350,31 @@ mod http_tests {
     use open_triplestore::ldp::ldp_routes;
     use open_triplestore::server::AppState;
 
+    /// Mount the LDP routes with an authenticated principal in extensions.
+    ///
+    /// In production `/ldp/*` sits behind `require_auth`, which puts an
+    /// `AuthenticatedUser` in the request extensions; PATCH now requires it, so
+    /// a bare `ldp_routes()` mount would 500 on every PATCH. These tests are
+    /// about LDP protocol semantics, so they inject a super-admin and leave the
+    /// authorization behaviour to `ldp_http_conformance.rs`, which drives the
+    /// real router with real tokens.
     fn make_router() -> (axum::Router, TripleStore) {
+        use axum::Extension;
+        use open_triplestore::auth::middleware::AuthenticatedUser;
+        use open_triplestore::auth::models::SystemRole;
+
         let store = TripleStore::in_memory().unwrap();
         // Clone the store reference for the state — TripleStore is Arc-backed
         let state = AppState::test_default_with_store(store.clone());
-        let router = ldp_routes().with_state(state);
+        let router = ldp_routes()
+            .with_state(state)
+            .layer(Extension(AuthenticatedUser {
+                user_id: "ldp-test-admin".to_string(),
+                role: SystemRole::SuperAdmin,
+                can_publish: true,
+                write_access: true,
+                can_mint_api_tokens: true,
+            }));
         (router, store)
     }
 

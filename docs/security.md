@@ -16,13 +16,23 @@ A provider can **auto-provision** accounts on first login and map an incoming cl
 
 Allow or deny access to HTTP endpoints by principal, independent of token scope. Each rule names a principal (`user`, `role`, `organisation`, or `group`), a path pattern with wildcard support (e.g. `/api/*`), an HTTP method (`GET`, `POST`, `PUT`, `DELETE`, or `*`), an effect (**allow** / **deny**), and a numeric **priority**. Higher priority is evaluated first, and an explicit *deny* overrides an *allow*. Managed at `/api/admin/acl/endpoints`.
 
+Rules apply across the API — `/sparql`, `/store`, `/api/**` and the rest — not only to a subset. **Deny rules bind admins too**, so a rule matching `/api/admin/**` will lock an admin out of the admin API; scope such rules to the principals you mean.
+
+**Anonymous callers** are matched by the reserved principal `role` = `public`. Use it to restrict the routes that permit unauthenticated access.
+
+**Default is open**: a request matching no rule is allowed, and role/scope middleware still applies independently. A DB failure while reading rules fails *closed* and records an `acl_error` audit event.
+
+`ENDPOINT_ACL_ENFORCE=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
+
 ## Named-Graph ACL
 
 Grant a principal access to a specific named graph at one of three levels: `read`, `write` (includes read), or `admin` (includes write). The special **public** principal grants unauthenticated read access to a single graph. Grants are additive and apply to both SPARQL queries and the Graph Store Protocol — an explicit write grant is required for `PUT` / `POST` / `DELETE` on `/store` and for any SPARQL Update that targets the graph. Managed at `/api/admin/acl/graphs`.
 
 ## Triple Security Labels
 
-For cell-level security, individual triples (matched by subject, predicate, and object) can be assigned to a **label graph**. The triple is then visible only to principals who can read that label graph via the Named-Graph ACL. When a graph carries security labels, both Graph Store downloads and SPARQL results are filtered per caller; admins bypass filtering. Managed at `/api/admin/acl/triples`.
+For cell-level security, individual triples (matched by subject, predicate, and object) can be assigned to a **label graph**. The triple is then visible only to principals who can read that label graph via the Named-Graph ACL; admins bypass filtering. Managed at `/api/admin/acl/triples`.
+
+> **Scope.** Labels are applied on **Graph Store reads** (`GET /store?graph=…`). SPARQL results are **not** filtered by triple label — scope sensitive data with a named graph and a Named-Graph ACL if it must be unreachable over `/sparql` as well. (This page previously claimed both paths were filtered; only the Graph Store path is.)
 
 ## Audit Log
 

@@ -21,7 +21,6 @@ use serde::Deserialize;
 use super::content_negotiation::{negotiate_graph_format, serialize_graph, GraphFormat};
 use super::error::AppError;
 use super::AppState;
-use crate::store::engine::TripleStore;
 
 /// Builds the IRI dereference routes.
 pub fn dereference_routes() -> Router<AppState> {
@@ -191,15 +190,26 @@ async fn void_handler(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
-    let void_turtle =
-        crate::dcat::generate_dcat_catalog(&state.base_url, &state.store, &state.auth_db, user_id);
+    let format = catalog_format(&params, &headers);
+    let bytes = crate::dcat::generate_catalog_bytes(
+        &state.base_url,
+        &state.store,
+        &state.auth_db,
+        user_id,
+        None,
+        format.to_rdf_format(),
+    )
+    .map_err(AppError::Internal)?;
+    catalog_response(format, bytes)
+}
 
+/// `?format=` wins over `Accept`; Turtle is the default.
+fn catalog_format(params: &FormatParam, headers: &HeaderMap) -> GraphFormat {
     let accept_from_header = headers
         .get(ACCEPT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("*/*")
         .to_lowercase();
-
     let effective_accept: String = match params.format.as_deref() {
         Some("turtle") => "text/turtle".to_string(),
         Some("jsonld") | Some("json-ld") => "application/ld+json".to_string(),
@@ -207,31 +217,15 @@ async fn void_handler(
         Some("rdfxml") | Some("rdf-xml") => "application/rdf+xml".to_string(),
         _ => accept_from_header,
     };
+    negotiate_graph_format(&effective_accept)
+}
 
-    let format = negotiate_graph_format(&effective_accept);
-
-    // For Turtle (the default), emit directly — no round-trip needed.
-    if format == GraphFormat::Turtle {
-        return axum::http::Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/turtle")
-            .header("vary", "Accept")
-            .body(axum::body::Body::from(void_turtle))
-            .map_err(|e| AppError::Internal(e.to_string()));
-    }
-
-    // For other formats: load into a temporary in-memory store and re-serialize.
-    let tmp = TripleStore::in_memory().map_err(|e| AppError::Internal(e.to_string()))?;
-    tmp.load_str(&void_turtle, oxigraph::io::RdfFormat::Turtle, None)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let bytes = tmp
-        .dump(format.to_rdf_format(), None)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
+fn catalog_response(format: GraphFormat, bytes: Vec<u8>) -> Result<Response, AppError> {
     axum::http::Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, format.content_type())
         .header("vary", "Accept")
+        .header("cache-control", "public, max-age=60")
         .body(axum::body::Body::from(bytes))
         .map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -257,54 +251,18 @@ async fn org_void_handler(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .or_else(|| state.auth_db.get_organisation(&org_id).unwrap_or(None))
         .ok_or_else(|| AppError::NotFound(format!("Organisation '{org_id}' not found")))?;
-
     let user_id = user.as_deref().map(|u| u.user_id.as_str());
-    let void_turtle = crate::dcat::generate_org_dcat_catalog(
-        &org,
+    let format = catalog_format(&params, &headers);
+    let bytes = crate::dcat::generate_catalog_bytes(
         &state.base_url,
         &state.store,
         &state.auth_db,
         user_id,
-    );
-
-    let accept_from_header = headers
-        .get(ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("*/*")
-        .to_lowercase();
-
-    let effective_accept: String = match params.format.as_deref() {
-        Some("turtle") => "text/turtle".to_string(),
-        Some("jsonld") | Some("json-ld") => "application/ld+json".to_string(),
-        Some("ntriples") | Some("n-triples") => "application/n-triples".to_string(),
-        Some("rdfxml") | Some("rdf-xml") => "application/rdf+xml".to_string(),
-        _ => accept_from_header,
-    };
-
-    let format = negotiate_graph_format(&effective_accept);
-
-    if format == GraphFormat::Turtle {
-        return axum::http::Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/turtle")
-            .header("vary", "Accept")
-            .body(axum::body::Body::from(void_turtle))
-            .map_err(|e| AppError::Internal(e.to_string()));
-    }
-
-    let tmp = TripleStore::in_memory().map_err(|e| AppError::Internal(e.to_string()))?;
-    tmp.load_str(&void_turtle, oxigraph::io::RdfFormat::Turtle, None)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    let bytes = tmp
-        .dump(format.to_rdf_format(), None)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    axum::http::Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, format.content_type())
-        .header("vary", "Accept")
-        .body(axum::body::Body::from(bytes))
-        .map_err(|e| AppError::Internal(e.to_string()))
+        Some(&org),
+        format.to_rdf_format(),
+    )
+    .map_err(AppError::Internal)?;
+    catalog_response(format, bytes)
 }
 
 /// Compute the set of named graph IRIs a NON-ADMIN caller may read when

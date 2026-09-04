@@ -4024,6 +4024,7 @@ dependencies = [
  "ots-plugin-api",
  "ots-plugin-hello",
  "oxigraph",
+ "oxiri",
  "oxrdf",
  "parry3d-f64",
  "percent-encoding",

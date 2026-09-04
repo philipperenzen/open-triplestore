@@ -2,6 +2,12 @@
 //!
 //! Generates RDF (Turtle) describing the capabilities of this SPARQL endpoint,
 //! per the W3C SPARQL 1.1 Service Description specification.
+//!
+//! `sd:BasicFederatedQuery` is advertised only when federation is actually
+//! available — i.e. an `OTS_REMOTE_ALLOWLIST` is configured (see
+//! `crate::remote`). Without one, `SERVICE` errors rather than reaching the
+//! network, and a federating client that planned calls against this endpoint
+//! would fail on every one of them. The description says what works.
 
 /// Generate a SPARQL Service Description as Turtle.
 ///
@@ -33,6 +39,7 @@ pub fn generate(
     default_graph_triples: usize,
     named_graphs: &[(&str, usize)],
     datasets: &[DatasetDesc],
+    federation: bool,
 ) -> String {
     let mut desc = String::new();
 
@@ -59,7 +66,7 @@ pub fn generate(
         <http://www.w3.org/ns/formats/RDF_XML> ,
         <http://www.w3.org/ns/formats/N-Quads> ,
         <http://www.w3.org/ns/formats/TriG> ;
-    sd:feature sd:UnionDefaultGraph, sd:BasicFederatedQuery ;
+    sd:feature sd:UnionDefaultGraph ;
     sd:extensionFunction
 "#,
     );
@@ -168,6 +175,14 @@ pub fn generate(
         desc.push_str(" .\n");
     }
 
+    if federation {
+        // Only when an allowlist exists: a federating client that plans
+        // SERVICE calls against an endpoint that refuses them gains nothing.
+        desc = desc.replace(
+            "sd:feature sd:UnionDefaultGraph ;",
+            "sd:feature sd:UnionDefaultGraph, sd:BasicFederatedQuery ;",
+        );
+    }
     desc
 }
 
@@ -177,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_generate_basic() {
-        let desc = generate(42, &[], &[]);
+        let desc = generate(42, &[], &[], false);
         assert!(desc.contains("sd:Service"));
         assert!(desc.contains("sd:SPARQL11Query"));
         assert!(desc.contains("void:triples 42"));
@@ -187,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_generate_with_named_graphs() {
-        let desc = generate(100, &[("http://example.org/graph1", 7)], &[]);
+        let desc = generate(100, &[("http://example.org/graph1", 7)], &[], false);
         assert!(desc.contains("http://example.org/graph1"));
         assert!(desc.contains("sd:namedGraph"));
     }
@@ -201,7 +216,7 @@ mod tests {
             public: true,
             graphs: vec!["http://x/g1".into()],
         };
-        let desc = generate(0, &[], std::slice::from_ref(&ds));
+        let desc = generate(0, &[], std::slice::from_ref(&ds), false);
         assert!(desc.contains("<http://x/dataset/d1> a void:Dataset"));
         assert!(desc.contains("My DS"));
         assert!(desc.contains("Public dataset"));
@@ -218,6 +233,7 @@ mod tests {
                 ("http://example.org/g2", 1000),
             ],
             &[],
+            false,
         );
         // Default graph count.
         assert!(desc.contains("void:triples 5"));

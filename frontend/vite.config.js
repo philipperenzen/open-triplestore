@@ -1,6 +1,70 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+// ── Cesium runtime assets, served from this origin ────────────────────────────
+//
+// Cesium loads its web workers, shaders, widget CSS and 3D-Tiles/terrain helper
+// assets at runtime relative to `window.CESIUM_BASE_URL`, outside the module
+// graph, so a bundler never sees them. The viewer used to point that at a CDN
+// pinned to a literal version — which had drifted 21 minor releases behind the
+// `cesium` package npm actually installed, and which made the globe depend on
+// internet access. This plugin serves the installed package's own Build/Cesium
+// runtime directories under /cesium/ in dev, and copies them into dist/cesium
+// at build time, so the assets always match the engine and work air-gapped.
+const CESIUM_RUNTIME_DIRS = ['Workers', 'Assets', 'ThirdParty', 'Widgets'];
+const CESIUM_MIME = {
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.wasm': 'application/wasm',
+  '.json': 'application/json',
+  '.css': 'text/css',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.xml': 'application/xml',
+  '.glsl': 'text/plain',
+  '.txt': 'text/plain',
+};
+
+function cesiumBuildDir() {
+  const require = createRequire(import.meta.url);
+  return path.join(path.dirname(require.resolve('cesium/package.json')), 'Build', 'Cesium');
+}
+
+function cesiumAssets() {
+  const buildDir = cesiumBuildDir();
+  return {
+    name: 'ots-cesium-assets',
+    configureServer(server) {
+      server.middlewares.use('/cesium', (req, res, next) => {
+        const rel = decodeURIComponent((req.url || '/').split('?')[0]);
+        const file = path.normalize(path.join(buildDir, rel));
+        // Containment + only the runtime directories, never the whole package.
+        if (!file.startsWith(buildDir + path.sep)) return next();
+        if (!CESIUM_RUNTIME_DIRS.some((d) => file.startsWith(path.join(buildDir, d) + path.sep))) {
+          return next();
+        }
+        fs.stat(file, (err, st) => {
+          if (err || !st.isFile()) return next();
+          res.setHeader('Content-Type', CESIUM_MIME[path.extname(file)] || 'application/octet-stream');
+          res.setHeader('Cache-Control', 'public, max-age=3600');
+          fs.createReadStream(file).pipe(res);
+        });
+      });
+    },
+    closeBundle() {
+      const outDir = path.resolve('dist', 'cesium');
+      for (const d of CESIUM_RUNTIME_DIRS) {
+        fs.cpSync(path.join(buildDir, d), path.join(outDir, d), { recursive: true });
+      }
+    },
+  };
+}
 
 // One-shot resolve of the service registry at dev-server startup so the backend proxy
 // targets can follow discovery. Falls back to {} (→ the localhost default) when it's down.
@@ -43,7 +107,7 @@ export default defineConfig(async () => {
     // Expose the opt-in flag to the browser bundle so serviceRegistry.ts only contacts the
     // registry when discovery is on (otherwise no /registry/events SSE reconnect loop, no noise).
     define: { __LD_DISCOVERY__: JSON.stringify(DISCOVERY) },
-    plugins: [tailwindcss(), svelte()],
+    plugins: [tailwindcss(), svelte(), cesiumAssets()],
     server: {
       // --no-reload (LD_NO_HMR=1) turns off hot module reload while keeping the dev server + proxy.
       hmr: process.env.LD_NO_HMR === '1' ? false : undefined,

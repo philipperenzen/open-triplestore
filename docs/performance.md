@@ -526,6 +526,161 @@ streaming and are unaffected by the size. Grouped-aggregate shard decomposition
 (§3 — `AVG`→merge `SUM`+`COUNT`) brings this down sharply for datasets *within* the
 in-memory mirror cap, but this 100M tier exceeds it and runs on the persistent store.
 
+#### OTL-scale benchmark — asset-shaped data, deep SHACL, concurrent writers (2026-09)
+
+The tiers above measure generic shapes. This tier measures what an object-type
+library deployment does: `N` assets typed against 40 object types with six
+typed properties, a part-of link and a location — ~9 quads per asset — in one
+named graph on the persistent store; six query shapes with the **result cache
+off** (`OTS_QUERY_CACHE=false`, so every number is an evaluation); SHACL over
+every asset against six property shapes (datatype, minCount, class, pattern,
+`sh:in`, bounds); and a 20-second phase of 4 writers inserting 500-quad
+batches next to 4 readers doing lookups. Harness:
+[`examples/scale_otl.rs`](../examples/scale_otl.rs) (`SCALE_DUMP=<file>` keeps
+the generated Turtle so another store can load the same data;
+[`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) loads it
+into Apache Jena Fuseki in Docker and times the same queries over HTTP).
+Apple M-series laptop, release build.
+
+| | 100k assets (0.9M quads) | 1M assets (9M quads) | Fuseki TDB2, 0.9M quads (HTTP)² |
+|---|--:|--:|--:|
+| Bulk load | 138k quads/s | 83k quads/s (109 s) | —² |
+| lookup (one asset) | 0.07 ms | 0.07 ms | —² |
+| 2-way join, 10k rows | 72 ms | 51 ms | —² |
+| filter + count (scan) | 29 ms | 250 ms | —² |
+| group by + avg (41 groups) | 1.18 s | 9.5 s | —² |
+| property path `partOf+` | 0.08 ms | 0.07 ms | —² |
+| `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
+| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 118 s (76k quads/s) | — |
+| 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+
+² The Docker Fuseki image is amd64-only and the webapp distribution needs a
+login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —
+see the like-for-like table below, which measures both servers the same way.
+
+##### Like for like over HTTP — Open Triplestore vs Apache Jena Fuseki
+
+The in-process numbers above are not comparable with a server measured over
+HTTP, so [`scripts/scale_compare_http.py`](../scripts/scale_compare_http.py)
+runs identical phases against any SPARQL 1.1 Protocol + Graph Store endpoint:
+load by Graph Store `PUT`, the same six queries (median of 5 after a warm-up),
+and 20 s of 4 writers (`INSERT DATA`, 500 quads per request) next to 4
+readers (single-asset lookups). Fuseki is Apache Jena Fuseki 6.2 "main" (the
+no-UI jar, TDB2, `-Xmx4g`, started by
+[`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) with
+`FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE=false`.
+Same machine, same file, one server at a time. SHACL is Jena's `shacl validate`
+command line against the same shapes and data, and the platform's Studio
+pipeline over HTTP.
+
+| 100k assets, 0.9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
+|---|--:|--:|
+| Load (Graph Store PUT, 23 MB Turtle) | 15.0 s (60k quads/s)¹ | 8.2 s (109k quads/s) |
+| Lookup of one asset | 0.7 ms | 3.1 ms |
+| 2-way join, 10k rows | 26 ms | 79 ms |
+| Filter and count (scan) | 8 ms | 46 ms |
+| Group by with average, 41 groups | 64 ms | 377 ms |
+| Property path `partOf+` | 0.7 ms | 3.2 ms |
+| `COUNT(*)` inside `GRAPH` | 0.7 ms | 144 ms |
+| 4 writers + 4 readers, 20 s: quads written | 736 000 (36.8k/s), write p95 85 ms | 49 000 (2.45k/s), write p95 947 ms |
+| same phase: reads | 2 616/s, read p95 2.5 ms | 832/s, read p95 10.4 ms |
+| SHACL, every asset, 6 property shapes | 1.3–2.0 s right after the load, 0.64–0.93 s once the accelerator has published³ (Studio pipeline over HTTP; in-process 1.1–1.3 s / 0.72 s) | 3.5 s (Jena `shacl` CLI) |
+
+¹ Into an empty graph. The platform's Graph Store `PUT` parses the payload
+into a temporary store first (so a malformed body cannot empty the graph) and
+indexes every literal for full-text search; Fuseki does neither. A graph
+clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
+36 s with the chunked clear (before it, 34–60 s for 900k quads).
+
+| 1M assets, 9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
+|---|--:|--:|
+| Load (five 45 MB appends² / one PUT) | 110 s (82k quads/s) | 105 s (85k quads/s) |
+| Lookup of one asset | 1.2 ms | 5.0 ms |
+| 2-way join, 10k rows | 31 ms | 109 ms |
+| Filter and count (scan) | 50 ms | 341 ms |
+| Group by with average, 41 groups | 0.52 s | 5.3 s |
+| Property path `partOf+` | 0.8 ms | 6.5 ms |
+| `COUNT(*)` inside `GRAPH` | 0.5 ms | 1.7 s |
+| 4 writers + 4 readers, 20 s: quads written | 365 500 (18.3k/s), write p95 139 ms | 31 500 (1.6k/s), write p95 1.6 s |
+| same phase: reads | 2 623/s, read p95 2.4 ms | 421/s, read p95 21 ms |
+
+² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_MB` (default
+512 MB); the 226 MB file was appended in five 45 MB chunks (`POST`,
+incremental index maintenance), which is also how a client would stream a
+large import. Both tables were taken after a settle (60 s and 150 s) so the
+in-memory query accelerator had been rebuilt — a background tick does that
+once writes go quiet; measured immediately after the 9M-quad import the
+group-by ran on RocksDB at about 11 s.
+
+**Reading the comparison.** Load rates are level at 9M quads; at the small
+tier Fuseki loads faster because its `PUT` neither stages the payload nor
+indexes literals for text search. Every query is faster on Open Triplestore
+at both tiers: point reads and property paths in about a millisecond where
+Fuseki takes 3–6 ms, the join and the scan by 3–7×, and the two aggregates
+the first run lost by an order of magnitude — group-by with `AVG` over
+every asset 64 ms vs 377 ms at 0.9M quads and 0.52 s vs 5.3 s at 9M (the
+sharded, multi-core path), `COUNT(*)` inside `GRAPH` 0.7 ms vs 144 ms and
+0.5 ms vs 1.7 s (the count index). Under concurrent writes the difference is
+structural: Open Triplestore sustains 11–15× Fuseki's write throughput at a
+tenth of its write latency while serving 3–6× its read rate at a quarter to
+a ninth of its read latency. SHACL, the one target the first comparison
+left open, was then profiled and the engine rebuilt (see below): the same
+validation now takes 0.64–0.93 s over HTTP once the accelerator has
+published its RAM copy and 1.3–2.0 s right after a load, against
+Jena's 3.5 s.
+
+³ A validation reads one data source for its whole run: the query
+accelerator's clean in-memory copy when one is published, else one RocksDB
+snapshot. Right after a load the accelerator is still rebuilding (a
+background tick starts it once writes go quiet), so the first runs take the
+snapshot path and share the machine with the rebuild; any store write —
+including creating a shape graph — starts that cycle again.
+
+**SHACL, profiled.** The engine used to run one full SPARQL query per focus
+node and property path (600 000 per run here) — three parses, a fresh
+evaluator with forty custom-function registrations and a store-wide
+`sh:SPARQLFunction` scan, a plan compile, a result-cache mutex that never
+hit — and took a RocksDB snapshot per raw probe under the database's global
+mutex; 73% of the worker CPU was in that pipeline and 25% in lock waits,
+with the data read itself at 4%. Every constraint also re-fetched its value
+nodes. A run now resolves value nodes natively from the quad index (once per
+focus node and property shape), targets and `sh:class` from per-run class
+sets, and on the snapshot path from a per-run adjacency built with one scan
+per shape predicate — no SPARQL on the per-focus-node path at all. The W3C
+SHACL core ratchet and every SHACL suite are unchanged; the result changes
+(a `+` path on a cycle includes the focus, anonymous subclasses count for
+`sh:class` as they did for `sh:targetClass`, an invalid data-graph IRI skips
+only that graph, result order unspecified) are listed in the changelog.
+
+**What the comparison found in the platform** — three per-write costs
+proportional to graph or store size, all fixed on the way: the count index
+rescanned a graph after every load or ground update, the text index dropped
+and re-indexed every literal of a graph after every write, and each
+incremental write committed the text index; plus a stale-read window while
+the in-memory query accelerator rebuilt. Before those fixes the same 20 s
+phase wrote 3 500 quads over HTTP.
+
+
+**What the benchmark found.** The first run wrote 2 000 quads in the 20-second
+mixed phase with a write p95 of 22 s: every load into a named graph ended with
+a full recount of that graph to refresh the count index, so a 500-quad insert
+into a 900k-quad graph cost a 900k-quad scan, and four writers serialised on
+it. The index is now bumped by the batch's exact new-quad count (duplicates
+and already-stored quads excluded with point lookups); the same phase then
+wrote 900 000+ quads (43–46k/s, p95 71–79 ms across runs) with readers at 2 ms p95 — a 430×
+throughput difference from one write-side `O(graph)` step. Bulk load rose
+from 77k to 111k quads/s for the same reason.
+
+**What it did not find.** Nothing in this tier suggests the backend is the
+limit: reads stay lock-free under writes, SHACL scales linearly with the
+number of targets, and the persistent store's load rate holds at 9M quads.
+The one visible cost at the time was `COUNT(*)` inside a `GRAPH` block
+(306 ms, a scan); it is now answered from the count index like the bare
+default-graph form. Per the readiness plan, the trigger for evaluating
+another backend is deep SHACL over
+tens of millions of quads *with concurrent writers* exceeding a single node;
+at this tier the store is well inside that envelope.
+
 **Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
 100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
 termination). Full scans grow linearly (~60 ms per 1M triples). RocksDB load is
@@ -612,7 +767,8 @@ graph; Fuseki via GSP; QLever via `qlever-index`), and times the queries with
 **Why not a large multi-store leaderboard?** A fair cross-store benchmark needs
 the *same* hardware, dataset, query mix and protocol; published BSBM/SP2Bench
 figures run on different machines and configurations and are not comparable
-line-for-line. Open Triplestore embeds **Oxigraph 0.4** as its engine, so its raw
+line-for-line. Open Triplestore embeds **Oxigraph** as its engine (0.4.11 when these
+figures were measured; 0.5 today), so its raw
 query/parse throughput tracks Oxigraph's (a modern Rust store competitive with
 RDF4J and Jena on many workloads). The Fuseki comparison is included precisely
 because it could be run here under identical conditions; apply the same recipe to

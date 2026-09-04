@@ -1,6 +1,7 @@
-use super::constraints::evaluate_constraint;
+use super::constraints::{evaluate_constraint, evaluate_constraint_with_values};
 use super::report::{Severity, ValidationReport, ValidationResult};
 use super::shapes::*;
+use super::view::{DataView, GraphSel};
 use crate::store::TripleStore;
 use oxigraph::model::Term;
 use rayon::prelude::*;
@@ -8,7 +9,6 @@ use tracing::{debug, info, warn};
 
 const SH: &str = "http://www.w3.org/ns/shacl#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDFS_SUBCLASS: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 
 /// Maximum loader recursion depth for inline shapes (sh:node / sh:not / sh:and /
 /// nested sh:property …). Inline shapes are loaded eagerly, so a cyclic shapes
@@ -50,36 +50,58 @@ pub fn validate(
         shapes_graph, data_graphs
     );
 
-    // Reset the calling thread's property-path cache before this validation pass.
-    // Each rayon worker thread also has its own cache that seeds itself lazily on
-    // first use; they hold at most MAX_ENTRIES (10 000) entries with LRU eviction.
-    crate::store::path_cache::tl_clear();
-
     let shapes = load_shapes(store, shapes_graph)?;
     debug!("Loaded {} shapes", shapes.len());
 
-    // Evaluate shapes in parallel using rayon (4-8x speedup on multi-core).
-    // Each shape is independent — evaluate_constraint() only reads from Arc<Store>.
+    // One data source for the whole run (see `view.rs`): the accelerator's
+    // clean RAM copy, else one RocksDB snapshot, else the live memory store.
+    // Class closures and target instance sets are computed up front, in
+    // parallel, so the fan-out below takes no lock and runs no SPARQL.
+    let mut view = DataView::new(store, data_graphs);
+    view.prepare(&shapes);
+
     // `shapes_slice` is a shared immutable reference passed into parallel closures so
     // that logical constraint operators (sh:not, sh:and, sh:or, sh:xone, sh:node,
     // sh:qualifiedValueShape) can look up sibling shapes by IRI.
     let shapes_slice: &[Shape] = &shapes;
-    let all_results: Vec<ValidationResult> = shapes_slice
+
+    // Targets first, per shape in parallel.
+    let targeted: Vec<(&Shape, Vec<Term>)> = {
+        let view = &view;
+        shapes_slice
+            .par_iter()
+            .filter(|shape| !shape.deactivated)
+            .map(|shape| {
+                let focus_nodes = resolve_targets(view, shape);
+                debug!(
+                    "Shape <{}> has {} target nodes",
+                    shape.iri,
+                    focus_nodes.len()
+                );
+                (shape, focus_nodes)
+            })
+            .collect()
+    };
+    // Sized by the real focus counts: one scan per (graph, shape predicate)
+    // when the run is large enough for hash lookups to beat index seeks.
+    view.build_index(shapes_slice, &targeted);
+    debug!(
+        "SHACL data source: {} (run index: {})",
+        view.source_kind(),
+        view.has_index()
+    );
+    let view = &view;
+
+    // Evaluate shapes and focus nodes in parallel using rayon. Each shape is
+    // independent — the evaluator only reads the shared view.
+    let all_results: Vec<ValidationResult> = targeted
         .par_iter()
-        .filter(|shape| !shape.deactivated)
-        .flat_map(|shape| {
+        .flat_map(|(shape, focus_nodes)| {
             let severity = shape
                 .severity
                 .as_deref()
                 .map(Severity::from_iri)
                 .unwrap_or(Severity::Violation);
-
-            let focus_nodes = resolve_targets(store, shape, data_graphs);
-            debug!(
-                "Shape <{}> has {} target nodes",
-                shape.iri,
-                focus_nodes.len()
-            );
 
             focus_nodes
                 .par_iter()
@@ -89,13 +111,12 @@ pub fn validate(
                     // Node-level constraints
                     for constraint in &shape.constraints {
                         let rs = evaluate_constraint(
-                            store,
+                            view,
                             shapes_slice,
                             &shape.iri,
                             focus_node,
                             constraint,
                             None,
-                            data_graphs,
                             &severity,
                         );
                         results.extend(apply_message(rs, &shape.message, constraint));
@@ -104,6 +125,8 @@ pub fn validate(
                     // Property shape constraints. A property shape's own
                     // sh:severity / sh:message override the parent shape's
                     // (SHACL §3.6 — the shape that declares the constraint).
+                    // The value nodes along the shape's path are fetched once
+                    // and shared by all of its constraints.
                     for prop_shape in &shape.property_shapes {
                         let shape_iri = prop_shape.iri.as_deref().unwrap_or(&shape.iri);
                         let prop_severity = prop_shape
@@ -111,16 +134,21 @@ pub fn validate(
                             .as_deref()
                             .map(Severity::from_iri)
                             .unwrap_or_else(|| severity.clone());
+                        let values = super::constraints::value_nodes(
+                            view,
+                            focus_node,
+                            Some(&prop_shape.path),
+                        );
 
                         for constraint in &prop_shape.constraints {
-                            let rs = evaluate_constraint(
-                                store,
+                            let rs = evaluate_constraint_with_values(
+                                view,
                                 shapes_slice,
                                 shape_iri,
                                 focus_node,
                                 constraint,
                                 Some(&prop_shape.path),
-                                data_graphs,
+                                &values,
                                 &prop_severity,
                             );
                             results.extend(apply_message(rs, &prop_shape.message, constraint));
@@ -136,11 +164,7 @@ pub fn validate(
     let conforms = all_results.is_empty();
     let results_count = all_results.len();
 
-    debug!(
-        "SHACL validation complete: {} violations; path-cache entries this thread: {}",
-        results_count,
-        crate::store::path_cache::tl_len()
-    );
+    debug!("SHACL validation complete: {} violations", results_count);
 
     Ok(ValidationReport {
         conforms,
@@ -191,6 +215,14 @@ pub fn infer(
     // the store. Once a whole round adds zero triples we are at the fixed point.
     // This both terminates early — instead of always running the full iteration
     // cap whenever any rule has a focus node — and reports an accurate count.
+    // SHACL-AF rules materialise into the data graph they infer over. With
+    // several data graphs there is no single "the" graph, so those keep the
+    // historical default-graph behaviour rather than silently picking one.
+    let target_graph: Option<&str> = match data_graphs {
+        [one] => Some(one.as_str()),
+        _ => None,
+    };
+
     for iteration in 0..100 {
         let before = store.len().map_err(|e| e.to_string())?;
 
@@ -198,7 +230,7 @@ pub fn infer(
             let focus_nodes = resolve_rule_targets(store, targets, data_graphs);
 
             for focus_node in &focus_nodes {
-                apply_rule(store, focus_node, rule_type, rule_body)?;
+                apply_rule(store, focus_node, rule_type, rule_body, target_graph)?;
             }
         }
 
@@ -901,7 +933,7 @@ fn load_property_shapes_inner(
 // Target resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -> Vec<Term> {
+fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
     let mut focus_nodes: Vec<Term> = Vec::new();
 
     for target in &shape.targets {
@@ -909,52 +941,54 @@ fn resolve_targets(store: &TripleStore, shape: &Shape, data_graphs: &[String]) -
             Target::TargetClass(class_iri) => {
                 // All SHACL instances of the class across the dataset's data
                 // graphs — including instances of subclasses
-                // (rdf:type/rdfs:subClassOf*, SHACL §2.1.3.1).
-                let query = format!(
-                    "SELECT DISTINCT ?s WHERE {{ {} }}",
-                    graph_scoped(
-                        data_graphs,
-                        &format!("?s <{RDF_TYPE}>/<{RDFS_SUBCLASS}>* <{class_iri}>")
-                    )
-                );
-                if let Ok(nodes) = execute_select_terms(store, &query, "s") {
-                    focus_nodes.extend(nodes);
+                // (rdf:type/rdfs:subClassOf*, SHACL §2.1.3.1). The type triple
+                // and the subclass chain are confined to one data graph each,
+                // as `GRAPH <g> { ?s rdf:type/rdfs:subClassOf* <C> }` was.
+                for i in 0..view.graph_count() {
+                    let set = match view.instances_of(class_iri, GraphSel::One(i)) {
+                        Some(set) => set,
+                        None => {
+                            // Not prepared (a target added after `prepare`):
+                            // compute it now from the same source.
+                            let closure = view.subclass_closure(class_iri, GraphSel::One(i));
+                            std::sync::Arc::new(
+                                closure
+                                    .iter()
+                                    .flat_map(|c| match c {
+                                        Term::NamedNode(_) | Term::BlankNode(_) => {
+                                            view.step(c, RDF_TYPE, true, GraphSel::One(i))
+                                        }
+                                        _ => Vec::new(),
+                                    })
+                                    .collect::<std::collections::HashSet<Term>>(),
+                            )
+                        }
+                    };
+                    focus_nodes.extend(set.iter().cloned());
                 }
             }
             Target::TargetNode(node) => {
                 focus_nodes.push(node.clone());
             }
             Target::TargetSubjectsOf(pred_iri) => {
-                let query = format!(
-                    "SELECT DISTINCT ?s WHERE {{ {} }}",
-                    graph_scoped(data_graphs, &format!("?s <{pred_iri}> ?o"))
-                );
-                if let Ok(nodes) = execute_select_terms(store, &query, "s") {
-                    focus_nodes.extend(nodes);
-                }
+                focus_nodes.extend(view.subjects_of(pred_iri, GraphSel::All));
             }
             Target::TargetObjectsOf(pred_iri) => {
-                let query = format!(
-                    "SELECT DISTINCT ?o WHERE {{ {} }}",
-                    graph_scoped(data_graphs, &format!("?s <{pred_iri}> ?o"))
-                );
-                if let Ok(nodes) = execute_select_terms(store, &query, "o") {
-                    focus_nodes.extend(nodes);
-                }
+                focus_nodes.extend(view.objects_of(pred_iri, GraphSel::All));
             }
             Target::SparqlTarget(sparql) => {
                 // SHACL-AF custom SPARQL target
-                if let Ok(nodes) = execute_select_terms(store, sparql, "this") {
+                if let Ok(nodes) = execute_select_terms(view.store, sparql, "this") {
                     focus_nodes.extend(nodes);
                 }
             }
         }
     }
 
-    // Deduplicate by term identity (N-Triples form) — the same node may arrive
-    // via multiple targets.
-    let mut seen = std::collections::BTreeSet::new();
-    focus_nodes.retain(|t| seen.insert(t.to_string()));
+    // Deduplicate by term identity — the same node may arrive via multiple
+    // targets (or from several data graphs).
+    let mut seen = std::collections::HashSet::new();
+    focus_nodes.retain(|t| seen.insert(t.clone()));
     focus_nodes
 }
 
@@ -1061,7 +1095,9 @@ fn resolve_rule_targets(
         message: None,
         deactivated: false,
     };
-    resolve_targets(store, &dummy_shape, data_graphs)
+    let mut view = DataView::new(store, data_graphs);
+    view.prepare(std::slice::from_ref(&dummy_shape));
+    resolve_targets(&view, &dummy_shape)
         .iter()
         .map(term_to_lexical)
         .collect()
@@ -1079,6 +1115,7 @@ fn apply_rule(
     focus_node: &str,
     rule_type: &RuleType,
     rule_body: &str,
+    target_graph: Option<&str>,
 ) -> Result<(), String> {
     let update = match rule_type {
         RuleType::SparqlRule => {
@@ -1086,17 +1123,34 @@ fn apply_rule(
             // form (`CONSTRUCT { t } WHERE { p }`) or the convenience
             // `INSERT { t } WHERE { p }` form — both materialise into the store.
             let bound = rule_body.replace("$this", &format!("<{}>", focus_node));
-            construct_to_update(&bound)
+            let update = construct_to_update(&bound);
+            // `WITH <g>` makes <g> the update's default graph, so the template
+            // materialises INTO the data graph rather than beside it. Without
+            // this the INSERT had no GRAPH clause at all, so inferred triples
+            // landed in the store's default graph — outside every registered,
+            // ACL'd, dataset-owned graph, invisible to the very data graph the
+            // rule was inferring over.
+            match target_graph {
+                Some(g) => format!("WITH <{g}> {update}"),
+                None => update,
+            }
         }
         RuleType::TripleRule => {
             // `$this` (from `sh:this`, mapped in `load_rules`) binds to the focus.
             let body = rule_body.replace("$this", &format!("<{}>", focus_node));
-            format!("INSERT DATA {{ {} }}", body)
+            // INSERT DATA takes no WITH clause, so name the graph inline.
+            match target_graph {
+                Some(g) => format!("INSERT DATA {{ GRAPH <{g}> {{ {body} }} }}"),
+                None => format!("INSERT DATA {{ {} }}", body),
+            }
         }
     };
-    if let Err(e) = store.update(&update) {
-        warn!("SHACL rule application error: {}", e);
-    }
+    // An erroring rule used to be logged and swallowed, so `infer` reported
+    // success with 0 inferred triples whether the rules ran or every one of them
+    // failed to parse. Surface it: the caller decides.
+    store
+        .update(&update)
+        .map_err(|e| format!("SHACL rule application failed ({update}): {e}"))?;
     Ok(())
 }
 
@@ -1423,28 +1477,6 @@ fn term_to_lexical(term: &oxigraph::model::Term) -> String {
     }
 }
 
-/// Wrap a triple-pattern `body` so it is matched within the dataset's data graphs.
-///
-/// - Empty `data_graphs`: match in the default graph (unscoped), preserving the
-///   behaviour for datasets without explicitly registered graphs.
-/// - One or more graphs: a UNION of `GRAPH <g> { body }` blocks, evaluating the
-///   pattern against exactly those graphs.
-///
-/// Replaces an earlier form that emitted `GRAPH <g> body` without the required
-/// braces — invalid SPARQL that silently matched nothing, so any dataset with a
-/// registered graph always reported `conforms: true`.
-pub(crate) fn graph_scoped(data_graphs: &[String], body: &str) -> String {
-    if data_graphs.is_empty() {
-        body.to_string()
-    } else {
-        data_graphs
-            .iter()
-            .map(|g| format!("{{ GRAPH <{g}> {{ {body} }} }}"))
-            .collect::<Vec<_>>()
-            .join(" UNION ")
-    }
-}
-
 fn term_to_string(term: Option<&oxigraph::model::Term>) -> String {
     match term {
         Some(oxigraph::model::Term::NamedNode(nn)) => format!("<{}>", nn.as_str()),
@@ -1731,5 +1763,325 @@ mod tests {
             report.results
         );
         assert_eq!(report.results[0].focus_node, "7");
+    }
+
+    /// `+` on a cycle yields the focus node itself, as SPARQL's `<s> <p>+ ?v`
+    /// does — for an IRI focus and for a blank-node focus alike. The old native
+    /// walk marked the start visited up front and never emitted it.
+    #[test]
+    fn one_or_more_path_on_cycle_includes_focus() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path [ sh:oneOrMorePath ex:p ] ; sh:minCount 2 ] .
+        "#;
+        // a -> b -> a: from a, `p+` reaches b and (via the cycle) a: 2 values.
+        // c -> c: from c, `p+` reaches c only: 1 value → violation.
+        // The blank node _:x -> _:y -> _:x mirrors the IRI case.
+        let data = r#"
+            @prefix ex: <http://example.org/> .
+            ex:a a ex:T ; ex:p ex:b . ex:b ex:p ex:a .
+            ex:c a ex:T ; ex:p ex:c .
+            _:x a ex:T ; ex:p _:y . _:y ex:p _:x .
+        "#;
+        let store = store_with(shapes, data);
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+        let focus: Vec<&str> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert_eq!(focus, vec!["http://example.org/c"], "{:?}", report.results);
+    }
+
+    /// `sh:class` and `sh:targetClass` agree on instances typed through an
+    /// anonymous subclass (`ex:x a [ rdfs:subClassOf ex:C ]`): both follow
+    /// `rdf:type/rdfs:subClassOf*`, blank-node classes included (SHACL §2.1.3.1).
+    #[test]
+    fn anonymous_subclasses_count_for_targets_and_sh_class() {
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:C ;
+                sh:property [ sh:path ex:friend ; sh:class ex:C ; sh:minCount 1 ] .
+        "#;
+        let data = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:x a [ rdfs:subClassOf ex:C ] ; ex:friend ex:y .
+            ex:y a ex:C ; ex:friend ex:x .
+            ex:z a ex:C ; ex:friend ex:stranger .
+        "#;
+        let store = store_with(shapes, data);
+        let report = validate(&store, "urn:shapes", &[]).unwrap();
+        // x is targeted (anonymous subclass) and its friend y conforms; y's
+        // friend x conforms via the anonymous subclass; z's friend is untyped.
+        let focus: Vec<&str> = report
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert_eq!(focus, vec!["http://example.org/z"], "{:?}", report.results);
+    }
+
+    /// One data graph named by an invalid IRI no longer voids the whole run: the
+    /// valid graphs are still validated (the UNION query this used to build
+    /// failed to parse and yielded zero targets and values everywhere).
+    #[test]
+    fn invalid_data_graph_iri_skips_only_that_graph() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(SHAPES, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> . ex:bob a ex:Person ."#,
+                RdfFormat::Turtle,
+                Some("http://example.org/data"),
+            )
+            .unwrap();
+        let graphs = vec![
+            "http://example.org/data".to_string(),
+            "not an iri".to_string(),
+        ];
+        let report = validate(&store, "urn:shapes", &graphs).unwrap();
+        assert!(!report.conforms);
+        assert!(report.results.iter().any(|r| r.focus_node.contains("bob")));
+    }
+
+    /// A run over the accelerator's clean RAM copy reports exactly what a run
+    /// over the live store reports, and a write after it is seen by the next
+    /// run (the copy is a peek at the clean state, never a stale snapshot).
+    #[test]
+    fn mirror_backed_run_matches_live_run_and_refreshes_after_write() {
+        let store = TripleStore::in_memory()
+            .unwrap()
+            .with_parallel_rebuild_quiet_ms(0);
+        store
+            .load_str(SHAPES, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        let g1 = "http://example.org/g1";
+        let g2 = "http://example.org/g2";
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> . ex:alice a ex:Person ; ex:name "Alice" . ex:bob a ex:Person ."#,
+                RdfFormat::Turtle,
+                Some(g1),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> . ex:carol a ex:Person ."#,
+                RdfFormat::Turtle,
+                Some(g2),
+            )
+            .unwrap();
+        let graphs = vec![g1.to_string(), g2.to_string()];
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| format!("{} {} {:?}", x.focus_node, x.source_constraint, x.path))
+                .collect();
+            v.sort();
+            (r.conforms, v)
+        };
+        // Live path: the mirror is dirty right after the loads.
+        assert!(store.mirror_full_copy().is_none());
+        let live = validate(&store, "urn:shapes", &graphs).unwrap();
+        assert_eq!(live.results_count, 2, "{:?}", live.results);
+        // Build the mirror and run again on its copy.
+        store.accelerator_tick();
+        assert_eq!(store.parallel_build_count(), 1);
+        assert!(store.mirror_full_copy().is_some(), "clean copy published");
+        let mirrored = validate(&store, "urn:shapes", &graphs).unwrap();
+        assert_eq!(summary(&mirrored), summary(&live));
+        // A write lands: the next run must see it, not the old copy.
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> . ex:carol ex:name "Carol" ."#,
+                RdfFormat::Turtle,
+                Some(g2),
+            )
+            .unwrap();
+        let after = validate(&store, "urn:shapes", &graphs).unwrap();
+        assert_eq!(after.results_count, 1, "{:?}", after.results);
+        assert!(after.results[0].focus_node.contains("bob"));
+    }
+
+    /// The run index (adjacency built from one scan per shape predicate) is a
+    /// pure cache: a run forced to build it reports exactly what a run forced
+    /// to answer every probe from the store reports, on a multi-graph fixture
+    /// with every path form and a property-pair constraint.
+    #[test]
+    fn run_index_is_invisible_in_the_report() {
+        use super::super::view::{set_index_policy_override, IndexPolicy};
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:datatype xsd:string ] ,
+                            [ sh:path [ sh:inversePath ex:partOf ] ; sh:maxCount 1 ] ,
+                            [ sh:path ( ex:partOf ex:name ) ; sh:minCount 1 ] ,
+                            [ sh:path [ sh:alternativePath ( ex:name ex:code ) ] ; sh:minCount 2 ] ,
+                            [ sh:path [ sh:zeroOrMorePath ex:partOf ] ; sh:class ex:T ] ,
+                            [ sh:path ex:low ; sh:lessThan ex:high ] .
+        "#;
+        let g1 = "http://example.org/g1";
+        let g2 = "http://example.org/g2";
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:a a ex:T ; ex:name "a" ; ex:code "A" ; ex:partOf ex:root ; ex:low 1 ; ex:high 2 .
+                   ex:b a ex:T ; ex:name "b" ; ex:partOf ex:root ; ex:low 5 ; ex:high 2 .
+                   ex:root a ex:T ; ex:name "root" .
+                   ex:c a ex:T ; ex:partOf ex:root, ex:a ."#,
+                RdfFormat::Turtle,
+                Some(g1),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:d a ex:T ; ex:name "d" ; ex:code "D" ; ex:partOf ex:e .
+                   ex:e ex:name "e" .
+                   ex:root ex:partOf ex:d ."#,
+                RdfFormat::Turtle,
+                Some(g2),
+            )
+            .unwrap();
+        let graphs = vec![g1.to_string(), g2.to_string()];
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| {
+                    format!(
+                        "{} | {} | {:?} | {:?}",
+                        x.focus_node, x.source_constraint, x.path, x.value
+                    )
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: usize::MAX,
+            max_quads: 0,
+        }));
+        let without = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: 0,
+            max_quads: usize::MAX,
+        }));
+        let with = validate(&store, "urn:shapes", &graphs).unwrap();
+        // A budget too small for every pair: some pairs indexed, the rest raw.
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: 0,
+            max_quads: 1,
+        }));
+        let partial = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(None);
+        assert!(!without.conforms, "fixture has violations");
+        assert!(without.results_count >= 4, "{:?}", summary(&without));
+        assert_eq!(summary(&with), summary(&without));
+        assert_eq!(summary(&partial), summary(&without));
+    }
+
+    /// The persistent backend takes the snapshot path (one RocksDB readable
+    /// transaction per run, projected scans for the class sets and the run
+    /// index). Same fixture, same report, with and without the index.
+    #[test]
+    fn snapshot_path_on_rocksdb_matches_with_and_without_the_index() {
+        use super::super::view::{set_index_policy_override, IndexPolicy};
+        let dir = tempfile::tempdir().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        assert!(store.is_persistent());
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path ex:name ; sh:minCount 1 ] ,
+                            [ sh:path [ sh:inversePath ex:partOf ] ; sh:maxCount 1 ] ,
+                            [ sh:path ex:partOf ; sh:class ex:T ] .
+        "#;
+        let g1 = "http://example.org/g1";
+        let g2 = "http://example.org/g2";
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                   ex:Sub rdfs:subClassOf ex:T .
+                   ex:a a ex:T ; ex:name "a" ; ex:partOf ex:root .
+                   ex:b a ex:Sub ; ex:partOf ex:root .
+                   ex:root a ex:T ; ex:name "root" .
+                   ex:c a ex:T ; ex:name "c" ; ex:partOf ex:a, ex:b ."#,
+                RdfFormat::Turtle,
+                Some(g1),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:d a ex:T ; ex:partOf ex:nobody ."#,
+                RdfFormat::Turtle,
+                Some(g2),
+            )
+            .unwrap();
+        let graphs = vec![g1.to_string(), g2.to_string()];
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| format!("{} | {} | {:?}", x.focus_node, x.source_constraint, x.value))
+                .collect();
+            v.sort();
+            v
+        };
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: usize::MAX,
+            max_quads: 0,
+        }));
+        let without = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: 0,
+            max_quads: usize::MAX,
+        }));
+        let with = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(None);
+        // b (a Sub) lacks a name; a has two children (c and ... no: a is partOf
+        // root only) — root has two children a and b → inverse maxCount 1
+        // violated for root; d's partOf points at an untyped node → sh:class.
+        assert_eq!(summary(&with), summary(&without));
+        let focus: std::collections::BTreeSet<&str> = without
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(
+            focus.contains("http://example.org/b"),
+            "{:?}",
+            summary(&without)
+        );
+        assert!(
+            focus.contains("http://example.org/root"),
+            "{:?}",
+            summary(&without)
+        );
+        assert!(
+            focus.contains("http://example.org/d"),
+            "{:?}",
+            summary(&without)
+        );
     }
 }

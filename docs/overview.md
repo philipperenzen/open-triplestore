@@ -23,4 +23,4 @@ A self-hosted, feature-complete RDF triplestore with a full web interface. Built
 - Loading data? See [Supported RDF Formats](/docs/formats) and [Import Auto-Detection](/docs/import).
 - Integrating programmatically? See the [API Reference](/docs/api-reference) and [API Services & AI Queries](/docs/api-services).
 - Curious what's implemented? See [Supported Standards](/docs/standards).
-- Want a guided tour? Every fresh install seeds a public **Open Triplestore** demo organisation — one dataset per standard, each with runnable API Services — so you can explore SPARQL, SHACL, GeoSPARQL and reasoning immediately. (A full multi-app demo walkthrough lives in `docs/demo-guide/` at the workspace root.)
+- Want a guided tour? Every fresh install seeds a public **Open Triplestore** demo organisation — one dataset per standard, each with runnable API Services — so you can explore SPARQL, SHACL, GeoSPARQL and reasoning immediately. (A full multi-app demo walkthrough lives in the OTL Suite workspace repository under `docs/demo-guide/`; it is not part of this repository.)

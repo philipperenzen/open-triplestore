@@ -15,6 +15,41 @@ type AccessibleGraphs = (HashSet<String>, HashSet<String>);
 
 use super::models::*;
 
+/// Which position a triple-security-label term occupies, since an object may be
+/// a literal while a subject or predicate may not.
+#[derive(Clone, Copy)]
+enum TermPosition {
+    Iri,
+    Object,
+}
+
+/// Render a caller-supplied term in N-Triples syntax.
+///
+/// Triple security labels are matched against keys built by splitting an
+/// N-Triples serialisation, so the stored values must be in that same form.
+/// Callers send bare IRIs (`http://ex/s`) or bare literal text; an already
+/// canonical value (`<…>`, `"…"`, `_:b0`) is passed through unchanged so
+/// re-canonicalising is idempotent.
+fn canonical_term(value: &str, position: TermPosition) -> String {
+    let v = value.trim();
+    if v.is_empty() {
+        return v.to_string();
+    }
+    // Already an N-Triples term.
+    if (v.starts_with('<') && v.ends_with('>')) || v.starts_with('"') || v.starts_with("_:") {
+        return v.to_string();
+    }
+    match position {
+        TermPosition::Iri => format!("<{v}>"),
+        TermPosition::Object => match oxigraph::model::NamedNode::new(v) {
+            // A well-formed absolute IRI is an IRI object.
+            Ok(n) => n.to_string(),
+            // Otherwise it is literal text.
+            Err(_) => oxigraph::model::Literal::new_simple_literal(v).to_string(),
+        },
+    }
+}
+
 /// Helper to read a User from a row (columns per USER_COLS: id, username, email, password_hash, role, is_active, created_at, updated_at, is_public, avatar_key, can_publish, display_name, bio, website, phone, organization, email_verified, totp_enabled).
 /// Escape SQLite `LIKE` wildcards (`%`, `_`) in a literal prefix so folder paths
 /// containing them cannot widen a `LIKE prefix || '/%'` match. Pair with `ESCAPE '\'`.
@@ -303,8 +338,12 @@ impl AuthDb {
                 "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
             )
         });
+        // Open one connection eagerly, the rest on demand: `build` used to open
+        // all eight at once, each running `journal_mode=WAL`, and the boot log
+        // carried a spurious "r2d2: database is locked" ERROR from the losers.
         let pool = r2d2::Pool::builder()
             .max_size(8)
+            .min_idle(Some(1))
             .build(manager)
             .map_err(|e| anyhow::anyhow!("Pool build failed: {}", e))?;
         let db = Self {
@@ -609,6 +648,43 @@ impl AuthDb {
             CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
             -- ── Endpoint ACL ────────────────────────────────────────────────
+            -- LDES (Linked Data Event Streams): per-dataset stream config,
+            -- the append-only member log, and the client's sync bookmarks.
+            CREATE TABLE IF NOT EXISTS ldes_streams (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                page_size INTEGER NOT NULL DEFAULT 100,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ldes_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_id TEXT NOT NULL,
+                entity_iri TEXT NOT NULL,
+                graph_iri TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                ntriples TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ldes_members_ds ON ldes_members(dataset_id, id);
+            CREATE TABLE IF NOT EXISTS ldes_sync_state (
+                dataset_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                last_timestamp TEXT,
+                members_applied INTEGER NOT NULL DEFAULT 0,
+                synced_at TEXT,
+                PRIMARY KEY (dataset_id, source_url)
+            );
+
+            -- Per-dataset entailment: selected regime, materialisation mode, last run.
+            CREATE TABLE IF NOT EXISTS dataset_entailment (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                regime TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'materialize',
+                updated_at TEXT NOT NULL,
+                last_run_at TEXT,
+                last_triples INTEGER
+            );
+
             CREATE TABLE IF NOT EXISTS endpoint_acl (
                 id TEXT PRIMARY KEY,
                 principal_type TEXT NOT NULL CHECK(principal_type IN ('user','organisation','group','role')),
@@ -1086,6 +1162,21 @@ impl AuthDb {
             "ALTER TABLE datasets ADD COLUMN version_notes TEXT",
             "ALTER TABLE datasets ADD COLUMN spatial TEXT",
             "ALTER TABLE datasets ADD COLUMN landing_page TEXT",
+            // Triple security labels were stored as callers sent them (bare
+            // `http://ex/s`) while the filter matches N-Triples terms
+            // (`<http://ex/s>`), so no label ever matched. Canonicalise the
+            // existing rows; new ones are canonicalised on write. Guarded on
+            // NOT LIKE so it is idempotent.
+            "UPDATE triple_security_labels SET subject_iri = '<' || subject_iri || '>' \
+             WHERE subject_iri NOT LIKE '<%' AND subject_iri NOT LIKE '_:%'",
+            "UPDATE triple_security_labels SET predicate_iri = '<' || predicate_iri || '>' \
+             WHERE predicate_iri NOT LIKE '<%'",
+            // Objects that look like absolute IRIs become IRI terms; anything
+            // else is left for the operator, since guessing a literal's
+            // datatype/language from bare text would be worse than a no-match.
+            "UPDATE triple_security_labels SET object_value = '<' || object_value || '>' \
+             WHERE object_value NOT LIKE '<%' AND object_value NOT LIKE '\"%' \
+               AND object_value NOT LIKE '_:%' AND object_value LIKE '%://%'",
             // Organisation Linked Data / FOAF / vCard metadata fields
             "ALTER TABLE organisations ADD COLUMN homepage TEXT",
             "ALTER TABLE organisations ADD COLUMN identifier TEXT",
@@ -5015,6 +5106,40 @@ impl AuthDb {
     }
 
     /// Fetch all endpoint ACL rules relevant to a given user (by user id, role, org memberships, group memberships).
+    /// Endpoint ACL rules that apply to an ANONYMOUS caller.
+    ///
+    /// Anonymous rules use the reserved principal `('role', 'public')`. The
+    /// table's CHECK constraint allows only user/organisation/group/role, and
+    /// `public` is not a `SystemRole`, so the pair is unambiguous and needs no
+    /// table rebuild to introduce.
+    ///
+    /// Without this, `check_endpoint_acl` had no rules to evaluate for an
+    /// unauthenticated request and simply allowed it — so a rule aimed at
+    /// anonymous access did nothing, on exactly the `optional_auth` routes where
+    /// anonymous access is what an operator wants to restrict.
+    pub fn get_endpoint_acl_rules_for_public(&self) -> anyhow::Result<Vec<EndpointAclRule>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, principal_type, principal_id, path_pattern, http_methods, effect, priority, created_at, created_by
+             FROM endpoint_acl WHERE principal_type='role' AND principal_id='public'
+             ORDER BY priority DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(EndpointAclRule {
+                id: row.get(0)?,
+                principal_type: row.get(1)?,
+                principal_id: row.get(2)?,
+                path_pattern: row.get(3)?,
+                http_methods: row.get(4)?,
+                effect: row.get(5)?,
+                priority: row.get(6)?,
+                created_at: row.get(7)?,
+                created_by: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn get_endpoint_acl_rules_for_user(
         &self,
         user_id: &str,
@@ -5377,6 +5502,16 @@ impl AuthDb {
         graph_iri: &str,
         label_graph_iri: &str,
     ) -> anyhow::Result<TripleSecurityLabel> {
+        // Canonicalise to N-Triples term syntax before storing. The filter that
+        // reads these rows builds its lookup keys by splitting an N-Triples
+        // line, so its subject is `<http://ex/s>` — while callers naturally
+        // send a bare `http://ex/s` (the repo's own API test does). Exact SQL
+        // equality between the two never matched, which made the whole
+        // cell-level security feature a silent no-op.
+        let subject_iri = &canonical_term(subject_iri, TermPosition::Iri);
+        let predicate_iri = &canonical_term(predicate_iri, TermPosition::Iri);
+        let object_value = &canonical_term(object_value, TermPosition::Object);
+
         let conn = self.pool.get()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(

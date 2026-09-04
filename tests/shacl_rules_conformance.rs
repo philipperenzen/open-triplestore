@@ -452,14 +452,30 @@ mod http {
             "endpoint must report inferred triples: {j}",
         );
 
-        // The triple rule writes to the default graph — verify via the store.
-        let materialised = matches!(
+        // The rule materialises INTO the dataset's data graph. It used to land
+        // in the default graph — outside every registered, ACL'd graph, and
+        // invisible to the data graph it was inferring over.
+        let in_data_graph = matches!(
+            state.store.query(
+                "ASK { GRAPH <urn:data> { <http://example.org/Registry> <http://example.org/status> <http://example.org/Active> } }"
+            ),
+            Ok(QueryResults::Boolean(true))
+        );
+        assert!(
+            in_data_graph,
+            "derived triple must land in the data graph it was inferred over"
+        );
+
+        let leaked_to_default = matches!(
             state.store.query(
                 "ASK { <http://example.org/Registry> <http://example.org/status> <http://example.org/Active> }"
             ),
             Ok(QueryResults::Boolean(true))
         );
-        assert!(materialised, "derived triple must be queryable after infer");
+        assert!(
+            !leaked_to_default,
+            "inferred triples must not be written to the default graph"
+        );
     }
 
     #[tokio::test]

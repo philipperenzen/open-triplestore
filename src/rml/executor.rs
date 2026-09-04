@@ -11,6 +11,8 @@
 //!       → Quad(subject, predicate, object, graph)
 //! ```
 
+use oxigraph::model::{Literal, NamedNode};
+
 use super::model::*;
 use super::sources::{load_rows, Row};
 use crate::store::engine::TripleStore;
@@ -242,7 +244,13 @@ fn eval_term(
     }
 
     Some(match tm.term_type {
-        TermType::IRI => format!("<{}>", raw_value),
+        // Build the IRI through oxrdf so it is validated and serialised, not
+        // pasted between angle brackets. A `rml:reference`/`rr:column` value
+        // with `rr:termType rr:IRI` went in raw: a value containing a space
+        // produced invalid Turtle and failed the WHOLE mapping, and one
+        // containing `>` could terminate the IRI and inject further triples.
+        // Only `rr:template` values were percent-encoded.
+        TermType::IRI => NamedNode::new(&raw_value).ok()?.to_string(),
         TermType::BlankNode => {
             if let Some(existing) = row_bnodes.get(&raw_value) {
                 existing.clone()
@@ -253,14 +261,23 @@ fn eval_term(
                 label
             }
         }
+        // Likewise for literals: hand-escaping only `\` and `"` left raw
+        // newlines, carriage returns and tabs in the output, which Turtle's
+        // STRING_LITERAL_QUOTE forbids — so one multi-line CSV field made the
+        // entire generated document unparseable and the mapping failed with
+        // "Failed to load generated triples" rather than skipping a row.
         TermType::Literal => {
-            let escaped = raw_value.replace('\\', "\\\\").replace('"', "\\\"");
             if let Some(ref lang) = tm.language {
-                format!("\"{}\"@{}", escaped, lang)
+                match Literal::new_language_tagged_literal(&raw_value, lang) {
+                    Ok(l) => l.to_string(),
+                    // An invalid language tag is a mapping error, not a reason
+                    // to emit a broken document.
+                    Err(_) => return None,
+                }
             } else if let Some(ref dt) = tm.datatype {
-                format!("\"{}\"^^<{}>", escaped, dt)
+                Literal::new_typed_literal(&raw_value, NamedNode::new(dt).ok()?).to_string()
             } else {
-                format!("\"{}\"", escaped)
+                Literal::new_simple_literal(&raw_value).to_string()
             }
         }
     })

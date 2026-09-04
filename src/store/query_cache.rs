@@ -133,10 +133,14 @@ impl QueryCache {
 
     /// Bump the generation so every existing entry is treated as stale. Called on
     /// every write to the store. O(1).
+    ///
+    /// The generation advances even when the result cache is disabled: it is the
+    /// store's public write generation (`TripleStore::write_generation`), which
+    /// keys the VoID statistics and the SHACL run state. Gating it on `enabled`
+    /// (as this used to) froze every one of those caches at generation 0 under
+    /// `OTS_QUERY_CACHE=false`, so they served stale data across writes.
     pub fn invalidate(&self) {
-        if self.inner.enabled {
-            self.inner.generation.fetch_add(1, Ordering::Release);
-        }
+        self.inner.generation.fetch_add(1, Ordering::Release);
     }
 
     /// Return a *fresh* (current-generation) cached result, or `None`.
@@ -152,14 +156,35 @@ impl QueryCache {
         }
     }
 
+    /// The current generation. Callers snapshot this *before* evaluating a
+    /// query and hand it back to [`Self::put`], so a write that lands during
+    /// evaluation invalidates the result instead of being stamped onto it.
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Acquire)
+    }
+
     /// Materialise `results`, caching it if it is cacheable and small enough, and
     /// return the (reconstructed) full results either way — so the caller streams
     /// the same data whether or not it was cached.
-    pub fn put(&self, sparql: &str, results: QueryResults<'static>) -> QueryResults<'static> {
+    ///
+    /// `gen_at_start` must be the generation observed before evaluation began.
+    /// Reading the generation here instead was a lost-update race against the
+    /// module's own "never stale" invariant: thread A computes a result from the
+    /// pre-write index, thread B commits a write and bumps the generation, then
+    /// A's `put` reads the NEW generation and stores (new_gen, old_value) — a
+    /// stale answer indistinguishable from a fresh one, served until the next
+    /// write. `try_fast_count` and the parallel-mirror paths materialise eagerly,
+    /// which makes the window easy to hit.
+    pub fn put(
+        &self,
+        sparql: &str,
+        gen_at_start: u64,
+        results: QueryResults<'static>,
+    ) -> QueryResults<'static> {
         if !self.inner.enabled || !is_cacheable(sparql) {
             return results;
         }
-        let gen = self.inner.generation.load(Ordering::Acquire);
+        let gen = gen_at_start;
         match results {
             QueryResults::Boolean(b) => {
                 self.store(sparql, gen, Cached::Boolean(b));
@@ -231,6 +256,13 @@ impl QueryCache {
     }
 
     fn store(&self, sparql: &str, gen: u64, value: Cached) {
+        // A write landed while this query was being evaluated, so the value is
+        // already out of date. Storing it under its start generation would be
+        // harmless (`get` compares against the current one and would miss), but
+        // it would still evict a live entry from the LRU for nothing.
+        if self.inner.generation.load(Ordering::Acquire) != gen {
+            return;
+        }
         if let Ok(mut cache) = self.inner.cache.lock() {
             cache.put(sparql.to_string(), (gen, value));
         }
@@ -290,4 +322,61 @@ fn is_cacheable(sparql: &str) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A result computed before a write must never be cached as if it were
+    /// computed after it.
+    ///
+    /// `put` used to read the generation counter itself, so this exact interleave
+    /// — evaluate, write commits, store — stamped the post-write generation onto
+    /// the pre-write value, and `get` then happily served it as fresh. The race
+    /// is too narrow to reproduce reliably by running threads, so it is pinned
+    /// here directly: take the snapshot, bump the generation, then put.
+    #[test]
+    fn a_result_computed_before_a_write_is_not_cached_as_fresh() {
+        let cache = QueryCache::new(true, 16, 1000);
+        let q = "ASK { ?s ?p ?o }";
+
+        let gen_at_start = cache.generation();
+        // A write commits while the query is being evaluated.
+        cache.invalidate();
+        let _ = cache.put(q, gen_at_start, QueryResults::Boolean(true));
+
+        assert!(
+            cache.get(q).is_none(),
+            "a value computed before an interleaved write must not be served as fresh"
+        );
+    }
+
+    /// The ordinary path still caches: no write, so the snapshot is current.
+    #[test]
+    fn a_result_with_no_interleaved_write_is_cached() {
+        let cache = QueryCache::new(true, 16, 1000);
+        let q = "ASK { ?s ?p ?o }";
+
+        let gen_at_start = cache.generation();
+        let _ = cache.put(q, gen_at_start, QueryResults::Boolean(true));
+
+        assert!(
+            matches!(cache.get(q), Some(QueryResults::Boolean(true))),
+            "an uncontended result must still be cached"
+        );
+    }
+
+    #[test]
+    fn generation_advances_with_the_cache_disabled() {
+        let cache = QueryCache::new(false, 8, 8);
+        assert_eq!(cache.generation(), 0);
+        cache.invalidate();
+        cache.invalidate();
+        assert_eq!(
+            cache.generation(),
+            2,
+            "the write generation is not a cache feature"
+        );
+    }
 }

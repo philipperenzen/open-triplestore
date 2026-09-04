@@ -14,6 +14,7 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use common::*;
+use oxigraph::sparql::QueryResults;
 use tower::ServiceExt as _;
 
 async fn send(
@@ -51,6 +52,80 @@ async fn post_member(app: &Router, token: &str, slug: &str) -> (StatusCode, Head
     )
     .await;
     (st, h)
+}
+
+/// LDP PATCH takes an arbitrary SPARQL UPDATE body. It used to run that body
+/// verbatim via `store.update()`, so any authenticated caller — every test in
+/// this file uses an admin token, which hid it — could `DROP ALL` or delete
+/// another tenant's named graph, bypassing every per-graph ACL. PATCH now goes
+/// through the same gate as `POST /sparql`, which admin-gates all-graph and
+/// variable-graph operations.
+#[tokio::test]
+async fn ldp_patch_cannot_drop_all_as_non_admin() {
+    let (state, admin) = admin_state();
+    state
+        .auth_db
+        .create_user(
+            "mallory",
+            "mallory",
+            "mallory@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let mallory = mint_token("mallory", "mallory", "user");
+    let app = test_app(state.clone());
+
+    let (st, _) = post_member(&app, &admin, "victim").await;
+    assert_eq!(st, StatusCode::CREATED, "seed member");
+
+    let before = state.store.query("SELECT * WHERE { ?s ?p ?o }").is_ok();
+    assert!(before, "store is queryable before the PATCH");
+
+    // A whole-store wipe, in both the all-graph and variable-graph forms.
+    for evil in [
+        "DROP ALL",
+        "DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { GRAPH ?g { ?s ?p ?o } }",
+    ] {
+        let (st, _, body) = send(
+            &app,
+            Method::PATCH,
+            "/ldp/c1/victim",
+            Some(&mallory),
+            &[("Content-Type", "application/sparql-update")],
+            evil,
+        )
+        .await;
+        assert!(
+            st == StatusCode::FORBIDDEN || st == StatusCode::UNAUTHORIZED,
+            "non-admin PATCH `{evil}` must be refused, got {st}: {body}"
+        );
+    }
+
+    // The store still holds the member's triples: a refused PATCH must not have
+    // deleted anything.
+    let survived = matches!(
+        state
+            .store
+            .query("ASK { <http://example.org/x> <http://example.org/p> \"v\" }"),
+        Ok(QueryResults::Boolean(true))
+    );
+    assert!(survived, "a refused PATCH must not delete store contents");
+
+    let (st, ..) = send(
+        &app,
+        Method::GET,
+        "/ldp/c1/victim",
+        Some(&admin),
+        &[("Accept", "text/turtle")],
+        "",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "member must survive the refused PATCHes"
+    );
 }
 
 // POST to a container creates a member and returns 201 with a Location header.
@@ -274,5 +349,234 @@ async fn ldp_binary_content_type_is_sanitised() {
             .unwrap_or(""),
         "nosniff",
         "must set X-Content-Type-Options: nosniff"
+    );
+}
+
+// ─── Spec deviations closed in the readiness program ─────────────────────────
+
+const BASE: &str = "http://localhost:7878";
+const LDP: &str = "http://www.w3.org/ns/ldp#";
+
+/// An ETag read from GET must satisfy If-Match on PUT. GET used to hash the
+/// re-serialised, Prefer-filtered body while PUT and PATCH compared If-Match
+/// against the raw DESCRIBE hash, so the documented read→modify→write round
+/// trip ALWAYS ended in 412 — optimistic concurrency was unusable by any client
+/// (the existing 412 test only ever sent a made-up ETag, which hid it).
+#[tokio::test]
+async fn ldp_etag_from_get_satisfies_if_match_on_put() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let iri = format!("{BASE}/ldp/rt1");
+    let (st, _, body) = send(
+        &app,
+        Method::PUT,
+        "/ldp/rt1",
+        Some(&token),
+        &[("Content-Type", "text/turtle")],
+        &format!("<{iri}> <http://example.org/p> \"v1\" ."),
+    )
+    .await;
+    assert!(st.is_success(), "create: {st} {body}");
+
+    let (st, hdrs, _) = send(
+        &app,
+        Method::GET,
+        "/ldp/rt1",
+        Some(&token),
+        &[("Accept", "text/turtle")],
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let etag = hdrs
+        .get("etag")
+        .expect("GET carries an ETag")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let (st, hdrs2, body) = send(
+        &app,
+        Method::PUT,
+        "/ldp/rt1",
+        Some(&token),
+        &[("Content-Type", "text/turtle"), ("If-Match", &etag)],
+        &format!("<{iri}> <http://example.org/p> \"v2\" ."),
+    )
+    .await;
+    assert!(
+        st.is_success(),
+        "the ETag GET returned must satisfy If-Match, got {st}: {body}"
+    );
+    // The ETag identifies STATE: it changes once the state has.
+    let new_etag = hdrs2
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_ne!(new_etag, etag, "a changed resource must carry a new ETag");
+}
+
+/// RFC 9110 §9.3.2: HEAD returns the headers GET would. HEAD used to be a
+/// separate implementation that hard-coded application/n-triples, hashed the
+/// unfiltered DESCRIBE and omitted Vary, so HEAD and GET disagreed on
+/// Content-Type and ETag for the same resource.
+#[tokio::test]
+async fn ldp_head_headers_match_get() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let iri = format!("{BASE}/ldp/rt2");
+    let (st, _, _) = send(
+        &app,
+        Method::PUT,
+        "/ldp/rt2",
+        Some(&token),
+        &[("Content-Type", "text/turtle")],
+        &format!("<{iri}> <http://example.org/p> \"v\" ."),
+    )
+    .await;
+    assert!(st.is_success());
+
+    let accept = [("Accept", "text/turtle")];
+    let (gst, get, gbody) = send(&app, Method::GET, "/ldp/rt2", Some(&token), &accept, "").await;
+    let (hst, head, hbody) = send(&app, Method::HEAD, "/ldp/rt2", Some(&token), &accept, "").await;
+    assert_eq!((gst, hst), (StatusCode::OK, StatusCode::OK));
+    assert!(
+        !gbody.is_empty() && hbody.is_empty(),
+        "HEAD carries no body"
+    );
+    for name in ["content-type", "etag", "vary", "link"] {
+        assert_eq!(
+            get.get(name).map(|v| v.to_str().unwrap().to_string()),
+            head.get(name).map(|v| v.to_str().unwrap().to_string()),
+            "HEAD's {name} must equal GET's"
+        );
+    }
+    assert!(
+        get.get("content-type")
+            .map(|v| v.to_str().unwrap().starts_with("text/turtle"))
+            .unwrap_or(false),
+        "negotiated type is honoured: {:?}",
+        get.get("content-type")
+    );
+    assert!(
+        get.get("vary")
+            .map(|v| v.to_str().unwrap().contains("Accept"))
+            .unwrap_or(false),
+        "the representation varies with Accept"
+    );
+}
+
+/// Every LDP response advertises `/ldp/constraints` as its constrainedBy
+/// document — and nothing served it (404), so the pointer led nowhere.
+#[tokio::test]
+async fn ldp_constraints_document_is_served() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let (st, hdrs, body) = send(&app, Method::GET, "/ldp/constraints", Some(&token), &[], "").await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "the constrainedBy target must exist: {body}"
+    );
+    assert!(
+        body.contains("constrainedBy") && body.contains("Slug"),
+        "it is the constraints document, not a resource: {body}"
+    );
+    assert!(hdrs.contains_key("content-type"));
+}
+
+/// LDP 1.0 §5.2.3.4: a client creates a Direct container by POSTing with
+/// `Link: <ldp:DirectContainer>; rel="type"` and the membership configuration in
+/// the body. The Link header was never read, so every POSTed member became a
+/// plain RDFSource and Direct/Indirect creation was reachable from Rust only.
+#[tokio::test]
+async fn ldp_post_with_link_type_creates_a_direct_container() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let dc = format!("{BASE}/ldp/c1/dc1");
+    let (st, hdrs, body) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1",
+        Some(&token),
+        &[
+            ("Content-Type", "text/turtle"),
+            ("Slug", "dc1"),
+            (
+                "Link",
+                "<http://www.w3.org/ns/ldp#DirectContainer>; rel=\"type\"",
+            ),
+        ],
+        &format!(
+            "<{dc}> <{LDP}membershipResource> <http://example.org/parent> ;\n\
+             <{LDP}hasMemberRelation> <http://example.org/hasChild> ."
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        hdrs.get("location").and_then(|v| v.to_str().ok()),
+        Some(dc.as_str())
+    );
+
+    // It IS a Direct container now …
+    let (st, hdrs, _) = send(&app, Method::GET, "/ldp/c1/dc1", Some(&token), &[], "").await;
+    assert_eq!(st, StatusCode::OK);
+    let links: Vec<String> = hdrs
+        .get_all("link")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert!(
+        links.iter().any(|l| l.contains("ldp#DirectContainer")),
+        "the new resource must be typed DirectContainer: {links:?}"
+    );
+
+    // … and behaves like one: a member POSTed into it yields the membership triple.
+    let (st, _, body) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1/dc1",
+        Some(&token),
+        &[("Content-Type", "text/turtle"), ("Slug", "kid")],
+        "<http://example.org/x> <http://example.org/p> \"v\" .",
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let ask =
+        format!("ASK {{ <http://example.org/parent> <http://example.org/hasChild> <{dc}/kid> }}");
+    assert!(
+        matches!(state.store.query(&ask), Ok(QueryResults::Boolean(true))),
+        "membership triple must be materialised for the Direct container"
+    );
+}
+
+/// A Direct container without its membership configuration is a constraint
+/// violation (4xx pointing at the constraints document), not a silently typed
+/// container that can never produce a membership triple.
+#[tokio::test]
+async fn ldp_direct_container_without_membership_config_is_rejected() {
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let (st, _, body) = send(
+        &app,
+        Method::POST,
+        "/ldp/c1",
+        Some(&token),
+        &[
+            ("Content-Type", "text/turtle"),
+            ("Slug", "dc-bad"),
+            (
+                "Link",
+                "<http://www.w3.org/ns/ldp#DirectContainer>; rel=\"type\"",
+            ),
+        ],
+        "<http://example.org/x> <http://example.org/p> \"no membership config\" .",
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("membershipResource") && body.contains("constraints"),
+        "the error names the missing property and the constraints doc: {body}"
     );
 }

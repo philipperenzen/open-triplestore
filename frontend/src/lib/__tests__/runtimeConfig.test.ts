@@ -7,7 +7,6 @@ function mockFetch(response: { ok: boolean; contentType: string; body?: unknown 
     headers: { get: (h: string) => (h.toLowerCase() === 'content-type' ? response.contentType : null) },
     json: async () => response.body,
   });
-  // @ts-expect-error jsdom global
   global.fetch = fetchMock;
   return fetchMock;
 }
@@ -85,8 +84,7 @@ describe('runtimeConfig', () => {
   });
 
   it('is a no-op when the fetch itself fails (e.g. offline)', async () => {
-    // @ts-expect-error jsdom global
-    global.fetch = vi.fn().mockRejectedValue(new Error('network down'));
+      global.fetch = vi.fn().mockRejectedValue(new Error('network down'));
     const { loadRuntimeConfig, runtimeBranding } = await freshModule();
     expect(() => loadRuntimeConfig()).not.toThrow();
     await new Promise((r) => setTimeout(r, 0));

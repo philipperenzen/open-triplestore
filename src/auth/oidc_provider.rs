@@ -151,6 +151,14 @@ impl ProviderKeys {
     /// Verify one of OUR access tokens: ES256, our issuer, unexpired. Returns
     /// the claims. (Audience is per-client, so it is checked by callers that
     /// know which client they are — the middleware accepts any registered aud.)
+    /// Sign arbitrary claims as an ES256 JWT with this key (kid in the header).
+    /// Used for federation identity assertions (see `crate::federation`).
+    pub fn sign_claims(&self, claims: &serde_json::Value) -> anyhow::Result<String> {
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some(self.kid.clone());
+        Ok(encode(&header, claims, &self.encoding)?)
+    }
+
     pub fn verify(&self, issuer: &str, token: &str) -> Option<serde_json::Value> {
         let header = decode_header(token).ok()?;
         if header.alg != Algorithm::ES256 {

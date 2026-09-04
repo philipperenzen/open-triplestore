@@ -7,7 +7,8 @@
 //! # Modules
 //!
 //! - `schema` — AST types for ShEx schemas
-//! - `parser` — ShExC compact syntax parser (nom-based)
+//! - `parser` — ShExC compact syntax parser (hand-written recursive descent;
+//!   `nom` is not used here, see the module header for why)
 //! - `validator` — Shape evaluation engine
 //! - `report` — Validation report types
 #![allow(dead_code)]

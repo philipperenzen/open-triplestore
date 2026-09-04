@@ -250,3 +250,49 @@ impl ObjectStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::safe_local_join;
+    use std::path::Path;
+
+    /// The containment guard is described as defense-in-depth against a future
+    /// caller bug; it had no tests, so none of its rejection branches was ever
+    /// exercised. Each branch gets a case here.
+    #[test]
+    fn safe_local_join_rejects_every_escape_shape() {
+        let base = Path::new("/srv/assets");
+        for key in [
+            "",                    // empty
+            "/etc/passwd",         // absolute (unix)
+            "\\windows\\system32", // absolute (windows-style)
+            "../secret",           // parent ref at the start
+            "a/../../secret",      // parent ref in the middle
+            "a/..",                // parent ref at the end
+            "ok\0hidden",          // NUL
+            "C:\\Users\\x",        // drive-letter path
+        ] {
+            assert!(
+                safe_local_join(base, key).is_err(),
+                "key {key:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_local_join_accepts_normal_keys_inside_the_root() {
+        let base = Path::new("/srv/assets");
+        for key in [
+            "ds1/a1b2c3/report.pdf",
+            "single",
+            "nested/deeper/file.ttl",
+            "with space.txt",
+        ] {
+            let joined = safe_local_join(base, key).expect("plain keys are fine");
+            assert!(
+                joined.starts_with(base),
+                "{joined:?} must stay under the root"
+            );
+        }
+    }
+}

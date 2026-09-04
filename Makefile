@@ -91,7 +91,7 @@ bench-baseline:
 # Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
 # Docker instead. See docs/performance.md.
 perf-check:
-	cargo bench --bench performance --features "$(FEATURES)" -- 'query|path|geosparql'
+	cargo bench --bench performance --features "$(FEATURES)" -- 'query|path|geosparql|insert|update|shacl|concurrent'
 	python3 scripts/perf_regression.py check --criterion-dir target/criterion --baseline benches/perf_baseline.json
 
 ## Self-test the perf regression checker against fixtures (no build; works on Windows)

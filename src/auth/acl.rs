@@ -104,33 +104,36 @@ fn methods_match(rule_methods: &str, request_method: &str) -> bool {
 /// 2. Among matching rules, if **any** `deny` rule matches → deny.
 /// 3. If **any** `allow` rule matches → allow.
 /// 4. If no rules match → allow (default open, guarded by role middleware).
+///
+/// Anonymous callers are matched against `principal_type = 'public'` rules.
 pub fn check_endpoint_acl(
     user: Option<&AuthenticatedUser>,
     method: &str,
     path: &str,
     auth_db: &Arc<AuthDb>,
 ) -> bool {
-    let user = match user {
-        Some(u) => u,
-        None => {
-            // No authenticated user — only check rules targeting 'public' (role='*') if any
-            // For now, unauthenticated requests pass ACL (role middleware handles auth).
-            return true;
-        }
+    // An anonymous caller is evaluated against rules whose principal is
+    // `public`. This branch used to `return true` unconditionally — "for now,
+    // unauthenticated requests pass ACL" — so a rule written to deny anonymous
+    // access had no effect at all, on routes mounted with `optional_auth` where
+    // anonymous access is precisely the case an operator wants to restrict.
+    let lookup = match user {
+        Some(u) => auth_db.get_endpoint_acl_rules_for_user(&u.user_id, u.role.as_str()),
+        None => auth_db.get_endpoint_acl_rules_for_public(),
     };
-
-    let rules = match auth_db.get_endpoint_acl_rules_for_user(&user.user_id, user.role.as_str()) {
+    let rules = match lookup {
         Ok(r) => r,
         Err(e) => {
             // CRITICAL — ACL DB unavailable. We fail CLOSED at the request
             // boundary, but record this as an `acl_error` audit event so
             // operators can detect a degraded state.
-            tracing::error!(actor = %user.user_id, "CRITICAL ACL DB error in check_endpoint_acl: {}", e);
+            let actor = user.map(|u| u.user_id.as_str()).unwrap_or("anonymous");
+            tracing::error!(actor = %actor, "CRITICAL ACL DB error in check_endpoint_acl: {}", e);
             let logger = crate::auth::audit::AuditLogger::new(auth_db.pool());
             use crate::auth::audit::{AuditEventBuilder, AuditEventType, AuditOutcome};
             logger.log(
                 AuditEventBuilder::new(AuditEventType::AclError, AuditOutcome::Failure)
-                    .actor_id(&user.user_id)
+                    .actor_id(actor)
                     .details(serde_json::json!({ "error": e.to_string(), "where": "check_endpoint_acl" })),
             );
             return false; // fail closed on DB error
@@ -225,10 +228,22 @@ pub fn filter_quad_indices_by_label(
         gs
     };
 
-    // Short-circuit: no labels in these graphs → return all
-    let has_labels = auth_db
-        .has_triple_security_labels(&unique_graphs)
-        .unwrap_or(false);
+    // Short-circuit: no labels in these graphs → return all.
+    //
+    // A DB error must NOT read as "no labels exist": that turned a transient
+    // lookup failure into "return every quad", i.e. the cell-level filter
+    // failing open. `check_endpoint_acl` already fails closed on the same class
+    // of failure; match it.
+    let has_labels = match auth_db.has_triple_security_labels(&unique_graphs) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                "triple-label lookup failed ({e}); withholding all quads rather than \
+                 serving them unfiltered"
+            );
+            return Vec::new();
+        }
+    };
     if !has_labels {
         return (0..quads.len()).collect();
     }
@@ -245,9 +260,18 @@ pub fn filter_quad_indices_by_label(
         })
         .collect();
 
-    let labelled = auth_db
-        .get_labels_for_quads(&quad_tuples)
-        .unwrap_or_default();
+    // Same reasoning as above: an empty denial set from an ERROR would return
+    // everything, including the quads the labels exist to withhold.
+    let labelled = match auth_db.get_labels_for_quads(&quad_tuples) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                "triple-label resolution failed ({e}); withholding all quads rather than \
+                 serving them unfiltered"
+            );
+            return Vec::new();
+        }
+    };
 
     // Build a set of (quad_index, label_graph_iri) pairs that are denied
     let denied: std::collections::HashSet<usize> = labelled

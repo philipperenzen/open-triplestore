@@ -277,11 +277,32 @@ fn test_biomedical_classification() {
 #[test]
 fn test_el_idempotent() {
     let s = store_with("ex:A rdfs:subClassOf ex:B . ex:x rdf:type ex:A .");
-    classify(&s);
-    let r1 = El2Classifier::new(&s).classify().unwrap();
-    let r2 = El2Classifier::new(&s).classify().unwrap();
-    assert_eq!(
-        r1.triples_added, r2.triples_added,
-        "EL classification is idempotent"
-    );
+    let first = El2Classifier::new(&s).classify().unwrap();
+    assert!(first.triples_added > 0, "the first run derives something");
+    let size_after_first = count_tg(&s);
+
+    // `triples_added` is the delta this run wrote. A rerun over an unchanged
+    // store derives nothing new, and the entailment graph does not grow.
+    // (This used to compare two graph SIZES, which are equal on any rerun —
+    // it could not distinguish idempotence from accumulation.)
+    let second = El2Classifier::new(&s).classify().unwrap();
+    assert_eq!(second.triples_added, 0, "a rerun adds nothing");
+    assert_eq!(count_tg(&s), size_after_first, "the graph does not grow");
+}
+
+fn count_tg(s: &TripleStore) -> usize {
+    match s
+        .query(&format!(
+            "SELECT (COUNT(*) AS ?c) WHERE {{ GRAPH <{TG}> {{ ?s ?p ?o }} }}"
+        ))
+        .unwrap()
+    {
+        oxigraph::sparql::QueryResults::Solutions(mut sols) => sols
+            .next()
+            .and_then(|r| r.ok())
+            .and_then(|r| r.get("c").map(|t| t.to_string()))
+            .and_then(|t| t.trim_start_matches('"').split('"').next()?.parse().ok())
+            .unwrap_or(0),
+        _ => 0,
+    }
 }

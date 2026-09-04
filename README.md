@@ -33,7 +33,7 @@
 
 > **Status:** current release **`0.6.0`** — source-available: free to use, self-host, and modify; **not for sale or paid hosting** (see [License](#license)).
 
-**Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL rules, with an external-reasoner bridge for full tableau classification/consistency), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
+**Open Triplestore** is a modern, high-performance RDF triple store with full **SPARQL 1.1**, **SPARQL 1.2 (RDF-star)**, **GeoSPARQL 1.1**, **OWL 2** reasoning (RL natively + DL extension rules; an optional, experimental bridge to an external tableau reasoner such as Konclude), and **LDP 1.0** support — built in Rust on top of [Oxigraph](https://github.com/oxigraph/oxigraph) with an [Axum](https://github.com/tokio-rs/axum) HTTP layer, JWT/API-key auth, and a full-featured Svelte web UI.
 
 ## Demo
 
@@ -67,9 +67,15 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | Feature | Detail |
 |---|---|
 | **SPARQL 1.1** | SELECT, CONSTRUCT, ASK, DESCRIBE, UPDATE (INSERT/DELETE) |
-| **SPARQL 1.2** | RDF-star embedded triples |
-| **GeoSPARQL 1.1** | All 30 OGC requirements — Simple Features, Egenhofer, RCC8, constructive & metric functions |
-| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey + all ~80 RL rules; external reasoner bridge for full tableau ([docs](docs/owl2-dl.md)) |
+| **SPARQL 1.2** | Triple terms `<<( )>>` / `rdf:reifies` and the accessor functions (RDF 1.2 model); `LATERAL` and `CALL` are not implemented |
+| **SPARQL federation** | `SERVICE` is off by default (SSRF mitigation) and enabled per endpoint with `OTS_REMOTE_ALLOWLIST`; calls are timed out and row-capped, and the service description advertises federation only when an allowlist exists |
+| **GeoSPARQL 1.1** | Simple Features, Egenhofer and RCC8 relations, DE-9IM `relate`, distance/area/buffer and the constructive functions, WKT and GML literals, CRS transform for the built-in CRS set. Not implemented: the geodesic metric family, `aggUnion`, GeoJSON literals ([grades & gaps](docs/standards.md#known-limitations--conformance-findings)) |
+| **OWL 2 DL** | Native hasSelf, disjointUnionOf, NegativePropertyAssertion, hasKey on top of the RL rules; optional external-reasoner bridge (experimental, `OTS_EXTERNAL_REASONER=konclude`) ([docs](docs/owl2-dl.md)) |
+| **Federated access control** | Signed identity assertions between instances (`SERVICE`, LDES sync); verified against the peer's JWKS, authorised locally ([docs](docs/federation.md)) |
+| **Linked-document containers** | Import and export packaged containers of documents, RDF payloads and link graphs — ISO 21597-1 ICDD as the first profile ([docs](docs/containers.md)) |
+| **Time-evolving properties** | OPM-style property states with validity, reliability and attribution; current value stays a plain triple, history and as-of queries read the chain ([docs](docs/datasets.md#time-evolving-properties-opm-profile)) |
+| **Spec → SHACL importers** | Generic constraint-specification importer interface; buildingSMART IDS 1.0 → SHACL Core shapes in SHACL Studio ([docs](docs/shacl.md#importing-constraint-specifications-ids)) |
+| **LDES** | Publish any dataset as a Linked Data Event Stream (TREE-fragmented version objects, tombstones) and sync a remote stream into a dataset incrementally ([docs](docs/ldes.md)) |
 | **LDP 1.0** | Basic, Direct, Indirect Containers; NonRDFSource; PATCH with SPARQL Update; Prefer header ([docs](docs/ldp.md)) |
 | **RBAC auth** | `super_admin` › `admin` › `user` role hierarchy; JWT access + refresh tokens; long-lived API keys |
 | **Dataset privacy** | Datasets default to `private`; public datasets are queryable without auth |
@@ -171,11 +177,14 @@ Delivering straight to recipient MXes needs a host with outbound port 25 and pro
 ### Native (requires Rust 1.94.1+)
 
 System libraries are needed on every OS: **GEOS** (GeoSPARQL) always, plus
-**libxmlsec1** for the `saml` feature in `--features full`. On Debian/Ubuntu:
+**libxmlsec1** only for the experimental `saml` feature (not in `full`; see docs/auth.md). On Debian/Ubuntu:
 `apt-get install libgeos-dev libxmlsec1-dev`; on macOS: `brew install geos libxmlsec1`.
 
 ```bash
 # macOS · Linux · WSL
+# The default feature set is `full` — every capability in the Highlights table
+# above. `cargo build --release --no-default-features` gives the minimal core
+# (SPARQL 1.1 + GeoSPARQL 2D) if you want a smaller binary.
 cargo build --release
 ./target/release/open-triplestore --port 7878 --data-dir ./data
 ```
@@ -474,7 +483,18 @@ the live prefix.cc for labels the local tiers don't know (cached in
 
 ## GeoSPARQL 1.1
 
-All 30 OGC requirements via GEOS bindings.
+Topological relations (Simple Features, Egenhofer, RCC8) and `geof:relate` with
+DE-9IM patterns; distance, area, buffer and the other constructive functions;
+WKT and GML geometry literals — all via GEOS. `geof:transform` converts between
+the built-in CRSs (RD New, CRS84, EPSG:4326 in authority axis order, Web
+Mercator), and binary predicates harmonise their operands' CRSs.
+
+**Not implemented:** the geodesic *metric* family (`geof:metricDistance` and
+friends), `geof:aggUnion`, GeoJSON/KML/DGGS literals and the Query Rewrite
+Extension; `geof:distance` is planar in the CRS units. (Earlier versions of this
+README claimed "all 30 OGC requirements" — that number was the test file's own
+numbering, not the OGC conformance classes. The honest grade is *Partial*; see
+[docs/standards.md](docs/standards.md).)
 
 ```sparql
 PREFIX geo:  <http://www.opengis.net/ont/geosparql#>
@@ -745,7 +765,7 @@ See [docs/rml.md](docs/rml.md) for the full RML guide including JSON and XML sou
 
 ## OWL 2 DL Reasoning
 
-Native OWL 2 DL support runs all ~80 OWL 2 RL forward-chaining rules plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` allows plugging in a full tableau reasoner (HermiT, Pellet, ELK) for ABox completion.
+Native OWL 2 DL support runs the OWL 2 RL forward-chaining rules (the equality, property, class and schema families — the Table 8 datatype rules `dt-*` are not implemented) plus DL-specific SPARQL rules for `owl:hasSelf`, `owl:disjointUnionOf`, `owl:NegativePropertyAssertion`, `owl:hasKey`, and cardinality annotations.  An `ExternalReasonerBridge` can hand the ontology to an external tableau reasoner for classification — Konclude is wired (`OTS_EXTERNAL_REASONER=konclude`) and experimental; it is off unless configured.
 
 ```bash
 # Query with OWL 2 DL entailment
@@ -811,14 +831,46 @@ open-triplestore
 
 ## Conformance
 
-| Test suite | Tests | Pass |
-|---|---|---|
-| W3C SPARQL 1.1 | 112 | **112** |
-| W3C RDF 1.1 Formats | 63 | **63** |
-| OGC GeoSPARQL 1.1 | 84 | **84** |
-| SP2B / BSBM Benchmarks | 28 | **28** |
-| sparqloscope | 67 | **67** |
-| Unit / Integration | ~39 | **~36** (3 ignored: RocksDB arm64) |
+The table below is generated from the test suites (`scripts/conformance_table.py`,
+checked in CI), so the counts are what `cargo test` runs. Grades per standard,
+and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
+
+<!-- conformance-table:start -->
+| Standard | Suite | Basis | Tests | Notes |
+|---|---|---|---:|---|
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 14 |  |
+| DCAT 2 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
+| GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 107 |  |
+| LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
+| LDP 1.0 (HTTP) | `tests/ldp_http_conformance.rs` | spec-derived | 13 |  |
+| OGC GeoSPARQL 1.1 validator shapes | `tests/ogc_geosparql_shacl_roundtrip.rs` | **vendored OGC corpus** | 2 |  |
+| OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
+| OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
+| OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
+| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 23 |  |
+| RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
+| RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
+| RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 18 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 9 |  |
+| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 16 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 8 |  |
+| ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
+| SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 14 |  |
+| SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
+| SPARQL 1.1 functions | `tests/sparql_functions_conformance.rs` | spec-derived | 9 |  |
+| SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
+| Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 25 |  |
+| SWRL | `tests/swrl_conformance.rs` | spec-derived | 3 |  |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 113 corpus cases: 97 pass, 1 known failure, 15 runner-side skips (floor ≥90 asserted) |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+
+694 conformance tests across 25 suites; a further 359 tests in 44 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the two **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
+
+_Generated by `scripts/conformance_table.py` — edit the suites, not the table._
+<!-- conformance-table:end -->
+
+Optional build features — which are in the default `full` set and the published
+image, and which CI compiles — are listed in [docs/build-features.md](docs/build-features.md).
 
 ---
 

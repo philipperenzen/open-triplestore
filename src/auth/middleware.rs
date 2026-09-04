@@ -235,6 +235,57 @@ async fn resolve_oidc_token(
     .clamped_to_role_policy())
 }
 
+/// A peer's identity assertion: verified against the peer's JWKS with this
+/// instance as audience, provisioned as a read-only federated user whose
+/// organisation memberships follow the assertion's `org:` groups.
+async fn resolve_federated_token(
+    auth_ext: &AuthExt,
+    auth_db: &Arc<AuthDb>,
+    verifier: &super::oidc_rs::OidcVerifier,
+    token: &str,
+) -> Result<AuthenticatedUser, Response> {
+    let mut claims = verifier.verify(token).await.map_err(|e| {
+        tracing::debug!(
+            "federation: assertion from {} rejected: {e}",
+            verifier.issuer()
+        );
+        (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()
+    })?;
+    // Assertions carry no e-mail; provisioning wants one. A synthetic address
+    // under the reserved `.invalid` TLD, keyed on issuer + subject, is stable
+    // and can never match a real account (no linking by e-mail).
+    if claims
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .is_none()
+    {
+        let host = crate::federation::origin_of(verifier.issuer())
+            .and_then(|o| o.split("://").nth(1).map(|h| h.replace(':', "-")))
+            .unwrap_or_else(|| "peer".to_string());
+        claims.email = Some(format!("{}@{host}.federated.invalid", claims.sub));
+    }
+    let provider =
+        super::oidc_rs::ensure_env_provider(auth_db, verifier.issuer(), &auth_ext.default_role)
+            .map_err(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Auth provisioning error").into_response()
+            })?;
+    let user = super::oidc_rs::provision_from_claims(auth_db, &provider, auth_ext, &claims)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "User provisioning failed").into_response())?;
+    if !user.is_active {
+        return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
+    }
+    Ok(AuthenticatedUser {
+        user_id: user.id,
+        role: user.role,
+        can_publish: false,
+        // Federated principals read; writes need a local credential.
+        write_access: false,
+        can_mint_api_tokens: false,
+    })
+}
+
 /// Resolve a bearer token to an authenticated user, honoring the legacy-token
 /// flag and falling through to OIDC verification for IdP-issued JWTs.
 #[allow(clippy::result_large_err)]
@@ -248,7 +299,8 @@ async fn authenticate(
 ) -> Result<AuthenticatedUser, Response> {
     let is_legacy_api_token = token.starts_with("ots_");
 
-    let has_fallback = auth_ext.oidc.is_some() || provider.0.is_some();
+    let has_fallback =
+        auth_ext.oidc.is_some() || provider.0.is_some() || !auth_ext.trusted_issuers.is_empty();
     // The legacy path's error is the most specific one we have (e.g. the
     // guest-disabled message for a deactivated account's still-valid session
     // token) — keep it and only surface the generic error when NO path could
@@ -296,6 +348,14 @@ async fn authenticate(
         }
     }
 
+    // Federated identity assertions from trusted peer instances (crate::federation).
+    if !auth_ext.trusted_issuers.is_empty() && !is_legacy_api_token {
+        if let Some(iss) = crate::federation::unverified_issuer(token) {
+            if let Some(verifier) = auth_ext.trusted_issuers.iter().find(|v| v.issuer() == iss) {
+                return resolve_federated_token(auth_ext, auth_db, verifier, token).await;
+            }
+        }
+    }
     if auth_ext.oidc.is_some() && !is_legacy_api_token {
         return resolve_oidc_token(auth_ext, auth_db, token).await;
     }
@@ -475,7 +535,19 @@ fn enforce_write_scope_for_mutation(
     user: &AuthenticatedUser,
 ) -> Result<(), Response> {
     let mutating = matches!(req.method().as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
-    if mutating && !user.write_access && !user.is_admin() {
+    // A SPARQL *query* sent by POST (SPARQL 1.1 Protocol §2.1.2/2.1.3) is a read;
+    // the update path enforces write scope itself (execute_update). Treating
+    // every POST as a mutation locked read-only principals — read-scoped API
+    // tokens and federated identities — out of the protocol's POST query form.
+    let sparql_post = req.method() == axum::http::Method::POST
+        && req.uri().path().trim_end_matches('/') == "/sparql"
+        && !req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("application/sparql-update");
+    if mutating && !sparql_post && !user.write_access && !user.is_admin() {
         return Err((
             StatusCode::FORBIDDEN,
             "This API token does not have write scope",
@@ -483,6 +555,22 @@ fn enforce_write_scope_for_mutation(
             .into_response());
     }
     Ok(())
+}
+
+/// Whether the endpoint ACL is enforced. `ENDPOINT_ACL_ENFORCE=false` (or `0`)
+/// turns it off. Read once — this sits on every request.
+fn endpoint_acl_enforced() -> bool {
+    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENFORCED.get_or_init(|| {
+        !matches!(
+            std::env::var("ENDPOINT_ACL_ENFORCE")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "false" | "0" | "no" | "off"
+        )
+    })
 }
 
 /// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.
@@ -501,6 +589,14 @@ pub async fn endpoint_acl_guard(
     req: Request,
     next: Next,
 ) -> Result<Response, Response> {
+    // Escape hatch for an operator whose rule misfires. Enforcement is ON by
+    // default (secure by default); this exists because the guard now covers
+    // every authenticated route rather than the six `/api/browse/*` ones it was
+    // mounted on before, so a bad rule has a much larger blast radius.
+    if !endpoint_acl_enforced() {
+        return Ok(next.run(req).await);
+    }
+
     let user = req.extensions().get::<AuthenticatedUser>().cloned();
     let method = req.method().as_str().to_uppercase();
     let path = req.uri().path().to_string();
@@ -535,6 +631,10 @@ pub async fn endpoint_acl_guard(
 
 #[cfg(test)]
 mod role_policy_tests {
+    /// `OTS_GUEST_CAPABILITIES` is process-wide; the tests below set and clear
+    /// it, so they must not interleave (they used to race and fail spuriously).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     fn principal(role: SystemRole) -> AuthenticatedUser {
@@ -552,6 +652,7 @@ mod role_policy_tests {
     /// them ordered rather than racing other tests in the same binary.
     #[test]
     fn guest_capabilities_clamp_the_resolved_principal() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Default: a guest reads and nothing else, even arriving on a session
         // that would otherwise carry full authority.
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
@@ -592,6 +693,7 @@ mod role_policy_tests {
     /// the authentication path did not already grant.
     #[test]
     fn clamping_never_adds_authority() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("OTS_GUEST_CAPABILITIES", "all");
         let mut p = principal(SystemRole::Guest);
         p.write_access = false;

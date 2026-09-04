@@ -143,7 +143,7 @@ function specialSegment(lang, body, queryRows = null) {
     // choice buttons, so untagged JSON must never accidentally become one.
     case 'ask': {
       const r = parseAskSpec(code);
-      return r.error
+      return 'error' in r
         ? { kind: 'broken', label: 'ask', error: r.error, raw: code }
         : { kind: 'ask', ask: r.ask };
     }
@@ -247,7 +247,7 @@ export function describeApiService(path) {
     for (const [k, v] of new URLSearchParams(m[4])) params[k] = v;
   }
   return {
-    scope: m[1],
+    scope: /** @type {'datasets' | 'organisations' | 'groups'} */ (m[1]),
     ownerId: decodeURIComponent(m[2]),
     slug: decodeURIComponent(m[3]),
     params,

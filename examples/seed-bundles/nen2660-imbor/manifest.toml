@@ -1,0 +1,98 @@
+# NEN 2660-2 + IMBOR — the LD-BIM Stage-1 payload on the layered-convention
+# mechanism (see ../layered-reference). The RDF files are NOT vendored: run
+# ./fetch.sh once (it downloads the published files next to this manifest;
+# they are git-ignored). Until then the bundle is skipped at boot with a
+# warning, like any bundle whose payloads are missing.
+#
+# Sources
+#   NEN 2660-2:2022 — https://github.com/nl-digigo/nen2660 (gh-pages, data/),
+#     downloads page https://nl-digigo.github.io/nen2660/-/downloads/
+#     four normative files: SKOS terms (nen2660-skos.ttl), RDFS, OWL, SHACL.
+#   IMBOR 2025 — https://github.com/Stichting-CROW/imbor (releases; the TTL
+#     files ship inside the release ZIP). The IMBOR Vocabulaire (SKOS) is
+#     already seeded by the platform as data model `imbor`; this bundle adds
+#     the object-type library (RDFS/SHACL) next to it.
+
+id = "nen2660-imbor"
+opt_out_env = "SEED_NEN2660_IMBOR"
+
+[organisation]
+slug = "nl-standards"
+name = "Dutch infrastructure standards"
+description = "NEN 2660-2 top-level model and the IMBOR object-type library, as reference models."
+
+[[data_models]]
+id = "nen2660-2"
+title = "NEN 2660-2:2022"
+namespace = "https://w3id.org/nen2660/def#"
+kind = "model"
+version = "2022"
+description = "Rules for information modelling of the built environment: the SKOS terms, the RDFS classes/properties, the OWL axioms and the SHACL shapes, one graph each."
+
+[[data_models.graphs]]
+iri = "https://w3id.org/nen2660/rdfs/def"
+role = "model"
+file = "nen2660-rdfs.ttl"
+
+[[data_models.graphs]]
+iri = "https://w3id.org/nen2660/owl/def"
+role = "model"
+file = "nen2660-owl.ttl"
+
+[[data_models.graphs]]
+iri = "https://w3id.org/nen2660/skos/term"
+role = "vocabulary"
+file = "nen2660-skos.ttl"
+
+[[data_models.graphs]]
+iri = "https://w3id.org/nen2660/shacl/def"
+role = "shapes"
+file = "nen2660-shacl.ttl"
+
+[[data_models]]
+id = "imbor-otl"
+title = "IMBOR 2025 object-type library"
+namespace = "https://data.crow.nl/imbor/def/"
+kind = "model"
+version = "2025"
+description = "The IMBOR 2025 Kern: object types as rdfs:Class + sh:NodeShape (implicit class targets) with their property shapes, the domain values they reference, the reference models (NEN 3610, …) they subclass, and the materials addendum. The IMBOR Vocabulaire (SKOS) is seeded separately as data model `imbor`."
+
+# Kern carries the shapes on the classes themselves (each object type is both
+# rdfs:Class and sh:NodeShape), so it is the model graph *and* the shape graph
+# the sample dataset binds below.
+[[data_models.graphs]]
+iri = "https://data.crow.nl/imbor/def/"
+role = "model"
+file = "imbor-release/imbor2025-kern.ttl"
+
+[[data_models.graphs]]
+iri = "https://data.crow.nl/imbor/id/domeinwaarden/"
+role = "domain-values"
+file = "imbor-release/imbor2025-domeinwaarden.ttl"
+
+[[data_models.graphs]]
+iri = "https://data.crow.nl/imbor/addendum/referentiemodellen/"
+role = "model"
+file = "imbor-release/imbor2025-addendum-referentiemodellen.ttl"
+
+[[data_models.graphs]]
+iri = "https://data.crow.nl/imbor/addendum/materie/"
+role = "model"
+file = "imbor-release/imbor2025-addendum-materie.ttl"
+
+# A sample asset dataset conforming to IMBOR: three trees (imbor "Boom"), one
+# of which breaks a property shape on purpose, so the Stage-1 benchmark
+# (classify against the model layer, validate through the bound shapes) has
+# something to find. Replace instances.ttl with your own beheerobjecten.
+[[datasets]]
+slug = "imbor-sample-assets"
+name = "IMBOR sample assets"
+description = "Sample beheerobjecten (three trees) conforming to the IMBOR 2025 object-type library; one planted violation."
+visibility = "public"
+conforms_to = { model = "imbor-otl", version = "2025" }
+shape_graphs = ["https://data.crow.nl/imbor/def/"]
+
+[[datasets.graphs]]
+iri = "https://example.org/imbor-sample/instances"
+role = "instances"
+file = "instances.ttl"

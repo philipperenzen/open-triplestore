@@ -127,6 +127,14 @@ The relay listens only on the compose network (no host port is published, so it 
 
 ## SSO provider setup (OIDC / SAML)
 
+> **SAML is experimental and not in the default build.** The `saml` feature is
+> excluded from `full` (and therefore from the published image): the ACS handler
+> has never been verified against a real identity provider and carries a known
+> request-ID validation defect, so at present no SAML login can succeed. The
+> provider type is still listed in the admin UI, marked experimental, for builds
+> that enable the feature. Use OIDC, which is complete and tested.
+
+
 Providers are configured by admins under **Security & Access Control → Identity providers**. Any standards-compliant OIDC or SAML 2.0 IdP works; the callback/redirect URL to register at the IdP is always:
 
 ```

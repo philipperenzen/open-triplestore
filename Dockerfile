@@ -85,8 +85,10 @@ COPY .cargo/ .cargo/
 COPY --from=planner /app/recipe.json recipe.json
 # This layer is cached as long as the dependency set is unchanged — source-only
 # edits no longer trigger a full dependency rebuild. `--features full` enables
-# every standard (RDF 1.2/RDF-star, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, SAML,
-# full-text search) so the running server matches what the docs advertise.
+# every standard (RDF 1.2, OWL 2 RL/EL/QL/DL, LDP, ShEx, SWRL, full-text search),
+# encrypted backups and alerting, so the running server matches what the docs
+# advertise. NOT included: `saml` (experimental) and `sfcgal3d` (native SFCGAL);
+# see docs/build-features.md.
 RUN --mount=type=cache,id=cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,sharing=locked,target=/usr/local/cargo/git \
     cargo chef cook --profile ${CARGO_PROFILE} --features full --recipe-path recipe.json

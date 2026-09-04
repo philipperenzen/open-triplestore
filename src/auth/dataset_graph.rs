@@ -553,5 +553,9 @@ pub fn graph_role_iri(role: GraphKind) -> &'static str {
         GraphKind::Shapes => "https://opentriplestore.org/ns#Shapes",
         GraphKind::Entailment => "https://opentriplestore.org/ns#Entailment",
         GraphKind::System => "https://opentriplestore.org/ns#System",
+        GraphKind::DomainValues => "https://opentriplestore.org/ns#DomainValues",
+        GraphKind::Linkset => "https://opentriplestore.org/ns#Linkset",
+        GraphKind::Provenance => "https://opentriplestore.org/ns#Provenance",
+        GraphKind::Catalog => "https://opentriplestore.org/ns#Catalog",
     }
 }

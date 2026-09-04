@@ -4,10 +4,12 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::container::{self, ContainerType};
+use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
 
 // ─── Link header values ────────────────────────────────────────────────────────
@@ -108,7 +110,7 @@ fn safe_binary_content_type(ct: &str) -> String {
 
 // ─── Query parameters ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct LdpPageParams {
     pub page: Option<usize>,
     pub page_size: Option<usize>,
@@ -425,7 +427,9 @@ pub async fn ldp_get(
     // Re-serialize from N-Triples to the negotiated format
     let body = reserialize_ntriples(&body, out_format);
 
-    let etag = container::compute_etag(&body);
+    // One ETag per resource STATE, shared with HEAD/PUT/PATCH — never a hash of
+    // this particular negotiated, Prefer-filtered representation.
+    let etag = container::resource_etag(&state.store, &iri);
     let link_val = build_link_header(&ct, base);
 
     let mut resp_headers = HeaderMap::new();
@@ -433,6 +437,11 @@ pub async fn ldp_get(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_str(out_content_type)
             .unwrap_or_else(|_| HeaderValue::from_static("text/turtle")),
+    );
+    // The representation varies with content negotiation and with Prefer.
+    resp_headers.insert(
+        axum::http::header::VARY,
+        HeaderValue::from_static("Accept, Prefer"),
     );
     resp_headers.insert(
         HeaderName::from_static("etag"),
@@ -474,35 +483,54 @@ pub async fn ldp_get(
 
 /// HEAD /ldp/*path — Headers only (no body). `path` is optional so the bare root
 /// container `/ldp/` (no `*path` segment) resolves to the empty path.
-pub async fn ldp_head(State(state): State<AppState>, path: Option<Path<String>>) -> Response {
-    let path = path.map(|p| p.0).unwrap_or_default();
-    let base = state.base_url.as_ref();
-    let iri = resource_iri(base, &path);
+pub async fn ldp_head(
+    State(state): State<AppState>,
+    path: Option<Path<String>>,
+    headers: HeaderMap,
+) -> Response {
+    // RFC 9110: HEAD's headers must be the ones GET would send. This used to be
+    // a separate implementation that hard-coded application/n-triples, hashed
+    // the unfiltered DESCRIBE, omitted Vary, and knew nothing about binary
+    // resources — so HEAD and GET disagreed on Content-Type and ETag for the
+    // same resource. Delegating makes divergence impossible.
+    let mut resp = ldp_get(State(state), path, headers, Query(LdpPageParams::default())).await;
+    *resp.body_mut() = axum::body::Body::empty();
+    resp
+}
 
-    if !container::resource_exists(&state.store, &iri) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    let body = container::describe_resource(&state.store, &iri).unwrap_or_default();
-    let etag = container::compute_etag(&body);
-    let ct = container::get_container_type(&state.store, &iri);
-    let link_val = build_link_header(&ct, base);
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/n-triples"),
-    );
-    headers.insert(
-        HeaderName::from_static("etag"),
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("\"x\"")),
-    );
-    headers.insert(
-        HeaderName::from_static("link"),
-        HeaderValue::from_str(&link_val).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-
-    (StatusCode::OK, headers).into_response()
+/// GET /ldp/constraints — the document every LDP response's `constrainedBy`
+/// Link points at. It was advertised on every response and served by no route.
+pub async fn ldp_constraints() -> Response {
+    const DOC: &str = "\
+# Open Triplestore — LDP server constraints\n\
+\n\
+This document is the target of the `Link: rel=\"http://www.w3.org/ns/ldp#constrainedBy\"`\n\
+header on every `/ldp/` response (LDP 1.0 §4.2.1.6).\n\
+\n\
+- Authentication is required for every `/ldp/` request.\n\
+- `POST` creates a member of the target container. `Slug` is sanitised to a\n\
+  URL-safe path segment; a missing or empty Slug yields a UUID.\n\
+- `POST` and `PUT` accept `text/turtle`, `application/ld+json` and\n\
+  `application/rdf+xml`; any other Content-Type is stored as a Non-RDF Source.\n\
+- A member is created as a container by sending `Link: <http://www.w3.org/ns/ldp#BasicContainer>; rel=\"type\"`\n\
+  (or `DirectContainer` / `IndirectContainer`). A Direct container's body must\n\
+  carry `ldp:membershipResource` and `ldp:hasMemberRelation`; an Indirect\n\
+  container additionally `ldp:insertedContentRelation`. Missing ones are a 400.\n\
+- `PATCH` takes `application/sparql-update`, evaluated under the same per-graph\n\
+  authorisation as `POST /sparql`: all-graph and variable-graph operations need\n\
+  admin rights.\n\
+- `If-Match` is honoured on `PUT` and `PATCH`; the ETag identifies the resource\n\
+  state and is the same for `GET` and `HEAD` regardless of the negotiated format.\n\
+- The path `/ldp/constraints` is reserved for this document.\n";
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
+        DOC,
+    )
+        .into_response()
 }
 
 // ─── POST ─────────────────────────────────────────────────────────────────────
@@ -627,6 +655,18 @@ pub async fn ldp_post(
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
+    // LDP 1.0 §5.2.3.4: a client creates a container by sending
+    // `Link: <http://www.w3.org/ns/ldp#DirectContainer>; rel="type"` (or the
+    // Basic / Indirect variants). The header was never read — every POSTed
+    // member became a plain RDFSource, and Direct/Indirect containers could only
+    // be created from Rust code, so the README's "Direct, Indirect Containers"
+    // was reachable by no client.
+    if let Some(requested) = requested_container_type(&headers) {
+        if let Err(msg) = apply_requested_container_type(&state.store, &member_iri, requested) {
+            return (StatusCode::BAD_REQUEST, msg).into_response();
+        }
+    }
+
     // Handle Direct Container membership triple
     let re_read_ct = container::get_container_type(&state.store, &container_iri);
     if re_read_ct == ContainerType::Direct || re_read_ct == ContainerType::Indirect {
@@ -679,6 +719,88 @@ pub async fn ldp_post(
     (StatusCode::CREATED, resp_headers).into_response()
 }
 
+/// The container type a client asked for with `Link: <ldp:…>; rel="type"`.
+/// When several are sent, the most specific wins (Indirect > Direct > Basic).
+fn requested_container_type(headers: &HeaderMap) -> Option<ContainerType> {
+    let mut found: Option<ContainerType> = None;
+    for value in headers.get_all(axum::http::header::LINK) {
+        let Ok(s) = value.to_str() else { continue };
+        for link in s.split(',') {
+            let link = link.trim();
+            let is_type = link
+                .split(';')
+                .skip(1)
+                .any(|p| p.trim().trim_matches('"') == "rel=type" || p.trim() == "rel=\"type\"");
+            if !is_type {
+                continue;
+            }
+            let target = link
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>');
+            let ct = match target.strip_prefix(LDP_NS) {
+                Some("IndirectContainer") => ContainerType::Indirect,
+                Some("DirectContainer") => ContainerType::Direct,
+                Some("BasicContainer") => ContainerType::Basic,
+                _ => continue,
+            };
+            let rank = |c: &ContainerType| match c {
+                ContainerType::Indirect => 3,
+                ContainerType::Direct => 2,
+                ContainerType::Basic => 1,
+                _ => 0,
+            };
+            if found.as_ref().map(rank).unwrap_or(0) < rank(&ct) {
+                found = Some(ct);
+            }
+        }
+    }
+    found
+}
+
+/// Type the freshly created member as the requested container, reading the
+/// membership configuration from the triples the client supplied in the body.
+fn apply_requested_container_type(
+    store: &crate::store::TripleStore,
+    iri: &str,
+    ct: ContainerType,
+) -> Result<(), String> {
+    let need = |pred: &str, name: &str| {
+        container::object_iri(store, iri, pred).ok_or_else(|| {
+            format!(
+                "creating a {} requires an IRI value for ldp:{name} in the request body \
+                 (see the constrainedBy document at /ldp/constraints)",
+                if ct == ContainerType::Indirect {
+                    "IndirectContainer"
+                } else {
+                    "DirectContainer"
+                }
+            )
+        })
+    };
+    match ct {
+        ContainerType::Basic => container::ensure_container(store, iri),
+        ContainerType::Direct => {
+            let mr = need(container::LDP_MEMBERSHIP_RESOURCE, "membershipResource")?;
+            let hmr = need(container::LDP_HAS_MEMBER_RELATION, "hasMemberRelation")?;
+            container::ensure_direct_container(store, iri, &mr, &hmr, None)
+        }
+        ContainerType::Indirect => {
+            let mr = need(container::LDP_MEMBERSHIP_RESOURCE, "membershipResource")?;
+            let hmr = need(container::LDP_HAS_MEMBER_RELATION, "hasMemberRelation")?;
+            let icr = need(
+                container::LDP_INSERTED_CONTENT_REL,
+                "insertedContentRelation",
+            )?;
+            container::ensure_indirect_container(store, iri, &mr, &hmr, &icr)
+        }
+        _ => Ok(()),
+    }
+}
+
 // ─── PUT ──────────────────────────────────────────────────────────────────────
 
 /// PUT /ldp/*path — Replace (or create) an LDP RDF Source.
@@ -699,8 +821,7 @@ pub async fn ldp_put(
 
     // If-Match check
     if let Some(if_match) = headers.get("if-match") {
-        let current = container::describe_resource(&state.store, &iri).unwrap_or_default();
-        let current_etag = container::compute_etag(&current);
+        let current_etag = container::resource_etag(&state.store, &iri);
         let client_etag = if_match.to_str().unwrap_or("");
         if client_etag != "*" && client_etag != current_etag {
             return StatusCode::PRECONDITION_FAILED.into_response();
@@ -772,8 +893,7 @@ pub async fn ldp_put(
         let _ = container::add_member(&state.store, &container, &iri);
     }
 
-    let new_body = container::describe_resource(&state.store, &iri).unwrap_or_default();
-    let etag = container::compute_etag(&new_body);
+    let etag = container::resource_etag(&state.store, &iri);
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
@@ -791,6 +911,7 @@ pub async fn ldp_put(
 /// `Content-Type` must be `application/sparql-update`.
 pub async fn ldp_patch(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     path: Option<Path<String>>,
     headers: HeaderMap,
     body: Bytes,
@@ -822,8 +943,7 @@ pub async fn ldp_patch(
 
     // If-Match ETag check
     if let Some(if_match) = headers.get("if-match") {
-        let current = container::describe_resource(&state.store, &iri).unwrap_or_default();
-        let current_etag = container::compute_etag(&current);
+        let current_etag = container::resource_etag(&state.store, &iri);
         let client_etag = if_match.to_str().unwrap_or("");
         if client_etag != "*" && client_etag != current_etag {
             return StatusCode::PRECONDITION_FAILED.into_response();
@@ -836,13 +956,21 @@ pub async fn ldp_patch(
         Err(_) => return (StatusCode::BAD_REQUEST, "Body must be valid UTF-8").into_response(),
     };
 
-    if let Err(e) = state.store.update(sparql) {
-        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    // Route through the same gate as POST /sparql instead of running the body
+    // verbatim. The body is arbitrary attacker-controlled SPARQL UPDATE: run
+    // unguarded it let any authenticated caller `DROP ALL` or delete another
+    // tenant's named graph, bypassing every per-graph ACL. `execute_update`
+    // enforces the API-token write scope, admin-gates variable-graph/SERVICE and
+    // all-graph operations, and checks read+write permission on every ground
+    // graph the update touches — and it audits and records provenance.
+    if let Err(e) =
+        crate::server::routes::execute_update(&state, Some(&user), sparql, Some("LDP PATCH")).await
+    {
+        return e.into_response();
     }
 
     // Return 204 with new ETag
-    let new_body = container::describe_resource(&state.store, &iri).unwrap_or_default();
-    let etag = container::compute_etag(&new_body);
+    let etag = container::resource_etag(&state.store, &iri);
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(

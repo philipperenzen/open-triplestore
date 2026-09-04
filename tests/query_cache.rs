@@ -223,3 +223,65 @@ fn cache_disabled_still_correct() {
         .unwrap();
     assert_eq!(count(&s, q), 2);
 }
+
+/// Concurrent readers and writers must never leave a stale value cached.
+///
+/// The cache read its generation counter in `put`, i.e. AFTER evaluation, so a
+/// write that committed between "compute the answer" and "store the answer"
+/// stamped the NEW generation onto the OLD value. `get` then compared equal and
+/// served the stale count until the next write — for a hot query on a busy
+/// store, indefinitely. The generation is now snapshotted before evaluation.
+///
+/// Asserts monotonicity rather than an exact value: with writers running, any
+/// count between the starting and final size is legitimate, but a count that
+/// goes DOWN can only come from a stale cache entry.
+#[test]
+fn concurrent_writes_never_leave_a_stale_count_cached() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let s = store(10_000);
+    s.load_str(
+        &format!("<{EX}seed> <{EX}p> \"0\" ."),
+        RdfFormat::Turtle,
+        None,
+    )
+    .unwrap();
+
+    let q = "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }";
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let writer = {
+        let s = s.clone();
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            for i in 0..200 {
+                s.load_str(
+                    &format!("<{EX}w{i}> <{EX}p> \"{i}\" ."),
+                    RdfFormat::Turtle,
+                    None,
+                )
+                .unwrap();
+            }
+            stop.store(true, Ordering::Release);
+        })
+    };
+
+    let mut highest = 0i64;
+    while !stop.load(Ordering::Acquire) {
+        let c = count(&s, q);
+        assert!(
+            c >= highest,
+            "count went backwards ({highest} -> {c}): a stale result was served from the cache"
+        );
+        highest = c;
+    }
+    writer.join().unwrap();
+
+    // After the writers are done, the next read must see everything.
+    assert_eq!(
+        count(&s, q),
+        201,
+        "the final count must reflect every committed write"
+    );
+}

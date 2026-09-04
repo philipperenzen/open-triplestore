@@ -9,6 +9,7 @@
 //!       cargo bench --bench parallel -- count_star
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
+use opengraph::oxigraph::sparql::SparqlEvaluator;
 use opengraph::oxigraph::store::Store;
 use opengraph::oxrdf::vocab::xsd;
 use opengraph::oxrdf::{GraphName, Literal, NamedNode, NamedOrBlankNode, Quad, Term};
@@ -50,7 +51,13 @@ fn persons(n: usize) -> Vec<Quad> {
 }
 
 fn single_count(store: &Store, sparql: &str) -> usize {
-    match store.query(sparql).unwrap() {
+    let results = SparqlEvaluator::new()
+        .parse_query(sparql)
+        .unwrap()
+        .on_store(store)
+        .execute()
+        .unwrap();
+    match results {
         opengraph::oxigraph::sparql::QueryResults::Solutions(s) => s.count(),
         _ => 0,
     }
