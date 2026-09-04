@@ -84,6 +84,36 @@ fn main() {
     timed(&store, "join default graph", &join_d);
     println!("mirror builds: {}", store.parallel_build_count());
 
+    // Scoped forms, as the HTTP path rewrites them (FROM / FROM NAMED): are they still shardable?
+    for (label, q) in [
+        ("plain GRAPH group_by", group_g.clone()),
+        ("FROM NAMED + GRAPH group_by", format!("SELECT ?t (COUNT(?a) AS ?c) (AVG(?l) AS ?avg) FROM NAMED <{G}> WHERE {{ GRAPH <{G}> {{ ?a a ?t ; <{EX}length> ?l }} }} GROUP BY ?t")),
+        ("FROM + FROM NAMED + GRAPH group_by", format!("SELECT ?t (COUNT(?a) AS ?c) (AVG(?l) AS ?avg) FROM <urn:x> FROM NAMED <{G}> WHERE {{ GRAPH <{G}> {{ ?a a ?t ; <{EX}length> ?l }} }} GROUP BY ?t")),
+    ] {
+        println!("decomposable? {label:38} {}", opengraph::parallel::is_decomposable(&q));
+        timed(&store, label, &q);
+    }
+
+    // SHACL over the graph (shapes in their own graph).
+    let shapes =
+        std::fs::read_to_string(std::env::args().nth(3).unwrap_or_default()).unwrap_or_default();
+    if !shapes.is_empty() {
+        store
+            .load_str(&shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .expect("shapes");
+        for i in 0..2 {
+            let t = Instant::now();
+            let r =
+                open_triplestore::shacl::engine::validate(&store, "urn:shapes", &[G.to_string()])
+                    .expect("shacl");
+            println!(
+                "SHACL run {i}: {:.1}s ({} results)",
+                t.elapsed().as_secs_f64(),
+                r.results.len()
+            );
+        }
+    }
+
     // Graph clear costs: the current path, then alternatives.
     let t = Instant::now();
     store.graph_store_delete(Some(G)).expect("delete");
