@@ -494,25 +494,62 @@ impl<'a> DataView<'a> {
         let graph = self.graph_ref(gi);
         let mut map: HashMap<Term, Vec<Term>> = HashMap::new();
         let mut n = 0usize;
-        for q in self
-            .raw
-            .quads_for_pattern(None, Some(pred), None, Some(graph))
-            .flatten()
-        {
+        let mut push = |subject: Term, object: Term| -> bool {
             n += 1;
             if n % 1024 == 0
                 && used.fetch_add(1024, std::sync::atomic::Ordering::Relaxed) + 1024 > budget
             {
-                return None;
+                return false;
             }
-            let subject = match q.subject {
-                oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
-                oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
-            };
             if inverse {
-                map.entry(q.object).or_default().push(subject);
+                map.entry(object).or_default().push(subject);
             } else {
-                map.entry(subject).or_default().push(q.object);
+                map.entry(subject).or_default().push(object);
+            }
+            true
+        };
+        if let RawSource::Snapshot(tx) = &self.raw {
+            // On RocksDB a raw quad scan decodes all four terms of every quad
+            // — four point lookups on the id2str column family, two of them
+            // for the constant predicate and graph — and that decode, not the
+            // seek, is what a snapshot-path run pays for. A projected SPARQL
+            // query on the same transaction decodes only the two variables.
+            let query = format!(
+                "SELECT ?s ?o WHERE {{ {} }}",
+                graph_scoped_pattern(graph, &format!("?s <{}> ?o", pred.as_str()))?
+            );
+            let solutions = self
+                .store
+                .query_options()
+                .parse_query(&query)
+                .ok()?
+                .on_transaction(tx)
+                .execute()
+                .ok()?;
+            let oxigraph::sparql::QueryResults::Solutions(rows) = solutions else {
+                return None;
+            };
+            for row in rows.flatten() {
+                let (Some(s), Some(o)) = (row.get("s"), row.get("o")) else {
+                    continue;
+                };
+                if !push(s.clone(), o.clone()) {
+                    return None;
+                }
+            }
+        } else {
+            for q in self
+                .raw
+                .quads_for_pattern(None, Some(pred), None, Some(graph))
+                .flatten()
+            {
+                let subject = match q.subject {
+                    oxigraph::model::NamedOrBlankNode::NamedNode(nn) => Term::NamedNode(nn),
+                    oxigraph::model::NamedOrBlankNode::BlankNode(bn) => Term::BlankNode(bn),
+                };
+                if !push(subject, q.object) {
+                    return None;
+                }
             }
         }
         used.fetch_add(n % 1024, std::sync::atomic::Ordering::Relaxed);
@@ -556,6 +593,34 @@ impl<'a> DataView<'a> {
         let graph = self.graph_ref(gi);
         let mut out = HashSet::new();
         for class in closure {
+            if let (RawSource::Snapshot(tx), Term::NamedNode(c)) = (&self.raw, class) {
+                // Same reasoning as in `scan_pair`: decode one term per row.
+                let pattern =
+                    graph_scoped_pattern(graph, &format!("?s <{RDF_TYPE}> <{}>", c.as_str()));
+                let rows = pattern.and_then(|pattern| {
+                    let query = format!("SELECT ?s WHERE {{ {pattern} }}");
+                    match self
+                        .store
+                        .query_options()
+                        .parse_query(&query)
+                        .ok()?
+                        .on_transaction(tx)
+                        .execute()
+                        .ok()?
+                    {
+                        oxigraph::sparql::QueryResults::Solutions(rows) => Some(rows),
+                        _ => None,
+                    }
+                });
+                if let Some(rows) = rows {
+                    for row in rows.flatten() {
+                        if let Some(s) = row.get("s") {
+                            out.insert(s.clone());
+                        }
+                    }
+                    continue;
+                }
+            }
             let class_ref: TermRef<'_> = match class {
                 Term::NamedNode(nn) => TermRef::NamedNode(nn.as_ref()),
                 Term::BlankNode(bn) => TermRef::BlankNode(bn.as_ref()),
@@ -791,5 +856,16 @@ fn collect_path_predicates(path: &PropertyPath, inverse: bool, out: &mut HashSet
         PropertyPath::ZeroOrMore(inner)
         | PropertyPath::OneOrMore(inner)
         | PropertyPath::ZeroOrOne(inner) => collect_path_predicates(inner, inverse, out),
+    }
+}
+
+/// `body` inside `GRAPH <g> { … }`, or bare for the default graph. `None` for
+/// a blank-node graph name, which SPARQL cannot address (the view never
+/// holds one — data graphs are IRIs or the default graph).
+fn graph_scoped_pattern(graph: GraphNameRef<'_>, body: &str) -> Option<String> {
+    match graph {
+        GraphNameRef::NamedNode(g) => Some(format!("GRAPH <{}> {{ {body} }}", g.as_str())),
+        GraphNameRef::DefaultGraph => Some(body.to_string()),
+        GraphNameRef::BlankNode(_) => None,
     }
 }

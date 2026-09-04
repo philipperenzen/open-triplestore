@@ -1993,4 +1993,95 @@ mod tests {
         assert_eq!(summary(&with), summary(&without));
         assert_eq!(summary(&partial), summary(&without));
     }
+
+    /// The persistent backend takes the snapshot path (one RocksDB readable
+    /// transaction per run, projected scans for the class sets and the run
+    /// index). Same fixture, same report, with and without the index.
+    #[test]
+    fn snapshot_path_on_rocksdb_matches_with_and_without_the_index() {
+        use super::super::view::{set_index_policy_override, IndexPolicy};
+        let dir = tempfile::tempdir().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        assert!(store.is_persistent());
+        let shapes = r#"
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix ex: <http://example.org/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+                sh:property [ sh:path ex:name ; sh:minCount 1 ] ,
+                            [ sh:path [ sh:inversePath ex:partOf ] ; sh:maxCount 1 ] ,
+                            [ sh:path ex:partOf ; sh:class ex:T ] .
+        "#;
+        let g1 = "http://example.org/g1";
+        let g2 = "http://example.org/g2";
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some("urn:shapes"))
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+                   ex:Sub rdfs:subClassOf ex:T .
+                   ex:a a ex:T ; ex:name "a" ; ex:partOf ex:root .
+                   ex:b a ex:Sub ; ex:partOf ex:root .
+                   ex:root a ex:T ; ex:name "root" .
+                   ex:c a ex:T ; ex:name "c" ; ex:partOf ex:a, ex:b ."#,
+                RdfFormat::Turtle,
+                Some(g1),
+            )
+            .unwrap();
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:d a ex:T ; ex:partOf ex:nobody ."#,
+                RdfFormat::Turtle,
+                Some(g2),
+            )
+            .unwrap();
+        let graphs = vec![g1.to_string(), g2.to_string()];
+        let summary = |r: &ValidationReport| {
+            let mut v: Vec<String> = r
+                .results
+                .iter()
+                .map(|x| format!("{} | {} | {:?}", x.focus_node, x.source_constraint, x.value))
+                .collect();
+            v.sort();
+            v
+        };
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: usize::MAX,
+            max_quads: 0,
+        }));
+        let without = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(Some(IndexPolicy {
+            min_probes: 0,
+            max_quads: usize::MAX,
+        }));
+        let with = validate(&store, "urn:shapes", &graphs).unwrap();
+        set_index_policy_override(None);
+        // b (a Sub) lacks a name; a has two children (c and ... no: a is partOf
+        // root only) — root has two children a and b → inverse maxCount 1
+        // violated for root; d's partOf points at an untyped node → sh:class.
+        assert_eq!(summary(&with), summary(&without));
+        let focus: std::collections::BTreeSet<&str> = without
+            .results
+            .iter()
+            .map(|r| r.focus_node.as_str())
+            .collect();
+        assert!(
+            focus.contains("http://example.org/b"),
+            "{:?}",
+            summary(&without)
+        );
+        assert!(
+            focus.contains("http://example.org/root"),
+            "{:?}",
+            summary(&without)
+        );
+        assert!(
+            focus.contains("http://example.org/d"),
+            "{:?}",
+            summary(&without)
+        );
+    }
 }

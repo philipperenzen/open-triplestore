@@ -2164,7 +2164,7 @@ them):
 
 | SHACL, 100k assets, six property shapes | before | after |
 |---|--:|--:|
-| in-process, right after a load (RocksDB snapshot) | 9.5–10.5 s | __SNAP_INPROC__ |
+| in-process, right after a load (RocksDB snapshot) | 9.5–10.5 s | 1.1–1.3 s |
 | in-process, accelerator published (RAM copy) | — | 0.72 s |
 | Studio pipeline over HTTP, right after a load | 6.9–9.4 s | __SNAP_HTTP__ |
 | Studio pipeline over HTTP, accelerator published | — | 0.64–0.76 s |

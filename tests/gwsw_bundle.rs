@@ -20,9 +20,7 @@ const GWSW: &str = "http://data.gwsw.nl/1.7/totaal/";
 async fn gwsw_bundle_loads_the_totaal_export_as_a_model() {
     let bundles = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/seed-bundles");
     if !bundles.join("gwsw/gwsw-totaal.ttl").exists() {
-        eprintln!(
-            "SKIP: gwsw-totaal.ttl is not present — run examples/seed-bundles/gwsw/fetch.sh"
-        );
+        eprintln!("SKIP: gwsw-totaal.ttl is not present — run examples/seed-bundles/gwsw/fetch.sh");
         return;
     }
 
@@ -30,7 +28,10 @@ async fn gwsw_bundle_loads_the_totaal_export_as_a_model() {
     load_seed_dir(&state, &bundles);
 
     let n = state.store.graph_count_cached(Some(GWSW)).unwrap_or(0);
-    assert!(n > 20_000, "GWSW Totaal loaded into its model graph ({n} triples)");
+    assert!(
+        n > 20_000,
+        "GWSW Totaal loaded into its model graph ({n} triples)"
+    );
 
     let ask = |q: &str| matches!(state.store.query(q), Ok(QueryResults::Boolean(true)));
     // A sewer manhole is a class of the dictionary, and the export carries the

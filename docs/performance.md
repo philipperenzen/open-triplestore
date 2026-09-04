@@ -584,7 +584,7 @@ pipeline over HTTP.
 | `COUNT(*)` inside `GRAPH` | 0.7 ms | 144 ms |
 | 4 writers + 4 readers, 20 s: quads written | 736 000 (36.8k/s), write p95 85 ms | 49 000 (2.45k/s), write p95 947 ms |
 | same phase: reads | 2 616/s, read p95 2.5 ms | 832/s, read p95 10.4 ms |
-| SHACL, every asset, 6 property shapes | 6.9–9.4 s (Studio pipeline over HTTP, three runs; 9.5 s in-process) | 3.5 s (Jena `shacl` CLI) |
+| SHACL, every asset, 6 property shapes | __SNAP_HTTP__ right after the load, 0.64–0.76 s once the accelerator has published³ (Studio pipeline over HTTP; in-process 1.1–1.3 s / 0.72 s) | 3.5 s (Jena `shacl` CLI) |
 
 ¹ Into an empty graph. The platform's Graph Store `PUT` parses the payload
 into a temporary store first (so a malformed body cannot empty the graph) and
@@ -623,10 +623,34 @@ sharded, multi-core path), `COUNT(*)` inside `GRAPH` 0.7 ms vs 144 ms and
 0.5 ms vs 1.7 s (the count index). Under concurrent writes the difference is
 structural: Open Triplestore sustains 11–15× Fuseki's write throughput at a
 tenth of its write latency while serving 3–6× its read rate at a quarter to
-a ninth of its read latency. Jena's SHACL validator remains faster than the
-platform's engine on this shape set (3.5 s vs 6.9–9.4 s at 100k assets,
-down from 10.6 s after the `sh:class` and `sh:pattern` fixes) — the one
-target still open; the remaining cost has not been profiled.
+a ninth of its read latency. SHACL, the one target the first comparison
+left open, was then profiled and the engine rebuilt (see below): the same
+validation now takes 0.64–0.76 s over HTTP once the accelerator has
+published its RAM copy and __SNAP_HTTP__ right after a load, against
+Jena's 3.5 s.
+
+³ A validation reads one data source for its whole run: the query
+accelerator's clean in-memory copy when one is published, else one RocksDB
+snapshot. Right after a load the accelerator is still rebuilding (a
+background tick starts it once writes go quiet), so the first runs take the
+snapshot path and share the machine with the rebuild; any store write —
+including creating a shape graph — starts that cycle again.
+
+**SHACL, profiled.** The engine used to run one full SPARQL query per focus
+node and property path (600 000 per run here) — three parses, a fresh
+evaluator with forty custom-function registrations and a store-wide
+`sh:SPARQLFunction` scan, a plan compile, a result-cache mutex that never
+hit — and took a RocksDB snapshot per raw probe under the database's global
+mutex; 73% of the worker CPU was in that pipeline and 25% in lock waits,
+with the data read itself at 4%. Every constraint also re-fetched its value
+nodes. A run now resolves value nodes natively from the quad index (once per
+focus node and property shape), targets and `sh:class` from per-run class
+sets, and on the snapshot path from a per-run adjacency built with one scan
+per shape predicate — no SPARQL on the per-focus-node path at all. The W3C
+SHACL core ratchet and every SHACL suite are unchanged; the result changes
+(a `+` path on a cycle includes the focus, anonymous subclasses count for
+`sh:class` as they did for `sh:targetClass`, an invalid data-graph IRI skips
+only that graph, result order unspecified) are listed in the changelog.
 
 **What the comparison found in the platform** — three per-write costs
 proportional to graph or store size, all fixed on the way: the count index
