@@ -127,10 +127,11 @@ pub fn check_write_gates(
     if gates.is_empty() {
         return Ok(());
     }
-    let needed_graphs = needed_shape_graphs(studio, &gates);
-    if needed_graphs.is_empty() {
-        return Ok(());
-    }
+    // Once a gate is discovered, only a successful resolution of every shape
+    // graph it names lets the write proceed: a pipeline whose shape graph
+    // cannot be resolved is a gate that cannot be evaluated, not a gate that
+    // no longer applies.
+    let needed_graphs = needed_shape_graphs(studio, &gates)?;
 
     // Build a temp store: the graph's future contents + the shapes (copied from
     // the live store).
@@ -186,10 +187,7 @@ pub fn check_import_gates(
     if gates.is_empty() {
         return Ok(());
     }
-    let needed_graphs = needed_shape_graphs(studio, &gates);
-    if needed_graphs.is_empty() {
-        return Ok(());
-    }
+    let needed_graphs = needed_shape_graphs(studio, &gates)?;
 
     let temp = TripleStore::in_memory().map_err(|e| gate_error(format!("temp store: {e}")))?;
     let graph = GraphName::NamedNode(NamedNode::new(graph_iri).map_err(|e| {
@@ -312,20 +310,54 @@ fn discover_gates(
     }
 }
 
+/// The graphs holding a pipeline's shapes, resolved from its shape-graph ids.
+///
+/// Every id must resolve. This used to be `if let Ok(Some(set)) = ..` — a
+/// lookup error or a deleted shape-graph record was silently dropped, the
+/// pipeline then validated against fewer (or no) shapes, and a gate that had
+/// been *discovered* as covering the graph stopped gating without a trace.
+/// A gate the server cannot evaluate must refuse the write, like a shape
+/// graph that will not copy or an engine error.
+fn pipeline_shape_graphs(
+    studio: &ShaclStudioStore,
+    p: &ValidationPipeline,
+) -> Result<Vec<String>, ValidationReport> {
+    p.shape_graph_ids
+        .iter()
+        .map(|set_id| {
+            studio
+                .get_shape_graph(set_id)
+                .map_err(|e| {
+                    gate_error(format!(
+                        "pipeline '{}': looking up shape graph '{set_id}': {e}",
+                        p.id
+                    ))
+                })?
+                .map(|set| set.graph_iri)
+                .ok_or_else(|| {
+                    gate_error(format!(
+                        "pipeline '{}': shape graph '{set_id}' not found",
+                        p.id
+                    ))
+                })
+        })
+        .collect()
+}
+
 /// Union of shape-graph graphs needed by every gate source, resolved once.
-fn needed_shape_graphs(studio: &ShaclStudioStore, gates: &GateSet) -> BTreeSet<String> {
+/// `Err` when a pipeline names a shape graph that cannot be resolved.
+fn needed_shape_graphs(
+    studio: &ShaclStudioStore,
+    gates: &GateSet,
+) -> Result<BTreeSet<String>, ValidationReport> {
     let mut needed: BTreeSet<String> = gates.binding_graphs.clone();
     for p in &gates.pipelines {
-        for set_id in &p.shape_graph_ids {
-            if let Ok(Some(set)) = studio.get_shape_graph(set_id) {
-                needed.insert(set.graph_iri);
-            }
-        }
+        needed.extend(pipeline_shape_graphs(studio, p)?);
     }
     if let Some(g) = &gates.legacy_shapes_graph {
         needed.insert(g.clone());
     }
-    needed
+    Ok(needed)
 }
 
 /// Copy each shape graph from the live store into the throwaway store.
@@ -362,20 +394,10 @@ fn evaluate_gates(
     // Pipeline gates (each at its own severity threshold). Inference is never
     // run here — gating must not mutate any store.
     for p in &gates.pipelines {
-        let shape_graphs: Vec<String> = p
-            .shape_graph_ids
-            .iter()
-            .filter_map(|id| {
-                studio
-                    .get_shape_graph(id)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.graph_iri)
-            })
-            .collect();
-        if shape_graphs.is_empty() {
-            continue;
-        }
+        // Resolved again rather than threaded through from
+        // `needed_shape_graphs`, and with the same fail-closed rule: an
+        // unresolvable pipeline is an error here too, never a skipped gate.
+        let shape_graphs = pipeline_shape_graphs(studio, p)?;
         match super::run::run_validation(
             temp,
             &shape_graphs,
@@ -736,6 +758,63 @@ mod tests {
             &person_quads(true),
         )
         .expect("conforming data must pass the pipeline gate");
+    }
+
+    /// A discovered gating pipeline whose shape-graph record is gone must
+    /// refuse the write on both paths. `needed_shape_graphs` used to drop the
+    /// unresolvable id and the callers returned `Ok(())` on the resulting empty
+    /// set — the pipeline still *covered* the graph but no longer gated it.
+    #[test]
+    fn a_gating_pipeline_with_a_missing_shape_graph_blocks_both_paths() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        let base = "http://x";
+
+        let mut p = pipe(vec![graph_target(DATA_GRAPH)], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id.clone()];
+        studio.insert_pipeline(&p).unwrap();
+        studio.delete_shape_graph(&set.id).unwrap();
+
+        // The pipeline still covers the graph…
+        assert!(import_gates_apply(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH
+        ));
+
+        // …so conforming data is refused on the import path…
+        let report = check_import_gates(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH,
+            &person_quads(true),
+        )
+        .expect_err("an unresolvable gate must block the import");
+        assert_eq!(
+            report.results[0].source_constraint,
+            "gate-evaluation-failure"
+        );
+        assert!(
+            report.results[0].message.contains("not found")
+                && report.results[0].message.contains(&set.id),
+            "the refusal names the missing shape graph: {}",
+            report.results[0].message
+        );
+
+        // …and on the Graph Store path.
+        let report = check_write_gates(
+            ctx(&store, &auth, &studio, base),
+            DATA_GRAPH,
+            "<http://example.org/p1> a <http://example.org/Person> ; \
+             <http://example.org/name> \"Ada\" .",
+            RdfFormat::Turtle,
+            WriteMode::Replace,
+        )
+        .expect_err("an unresolvable gate must block the write");
+        assert_eq!(
+            report.results[0].source_constraint,
+            "gate-evaluation-failure"
+        );
+        assert!(report.results[0].message.contains("was not applied"));
     }
 
     #[test]

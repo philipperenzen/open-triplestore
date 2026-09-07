@@ -333,3 +333,86 @@ async fn binding_a_shape_graph_to_a_graph_is_listed_for_that_target() {
         items(&v).len()
     );
 }
+
+// ─── Write gates fail closed ─────────────────────────────────────────────────
+
+/// A gating pipeline whose shape graph record has gone (deleted, or the
+/// lookup failed) must refuse the write, not wave it through.
+///
+/// `needed_shape_graphs` used `if let Ok(Some(set)) = studio.get_shape_graph(..)`
+/// and `check_write_gates` returned `Ok(())` when the resolved set came back
+/// empty, so a pipeline that was *discovered* as gating the graph stopped
+/// gating the moment its shape graph could not be resolved — the one outcome
+/// the module's own fail-closed handling (copy failure, engine error) exists
+/// to prevent.
+#[tokio::test]
+async fn a_gating_pipeline_whose_shape_graph_is_missing_refuses_the_write() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let sg = create_shape_graph(&app, &token, SHAPES).await;
+
+    let (st, _, txt) = json_req(
+        &app,
+        Method::POST,
+        "/api/shacl/pipelines",
+        &token,
+        json!({
+            "name": "people-gate",
+            "targets": [{ "kind": "graph", "id": DATA_GRAPH }],
+            "shape_graph_ids": [sg],
+            "gate_writes": true,
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "create gating pipeline: {txt}");
+
+    let gsp_uri = format!("/store?graph={}", url_encode(DATA_GRAPH));
+    let put =
+        |turtle: &'static str| send(&app, Method::PUT, &gsp_uri, &token, "text/turtle", turtle);
+    const CONFORMING: &str =
+        "<http://example.org/bob> a <http://example.org/Person> ; <http://example.org/name> \"Bob\" .";
+    const VIOLATING: &str = "<http://example.org/bob> a <http://example.org/Person> .";
+    // Conforming too, but three triples to bob's two: had it landed, the
+    // graph's size would have changed.
+    const CONFORMING_ALICE: &str = "<http://example.org/alice> a <http://example.org/Person> ; \
+         <http://example.org/name> \"Alice\" ; <http://example.org/age> 42 .";
+
+    // Sanity: the gate is live — a violation is refused, conforming data lands.
+    let (st, _, txt) = put(VIOLATING).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "gate rejects: {txt}");
+    let (st, _, txt) = put(CONFORMING).await;
+    assert!(st.is_success(), "gate admits conforming data: {st} {txt}");
+    let before = state.store.count_graph(Some(DATA_GRAPH)).unwrap();
+    assert_eq!(before, 2, "bob's two triples are in the graph");
+
+    // The shape graph record disappears; the pipeline still references it.
+    let (st, _, txt) = send(
+        &app,
+        Method::DELETE,
+        &format!("/api/shacl/shape-graphs/{}", sg),
+        &token,
+        "application/json",
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "delete shape graph: {st} {txt}");
+
+    // Even data that would have conformed is refused: the gate cannot be
+    // evaluated, and an unevaluable gate blocks the write.
+    let (st, body, txt) = put(CONFORMING_ALICE).await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a gate that cannot be evaluated must refuse the write: {txt}"
+    );
+    assert!(
+        txt.contains("not found") && txt.contains("gate-evaluation-failure"),
+        "the refusal names the missing shape graph, not a data problem: {txt}"
+    );
+    assert_eq!(body["conforms"], false, "{txt}");
+    assert_eq!(
+        state.store.count_graph(Some(DATA_GRAPH)).unwrap(),
+        before,
+        "a refused PUT must leave the graph unchanged"
+    );
+}
