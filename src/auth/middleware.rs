@@ -235,9 +235,65 @@ async fn resolve_oidc_token(
     .clamped_to_role_policy())
 }
 
+/// Host part of a peer issuer (`127.0.0.1-8080`, `peer.example.org`), used to
+/// name the peer's provider row and the synthetic e-mail domain of its users.
+fn federated_peer_host(issuer: &str) -> String {
+    crate::federation::origin_of(issuer)
+        .and_then(|o| o.split("://").nth(1).map(|h| h.replace(':', "-")))
+        .unwrap_or_else(|| "peer".to_string())
+}
+
+/// The provider row a peer's federated users hang off: one per issuer, so
+/// its `(provider, subject)` identity links can never collide with the
+/// deployment's own OIDC users, and inactive, so it is no login option.
+/// Idempotent; required because `oauth_identities` FK-references
+/// `oauth_providers(id)`.
+fn ensure_federated_provider(
+    auth_db: &Arc<AuthDb>,
+    issuer: &str,
+) -> anyhow::Result<super::models::OauthProvider> {
+    let host = federated_peer_host(issuer);
+    let slug = format!("federated:{host}");
+    if let Some(p) = auth_db.get_oauth_provider_by_slug(&slug)? {
+        return Ok(p);
+    }
+    auth_db.create_oauth_provider(&super::models::OauthProviderCreate {
+        name: format!("Federated peer {host}"),
+        slug,
+        provider_type: "oidc".to_string(),
+        client_id: None,
+        client_secret: None,
+        client_secret_enc: None,
+        discovery_url: Some(format!(
+            "{}/.well-known/openid-configuration",
+            issuer.trim_end_matches('/')
+        )),
+        tenant_id: None,
+        entity_id: None,
+        sso_url: None,
+        idp_certificate: None,
+        scopes: Some("openid".to_string()),
+        role_claim_map: None,
+        auto_provision: true,
+        default_role: Some(SystemRole::User.as_str().to_string()),
+        is_active: false,
+    })
+}
+
 /// A peer's identity assertion: verified against the peer's JWKS with this
 /// instance as audience, provisioned as a read-only federated user whose
 /// organisation memberships follow the assertion's `org:` groups.
+///
+/// An assertion speaks for the peer's user, never for one of ours. Whatever
+/// it carries, it cannot resolve to or link with a locally created account,
+/// and it cannot confer a role:
+/// - identities live under a per-issuer provider row, so a peer subject can
+///   never match an env-OIDC identity with the same `sub`;
+/// - the e-mail is always the synthetic `<sub>@<peer host>.federated.invalid`
+///   (any peer-supplied address and `email_verified` are dropped), so
+///   provisioning never links by e-mail;
+/// - role claims and the deployment's group-to-role map are not consulted,
+///   and the principal is capped at `User` whatever the DB row says.
 // The Err is a ready-made axum `Response` on the cold (rejection) path, as in
 // the sibling resolvers.
 #[allow(clippy::result_large_err)]
@@ -254,39 +310,48 @@ async fn resolve_federated_token(
         );
         (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()
     })?;
-    // Assertions carry no e-mail; provisioning wants one. A synthetic address
-    // under the reserved `.invalid` TLD, keyed on issuer + subject, is stable
-    // and can never match a real account (no linking by e-mail).
-    if claims
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-        .is_none()
-    {
-        let host = crate::federation::origin_of(verifier.issuer())
-            .and_then(|o| o.split("://").nth(1).map(|h| h.replace(':', "-")))
-            .unwrap_or_else(|| "peer".to_string());
-        claims.email = Some(format!("{}@{host}.federated.invalid", claims.sub));
+    let host = federated_peer_host(verifier.issuer());
+    claims.email = Some(format!("{}@{host}.federated.invalid", claims.sub));
+    // Of the extra claims only the org groups matter (membership sync); the
+    // rest — `email_verified`, `roles`, `realm_access`, … — must not reach
+    // provisioning.
+    let groups = claims.extra.remove(&auth_ext.groups_claim);
+    claims.extra.clear();
+    if let Some(groups) = groups {
+        claims.extra.insert(auth_ext.groups_claim.clone(), groups);
     }
-    let provider =
-        super::oidc_rs::ensure_env_provider(auth_db, verifier.issuer(), &auth_ext.default_role)
-            .map_err(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Auth provisioning error").into_response()
-            })?;
-    let user = super::oidc_rs::provision_from_claims(auth_db, &provider, auth_ext, &claims)
+    // Provision with a config that maps no claim to a role, so the groups
+    // are read for organisation membership only.
+    let mut fed_ext = AuthExt::disabled();
+    fed_ext.role_claims.clear();
+    fed_ext.role_claim_map = None;
+    fed_ext.groups_claim = auth_ext.groups_claim.clone();
+    fed_ext.org_group_prefix = auth_ext.org_group_prefix.clone();
+
+    let provider = ensure_federated_provider(auth_db, verifier.issuer()).map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Auth provisioning error").into_response()
+    })?;
+    let user = super::oidc_rs::provision_from_claims(auth_db, &provider, &fed_ext, &claims)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "User provisioning failed").into_response())?;
     if !user.is_active {
         return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
     }
+    // Never above `User`: a federated principal holds no local authority, even
+    // if its row was promoted locally. A lower row role (guest) stays.
+    let role = if user.role.level() < SystemRole::User.level() {
+        user.role
+    } else {
+        SystemRole::User
+    };
     Ok(AuthenticatedUser {
         user_id: user.id,
-        role: user.role,
+        role,
         can_publish: false,
         // Federated principals read; writes need a local credential.
         write_access: false,
         can_mint_api_tokens: false,
-    })
+    }
+    .clamped_to_role_policy())
 }
 
 /// Resolve a bearer token to an authenticated user, honoring the legacy-token

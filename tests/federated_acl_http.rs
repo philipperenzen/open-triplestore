@@ -298,3 +298,183 @@ async fn identity_assertions_cross_instances_and_authorise_locally() {
         "an assertion for another audience is refused"
     );
 }
+
+/// A peer assertion is a claim about the peer's user, never about ours: it
+/// must not link to a local account by e-mail, must not resolve to the local
+/// user behind a colliding env-OIDC subject, and must not pick up a role from
+/// the local DB row or from the deployment's group-to-role map.
+#[tokio::test]
+async fn federated_assertions_never_link_to_local_accounts_or_inherit_their_role() {
+    use open_triplestore::auth::models::SystemRole;
+
+    // ── B: a local admin, and an env-OIDC user whose subject a peer could reuse. ──
+    let (mut b, _b_token) = admin_state();
+    let origin_b = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let o = format!("http://{}", l.local_addr().unwrap());
+        drop(l);
+        o
+    };
+    b.base_url = Arc::new(origin_b.clone());
+    b.auth_db
+        .create_user(
+            "loc-admin",
+            "localadmin",
+            "admin@example.org",
+            "hash",
+            SystemRole::Admin,
+        )
+        .unwrap();
+    b.auth_db.set_email_verified("loc-admin", true).unwrap();
+    b.auth_db
+        .create_user(
+            "oidc-u",
+            "oidcuser",
+            "oidc-user@example.org",
+            "hash",
+            SystemRole::Admin,
+        )
+        .unwrap();
+    let env_provider = open_triplestore::auth::oidc_rs::ensure_env_provider(
+        &b.auth_db,
+        "https://idp.example.org",
+        "user",
+    )
+    .unwrap();
+    b.auth_db
+        .upsert_oauth_identity("ident-1", "oidc-u", &env_provider.id, "shared-sub", None)
+        .unwrap();
+
+    // ── A: only needed for its signing key and JWKS. ──
+    let (mut a, _a_token) = admin_state();
+    a.oidc_provider = Some(Arc::new(
+        open_triplestore::auth::oidc_provider::ProviderKeys::load_or_generate(
+            &a.auth_db,
+            "test-secret",
+        )
+        .unwrap(),
+    ));
+    let origin_a = serve(&mut a);
+    start(&origin_a, a.clone());
+
+    // B trusts A, and maps the IdP group `app-admins` to admin for its own OIDC users.
+    let mut ext = AuthExt::disabled();
+    ext.trusted_issuers = vec![OidcVerifier::new(origin_a.clone(), Some(origin_b.clone()))];
+    ext.role_claim_map = Some(r#"{"app-admins":"admin"}"#.to_string());
+    b.auth_ext = Arc::new(ext);
+    let b_app = test_app(b.clone());
+
+    // A (or someone holding A's key) asserts the local admin's verified e-mail,
+    // the env-OIDC user's subject, and an admin-mapped group.
+    let now = chrono::Utc::now().timestamp();
+    let assertion = a
+        .oidc_provider
+        .as_ref()
+        .unwrap()
+        .sign_claims(&serde_json::json!({
+            "iss": origin_a,
+            "sub": "shared-sub",
+            "aud": origin_b,
+            "iat": now,
+            "nbf": now - 5,
+            "exp": now + 60,
+            "preferred_username": "localadmin",
+            "email": "admin@example.org",
+            "email_verified": true,
+            "groups": ["app-admins"],
+            "roles": ["admin"],
+            "ots_federated": true,
+        }))
+        .unwrap();
+
+    let me = b_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/auth/me")
+                .header(header::AUTHORIZATION, format!("Bearer {assertion}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let me_status = me.status();
+    let me_body = body_text(me.into_body()).await;
+    assert_eq!(
+        me_status,
+        StatusCode::OK,
+        "B authenticates the assertion: {me_body}"
+    );
+    let me_json: Value = serde_json::from_str(&me_body).unwrap();
+    let id = me_json["id"].as_str().unwrap_or_default();
+    assert!(
+        !["adm", "loc-admin", "oidc-u"].contains(&id),
+        "a federated user, never a local account: {me_body}"
+    );
+    assert_ne!(me_json["role"], "admin", "never admin: {me_body}");
+    assert_ne!(me_json["role"], "super_admin", "never admin: {me_body}");
+    assert!(
+        me_json["email"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with(".federated.invalid"),
+        "the peer's e-mail claim is ignored: {me_body}"
+    );
+
+    // The local accounts were not linked to the peer's identity: the admin has
+    // no external identity, the env-OIDC user only its own.
+    let links = b
+        .auth_db
+        .list_oauth_identities_for_user("loc-admin")
+        .unwrap();
+    assert!(links.is_empty(), "the local admin is untouched: {links:?}");
+    let links = b.auth_db.list_oauth_identities_for_user("oidc-u").unwrap();
+    assert!(
+        links.iter().all(|l| l.provider_id == env_provider.id),
+        "the env-OIDC user is untouched: {links:?}"
+    );
+    assert_eq!(
+        b.auth_db.get_user_by_id("loc-admin").unwrap().unwrap().role,
+        SystemRole::Admin
+    );
+
+    // Mutating and admin-only requests are refused.
+    let update = b_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/sparql")
+                .header(header::AUTHORIZATION, format!("Bearer {assertion}"))
+                .header(header::CONTENT_TYPE, "application/sparql-update")
+                .body(Body::from(
+                    "INSERT DATA { <urn:s:9> <urn:p> \"nine\" }".to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        update.status() == StatusCode::FORBIDDEN || update.status() == StatusCode::UNAUTHORIZED,
+        "federated principals cannot write: {}",
+        update.status()
+    );
+    let users = b_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/admin/users")
+                .header(header::AUTHORIZATION, format!("Bearer {assertion}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        users.status(),
+        StatusCode::FORBIDDEN,
+        "federated principals are not admins"
+    );
+}
