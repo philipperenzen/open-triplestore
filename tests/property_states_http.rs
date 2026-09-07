@@ -261,3 +261,113 @@ async fn states_keep_history_and_the_data_graph_keeps_the_current_value() {
         "{st}"
     );
 }
+
+/// The language tag is written raw after `@`, so it must be a tag. It went in
+/// unvalidated: `@en } } WHERE { } ; INSERT DATA { GRAPH <urn:probe> {…} } ;
+/// INSERT { GRAPH <g> { <e> <p> "v"@en` closed the INSERT template and the
+/// operation, ran its own INSERT DATA, and reopened a template so the rest
+/// of the generated update still parsed. Now it is a 400 and nothing is
+/// written; a real tag such as `en-GB` still works.
+#[tokio::test]
+async fn language_tags_are_validated_before_they_reach_sparql() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "ps",
+            "Property states",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("ps", G).unwrap();
+    let app = test_app(state.clone());
+    let ask = |q: &str| matches!(state.store.query(q), Ok(QueryResults::Boolean(true)));
+    let graphs_before = state.store.store().named_graphs().count();
+
+    let payload = format!(
+        "en }} }} WHERE {{ }} ; INSERT DATA {{ GRAPH <urn:probe> {{ <urn:s> <urn:p> <urn:o> }} }} ; INSERT {{ GRAPH <{G}> {{ <{E}> <{P}> \"Waalbrug\"@en"
+    );
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/ps/properties/state",
+        Some(&token),
+        Some(json!({ "entity": E, "property": P, "value": "Waalbrug", "language": payload })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("language tag"), "{txt}");
+    assert!(
+        !ask("ASK { GRAPH <urn:probe> { ?s ?p ?o } }"),
+        "the injected INSERT DATA must not have run"
+    );
+    assert!(
+        !ask(&format!("ASK {{ GRAPH <{G}> {{ <{E}> <{P}> ?v }} }}")),
+        "no value may have been written"
+    );
+    assert_eq!(
+        state.store.store().named_graphs().count(),
+        graphs_before,
+        "no graph may have been created"
+    );
+    for bad in ["", "en GB", "en_GB", "en\" } #"] {
+        let (st, _, txt) = req(
+            &app,
+            Method::POST,
+            "/api/datasets/ps/properties/state",
+            Some(&token),
+            Some(json!({ "entity": E, "property": P, "value": "x", "language": bad })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad:?}: {txt}");
+    }
+
+    // A datatype that is not an IRI is refused too.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/ps/properties/state",
+        Some(&token),
+        Some(json!({ "entity": E, "property": P, "value": "1", "datatype": "xsd:int> <urn:p> <urn:o" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+
+    // A well-formed tag works and comes back in the history.
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/datasets/ps/properties/state",
+        Some(&token),
+        Some(json!({ "entity": E, "property": P, "value": "Waal bridge", "language": "en-GB" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    assert!(ask(&format!(
+        "ASK {{ GRAPH <{G}> {{ <{E}> <{P}> \"Waal bridge\"@en-GB }} }}"
+    )));
+    let (st, h, txt) = req(
+        &app,
+        Method::GET,
+        &format!(
+            "/api/datasets/ps/properties/history?entity={}&property={}",
+            url_encode(E),
+            url_encode(P)
+        ),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    // Language tags compare case-insensitively; the store normalises them.
+    assert!(
+        h["states"][0]["language"]
+            .as_str()
+            .is_some_and(|l| l.eq_ignore_ascii_case("en-GB")),
+        "{txt}"
+    );
+}

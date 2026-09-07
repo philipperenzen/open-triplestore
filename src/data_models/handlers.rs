@@ -1251,11 +1251,7 @@ fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
             let value = map.get("value").and_then(|v| v.as_str()).unwrap_or("");
             let escaped = escape_sparql_literal(value);
             if let Some(lang) = map.get("lang").and_then(|v| v.as_str()) {
-                if lang.is_empty() || !lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                    return Err(AppError::BadRequest(format!(
-                        "Invalid language tag: '{lang}'"
-                    )));
-                }
+                crate::store::validate_language_tag(lang).map_err(AppError::BadRequest)?;
                 Ok(format!("\"{escaped}\"@{lang}"))
             } else if let Some(dt) = map.get("datatype").and_then(|v| v.as_str()) {
                 oxigraph::model::NamedNode::new(dt)

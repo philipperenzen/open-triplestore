@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::{Dataset, GraphKind};
 use crate::server::AppState;
-use crate::store::escape_sparql_iri;
+use crate::store::{escape_sparql_iri, escape_sparql_literal, validate_language_tag};
 
 pub const OPM: &str = "https://w3id.org/opm#";
 pub const SCHEMA: &str = "https://schema.org/";
@@ -59,21 +59,20 @@ pub fn property_iri(entity: &str, property: &str) -> String {
     format!("urn:ots:property:{hex}")
 }
 
-fn esc_lit(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-}
-
 /// The value as a SPARQL term.
+///
+/// Everything the caller sent is checked before it is spliced into the
+/// update: the literal text is escaped, the language tag must be a tag
+/// (`@` ends a literal, so an unchecked tag is a way out of the string), and
+/// datatype / IRI values must be IRIs.
 fn value_term(
     value: &str,
     datatype: Option<&str>,
     language: Option<&str>,
 ) -> Result<String, ApiErr> {
     if let Some(lang) = language {
-        return Ok(format!("\"{}\"@{lang}", esc_lit(value)));
+        validate_language_tag(lang).map_err(bad)?;
+        return Ok(format!("\"{}\"@{lang}", escape_sparql_literal(value)));
     }
     match datatype {
         Some("iri") => {
@@ -88,7 +87,7 @@ fn value_term(
             NamedNode::new(&dt).map_err(|e| bad(format!("datatype is not an IRI: {e}")))?;
             Ok(format!(
                 "\"{}\"^^<{}>",
-                esc_lit(value),
+                escape_sparql_literal(value),
                 escape_sparql_iri(&dt)
             ))
         }
@@ -99,7 +98,7 @@ fn value_term(
             } else if v.contains('.') && v.parse::<f64>().is_ok() {
                 Ok(format!("\"{v}\"^^<{XSD}decimal>"))
             } else {
-                Ok(format!("\"{}\"", esc_lit(value)))
+                Ok(format!("\"{}\"", escape_sparql_literal(value)))
             }
         }
     }
@@ -280,7 +279,10 @@ pub async fn set_state(
         state_lines.push(format!("<{st}> a opm:{r}"));
     }
     if let Some(n) = &body.note {
-        state_lines.push(format!("<{st}> rdfs:comment \"{}\"", esc_lit(n)));
+        state_lines.push(format!(
+            "<{st}> rdfs:comment \"{}\"",
+            escape_sparql_literal(n)
+        ));
     }
     let state_block = state_lines.join(" .\n        ");
     let update = format!(
@@ -507,6 +509,30 @@ mod tests {
         );
         assert_eq!(value_term("urn:x", Some("iri"), None).unwrap(), "<urn:x>");
         assert!(value_term("not an iri", Some("iri"), None).is_err());
+    }
+
+    /// The language tag is the one piece of a literal that is written raw
+    /// after the closing quote; it must be a tag and nothing else.
+    #[test]
+    fn language_tags_and_datatypes_are_validated() {
+        assert_eq!(
+            value_term("Bridge", None, Some("en-GB")).unwrap(),
+            "\"Bridge\"@en-GB"
+        );
+        let (st, msg) = value_term(
+            "v",
+            None,
+            Some(
+                "en } } WHERE { } ; INSERT DATA { GRAPH <urn:probe> { <urn:s> <urn:p> <urn:o> } }",
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("language tag"), "{msg}");
+        assert!(value_term("v", None, Some("")).is_err());
+        assert!(value_term("v", Some("xsd:int> <urn:p> <urn:o"), None).is_err());
+        // Tabs are escaped too (the old local escaper let them through raw).
+        assert_eq!(value_term("a\tb", None, None).unwrap(), "\"a\\tb\"");
     }
 
     #[test]

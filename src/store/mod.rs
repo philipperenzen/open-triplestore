@@ -46,9 +46,22 @@ pub fn escape_sparql_literal(s: &str) -> String {
     out
 }
 
+/// Check a language tag before it is written after `@` in a SPARQL literal.
+///
+/// A tag is a non-empty run of ASCII letters, digits and `-` (the shape of
+/// BCP 47, without checking the subtag registry). Anything else — a space, a
+/// quote, `}` — is refused: `@` ends a literal in SPARQL and the tag is pasted
+/// raw, so an unchecked tag is a way out of the literal and into the update.
+pub fn validate_language_tag(lang: &str) -> Result<(), String> {
+    if lang.is_empty() || !lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(format!("Invalid language tag: '{lang}'"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{escape_sparql_iri, escape_sparql_literal};
+    use super::{escape_sparql_iri, escape_sparql_literal, validate_language_tag};
 
     #[test]
     fn valid_iri_unchanged() {
@@ -66,6 +79,17 @@ mod tests {
         assert!(!escaped.contains('{'));
         assert!(!escaped.contains('}'));
         assert!(!escaped.contains(' '));
+    }
+
+    #[test]
+    fn language_tags_are_letters_digits_and_hyphens() {
+        assert!(validate_language_tag("en").is_ok());
+        assert!(validate_language_tag("en-GB").is_ok());
+        assert!(validate_language_tag("zh-Hant-TW").is_ok());
+        assert!(validate_language_tag("").is_err());
+        assert!(validate_language_tag("en GB").is_err());
+        assert!(validate_language_tag("en\" } ; DROP ALL").is_err());
+        assert!(validate_language_tag("en_GB").is_err());
     }
 
     #[test]
