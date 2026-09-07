@@ -21,7 +21,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
-use oxigraph::model::{GraphNameRef, NamedNodeRef};
+use oxigraph::model::{BlankNode, GraphNameRef, Literal, NamedNode, NamedNodeRef};
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
@@ -29,6 +29,12 @@ use crate::store::{escape_sparql_iri, TripleStore};
 
 pub const MEDIA_TYPE: &str = "application/rdf-patch";
 
+/// One quad of the patch, each term in canonical N-Triples form: IRIs as
+/// `<…>` (prefixed names expanded through the patch's own `PA` declarations),
+/// blank nodes as `_:label`, literals quoted and escaped. Every term went
+/// through the oxrdf constructors in [`parse`], so [`to_sparql_update`] can
+/// concatenate them: nothing in a term can close a `GRAPH { … }` block or
+/// start another operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuadText {
     pub s: String,
@@ -161,42 +167,112 @@ fn is_bnode(t: &str) -> bool {
 fn is_literal(t: &str) -> bool {
     t.starts_with('"')
 }
-fn is_prefixed(t: &str) -> bool {
-    !is_iri(t)
-        && !is_bnode(t)
-        && !is_literal(t)
-        && t.contains(':')
-        && !t.contains(char::is_whitespace)
+/// Whether `local` is acceptable as the local part of a prefixed name: the
+/// SPARQL `PN_LOCAL` production, minus its `\`-escapes. Letters, digits, `_`,
+/// `-`, `.`, `:`, `%XX` and non-ASCII characters; nothing else — in particular
+/// none of `{ } ; < > " ' \` or whitespace, which is what let a "prefixed
+/// name" carry SPARQL syntax into the generated update.
+fn is_pn_local(local: &str) -> bool {
+    let mut chars = local.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '.' | ':' => {}
+            '%' => {
+                for _ in 0..2 {
+                    if !chars.next().is_some_and(|h| h.is_ascii_hexdigit()) {
+                        return false;
+                    }
+                }
+            }
+            c if !c.is_ascii() && !c.is_whitespace() && !c.is_control() => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
-fn check_term(
+/// Expand `pfx:local` through the patch's `PA` declarations into a validated
+/// IRI. The prefix must have been declared (and not `PD`-removed) on an
+/// earlier line.
+fn expand_prefixed(t: &str, prefixes: &[(String, String)]) -> Result<NamedNode, String> {
+    let Some((pfx, local)) = t.split_once(':') else {
+        return Err(format!("`{t}` is not an RDF term"));
+    };
+    let key = format!("{pfx}:");
+    let Some((_, ns)) = prefixes.iter().find(|(p, _)| *p == key) else {
+        return Err(format!("`{t}` uses the undeclared prefix `{key}`"));
+    };
+    if !is_pn_local(local) {
+        return Err(format!(
+            "`{t}` is not a prefixed name: the local part may only contain letters, digits, `_ - . : %XX`"
+        ));
+    }
+    NamedNode::new(format!("{ns}{local}"))
+        .map_err(|e| format!("`{t}` expands to an invalid IRI: {e}"))
+}
+
+/// Split a literal token into its quoted body and its `@lang` / `^^dt` suffix.
+fn split_literal(t: &str) -> Result<(&str, &str), String> {
+    let bytes = t.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return Ok((&t[..=i], &t[i + 1..])),
+            _ => i += 1,
+        }
+    }
+    Err(format!("unterminated literal {t}"))
+}
+
+/// Parse one term of an `A`/`D` line into its canonical N-Triples text.
+///
+/// Every kind of term is rebuilt from an oxrdf value — `NamedNode`,
+/// `BlankNode`, `Literal` — so what comes out is exactly what the store's own
+/// serializer would print, and nothing the patch author typed reaches the
+/// SPARQL text unchecked. Prefixed names (also in a literal's datatype) are
+/// expanded here; the generated update declares no prefixes.
+fn canonical_term(
     t: &str,
+    prefixes: &[(String, String)],
     allow_bnode: bool,
     allow_literal: bool,
     what: &str,
     ln: usize,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let err = |e: String| format!("line {ln}: {what}: {e}");
     if is_iri(t) {
-        oxigraph::model::NamedNode::new(&t[1..t.len() - 1])
-            .map_err(|e| format!("line {ln}: {what} {t}: {e}"))?;
-        Ok(())
-    } else if is_bnode(t) {
-        if allow_bnode {
-            Ok(())
-        } else {
-            Err(format!("line {ln}: {what} must not be a blank node ({t})"))
-        }
-    } else if is_literal(t) {
-        if allow_literal {
-            Ok(())
-        } else {
-            Err(format!("line {ln}: {what} must not be a literal ({t})"))
-        }
-    } else if is_prefixed(t) {
-        Ok(())
-    } else {
-        Err(format!("line {ln}: `{t}` is not an RDF term"))
+        return NamedNode::new(&t[1..t.len() - 1])
+            .map(|n| n.to_string())
+            .map_err(|e| err(format!("{t}: {e}")));
     }
+    if is_bnode(t) {
+        if !allow_bnode {
+            return Err(err(format!("must not be a blank node ({t})")));
+        }
+        return BlankNode::new(&t[2..])
+            .map(|b| b.to_string())
+            .map_err(|e| err(format!("{t}: {e}")));
+    }
+    if is_literal(t) {
+        if !allow_literal {
+            return Err(err(format!("must not be a literal ({t})")));
+        }
+        let (body, suffix) = split_literal(t).map_err(err)?;
+        let full = match suffix.strip_prefix("^^") {
+            Some(dt) if !dt.starts_with('<') => {
+                format!("{body}^^{}", expand_prefixed(dt, prefixes).map_err(err)?)
+            }
+            _ => t.to_string(),
+        };
+        return full
+            .parse::<Literal>()
+            .map(|l| l.to_string())
+            .map_err(|e| err(format!("{t}: {e}")));
+    }
+    expand_prefixed(t, prefixes)
+        .map(|n| n.to_string())
+        .map_err(err)
 }
 
 /// Parse a patch document.
@@ -276,21 +352,16 @@ pub fn parse(text: &str) -> Result<Patch, String> {
                     ));
                 }
                 let delete = code == "D";
-                check_term(&args[0], !delete, false, "subject", ln)?;
-                check_term(&args[1], false, false, "predicate", ln)?;
-                check_term(&args[2], !delete, true, "object", ln)?;
+                let px = &patch.prefixes;
+                let s = canonical_term(&args[0], px, !delete, false, "subject", ln)?;
+                let p = canonical_term(&args[1], px, false, false, "predicate", ln)?;
+                let o = canonical_term(&args[2], px, !delete, true, "object", ln)?;
                 let g = if args.len() == 4 {
-                    check_term(&args[3], false, false, "graph", ln)?;
-                    Some(args[3].clone())
+                    Some(canonical_term(&args[3], px, false, false, "graph", ln)?)
                 } else {
                     None
                 };
-                let q = QuadText {
-                    s: args[0].clone(),
-                    p: args[1].clone(),
-                    o: args[2].clone(),
-                    g,
-                };
+                let q = QuadText { s, p, o, g };
                 patch
                     .ops
                     .push(if delete { Op::Delete(q) } else { Op::Add(q) });
@@ -309,11 +380,12 @@ pub fn parse(text: &str) -> Result<Patch, String> {
 /// The patch as one SPARQL Update request: runs of adds / deletes become
 /// `INSERT DATA` / `DELETE DATA` blocks in order, grouped by graph, so the
 /// sequence semantics of the patch are preserved inside one transaction.
+///
+/// The terms are the canonical ones [`parse`] produced (prefixed names already
+/// expanded), so no `PREFIX` header is emitted and every token is a complete,
+/// validated N-Triples term.
 pub fn to_sparql_update(patch: &Patch) -> String {
     let mut out = String::new();
-    for (pfx, ns) in &patch.prefixes {
-        out.push_str(&format!("PREFIX {pfx} <{ns}>\n"));
-    }
     let mut blocks: Vec<String> = Vec::new();
     let mut run: Vec<&QuadText> = Vec::new();
     let mut run_is_add: Option<bool> = None;
@@ -484,26 +556,15 @@ pub async fn apply_patch_handler(
             "reason": if patch.aborted { "the transaction was aborted (TA)" } else { "no A/D lines" },
         })));
     }
-    // Every quad names one of the dataset's graphs (prefixed graph names are
-    // expanded through the patch's own PA declarations).
+    // Every quad names one of the dataset's graphs. `parse` already expanded
+    // prefixed graph names through the patch's own PA declarations, so each
+    // graph term is a canonical `<iri>`.
     let registered: HashSet<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(e500)?
         .into_iter()
         .collect();
-    let expand = |t: &str| -> Option<String> {
-        if is_iri(t) {
-            return Some(t[1..t.len() - 1].to_string());
-        }
-        let (pfx, local) = t.split_once(':')?;
-        let pfx = format!("{pfx}:");
-        patch
-            .prefixes
-            .iter()
-            .find(|(p, _)| *p == pfx)
-            .map(|(_, ns)| format!("{ns}{local}"))
-    };
     let mut graphs: Vec<String> = Vec::new();
     for g in patch.graphs() {
         let Some(g) = g else {
@@ -512,12 +573,11 @@ pub async fn apply_patch_handler(
                 "every A/D line must name a graph: a dataset patch applies to the dataset's registered graphs".to_string(),
             ));
         };
-        let iri = expand(&g).ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("graph {g} uses an undeclared prefix"),
-            )
-        })?;
+        let iri = g
+            .strip_prefix('<')
+            .and_then(|g| g.strip_suffix('>'))
+            .unwrap_or(&g)
+            .to_string();
         if !registered.contains(&iri) {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -597,12 +657,12 @@ mod tests {
         assert!(!p.aborted);
         let sparql = to_sparql_update(&p);
         assert!(
-            sparql.starts_with("PREFIX ex: <http://example.org/>\n"),
-            "{sparql}"
+            !sparql.contains("PREFIX"),
+            "terms are expanded at parse time, the update declares no prefixes: {sparql}"
         );
         assert!(
             sparql.contains(
-                "INSERT DATA {\n  GRAPH <urn:g> {\n    ex:s ex:p \"v \\\"q\\\" .\"@en .\n"
+                "INSERT DATA {\n  GRAPH <urn:g> {\n    <http://example.org/s> <http://example.org/p> \"v \\\"q\\\" .\"@en .\n"
             ),
             "{sparql}"
         );
@@ -626,6 +686,54 @@ mod tests {
             .contains("terminating"));
         let aborted = parse("TX .\nA <urn:s> <urn:p> <urn:o> <urn:g> .\nTA .\n").unwrap();
         assert!(aborted.aborted && aborted.ops.is_empty());
+    }
+
+    /// A "prefixed name" is only accepted when its prefix was declared and its
+    /// local part is a `PN_LOCAL`. The old check took any whitespace-free token
+    /// containing `:`, so `ex:o}GRAPH<urn:x>{<a><b><c>` — SPARQL needs no
+    /// whitespace between IRIs — closed the registered `GRAPH { … }` block and
+    /// wrote to a graph the dataset never registered.
+    #[test]
+    fn prefixed_names_must_be_declared_and_well_formed() {
+        let undeclared = parse("TX .\nA ex:s <urn:p> <urn:o> <urn:g> .\nTC .\n").unwrap_err();
+        assert!(undeclared.contains("undeclared prefix"), "{undeclared}");
+
+        let escape = parse(
+            "PA ex: <http://example.org/> .\nTX .\nA ex:s ex:p ex:o}GRAPH<urn:x>{<urn:a><urn:b><urn:c> <urn:g> .\nTC .\n",
+        )
+        .unwrap_err();
+        assert!(escape.contains("not a prefixed name"), "{escape}");
+
+        for bad in [
+            "ex:a;b", "ex:a<b", "ex:a>b", "ex:a\"b", "ex:a'b", "ex:a\\b", "ex:a%2", "ex:{",
+        ] {
+            let text = format!(
+                "PA ex: <http://example.org/> .\nTX .\nA <urn:s> <urn:p> {bad} <urn:g> .\nTC .\n"
+            );
+            assert!(parse(&text).is_err(), "{bad} must be refused");
+        }
+
+        // A datatype may be prefixed too, and is expanded like any other IRI.
+        let p = parse(
+            "PA xsd: <http://www.w3.org/2001/XMLSchema#> .\nPA ex: <http://example.org/> .\nTX .\nA ex:s ex:p \"1\"^^xsd:integer ex:g .\nTC .\n",
+        )
+        .unwrap();
+        let Op::Add(q) = &p.ops[0] else { panic!() };
+        assert_eq!(q.s, "<http://example.org/s>");
+        assert_eq!(q.o, "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+        assert_eq!(q.g.as_deref(), Some("<http://example.org/g>"));
+        // `PD` removes the declaration for the lines after it.
+        let after_pd = parse(
+            "PA ex: <http://example.org/> .\nPD ex: .\nTX .\nA ex:s <urn:p> <urn:o> <urn:g> .\nTC .\n",
+        )
+        .unwrap_err();
+        assert!(after_pd.contains("undeclared prefix"), "{after_pd}");
+        // The generated update is exactly one INSERT DATA into the named graph.
+        let sparql = to_sparql_update(&p);
+        let parsed = spargebra::SparqlParser::new()
+            .parse_update(&sparql)
+            .expect("generated update must parse");
+        assert_eq!(parsed.operations.len(), 1, "{sparql}");
     }
 
     #[test]

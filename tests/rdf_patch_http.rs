@@ -317,3 +317,90 @@ async fn version_diff_as_patch_applies_to_another_dataset() {
         "{st}"
     );
 }
+
+/// Only well-formed, declared prefixed names reach the generated update. The
+/// old check accepted any whitespace-free token containing `:`, and the
+/// registered-graph gate only looked at the parsed graph position — so an
+/// object token like `ex:o}GRAPH<urn:x>{<urn:a><urn:b><urn:c>` (SPARQL needs
+/// no whitespace between IRIs) closed the registered `GRAPH { … }` block and
+/// wrote into a graph the dataset never registered.
+#[tokio::test]
+async fn patch_rejects_undeclared_and_malformed_prefixed_names() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "dst",
+            "dst",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("dst", G2).unwrap();
+    let app = test_app(state.clone());
+    let ask = |q: &str| matches!(state.store.query(q), Ok(QueryResults::Boolean(true)));
+    let graphs_before = state.store.store().named_graphs().count();
+    let post = |body: String| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            req(
+                &app,
+                Method::POST,
+                "/api/datasets/dst/patch",
+                Some(&token),
+                Some("application/rdf-patch"),
+                None,
+                &body,
+            )
+            .await
+        }
+    };
+
+    // An undeclared prefix is refused, even in a well-shaped local part.
+    let (st, _, txt) = post(format!("TX .\nA ex:s <urn:p> <urn:o> <{G2}> .\nTC .\n")).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("undeclared prefix"), "{txt}");
+
+    // A declared prefix with a local part carrying `}`, `<`, `>` and `{`.
+    let (st, _, txt) = post(format!(
+        "PA ex: <http://example.org/> .\nTX .\nA ex:s ex:p ex:o}}GRAPH<urn:x>{{<urn:a><urn:b><urn:c> <{G2}> .\nTC .\n"
+    ))
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("not a prefixed name"), "{txt}");
+    assert!(
+        !ask("ASK { GRAPH <urn:x> { ?s ?p ?o } }"),
+        "nothing may have been written to the unregistered graph"
+    );
+    assert!(
+        !ask(&format!("ASK {{ GRAPH <{G2}> {{ ?s ?p ?o }} }}")),
+        "nothing may have been written to the registered graph either"
+    );
+    // The same with `;`, `"` and whitespace-free `<`: refused.
+    for bad in ["ex:o;DROP", "ex:o\"x", "ex:a<urn:b>"] {
+        let (st, _, txt) = post(format!(
+            "PA ex: <http://example.org/> .\nTX .\nA <urn:s> <urn:p> {bad} <{G2}> .\nTC .\n"
+        ))
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {txt}");
+    }
+    assert_eq!(
+        state.store.store().named_graphs().count(),
+        graphs_before,
+        "no graph may have been created"
+    );
+
+    // A proper prefixed name — declared, PN_LOCAL — still applies.
+    let (st, _, txt) = post(format!(
+        "PA ex: <http://example.org/> .\nTX .\nA ex:s ex:p ex:o-1.v2 <{G2}> .\nTC .\n"
+    ))
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert!(ask(&format!(
+        "ASK {{ GRAPH <{G2}> {{ <http://example.org/s> <http://example.org/p> <http://example.org/o-1.v2> }} }}"
+    )));
+}
