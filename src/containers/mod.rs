@@ -245,6 +245,17 @@ fn dataset(state: &AppState, uid: Option<&str>, id: &str) -> Result<Dataset, Api
     Ok(ds)
 }
 
+/// May an imported payload be loaded into `iri` for `dataset_id`? Only a graph
+/// in the dataset's own reserved namespace that no other dataset has registered.
+/// Fails closed on a registry error.
+fn payload_graph_allowed(state: &AppState, dataset_id: &str, iri: &str) -> bool {
+    crate::auth::dataset_graph::dataset_owns_graph(&state.base_url, dataset_id, iri)
+        && !state
+            .auth_db
+            .graph_has_other_dataset_refs(iri, dataset_id)
+            .unwrap_or(true)
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ProfileQuery {
     pub profile: Option<String>,
@@ -365,32 +376,55 @@ pub async fn import_container(
         }));
     }
 
-    // 2. RDF payloads → role-typed graphs.
+    // 2. RDF payloads → role-typed graphs. The graph IRI an index gives a
+    //    payload comes from an untrusted file: it is honoured only when it lies
+    //    inside this dataset's own namespace and no other dataset has claimed
+    //    it (admins included — the caller did not choose the IRI, the archive
+    //    did). Anything else is re-homed under the container's namespace; the
+    //    original IRI is kept as `ots:sourceIri` in the index graph.
+    let mut sources: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut targets: Vec<String> = Vec::with_capacity(manifest.payloads.len());
+    for p in &manifest.payloads {
+        let minted = format!(
+            "{container_ns}/{}/{}",
+            match p.kind {
+                PayloadKind::Linkset => "linkset",
+                PayloadKind::Triples => "triples",
+                PayloadKind::Ontology => "ontology",
+            },
+            sanitize_segment(&p.filename)
+        );
+        let claimed = p
+            .iri
+            .as_deref()
+            .filter(|i| oxigraph::model::NamedNode::new(*i).is_ok());
+        let iri = match claimed {
+            Some(i) if payload_graph_allowed(&state, &dataset_id, i) => i.to_string(),
+            Some(i) => {
+                warnings.push(format!(
+                    "payload {}: graph <{i}> is outside dataset '{dataset_id}' or claimed by another dataset; stored as <{minted}>",
+                    p.filename
+                ));
+                sources.insert(minted.clone(), i.to_string());
+                minted
+            }
+            None => minted,
+        };
+        targets.push(iri);
+    }
     let st = state.clone();
-    let payloads = manifest.payloads.clone();
-    let ns = container_ns.clone();
+    let payloads: Vec<(RdfPayload, String)> =
+        manifest.payloads.iter().cloned().zip(targets).collect();
     let loaded = tokio::task::spawn_blocking(
         move || -> Vec<Result<(String, PayloadKind, String, usize), String>> {
             payloads
                 .iter()
-                .map(|p| {
-                    let iri = match &p.iri {
-                        Some(i) if oxigraph::model::NamedNode::new(i).is_ok() => i.clone(),
-                        _ => format!(
-                            "{ns}/{}/{}",
-                            match p.kind {
-                                PayloadKind::Linkset => "linkset",
-                                PayloadKind::Triples => "triples",
-                                PayloadKind::Ontology => "ontology",
-                            },
-                            sanitize_segment(&p.filename)
-                        ),
-                    };
+                .map(|(p, iri)| {
                     st.store
-                        .load_str(&p.text, p.format, Some(&iri))
+                        .load_str(&p.text, p.format, Some(iri))
                         .map_err(|e| format!("{}: {e}", p.filename))?;
-                    let n = st.store.graph_count_cached(Some(&iri)).unwrap_or(0);
-                    Ok((iri, p.kind, p.filename.clone(), n))
+                    let n = st.store.graph_count_cached(Some(iri)).unwrap_or(0);
+                    Ok((iri.clone(), p.kind, p.filename.clone(), n))
                 })
                 .collect()
         },
@@ -445,6 +479,11 @@ pub async fn import_container(
                 "<{iri}> <https://opentriplestore.org/ns#partOfContainer> <{}> ; <https://opentriplestore.org/ns#graphRole> \"{role}\" .\n",
                 manifest.iri
             ));
+            if let Some(src) = sources.get(iri) {
+                extra.push_str(&format!(
+                    "<{iri}> <https://opentriplestore.org/ns#sourceIri> <{src}> .\n"
+                ));
+            }
         }
     }
     state

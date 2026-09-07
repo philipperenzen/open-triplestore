@@ -1130,8 +1130,16 @@ fn apply_rule(
             // landed in the store's default graph — outside every registered,
             // ACL'd, dataset-owned graph, invisible to the very data graph the
             // rule was inferring over.
+            // SPARQL 1.1 Update grammar is `Prologue ( Update1 … )` with `WITH`
+            // part of `Modify`, so the `PREFIX`/`BASE` prologue that `load_rules`
+            // expands from `sh:prefixes` must stay ahead of `WITH` — otherwise
+            // the update fails to parse and, as rule errors propagate, `infer`
+            // fails for every prefixed rule on a single-graph dataset.
             match target_graph {
-                Some(g) => format!("WITH <{g}> {update}"),
+                Some(g) => {
+                    let head = prologue_len(&update);
+                    format!("{}WITH <{g}> {}", &update[..head], &update[head..])
+                }
                 None => update,
             }
         }
@@ -1166,24 +1174,39 @@ fn apply_rule(
 /// `WHERE` clause are kept verbatim. A `PREFIX`/`BASE` prologue is skipped first
 /// so a `construct` substring inside a prefix IRI is never mistaken for it.
 fn construct_to_update(body: &str) -> String {
+    let head_len = prologue_len(body);
+    let rest = &body[head_len..];
+    let token = leading_token(rest);
+    if token.eq_ignore_ascii_case("construct") {
+        format!("{}INSERT{}", &body[..head_len], &rest[token.len()..])
+    } else {
+        body.to_string()
+    }
+}
+
+/// Byte length of the leading `PREFIX`/`BASE` prologue of a SPARQL body,
+/// trailing whitespace included, so `body[..len]` is the prologue and
+/// `body[len..]` starts at the first operation keyword. Zero when there is no
+/// prologue or a declaration is unterminated (the parser reports that).
+fn prologue_len(body: &str) -> usize {
     let mut rest = body.trim_start();
     loop {
-        let token = rest
-            .split(|c: char| c.is_whitespace() || c == '<' || c == '{')
-            .next()
-            .unwrap_or("");
-        if token.eq_ignore_ascii_case("prefix") || token.eq_ignore_ascii_case("base") {
-            match rest.find('>') {
-                Some(gt) => rest = rest[gt + 1..].trim_start(),
-                None => return body.to_string(),
-            }
-        } else if token.eq_ignore_ascii_case("construct") {
-            let head_len = body.len() - rest.len();
-            return format!("{}INSERT{}", &body[..head_len], &rest[token.len()..]);
-        } else {
-            return body.to_string();
+        let token = leading_token(rest);
+        if !(token.eq_ignore_ascii_case("prefix") || token.eq_ignore_ascii_case("base")) {
+            return body.len() - rest.len();
+        }
+        match rest.find('>') {
+            Some(gt) => rest = rest[gt + 1..].trim_start(),
+            None => return 0,
         }
     }
+}
+
+/// The first keyword-like token of `s` (up to whitespace, `<` or `{`).
+fn leading_token(s: &str) -> &str {
+    s.split(|c: char| c.is_whitespace() || c == '<' || c == '{')
+        .next()
+        .unwrap_or("")
 }
 
 /// Stringify a triple-rule term, mapping `sh:this` to the `$this` placeholder so

@@ -69,6 +69,50 @@ fn sample_icdd() -> Vec<u8> {
     buf
 }
 
+/// A minimal ICDD: one linkset, named `about` in the index.
+fn linkset_icdd(about: &str) -> Vec<u8> {
+    let index = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:ct="{CT}">
+  <ct:ContainerDescription rdf:about="urn:icdd:minimal">
+    <ct:containsLinkset>
+      <ct:Linkset rdf:about="{about}"><ct:filename>links.ttl</ct:filename></ct:Linkset>
+    </ct:containsLinkset>
+  </ct:ContainerDescription>
+</rdf:RDF>
+"#
+    );
+    let links = format!("@prefix ls: <{LS}> .\n<urn:icdd:link:1> a ls:Link .\n");
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (name, bytes) in [
+            ("Index.rdf", index.as_bytes()),
+            ("Payload triples/links.ttl", links.as_bytes()),
+        ] {
+            w.start_file(name, opts).unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    buf
+}
+
+fn count(state: &open_triplestore::server::AppState, graph: &str) -> u64 {
+    match state.store.query(&format!(
+        "SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}"
+    )) {
+        Ok(QueryResults::Solutions(sol)) => sol
+            .flatten()
+            .next()
+            .and_then(|r| r.get("n").map(|t| t.to_string()))
+            .and_then(|t| t.trim_start_matches('"').split('"').next()?.parse().ok())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 async fn send(
     app: &Router,
     method: Method,
@@ -165,9 +209,13 @@ async fn icdd_container_imports_exports_and_round_trips() {
     };
     let (links_role, links_iri) = role_of("links.ttl").expect("linkset graph");
     assert_eq!(links_role, "linkset");
-    assert_eq!(
-        links_iri, "urn:icdd:linkset:main",
-        "the linkset keeps its index IRI"
+    assert!(
+        links_iri.starts_with("http://localhost:7878/dataset/a/"),
+        "a linkset IRI outside the dataset is re-homed under it: {links_iri}"
+    );
+    assert!(
+        ask(&format!("ASK {{ GRAPH <{}> {{ <{links_iri}> <https://opentriplestore.org/ns#sourceIri> <urn:icdd:linkset:main> }} }}", r["index_graph"].as_str().unwrap())),
+        "the index graph records the linkset's original IRI"
     );
     let (data_role, data_iri) = role_of("data.ttl").expect("payload graph");
     assert_eq!(data_role, "instances");
@@ -245,7 +293,7 @@ async fn icdd_container_imports_exports_and_round_trips() {
     let tmp = open_triplestore::store::TripleStore::in_memory().unwrap();
     tmp.load_str(&index, RdfFormat::RdfXml, Some("urn:idx"))
         .expect("Index.rdf is valid RDF/XML");
-    assert!(matches!(tmp.query(&format!("ASK {{ GRAPH <urn:idx> {{ ?c a <{CT}ContainerDescription> ; <{CT}conformanceIndicator> \"ICDD-Part1-Container\" ; <{CT}containsLinkset> <urn:icdd:linkset:main> . <urn:icdd:linkset:main> <{CT}filename> ?f }} }}")), Ok(QueryResults::Boolean(true))), "the linkset keeps its IRI in the exported index: {index}");
+    assert!(matches!(tmp.query(&format!("ASK {{ GRAPH <urn:idx> {{ ?c a <{CT}ContainerDescription> ; <{CT}conformanceIndicator> \"ICDD-Part1-Container\" ; <{CT}containsLinkset> ?l . ?l <{CT}filename> ?f . FILTER(STRSTARTS(STR(?l), \"http://localhost:7878/dataset/a/\")) }} }}")), Ok(QueryResults::Boolean(true))), "the exported index lists the linkset by its graph IRI: {index}");
 
     // Round trip: the export imports into another dataset with the same data.
     let (st, body, _) = send(
@@ -326,4 +374,136 @@ async fn icdd_container_imports_exports_and_round_trips() {
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn icdd_payload_graph_outside_the_dataset_is_rehomed() {
+    let (state, token) = admin_state();
+    for id in ["a", "v"] {
+        state
+            .auth_db
+            .create_dataset(
+                id,
+                id,
+                None,
+                OwnerType::User,
+                "adm",
+                Visibility::Private,
+                None,
+            )
+            .unwrap();
+    }
+    // The victim: another dataset's graph, registered to it, with data.
+    let victim = "http://localhost:7878/dataset/v/data";
+    state.auth_db.add_dataset_graph("v", victim).unwrap();
+    state
+        .store
+        .load_str(
+            "<urn:v:1> <urn:p> \"one\" . <urn:v:2> <urn:p> \"two\" .",
+            RdfFormat::Turtle,
+            Some(victim),
+        )
+        .unwrap();
+    let before = count(&state, victim);
+    assert_eq!(before, 2);
+    let app = test_app(state.clone());
+
+    // An index whose linkset claims the victim graph's IRI.
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        "/api/datasets/a/containers/import",
+        Some(&token),
+        Some("application/zip"),
+        linkset_icdd(victim),
+    )
+    .await;
+    let txt = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let r: Value = serde_json::from_str(&txt).unwrap();
+    let linkset_iri = r["graphs"][0]["iri"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        count(&state, victim),
+        before,
+        "the victim graph is untouched"
+    );
+    assert!(
+        !state
+            .auth_db
+            .list_dataset_graphs("a")
+            .unwrap()
+            .contains(&victim.to_string()),
+        "the victim graph is not registered to the importing dataset"
+    );
+    assert_ne!(linkset_iri, victim);
+    assert!(
+        linkset_iri.starts_with("http://localhost:7878/dataset/a/"),
+        "the payload lands under the importing dataset's namespace: {linkset_iri}"
+    );
+    assert_eq!(count(&state, &linkset_iri), 1, "the payload was loaded");
+    assert!(
+        state
+            .auth_db
+            .list_dataset_graphs("a")
+            .unwrap()
+            .contains(&linkset_iri),
+        "the re-homed graph is registered to the importing dataset"
+    );
+    let index_graph = r["index_graph"].as_str().unwrap();
+    assert!(
+        matches!(
+            state.store.query(&format!(
+                "ASK {{ GRAPH <{index_graph}> {{ <{linkset_iri}> <https://opentriplestore.org/ns#sourceIri> <{victim}> }} }}"
+            )),
+            Ok(QueryResults::Boolean(true))
+        ),
+        "the index graph keeps the original IRI as ots:sourceIri"
+    );
+    assert!(
+        r["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains(victim)),
+        "the response warns about the re-homed payload: {txt}"
+    );
+}
+
+#[tokio::test]
+async fn icdd_payload_graph_inside_the_dataset_namespace_is_honoured() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "a",
+            "a",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+    let own = "http://localhost:7878/dataset/a/links/main";
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        "/api/datasets/a/containers/import",
+        Some(&token),
+        Some("application/zip"),
+        linkset_icdd(own),
+    )
+    .await;
+    let txt = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let r: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(r["graphs"][0]["iri"], own, "{txt}");
+    assert_eq!(count(&state, own), 1);
+    assert!(state
+        .auth_db
+        .list_dataset_graphs("a")
+        .unwrap()
+        .contains(&own.to_string()));
 }
