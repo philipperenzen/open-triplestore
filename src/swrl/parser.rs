@@ -11,16 +11,21 @@
 //! The ad-hoc text form ([`parse_swrl_text`], `A(?x) ^ B(?x,?y) -> C(?y)`) is a
 //! convenience shorthand, not a second serialization of the same model. Two
 //! limits follow from [`parse_single_atom`]: every predicate is taken verbatim
-//! as an IRI, so bare names become relative IRIs and the generated SPARQL will
-//! not parse — write them out in full; and every two-argument atom becomes an
-//! ObjectPropertyAtom, so `swrlb:` builtins cannot be expressed in the text form
-//! at all. Use the OWL/XML form for any rule with a builtin.
+//! as an IRI — there are no prefix declarations — so it must be an absolute
+//! IRI (`http://ex/Person(?x)`; bare names are rejected); and every
+//! two-argument atom becomes an ObjectPropertyAtom, so `swrlb:` builtins cannot
+//! be expressed in the text form at all. Use the OWL/XML form for any rule with
+//! a builtin.
+//!
+//! Both forms refuse a class or property predicate that is not an IRI at parse
+//! time ([`validate_predicate_iri`]): the predicate ends up inside the generated
+//! SPARQL Update, and text is not a place for unchecked input.
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use tracing::{debug, warn};
 
-use super::engine::{Atom, SwrlArg, SwrlRule};
+use super::engine::{validate_predicate_iri, Atom, SwrlArg, SwrlRule};
 
 /// Parse SWRL rules from an OWL/XML document.
 pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
@@ -166,13 +171,18 @@ pub fn parse_swrl(xml: &str) -> Result<Vec<SwrlRule>, String> {
                     | "DifferentIndividualsAtom"
                     | "BuiltinAtom" => {
                         if let Some(atom_builder) = current_atom.take() {
-                            if let Ok(atom) = atom_builder.build() {
-                                if let Some(ref mut rule) = current_rule {
-                                    if in_body {
-                                        rule.body.push(atom);
-                                    } else if in_head {
-                                        rule.head.push(atom);
-                                    }
+                            // A malformed atom fails the document. Dropping it
+                            // and keeping the rule would run the rule with one
+                            // condition fewer — the same unsoundness as the
+                            // untranslatable-builtin case in the engine.
+                            let atom = atom_builder
+                                .build()
+                                .map_err(|e| format!("Malformed SWRL {local_name}: {e}"))?;
+                            if let Some(ref mut rule) = current_rule {
+                                if in_body {
+                                    rule.body.push(atom);
+                                } else if in_head {
+                                    rule.head.push(atom);
                                 }
                             }
                         }
@@ -255,6 +265,7 @@ fn parse_single_atom(input: &str) -> Result<Atom, String> {
         .ok_or_else(|| format!("Expected ')' in atom: {}", input))?;
 
     let predicate = input[..paren_start].trim();
+    validate_predicate_iri(predicate, "predicate")?;
     let args_str = &input[paren_start + 1..paren_end];
     let args: Vec<SwrlArg> = args_str
         .split(',')
@@ -317,10 +328,14 @@ enum AtomBuilder {
 impl AtomBuilder {
     fn build(self) -> Result<Atom, String> {
         match self {
-            AtomBuilder::Class { class_iri, arg } => Ok(Atom::ClassAtom {
-                class_iri: class_iri.ok_or("ClassAtom missing class IRI")?,
-                arg: arg.ok_or("ClassAtom missing argument")?,
-            }),
+            AtomBuilder::Class { class_iri, arg } => {
+                let class_iri = class_iri.ok_or("ClassAtom missing class IRI")?;
+                validate_predicate_iri(&class_iri, "class")?;
+                Ok(Atom::ClassAtom {
+                    class_iri,
+                    arg: arg.ok_or("ClassAtom missing argument")?,
+                })
+            }
             AtomBuilder::Property {
                 property,
                 arg1,
@@ -328,6 +343,7 @@ impl AtomBuilder {
                 is_data,
             } => {
                 let prop = property.ok_or("PropertyAtom missing property IRI")?;
+                validate_predicate_iri(&prop, "property")?;
                 let a1 = arg1.ok_or("PropertyAtom missing first argument")?;
                 let a2 = arg2.ok_or("PropertyAtom missing second argument")?;
                 if is_data {
@@ -473,10 +489,10 @@ mod tests {
     fn test_parse_text_rules() {
         let input = r#"
 # If ?x is a Person and ?x knows ?y, then ?y is a Person
-Person(?x) ^ knows(?x, ?y) -> Person(?y)
+http://ex/Person(?x) ^ http://ex/knows(?x, ?y) -> http://ex/Person(?y)
 
 # If ?x is a Parent and ?x hasChild ?y, then ?y hasParent ?x
-Parent(?x) ^ hasChild(?x, ?y) -> hasParent(?y, ?x)
+http://ex/Parent(?x) ^ http://ex/hasChild(?x, ?y) -> http://ex/hasParent(?y, ?x)
 "#;
         let rules = parse_swrl_text(input).unwrap();
         assert_eq!(rules.len(), 2);
@@ -511,10 +527,49 @@ Parent(?x) ^ hasChild(?x, ?y) -> hasParent(?y, ?x)
 
     #[test]
     fn test_parse_single_atom() {
-        let atom = parse_single_atom("Person(?x)").unwrap();
+        let atom = parse_single_atom("http://ex/Person(?x)").unwrap();
         assert!(matches!(atom, Atom::ClassAtom { .. }));
 
-        let atom = parse_single_atom("knows(?x, ?y)").unwrap();
+        let atom = parse_single_atom("http://ex/knows(?x, ?y)").unwrap();
         assert!(matches!(atom, Atom::ObjectPropertyAtom { .. }));
+    }
+
+    /// Predicates are validated where they are read. A bare name is a relative
+    /// IRI and is refused; so is anything carrying SPARQL syntax.
+    #[test]
+    fn text_form_rejects_predicates_that_are_not_iris() {
+        let err = parse_single_atom("Person(?x)").unwrap_err();
+        assert!(err.contains("Person"), "{err}");
+        let err = parse_swrl_text(
+            "http://ex/Person> } ; INSERT DATA { GRAPH <urn:probe> { <urn:s> <urn:p> <urn:o> } } ; INSERT { } WHERE { ?z a <http://ex/Q(?x) -> http://ex/T(?x)",
+        )
+        .unwrap_err();
+        assert!(err.contains("Invalid SWRL predicate IRI"), "{err}");
+    }
+
+    /// The OWL/XML form: a `Class`/`ObjectProperty` IRI attribute that is not an
+    /// IRI fails the document instead of being dropped from the rule.
+    #[test]
+    fn xml_form_rejects_predicates_that_are_not_iris() {
+        let xml = r#"<?xml version="1.0"?>
+<Ontology xmlns="http://www.w3.org/2002/07/owl#">
+    <DLSafeRule>
+        <Body>
+            <ObjectPropertyAtom>
+                <ObjectProperty IRI="http://ex/p> ; DROP ALL ; INSERT { } WHERE { ?z &lt;http://ex/q"/>
+                <Variable IRI="urn:swrl:var#x"/>
+                <Variable IRI="urn:swrl:var#y"/>
+            </ObjectPropertyAtom>
+        </Body>
+        <Head>
+            <ClassAtom>
+                <Class IRI="http://ex/Agent"/>
+                <Variable IRI="urn:swrl:var#x"/>
+            </ClassAtom>
+        </Head>
+    </DLSafeRule>
+</Ontology>"#;
+        let err = parse_swrl(xml).unwrap_err();
+        assert!(err.contains("Invalid SWRL property IRI"), "{err}");
     }
 }

@@ -101,6 +101,29 @@ impl SwrlArg {
     }
 }
 
+/// Check that a class or property predicate is an absolute IRI.
+///
+/// Both rule syntaxes hand predicates over verbatim (`Person(?x)` in the text
+/// form, the `IRI` attribute in OWL/XML), so this is where a predicate that is
+/// not an IRI is refused with a message naming it. Surrounding `<…>` is
+/// tolerated, as the text form allows it.
+pub(crate) fn validate_predicate_iri(iri: &str, what: &str) -> Result<NamedNode, String> {
+    let trimmed = iri.trim_start_matches('<').trim_end_matches('>');
+    NamedNode::new(trimmed).map_err(|e| {
+        format!("Invalid SWRL {what} IRI '{trimmed}': {e} (predicates must be absolute IRIs)")
+    })
+}
+
+/// Render a class or property predicate as a SPARQL IRI term.
+///
+/// Same rule as [`SwrlArg::to_sparql`]: the text is validated by `NamedNode`
+/// and printed by its `Display`, never pasted between angle brackets. The
+/// parser already refuses bad predicates; this is the second line, for rules
+/// built in code or by a future syntax.
+fn predicate_to_sparql(iri: &str, what: &str) -> Result<String, String> {
+    Ok(validate_predicate_iri(iri, what)?.to_string())
+}
+
 /// Result of SWRL rule execution.
 #[derive(Debug, Clone, Serialize)]
 pub struct SwrlExecutionResult {
@@ -180,37 +203,29 @@ pub fn execute_rules(
         debug!("Iteration {}: {} triples before", iteration, count_before);
 
         for (name, sparql) in &sparql_rules {
-            match store.query_options().parse_update(sparql) {
-                Ok(update) => match update.on_store(store.store()).execute() {
-                    Ok(()) => {
-                        if iteration == 1 {
-                            rule_results.push(RuleResult {
-                                rule_name: name.clone(),
-                                sparql: sparql.clone(),
-                                success: true,
-                                error: None,
-                            });
-                        }
+            // Through `TripleStore::update`, not a raw `parse_update(..).execute()`
+            // on the inner store: the store's write guard (mirror, query cache)
+            // and per-graph count maintenance must see these writes like any
+            // other update.
+            match store.update(sparql) {
+                Ok(()) => {
+                    if iteration == 1 {
+                        rule_results.push(RuleResult {
+                            rule_name: name.clone(),
+                            sparql: sparql.clone(),
+                            success: true,
+                            error: None,
+                        });
                     }
-                    Err(e) => {
-                        warn!("Rule {} failed: {}", name, e);
-                        if iteration == 1 {
-                            rule_results.push(RuleResult {
-                                rule_name: name.clone(),
-                                sparql: sparql.clone(),
-                                success: false,
-                                error: Some(e.to_string()),
-                            });
-                        }
-                    }
-                },
+                }
                 Err(e) => {
+                    warn!("Rule {} failed: {}", name, e);
                     if iteration == 1 {
                         rule_results.push(RuleResult {
                             rule_name: name.clone(),
                             sparql: sparql.clone(),
                             success: false,
-                            error: Some(format!("SPARQL parse error: {}", e)),
+                            error: Some(e.to_string()),
                         });
                     }
                 }
@@ -235,9 +250,6 @@ pub fn execute_rules(
         }
     }
 
-    // Rebuild graph index after rule execution
-    store.rebuild_graph_index();
-
     Ok(SwrlExecutionResult {
         rules_count: rules.len(),
         iterations: iteration,
@@ -260,9 +272,9 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
         match atom {
             Atom::ClassAtom { class_iri, arg } => {
                 where_patterns.push(format!(
-                    "  {} a <{}> .",
+                    "  {} a {} .",
                     arg.to_sparql()?,
-                    class_iri.trim_start_matches('<').trim_end_matches('>')
+                    predicate_to_sparql(class_iri, "class")?
                 ));
             }
             Atom::ObjectPropertyAtom {
@@ -276,9 +288,9 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
                 arg2,
             } => {
                 where_patterns.push(format!(
-                    "  {} <{}> {} .",
+                    "  {} {} {} .",
                     arg1.to_sparql()?,
-                    property.trim_start_matches('<').trim_end_matches('>'),
+                    predicate_to_sparql(property, "property")?,
                     arg2.to_sparql()?
                 ));
             }
@@ -322,9 +334,9 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
         match atom {
             Atom::ClassAtom { class_iri, arg } => {
                 insert_patterns.push(format!(
-                    "  {} a <{}> .",
+                    "  {} a {} .",
                     arg.to_sparql()?,
-                    class_iri.trim_start_matches('<').trim_end_matches('>')
+                    predicate_to_sparql(class_iri, "class")?
                 ));
             }
             Atom::ObjectPropertyAtom {
@@ -338,9 +350,9 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
                 arg2,
             } => {
                 insert_patterns.push(format!(
-                    "  {} <{}> {} .",
+                    "  {} {} {} .",
                     arg1.to_sparql()?,
-                    property.trim_start_matches('<').trim_end_matches('>'),
+                    predicate_to_sparql(property, "property")?,
                     arg2.to_sparql()?
                 ));
             }
@@ -583,6 +595,51 @@ mod tests {
         assert!(
             evil.to_sparql().is_err(),
             "an unrepresentable IRI must be an error, not spliced text"
+        );
+    }
+
+    /// Class and property predicates take the same road as arguments: a value
+    /// that is not an IRI is refused, never interpolated between `<…>`. The
+    /// text `<http://ex/A> } ; INSERT DATA …` used to land verbatim in the
+    /// WHERE clause and turn one rule into several update operations.
+    #[test]
+    fn class_and_property_predicates_that_are_not_iris_are_rejected() {
+        let payload = "http://ex/Person> } ; INSERT DATA { GRAPH <urn:probe> { <urn:s> <urn:p> <urn:o> } } ; INSERT { } WHERE { ?z a <http://ex/Q";
+        let by_class = SwrlRule {
+            name: None,
+            body: vec![Atom::ClassAtom {
+                class_iri: payload.to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+            head: vec![Atom::ClassAtom {
+                class_iri: "http://ex/T".to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+        };
+        let err = rule_to_sparql(&by_class, None).expect_err("class predicate");
+        assert!(err.contains("class IRI"), "{err}");
+
+        let by_property = SwrlRule {
+            name: None,
+            body: vec![Atom::ClassAtom {
+                class_iri: "http://ex/Person".to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+            head: vec![Atom::ObjectPropertyAtom {
+                property: payload.to_string(),
+                arg1: SwrlArg::Variable("?x".to_string()),
+                arg2: SwrlArg::Variable("?x".to_string()),
+            }],
+        };
+        let err = rule_to_sparql(&by_property, None).expect_err("property predicate");
+        assert!(err.contains("property IRI"), "{err}");
+
+        // A relative name is not an IRI either.
+        assert!(validate_predicate_iri("Person", "class").is_err());
+        // Angle brackets around a proper IRI are tolerated.
+        assert_eq!(
+            predicate_to_sparql("<http://ex/Person>", "class").unwrap(),
+            "<http://ex/Person>"
         );
     }
 
