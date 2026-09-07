@@ -1187,6 +1187,18 @@ impl TripleStore {
         quads: Vec<Quad>,
         to_graph: Option<&str>,
     ) -> Result<Vec<Quad>, StoreError> {
+        self.insert_quads_and_reindex_into(quads, to_graph, false)
+    }
+
+    /// [`Self::insert_quads_and_reindex`] for a caller that knows the target
+    /// graph holds nothing (it just emptied it): every distinct quad is new,
+    /// so the per-quad `contains` probe is skipped.
+    fn insert_quads_and_reindex_into(
+        &self,
+        quads: Vec<Quad>,
+        to_graph: Option<&str>,
+        target_is_empty: bool,
+    ) -> Result<Vec<Quad>, StoreError> {
         let _w = self.begin_write();
         // A graph-targeted load knows exactly how many quads are new (duplicates
         // within the batch and quads already stored do not count), so the graph
@@ -1198,7 +1210,7 @@ impl TripleStore {
                 std::collections::HashSet::with_capacity(quads.len());
             let mut fresh = Vec::new();
             for q in &quads {
-                if seen.insert(q) && !self.store.contains(q.as_ref())? {
+                if seen.insert(q) && (target_is_empty || !self.store.contains(q.as_ref())?) {
                     fresh.push(q.clone());
                 }
             }
@@ -1349,6 +1361,10 @@ impl TripleStore {
         data: &str,
         format: RdfFormat,
     ) -> Result<(), StoreError> {
+        // Bracket the whole replace, clear included: the guard nests with the
+        // one the load takes, and the mirror must be stale before the graph is
+        // emptied, not only before it is refilled.
+        let _w = self.begin_write();
         let graph_name = match graph_iri {
             Some(iri) => GraphNameRef::NamedNode(
                 NamedNodeRef::new(iri)
@@ -1365,7 +1381,16 @@ impl TripleStore {
         let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
 
         self.clear_graph_chunked(graph_name)?;
-        self.insert_quads_and_reindex(quads, graph_iri).map(|_| ())
+        if graph_iri.is_some() {
+            // The graph is empty now, so its cached count is exactly zero. The
+            // load below adds its new-quad count on top of whatever the index
+            // holds; leaving the pre-clear count in place made every replace
+            // report old + new (and boot-time re-PUTs compounded it per restart).
+            self.graph_index.remove(graph_iri);
+            self.graph_index.add(graph_iri, 0);
+        }
+        self.insert_quads_and_reindex_into(quads, graph_iri, true)
+            .map(|_| ())
     }
 
     /// Graph Store Protocol: POST (merge into) a named graph.
@@ -2421,6 +2446,76 @@ mod graph_index_increment_tests {
             3,
             "the index agrees with a real count"
         );
+    }
+}
+
+#[cfg(test)]
+mod graph_store_put_index_tests {
+    use super::*;
+    use oxigraph::sparql::QueryResults;
+
+    fn sparql_count(store: &TripleStore, q: &str) -> i64 {
+        match store.query(q).unwrap() {
+            QueryResults::Solutions(mut s) => match s.next().unwrap().unwrap().get(0) {
+                Some(Term::Literal(l)) => l.value().parse().unwrap(),
+                other => panic!("expected a count literal, got {other:?}"),
+            },
+            _ => panic!("expected solutions"),
+        }
+    }
+
+    /// A Graph Store PUT replaces the graph, so the cached count must be the
+    /// size of the new body — not old + new. The clear never touched the
+    /// index, and the load then added its (all fresh) quads on top of the
+    /// stale count, so every PUT-replace drifted the cached count upwards and
+    /// `SELECT (COUNT(*)) WHERE { GRAPH <g> { … } }` answered from it.
+    #[test]
+    fn graph_store_put_replace_keeps_the_cached_count_exact() {
+        let store = TripleStore::in_memory().unwrap();
+        let g = "urn:put";
+        store
+            .graph_store_put(
+                Some(g),
+                "<urn:a> <urn:p> 1 . <urn:b> <urn:p> 2 . <urn:c> <urn:p> 3 .",
+                RdfFormat::Turtle,
+            )
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(g)), Some(3));
+        assert_eq!(store.writes_in_flight(), 0);
+
+        store
+            .graph_store_put(
+                Some(g),
+                "<urn:x> <urn:p> 1 . <urn:y> <urn:p> 2 .",
+                RdfFormat::Turtle,
+            )
+            .unwrap();
+        assert_eq!(
+            store.graph_count_cached(Some(g)),
+            Some(2),
+            "a replace leaves the index at the new body's size"
+        );
+        assert_eq!(store.count_graph(Some(g)).unwrap(), 2);
+        assert_eq!(
+            sparql_count(
+                &store,
+                "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <urn:put> { ?s ?p ?o } }"
+            ),
+            2,
+            "the fast COUNT(*) path answers from the exact index"
+        );
+        assert_eq!(
+            store.writes_in_flight(),
+            0,
+            "the write bracket was released"
+        );
+
+        // A third replace does not compound either.
+        store
+            .graph_store_put(Some(g), "<urn:z> <urn:p> 1 .", RdfFormat::Turtle)
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(g)), Some(1));
+        assert_eq!(store.count_graph(Some(g)).unwrap(), 1);
     }
 }
 
