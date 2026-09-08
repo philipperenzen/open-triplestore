@@ -28,6 +28,16 @@
 //! pattern so that results are reproducible across machines. The default graph
 //! is used throughout unless stated otherwise; GeoSPARQL benchmarks store WKT
 //! geometries.
+//!
+//! # What is measured
+//!
+//! Every read benchmark repeats one query on a store nothing writes to, so with
+//! `TripleStore`'s result cache on every iteration after the first would be a
+//! cache hit and the number would measure the cache, not the engine (63 of the
+//! 68 read benchmarks did exactly that until 2026-09). `fresh_store()` therefore
+//! disables the result cache; build stores through it, never through
+//! `TripleStore::in_memory()` directly. The cached path has its own benchmark,
+//! `query/cache_hit`, which enables the cache on purpose.
 
 use std::sync::{Arc, Mutex};
 
@@ -41,7 +51,20 @@ use oxigraph::sparql::QueryResults;
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn fresh_store() -> TripleStore {
-    TripleStore::in_memory().unwrap()
+    // Result cache OFF: a benchmark that repeats one query on an unchanged store
+    // must measure evaluation, not a cache hit (see the module docs). The
+    // runners also export OTS_QUERY_CACHE=off, but the bench must not depend on
+    // the environment.
+    TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(false, 0, 0)
+}
+
+/// The one store with the result cache ON, for `query/cache_hit` only.
+fn cached_store() -> TripleStore {
+    TripleStore::in_memory()
+        .unwrap()
+        .with_query_cache(true, 256, 10_000)
 }
 
 /// Generate N generic person triples in Turtle.
@@ -512,6 +535,27 @@ fn bench_query_optional(c: &mut Criterion) {
             });
         });
     }
+    group.finish();
+}
+
+/// Measure a result-cache hit: the same small query repeated on an unchanged
+/// store with the cache ON. This is the only benchmark that exercises the cached
+/// path, and it exists because that path regresses on its own — a text scan
+/// placed in front of the lookup once cost every query ~250 ns.
+fn bench_query_cache_hit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query/cache_hit");
+
+    let store = cached_store();
+    store
+        .load_str(&gen_persons_ttl(1_000), RdfFormat::Turtle, None)
+        .unwrap();
+    let query = "SELECT ?name WHERE { <http://example.org/p0> <http://example.org/name> ?name }";
+    // Populate the cache once so every timed iteration is a hit.
+    consume_solutions(store.query(query).unwrap());
+
+    group.bench_function("point_lookup", |b| {
+        b.iter(|| consume_solutions(store.query(query).unwrap()));
+    });
     group.finish();
 }
 
@@ -1653,6 +1697,7 @@ criterion_group!(
     config = Criterion::default().sample_size(50);
     targets =
         bench_query_lookup,
+        bench_query_cache_hit,
         bench_query_lookup_limit,
         bench_query_join_2way,
         bench_query_join_3way,

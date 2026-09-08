@@ -178,6 +178,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **Benchmarks measure the engine, not the result cache.** Every read
+  benchmark in `benches/performance.rs` repeats one query on an unchanged
+  store; with the result cache on, 63 of the 68 gated read benchmarks measured
+  cache hits (the cache landed in June). The bench file now builds every store
+  with the cache disabled, every bench runner exports `OTS_QUERY_CACHE=off`,
+  and one explicit `query/cache_hit` benchmark covers the cached path. Read
+  numbers in `benches/perf_baseline.json` recorded before this are cache-hit
+  figures until the next refresh. See "What the read benchmarks measure" in
+  docs/performance.md.
 - **Standards grades now match the code.** GeoSPARQL 1.1 (no geodesic
   metric family, `aggUnion`, GeoJSON literals or Query Rewrite Extension),
   OWL 2 RL (no Table 8 datatype rules), OWL 2 EL (`owl:equivalentClass` and

@@ -108,7 +108,7 @@ if [ "${OTS_PERF_FULL:-}" = "1" ]; then
     echo "Skipping (CI is authoritative); unset OTS_PERF_FULL or install Python to gate locally."
     exit 0
   fi
-  if ! cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'; then
+  if ! OTS_QUERY_CACHE=off cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'; then
     echo "✗ Benchmark subset failed to build/run — blocking push." >&2
     exit 1
   fi

@@ -60,6 +60,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Every read benchmark repeats one query on an unchanged store. With the
+  # result cache on, every iteration after the first is a cache hit, so the
+  # numbers measure the cache, not the engine (63 of the 68 read benchmarks did,
+  # until 2026-09). The bench file disables the cache in code; this makes the
+  # merge-base side honest too while that fix is not yet on the base commit.
+  OTS_QUERY_CACHE: "off"
 
 jobs:
   perf:

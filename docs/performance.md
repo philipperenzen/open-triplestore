@@ -225,10 +225,13 @@ help when the two modes are that far apart: whichever side happens to land in th
 fast mode wins, so the *base* drawing a 54 ms sample against the change's 74 ms
 reads as +37 % with nothing to show for it.
 
-It is kept in the gated subset despite that, because it is the only benchmark
-covering the uncached read path (results above the query cache's 10 000-row cap),
-and a loose gate on that path beats none. 1.45 is chosen to sit above the observed
-span rather than to make a particular run pass.
+It is kept in the gated subset despite that: until 2026-09 it was the only read
+benchmark whose result exceeded the query cache's 10 000-row cap, i.e. the only one
+that measured evaluation at all (see *What the read benchmarks measure* below).
+1.45 is chosen to sit above the observed span rather than to make a particular run
+pass. `query_group_concat/` (1.35) and `query_alternative_path/10000` (1.5) were
+measured while the cache was still on, i.e. on replayed results; re-evaluate both
+at the first refresh that runs cache-off.
 
 Add an entry only with measurements behind it — the same table above, from a run
 with no runtime change — rather than nudging a number until CI goes green. If
@@ -268,6 +271,31 @@ the ground-update delta path the HTTP write route takes), SHACL (both the
 in-memory and the RocksDB-snapshot variant) and the concurrency groups had
 regressions worth catching. The three groups that joined later carry a
 provisional 1.5 tolerance (see above) until their noise is measured.
+
+#### What the read benchmarks measure
+
+Every `query/*`, `path/*` and `geosparql/*` benchmark repeats one query on a store
+that nothing writes to between iterations. `TripleStore` keeps a result cache
+(`OTS_QUERY_CACHE`, on by default, generation-keyed), so with the cache on every
+iteration after the first is a hit: an audit on 2026-09-08 (same binary, cache on
+vs `OTS_QUERY_CACHE=off`) found **63 of the 68** read benchmarks measuring the
+cache — `query_group_by/10000` at 1.8 µs against 8.6 ms of evaluation,
+`geosparql_sf_contains/50` at 75 ns against 135 µs, `path_zero_or_more/200` at
+4.6 µs against 6 ms. Only the five whose results are not cacheable (CONSTRUCT, or
+above the row cap) measured the engine. The gate had compared cache hits since the
+cache landed (2026-06).
+
+Since then the bench file builds every store with the result cache **disabled**
+(`fresh_store()` → `with_query_cache(false, …)`), so the numbers are evaluation
+by construction, and every runner (perf.yml, perf-baseline.yml, GitLab, the
+Makefile targets, the pre-push hook) also exports `OTS_QUERY_CACHE=off`, which
+keeps the merge-base side honest while the base commit still has the old bench
+file. One benchmark measures the cached path on purpose — `query/cache_hit`, a
+small query with the cache explicitly enabled — because that path has its own
+regressions to catch (a text scan added in front of the lookup once cost every
+query +250 ns). Read-group numbers in `benches/perf_baseline.json` recorded before
+this change are cache-hit figures and are not comparable with cache-off runs; the
+next refresh replaces them.
 
 The full suite runs only on tags / manual dispatch (see *Refreshing the
 baseline*) — and that job then runs the gated set a **second** time, so the
