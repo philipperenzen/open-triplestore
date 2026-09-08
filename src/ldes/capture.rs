@@ -7,6 +7,11 @@
 //! (direct triples plus blank-node closure); every entity that vanished
 //! becomes a tombstone. Graphs of datasets without a stream are never indexed,
 //! so writes elsewhere cost one indexed SQLite lookup.
+//!
+//! Graphs marked private are never published: [`before`] does not track them
+//! and [`publish_all`] skips them, so their entities never become members of
+//! a stream that every viewer of the dataset can read. Members published
+//! before a graph was marked private are not retracted.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -160,15 +165,26 @@ pub fn after(state: &AppState, before: Before) -> usize {
 
 /// Publish every entity of `graphs` as a member (initial publish when a
 /// stream is enabled, and after a bulk import). Only applies when the dataset
-/// has an enabled stream.
+/// has an enabled stream; graphs the dataset marks private are skipped.
 pub fn publish_all(state: &AppState, dataset_id: &str, graphs: &[String]) -> usize {
     match crate::ldes::store::stream(&state.auth_db, dataset_id) {
         Ok(Some(cfg)) if cfg.enabled => {}
         _ => return 0,
     }
+    let private: HashSet<String> = match state.auth_db.list_dataset_graph_entries(dataset_id) {
+        Ok(entries) => entries
+            .into_iter()
+            .filter(|e| e.private)
+            .map(|e| e.graph_iri)
+            .collect(),
+        Err(e) => {
+            tracing::warn!("ldes: graph registry lookup failed; publishing nothing: {e}");
+            return 0;
+        }
+    };
     let now = chrono::Utc::now().to_rfc3339();
     let mut written = 0;
-    for graph in graphs {
+    for graph in graphs.iter().filter(|g| !private.contains(*g)) {
         let idx = subject_index(&state.store, graph);
         let mut entities: Vec<&String> = idx.keys().collect();
         entities.sort();

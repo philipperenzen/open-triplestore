@@ -394,6 +394,90 @@ async fn a_private_stream_is_invisible_to_strangers() {
     assert_eq!(st, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn private_graphs_are_never_published_to_the_stream() {
+    let (state, token) = admin_state();
+    setup(&state, "pv", Visibility::Public);
+    let secret = "https://example.org/ldes-test/secret";
+    state.auth_db.add_dataset_graph("pv", secret).unwrap();
+    state
+        .auth_db
+        .set_dataset_graph_private("pv", secret, true)
+        .unwrap();
+    state
+        .store
+        .load_str(
+            &format!("<{EX}s1> a <{EX}Bridge> ; <{EX}name> \"hidden\" ."),
+            RdfFormat::Turtle,
+            Some(secret),
+        )
+        .unwrap();
+    let app = test_app(state.clone());
+
+    // Seeding skips the private graph.
+    let (st, _, txt) = req(
+        &app,
+        Method::PUT,
+        "/api/datasets/pv/ldes",
+        Some(&token),
+        Some("application/json"),
+        None,
+        &json!({ "enabled": true }).to_string(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    let v: Value = serde_json::from_str(&txt).unwrap();
+    assert_eq!(v["members_seeded"], 2, "only the public graph seeds: {txt}");
+
+    // A write to the private graph yields no member; one to the public graph does.
+    let (st, _, _) = req(
+        &app,
+        Method::PUT,
+        &format!("/store?graph={}", url_encode(secret)),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        &format!(
+            "<{EX}s1> a <{EX}Bridge> ; <{EX}name> \"still hidden\" . <{EX}s2> a <{EX}Bridge> ."
+        ),
+    )
+    .await;
+    assert!(st.is_success(), "{st}");
+    let (st, _, _) = req(
+        &app,
+        Method::POST,
+        &format!("/store?graph={}", url_encode(G)),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        &format!("<{EX}b3> a <{EX}Bridge> ."),
+    )
+    .await;
+    assert!(st.is_success(), "{st}");
+
+    let (st, _, n1) = req(
+        &app,
+        Method::GET,
+        "/api/datasets/pv/ldes/nodes/1",
+        None,
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{n1}");
+    let entities: Vec<String> = members(&n1).into_iter().map(|(e, _)| e).collect();
+    assert_eq!(
+        entities,
+        vec![format!("{EX}b1"), format!("{EX}b2"), format!("{EX}b3")],
+        "{n1}"
+    );
+    assert!(
+        !n1.contains("hidden") && !n1.contains(secret),
+        "private-graph entities never reach the stream: {n1}"
+    );
+}
+
 /// A second instance on a local listener publishes; this instance syncs.
 /// The publisher's base URL is the listener's origin, as a deployment's
 /// BASE_URL is its public origin — the stream's node IRIs are built from it.

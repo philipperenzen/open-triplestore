@@ -58,8 +58,10 @@ pub fn set_stream(
 }
 
 /// `(graph, dataset)` pairs for the given graphs that belong to a dataset with
-/// an enabled stream. The common case — no streams at all — is one indexed
-/// query returning nothing.
+/// an enabled stream. Graphs marked private are not tracked: a stream is read
+/// by every viewer of the dataset, so private data never becomes a member.
+/// The common case — no streams at all — is one indexed query returning
+/// nothing.
 pub fn tracked(db: &AuthDb, graphs: &[String]) -> anyhow::Result<Vec<(String, String)>> {
     if graphs.is_empty() {
         return Ok(Vec::new());
@@ -68,7 +70,7 @@ pub fn tracked(db: &AuthDb, graphs: &[String]) -> anyhow::Result<Vec<(String, St
     let mut stmt = conn.prepare(
         "SELECT g.graph_iri, g.dataset_id FROM dataset_graphs g \
          JOIN ldes_streams s ON s.dataset_id = g.dataset_id AND s.enabled = 1 \
-         WHERE g.graph_iri = ?1",
+         WHERE g.graph_iri = ?1 AND g.private = 0",
     )?;
     let mut out = Vec::new();
     for g in graphs {

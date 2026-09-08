@@ -597,16 +597,23 @@ pub async fn export_container(
             Err(e) => tracing::warn!("container export: asset {} unreadable: {e}", a.id),
         }
     }
-    // RDF payloads: every graph by role (catalogue graphs of earlier imports are skipped).
+    // RDF payloads: every graph by role (catalogue graphs of earlier imports are
+    // skipped). A graph marked private is only visible to principals who can
+    // write the dataset — a viewer's (or anonymous) export must not carry it.
+    let can_write = match uid {
+        Some(u) => state.auth_db.can_write_dataset(u, &ds).map_err(e500)?,
+        None => false,
+    };
     let entries = state
         .auth_db
         .list_dataset_graph_entries(&dataset_id)
         .map_err(e500)?;
     let mut payloads = Vec::new();
-    for e in entries
-        .iter()
-        .filter(|e| !e.graph_iri.starts_with("urn:system:") && !e.graph_iri.starts_with("urn:ots:"))
-    {
+    for e in entries.iter().filter(|e| {
+        (can_write || !e.private)
+            && !e.graph_iri.starts_with("urn:system:")
+            && !e.graph_iri.starts_with("urn:ots:")
+    }) {
         let kind = match e.graph_role {
             Some(GraphKind::Linkset) => PayloadKind::Linkset,
             Some(

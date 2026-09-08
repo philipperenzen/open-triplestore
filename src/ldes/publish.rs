@@ -1,6 +1,11 @@
 //! The published side of LDES: `GET /api/datasets/:id/ldes` (the
 //! `ldes:EventStream`) and `GET /api/datasets/:id/ldes/nodes/:n` (fragments),
 //! plus `PUT /api/datasets/:id/ldes` to enable the stream.
+//!
+//! A stream is readable by everyone who can access the dataset, so it carries
+//! only what a dataset viewer may see: graphs marked private are never
+//! published — neither seeded when the stream is enabled nor captured on
+//! later writes (see [`super::capture`]).
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -53,7 +58,7 @@ pub struct StreamBody {
 
 /// PUT /api/datasets/:id/ldes — enable (or disable) the dataset's stream.
 /// Enabling a stream that has no members yet publishes every entity of the
-/// dataset's graphs as its first members.
+/// dataset's non-private graphs as its first members.
 pub async fn put_stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -72,10 +77,14 @@ pub async fn put_stream(
     store::set_stream(&state.auth_db, &dataset_id, body.enabled, page_size).map_err(e500)?;
     let mut seeded = 0;
     if body.enabled && store::member_count(&state.auth_db, &dataset_id).map_err(e500)? == 0 {
-        let graphs = state
+        let graphs: Vec<String> = state
             .auth_db
-            .list_dataset_graphs(&dataset_id)
-            .map_err(e500)?;
+            .list_dataset_graph_entries(&dataset_id)
+            .map_err(e500)?
+            .into_iter()
+            .filter(|e| !e.private)
+            .map(|e| e.graph_iri)
+            .collect();
         let st = state.clone();
         let id = dataset_id.clone();
         seeded =

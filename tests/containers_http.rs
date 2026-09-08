@@ -507,3 +507,87 @@ async fn icdd_payload_graph_inside_the_dataset_namespace_is_honoured() {
         .unwrap()
         .contains(&own.to_string()));
 }
+
+#[tokio::test]
+async fn export_hides_private_graphs_from_viewers() {
+    let (state, token) = admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "p",
+            "p",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Public,
+            None,
+        )
+        .unwrap();
+    let open = "http://localhost:7878/dataset/p/open";
+    let secret = "http://localhost:7878/dataset/p/secret";
+    for (g, marker) in [(open, "OPEN-MARKER"), (secret, "SECRET-MARKER")] {
+        state.auth_db.add_dataset_graph("p", g).unwrap();
+        state
+            .store
+            .load_str(
+                &format!("<urn:x:{marker}> <urn:p> \"{marker}\" ."),
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+    }
+    state
+        .auth_db
+        .set_dataset_graph_private("p", secret, true)
+        .unwrap();
+    let app = test_app(state.clone());
+
+    let unzip_all = |bytes: Vec<u8>| -> String {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut all = String::new();
+        for i in 0..archive.len() {
+            let mut f = archive.by_index(i).unwrap();
+            all.push_str(f.name());
+            all.push('\n');
+            let mut s = String::new();
+            f.read_to_string(&mut s).unwrap();
+            all.push_str(&s);
+        }
+        all
+    };
+
+    // Anonymous on a public dataset: the private graph is not in the archive.
+    let (st, bytes, _) = send(
+        &app,
+        Method::GET,
+        "/api/datasets/p/containers/export",
+        None,
+        None,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let anon = unzip_all(bytes);
+    assert!(anon.contains("OPEN-MARKER"), "{anon}");
+    assert!(
+        !anon.contains("SECRET-MARKER") && !anon.contains(secret),
+        "a viewer's export must not carry the private graph:\n{anon}"
+    );
+
+    // The owner gets everything.
+    let (st, bytes, _) = send(
+        &app,
+        Method::GET,
+        "/api/datasets/p/containers/export",
+        Some(&token),
+        None,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let owner = unzip_all(bytes);
+    assert!(
+        owner.contains("OPEN-MARKER") && owner.contains("SECRET-MARKER"),
+        "{owner}"
+    );
+}
