@@ -992,15 +992,56 @@ impl TripleStore {
         sparql: &str,
     ) -> Option<(Vec<(Option<String>, i64)>, Vec<Quad>, Vec<Quad>)> {
         use spargebra::GraphUpdateOperation;
+        use std::collections::{HashMap, HashSet};
+
+        fn graph_key(quad: &Quad) -> Option<Option<String>> {
+            match &quad.graph_name {
+                GraphName::NamedNode(n) => Some(Some(n.as_str().to_string())),
+                GraphName::DefaultGraph => Some(None),
+                GraphName::BlankNode(_) => None,
+            }
+        }
+
+        /// The simulated state of one ground quad: `(quad, stored now, stored
+        /// after the operations so far)`, in first-seen order.
+        type Sim = Vec<(Quad, bool, bool)>;
+
+        /// The slot for `quad`, seeded from the store the first time it is seen.
+        fn slot(
+            store: &Store,
+            sim: &mut Sim,
+            slots: &mut HashMap<Quad, usize>,
+            quad: Quad,
+        ) -> Option<usize> {
+            if let Some(&i) = slots.get(&quad) {
+                return Some(i);
+            }
+            let present = store.contains(quad.as_ref()).ok()?;
+            sim.push((quad.clone(), present, present));
+            slots.insert(quad, sim.len() - 1);
+            Some(sim.len() - 1)
+        }
+
         let parsed = spargebra::SparqlParser::new().parse_update(sparql).ok()?;
-        let mut deltas: std::collections::HashMap<Option<String>, i64> =
-            std::collections::HashMap::new();
-        let mut seen: std::collections::HashSet<Quad> = std::collections::HashSet::new();
+        // The operations are simulated in order against the store's current
+        // state and the delta is the NET difference: `DELETE DATA {q}; INSERT
+        // DATA {q}` with `q` stored changes nothing, and `INSERT DATA {q};
+        // DELETE DATA {q}` with `q` absent changes nothing. Checking each
+        // operation against the pre-update store instead reported -1 / +1 for
+        // those, so the count index drifted and the text index dropped a
+        // document for a quad still stored (or kept one for a quad never
+        // stored).
+        let mut sim: Sim = Vec::new();
+        let mut slots: HashMap<Quad, usize> = HashMap::new();
+        let mut deltas: HashMap<Option<String>, i64> = HashMap::new();
         let mut inserted: Vec<Quad> = Vec::new();
-        let mut deleted: Vec<Quad> = Vec::new();
         for op in &parsed.operations {
             match op {
                 GraphUpdateOperation::InsertData { data } => {
+                    // A blank node in INSERT DATA is a fresh node, so its quad
+                    // is always new; the same label twice in one operation is
+                    // one node, hence one quad.
+                    let mut op_bnodes: HashSet<Quad> = HashSet::new();
                     for q in data {
                         let quad = Quad::new(
                             q.subject.clone(),
@@ -1008,20 +1049,18 @@ impl TripleStore {
                             q.object.clone(),
                             Self::oxrdf_graph_name(&q.graph_name)?,
                         );
-                        let key = match &quad.graph_name {
-                            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
-                            GraphName::DefaultGraph => None,
-                            GraphName::BlankNode(_) => return None,
-                        };
+                        let key = graph_key(&quad)?;
                         let fresh_bnode = matches!(quad.subject, NamedOrBlankNode::BlankNode(_))
                             || matches!(quad.object, Term::BlankNode(_));
-                        if fresh_bnode
-                            || (seen.insert(quad.clone())
-                                && !self.store.contains(quad.as_ref()).ok()?)
-                        {
-                            *deltas.entry(key).or_insert(0) += 1;
-                            inserted.push(quad);
+                        if fresh_bnode {
+                            if op_bnodes.insert(quad.clone()) {
+                                *deltas.entry(key).or_insert(0) += 1;
+                                inserted.push(quad);
+                            }
+                            continue;
                         }
+                        let i = slot(&self.store, &mut sim, &mut slots, quad)?;
+                        sim[i].2 = true;
                     }
                 }
                 GraphUpdateOperation::DeleteData { data } => {
@@ -1032,18 +1071,26 @@ impl TripleStore {
                             Term::from(q.object.clone()),
                             Self::oxrdf_graph_name(&q.graph_name)?,
                         );
-                        let key = match &quad.graph_name {
-                            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
-                            GraphName::DefaultGraph => None,
-                            GraphName::BlankNode(_) => return None,
-                        };
-                        if seen.insert(quad.clone()) && self.store.contains(quad.as_ref()).ok()? {
-                            *deltas.entry(key).or_insert(0) -= 1;
-                            deleted.push(quad);
-                        }
+                        graph_key(&quad)?;
+                        let i = slot(&self.store, &mut sim, &mut slots, quad)?;
+                        sim[i].2 = false;
                     }
                 }
                 _ => return None,
+            }
+        }
+        let mut deleted: Vec<Quad> = Vec::new();
+        for (quad, before, after) in sim {
+            if before == after {
+                continue;
+            }
+            let key = graph_key(&quad)?;
+            if after {
+                *deltas.entry(key).or_insert(0) += 1;
+                inserted.push(quad);
+            } else {
+                *deltas.entry(key).or_insert(0) -= 1;
+                deleted.push(quad);
             }
         }
         Some((deltas.into_iter().collect(), inserted, deleted))
@@ -2516,6 +2563,127 @@ mod graph_store_put_index_tests {
             .unwrap();
         assert_eq!(store.graph_count_cached(Some(g)), Some(1));
         assert_eq!(store.count_graph(Some(g)).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ground_update_delta_tests {
+    use super::*;
+
+    const G: &str = "urn:net";
+
+    fn q(store: &TripleStore, n: u32) -> Quad {
+        let _ = store;
+        Quad::new(
+            NamedNode::new_unchecked("urn:s"),
+            NamedNode::new_unchecked("urn:p"),
+            Literal::from(n),
+            NamedNode::new_unchecked(G),
+        )
+    }
+
+    fn delta(store: &TripleStore, sparql: &str) -> QuadDelta {
+        store
+            .update_targeted_delta(sparql, &[G.to_string()], false)
+            .unwrap()
+            .expect("a ground update has an exact delta")
+    }
+
+    /// `DELETE DATA {q}; INSERT DATA {q}` with `q` present leaves the store as
+    /// it was: the delta must net to nothing, or the count index drifts down
+    /// by one and the text index drops a document for a quad that is still
+    /// stored.
+    #[test]
+    fn delete_then_insert_of_a_present_quad_nets_to_nothing() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ))
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+
+        let (inserted, deleted) = delta(
+            &store,
+            &format!(
+                "DELETE DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }} ; \
+                 INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ),
+        );
+        assert!(inserted.is_empty(), "net insert: {inserted:?}");
+        assert!(deleted.is_empty(), "net delete: {deleted:?}");
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+        assert!(store.store.contains(q(&store, 1).as_ref()).unwrap());
+    }
+
+    /// The mirror image: `INSERT DATA {q}; DELETE DATA {q}` with `q` absent
+    /// ends with `q` absent — no +1, no ghost document.
+    #[test]
+    fn insert_then_delete_of_an_absent_quad_nets_to_nothing() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 0 }} }}"
+            ))
+            .unwrap();
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+
+        let (inserted, deleted) = delta(
+            &store,
+            &format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }} ; \
+                 DELETE DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ),
+        );
+        assert!(inserted.is_empty(), "net insert: {inserted:?}");
+        assert!(deleted.is_empty(), "net delete: {deleted:?}");
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+        assert!(!store.store.contains(q(&store, 1).as_ref()).unwrap());
+    }
+
+    /// Distinct quads still produce the exact (-1, +1) effect.
+    #[test]
+    fn delete_one_insert_another_is_still_exact() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ))
+            .unwrap();
+
+        let (inserted, deleted) = delta(
+            &store,
+            &format!(
+                "DELETE DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }} ; \
+                 INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 2 }} }}"
+            ),
+        );
+        assert_eq!(deleted, vec![q(&store, 1)]);
+        assert_eq!(inserted, vec![q(&store, 2)]);
+        assert_eq!(store.graph_count_cached(Some(G)), Some(1));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 1);
+    }
+
+    /// A blank-node quad is always fresh, but the same bnode quad written twice
+    /// in one operation is one quad.
+    #[test]
+    fn blank_node_quads_are_fresh_but_not_double_counted_within_an_operation() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .update(&format!(
+                "INSERT DATA {{ GRAPH <{G}> {{ <urn:s> <urn:p> 1 }} }}"
+            ))
+            .unwrap();
+        let (inserted, deleted) = delta(
+            &store,
+            &format!("INSERT DATA {{ GRAPH <{G}> {{ _:b <urn:p> 1 . _:b <urn:p> 1 }} }}"),
+        );
+        assert_eq!(inserted.len(), 1, "{inserted:?}");
+        assert!(deleted.is_empty());
+        assert_eq!(store.graph_count_cached(Some(G)), Some(2));
+        assert_eq!(store.count_graph(Some(G)).unwrap(), 2);
     }
 }
 
