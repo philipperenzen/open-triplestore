@@ -135,6 +135,8 @@ the group quietly falls back to the default.
     "query_group_concat/": 1.35,           // both sizes; allocation-heavy, measured +25.5 %
     "query_simple_lookup/100000": 1.45,    // bimodal on this runner; see below
     "shacl_validate_": 1.5,                // provisional, see below
+    "shacl_validate_clean/": 2.75,         // merge base measured cache hits; see below
+    "shacl_validate_violations/": 2.75,    // same
     "update_": 1.5                         // provisional, see below
   },
   "small_benchmark_ns": 1000,           // below 1 µs, a percentage bar means nothing
@@ -185,6 +187,22 @@ the three below were set — from the observed span, not to make a run pass.
 
 `query_group_concat/*` is allocation-heavy at 1–3 µs and read +25.5 % with nothing
 changed.
+
+`shacl_validate_clean/*` and `shacl_validate_violations/*` (the in-memory SHACL
+micro-benchmarks, 100–1000 focus nodes, two property shapes) carry 2.75 against
+the merge base of the readiness branch for a measured reason: before that branch
+the engine kept a thread-local path cache that rayon workers never invalidated,
+so every iteration after the first replayed the previous run's value lists and
+the benchmark measured cache hits, not validation (the cache was also a stale-read
+hazard: validate → write → validate could serve the old values). The rebuilt
+engine does the work each run — two index probes and the constraint evaluation
+per focus node, ≈2.5 µs on the in-memory source — and reads +83 % to +154 % against
+those cached numbers (base → head, alternating passes on one machine:
+clean/500 598 µs → 1.22 ms, clean/1000 916 µs → 2.33 ms, violations/1000
+1.06 → 2.53 ms). `shacl/validate_snapshot/5000`, which measures the
+RocksDB path with the run index, is flat. Drop these two entries back to the
+group's 1.5 at the first baseline refresh after the branch merges; from then on
+both sides of the gate run the honest engine.
 
 `query_alternative_path/10000` is bimodal the same way `query_simple_lookup/100000`
 is, and for the same reason: it materialises every solution of a two-branch
