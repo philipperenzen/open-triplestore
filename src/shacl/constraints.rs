@@ -918,6 +918,13 @@ fn term_set(values: Vec<Term>) -> BTreeMap<String, Term> {
 /// keep the historical native walk where each hop unions over every data
 /// graph.
 fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Vec<Term> {
+    // One graph and a single predicate step (forward or inverse): the quad
+    // index yields each `(focus, p, ?v)` match once, so the result is already
+    // a set and the per-value clone-and-hash pass below is pure overhead on
+    // the commonest shape there is.
+    if view.graph_count() == 1 && is_single_step(path) {
+        return eval_path_native(view, focus, path, GraphSel::One(0));
+    }
     let mut seen: HashSet<Term> = HashSet::new();
     let mut out = Vec::new();
     if matches!(focus, Term::NamedNode(_)) {
@@ -936,6 +943,16 @@ fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Ve
         }
     }
     out
+}
+
+/// A plain predicate or its inverse — one quad-index step, whose results are
+/// distinct within a graph.
+fn is_single_step(path: &PropertyPath) -> bool {
+    match path {
+        PropertyPath::Predicate(_) => true,
+        PropertyPath::Inverse(inner) => matches!(inner.as_ref(), PropertyPath::Predicate(_)),
+        _ => false,
+    }
 }
 
 /// Native SHACL path evaluation over the run's quad index. Mirrors SPARQL

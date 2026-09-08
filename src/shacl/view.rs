@@ -265,9 +265,12 @@ impl<'a> DataView<'a> {
         if let Some(hit) = self.step_indexed(from, predicate, inverse, sel) {
             return hit;
         }
-        let Ok(pred) = NamedNodeRef::new(predicate) else {
-            return Vec::new();
-        };
+        // No IRI validation per probe: the predicates come from the parsed
+        // shapes graph, and a string that is not an IRI names no stored term,
+        // so the pattern below matches nothing — the same result the
+        // validating constructor's `Err` arm gave, minus the parse on the
+        // hottest path of the run.
+        let pred = NamedNodeRef::new_unchecked(predicate);
         let mut out = Vec::new();
         if inverse {
             let obj = from.as_ref();
@@ -366,6 +369,31 @@ impl<'a> DataView<'a> {
             }
         });
         out
+    }
+
+    /// Run a projected `SELECT` on the run's source and return its rows.
+    ///
+    /// A raw quad scan decodes all four terms of every quad: on RocksDB four
+    /// point lookups on the id2str column family, two of them for the constant
+    /// predicate and graph; on the memory backend four hash lookups and four
+    /// `String` allocations. A projected query decodes only the variables. The
+    /// queries are bare basic graph patterns, so a plain evaluator — no
+    /// GeoSPARQL/SHACL-AF function registration, no `sh:SPARQLFunction`
+    /// discovery — is enough. `None` when the query does not parse or run.
+    fn select(&self, query: &str) -> Option<oxigraph::sparql::QuerySolutionIter<'_>> {
+        let prepared = oxigraph::sparql::SparqlEvaluator::new()
+            .parse_query(query)
+            .ok()?;
+        let results = match &self.raw {
+            RawSource::Snapshot(tx) => prepared.on_transaction(tx).execute(),
+            RawSource::Mirror(store) => prepared.on_store(store).execute(),
+            RawSource::Live(store) => prepared.on_store(store).execute(),
+        }
+        .ok()?;
+        match results {
+            oxigraph::sparql::QueryResults::Solutions(rows) => Some(rows),
+            _ => None,
+        }
     }
 
     /// Answer a step from the run index when it holds the (graph, predicate)
@@ -511,27 +539,14 @@ impl<'a> DataView<'a> {
             }
             true
         };
-        if let RawSource::Snapshot(tx) = &self.raw {
-            // On RocksDB a raw quad scan decodes all four terms of every quad
-            // — four point lookups on the id2str column family, two of them
-            // for the constant predicate and graph — and that decode, not the
-            // seek, is what a snapshot-path run pays for. A projected SPARQL
-            // query on the same transaction decodes only the two variables.
-            let query = format!(
-                "SELECT ?s ?o WHERE {{ {} }}",
-                graph_scoped_pattern(graph, &format!("?s <{}> ?o", pred.as_str()))?
-            );
-            let solutions = self
-                .store
-                .query_options()
-                .parse_query(&query)
-                .ok()?
-                .on_transaction(tx)
-                .execute()
-                .ok()?;
-            let oxigraph::sparql::QueryResults::Solutions(rows) = solutions else {
-                return None;
-            };
+        // The scan itself, not the seek, is what a run pays for here: a
+        // projected query decodes the two variables only (see `select`). The
+        // raw scan stays as the fallback for anything the query path declines.
+        let query = format!(
+            "SELECT ?s ?o WHERE {{ {} }}",
+            graph_scoped_pattern(graph, &format!("?s <{}> ?o", pred.as_str()))?
+        );
+        if let Some(rows) = self.select(&query) {
             for row in rows.flatten() {
                 let (Some(s), Some(o)) = (row.get("s"), row.get("o")) else {
                     continue;
@@ -596,25 +611,15 @@ impl<'a> DataView<'a> {
         let graph = self.graph_ref(gi);
         let mut out = HashSet::new();
         for class in closure {
-            if let (RawSource::Snapshot(tx), Term::NamedNode(c)) = (&self.raw, class) {
-                // Same reasoning as in `scan_pair`: decode one term per row.
+            if let Term::NamedNode(c) = class {
+                // Decode one term per row instead of four per quad (see
+                // `select`); on every source, since the memory backend pays the
+                // same per-term lookup and allocation as RocksDB does, and this
+                // scan is single-threaded per class.
                 let pattern =
                     graph_scoped_pattern(graph, &format!("?s <{RDF_TYPE}> <{}>", c.as_str()));
-                let rows = pattern.and_then(|pattern| {
-                    let query = format!("SELECT ?s WHERE {{ {pattern} }}");
-                    match self
-                        .store
-                        .query_options()
-                        .parse_query(&query)
-                        .ok()?
-                        .on_transaction(tx)
-                        .execute()
-                        .ok()?
-                    {
-                        oxigraph::sparql::QueryResults::Solutions(rows) => Some(rows),
-                        _ => None,
-                    }
-                });
+                let rows = pattern
+                    .and_then(|pattern| self.select(&format!("SELECT ?s WHERE {{ {pattern} }}")));
                 if let Some(rows) = rows {
                     for row in rows.flatten() {
                         if let Some(s) = row.get("s") {

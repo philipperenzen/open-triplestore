@@ -986,10 +986,38 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
     }
 
     // Deduplicate by term identity — the same node may arrive via multiple
-    // targets (or from several data graphs).
-    let mut seen = std::collections::HashSet::new();
-    focus_nodes.retain(|t| seen.insert(t.clone()));
+    // targets, from several data graphs, or several times from one predicate
+    // scan. A single target class or node over a single graph is already a
+    // set (the instance set is a `HashSet`), so it skips the pass.
+    let already_distinct = view.graph_count() == 1
+        && matches!(
+            shape.targets.as_slice(),
+            [Target::TargetClass(_)] | [Target::TargetNode(_)]
+        );
+    if !already_distinct {
+        dedup_terms(&mut focus_nodes);
+    }
     focus_nodes
+}
+
+/// Drop repeated terms, keeping first occurrences in order, without cloning a
+/// term: the membership set borrows the vector, and the keep-mask drives the
+/// compaction afterwards.
+fn dedup_terms(terms: &mut Vec<Term>) {
+    let keep: Vec<bool> = {
+        let mut seen: std::collections::HashSet<&Term> =
+            std::collections::HashSet::with_capacity(terms.len());
+        terms.iter().map(|t| seen.insert(t)).collect()
+    };
+    if keep.iter().all(|k| *k) {
+        return;
+    }
+    let mut i = 0;
+    terms.retain(|_| {
+        let k = keep[i];
+        i += 1;
+        k
+    });
 }
 
 // ---------------------------------------------------------------------------
