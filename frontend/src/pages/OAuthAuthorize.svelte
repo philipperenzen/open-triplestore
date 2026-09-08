@@ -13,6 +13,7 @@
   import { Loader2, ShieldCheck, XCircle } from 'lucide-svelte';
 
   let params = null;      // validated query params
+  let promptNone = false; // prompt=none: answer login_required instead of asking
   let paramError = '';
   let clientName = '';
   let scope = '';
@@ -33,6 +34,9 @@
       code_challenge: q.get('code_challenge') || undefined,
       code_challenge_method: q.get('code_challenge_method') || undefined,
     };
+    // OIDC `prompt=none`: the client is probing for an existing session (silent
+    // renew) and must get an error back, never a login page.
+    promptNone = q.get('prompt') === 'none';
     if (!p.client_id || !p.redirect_uri) {
       paramError = $t('pages.oauthAuthorize.missingParams');
       return null;
@@ -91,6 +95,12 @@
       let authed = false;
       isAuthenticated.subscribe((v) => { authed = v; })();
       if (!authed) {
+        if (promptNone) {
+          const sep = params.redirect_uri.includes('?') ? '&' : '?';
+          const state = params.state ? `&state=${encodeURIComponent(params.state)}` : '';
+          window.location.replace(`${params.redirect_uri}${sep}error=login_required${state}`);
+          return;
+        }
         const here = window.location.pathname + window.location.search;
         navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
       } else {
