@@ -164,6 +164,7 @@ impl QueryCache {
     }
 
     #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)] // pairs with `len` for clippy's len_without_is_empty; only tests call it
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
