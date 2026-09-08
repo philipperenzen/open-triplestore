@@ -19,8 +19,9 @@
 # decision — if you make it required, pair it with a path-aware allowance.
 #
 # Note: Criterion sample sizes are hard-coded in benches/performance.rs, so the
-# run time is controlled by the benchmark *name filter* below (query/path/
-# geosparql), NOT by a --sample-size flag.
+# run time is controlled by the benchmark *name filter* below — all seven groups
+# (query/path/geosparql/insert/update/shacl/concurrent), the same filter
+# perf-baseline.yml and scripts/hooks/pre-push use — NOT by a --sample-size flag.
 name: Performance
 
 on:

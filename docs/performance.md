@@ -129,10 +129,13 @@ the group quietly falls back to the default.
 {
   "default_tolerance_ratio": 1.15,
   "tolerances": {
-    "concurrent_": 1.5,                    // genuinely variable; not in the gated subset
+    "concurrent_": 1.5,                    // thread scheduling; provisional, see below
+    "insert_": 1.5,                        // provisional, see below
     "query_alternative_path/10000": 1.5,   // bimodal on this runner; see below
     "query_group_concat/": 1.35,           // both sizes; allocation-heavy, measured +25.5 %
-    "query_simple_lookup/100000": 1.45     // bimodal on this runner; see below
+    "query_simple_lookup/100000": 1.45,    // bimodal on this runner; see below
+    "shacl_validate_": 1.5,                // provisional, see below
+    "update_": 1.5                         // provisional, see below
   },
   "small_benchmark_ns": 1000,           // below 1 µs, a percentage bar means nothing
   "small_benchmark_tolerance": 1.35
@@ -167,7 +170,18 @@ Widening the four benchmarks one at a time would have been the wrong lever — t
 next unrelated PR trips a fifth. If the marginal failures come back at 1.15, the
 fix is a third pass per side rather than a fifth exception.
 
-Three benchmarks still need an exception on top of the default, and only three.
+Three benchmarks need a *measured* exception on top of the default; four group
+prefixes carry a *provisional* one.
+
+The provisional four — `concurrent_`, `insert_`, `update_` and `shacl_validate_`
+— are the groups that joined the gate when the filter widened from
+`query|path|geosparql` to all seven groups. Their 1.5 is not a measured noise
+span: it is a deliberately loose bar so the newly gated groups cannot block a PR
+on noise nobody has yet characterised (thread scheduling in `concurrent/*`, a
+RocksDB store on a shared runner in `shacl/validate_snapshot`, the write path's
+count-index work in `insert/*` and `update/*`). Tighten them once the first
+baseline refresh after the widening has a few gate runs behind it, the same way
+the three below were set — from the observed span, not to make a run pass.
 
 `query_group_concat/*` is allocation-heavy at 1–3 µs and read +25.5 % with nothing
 changed.
@@ -220,16 +234,25 @@ map the gate reads, and its absolute numbers are the tracked record of where
 performance actually is over time — which a pure A/B gate cannot tell you, since
 a series of individually-tolerable changes can drift a long way.
 
-### Subset (PR gate) vs full suite
+### Gated set (PR gate) vs full suite
 
-The PR gate runs only a representative slice for speed and to limit noise:
+The PR gate names the benchmarks it grades with one filter, and the same filter
+is what `perf-baseline.yml` re-measures and what the pre-push hook runs under
+`OTS_PERF_FULL=1`:
 
 ```bash
-cargo bench --bench performance --features full -- 'query|path|geosparql'
+cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
 ```
 
+That is all seven groups. It began as `query|path|geosparql` — the read path
+only — and was widened once the write path (`insert/*`, `update/*`, including
+the ground-update delta path the HTTP write route takes), SHACL (both the
+in-memory and the RocksDB-snapshot variant) and the concurrency groups had
+regressions worth catching. The three groups that joined later carry a
+provisional 1.5 tolerance (see above) until their noise is measured.
+
 The full suite runs only on tags / manual dispatch (see *Refreshing the
-baseline*) — and that job then runs the subset above a **second** time, so the
+baseline*) — and that job then runs the gated set a **second** time, so the
 gated benchmarks are baselined under the same conditions the gate will reproduce.
 A benchmark's timing is not independent of what ran before it in the same process
 (allocator arenas, page cache and CPU state are all warmer after the insert and
@@ -238,17 +261,18 @@ the same code. Left uncorrected that is a constant offset on every gated
 benchmark, and with a +10 % bar it would consume much of the budget before any
 real regression could.
 
-Two reasons for the split:
+Two reasons for keeping an explicit filter:
 
-- **Why a subset on PRs.** The full suite is slow, and every extra benchmark on
-  a shared runner adds variance — a representative subset gives a fast, stable
-  signal on each PR; the exhaustive run is reserved for the controlled baseline
-  job.
+- **Why the gate names its groups.** Every benchmark on a shared runner adds
+  variance and minutes, so the gate lists exactly what it grades; a group is
+  dropped from the filter, never silently, if it turns out to be noise. The
+  exhaustive run (which also covers anything a future group adds before it is
+  gated) is reserved for the controlled baseline job.
 - **Why a name filter, not `--sample-size`.** Sample sizes are **hard-coded**
   per group in [`benches/performance.rs`](../benches/performance.rs) via
   `sample_size(...)`, so Criterion's `--sample-size` CLI flag is **ignored**.
-  Scope and speed are therefore controlled by the benchmark-**name filter**
-  (`query|path|geosparql`), not by trimming sample count.
+  Scope and speed are therefore controlled by the benchmark-**name filter**,
+  not by trimming sample count.
 
 ### Refreshing the baseline (bootstrap and updates)
 
@@ -1165,6 +1189,21 @@ triples in one transaction.
 deletion. Tests the write-path under a moderately selective DELETE (~10% of
 triples).
 
+### `update/ground_delta`
+
+A ground `INSERT DATA { GRAPH <g> { … } }` of 1 and of 100 quads into a named
+graph that already holds ~100k quads, through `update_targeted_delta` — the
+call `POST …/update` makes. For a ground update (`INSERT DATA` / `DELETE DATA`
+only) that path computes the exact per-graph count delta before executing and
+adjusts the count index by it, so the write costs O(statement) rather than the
+O(graph) recount `TripleStore::update` does after every write (a 500-quad
+insert into a 900k-quad graph used to pay a 900k-quad scan). The quads each
+iteration inserts are deleted again in the untimed setup, so the graph is the
+same size for every sample. `insert/sparql_update` measures the plain `update`
+path on a one-triple graph by contrast — also steady-state now: the previous
+iteration's triple is removed in the setup, where it used to accumulate and
+make the recount grow with the sample count.
+
 ### `geosparql/sf_contains` and `geosparql/distance`
 
 GeoSPARQL custom functions are called once per binding via GEOS C++ library.
@@ -1201,6 +1240,18 @@ focus-node resolution + constraint evaluation when no violations are found.
 Same setup but 20% of records intentionally omit `ex:age` (violating
 `sh:minCount 1`). Tests violation-accumulation overhead compared to the clean
 baseline. Violation objects are collected into a `ValidationReport`.
+
+### `shacl/validate_snapshot`
+
+The two benchmarks above run on the memory backend, so the run reads the live
+store and — at 1 000 nodes × 2 paths = 2 000 probes, under the 20 000-probe
+threshold — never builds the per-run adjacency index. This one opens a RocksDB
+store in a temporary directory with the query accelerator off (its switch is
+read at open time), so the run takes the **snapshot** source, and validates
+5 000 `ex:Person` nodes against five property shapes: 25 000 probes, enough
+for `build_index` to scan the five predicates once and answer every probe from
+the adjacency maps. That is the path a production dataset takes right after a
+load, before the accelerator has published its mirror.
 
 ### `concurrent/reads`
 

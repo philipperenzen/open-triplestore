@@ -175,6 +175,33 @@ fn gen_shacl_persons_ttl(n: usize, violation_rate: f64) -> String {
     s
 }
 
+/// `gen_persons_ttl` plus `rdf:type ex:Person` on every person, so all five
+/// properties (name, age, type, score, email) sit under one SHACL target class.
+fn gen_shacl_wide_persons_ttl(n: usize) -> String {
+    let mut s = gen_persons_ttl(n);
+    for i in 0..n {
+        s.push_str(&format!("ex:p{i} a ex:Person .\n"));
+    }
+    s
+}
+
+/// A shapes graph with five property shapes over `ex:Person` — one per
+/// property `gen_persons_ttl` emits — so a run makes five probes per focus node.
+fn gen_wide_shapes_ttl() -> String {
+    String::from(
+        "@prefix sh:  <http://www.w3.org/ns/shacl#> .\n\
+         @prefix ex:  <http://example.org/> .\n\
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         ex:PersonShape a sh:NodeShape ;\n\
+             sh:targetClass ex:Person ;\n\
+             sh:property [ sh:path ex:name  ; sh:minCount 1 ; sh:datatype xsd:string ] ;\n\
+             sh:property [ sh:path ex:age   ; sh:minCount 1 ; sh:minInclusive 0 ] ;\n\
+             sh:property [ sh:path ex:type  ; sh:minCount 1 ; sh:nodeKind sh:IRI ] ;\n\
+             sh:property [ sh:path ex:score ; sh:minCount 1 ; sh:maxCount 1 ] ;\n\
+             sh:property [ sh:path ex:email ; sh:minCount 1 ; sh:pattern \"@\" ] .\n",
+    )
+}
+
 /// Fully consume a `QueryResults` iterator so timing is fair.
 fn consume_solutions(results: QueryResults) -> usize {
     match results {
@@ -213,14 +240,26 @@ fn bench_insert_update(c: &mut Criterion) {
     group.bench_function("single_triple", |b| {
         let store = fresh_store();
         let mut i: usize = 0;
-        b.iter(|| {
-            store
-                .update(&format!(
-                    "INSERT DATA {{ <http://ex/s{i}> <http://ex/p> \"v{i}\" }}"
-                ))
-                .unwrap();
-            i += 1;
-        });
+        // `update` recounts the target graph after the write; the previous
+        // iteration's triple is removed in the (untimed) setup so that graph
+        // stays one triple large instead of growing with every sample, which
+        // made this a drifting measurement rather than a per-write cost.
+        b.iter_batched(
+            || {
+                let cur = i;
+                i += 1;
+                if let Some(prev) = cur.checked_sub(1) {
+                    store
+                        .update(&format!(
+                            "DELETE DATA {{ <http://ex/s{prev}> <http://ex/p> \"v{prev}\" }}"
+                        ))
+                        .unwrap();
+                }
+                format!("INSERT DATA {{ <http://ex/s{cur}> <http://ex/p> \"v{cur}\" }}")
+            },
+            |sparql| store.update(&sparql).unwrap(),
+            criterion::BatchSize::SmallInput,
+        );
     });
     group.finish();
 }
@@ -234,16 +273,28 @@ fn bench_insert_update_batch(c: &mut Criterion) {
     group.bench_function("10_triples", |b| {
         let store = fresh_store();
         let mut base: usize = 0;
-        b.iter(|| {
-            let triples: String = (base..base + 10)
+        let triples = |from: usize| -> String {
+            (from..from + 10)
                 .map(|i| format!("<http://ex/s{i}> <http://ex/p> \"v{i}\" ."))
                 .collect::<Vec<_>>()
-                .join(" ");
-            store
-                .update(&format!("INSERT DATA {{ {triples} }}"))
-                .unwrap();
-            base += 10;
-        });
+                .join(" ")
+        };
+        // Steady-state like `single_triple`: the previous batch is removed in
+        // the untimed setup so the recounted graph does not grow.
+        b.iter_batched(
+            || {
+                let cur = base;
+                base += 10;
+                if let Some(prev) = cur.checked_sub(10) {
+                    store
+                        .update(&format!("DELETE DATA {{ {} }}", triples(prev)))
+                        .unwrap();
+                }
+                format!("INSERT DATA {{ {} }}", triples(cur))
+            },
+            |sparql| store.update(&sparql).unwrap(),
+            criterion::BatchSize::SmallInput,
+        );
     });
     group.finish();
 }
@@ -1011,6 +1062,60 @@ fn bench_update_delete_where(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure a ground `INSERT DATA` into an already-populated named graph
+/// through the HTTP write path.
+///
+/// `POST …/update` runs `update_targeted_delta`, which for a ground update
+/// (`INSERT DATA` / `DELETE DATA` only) computes the exact per-graph count
+/// delta up front and adjusts the count index by it — instead of recounting
+/// the whole target graph after every write, the O(graph)-per-write cost that
+/// made a 500-quad insert into a 900k-quad graph a 900k-quad scan. The graph
+/// holds ~100k quads so a recount would show; the quads an iteration inserts
+/// are removed again in the (untimed) setup, so the graph is the same size for
+/// every sample. `insert/sparql_update` measures the plain `update` path on a
+/// one-triple graph by contrast.
+fn bench_update_ground_delta(c: &mut Criterion) {
+    let mut group = c.benchmark_group("update/ground_delta");
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let graph = "http://example.org/g0";
+    let store = fresh_store();
+    // Three quads per person into one graph: ~102k quads in <g0>.
+    store
+        .load_str(&gen_named_graph_nq(34_000, 1), RdfFormat::NQuads, None)
+        .unwrap();
+    let affected = vec![graph.to_string()];
+    let quads = |n: usize| -> String {
+        (0..n)
+            .map(|i| format!("<http://example.org/fresh{i}> <http://example.org/p> \"v{i}\" ."))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    for &n in &[1_usize, 100] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("insert_data", n), &n, |b, &n| {
+            let insert = format!("INSERT DATA {{ GRAPH <{graph}> {{ {} }} }}", quads(n));
+            let delete = format!("DELETE DATA {{ GRAPH <{graph}> {{ {} }} }}", quads(n));
+            b.iter_batched(
+                || {
+                    store
+                        .update_targeted_delta(&delete, &affected, false)
+                        .unwrap();
+                },
+                |()| {
+                    store
+                        .update_targeted_delta(&insert, &affected, false)
+                        .unwrap()
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 // ─── GeoSPARQL benchmarks ─────────────────────────────────────────────────────
 
 /// Measure GeoSPARQL sfContains over point features.
@@ -1271,6 +1376,61 @@ fn bench_shacl_validate_violations(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure SHACL validation on a persistent (RocksDB) store — the snapshot
+/// source plus the per-run adjacency index.
+///
+/// `shacl/validate_clean` runs on the memory backend, so `DataView` takes the
+/// live source and, at 2 000 probes (1 000 nodes × 2 paths, under the
+/// 20 000-probe threshold), never builds the run index. This variant opens a
+/// RocksDB store in a temporary directory with the accelerator off, so the run
+/// reads one RocksDB snapshot, and validates 5 000 focus nodes against five
+/// property shapes: 25 000 probes, enough for `build_index` to scan the five
+/// predicates once and answer every probe from the adjacency maps — the path a
+/// production dataset takes.
+fn bench_shacl_validate_snapshot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("shacl/validate_snapshot");
+    group.sample_size(10);
+    group.sampling_mode(SamplingMode::Flat);
+
+    let data_graph = "http://example.org/data";
+    let shapes_graph = "http://example.org/shapes";
+    let dir = tempfile::tempdir().unwrap();
+    // The accelerator would publish a RAM mirror after the first queries and
+    // move the run onto the mirror source; it reads its switch at open time,
+    // so turn it off for this store only and put the environment back.
+    let prev = std::env::var_os("OTS_PARALLEL_QUERY");
+    std::env::set_var("OTS_PARALLEL_QUERY", "off");
+    let store = TripleStore::open(dir.path()).unwrap();
+    match prev {
+        Some(v) => std::env::set_var("OTS_PARALLEL_QUERY", v),
+        None => std::env::remove_var("OTS_PARALLEL_QUERY"),
+    }
+    let n = 5_000_usize;
+    store
+        .load_str(
+            &gen_shacl_wide_persons_ttl(n),
+            RdfFormat::Turtle,
+            Some(data_graph),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &gen_wide_shapes_ttl(),
+            RdfFormat::Turtle,
+            Some(shapes_graph),
+        )
+        .unwrap();
+
+    group.throughput(Throughput::Elements(n as u64));
+    group.bench_with_input(BenchmarkId::from_parameter(n), &store, |b, s| {
+        let dg = vec![data_graph.to_string()];
+        b.iter(|| open_triplestore::shacl::validate(s, shapes_graph, &dg).unwrap());
+    });
+    group.finish();
+    drop(store);
+    drop(dir);
+}
+
 // ─── Concurrent read benchmarks ───────────────────────────────────────────────
 
 /// Measure read throughput with multiple concurrent threads.
@@ -1528,7 +1688,8 @@ criterion_group!(
     config = Criterion::default().sample_size(20);
     targets =
         bench_update_insert_where,
-        bench_update_delete_where
+        bench_update_delete_where,
+        bench_update_ground_delta
 );
 
 criterion_group!(
@@ -1547,7 +1708,8 @@ criterion_group!(
     config = Criterion::default().sample_size(20);
     targets =
         bench_shacl_validate_clean,
-        bench_shacl_validate_violations
+        bench_shacl_validate_violations,
+        bench_shacl_validate_snapshot
 );
 
 criterion_group!(
