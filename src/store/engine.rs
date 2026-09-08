@@ -219,16 +219,6 @@ impl GraphIndex {
     }
 }
 
-/// The core triple store engine wrapping Oxigraph with GeoSPARQL extensions.
-/// Does the query text mention `SERVICE` (case-insensitively)? A false positive
-/// only costs a cache miss.
-fn sparql_uses_service(sparql: &str) -> bool {
-    sparql
-        .as_bytes()
-        .windows(7)
-        .any(|w| w.eq_ignore_ascii_case(b"SERVICE"))
-}
-
 /// The exact effect of a ground write: `(inserted, deleted)` quads.
 pub type QuadDelta = (Vec<Quad>, Vec<Quad>);
 
@@ -242,6 +232,7 @@ pub struct VoidStats {
     pub named_graphs: usize,
 }
 
+/// The core triple store engine wrapping Oxigraph with GeoSPARQL extensions.
 #[derive(Clone)]
 pub struct TripleStore {
     store: Arc<Store>,
@@ -585,15 +576,13 @@ impl TripleStore {
 
     /// Execute a SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE).
     pub fn query(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
-        // A federated query is never cached: its SERVICE part reads a remote
-        // whose data and whose view of *this caller's identity* the local write
-        // generation knows nothing about.
-        if sparql_uses_service(sparql) {
-            return self.query_uncached(sparql);
-        }
         // Result cache: a repeated, *deterministic* query is answered from a small
         // LRU keyed by the (already ACL-scoped) query string and invalidated on
         // every write — so a hit is the exact result the engine would compute.
+        // A federated (SERVICE) query is never *stored* (`is_cacheable`, on the
+        // put path), so it can never be a hit: nothing about the query text is
+        // inspected before the lookup — that scan on every call, hits included,
+        // tripled the cost of a cached point query.
         if let Some(cached) = self.query_cache.get(sparql) {
             return Ok(cached);
         }
@@ -1709,6 +1698,13 @@ impl TripleStore {
     /// Get the cached count for a specific graph.
     pub fn graph_count_cached(&self, graph_iri: Option<&str>) -> Option<usize> {
         self.graph_index.get_count(graph_iri)
+    }
+
+    /// Entries held by the query-result cache (a test probe, see
+    /// [`QueryCache::len`]).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn query_cache_len(&self) -> usize {
+        self.query_cache.len()
     }
 
     /// Rebuild the graph index (e.g. after external writes).

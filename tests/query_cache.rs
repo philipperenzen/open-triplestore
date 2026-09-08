@@ -94,6 +94,38 @@ fn nondeterministic_query_is_not_cached() {
     assert_ne!(a, b, "UUID() must not be cached (it is non-deterministic)");
 }
 
+/// A federated query is never cached — its SERVICE part reads a remote the
+/// local write generation knows nothing about — while a plain query still is.
+/// The endpoint is not on the remote allowlist, so `SERVICE SILENT` yields an
+/// empty solution without touching the network.
+#[test]
+fn federated_query_is_not_cached_but_a_plain_one_is() {
+    let s = store(10_000);
+    s.load_str(&format!("<{EX}a> <{EX}p> \"x\" ."), RdfFormat::Turtle, None)
+        .unwrap();
+    assert_eq!(s.query_cache_len(), 0);
+
+    let federated =
+        "SELECT ?s WHERE { ?s ?p ?o . SERVICE SILENT <http://remote.example/sparql> { ?x ?y ?z } }";
+    assert_eq!(
+        rows(&s, federated),
+        1,
+        "SILENT: the failed remote is one empty row"
+    );
+    assert_eq!(rows(&s, federated), 1);
+    assert_eq!(
+        s.query_cache_len(),
+        0,
+        "a SERVICE query must never be stored in the result cache"
+    );
+
+    let plain = "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }";
+    assert_eq!(count(&s, plain), 1);
+    assert_eq!(s.query_cache_len(), 1, "a plain query is cached");
+    assert_eq!(count(&s, plain), 1);
+    assert_eq!(s.query_cache_len(), 1);
+}
+
 #[test]
 fn over_cap_results_are_correct_and_not_truncated() {
     // Cap of 2 rows, but the query returns 5 — must stream the full result.

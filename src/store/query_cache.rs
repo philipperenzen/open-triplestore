@@ -156,6 +156,18 @@ impl QueryCache {
         }
     }
 
+    /// Number of entries currently held (fresh or stale). A test probe: lets a
+    /// caller prove a query was — or was not — stored without reaching in.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn len(&self) -> usize {
+        self.inner.cache.lock().map(|c| c.len()).unwrap_or(0)
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The current generation. Callers snapshot this *before* evaluating a
     /// query and hand it back to [`Self::put`], so a write that lands during
     /// evaluation invalidates the result instead of being stamped onto it.
@@ -293,13 +305,23 @@ fn row_values(sol: &QuerySolution, vars: &Arc<[Variable]>) -> Vec<Option<Term>> 
 }
 
 /// True unless the query calls a non-deterministic SPARQL function whose value
-/// changes between executions (`RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE`). A
-/// conservative token scan: it matches a keyword only at a word boundary followed
-/// by `(`, so it errs toward *not* caching (a false positive is a missed cache, a
-/// false negative — caching something non-deterministic — never happens for these).
+/// changes between executions (`RAND`/`NOW`/`UUID`/`STRUUID`/`BNODE`), or is
+/// federated. A conservative token scan: it matches a keyword only at a word
+/// boundary followed by `(`, so it errs toward *not* caching (a false positive is
+/// a missed cache, a false negative — caching something non-deterministic — never
+/// happens for these).
+///
+/// Runs on the put path only — a miss has just paid for an evaluation, so the
+/// scan is noise there — and never before a lookup, where it would tax every hit.
 fn is_cacheable(sparql: &str) -> bool {
     const NONDET: &[&str] = &["rand", "now", "uuid", "struuid", "bnode"];
     let lower = sparql.to_ascii_lowercase();
+    // A federated query is never cached — its SERVICE part reads a remote whose
+    // data and whose view of *this caller's identity* the local write generation
+    // knows nothing about. Substring match: a false positive only costs a miss.
+    if lower.contains("service") {
+        return false;
+    }
     let bytes = lower.as_bytes();
     let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     for kw in NONDET {
@@ -365,6 +387,28 @@ mod tests {
             matches!(cache.get(q), Some(QueryResults::Boolean(true))),
             "an uncontended result must still be cached"
         );
+    }
+
+    /// A federated query is never cached: its SERVICE part reads a remote
+    /// whose data and whose view of the caller's identity the local write
+    /// generation knows nothing about. Decided here, on the put path, so a
+    /// lookup never pays for the scan.
+    #[test]
+    fn a_service_query_is_not_cacheable() {
+        assert!(!is_cacheable(
+            "SELECT ?s WHERE { SERVICE <http://remote.example/sparql> { ?s ?p ?o } }"
+        ));
+        assert!(
+            !is_cacheable("SELECT ?s WHERE { service silent <http://r/sparql> { ?s ?p ?o } }"),
+            "case-insensitive"
+        );
+        assert!(is_cacheable("SELECT ?s WHERE { ?s ?p ?o }"));
+
+        let cache = QueryCache::new(true, 16, 1000);
+        let q = "ASK { SERVICE <http://remote.example/sparql> { ?s ?p ?o } }";
+        let _ = cache.put(q, cache.generation(), QueryResults::Boolean(true));
+        assert!(cache.is_empty(), "put must refuse to store a SERVICE query");
+        assert!(cache.get(q).is_none());
     }
 
     #[test]
