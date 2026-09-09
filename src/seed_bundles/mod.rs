@@ -97,6 +97,22 @@ pub struct BundleDataset {
     pub graphs: Vec<BundleGraph>,
     pub quads: Vec<QuadsPayload>,
     pub saved_queries: Vec<CreateSavedQueryRequest>,
+    /// `(data model id, version)` this dataset conforms to.
+    pub conforms_to: Option<(String, Option<String>)>,
+    /// Shape-graph IRIs to register in the Studio library and bind to the dataset.
+    pub shape_graphs: Vec<String>,
+}
+
+/// A reference model shipped by a bundle (see `[[data_models]]`).
+pub struct BundleDataModel {
+    pub id: String,
+    pub title: String,
+    pub namespace: String,
+    pub description: Option<String>,
+    pub kind: crate::kind_detector::RegistryKind,
+    pub version: String,
+    /// First graph = the version's base graph, the rest its sub-graphs.
+    pub graphs: Vec<BundleGraph>,
 }
 
 /// A complete seed bundle: one organisation owning one or more datasets.
@@ -113,6 +129,9 @@ pub struct Bundle {
     /// registry (served by `GET /api/prefixes`; auto-declared in SPARQL
     /// queries). Existing registry entries always win.
     pub prefixes: std::collections::HashMap<String, String>,
+    /// Reference models registered before the datasets, so `conforms_to`
+    /// can resolve them.
+    pub data_models: Vec<BundleDataModel>,
 }
 
 impl Bundle {
@@ -143,6 +162,12 @@ impl Bundle {
 /// boot logging) react to what was actually created vs. already present.
 #[derive(Default)]
 pub struct SeedReport {
+    /// Reference models registered (or already present) from `[[data_models]]`.
+    pub models_registered: usize,
+    /// Datasets whose `conforms_to` was applied.
+    pub conformance_declared: usize,
+    /// Shape graphs registered/bound to datasets.
+    pub shape_graphs_bound: usize,
     pub org_id: String,
     pub org_created: bool,
     /// The admin user owner-attributed content (services, membership) was
@@ -224,6 +249,88 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
     }
 
     let sq = SavedQueryStore::new(state.auth_db.pool());
+
+    // Reference models first: a dataset's `conforms_to` names one of them.
+    // Idempotent — an existing model/version is left alone (its graphs are
+    // backfilled only when empty, like dataset graphs).
+    for dm in &bundle.data_models {
+        let base = state.base_url.as_str();
+        let now = chrono::Utc::now().to_rfc3339();
+        if crate::data_models::registry::get_data_model(&state.store, base, &dm.id).is_none() {
+            if let Err(e) = crate::data_models::registry::insert_data_model(
+                &state.store,
+                base,
+                &dm.id,
+                &dm.title,
+                &dm.namespace,
+                dm.description.as_deref(),
+                true,
+                Some("organisation"),
+                Some(&org_id),
+                None,
+                &now,
+            ) {
+                tracing::warn!(bundle = %bundle.id, model = %dm.id, error = %e, "failed to register data model");
+                continue;
+            }
+            if dm.kind != crate::kind_detector::RegistryKind::DataModel {
+                let _ = crate::data_models::registry::set_data_model_kind(
+                    &state.store,
+                    base,
+                    &dm.id,
+                    dm.kind,
+                );
+            }
+        }
+        for g in &dm.graphs {
+            if let Some((data, fmt)) = &g.data {
+                let empty = state
+                    .store
+                    .graph_count_cached(Some(&g.iri))
+                    .map(|n| n == 0)
+                    .unwrap_or(true);
+                if empty {
+                    if let Err(e) = load_graph(state, &g.iri, data, *fmt) {
+                        tracing::warn!(bundle = %bundle.id, graph = %g.iri, error = %e, "failed to load model graph");
+                    } else {
+                        report.graphs_loaded += 1;
+                    }
+                }
+            }
+        }
+        if crate::data_models::registry::get_version(&state.store, base, &dm.id, &dm.version)
+            .is_none()
+        {
+            let mut iris = dm.graphs.iter().map(|g| g.iri.clone());
+            let graph_iri = iris.next().expect("manifest guarantees at least one graph");
+            let version = crate::data_models::models::DataModelVersion {
+                data_model_id: dm.id.clone(),
+                version: dm.version.clone(),
+                status: crate::data_models::models::VersionStatus::Published,
+                graph_iri,
+                sub_graphs: iris.collect(),
+                created_at: now.clone(),
+                created_by: None,
+                derived_from: None,
+                notes: Some(format!("Seeded by bundle '{}'", bundle.id)),
+                branch: None,
+                sub_graph_status: vec![],
+            };
+            if let Err(e) =
+                crate::data_models::registry::insert_version(&state.store, base, &version)
+            {
+                tracing::warn!(bundle = %bundle.id, model = %dm.id, error = %e, "failed to register model version");
+                continue;
+            }
+            let _ = crate::data_models::registry::update_latest_published(
+                &state.store,
+                base,
+                &dm.id,
+                &dm.version,
+            );
+        }
+        report.models_registered += 1;
+    }
 
     for ds in &bundle.datasets {
         let existed = matches!(state.auth_db.get_dataset(&ds.slug), Ok(Some(_)));
@@ -354,6 +461,29 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
                 }
             }
         }
+
+        // The conformance layer: which model this dataset conforms to, and
+        // which shape graphs validate it. Declared, not inferred.
+        if let Some((model, version)) = &ds.conforms_to {
+            match state.auth_db.update_dataset_conformance(
+                &ds.slug,
+                Some(model),
+                version.as_deref(),
+            ) {
+                Ok(()) => report.conformance_declared += 1,
+                Err(e) => {
+                    tracing::warn!(bundle = %bundle.id, dataset = %ds.slug, error = %e, "failed to declare conformance")
+                }
+            }
+        }
+        for shapes_iri in &ds.shape_graphs {
+            match bind_shape_graph(state, &org_id, ds, shapes_iri) {
+                Ok(()) => report.shape_graphs_bound += 1,
+                Err(e) => {
+                    tracing::warn!(bundle = %bundle.id, dataset = %ds.slug, shapes = %shapes_iri, error = %e, "failed to bind shape graph")
+                }
+            }
+        }
     }
 
     // Loaded graph data changes what each principal can see/count — drop the
@@ -390,6 +520,54 @@ fn load_graph(state: &AppState, graph_iri: &str, data: &str, fmt: Fmt) -> anyhow
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
     }
+    Ok(())
+}
+
+/// Register `shapes_iri` in the SHACL Studio library (if it is not yet a
+/// shape graph) and bind it to the dataset, so `POST …/validate` and the
+/// write gate apply it. Mirrors `register_shape_graph` + `POST /bindings`.
+fn bind_shape_graph(
+    state: &AppState,
+    org_id: &str,
+    ds: &BundleDataset,
+    shapes_iri: &str,
+) -> anyhow::Result<()> {
+    use crate::shacl_studio::store::ShaclStudioStore;
+    let st = ShaclStudioStore::new(state.auth_db.pool());
+    if st.get_shape_graph_by_iri(shapes_iri)?.is_none() {
+        let (targets, count) =
+            crate::shacl_studio::run::analyze_shapes_graph(&state.store, shapes_iri);
+        if count == 0 {
+            anyhow::bail!("graph <{shapes_iri}> contains no SHACL shapes");
+        }
+        let set = st.create_shape_graph(
+            &format!("{} shapes", ds.name),
+            Some("Shipped by a seed bundle"),
+            crate::auth::models::OwnerType::Organisation,
+            org_id,
+            ds.visibility,
+            shapes_iri,
+            &[],
+            crate::shacl_studio::models::ShapeSource::Imported,
+            None,
+        )?;
+        let turtle = state
+            .store
+            .graph_store_get(Some(shapes_iri), oxigraph::io::RdfFormat::Turtle)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let turtle = String::from_utf8(turtle)?;
+        st.save_shape_graph_revision(
+            &set.id,
+            &turtle,
+            &targets,
+            count,
+            Some("Seeded by bundle"),
+            None,
+        )?;
+    }
+    let target = crate::shacl_studio::bindings::dataset_target_iri(&state.base_url, &ds.slug);
+    crate::shacl_studio::bindings::add_binding(&state.store, &target, shapes_iri)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
 }
 
@@ -502,11 +680,14 @@ mod tests {
                     version_name: None,
                     note: None,
                 }],
+                conforms_to: None,
+                shape_graphs: Vec::new(),
             }],
             prefixes: std::collections::HashMap::from([(
                 "ex".to_string(),
                 format!("https://example.org/{id}/ns#"),
             )]),
+            data_models: Vec::new(),
         }
     }
 

@@ -23,6 +23,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Every read benchmark repeats one query on an unchanged store. With the
+  # result cache on, every iteration after the first is a cache hit, so the
+  # numbers measure the cache, not the engine (63 of the 68 read benchmarks did,
+  # until 2026-09). The bench file disables the cache in code; this makes the
+  # merge-base side honest too while that fix is not yet on the base commit.
+  OTS_QUERY_CACHE: "off"
 
 jobs:
   perf-baseline:
@@ -51,8 +57,8 @@ jobs:
 
       # Then re-measure exactly what the PR gate measures, the way it measures it.
       #
-      # The gate (perf.yml) runs only the 'query|path|geosparql' subset, in its own
-      # process. A benchmark's timing is not independent of what ran before it in the
+      # The gate (perf.yml) runs the seven-group filter below — the same one used
+      # here and in scripts/hooks/pre-push — in its own process. A benchmark's timing is not independent of what ran before it in the
       # same process — allocator arenas, page-cache and CPU state are all warmer after
       # the insert/update groups — so a number captured in a full-suite run is not the
       # number the gate will produce for the same code. That gap is a constant offset
@@ -70,13 +76,13 @@ jobs:
       # whole-process interference. Baseline and gate must use the same estimator, or
       # the difference between them is itself a systematic offset.
       - name: Re-measure the gated subset under gate conditions (pass 1)
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
 
       - name: Set pass 1 aside
         run: cp -r target/criterion target/criterion-pass1
 
       - name: Re-measure the gated subset under gate conditions (pass 2)
-        run: cargo bench --bench performance --features full -- 'query|path|geosparql'
+        run: cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
 
       # --keep-tolerances preserves the per-benchmark tolerances already in the
       # committed baseline; only the measured numbers are refreshed.

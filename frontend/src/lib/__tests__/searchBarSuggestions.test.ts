@@ -17,7 +17,7 @@ const listDatasets = vi.fn();
 vi.mock('../api.js', () => ({ listDatasets: () => listDatasets() }));
 
 beforeAll(() => {
-  addMessages('en', en as Record<string, unknown>);
+  addMessages('en', en as unknown as Parameters<typeof addMessages>[1]);
   init({ fallbackLocale: 'en', initialLocale: 'en' });
 });
 

@@ -148,6 +148,8 @@ fn build_bundle() -> Bundle {
                 graphs,
                 quads: Vec::new(),
                 saved_queries: seed_data::services_for(ds.slug),
+                conforms_to: None,
+                shape_graphs: Vec::new(),
             }
         })
         .collect();
@@ -164,6 +166,7 @@ fn build_bundle() -> Bundle {
             description: Some(ORG_DESCRIPTION.to_string()),
         },
         datasets,
+        data_models: Vec::new(),
     }
 }
 

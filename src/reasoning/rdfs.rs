@@ -57,15 +57,46 @@ const MAX_ITERATIONS: usize = 500;
 pub struct RdfsMaterializer<'a> {
     store: &'a TripleStore,
     target_graph: String,
+    /// When set, the rules read ONLY these graphs (plus the target graph).
+    /// Without it they read the unnamed default graph, as they always did.
+    sources: Option<Vec<String>>,
 }
 
 impl<'a> RdfsMaterializer<'a> {
+    /// Restrict the rules to `sources` (plus the target graph). Without a
+    /// scope the rules read the unnamed default graph only, so a dataset's
+    /// named graphs — and the model version it conforms to — were invisible to
+    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// from `source_graphs` or the dataset's conformance layer.
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    fn scope(&self) -> Option<Vec<String>> {
+        self.sources.as_ref().map(|s| {
+            let mut g = s.clone();
+            if !g.contains(&self.target_graph) {
+                g.push(self.target_graph.clone());
+            }
+            g
+        })
+    }
+
+    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.update_scoped(sparql, &scope),
+            None => self.store.update(sparql),
+        }
+    }
+
     /// Create a materializer targeting a named graph (pass [`RDFS_ENTAILMENT_GRAPH`]
     /// for the standard `urn:entailment:rdfs`).
     pub fn with_target(store: &'a TripleStore, target_graph: impl Into<String>) -> Self {
         Self {
             store,
             target_graph: target_graph.into(),
+            sources: None,
         }
     }
 
@@ -73,6 +104,10 @@ impl<'a> RdfsMaterializer<'a> {
     pub fn materialize(&self) -> Result<ReasoningReport, ReasoningError> {
         let start = Instant::now();
         let mut iterations = 0usize;
+        // `triples_added` must be the delta this run produced, not the graph's
+        // size afterwards — reporting the size meant a second run that inferred
+        // nothing still claimed thousands of "added" triples.
+        let initial = count_graph(self.store, &self.target_graph)?;
 
         info!("RDFS materialization → <{}>", self.target_graph);
 
@@ -124,7 +159,7 @@ impl<'a> RdfsMaterializer<'a> {
 
         Ok(ReasoningReport {
             regime: "rdfs".to_string(),
-            triples_added: final_count,
+            triples_added: final_count.saturating_sub(initial),
             iterations,
             elapsed_ms: start.elapsed().as_millis() as u64,
             target_graph: self.target_graph.clone(),
@@ -143,7 +178,7 @@ impl<'a> RdfsMaterializer<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -160,21 +195,31 @@ impl<'a> RdfsMaterializer<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
     // ─── Rule rdfs5: subPropertyOf transitivity ───────────────────────────────
 
     fn apply_rdfs5(&self) -> Result<(), ReasoningError> {
+        // Both legs must also be read from the target graph — the derived
+        // `subPropertyOf` triples land there, so a rule that only reads the
+        // default graph never sees its own previous round's output. The
+        // fixed-point loop then converged after one step and a chain
+        // p ⊑ q ⊑ r ⊑ s never produced p ⊑ s. Mirrors `apply_rdfs11`, which
+        // already reads both.
         let q = format!(
             r#"INSERT {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
-               WHERE  {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q .
-                         ?q <{RDFS_SUB_PROPERTY_OF}> ?r .
-                         FILTER(?p != ?r) }}"#,
+               WHERE  {{
+                   {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }}
+                   UNION {{ GRAPH <{tg}> {{ ?p <{RDFS_SUB_PROPERTY_OF}> ?q }} }}
+                   {{ ?q <{RDFS_SUB_PROPERTY_OF}> ?r }}
+                   UNION {{ GRAPH <{tg}> {{ ?q <{RDFS_SUB_PROPERTY_OF}> ?r }} }}
+                   FILTER(?p != ?r)
+               }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -191,7 +236,7 @@ impl<'a> RdfsMaterializer<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -210,7 +255,7 @@ impl<'a> RdfsMaterializer<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -228,7 +273,7 @@ impl<'a> RdfsMaterializer<'a> {
                }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -240,7 +285,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?p <{RDF_TYPE}> <{RDFS_CONTAINER_MEMBERSHIP_PROPERTY}> }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -252,7 +297,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?d <{RDF_TYPE}> <{RDFS_DATATYPE}> }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -272,7 +317,7 @@ impl<'a> RdfsMaterializer<'a> {
                          BIND(DATATYPE(?lit) AS ?dt) FILTER(BOUND(?dt)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -284,7 +329,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?s ?p ?o . FILTER(isIRI(?s) || isBlank(?s)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -296,7 +341,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?s ?p ?o . FILTER(isIRI(?o) || isBlank(?o)) }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -308,7 +353,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?p <{RDF_TYPE}> <{RDF_PROPERTY}> }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -320,7 +365,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?c <{RDF_TYPE}> <{RDFS_CLASS}> }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 
@@ -332,7 +377,7 @@ impl<'a> RdfsMaterializer<'a> {
                WHERE  {{ ?c <{RDF_TYPE}> <{RDFS_CLASS}> }}"#,
             tg = self.target_graph
         );
-        self.store.update(&q)?;
+        self.run_update(&q)?;
         Ok(())
     }
 }

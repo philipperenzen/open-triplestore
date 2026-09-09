@@ -102,13 +102,54 @@ impl TBox {
 pub struct QLQueryRewriter<'a> {
     store: &'a TripleStore,
     pub target_graph: String,
+    /// When set, the rules read ONLY these graphs (plus the target graph).
+    /// Without it they read the unnamed default graph, as they always did.
+    sources: Option<Vec<String>>,
 }
 
 impl<'a> QLQueryRewriter<'a> {
+    /// Restrict the rules to `sources` (plus the target graph). Without a
+    /// scope the rules read the unnamed default graph only, so a dataset's
+    /// named graphs — and the model version it conforms to — were invisible to
+    /// materialisation; this is what `POST /api/reasoning/materialize` sets
+    /// from `source_graphs` or the dataset's conformance layer.
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    fn scope(&self) -> Option<Vec<String>> {
+        self.sources.as_ref().map(|s| {
+            let mut g = s.clone();
+            if !g.contains(&self.target_graph) {
+                g.push(self.target_graph.clone());
+            }
+            g
+        })
+    }
+
+    fn run_update(&self, sparql: &str) -> Result<(), crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.update_scoped(sparql, &scope),
+            None => self.store.update(sparql),
+        }
+    }
+
+    fn run_query(
+        &self,
+        sparql: &str,
+    ) -> Result<oxigraph::sparql::QueryResults<'static>, crate::store::engine::StoreError> {
+        match self.scope() {
+            Some(scope) => self.store.query_scoped(sparql, &scope),
+            None => self.store.query(sparql),
+        }
+    }
+
     pub fn new(store: &'a TripleStore) -> Self {
         Self {
             store,
             target_graph: OWL2_QL_ENTAILMENT_GRAPH.to_string(),
+            sources: None,
         }
     }
 
@@ -185,7 +226,7 @@ impl<'a> QLQueryRewriter<'a> {
                         "INSERT {{ GRAPH <{}> {{ <{sub}> <{RDFS_SUB_CLASS_OF}> <{sup}> }} }} WHERE {{}}",
                         self.target_graph
                     );
-                    self.store.update(&q)?;
+                    self.run_update(&q)?;
                     count += 1;
                 }
             }
@@ -197,7 +238,7 @@ impl<'a> QLQueryRewriter<'a> {
                         "INSERT {{ GRAPH <{}> {{ <{sub}> <{RDFS_SUB_PROPERTY_OF}> <{sup}> }} }} WHERE {{}}",
                         self.target_graph
                     );
-                    self.store.update(&q)?;
+                    self.run_update(&q)?;
                     count += 1;
                 }
             }
@@ -483,7 +524,7 @@ impl<'a> QLQueryRewriter<'a> {
                FILTER(isIRI(?prop) && isIRI(?class)) \
              }}"
         );
-        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.store.query(&q)? {
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.run_query(&q)? {
             for sol in sols.flatten() {
                 let prop = sol.get("prop").and_then(|v| {
                     if let oxigraph::model::Term::NamedNode(nn) = v {
@@ -513,7 +554,7 @@ impl<'a> QLQueryRewriter<'a> {
             "SELECT ?s ?o WHERE {{ ?s <{predicate}> ?o . FILTER(isIRI(?s) && isIRI(?o)) }}"
         );
         let mut pairs = Vec::new();
-        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.store.query(&q)? {
+        if let oxigraph::sparql::QueryResults::Solutions(sols) = self.run_query(&q)? {
             for sol in sols.flatten() {
                 let s = sol.get("s").and_then(|v| {
                     if let oxigraph::model::Term::NamedNode(nn) = v {

@@ -387,7 +387,9 @@ describe('normalizeSparqlResult', () => {
   it('classifies graph, boolean and bindings responses', () => {
     expect(normalizeSparqlResult({ _graphResult: true, ntriples: '<a> <b> <c> .' }).kind).toBe('graph');
     expect(normalizeSparqlResult({ boolean: true })).toEqual({ kind: 'boolean', value: true });
-    const b = normalizeSparqlResult({ head: { vars: ['s'] }, results: { bindings: [{ s: { type: 'uri', value: 'x' } }] } });
+    const b = /** @type {any} */ (
+      normalizeSparqlResult({ head: { vars: ['s'] }, results: { bindings: [{ s: { type: 'uri', value: 'x' } }] } })
+    );
     expect(b.kind).toBe('bindings');
     expect(b.vars).toEqual(['s']);
     expect(b.bindings).toHaveLength(1);
@@ -524,10 +526,10 @@ describe('parseAskSpec / ask blocks', () => {
 
   it('caps and cleans options, and rejects broken specs', () => {
     const many = { question: 'q', options: ['a', '', 'b', 3, 'c', 'd', 'e', 'f'] };
-    expect(parseAskSpec(JSON.stringify(many)).ask.options).toEqual(['a', 'b', 'c', 'd', 'e']);
-    expect(parseAskSpec('not json').error).toBeTruthy();
-    expect(parseAskSpec('{"options":["a"]}').error).toBeTruthy();
-    expect(parseAskSpec('{"question":"q","options":[]}').error).toBeTruthy();
+    expect(/** @type {any} */ (parseAskSpec(JSON.stringify(many))).ask.options).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(/** @type {any} */ (parseAskSpec('not json')).error).toBeTruthy();
+    expect(/** @type {any} */ (parseAskSpec('{"options":["a"]}')).error).toBeTruthy();
+    expect(/** @type {any} */ (parseAskSpec('{"question":"q","options":[]}')).error).toBeTruthy();
     // A broken fence degrades to the broken block, never a crash.
     const segs = parseChatBlocks('```ask\n{"question":""}\n```');
     expect(segs[0].kind).toBe('broken');

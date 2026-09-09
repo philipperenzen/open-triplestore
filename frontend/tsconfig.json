@@ -1,0 +1,22 @@
+{
+  "extends": "./jsconfig.json",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "types": [
+      "vite/client",
+      "node"
+    ],
+    "maxNodeModuleJsDepth": 0
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js",
+    "src/**/*.svelte"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "e2e",
+    "public"
+  ]
+}

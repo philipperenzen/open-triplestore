@@ -29,7 +29,7 @@ const OWL = 'http://www.w3.org/2002/07/owl#';
 const GRAPH = 'https://example.org/data-model/ex/version/1.0';
 
 beforeAll(() => {
-  addMessages('en', en as Record<string, unknown>);
+  addMessages('en', en as unknown as Parameters<typeof addMessages>[1]);
   init({ fallbackLocale: 'en', initialLocale: 'en' });
 });
 

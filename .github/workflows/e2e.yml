@@ -1,15 +1,33 @@
 name: Browser E2E (Open Triplestore demo)
 
 # Boots the seeded backend + frontend and drives the public demo through a real
-# browser with Playwright. Heavier than the unit/integration suites, so it runs
-# on demand and on pushes that touch the demo, frontend, or seed.
+# browser with Playwright.
+#
+# It gates pull requests. It used to run only on `push` with a path filter that
+# excluded `src/server/routes.rs` — the API every page calls — so no PR was ever
+# blocked by a browser failure, and a backend change could break the UI without
+# any job noticing until someone opened it. The path filter now covers the whole
+# backend and build inputs; docs-only changes still skip it.
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     paths:
       - 'frontend/**'
-      - 'src/saved_queries/**'
-      - 'src/auth/handlers.rs'
+      - 'src/**'
+      - 'opengraph/**'
+      - 'plugins/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/e2e.yml'
+  push:
+    branches: [main, master, 'release/**']
+    paths:
+      - 'frontend/**'
+      - 'src/**'
+      - 'opengraph/**'
+      - 'plugins/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/e2e.yml'
 
 # Cancel a superseded e2e run when the same ref is pushed again — this 40-min job

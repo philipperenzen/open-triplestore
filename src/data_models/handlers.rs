@@ -1251,11 +1251,7 @@ fn rdf_value_to_sparql(v: &serde_json::Value) -> Result<String, AppError> {
             let value = map.get("value").and_then(|v| v.as_str()).unwrap_or("");
             let escaped = escape_sparql_literal(value);
             if let Some(lang) = map.get("lang").and_then(|v| v.as_str()) {
-                if lang.is_empty() || !lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                    return Err(AppError::BadRequest(format!(
-                        "Invalid language tag: '{lang}'"
-                    )));
-                }
+                crate::store::validate_language_tag(lang).map_err(AppError::BadRequest)?;
                 Ok(format!("\"{escaped}\"@{lang}"))
             } else if let Some(dt) = map.get("datatype").and_then(|v| v.as_str()) {
                 oxigraph::model::NamedNode::new(dt)
@@ -1939,7 +1935,9 @@ pub async fn publish_version(
     Path((id, ver)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     if !user.is_admin() {
-        return Err(AppError::Unauthorized("Admin access required".to_string()));
+        // 403, not 401: the caller is authenticated and merely lacks the role;
+        // a 401 made clients treat "not an admin" as a session expiry.
+        return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
@@ -2027,7 +2025,9 @@ pub async fn deprecate_version(
     Path((id, ver)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, AppError> {
     if !user.is_admin() {
-        return Err(AppError::Unauthorized("Admin access required".to_string()));
+        // 403, not 401: the caller is authenticated and merely lacks the role;
+        // a 401 made clients treat "not an admin" as a session expiry.
+        return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
     let record = registry::get_version(&state.store, &state.base_url, &id, &ver)
@@ -2080,7 +2080,9 @@ async fn transition_sub_graph(
         .ok_or_else(|| AppError::NotFound(format!("Data model '{id}' not found")))?;
     if require_admin {
         if !user.is_admin() {
-            return Err(AppError::Unauthorized("Admin access required".to_string()));
+            // 403, not 401: the caller is authenticated and merely lacks the role;
+            // a 401 made clients treat "not an admin" as a session expiry.
+            return Err(AppError::Forbidden("Admin access required".to_string()));
         }
     } else if !state
         .auth_db

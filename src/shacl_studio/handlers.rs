@@ -35,7 +35,7 @@ fn org_ids(state: &AppState, uid: &str) -> Vec<String> {
 fn e500<E: ToString>(e: E) -> ApiErr {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
-fn parse_visibility(s: &Option<String>) -> Visibility {
+pub(crate) fn parse_visibility(s: &Option<String>) -> Visibility {
     s.as_deref()
         .and_then(Visibility::from_str)
         .unwrap_or(Visibility::Private)
@@ -43,7 +43,7 @@ fn parse_visibility(s: &Option<String>) -> Visibility {
 
 /// Resolve the owner for a new artifact from the request, defaulting to the
 /// current user. Organisation ownership requires membership.
-fn resolve_owner(
+pub(crate) fn resolve_owner(
     state: &AppState,
     user: &AuthenticatedUser,
     owner_type: &Option<String>,
@@ -86,56 +86,90 @@ pub async fn create_shape_graph(
     State(state): State<AppState>,
     Json(body): Json<CreateShapeGraphBody>,
 ) -> Result<impl IntoResponse, ApiErr> {
-    let st = studio(&state);
     let (owner_type, owner_id) = resolve_owner(&state, &user, &body.owner_type, &body.owner_id)?;
-    let graph_iri = format!("urn:shapes:{}", Uuid::new_v4());
     let source = body
         .source
         .as_deref()
         .map(ShapeSource::from_str_or_manual)
         .unwrap_or(ShapeSource::Manual);
+    let turtle = body.turtle.unwrap_or_else(|| EMPTY_SHAPES.to_string());
+    let set = create_shape_graph_from_turtle(
+        &state,
+        &user,
+        &body.name,
+        body.description.as_deref(),
+        owner_type,
+        &owner_id,
+        parse_visibility(&body.visibility),
+        &body.tags,
+        source,
+        &turtle,
+        "Created",
+    )?;
+    Ok((StatusCode::CREATED, Json(set)))
+}
 
+/// Create a shape graph from Turtle: the registry row, the store graph, the
+/// first revision and its commit. Shared by the create endpoint and the
+/// specification importers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_shape_graph_from_turtle(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    name: &str,
+    description: Option<&str>,
+    owner_type: OwnerType,
+    owner_id: &str,
+    visibility: Visibility,
+    tags: &[String],
+    source: ShapeSource,
+    turtle: &str,
+    note: &str,
+) -> Result<ShapeGraph, ApiErr> {
+    let st = studio(state);
+    let graph_iri = format!("urn:shapes:{}", Uuid::new_v4());
     let set = st
         .create_shape_graph(
-            &body.name,
-            body.description.as_deref(),
+            name,
+            description,
             owner_type,
-            &owner_id,
-            parse_visibility(&body.visibility),
+            owner_id,
+            visibility,
             &graph_iri,
-            &body.tags,
+            tags,
             source,
             Some(&user.user_id),
         )
         .map_err(e500)?;
-
-    let turtle = body.turtle.unwrap_or_else(|| EMPTY_SHAPES.to_string());
     state
         .store
-        .graph_store_put(Some(&graph_iri), &turtle, oxigraph::io::RdfFormat::Turtle)
+        .graph_store_put(Some(&graph_iri), turtle, oxigraph::io::RdfFormat::Turtle)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let (targets, count) = super::run::analyze_shapes_graph(&state.store, &graph_iri);
     let version = st
         .save_shape_graph_revision(
             &set.id,
-            &turtle,
+            turtle,
             &targets,
             count,
-            Some("Created"),
+            Some(note),
             Some(&user.user_id),
         )
         .map_err(e500)?;
     record_shape_graph_commit(
-        &state,
+        state,
         &set.id,
         &graph_iri,
         version,
-        Some("Created"),
+        Some(note),
         &user.user_id,
     );
-
-    let set = st.get_shape_graph(&set.id).map_err(e500)?;
-    Ok((StatusCode::CREATED, Json(set)))
+    st.get_shape_graph(&set.id).map_err(e500)?.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "shape graph missing right after creation".to_string(),
+        )
+    })
 }
 
 pub async fn list_shape_graphs(
@@ -1440,7 +1474,17 @@ async fn resolve_scope(
         }
         return Ok(graphs);
     }
-    Ok(vec![])
+    // No scope named. This used to return an empty list, which `values_clause`
+    // turned into "no GRAPH wrapper at all" — so introspection ran over the
+    // union graph and any authenticated caller could enumerate every tenant's
+    // classes, properties and datatypes. Default to exactly what the caller can
+    // read over /sparql instead.
+    let mut graphs: Vec<String> = crate::server::routes::accessible_read_graphs(state, Some(user))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?
+        .into_iter()
+        .collect();
+    graphs.sort();
+    Ok(graphs)
 }
 
 pub async fn model_context(
@@ -1497,7 +1541,19 @@ pub async fn derive_shapes(
                 ));
             }
         }
-        body.graphs.clone()
+        if body.graphs.is_empty() {
+            // Neither a dataset nor any graph named: fall back to the caller's
+            // readable set rather than the whole store (see `resolve_scope`).
+            let mut graphs: Vec<String> =
+                crate::server::routes::accessible_read_graphs(&state, Some(&user))
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.message()))?
+                    .into_iter()
+                    .collect();
+            graphs.sort();
+            graphs
+        } else {
+            body.graphs.clone()
+        }
     };
     let targets = body.target_classes.clone();
     let store = state.store.clone();

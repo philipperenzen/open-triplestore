@@ -116,10 +116,13 @@ fn dcat_void_statistics() {
         .unwrap();
     let ttl = generate_dcat_catalog("http://localhost:7878", &store, &db, None);
     let s = parse(&ttl);
-    // VoID triples count is emitted (void:triples or void:Dataset typing).
+    // A void:triples statistic is emitted. (This used to be
+    // `ttl.contains("void") || ask(...)`, and the catalog always begins with
+    // `@prefix void:`, so the left disjunct was unconditionally true and the
+    // assertion could not fail even with every statistic removed.)
     assert!(
-        ttl.contains("void") || ask(&s, "ASK { ?d <http://rdfs.org/ns/void#triples> ?n }"),
-        "catalog includes VoID statistics:\n{ttl}"
+        ask(&s, "ASK { ?d <http://rdfs.org/ns/void#triples> ?n }"),
+        "catalog includes a void:triples statistic:\n{ttl}"
     );
 }
 

@@ -169,3 +169,54 @@ fn shaclc_lenient_on_non_shape_input() {
         "no shapes are produced from non-shape input"
     );
 }
+
+// Serializing a shape with SEVERAL blank-node property shapes — the standard
+// `sh:property [ … ]` idiom — must give each property its own path and datatype.
+//
+// The serializer resolved a blank-node property shape by interpolating `_:bN`
+// into a SPARQL query. In SPARQL a blank node is an existential VARIABLE, not a
+// reference to the stored node, so the pattern matched every subject in the
+// graph and each property drew an arbitrary path/datatype from whichever
+// property shape matched first. The existing round-trip test uses a shape with
+// ONE property, where "arbitrary" and "correct" coincide, so it never fired.
+#[test]
+fn shaclc_serializes_each_blank_node_property_shape_distinctly() {
+    let turtle = r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    sh:property [ sh:path ex:name ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path ex:age  ; sh:datatype xsd:integer ] .
+"#;
+    let store = load_turtle(turtle);
+    let out = serialize(&store, "urn:shapes").expect("serialize");
+
+    assert!(
+        out.contains("name") && out.contains("age"),
+        "both property paths must appear, got:\n{out}"
+    );
+
+    // Each path must be paired with ITS OWN datatype. Under the old lookup both
+    // lines got whichever datatype the wildcard match returned first.
+    let name_line = out
+        .lines()
+        .find(|l| l.contains("name"))
+        .unwrap_or_default()
+        .to_string();
+    let age_line = out
+        .lines()
+        .find(|l| l.contains("age"))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        name_line.contains("string") && !name_line.contains("integer"),
+        "ex:name must keep xsd:string, got: {name_line:?}\nfull output:\n{out}"
+    );
+    assert!(
+        age_line.contains("integer") && !age_line.contains("string"),
+        "ex:age must keep xsd:integer, got: {age_line:?}\nfull output:\n{out}"
+    );
+}

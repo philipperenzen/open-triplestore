@@ -70,7 +70,13 @@ geometry3d      = ["dep:parry3d-f64"]
 ## `--all-features` job compiles it (on a trixie-based rust image — see
 ## .gitlab-ci.yml).
 sfcgal3d        = ["geometry3d", "dep:sfcgal"]
-## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature)
+## SAML 2.0 SSO support (requires libxml2 + openssl via samael's xmlsec feature).
+## EXPERIMENTAL and deliberately NOT in `full`: the ACS handler has never been
+## verified against a real IdP and has a known request-ID validation defect
+## (`parse_base64_response` is handed a confirmation-method URN where samael
+## expects request IDs, with IdP-initiated responses disallowed), so no login
+## can currently succeed. Kept compiling — CI enables it explicitly — for
+## whoever picks it up; see docs/auth.md.
 saml            = ["dep:samael", "samael/xmlsec"]
 ## Test helpers (AppState::test_default_with_store etc.)
 test-utils      = []
@@ -93,8 +99,30 @@ asset-archive     = ["dep:zip"]              # ZIP entry count + uncompressed si
 asset-spreadsheet = ["dep:calamine"]         # XLSX/ODS sheet + row counts
 asset-thumbnail   = ["dep:image"]            # derived thumbnail generation (routes.rs)
 asset-clamav      = []                        # ClamAV INSTREAM virus scan on upload (std net only)
-## All extensions enabled
-full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "saml", "geometry3d", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
+## The feature set a plain `cargo build` produces.
+##
+## `full`, so the README's native build path yields the binary its Highlights
+## table describes. With no `default` key at all — the previous state — a plain
+## `cargo build --release` compiled none of RDF 1.2, the OWL 2 profiles, LDP,
+## ShEx, SWRL, text/vocab search, SAML or 3D geometry, while the README told
+## users to build exactly that way and then start the server. Docker and CI pass
+## explicit feature lists, so only the documented native path was affected.
+##
+## `--no-default-features` gets the minimal core (SPARQL 1.1 + GeoSPARQL 2D over
+## the Oxigraph engine); CI compiles that configuration so its `#[cfg(not(...))]`
+## fallbacks keep building.
+default         = ["full"]
+
+## All extensions enabled.
+##
+## `backup-encrypt` and `alerting` are included: docs/administration.md
+## documents BACKUP_ENCRYPT and ALERT_WEBHOOK_URL / ALERT_SMTP_* as ordinary
+## operational knobs, but the Dockerfile and the release workflow both build
+## `--features full`, so leaving them out meant every published image silently
+## ignored those variables. Neither pulls a native dependency (`age` is pure
+## Rust; lettre is already a core dependency — the `alerting` flag only gates
+## the module), so there is no build-portability cost.
+full            = ["rdf-12", "owl2-rl", "owl2-el", "owl2-ql", "owl2-dl", "text-search", "vocab-search", "ldp", "shex", "swrl", "geometry3d", "backup-encrypt", "alerting", "asset-pdf", "asset-exif", "asset-media", "asset-archive", "asset-spreadsheet", "asset-thumbnail", "asset-clamav"]
 
 [dependencies]
 libc = "0.2"
@@ -103,6 +131,8 @@ libc = "0.2"
 # (a mismatch splits e.g. oxrdf and breaks rdf-star feature unification).
 oxigraph = "0.5"
 oxrdf = "0.3"
+# Needed only to name `Iri` in the federation service-handler trait; already in the tree.
+oxiri = "0.2.11"
 spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable

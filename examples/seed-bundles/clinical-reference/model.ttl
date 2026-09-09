@@ -1,0 +1,18 @@
+@prefix ex: <https://example.org/clinical/def#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix fhir: <http://hl7.org/fhir/> .
+
+ex:Resource a owl:Class ; rdfs:label "Resource"@en ; rdfs:seeAlso fhir:Resource .
+ex:Patient a owl:Class ; rdfs:subClassOf ex:Resource ; rdfs:label "Patient"@en ; rdfs:seeAlso fhir:Patient .
+ex:Encounter a owl:Class ; rdfs:subClassOf ex:Resource ; rdfs:label "Encounter"@en ; rdfs:seeAlso fhir:Encounter .
+ex:Observation a owl:Class ; rdfs:subClassOf ex:Resource ; rdfs:label "Observation"@en ; rdfs:seeAlso fhir:Observation .
+
+ex:subject a owl:ObjectProperty ; rdfs:domain ex:Resource ; rdfs:range ex:Patient ; rdfs:label "subject"@en .
+ex:encounter a owl:ObjectProperty ; rdfs:domain ex:Observation ; rdfs:range ex:Encounter .
+ex:code a owl:ObjectProperty ; rdfs:domain ex:Observation ; rdfs:label "code"@en .
+ex:value a owl:DatatypeProperty ; rdfs:domain ex:Observation ; rdfs:label "value"@en .
+ex:unit a owl:DatatypeProperty ; rdfs:domain ex:Observation .
+ex:status a owl:ObjectProperty ; rdfs:domain ex:Resource ; rdfs:label "status"@en .
+ex:effective a owl:DatatypeProperty ; rdfs:domain ex:Observation .
+ex:birthDate a owl:DatatypeProperty ; rdfs:domain ex:Patient .

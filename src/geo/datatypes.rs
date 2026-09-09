@@ -118,12 +118,21 @@ pub fn extract_crs(value: &str) -> Option<&str> {
     }
 }
 
-/// Serialize a GEOS Geometry back to a `geo:wktLiteral` Term.
-pub fn geometry_to_wkt_literal(geom: &GeosGeometry) -> Option<Term> {
+/// Serialize a GEOS Geometry back to a `geo:wktLiteral` Term, carrying `crs_uri`
+/// as the literal's CRS prefix when one is given.
+///
+/// The CRS must be threaded through: emitting a bare WKT literal dropped the
+/// operand's CRS, so `geof:getSRID(geof:buffer("<…/28992> POINT(…)", 10))`
+/// reported CRS84 — silently relabelling RD New metres as degrees, and making
+/// the result unusable as an operand for anything else.
+pub fn geometry_to_wkt_literal_in(geom: &GeosGeometry, crs_uri: Option<&str>) -> Option<Term> {
     let wkt = geom.to_wkt().ok()?;
-    // Clean up GEOS WKT output (sometimes has extra precision)
+    let lexical = match crs_uri {
+        Some(uri) => format!("<{uri}> {wkt}"),
+        None => wkt,
+    };
     let literal =
-        Literal::new_typed_literal(wkt, NamedNode::new_unchecked(vocabulary::WKT_LITERAL));
+        Literal::new_typed_literal(lexical, NamedNode::new_unchecked(vocabulary::WKT_LITERAL));
     Some(Term::Literal(literal))
 }
 
@@ -206,7 +215,7 @@ mod tests {
             NamedNode::new_unchecked(vocabulary::WKT_LITERAL),
         ));
         let geom = parse_wkt_literal(&term).expect("Should parse POLYGON");
-        let output = geometry_to_wkt_literal(&geom).expect("Should serialize");
+        let output = geometry_to_wkt_literal_in(&geom, None).expect("Should serialize");
         // The output should still be a wktLiteral
         if let Term::Literal(lit) = &output {
             assert_eq!(lit.datatype().as_str(), vocabulary::WKT_LITERAL);

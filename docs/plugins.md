@@ -80,6 +80,39 @@ description = "…"
 sparql = "SELECT ?p WHERE { ?p a <https://acme.example/catalog#Product> }"
 ```
 
+#### Layered-convention keys (reference models, conformance, shapes)
+
+A bundle can ship the *model layer* as well as datasets, so a dataset can
+declare what it conforms to and be validated out of the box:
+
+```toml
+[[data_models]]                      # registered in the data-model registry
+id = "asset-model"                   # → {base}/data-model/asset-model
+title = "Asset model"
+namespace = "https://example.org/layered/def#"
+kind = "model"                       # model (default) | vocabulary | shapes
+version = "1.0.0"                    # one published version; default 1.0.0
+[[data_models.graphs]]               # first graph = the version's base graph,
+iri = "https://example.org/layered/model"   #   the rest are its sub-graphs
+role = "model"
+file = "model.ttl"
+
+[[datasets]]
+slug = "assets"
+# …
+conforms_to = { model = "asset-model", version = "1.0.0" }   # dct:conformsTo
+shape_graphs = ["https://example.org/layered/shapes"]        # registered in the
+                                                             # Studio library and
+                                                             # bound to the dataset
+```
+
+Graph roles accept the whole convention: `instances`, `model` (alias
+`ontology`), `vocabulary`, `shapes`, `domain-values`, `linkset`, `provenance`,
+`catalog`. `examples/seed-bundles/layered-reference` is a complete,
+domain-neutral example (run by `tests/layered_bundle_e2e.rs`);
+`examples/seed-bundles/nen2660-imbor` is the same mechanism with NEN 2660-2
+and IMBOR as payload (files fetched by its `fetch.sh`, not vendored).
+
 ### Semantics
 
 - **Idempotent.** An existing organisation/dataset is never re-created; a
@@ -96,6 +129,22 @@ sparql = "SELECT ?p WHERE { ?p a <https://acme.example/catalog#Product> }"
   point in boot as the built-in demo seed, after the store is open.
 - Payload paths in a manifest may not be absolute or contain `..` — a bundle
   can only read files inside its own directory.
+
+### Domain starter profiles
+
+A domain profile is a bundle, not a code change. The repository ships:
+
+| Bundle | Domain | Payload |
+|---|---|---|
+| `layered-reference` | asset registry (toy) | vendored; loaded in CI by `tests/layered_bundle_e2e.rs` |
+| `clinical-reference` | clinical records (FHIR-shaped, LOINC-like codes) | vendored; loaded in CI by `tests/clinical_bundle_e2e.rs` |
+| `nen2660-imbor` | Dutch infrastructure (NEN 2660-2 + IMBOR 2025) | fetched by `fetch.sh` (public downloads); the real-data Stage-1 benchmark |
+| `gwsw` | Dutch urban water (GWSW Totaal 1.7.0, RIONED) | `fetch.sh` downloads the CC0 Turtle export from data.gwsw.nl |
+
+CB'23 (material passports) and clinical terminologies such as SNOMED CT are
+licensed or not published as RDF by their owners; write a manifest like the
+ones above, point it at the files you are entitled to, and drop the directory
+into `--seed-dir`.
 
 ### Docker: mounting extra bundles
 

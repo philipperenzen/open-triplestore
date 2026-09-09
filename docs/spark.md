@@ -137,7 +137,13 @@ Signed-in users keep their conversations: the sidebar lists past chats (newest f
 
 ## Safety guard
 
-Every LLM-backed request passes a guard before any completion is spent:
+Every LLM-backed request passes a guard before any completion is spent — the
+chat and streaming endpoints, NL→SPARQL, the SHACL assistant, the saved-query
+`…/repair` route and the `/api/llm/feedback` relay. The one LLM route outside
+it is `GET /api/llm/health`: a reachability probe that spends no completion and
+carries no caller text, which the UI polls every 30 s, so it sits under the
+per-IP request governor shared with `/sparql` rather than the per-principal
+LLM budget below.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -169,6 +175,23 @@ Spark uses the same bring-your-own-LLM gateway as the platform's other AI featur
 | `LLM_CHAT_MAX_ROUNDS` | Retrieval rounds per turn (default `3`, clamped 1–8). Three is right for a small local model — more rounds mostly buy more failed repairs — but a capable model answering multi-part questions makes good use of four or five. |
 | `LLM_CHAT_QUERY_MAX_SECS` | Per-round SPARQL cap in seconds (default `30`, clamped 5–600); the effective bound is the smaller of this and the endpoint's own query timeout. Raise it where legitimate analytical questions (property paths over a large ontology) need more. |
 | `LLM_CHAT_TOOLS` | `auto` (default): offer the native function tools on every completion and fall back to the `SPARQL:` directive transparently — a gateway that rejects the `tools` parameter is remembered per model. `off`: directive protocol only. Tool rounds are not token-streamed; with tools active the answer arrives when the turn completes. |
+
+When the gateway is unreachable, or answers with a non-2xx status, the chat
+endpoints return **503 Service Unavailable** with a message naming the endpoint
+that was tried and this knob; `GET /api/llm/health` keeps reporting
+`reachable: false`. (They used to answer a bare 500 "Internal server error",
+indistinguishable from a crash.)
+
+Budgeting at small windows: the reserve for the answer (3072 tokens) and the
+prompt margin (2048) come off the window first, so an 8k window leaves about 3k
+tokens for the system prompt and history — tight for a demo-seeded instance.
+When the prompt does not fit, the graph-vocabulary blocks are trimmed one graph
+at a time, lowest priority first (the conversation's own graphs are described
+last to go); a `WARN` line reports how many were kept. Prefer a 16k window or
+larger for local models, and make sure the *server's* context
+(`OLLAMA_CONTEXT_LENGTH`, or a Modelfile `num_ctx`) is at least as large — a
+server that truncates from the top deletes Spark's execution protocol, and the
+model then answers from its own knowledge while claiming the data said so.
 
 **Why `LLM_CONTEXT_TOKENS` exists next to `OLLAMA_CONTEXT_LENGTH`.** They size two different things in two different processes: `OLLAMA_CONTEXT_LENGTH` (or a Modelfile `num_ctx`) is the *server's* context — how many tokens Ollama actually processes before cutting; `LLM_CONTEXT_TOKENS` is the *client's* budget — what this store assumes while trimming its own prompt. The store cannot read the server's setting over the API, so when both apply they must agree; a compose file can feed both from one shared variable. With vLLM no client knob is needed at all — it advertises `max_model_len` and detection picks it up automatically; the same goes for any gateway whose `/v1/models` carries a `context_window`/`context_length` field.
 

@@ -8,8 +8,16 @@
 
 export type Option = { value: string; label: string };
 
-/** System account roles — `SystemRole` (`super_admin` is assignable only by a super-admin). */
+/**
+ * System account roles — `SystemRole` (`super_admin` is assignable only by a
+ * super-admin). `guest` is the self-registered low-privilege tier; it was
+ * missing here, so a guest-registered account rendered an EMPTY role select on
+ * the admin users page and no endpoint-ACL rule could target the guest role —
+ * on the very page that toggles guest self-registration. A vitest case pins
+ * this list against the Rust enum.
+ */
 export const SYSTEM_ROLES: Option[] = [
+  { value: 'guest', label: 'Guest' },
   { value: 'user', label: 'User' },
   { value: 'admin', label: 'Admin' },
   { value: 'super_admin', label: 'Super Admin' },

@@ -1,0 +1,7 @@
+@prefix id:  <https://example.org/layered/asset/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+id:b1 owl:sameAs <https://registry.example.org/bridge/NL-001> .
+id:b2 owl:sameAs <https://registry.example.org/bridge/NL-002> .
+<https://example.org/layered/vocab/bridge> skos:exactMatch <https://registry.example.org/kind/bridge> .

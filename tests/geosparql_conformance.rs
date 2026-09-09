@@ -1886,8 +1886,10 @@ fn geos_cx_geosparql11_function_gaps() {
     }
 }
 
-// geof:transform reprojects between EPSG:28992 / 4326 / 3857. The Waalbrug tracé point
-// in RD New transforms to a plausible WGS84 lon/lat near Nijmegen (~5.86, ~51.85).
+// geof:transform reprojects between EPSG:28992 / CRS84 / 4326 / 3857. The Waalbrug
+// tracé point in RD New transforms to a plausible WGS84 lon/lat near Nijmegen
+// (~5.86, ~51.85). CRS84 is the lon/lat form; see the EPSG:4326 test below for
+// the authority's lat/lon order.
 #[test]
 fn geos_cx_transform_rd_to_wgs84() {
     let s = ts();
@@ -1895,7 +1897,7 @@ fn geos_cx_transform_rd_to_wgs84() {
         "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)\"^^geo:wktLiteral";
     let out = geof_opt(
         &s,
-        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
+        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/OGC/1.3/CRS84>)"),
     )
     .unwrap_or_default();
     assert!(out.contains("POINT"), "expected a WKT point, got {:?}", out);
@@ -2057,5 +2059,173 @@ fn geold_gml_literal_supported() {
         eq.contains("true"),
         "GML/WKT round-trip equal, got {:?}",
         eq
+    );
+}
+
+// ─── CRS harmonisation between operands ──────────────────────────────────────
+
+// GeoSPARQL requires a binary function's operands to be in a common CRS. Both
+// `<crs>` prefixes used to be stripped and thrown away, so a query mixing
+// RD New (metres) with CRS84 (degrees) compared incompatible numbers and
+// returned a confident `false` — a silently wrong spatial filter.
+//
+// Rijksmuseum, Amsterdam: RD New (121_800, 487_400) is CRS84 (4.885, 52.360).
+#[test]
+fn binary_predicates_harmonise_operand_crs() {
+    let s = ts();
+    let rd_point =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+    // A CRS84 box comfortably around the same place.
+    let wgs_box =
+        "\"POLYGON((4.80 52.30, 4.95 52.30, 4.95 52.42, 4.80 52.42, 4.80 52.30))\"^^geo:wktLiteral";
+
+    let within = geof_opt(&s, &format!("geof:sfWithin({rd_point}, {wgs_box})")).unwrap_or_default();
+    assert!(
+        within.contains("true"),
+        "an RD New point inside a CRS84 box must be within it once the operands are \
+         harmonised, got {within:?}"
+    );
+
+    let intersects =
+        geof_opt(&s, &format!("geof:sfIntersects({wgs_box}, {rd_point})")).unwrap_or_default();
+    assert!(
+        intersects.contains("true"),
+        "harmonisation must work with the operands the other way round, got {intersects:?}"
+    );
+}
+
+// Same-CRS operands are untouched — harmonisation must not disturb the ordinary
+// case, including two geometries sharing a CRS this build cannot reproject.
+#[test]
+fn same_crs_operands_are_not_reprojected() {
+    let s = ts();
+    let a =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+    let b =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+    let eq = geof_opt(&s, &format!("geof:sfEquals({a}, {b})")).unwrap_or_default();
+    assert!(
+        eq.contains("true"),
+        "identical RD New points are equal, got {eq:?}"
+    );
+
+    // An unsupported CRS shared by both operands is still a meaningful
+    // comparison — no transform is needed, so it must not go unbound.
+    let c = "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(1 2)\"^^geo:wktLiteral";
+    let d = "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(1 2)\"^^geo:wktLiteral";
+    let eq2 = geof_opt(&s, &format!("geof:sfEquals({c}, {d})")).unwrap_or_default();
+    assert!(
+        eq2.contains("true"),
+        "two geometries in the same (unsupported) CRS still compare, got {eq2:?}"
+    );
+}
+
+// Mixing a CRS this build cannot reproject with a different one yields unbound,
+// rather than a comparison of incompatible coordinates.
+#[test]
+fn unreprojectable_crs_pair_is_unbound_not_wrong() {
+    let s = ts();
+    let lambert93 =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral";
+    let wgs = "\"POINT(2.35 48.85)\"^^geo:wktLiteral";
+    let r = geof_opt(&s, &format!("geof:sfIntersects({lambert93}, {wgs})"));
+    assert!(
+        r.is_none() || !r.as_deref().unwrap_or("").contains("true"),
+        "an unreprojectable CRS pair must not produce a confident answer, got {r:?}"
+    );
+}
+
+// A constructive function's result must stay in its operand's CRS.
+//
+// The result was serialised as bare WKT with the prefix dropped, so
+// `geof:getSRID(geof:buffer("<…/28992> POINT(…)", 10))` reported CRS84 —
+// relabelling RD New metres as degrees, and making the result unusable as an
+// operand for anything else.
+#[test]
+fn constructive_functions_preserve_the_operand_crs() {
+    let s = ts();
+    let rd =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(121800 487400)\"^^geo:wktLiteral";
+
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:buffer({rd}, 10))")).unwrap_or_default();
+    assert!(
+        srid.contains("28992"),
+        "a buffer of an RD New geometry stays in RD New, got {srid:?}"
+    );
+
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:envelope({rd}))")).unwrap_or_default();
+    assert!(
+        srid.contains("28992"),
+        "an envelope keeps the operand CRS, got {srid:?}"
+    );
+
+    // A geometry with no CRS prefix keeps GeoSPARQL's CRS84 default.
+    let plain = "\"POINT(4.885 52.360)\"^^geo:wktLiteral";
+    let srid = geof_opt(&s, &format!("geof:getSRID(geof:envelope({plain}))")).unwrap_or_default();
+    assert!(
+        srid.contains("CRS84") || srid.contains("4326"),
+        "an unprefixed geometry stays at the CRS84 default, got {srid:?}"
+    );
+}
+
+// ─── EPSG:4326 authority axis order ───────────────────────────────────────────
+
+// GeoSPARQL: a WKT literal's coordinates are in the order its CRS prescribes.
+// The OGC registry defines EPSG:4326 as (lat, lon); only CRS84 (and the
+// unprefixed default) are (lon, lat). Both were read as lon/lat, so every
+// authority-ordered geometry was transposed — a point in the Netherlands
+// (lat 52, lon 5) landed in the Gulf of Guinea (lat 5, lon 52).
+#[test]
+fn epsg4326_literal_is_read_in_lat_lon_order() {
+    let s = ts();
+    // The same place, written both ways.
+    let authority =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(52.360 4.885)\"^^geo:wktLiteral";
+    let crs84 = "\"POINT(4.885 52.360)\"^^geo:wktLiteral";
+    let eq = geof_opt(&s, &format!("geof:sfEquals({authority}, {crs84})")).unwrap_or_default();
+    assert!(
+        eq.contains("true"),
+        "EPSG:4326 (lat lon) and CRS84 (lon lat) forms of one point must be equal, got {eq:?}"
+    );
+
+    // And a transposed reading must NOT be equal: the authority form's lat/lon
+    // is not the CRS84 form's lon/lat.
+    let swapped = "\"POINT(52.360 4.885)\"^^geo:wktLiteral";
+    let ne = geof_opt(&s, &format!("geof:sfEquals({authority}, {swapped})")).unwrap_or_default();
+    assert!(
+        ne.contains("false"),
+        "reading EPSG:4326 as lon/lat would have made these equal, got {ne:?}"
+    );
+}
+
+// Transforming INTO EPSG:4326 emits the authority's (lat, lon) order.
+#[test]
+fn transform_into_epsg4326_emits_lat_lon() {
+    let s = ts();
+    let rd =
+        "\"<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(187420 428470)\"^^geo:wktLiteral";
+    let out = geof_opt(
+        &s,
+        &format!("geof:transform({rd}, <http://www.opengis.net/def/crs/EPSG/0/4326>)"),
+    )
+    .unwrap_or_default();
+    let inner = out
+        .split_once("POINT(")
+        .and_then(|(_, r)| r.split_once(')'))
+        .map(|(c, _)| c.to_string())
+        .unwrap_or_default();
+    let nums: Vec<f64> = inner
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .collect();
+    assert_eq!(nums.len(), 2, "two coords, got {inner:?}");
+    let (first, second) = (nums[0], nums[1]);
+    assert!(
+        (first - 51.85).abs() < 0.1 && (second - 5.86).abs() < 0.1,
+        "EPSG:4326 output must be (lat lon), got ({first} {second})"
+    );
+    assert!(
+        out.contains("EPSG/0/4326"),
+        "the output must carry the EPSG:4326 prefix it was transformed into: {out}"
     );
 }

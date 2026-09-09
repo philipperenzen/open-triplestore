@@ -9,6 +9,9 @@ use crate::server::AppState;
 /// Build the LDP router, to be merged under `/ldp`.
 pub fn ldp_routes() -> Router<AppState> {
     Router::new()
+        // The constrainedBy document. A static segment beats the catch-all in
+        // the router, so this path is reserved (it says so in the document).
+        .route("/ldp/constraints", get(handler::ldp_constraints))
         .route("/ldp/*path", get(handler::ldp_get))
         .route("/ldp/*path", head(handler::ldp_head))
         .route("/ldp/*path", post(handler::ldp_post))

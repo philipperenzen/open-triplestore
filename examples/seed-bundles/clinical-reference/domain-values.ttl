@@ -1,0 +1,8 @@
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix st: <https://example.org/clinical/status/> .
+
+st:scheme a skos:ConceptScheme ; skos:prefLabel "Observation status"@en .
+st:registered a skos:Concept ; skos:inScheme st:scheme ; skos:prefLabel "registered"@en .
+st:preliminary a skos:Concept ; skos:inScheme st:scheme ; skos:prefLabel "preliminary"@en .
+st:final a skos:Concept ; skos:inScheme st:scheme ; skos:prefLabel "final"@en .
+st:amended a skos:Concept ; skos:inScheme st:scheme ; skos:prefLabel "amended"@en .

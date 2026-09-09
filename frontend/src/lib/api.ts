@@ -782,7 +782,14 @@ export async function llmChat(messages, model = null) {
 // stream (older server, buffering proxy) — callers fall back to llmChat then.
 // Abort via `signal` to stop generation (closing the stream stops the server-side
 // turn as well).
-export async function llmChatStream(messages, { model = null, signal, onEvent } = {}) {
+export async function llmChatStream(
+  messages,
+  {
+    model = null,
+    signal,
+    onEvent,
+  }: { model?: string | null; signal?: AbortSignal; onEvent?: (event: unknown) => void } = {}
+) {
   const token = getAccessToken();
   const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -1306,8 +1313,12 @@ export const deleteAssetFolder = (datasetId, path, recursive = false) =>
   );
 
 // Move (folder) and/or rename (filename) an asset; absent keys keep their value.
-export const moveAsset = (datasetId, assetId, { folder, filename } = {}) => {
-  const body = {};
+export const moveAsset = (
+  datasetId,
+  assetId,
+  { folder, filename }: { folder?: string; filename?: string } = {}
+) => {
+  const body: Record<string, string> = {};
   if (folder !== undefined) body.folder = folder;
   if (filename !== undefined) body.filename = filename;
   return request('PATCH', `/api/datasets/${datasetId}/assets/${assetId}`, body);

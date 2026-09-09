@@ -1,0 +1,6 @@
+@prefix exv:  <https://example.org/layered/vocab/> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+exv:AssetKinds a skos:ConceptScheme ; skos:prefLabel "Asset kinds"@en .
+exv:bridge a skos:Concept ; skos:inScheme exv:AssetKinds ; skos:prefLabel "bridge"@en ; skos:definition "A structure carrying a route over an obstacle."@en .
+exv:road   a skos:Concept ; skos:inScheme exv:AssetKinds ; skos:prefLabel "road"@en   ; skos:definition "A paved way for vehicles."@en .

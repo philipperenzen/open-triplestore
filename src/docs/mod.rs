@@ -217,6 +217,14 @@ const BUILTINS: &[Builtin] = &[
         sort: 14,
     },
     Builtin {
+        slug: "federation",
+        title: "Federated access control",
+        category: "Security",
+        body: include_str!("../../docs/federation.md"),
+        admin_only: false,
+        sort: 116,
+    },
+    Builtin {
         slug: "versioning",
         title: "Dataset Versioning & Sharing",
         category: "Concepts",
@@ -423,6 +431,169 @@ const BUILTINS: &[Builtin] = &[
         admin_only: false,
         sort: 140,
     },
+    // ── Guides that were in the repo but never surfaced in the viewer ──
+    // (17 of them — every OWL 2 guide, LDP, RML, SPARQL 1.2, plugins, GDPR, …).
+    // `builtin_parity::every_top_level_doc_is_registered` keeps this complete.
+    Builtin {
+        slug: "rml",
+        title: "RML Mapping Guide",
+        category: "Data Exchange",
+        body: include_str!("../../docs/rml.md"),
+        admin_only: false,
+        sort: 54,
+    },
+    Builtin {
+        slug: "sparql-12",
+        title: "SPARQL 1.2 Support",
+        category: "Query & Search",
+        body: include_str!("../../docs/sparql-12.md"),
+        admin_only: false,
+        sort: 67,
+    },
+    Builtin {
+        slug: "rdfs-entailment",
+        title: "RDFS Entailment",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/rdfs-entailment.md"),
+        admin_only: false,
+        sort: 84,
+    },
+    Builtin {
+        slug: "owl2-rl",
+        title: "OWL 2 RL Profile",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/owl2-rl.md"),
+        admin_only: false,
+        sort: 85,
+    },
+    Builtin {
+        slug: "owl2-el",
+        title: "OWL 2 EL Profile",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/owl2-el.md"),
+        admin_only: false,
+        sort: 86,
+    },
+    Builtin {
+        slug: "owl2-ql",
+        title: "OWL 2 QL Profile",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/owl2-ql.md"),
+        admin_only: false,
+        sort: 87,
+    },
+    Builtin {
+        slug: "owl2-dl",
+        title: "OWL 2 DL",
+        category: "Reasoning & Validation",
+        body: include_str!("../../docs/owl2-dl.md"),
+        admin_only: false,
+        sort: 88,
+    },
+    Builtin {
+        slug: "oidc-provider",
+        title: "The store as an OIDC provider",
+        category: "Security",
+        body: include_str!("../../docs/oidc-provider.md"),
+        admin_only: false,
+        sort: 104,
+    },
+    Builtin {
+        slug: "gdpr",
+        title: "GDPR Compliance Guide (for self-hosters)",
+        category: "Security",
+        body: include_str!("../../docs/gdpr.md"),
+        admin_only: false,
+        sort: 106,
+    },
+    Builtin {
+        slug: "containers",
+        title: "Linked-document containers (ICDD)",
+        category: "API & Operations",
+        body: include_str!("../../docs/containers.md"),
+        admin_only: false,
+        sort: 114,
+    },
+    Builtin {
+        slug: "ldes",
+        title: "Linked Data Event Streams (LDES)",
+        category: "API & Operations",
+        body: include_str!("../../docs/ldes.md"),
+        admin_only: false,
+        sort: 115,
+    },
+    Builtin {
+        slug: "ldp",
+        title: "Linked Data Platform (LDP) 1.0",
+        category: "API & Operations",
+        body: include_str!("../../docs/ldp.md"),
+        admin_only: false,
+        sort: 116,
+    },
+    Builtin {
+        slug: "plugins",
+        title: "Extending Open Triplestore",
+        category: "API & Operations",
+        body: include_str!("../../docs/plugins.md"),
+        admin_only: false,
+        sort: 118,
+    },
+    Builtin {
+        slug: "performance",
+        title: "Performance Guide",
+        category: "API & Operations",
+        body: include_str!("../../docs/performance.md"),
+        admin_only: false,
+        sort: 120,
+    },
+    Builtin {
+        slug: "windows",
+        title: "Running Open Triplestore on Windows",
+        category: "API & Operations",
+        body: include_str!("../../docs/windows.md"),
+        admin_only: false,
+        sort: 122,
+    },
+    Builtin {
+        slug: "build-features",
+        title: "Build Features",
+        category: "Reference",
+        body: include_str!("../../docs/build-features.md"),
+        admin_only: false,
+        sort: 136,
+    },
+    Builtin {
+        slug: "triplestore-comparison",
+        title: "RDF Triplestore Performance Comparison",
+        category: "Reference",
+        body: include_str!("../../docs/triplestore-comparison.md"),
+        admin_only: false,
+        sort: 134,
+    },
+    Builtin {
+        slug: "development",
+        title: "Development & build performance",
+        category: "Reference",
+        body: include_str!("../../docs/development.md"),
+        admin_only: false,
+        sort: 142,
+    },
+    Builtin {
+        slug: "release-process",
+        title: "Release Process",
+        category: "Reference",
+        body: include_str!("../../docs/release-process.md"),
+        admin_only: false,
+        sort: 144,
+    },
+    Builtin {
+        slug: "administration",
+        title: "Administration Guide",
+        category: "Administration",
+        body: include_str!("../../docs/administration.md"),
+        admin_only: false,
+        sort: 202,
+    },
     // ── Administration (admin-only; 404 for non-admins) ──
     Builtin {
         slug: "dataset-governance",
@@ -548,4 +719,43 @@ pub fn routes() -> Router<AppState> {
             .post(create_doc)
             .delete(delete_doc),
     )
+}
+
+#[cfg(test)]
+mod builtin_parity {
+    use super::BUILTINS;
+
+    /// Every guide directly under `docs/` is surfaced in the in-app viewer. The
+    /// registry is a hand-maintained list, and 17 guides had silently never
+    /// been added; comparing bodies (not names) means a renamed file is caught
+    /// too.
+    #[test]
+    fn every_top_level_doc_is_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).unwrap();
+            if !BUILTINS.iter().any(|b| b.body == body) {
+                missing.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
+        }
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "docs not registered in the viewer (add them to BUILTINS in src/docs/mod.rs): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn slugs_are_unique() {
+        let mut slugs: Vec<&str> = BUILTINS.iter().map(|b| b.slug).collect();
+        let n = slugs.len();
+        slugs.sort_unstable();
+        slugs.dedup();
+        assert_eq!(slugs.len(), n, "duplicate doc slug");
+    }
 }

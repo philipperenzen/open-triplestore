@@ -3,6 +3,7 @@
 //! Translates SWRL rules to SPARQL INSERT WHERE queries and executes them
 //! in a fixed-point loop until no new triples are inferred.
 
+use oxigraph::model::{Literal, NamedNode, Variable};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
@@ -58,7 +59,15 @@ pub enum SwrlArg {
 
 impl SwrlArg {
     /// Convert to a SPARQL expression.
-    fn to_sparql(&self) -> String {
+    ///
+    /// Every term goes through the oxrdf constructors and their `Display`
+    /// impls, which quote and escape to N-Triples syntax. Formatting these by
+    /// hand — `format!("\"{value}\"")` / `format!("<{iri}>")` — let a literal
+    /// containing a quote or an IRI containing `>` close the generated
+    /// `INSERT { … } WHERE { … }` early and append attacker-chosen SPARQL. A
+    /// term that cannot be represented (an invalid IRI, a bad datatype) is
+    /// rejected here rather than being spliced in as text.
+    fn to_sparql(&self) -> Result<String, String> {
         match self {
             SwrlArg::Variable(v) => {
                 // Normalize variable names: urn:swrl:var#x → ?x
@@ -66,21 +75,53 @@ impl SwrlArg {
                     .strip_prefix("urn:swrl:var#")
                     .or_else(|| v.strip_prefix("?"))
                     .unwrap_or(v);
-                format!("?{}", name)
+                let var = Variable::new(name)
+                    .map_err(|e| format!("Invalid SWRL variable '{name}': {e}"))?;
+                Ok(var.to_string())
             }
             SwrlArg::Individual(iri) => {
-                format!("<{}>", iri.trim_start_matches('<').trim_end_matches('>'))
+                let trimmed = iri.trim_start_matches('<').trim_end_matches('>');
+                let node = NamedNode::new(trimmed)
+                    .map_err(|e| format!("Invalid SWRL individual IRI '{trimmed}': {e}"))?;
+                Ok(node.to_string())
             }
             SwrlArg::Literal {
                 value,
                 datatype: Some(dt),
-            } => format!("\"{}\"^^<{}>", value, dt),
+            } => {
+                let dt_node = NamedNode::new(dt.as_str())
+                    .map_err(|e| format!("Invalid SWRL literal datatype '{dt}': {e}"))?;
+                Ok(Literal::new_typed_literal(value.as_str(), dt_node).to_string())
+            }
             SwrlArg::Literal {
                 value,
                 datatype: None,
-            } => format!("\"{}\"", value),
+            } => Ok(Literal::new_simple_literal(value.as_str()).to_string()),
         }
     }
+}
+
+/// Check that a class or property predicate is an absolute IRI.
+///
+/// Both rule syntaxes hand predicates over verbatim (`Person(?x)` in the text
+/// form, the `IRI` attribute in OWL/XML), so this is where a predicate that is
+/// not an IRI is refused with a message naming it. Surrounding `<…>` is
+/// tolerated, as the text form allows it.
+pub(crate) fn validate_predicate_iri(iri: &str, what: &str) -> Result<NamedNode, String> {
+    let trimmed = iri.trim_start_matches('<').trim_end_matches('>');
+    NamedNode::new(trimmed).map_err(|e| {
+        format!("Invalid SWRL {what} IRI '{trimmed}': {e} (predicates must be absolute IRIs)")
+    })
+}
+
+/// Render a class or property predicate as a SPARQL IRI term.
+///
+/// Same rule as [`SwrlArg::to_sparql`]: the text is validated by `NamedNode`
+/// and printed by its `Display`, never pasted between angle brackets. The
+/// parser already refuses bad predicates; this is the second line, for rules
+/// built in code or by a future syntax.
+fn predicate_to_sparql(iri: &str, what: &str) -> Result<String, String> {
+    Ok(validate_predicate_iri(iri, what)?.to_string())
 }
 
 /// Result of SWRL rule execution.
@@ -162,37 +203,29 @@ pub fn execute_rules(
         debug!("Iteration {}: {} triples before", iteration, count_before);
 
         for (name, sparql) in &sparql_rules {
-            match store.query_options().parse_update(sparql) {
-                Ok(update) => match update.on_store(store.store()).execute() {
-                    Ok(()) => {
-                        if iteration == 1 {
-                            rule_results.push(RuleResult {
-                                rule_name: name.clone(),
-                                sparql: sparql.clone(),
-                                success: true,
-                                error: None,
-                            });
-                        }
+            // Through `TripleStore::update`, not a raw `parse_update(..).execute()`
+            // on the inner store: the store's write guard (mirror, query cache)
+            // and per-graph count maintenance must see these writes like any
+            // other update.
+            match store.update(sparql) {
+                Ok(()) => {
+                    if iteration == 1 {
+                        rule_results.push(RuleResult {
+                            rule_name: name.clone(),
+                            sparql: sparql.clone(),
+                            success: true,
+                            error: None,
+                        });
                     }
-                    Err(e) => {
-                        warn!("Rule {} failed: {}", name, e);
-                        if iteration == 1 {
-                            rule_results.push(RuleResult {
-                                rule_name: name.clone(),
-                                sparql: sparql.clone(),
-                                success: false,
-                                error: Some(e.to_string()),
-                            });
-                        }
-                    }
-                },
+                }
                 Err(e) => {
+                    warn!("Rule {} failed: {}", name, e);
                     if iteration == 1 {
                         rule_results.push(RuleResult {
                             rule_name: name.clone(),
                             sparql: sparql.clone(),
                             success: false,
-                            error: Some(format!("SPARQL parse error: {}", e)),
+                            error: Some(e.to_string()),
                         });
                     }
                 }
@@ -217,9 +250,6 @@ pub fn execute_rules(
         }
     }
 
-    // Rebuild graph index after rule execution
-    store.rebuild_graph_index();
-
     Ok(SwrlExecutionResult {
         rules_count: rules.len(),
         iterations: iteration,
@@ -242,9 +272,9 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
         match atom {
             Atom::ClassAtom { class_iri, arg } => {
                 where_patterns.push(format!(
-                    "  {} a <{}> .",
-                    arg.to_sparql(),
-                    class_iri.trim_start_matches('<').trim_end_matches('>')
+                    "  {} a {} .",
+                    arg.to_sparql()?,
+                    predicate_to_sparql(class_iri, "class")?
                 ));
             }
             Atom::ObjectPropertyAtom {
@@ -258,29 +288,41 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
                 arg2,
             } => {
                 where_patterns.push(format!(
-                    "  {} <{}> {} .",
-                    arg1.to_sparql(),
-                    property.trim_start_matches('<').trim_end_matches('>'),
-                    arg2.to_sparql()
+                    "  {} {} {} .",
+                    arg1.to_sparql()?,
+                    predicate_to_sparql(property, "property")?,
+                    arg2.to_sparql()?
                 ));
             }
             Atom::SameIndividualAtom { arg1, arg2 } => {
                 where_patterns.push(format!(
                     "  {} <http://www.w3.org/2002/07/owl#sameAs> {} .",
-                    arg1.to_sparql(),
-                    arg2.to_sparql()
+                    arg1.to_sparql()?,
+                    arg2.to_sparql()?
                 ));
             }
             Atom::DifferentIndividualsAtom { arg1, arg2 } => {
                 where_patterns.push(format!(
                     "  {} <http://www.w3.org/2002/07/owl#differentFrom> {} .",
-                    arg1.to_sparql(),
-                    arg2.to_sparql()
+                    arg1.to_sparql()?,
+                    arg2.to_sparql()?
                 ));
             }
             Atom::BuiltinAtom { builtin, args } => {
-                if let Some(filter) = builtin_to_filter(builtin, args) {
-                    filters.push(filter);
+                // A builtin we cannot translate is a hard error, not a skip.
+                // Dropping the FILTER left the rest of the rule intact and
+                // firing — so `Person(?x) ^ stringLength(?n, ?len) ^
+                // greaterThan(?len, 5) -> LongName(?x)` lost its guard entirely
+                // and asserted the head for every binding. Silently unsound
+                // inference is worse than a refused rule.
+                match builtin_to_filter(builtin, args)? {
+                    Some(filter) => filters.push(filter),
+                    None => {
+                        return Err(format!(
+                            "Unsupported SWRL builtin '{builtin}': refusing to run the rule, \
+                             because dropping its condition would assert the head unconditionally"
+                        ))
+                    }
                 }
             }
         }
@@ -292,9 +334,9 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
         match atom {
             Atom::ClassAtom { class_iri, arg } => {
                 insert_patterns.push(format!(
-                    "  {} a <{}> .",
-                    arg.to_sparql(),
-                    class_iri.trim_start_matches('<').trim_end_matches('>')
+                    "  {} a {} .",
+                    arg.to_sparql()?,
+                    predicate_to_sparql(class_iri, "class")?
                 ));
             }
             Atom::ObjectPropertyAtom {
@@ -308,24 +350,24 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
                 arg2,
             } => {
                 insert_patterns.push(format!(
-                    "  {} <{}> {} .",
-                    arg1.to_sparql(),
-                    property.trim_start_matches('<').trim_end_matches('>'),
-                    arg2.to_sparql()
+                    "  {} {} {} .",
+                    arg1.to_sparql()?,
+                    predicate_to_sparql(property, "property")?,
+                    arg2.to_sparql()?
                 ));
             }
             Atom::SameIndividualAtom { arg1, arg2 } => {
                 insert_patterns.push(format!(
                     "  {} <http://www.w3.org/2002/07/owl#sameAs> {} .",
-                    arg1.to_sparql(),
-                    arg2.to_sparql()
+                    arg1.to_sparql()?,
+                    arg2.to_sparql()?
                 ));
             }
             Atom::DifferentIndividualsAtom { arg1, arg2 } => {
                 insert_patterns.push(format!(
                     "  {} <http://www.w3.org/2002/07/owl#differentFrom> {} .",
-                    arg1.to_sparql(),
-                    arg2.to_sparql()
+                    arg1.to_sparql()?,
+                    arg2.to_sparql()?
                 ));
             }
             Atom::BuiltinAtom { .. } => {
@@ -356,15 +398,23 @@ fn rule_to_sparql(rule: &SwrlRule, target_graph: Option<&str>) -> Result<String,
 }
 
 /// Translate a SWRL built-in predicate to a SPARQL FILTER expression.
-fn builtin_to_filter(builtin: &str, args: &[SwrlArg]) -> Option<String> {
+///
+/// `Err` means an argument could not be represented as an RDF term; `Ok(None)`
+/// means the builtin itself is not one of the supported ones. The caller must
+/// treat both as rule-level failures — see the `BuiltinAtom` arm of
+/// [`rule_to_sparql`].
+fn builtin_to_filter(builtin: &str, args: &[SwrlArg]) -> Result<Option<String>, String> {
     let builtin_local = builtin
         .rsplit_once('#')
         .map(|(_, local)| local)
         .unwrap_or(builtin);
 
-    let sparql_args: Vec<String> = args.iter().map(|a| a.to_sparql()).collect();
+    let sparql_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_sparql())
+        .collect::<Result<Vec<_>, _>>()?;
 
-    match builtin_local {
+    Ok(match builtin_local {
         "equal" if sparql_args.len() == 2 => {
             Some(format!("{} = {}", sparql_args[0], sparql_args[1]))
         }
@@ -413,7 +463,7 @@ fn builtin_to_filter(builtin: &str, args: &[SwrlArg]) -> Option<String> {
             debug!("Unsupported SWRL builtin: {}", builtin);
             None
         }
-    }
+    })
 }
 
 /// Count total triples in the store (default graph).
@@ -463,21 +513,167 @@ mod tests {
             SwrlArg::Variable("?y".to_string()),
         ];
         assert_eq!(
-            builtin_to_filter("http://www.w3.org/2003/11/swrlb#greaterThan", &args),
+            builtin_to_filter("http://www.w3.org/2003/11/swrlb#greaterThan", &args).unwrap(),
             Some("?x > ?y".to_string())
         );
     }
 
     #[test]
     fn test_swrl_arg_to_sparql() {
-        assert_eq!(SwrlArg::Variable("?x".to_string()).to_sparql(), "?x");
         assert_eq!(
-            SwrlArg::Variable("urn:swrl:var#foo".to_string()).to_sparql(),
+            SwrlArg::Variable("?x".to_string()).to_sparql().unwrap(),
+            "?x"
+        );
+        assert_eq!(
+            SwrlArg::Variable("urn:swrl:var#foo".to_string())
+                .to_sparql()
+                .unwrap(),
             "?foo"
         );
         assert_eq!(
-            SwrlArg::Individual("http://example.org/Alice".to_string()).to_sparql(),
+            SwrlArg::Individual("http://example.org/Alice".to_string())
+                .to_sparql()
+                .unwrap(),
             "<http://example.org/Alice>"
+        );
+    }
+
+    /// A literal argument must be escaped, not pasted in. Rendering it as
+    /// `format!("\"{value}\"")` let a quote close the string and the rest of the
+    /// value become SPARQL syntax in the generated INSERT/WHERE.
+    #[test]
+    fn literal_arg_cannot_break_out_of_its_quotes() {
+        let evil = SwrlArg::Literal {
+            value: "\" } ; DROP ALL ; INSERT DATA { <urn:x> <urn:y> \"pwned".to_string(),
+            datatype: None,
+        };
+        let rendered = evil.to_sparql().unwrap();
+        // The payload text is still present — it is data. What matters is that
+        // the quote inside it is escaped, so it cannot terminate the literal.
+        assert!(
+            rendered.contains("\\\""),
+            "inner quote must be escaped: {rendered}"
+        );
+
+        // The property that actually matters: the generated update still parses
+        // as exactly ONE operation, so the payload never becomes executable.
+        let rule = SwrlRule {
+            name: Some("injected".to_string()),
+            body: vec![Atom::DataPropertyAtom {
+                property: "http://example.org/name".to_string(),
+                arg1: SwrlArg::Variable("?x".to_string()),
+                arg2: evil,
+            }],
+            head: vec![Atom::ClassAtom {
+                class_iri: "http://example.org/Tagged".to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+        };
+        let sparql = rule_to_sparql(&rule, None).unwrap();
+        let parsed = spargebra::SparqlParser::new()
+            .parse_update(&sparql)
+            .expect("generated update must still parse");
+        assert_eq!(
+            parsed.operations.len(),
+            1,
+            "the literal must not split the update into several operations: {sparql}"
+        );
+        assert!(
+            !matches!(
+                parsed.operations[0],
+                spargebra::GraphUpdateOperation::Drop { .. }
+            ),
+            "the injected DROP must not become an operation: {sparql}"
+        );
+    }
+
+    /// An IRI argument that is not a valid IRI is rejected outright rather than
+    /// interpolated between angle brackets.
+    #[test]
+    fn individual_arg_with_invalid_iri_is_rejected() {
+        let evil = SwrlArg::Individual("http://ex/a> <urn:p> <urn:o> . <urn:s".to_string());
+        assert!(
+            evil.to_sparql().is_err(),
+            "an unrepresentable IRI must be an error, not spliced text"
+        );
+    }
+
+    /// Class and property predicates take the same road as arguments: a value
+    /// that is not an IRI is refused, never interpolated between `<…>`. The
+    /// text `<http://ex/A> } ; INSERT DATA …` used to land verbatim in the
+    /// WHERE clause and turn one rule into several update operations.
+    #[test]
+    fn class_and_property_predicates_that_are_not_iris_are_rejected() {
+        let payload = "http://ex/Person> } ; INSERT DATA { GRAPH <urn:probe> { <urn:s> <urn:p> <urn:o> } } ; INSERT { } WHERE { ?z a <http://ex/Q";
+        let by_class = SwrlRule {
+            name: None,
+            body: vec![Atom::ClassAtom {
+                class_iri: payload.to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+            head: vec![Atom::ClassAtom {
+                class_iri: "http://ex/T".to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+        };
+        let err = rule_to_sparql(&by_class, None).expect_err("class predicate");
+        assert!(err.contains("class IRI"), "{err}");
+
+        let by_property = SwrlRule {
+            name: None,
+            body: vec![Atom::ClassAtom {
+                class_iri: "http://ex/Person".to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+            head: vec![Atom::ObjectPropertyAtom {
+                property: payload.to_string(),
+                arg1: SwrlArg::Variable("?x".to_string()),
+                arg2: SwrlArg::Variable("?x".to_string()),
+            }],
+        };
+        let err = rule_to_sparql(&by_property, None).expect_err("property predicate");
+        assert!(err.contains("property IRI"), "{err}");
+
+        // A relative name is not an IRI either.
+        assert!(validate_predicate_iri("Person", "class").is_err());
+        // Angle brackets around a proper IRI are tolerated.
+        assert_eq!(
+            predicate_to_sparql("<http://ex/Person>", "class").unwrap(),
+            "<http://ex/Person>"
+        );
+    }
+
+    /// A rule whose body uses a builtin the engine cannot translate must be
+    /// refused. It used to drop the FILTER and run the rest, so the head was
+    /// asserted for every binding — silently unsound inference.
+    #[test]
+    fn unsupported_builtin_fails_the_rule_instead_of_dropping_its_guard() {
+        let rule = SwrlRule {
+            name: Some("guarded".to_string()),
+            body: vec![
+                Atom::ClassAtom {
+                    class_iri: "http://example.org/Person".to_string(),
+                    arg: SwrlArg::Variable("?x".to_string()),
+                },
+                Atom::BuiltinAtom {
+                    builtin: "http://www.w3.org/2003/11/swrlb#stringLength".to_string(),
+                    args: vec![
+                        SwrlArg::Variable("?n".to_string()),
+                        SwrlArg::Variable("?len".to_string()),
+                    ],
+                },
+            ],
+            head: vec![Atom::ClassAtom {
+                class_iri: "http://example.org/LongName".to_string(),
+                arg: SwrlArg::Variable("?x".to_string()),
+            }],
+        };
+
+        let err = rule_to_sparql(&rule, None)
+            .expect_err("a rule with an untranslatable builtin must not produce SPARQL");
+        assert!(
+            err.contains("stringLength"),
+            "the error must name the offending builtin: {err}"
         );
     }
 }

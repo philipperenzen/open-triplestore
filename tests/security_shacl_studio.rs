@@ -98,6 +98,57 @@ async fn import_shapes_denies_unreadable_source_graph() {
     );
 }
 
+/// model-context and derive with NO scope at all must not read outside the
+/// caller's grants. `resolve_scope` returned an empty graph list, which the
+/// introspection query builder turned into "no GRAPH wrapper" — an unscoped BGP.
+/// That reads the default graph, which no per-graph ACL covers and which holds
+/// LDP resources and anything loaded without a target graph, so any
+/// authenticated caller could enumerate it by omitting `?dataset=`/`?graphs=`.
+/// Scope now defaults to the caller's readable graphs instead.
+#[tokio::test]
+async fn unscoped_introspection_does_not_read_the_whole_store() {
+    let state = test_state();
+    // Default-graph content: what an unscoped BGP actually reaches.
+    state
+        .store
+        .load_str(
+            "<http://other/s> a <http://other/TopSecretClass> .",
+            oxigraph::io::RdfFormat::Turtle,
+            None,
+        )
+        .unwrap();
+    let token = make_user(&state, "alice");
+    let app = test_app(state);
+
+    let (st, txt) = send(
+        &app,
+        Method::GET,
+        "/api/shacl/model-context",
+        Some(&token),
+        "",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "unscoped model-context should answer");
+    assert!(
+        !txt.contains("TopSecretClass"),
+        "unscoped model-context must not expose another tenant's classes: {txt}"
+    );
+
+    let (st, txt) = send(
+        &app,
+        Method::POST,
+        "/api/shacl/derive",
+        Some(&token),
+        "{\"graphs\":[]}",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "unscoped derive should answer");
+    assert!(
+        !txt.contains("TopSecretClass"),
+        "unscoped derive must not read another tenant's graphs: {txt}"
+    );
+}
+
 // model-context with caller-named ?graphs= must reject graphs the caller cannot read.
 #[tokio::test]
 async fn model_context_denies_unreadable_graph() {

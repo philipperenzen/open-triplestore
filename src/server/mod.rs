@@ -478,6 +478,46 @@ impl AppState {
     #[cfg(not(feature = "text-search"))]
     pub fn refresh_text_index_graphs(&self, _graphs: &[String]) {}
 
+    /// Maintain the text index for a write whose exact inserted and deleted
+    /// quads are known: add and remove just those documents instead of
+    /// re-indexing every literal of the affected graphs (which made each
+    /// write cost O(graph)). Falls back to a graph refresh on error.
+    #[cfg(feature = "text-search")]
+    pub fn text_index_apply_delta(
+        &self,
+        inserted: &[oxigraph::model::Quad],
+        deleted: &[oxigraph::model::Quad],
+        graphs: &[String],
+    ) {
+        let Some(ref idx) = self.text_index else {
+            return;
+        };
+        if inserted.is_empty() && deleted.is_empty() {
+            return;
+        }
+        let _guard = self
+            .text_sync_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let r = idx
+            .remove_quads(deleted)
+            .and_then(|_| idx.index_quads(inserted));
+        if let Err(e) = r {
+            tracing::warn!("text index incremental update failed ({e}); refreshing the graphs");
+            drop(_guard);
+            self.refresh_text_index_graphs(graphs);
+        }
+    }
+
+    #[cfg(not(feature = "text-search"))]
+    pub fn text_index_apply_delta(
+        &self,
+        _inserted: &[oxigraph::model::Quad],
+        _deleted: &[oxigraph::model::Quad],
+        _graphs: &[String],
+    ) {
+    }
+
     /// Apply the full-text preprocessing pipeline to an already read-scoped query.
     ///
     /// Expands the `text:search` / `ft:search` magic property and pushes
@@ -831,6 +871,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/oauth/authorize",
             post(crate::auth::oidc_provider::authorize),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
@@ -884,6 +928,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -892,6 +940,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     let auth_protected_routes = Router::new()
         .route("/api/auth/me", get(handlers::me).put(handlers::update_me))
         .route("/api/me/dataset-usage", get(handlers::my_dataset_usage))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -958,11 +1010,19 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             delete(crate::auth::oidc_provider::admin_delete_client),
         )
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // Spark chat history + user memory (strictly per-user, so auth required).
     let llm_history_routes = llm_history::llm_history_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -979,6 +1039,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .put(handlers::update_organisation)
                 .delete(handlers::delete_organisation),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1010,6 +1074,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/organisations/:org_id/groups/:group_id/members/:user_id",
             delete(handlers::remove_group_member),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1027,6 +1095,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/users/:user_id",
             get(handlers::get_user).delete(handlers::delete_user),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1055,6 +1127,51 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .delete(handlers::remove_dataset_graph),
         )
         .route(
+            "/api/datasets/:dataset_id/conformance",
+            get(crate::conformance::get_dataset_conformance),
+        )
+        .route(
+            "/api/datasets/:dataset_id/provenance",
+            get(crate::provenance::get_dataset_provenance),
+        )
+        .route(
+            "/api/datasets/:dataset_id/ldes",
+            get(crate::ldes::publish::get_stream).put(crate::ldes::publish::put_stream),
+        )
+        .route(
+            "/api/datasets/:dataset_id/ldes/nodes/:n",
+            get(crate::ldes::publish::get_node),
+        )
+        .route("/api/ldes/sync", post(crate::ldes::client::sync_handler))
+        .route(
+            "/api/datasets/:dataset_id/properties/state",
+            post(crate::property_states::set_state),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/history",
+            get(crate::property_states::history),
+        )
+        .route(
+            "/api/datasets/:dataset_id/properties/as-of",
+            get(crate::property_states::as_of),
+        )
+        .route(
+            "/api/datasets/:dataset_id/patch",
+            post(crate::rdf_patch::apply_patch_handler),
+        )
+        .route(
+            "/api/datasets/:dataset_id/entailment",
+            get(crate::entailment::get_entailment).put(crate::entailment::put_entailment),
+        )
+        .route(
+            "/api/datasets/:dataset_id/containers/import",
+            post(crate::containers::import_container),
+        )
+        .route(
+            "/api/datasets/:dataset_id/containers/export",
+            get(crate::containers::export_container),
+        )
+        .route(
             "/api/datasets/:dataset_id/commits",
             get(handlers::list_dataset_commits),
         )
@@ -1074,6 +1191,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .post(handlers::add_service_graph)
                 .delete(handlers::remove_service_graph),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1103,6 +1224,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/grants/:principal_type/:principal_id",
             delete(handlers::revoke_dataset_grant),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1140,6 +1265,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // for logged-out visitors, exactly like its graphs/viewer-feed. Write
         // handlers demand a user themselves via require_user(); per-asset
         // visibility (Asset.public) is enforced in the handlers.
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .layer(DefaultBodyLimit::max(routes::ASSET_MAX_BYTES + 1024 * 1024))
         .with_state(state.clone());
@@ -1152,6 +1281,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/services/:service_slug/sparql",
             get(routes::dataset_sparql_query).post(routes::dataset_sparql_post),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
@@ -1161,6 +1294,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // User avatar — upload requires auth, download is public
     let avatar_routes = Router::new()
         .route("/api/users/me/avatar", put(handlers::upload_user_avatar))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1182,6 +1319,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/organisations/:org_id/banner-preset",
             put(handlers::set_org_banner_preset),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1219,6 +1360,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/download",
             get(routes::download_asset_public),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1259,6 +1404,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/shacl/dataset-shape-graphs",
             get(routes::list_accessible_shape_graphs),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1288,24 +1437,40 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
     // Vocabulary install (copies a vocabulary from the bundled LOV corpus
     // into the model registry) — admin only.
     let vocab_service_admin_routes = crate::vocab_search::routes::vocab_admin_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // SHACL Studio: shape graphs (Library), pipelines, runs, model-context, derive.
     let studio_auth = crate::shacl_studio::routes::studio_auth_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // SHACL Studio (optional auth) — the form-manifest is anonymous-readable
     // for public datasets and auth-gated otherwise (enforced inside the handler).
     let studio_optional = crate::shacl_studio::routes::studio_optional_auth_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1319,6 +1484,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/mappings/execute",
             post(routes::execute_rml_mapping),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1359,6 +1528,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("vary"),
@@ -1373,8 +1546,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(512)))
         .with_state(state.clone());
 
     // Bulk multi-file import (authentication required)
@@ -1384,8 +1561,12 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: bulk_import_rate_conf,
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(upload_limit_bytes(1024)))
         .with_state(state.clone());
 
     // Batch SPARQL UPDATE routes (authentication required)
@@ -1395,6 +1576,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state.clone());
@@ -1410,6 +1595,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/assets/:asset_id/metadata",
             axum::routing::get(routes::asset_metadata),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1418,6 +1607,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(linked_data::dereference_routes())
         .merge(linked_data::well_known_routes())
         .merge(linked_data::well_known_org_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1430,12 +1623,20 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Reasoning routes (always compiled; feature gates are inside the handler)
     let reasoning_api_routes = Router::new()
         .merge(routes::reasoning_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     // Data-model registry — public read routes
     let data_model_read = Router::new()
         .merge(data_model_public_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1453,6 +1654,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // path.
     let data_model_write = Router::new()
         .merge(data_model_auth_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1463,12 +1668,20 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Dataset versioning — public read routes (visibility scoped via optional_auth)
     let dataset_version_read = Router::new()
         .merge(dataset_version_public_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
     // Dataset versioning — write routes (per-dataset write checks inside handlers)
     let dataset_version_write = Router::new()
         .merge(dataset_version_auth_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1481,6 +1694,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
         })
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1488,20 +1705,33 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // checked inside the handlers).
     let saved_query_write = Router::new()
         .merge(saved_query_auth_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // LDP routes (feature-gated). Mounted behind `require_auth`: the LDP handlers
-    // read/write the shared store via raw SPARQL with no per-graph scoping, so an
+    // LDP routes (feature-gated). Mounted behind `require_auth`: an
     // unauthenticated mount allowed anonymous `PATCH /ldp/*` (arbitrary SPARQL
     // UPDATE — e.g. `DROP GRAPH`) and `Slug`/path SPARQL injection against ANY
-    // tenant's graphs. Requiring auth closes the anonymous-access hole; full
-    // per-graph ACL scoping for authenticated LDP writes is tracked as a follow-up.
+    // tenant's graphs.
+    //
+    // `PATCH` now runs its body through `routes::execute_update`, the same gate
+    // as `POST /sparql`, so it gets the write-scope check, the admin gate on
+    // all-graph/variable-graph operations, and per-graph read+write ACLs. The
+    // remaining verbs write LDP resources into the DEFAULT graph, which carries
+    // no per-graph ACL of its own — scoping LDP resources into per-owner named
+    // graphs is the follow-up.
     #[cfg(feature = "ldp")]
     let ldp_router = {
         use crate::ldp::ldp_routes;
         Router::new()
             .merge(ldp_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
             .with_state(state.clone())
     };
@@ -1535,6 +1765,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             delete(acl_handlers::delete_triple_security_label),
         )
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1551,6 +1785,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
                 .delete(oauth_handlers::admin_delete_provider),
         )
         .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -1586,6 +1824,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // In-app documentation API (optional auth; admin-only docs filtered + admin
     // CRUD enforced in-handler).
     let docs_routes = crate::docs::routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
@@ -1639,6 +1881,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(
             Router::new()
                 .merge(catalog_routes())
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    endpoint_acl_guard,
+                ))
                 .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
                 .with_state(state.clone()),
         );
@@ -1649,6 +1895,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     router = router.merge(
         Router::new()
             .merge(crate::ogcapi::ogcapi_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
             .with_state(state.clone()),
     );
@@ -1658,6 +1908,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     {
         let tiles3d_routes = Router::new()
             .merge(crate::tiles3d::tiles3d_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
             .with_state(state.clone());
         router = router.merge(tiles3d_routes);
@@ -1673,6 +1927,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     {
         let shex_auth_routes = Router::new()
             .merge(routes::shex_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
             .with_state(state.clone());
         router = router.merge(shex_auth_routes);
@@ -1683,6 +1941,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     {
         let swrl_auth_routes = Router::new()
             .merge(routes::swrl_routes())
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                endpoint_acl_guard,
+            ))
             .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
             .with_state(state.clone());
         router = router.merge(swrl_auth_routes);
@@ -1698,6 +1960,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // operations are hidden from anonymous callers, and Admin operations from non-admins.
     let openapi_doc_route = Router::new()
         .route("/api-docs/openapi.json", get(openapi::openapi_json_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
     router = router.merge(openapi_doc_route);
@@ -1956,6 +2222,13 @@ pub async fn run(
     registry_token: String,
     // Data directory — vocab corpus cache + term index live under it.
     data_dir: std::path::PathBuf,
+    // The identity DB file main.rs actually opened (`--db-path`, else
+    // `<data-dir>/auth.db`). The backup subsystem must copy THIS file: it used
+    // to re-derive the path from AUTH_DB_PATH with a different default
+    // (`data/auth.sqlite`), so on any install that did not set that variable the
+    // scheduled backup opened a file that does not exist and failed — after
+    // writing the RDF dump, leaving no manifest and only a warn! line.
+    db_path: std::path::PathBuf,
     #[cfg(feature = "text-search")] text_index: Option<Arc<TextIndex>>,
     #[cfg(feature = "vocab-search")] vocab_engine: Option<
         Arc<crate::vocab_search::index::VocabSearchEngine>,
@@ -1965,9 +2238,8 @@ pub async fn run(
 
     // ── Backup subsystem (optional) ─────────────────────────────────────────
     let backup = {
-        let dir = std::env::var("BACKUP_DIR").unwrap_or_else(|_| "data/backups".to_string());
-        let sqlite =
-            std::env::var("AUTH_DB_PATH").unwrap_or_else(|_| "data/auth.sqlite".to_string());
+        let dir = default_backup_dir(&data_dir);
+        let sqlite = db_path.clone();
         let retention: usize = std::env::var("BACKUP_RETENTION_COUNT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1976,20 +2248,16 @@ pub async fn run(
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        // Initialize backup encryption key (auto-generates if not present)
+        // Resolve the operator-supplied age recipient. A failure here is FATAL:
+        // continuing with `encrypt = true` and no key produced a manager whose
+        // every run failed inside maybe_encrypt, so "encrypted backups are on"
+        // and "no backup has ever succeeded" looked identical from the outside.
         let key_path = if encrypt {
-            let default_path = std::path::PathBuf::from("data/backup_key.age");
             let key_file = std::env::var("BACKUP_ENCRYPT_KEY_PATH")
                 .ok()
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| default_path);
-            match crate::backup::init_backup_encryption(&key_file) {
-                Ok(path) => path,
-                Err(e) => {
-                    tracing::error!("Failed to initialize backup encryption: {}", e);
-                    None
-                }
-            }
+                .unwrap_or_else(|| data_dir.join("backup_key.age"));
+            crate::backup::init_backup_encryption(&key_file)?
         } else {
             None
         };
@@ -1999,9 +2267,17 @@ pub async fn run(
                 "Backup encryption is disabled. Recommended if data/ is not on an encrypted volume — set BACKUP_ENCRYPT=true"
             );
         }
+        if !sqlite.exists() {
+            // Not fatal (the DB is created on first open), but the operator
+            // should see it rather than discover it at restore time.
+            tracing::warn!(
+                "backup: identity DB {} does not exist yet; backups will include it once it does",
+                sqlite.display()
+            );
+        }
         match crate::backup::BackupManager::new(
             std::path::PathBuf::from(&dir),
-            std::path::PathBuf::from(&sqlite),
+            sqlite,
             store.clone(),
             audit.clone(),
             retention,
@@ -2102,6 +2378,24 @@ pub async fn run(
         #[cfg(feature = "vocab-search")]
         vocab_engine,
     };
+    if let Some(keys) = state.oidc_provider.clone() {
+        crate::federation::init(keys, &state.base_url);
+    }
+    // Keep the in-memory query accelerator fresh: after a write burst goes
+    // quiet, rebuild it in the background instead of making the next
+    // aggregate query wait for — or run without — it.
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_millis(500));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                every.tick().await;
+                let s = st.clone();
+                let _ = tokio::task::spawn_blocking(move || s.store.accelerator_tick()).await;
+            }
+        });
+    }
 
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.
@@ -2444,4 +2738,46 @@ mod panic_safety_net_tests {
         // Generic message only — the panic payload is never leaked to the client.
         assert_eq!(body.as_ref(), b"Internal server error");
     }
+}
+
+/// Where backups go: `BACKUP_DIR`, else `<data-dir>/backups`. The default used
+/// to be the *relative* `data/backups`, resolved against the working directory
+/// — in the Docker image that is `/app`, root-owned and read-only for the
+/// service user, so unattended backups were silently disabled on every
+/// default deployment ("backup: disabled — init failed: create backup dir").
+pub(crate) fn default_backup_dir(data_dir: &std::path::Path) -> String {
+    std::env::var("BACKUP_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| data_dir.join("backups").to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod backup_dir_tests {
+    #[test]
+    fn backup_dir_defaults_under_the_data_dir() {
+        std::env::remove_var("BACKUP_DIR");
+        let d = super::default_backup_dir(std::path::Path::new("/data"));
+        assert_eq!(d, "/data/backups");
+        std::env::set_var("BACKUP_DIR", "/mnt/backups");
+        assert_eq!(
+            super::default_backup_dir(std::path::Path::new("/data")),
+            "/mnt/backups"
+        );
+        std::env::remove_var("BACKUP_DIR");
+    }
+}
+
+/// Request-body limit for RDF uploads (Graph Store writes, bulk imports):
+/// `OTS_MAX_UPLOAD_MB` when set, else `default_mb`. Uploads are buffered and
+/// parsed into a temporary store before they replace anything, so the limit
+/// bounds memory as well as wire size; the 50 MB the Graph Store routes used
+/// to have rejected a 226 MB dataset that loaded fine in five appends.
+fn upload_limit_bytes(default_mb: usize) -> usize {
+    let mb = std::env::var("OTS_MAX_UPLOAD_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(default_mb);
+    mb.saturating_mul(1024 * 1024)
 }

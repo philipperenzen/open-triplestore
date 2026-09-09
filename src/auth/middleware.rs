@@ -235,6 +235,125 @@ async fn resolve_oidc_token(
     .clamped_to_role_policy())
 }
 
+/// Host part of a peer issuer (`127.0.0.1-8080`, `peer.example.org`), used to
+/// name the peer's provider row and the synthetic e-mail domain of its users.
+fn federated_peer_host(issuer: &str) -> String {
+    crate::federation::origin_of(issuer)
+        .and_then(|o| o.split("://").nth(1).map(|h| h.replace(':', "-")))
+        .unwrap_or_else(|| "peer".to_string())
+}
+
+/// The provider row a peer's federated users hang off: one per issuer, so
+/// its `(provider, subject)` identity links can never collide with the
+/// deployment's own OIDC users, and inactive, so it is no login option.
+/// Idempotent; required because `oauth_identities` FK-references
+/// `oauth_providers(id)`.
+fn ensure_federated_provider(
+    auth_db: &Arc<AuthDb>,
+    issuer: &str,
+) -> anyhow::Result<super::models::OauthProvider> {
+    let host = federated_peer_host(issuer);
+    let slug = format!("federated:{host}");
+    if let Some(p) = auth_db.get_oauth_provider_by_slug(&slug)? {
+        return Ok(p);
+    }
+    auth_db.create_oauth_provider(&super::models::OauthProviderCreate {
+        name: format!("Federated peer {host}"),
+        slug,
+        provider_type: "oidc".to_string(),
+        client_id: None,
+        client_secret: None,
+        client_secret_enc: None,
+        discovery_url: Some(format!(
+            "{}/.well-known/openid-configuration",
+            issuer.trim_end_matches('/')
+        )),
+        tenant_id: None,
+        entity_id: None,
+        sso_url: None,
+        idp_certificate: None,
+        scopes: Some("openid".to_string()),
+        role_claim_map: None,
+        auto_provision: true,
+        default_role: Some(SystemRole::User.as_str().to_string()),
+        is_active: false,
+    })
+}
+
+/// A peer's identity assertion: verified against the peer's JWKS with this
+/// instance as audience, provisioned as a read-only federated user whose
+/// organisation memberships follow the assertion's `org:` groups.
+///
+/// An assertion speaks for the peer's user, never for one of ours. Whatever
+/// it carries, it cannot resolve to or link with a locally created account,
+/// and it cannot confer a role:
+/// - identities live under a per-issuer provider row, so a peer subject can
+///   never match an env-OIDC identity with the same `sub`;
+/// - the e-mail is always the synthetic `<sub>@<peer host>.federated.invalid`
+///   (any peer-supplied address and `email_verified` are dropped), so
+///   provisioning never links by e-mail;
+/// - role claims and the deployment's group-to-role map are not consulted,
+///   and the principal is capped at `User` whatever the DB row says.
+// The Err is a ready-made axum `Response` on the cold (rejection) path, as in
+// the sibling resolvers.
+#[allow(clippy::result_large_err)]
+async fn resolve_federated_token(
+    auth_ext: &AuthExt,
+    auth_db: &Arc<AuthDb>,
+    verifier: &super::oidc_rs::OidcVerifier,
+    token: &str,
+) -> Result<AuthenticatedUser, Response> {
+    let mut claims = verifier.verify(token).await.map_err(|e| {
+        tracing::debug!(
+            "federation: assertion from {} rejected: {e}",
+            verifier.issuer()
+        );
+        (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()
+    })?;
+    let host = federated_peer_host(verifier.issuer());
+    claims.email = Some(format!("{}@{host}.federated.invalid", claims.sub));
+    // Of the extra claims only the org groups matter (membership sync); the
+    // rest — `email_verified`, `roles`, `realm_access`, … — must not reach
+    // provisioning.
+    let groups = claims.extra.remove(&auth_ext.groups_claim);
+    claims.extra.clear();
+    if let Some(groups) = groups {
+        claims.extra.insert(auth_ext.groups_claim.clone(), groups);
+    }
+    // Provision with a config that maps no claim to a role, so the groups
+    // are read for organisation membership only.
+    let mut fed_ext = AuthExt::disabled();
+    fed_ext.role_claims.clear();
+    fed_ext.role_claim_map = None;
+    fed_ext.groups_claim = auth_ext.groups_claim.clone();
+    fed_ext.org_group_prefix = auth_ext.org_group_prefix.clone();
+
+    let provider = ensure_federated_provider(auth_db, verifier.issuer()).map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Auth provisioning error").into_response()
+    })?;
+    let user = super::oidc_rs::provision_from_claims(auth_db, &provider, &fed_ext, &claims)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "User provisioning failed").into_response())?;
+    if !user.is_active {
+        return Err((StatusCode::UNAUTHORIZED, "User account is deactivated").into_response());
+    }
+    // Never above `User`: a federated principal holds no local authority, even
+    // if its row was promoted locally. A lower row role (guest) stays.
+    let role = if user.role.level() < SystemRole::User.level() {
+        user.role
+    } else {
+        SystemRole::User
+    };
+    Ok(AuthenticatedUser {
+        user_id: user.id,
+        role,
+        can_publish: false,
+        // Federated principals read; writes need a local credential.
+        write_access: false,
+        can_mint_api_tokens: false,
+    }
+    .clamped_to_role_policy())
+}
+
 /// Resolve a bearer token to an authenticated user, honoring the legacy-token
 /// flag and falling through to OIDC verification for IdP-issued JWTs.
 #[allow(clippy::result_large_err)]
@@ -248,7 +367,8 @@ async fn authenticate(
 ) -> Result<AuthenticatedUser, Response> {
     let is_legacy_api_token = token.starts_with("ots_");
 
-    let has_fallback = auth_ext.oidc.is_some() || provider.0.is_some();
+    let has_fallback =
+        auth_ext.oidc.is_some() || provider.0.is_some() || !auth_ext.trusted_issuers.is_empty();
     // The legacy path's error is the most specific one we have (e.g. the
     // guest-disabled message for a deactivated account's still-valid session
     // token) — keep it and only surface the generic error when NO path could
@@ -296,6 +416,14 @@ async fn authenticate(
         }
     }
 
+    // Federated identity assertions from trusted peer instances (crate::federation).
+    if !auth_ext.trusted_issuers.is_empty() && !is_legacy_api_token {
+        if let Some(iss) = crate::federation::unverified_issuer(token) {
+            if let Some(verifier) = auth_ext.trusted_issuers.iter().find(|v| v.issuer() == iss) {
+                return resolve_federated_token(auth_ext, auth_db, verifier, token).await;
+            }
+        }
+    }
     if auth_ext.oidc.is_some() && !is_legacy_api_token {
         return resolve_oidc_token(auth_ext, auth_db, token).await;
     }
@@ -475,7 +603,19 @@ fn enforce_write_scope_for_mutation(
     user: &AuthenticatedUser,
 ) -> Result<(), Response> {
     let mutating = matches!(req.method().as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
-    if mutating && !user.write_access && !user.is_admin() {
+    // A SPARQL *query* sent by POST (SPARQL 1.1 Protocol §2.1.2/2.1.3) is a read;
+    // the update path enforces write scope itself (execute_update). Treating
+    // every POST as a mutation locked read-only principals — read-scoped API
+    // tokens and federated identities — out of the protocol's POST query form.
+    let sparql_post = req.method() == axum::http::Method::POST
+        && req.uri().path().trim_end_matches('/') == "/sparql"
+        && !req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("application/sparql-update");
+    if mutating && !sparql_post && !user.write_access && !user.is_admin() {
         return Err((
             StatusCode::FORBIDDEN,
             "This API token does not have write scope",
@@ -483,6 +623,22 @@ fn enforce_write_scope_for_mutation(
             .into_response());
     }
     Ok(())
+}
+
+/// Whether the endpoint ACL is enforced. `ENDPOINT_ACL_ENFORCE=false` (or `0`)
+/// turns it off. Read once — this sits on every request.
+fn endpoint_acl_enforced() -> bool {
+    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENFORCED.get_or_init(|| {
+        !matches!(
+            std::env::var("ENDPOINT_ACL_ENFORCE")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "false" | "0" | "no" | "off"
+        )
+    })
 }
 
 /// Middleware that checks endpoint-level ACL rules from the `endpoint_acl` table.
@@ -501,6 +657,14 @@ pub async fn endpoint_acl_guard(
     req: Request,
     next: Next,
 ) -> Result<Response, Response> {
+    // Escape hatch for an operator whose rule misfires. Enforcement is ON by
+    // default (secure by default); this exists because the guard now covers
+    // every authenticated route rather than the six `/api/browse/*` ones it was
+    // mounted on before, so a bad rule has a much larger blast radius.
+    if !endpoint_acl_enforced() {
+        return Ok(next.run(req).await);
+    }
+
     let user = req.extensions().get::<AuthenticatedUser>().cloned();
     let method = req.method().as_str().to_uppercase();
     let path = req.uri().path().to_string();
@@ -535,6 +699,10 @@ pub async fn endpoint_acl_guard(
 
 #[cfg(test)]
 mod role_policy_tests {
+    /// `OTS_GUEST_CAPABILITIES` is process-wide; the tests below set and clear
+    /// it, so they must not interleave (they used to race and fail spuriously).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     fn principal(role: SystemRole) -> AuthenticatedUser {
@@ -552,6 +720,7 @@ mod role_policy_tests {
     /// them ordered rather than racing other tests in the same binary.
     #[test]
     fn guest_capabilities_clamp_the_resolved_principal() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Default: a guest reads and nothing else, even arriving on a session
         // that would otherwise carry full authority.
         std::env::remove_var("OTS_GUEST_CAPABILITIES");
@@ -592,6 +761,7 @@ mod role_policy_tests {
     /// the authentication path did not already grant.
     #[test]
     fn clamping_never_adds_authority() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("OTS_GUEST_CAPABILITIES", "all");
         let mut p = principal(SystemRole::Guest);
         p.write_access = false;

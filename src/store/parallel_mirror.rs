@@ -134,6 +134,11 @@ struct Inner {
     /// True while a background rebuild thread is running — deduplicates spawns
     /// so a burst of queries after a big write starts one thread, not one each.
     background_building: AtomicBool,
+    /// Writes that have started and not yet finished (see
+    /// [`ParallelMirror::write_started`]). A build that starts or ends while
+    /// this is non-zero cannot be published clean: the store may already hold
+    /// quads whose `mark_dirty` has not been recorded yet.
+    writes_in_flight: AtomicUsize,
     /// Count of full (re)builds performed — diagnostics + regression guard.
     build_count: AtomicUsize,
     /// Count of `Store::len()` probes. That call is a full-store key scan in
@@ -210,10 +215,48 @@ impl ParallelMirror {
                 rebuild_quiet_ms: AtomicU64::new(env_rebuild_quiet_ms()),
                 inline_rebuild_max: AtomicUsize::new(DEFAULT_INLINE_REBUILD_MAX_TRIPLES),
                 background_building: AtomicBool::new(false),
+                writes_in_flight: AtomicUsize::new(0),
                 build_count: AtomicUsize::new(0),
                 len_probes: AtomicUsize::new(0),
             }),
         }
+    }
+
+    /// A write is starting. Marks the mirror stale *before* the store mutates,
+    /// so a rebuild that overlaps the write can never publish clean: the write's
+    /// timestamp already differs from the mark the build took, and the in-flight
+    /// count keeps `build_and_publish` from publishing at all until the write has
+    /// finished. Pair with [`Self::write_finished`] (the store does this through
+    /// an RAII guard, so every return path balances the counter).
+    pub fn write_started(&self) {
+        self.inner.writes_in_flight.fetch_add(1, Ordering::AcqRel);
+        self.mark_dirty();
+    }
+
+    /// The write that called [`Self::write_started`] has finished (committed or
+    /// failed). Marks dirty first, then decrements: a publisher that observes zero
+    /// in flight is then guaranteed to also observe this write's timestamp.
+    pub fn write_finished(&self) {
+        self.mark_dirty();
+        self.inner.writes_in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Writes currently between `write_started` and `write_finished`.
+    pub fn writes_in_flight(&self) -> usize {
+        self.inner.writes_in_flight.load(Ordering::Acquire)
+    }
+
+    /// The clean, unsharded in-memory copy of the whole store, if one is
+    /// published and no write has landed since. A *peek*: it never rebuilds,
+    /// never probes `store.len()` and never spawns a thread, so a caller that
+    /// wants a consistent RAM snapshot for a long read (the SHACL engine) can
+    /// ask on every run at no cost. `None` while dirty, while a rebuild is in
+    /// progress, over the cap, or when the accelerator is disabled.
+    pub fn full_copy(&self) -> Option<Arc<Store>> {
+        if !self.inner.enabled || self.inner.dirty.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner.full.read().ok()?.clone()
     }
 
     /// Mark the mirror stale after any write to the persistent store.
@@ -230,7 +273,6 @@ impl ParallelMirror {
 
     /// Number of full (re)builds performed since construction. Diagnostics, and the
     /// hook the regression test uses to prove a write burst does not thrash rebuilds.
-    #[cfg(test)]
     pub fn build_count(&self) -> usize {
         self.inner.build_count.load(Ordering::Relaxed)
     }
@@ -244,8 +286,7 @@ impl ParallelMirror {
 
     /// Override the rebuild quiet period (ms) — used by tests to drive the debounce
     /// deterministically without touching the process-wide environment variable.
-    #[cfg(test)]
-    fn set_rebuild_quiet_ms(&self, ms: u64) {
+    pub fn set_rebuild_quiet_ms(&self, ms: u64) {
         self.inner.rebuild_quiet_ms.store(ms, Ordering::Relaxed);
     }
 
@@ -289,6 +330,17 @@ impl ParallelMirror {
 
     /// Get warm shards, (re)building from `store` if dirty, or `None` if the store
     /// is empty or larger than the cap.
+    /// Keep the mirror fresh without waiting for a query: if writes have gone
+    /// quiet and the copies are stale, start (or perform) the rebuild now. Called
+    /// from a periodic server task, so the first query after a write burst does
+    /// not pay for — or wait out — the rebuild.
+    pub fn ensure_fresh(&self, store: &Store) {
+        if !self.inner.enabled || !self.inner.dirty.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.get_or_build(store);
+    }
+
     fn get_or_build(&self, store: &Store) -> Option<Arc<ParallelStore>> {
         // Fast path: a CLEAN state is authoritative in both directions — `Some` is
         // the warm mirror, and `None` means "deliberately off for this state" (empty
@@ -314,6 +366,15 @@ impl ParallelMirror {
         // `try_lock`, not `lock`: a query that finds a rebuild already running —
         // inline on another request or on the background thread — must fall back
         // to the persistent store, not queue up behind a multi-second build.
+        // A background rebuild is pending or running: decline without touching
+        // the lock. The rebuild thread takes `build_lock` with a blocking `lock()`;
+        // while it waited, every query that won `try_lock` here first ran a full
+        // `store.len()` scan (below) before declining anyway — profiled at 9% of a
+        // SHACL run's worker CPU across seven threads, starving the rebuild for
+        // the whole window. Now the pending thread is the only candidate builder.
+        if self.inner.background_building.load(Ordering::Acquire) {
+            return None;
+        }
         let Ok(_guard) = self.inner.build_lock.try_lock() else {
             return None;
         };
@@ -434,27 +495,52 @@ impl ParallelMirror {
     /// rebuilds again. Clearing after the publish (the old order) erased that
     /// mark and served a silently stale mirror until the write after it.
     fn build_and_publish(&self, store: &Store, total: usize) -> Option<Arc<ParallelStore>> {
-        self.inner.dirty.store(false, Ordering::Release);
+        // The mirror stays *dirty* for the whole build, so `get_or_build` answers
+        // None (the persistent store serves the query) instead of the previous
+        // snapshot. Clearing the flag up front, as this used to, handed every
+        // reader the pre-write copy for the seconds a rebuild takes — a SHACL run
+        // right after an import mixed stale and fresh answers and reported
+        // violations that did not exist, or none at all.
+        // A write in flight may have committed quads whose mark is not recorded
+        // yet; the copies built now could miss them and still look clean. Stay
+        // dirty and let the next quiet tick retry once the write has finished.
+        if self.writes_in_flight() > 0 {
+            return None;
+        }
+        let write_mark = self.inner.last_write_ms.load(Ordering::Acquire);
         let built = build_from_store(store, self.inner.shard_count)
             .map(Arc::new)
             .zip(build_full_store(store).map(Arc::new));
         let Some((ps, full)) = built else {
             // Build error: leave the previous state untouched and stay dirty.
-            self.inner.dirty.store(true, Ordering::Release);
             return None;
         };
-        *self.inner.shards.write().ok()? = Some(ps.clone());
-        *self.inner.full.write().ok()? = Some(full);
-        self.inner.built_len.store(total, Ordering::Release);
-        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
-        // Built successfully (under cap): re-arm the over-cap warning so a later
-        // growth back over the cap is surfaced again.
-        self.inner.over_cap_warned.store(false, Ordering::Release);
+        self.publish(ps.clone(), full, total, write_mark);
         debug!(
             "parallel mirror built: {total} triples ({} shards + 1 full copy)",
             self.inner.shard_count
         );
         Some(ps)
+    }
+
+    /// Install freshly built copies. The mirror is marked clean only if no
+    /// write landed since `write_mark` was taken at the start of the build;
+    /// otherwise it stays dirty and the next quiet window rebuilds again.
+    fn publish(&self, ps: Arc<ParallelStore>, full: Arc<Store>, total: usize, write_mark: u64) {
+        if let Ok(mut shards) = self.inner.shards.write() {
+            *shards = Some(ps);
+        }
+        if let Ok(mut f) = self.inner.full.write() {
+            *f = Some(full);
+        }
+        self.inner.built_len.store(total, Ordering::Release);
+        self.inner.build_count.fetch_add(1, Ordering::Relaxed);
+        // Built successfully (under cap): re-arm the over-cap warning so a later
+        // growth back over the cap is surfaced again.
+        self.inner.over_cap_warned.store(false, Ordering::Release);
+        let unchanged = self.inner.last_write_ms.load(Ordering::Acquire) == write_mark
+            && self.writes_in_flight() == 0;
+        self.inner.dirty.store(!unchanged, Ordering::Release);
     }
 
     /// Try to answer `sparql` from the **unsharded** in-memory copy — the path for
@@ -516,7 +602,7 @@ fn env_rebuild_quiet_ms() -> u64 {
 /// matters for the flap), else total system RAM. Returns `None` when neither can
 /// be read (e.g. on non-Linux hosts), where the caller falls back to the fixed
 /// floor.
-fn detect_memory_limit_bytes() -> Option<u64> {
+pub(crate) fn detect_memory_limit_bytes() -> Option<u64> {
     // cgroup v2 (Docker default on modern hosts): a numeric byte limit, or the
     // literal "max" when unconstrained.
     if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
@@ -535,6 +621,29 @@ fn detect_memory_limit_bytes() -> Option<u64> {
             if n > 0 && n < (1u64 << 62) {
                 return Some(n);
             }
+        }
+    }
+    // macOS has no /proc: ask sysctl for the physical memory size, so the
+    // RAM-aware cap applies on developer machines too (it used to fall back to
+    // the 2M floor there, keeping the accelerator off above it).
+    #[cfg(target_os = "macos")]
+    {
+        let mut size: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let name = std::ffi::CString::new("hw.memsize").expect("static name");
+        // SAFETY: sysctlbyname writes at most `len` bytes into `size`, whose
+        // address and size we pass; no other pointers are involved.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                &mut size as *mut u64 as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && size > 0 {
+            return Some(size);
         }
     }
     // No cgroup limit (or unconstrained) → total system RAM.
@@ -810,5 +919,120 @@ mod tests {
             .try_full_query(&store, q, SparqlEvaluator::new)
             .is_some());
         assert_eq!(mirror.build_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod stale_read_tests {
+    use super::*;
+    use oxigraph::model::{NamedNode, Quad};
+
+    fn store_with(n: usize) -> Store {
+        let store = Store::new().unwrap();
+        for i in 0..n {
+            store
+                .insert(&Quad::new(
+                    NamedNode::new_unchecked(format!("urn:s{i}")),
+                    NamedNode::new_unchecked("urn:p"),
+                    NamedNode::new_unchecked("urn:o"),
+                    oxigraph::model::GraphName::DefaultGraph,
+                ))
+                .unwrap();
+        }
+        store
+    }
+
+    /// While a rebuild holds the build lock and the mirror is dirty, a query
+    /// must fall back to the persistent store — never read the old snapshot.
+    #[test]
+    fn a_build_in_progress_hands_out_no_snapshot() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(
+            mirror.get_or_build(&store).is_some(),
+            "first build (inline) publishes"
+        );
+        mirror.mark_dirty();
+        let _building = mirror.inner.build_lock.lock().unwrap();
+        assert!(
+            mirror.get_or_build(&store).is_none(),
+            "dirty + build lock held = a rebuild is running: no stale shards"
+        );
+    }
+
+    /// A stale mirror with writes gone quiet is rebuilt by `ensure_fresh`
+    /// without any query asking for it.
+    #[test]
+    fn ensure_fresh_rebuilds_a_quiet_dirty_mirror() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(mirror.get_or_build(&store).is_some());
+        let builds = mirror.inner.build_count.load(Ordering::Relaxed);
+        mirror.mark_dirty();
+        mirror.ensure_fresh(&store);
+        assert_eq!(mirror.inner.build_count.load(Ordering::Relaxed), builds + 1);
+        assert!(!mirror.inner.dirty.load(Ordering::Acquire));
+        mirror.ensure_fresh(&store);
+        assert_eq!(
+            mirror.inner.build_count.load(Ordering::Relaxed),
+            builds + 1,
+            "clean: no rebuild"
+        );
+    }
+
+    /// A write that has started but not finished keeps a build from publishing
+    /// at all, and `full_copy()` (the SHACL engine's snapshot peek) hands out a
+    /// copy only in the clean state — never during or right after a write.
+    #[test]
+    fn a_write_in_flight_blocks_publication_and_the_peek() {
+        let store = store_with(10);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        assert!(mirror.full_copy().is_none(), "nothing built yet");
+        assert!(mirror.get_or_build(&store).is_some());
+        assert!(mirror.full_copy().is_some(), "clean and built");
+        mirror.write_started();
+        assert!(
+            mirror.full_copy().is_none(),
+            "dirty as soon as a write starts"
+        );
+        assert!(
+            mirror.build_and_publish(&store, 10).is_none(),
+            "no publish while a write is in flight"
+        );
+        assert!(mirror.inner.dirty.load(Ordering::Acquire));
+        mirror.write_finished();
+        assert_eq!(mirror.writes_in_flight(), 0);
+        assert!(mirror.build_and_publish(&store, 10).is_some());
+        assert!(!mirror.inner.dirty.load(Ordering::Acquire));
+        assert!(mirror.full_copy().is_some());
+    }
+
+    /// Publishing clears the dirty flag only when nothing was written during
+    /// the build; a write that landed meanwhile keeps the mirror dirty.
+    #[test]
+    fn publish_stays_dirty_when_a_write_landed_during_the_build() {
+        let store = store_with(5);
+        let mirror = ParallelMirror::new(true, 2, 1_000_000);
+        mirror.set_rebuild_quiet_ms(0);
+        let ps = Arc::new(build_from_store(&store, 2).unwrap());
+        let full = Arc::new(build_full_store(&store).unwrap());
+        let mark = mirror.inner.last_write_ms.load(Ordering::Acquire);
+        mirror.publish(ps.clone(), full.clone(), 5, mark);
+        assert!(
+            !mirror.inner.dirty.load(Ordering::Acquire),
+            "no write during the build: clean"
+        );
+        // A write during the build bumps the write mark past `mark`.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        mirror.mark_dirty();
+        let mark_before_second_build = mark;
+        mirror.publish(ps, full, 5, mark_before_second_build);
+        assert!(
+            mirror.inner.dirty.load(Ordering::Acquire),
+            "a write landed during the build: still dirty"
+        );
     }
 }

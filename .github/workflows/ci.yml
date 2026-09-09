@@ -19,7 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # The `--features full,test-utils,backup-encrypt,alerting` debug build of every test binary fills the runner's small
+  # The `--features full,saml,test-utils,backup-encrypt,alerting` debug build of every test binary fills the runner's small
   # disk ("No space left on device"; the "ld terminated with signal 7 [Bus error]"
   # crash is the same thing — a bus error from mmap on a full disk). Shrink target/:
   # line-tables-only debuginfo (keeps file:line in backtraces) and no incremental
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Reclaim ~25 GB of preinstalled tooling the Rust build doesn't need, so the
-      # `--features full,test-utils,backup-encrypt,alerting` build of all test binaries doesn't run the disk out.
+      # `--features full,saml,test-utils,backup-encrypt,alerting` build of all test binaries doesn't run the disk out.
       - name: Free up disk space
         run: |
           df -h /
@@ -68,35 +68,77 @@ jobs:
       # (plugins/api / plugins/hello, src/plugins.rs) — is exercised on every CI run,
       # same as any other optional capability. The plugin crates ALSO build/test
       # standalone at their own default features in the "Plugin crates" job below.
+      # `--workspace` is load-bearing: without it cargo selects only the root
+      # package, so the `opengraph` member was never linted or test-compiled. Its
+      # test module had been broken (a stale oxigraph `on_store` signature) for
+      # long enough that all 59 of its tests silently never ran.
       - name: Clippy
-        run: cargo clippy --all-targets --features full,test-utils,backup-encrypt,alerting,plugin-hello -- -D warnings
+        run: cargo clippy --workspace --all-targets --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard -- -D warnings
 
       - name: Build
-        run: cargo build --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo build --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
 
       - name: Test
-        run: cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked
+        run: cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked
 
       # Explicit, named gate for the security regression suite. These also run in
       # the step above; surfacing them separately makes a security regression
-      # obvious in the CI summary. The `security` filter yields a "0 passed; N
-      # filtered out" line for every binary that has no security tests (the
-      # conformance suites, etc.) — that is expected. What is NOT acceptable is the
-      # filter matching *nothing at all* (e.g. after a rename), which `cargo test`
-      # would still exit 0 on. The guard below fails the job if too few security
-      # tests actually ran, so the suite can never be silently skipped.
+      # obvious in the CI summary. What is NOT acceptable is the filter matching
+      # *nothing at all* (e.g. after a rename), which `cargo test` would still
+      # exit 0 on — hence the floors below.
+      #
+      # TWO selections, because either alone has a blind spot:
+      #   * `--test 'security_*'` runs the dedicated tests/security_*.rs files.
+      #     The name filter misses most of them: libtest matches on the test's
+      #     own path, not the binary's name, and a test called
+      #     `viewer_cannot_read_private_snapshot_...` contains no "security".
+      #   * the `security` name filter catches the `mod security` blocks that
+      #     live inside other binaries, which `--test 'security_*'` never selects.
+      # Each gets its own floor, so a regression in one cannot be masked by the
+      # other being comfortably over its own bar.
       - name: Security regression tests
         shell: bash
         run: |
           set -o pipefail
-          out=$(cargo test --features full,test-utils,backup-encrypt,alerting,plugin-hello --locked security 2>&1)
-          echo "$out"
-          passed=$(printf '%s\n' "$out" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
-          echo "==> security-named tests passed across all binaries: $passed"
-          if [ "$passed" -lt 40 ]; then
-            echo "::error::Expected at least 40 security tests to run, but only $passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
+          count_passed() { printf '%s\n' "$1" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}'; }
+
+          files_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked --test 'security_*' 2>&1)
+          echo "$files_out"
+          files_passed=$(count_passed "$files_out")
+          echo "==> tests/security_*.rs passed: $files_passed"
+          if [ "$files_passed" -lt 30 ]; then
+            echo "::error::Expected at least 30 tests from tests/security_*.rs, got $files_passed — a security suite may have been removed or renamed."
             exit 1
           fi
+
+          named_out=$(cargo test --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked security 2>&1)
+          echo "$named_out"
+          named_passed=$(count_passed "$named_out")
+          echo "==> security-named tests passed across all binaries: $named_passed"
+          if [ "$named_passed" -lt 40 ]; then
+            echo "::error::Expected at least 40 security-named tests to run, but only $named_passed did — the 'security' filter may be broken (tests renamed/moved). Failing to avoid a silent skip."
+            exit 1
+          fi
+
+  # `default = ["full"]` makes the README's plain `cargo build` produce the
+  # binary its Highlights table describes. The minimal configuration then has no
+  # job of its own, so every `#[cfg(not(feature = ...))]` fallback would rot
+  # unbuilt — this compiles it. Test-only, no clippy gate: the minimal build
+  # legitimately has unused-code warnings for the paths its features would use.
+  minimal-build:
+    name: Minimal build (--no-default-features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies (GEOS for GeoSPARQL)
+        run: sudo apt-get update && sudo apt-get install -y libgeos-dev lld
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: Build (no default features)
+        run: cargo build --no-default-features --locked
 
   plugins:
     name: Plugin crates (standalone, default features)
@@ -129,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Reclaim ~25 GB of preinstalled tooling so the `--features full,test-utils,backup-encrypt,alerting` conformance
+      # Reclaim ~25 GB of preinstalled tooling so the `--features full,saml,test-utils,backup-encrypt,alerting` conformance
       # test binaries don't run the disk out (see the backend job).
       - name: Free up disk space
         run: |
@@ -151,7 +193,7 @@ jobs:
       # W3C / GeoSPARQL / OWL2 / LDP conformance tests. Enabling all features
       # exercises the optional reasoning, ldp, shex, swrl and text-search paths.
       - name: Run conformance tests
-        run: cargo test --features full,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
+        run: cargo test --features full,saml,test-utils,backup-encrypt,alerting --locked --test '*conformance*'
 
   frontend:
     name: Frontend (lint, test, build)
@@ -174,11 +216,29 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # `tsc --noEmit` over src/. Until this step existed no compiler ever ran:
+      # eslint's `no-undef` is disabled for .ts on the grounds that "TypeScript
+      # already checks", so a typo'd identifier reached production as a runtime
+      # `undefined`. The backlog was cleared when the gate was added.
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Test
         run: npm run test
 
       - name: Build
         run: npm run build
+
+  docs-parity:
+    name: Conformance table is generated, not hand-maintained
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The README / docs/standards.md table is written by this script from the
+      # test suites; a stale table (counts that no longer match the code) fails.
+      - name: Check the conformance table
+        run: python3 scripts/conformance_table.py --check
 
   audit:
     name: Dependency audit

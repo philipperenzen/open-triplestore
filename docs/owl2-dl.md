@@ -168,8 +168,20 @@ The bridge:
 3. Passes it to Konclude via stdin (`Konclude realization -i - -o -`).
 4. Parses the class hierarchy from the response and loads it into the target graph.
 
-If Konclude is not in PATH, step 3 is skipped and only native results are returned
-(no error — the native rules still provide substantial coverage).
+The bridge is selected by configuration — it is **not** on by default:
+
+| Variable | Effect |
+|---|---|
+| `OTS_EXTERNAL_REASONER=konclude` | Route `regime: "owl2-dl"` through Konclude after the native rules. Unset: native rules only (the `NativeTableauStub`). |
+| `OTS_EXTERNAL_REASONER_BIN=/path/to/Konclude` | Binary to run; default `Konclude` on `PATH`. |
+
+With Konclude *configured but not found*, materialisation fails with an error
+rather than silently returning only native results — a misconfigured reasoner
+should be visible, not papered over. Without the variable there is no external
+step at all, and `triples_added` reports what the native rules derived.
+
+The bridge is **experimental**: its Turtle→OWL/XML hand-off and the response
+parser have not been exercised against a real Konclude build in CI.
 
 ### Custom external reasoner
 

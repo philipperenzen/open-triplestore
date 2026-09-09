@@ -1,0 +1,7 @@
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix code: <https://example.org/clinical/code/> .
+
+code:scheme a skos:ConceptScheme ; skos:prefLabel "Observation codes (LOINC-like)"@en .
+code:body-weight a skos:Concept ; skos:inScheme code:scheme ; skos:prefLabel "Body weight"@en ; skos:notation "29463-7" .
+code:body-height a skos:Concept ; skos:inScheme code:scheme ; skos:prefLabel "Body height"@en ; skos:notation "8302-2" .
+code:heart-rate a skos:Concept ; skos:inScheme code:scheme ; skos:prefLabel "Heart rate"@en ; skos:notation "8867-4" .

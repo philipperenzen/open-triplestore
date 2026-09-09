@@ -22,6 +22,36 @@ The triplestore automatically generates a full [W3C DCAT 2](https://www.w3.org/T
 
 ---
 
+## Profiles: DCAT-AP and DCAT-AP-NL
+
+The catalogue is generated from the dataset registry as an RDF graph and
+serialised on request (Turtle, JSON-LD, RDF/XML, N-Triples by `Accept` or
+`?format=`), so every user-supplied value is a real RDF term — a title with a
+quote, a description with a `>`, or a malformed theme IRI cannot break the
+document (malformed IRIs are dropped with a warning in the log).
+
+`DCAT_PROFILE` selects the application profile:
+
+| Value | Effect |
+|---|---|
+| `dcat` (default) | DCAT 3 with VoID statistics, as before. |
+| `dcat-ap` | DCAT-AP 3: every dataset gets a `dct:publisher` that is a `foaf:Agent` with a name, `dct:identifier`, an `adms:identifier`, `dct:language`, typed distributions (`dct:format` from the EU file-type authority, `dcat:mediaType`), the SPARQL endpoint as a `dcat:DataService`, and `adms:status` mapped onto the EU dataset-status authority. |
+| `dcat-ap-nl` | DCAT-AP-NL 3 on top of DCAT-AP: the language defaults to Dutch, licences are repeated on every distribution, keywords are tagged `@nl`. |
+
+The catalogue's own metadata comes from the environment:
+
+| Variable | Meaning |
+|---|---|
+| `CATALOG_TITLE`, `CATALOG_DESCRIPTION` | Title and description of the `dcat:Catalog`. |
+| `CATALOG_PUBLISHER_URI`, `CATALOG_PUBLISHER_NAME`, `CATALOG_PUBLISHER_IDENTIFIER` | The publishing organisation (`foaf:Agent`); the identifier is emitted as `dct:identifier` (an OIN or KvK number in the NL profile). Defaults to `<base>/publisher` named after the instance. |
+| `CATALOG_LANGUAGE` | ISO 639-3 code (`ENG`, `NLD`, …) mapped onto the EU language authority; default `ENG`, or `NLD` under `dcat-ap-nl`. |
+| `CATALOG_LICENSE` | Licence IRI for the catalogue and, when a dataset declares none, its distributions. |
+
+Statistics (`void:triples`, distinct subjects/predicates/objects) are computed
+over the whole store — default and named graphs alike — and cached until the
+next write, so an anonymous `/.well-known/void` no longer costs three full
+scans per request.
+
 ## Accessing the Catalog
 
 ```bash
