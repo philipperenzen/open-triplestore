@@ -178,6 +178,19 @@ impl<'a> ShExParser<'a> {
             });
         }
 
+        // Unconsumed input is a syntax error, not trailing noise. The shape loop
+        // stops at the first token it cannot read, so "this is not shexc {{{"
+        // used to parse as an EMPTY schema — every focus node conformed and the
+        // HTTP API answered 200 — and a shape after a typo silently vanished.
+        self.skip_ws();
+        if self.pos < self.input.len() {
+            let tail: String = self.remaining().chars().take(40).collect();
+            return Err(format!(
+                "Unexpected input at position {}: {tail:?}",
+                self.pos
+            ));
+        }
+
         Ok(ShExSchema {
             prefixes: self.prefixes.clone(),
             base,
@@ -311,8 +324,10 @@ impl<'a> ShExParser<'a> {
                         datatype: Some(dt),
                         ..Default::default()
                     };
-                    // Parse optional string facets
-                    nc.string_facets = self.parse_string_facets();
+                    // Parse optional string and numeric facets
+                    let (sf, nf) = self.parse_facets();
+                    nc.string_facets = sf;
+                    nc.numeric_facets = nf;
                     return Ok(ShapeExpr::NodeConstraint(nc));
                 }
                 Err(format!(
@@ -482,7 +497,9 @@ impl<'a> ShExParser<'a> {
                         datatype: Some(dt),
                         ..Default::default()
                     };
-                    nc.string_facets = self.parse_string_facets();
+                    let (sf, nf) = self.parse_facets();
+                    nc.string_facets = sf;
+                    nc.numeric_facets = nf;
                     return Ok(Some(Box::new(ShapeExpr::NodeConstraint(nc))));
                 }
                 Ok(None)
@@ -587,63 +604,126 @@ impl<'a> ShExParser<'a> {
         })
     }
 
-    fn parse_string_facets(&mut self) -> Vec<StringFacet> {
-        let mut facets = Vec::new();
+    /// Consume `kw` (case-insensitively) when it stands as a whole token, and
+    /// report whether it did. The facet loops all need the same "keyword
+    /// followed by whitespace" check — `MAXLENGTH` must not be seen inside
+    /// `MAXLENGTHX`, and `LENGTH` must not swallow the tail of `MINLENGTH`
+    /// (which is why the caller order still matters).
+    fn eat_keyword(&mut self, kw: &str) -> bool {
+        if self.starts_with_ci(kw)
+            && self
+                .remaining()
+                .as_bytes()
+                .get(kw.len())
+                .is_none_or(|b| b.is_ascii_whitespace())
+        {
+            self.advance(kw.len());
+            self.skip_ws();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Parse the string and numeric facets that may follow a node constraint.
+    ///
+    /// Numeric facets were declared in the schema type but never parsed here, so
+    /// `ex:age xsd:integer MININCLUSIVE 0` silently accepted -5.
+    fn parse_facets(&mut self) -> (Vec<StringFacet>, Vec<NumericFacet>) {
+        let mut string_facets = Vec::new();
+        let mut numeric_facets = Vec::new();
         loop {
             self.skip_ws();
-            if self.starts_with_ci("PATTERN")
-                && self
-                    .remaining()
-                    .as_bytes()
-                    .get(7)
-                    .is_none_or(|b| b.is_ascii_whitespace())
-            {
-                self.advance(7);
-                self.skip_ws();
+            if self.eat_keyword("PATTERN") {
                 if let Ok(pat) = self.parse_quoted_string() {
-                    facets.push(StringFacet::Pattern(pat, None));
+                    // An optional bare flag token follows the pattern
+                    // (XPath-style: i, s, m, x). It used to be discarded.
+                    let flags = self.parse_pattern_flags();
+                    string_facets.push(StringFacet::Pattern(pat, flags));
                 }
-            } else if self.starts_with_ci("MINLENGTH")
-                && self
-                    .remaining()
-                    .as_bytes()
-                    .get(9)
-                    .is_none_or(|b| b.is_ascii_whitespace())
-            {
-                self.advance(9);
-                self.skip_ws();
+            } else if self.eat_keyword("MINLENGTH") {
                 if let Some(n) = self.parse_usize() {
-                    facets.push(StringFacet::MinLength(n));
+                    string_facets.push(StringFacet::MinLength(n));
                 }
-            } else if self.starts_with_ci("MAXLENGTH")
-                && self
-                    .remaining()
-                    .as_bytes()
-                    .get(9)
-                    .is_none_or(|b| b.is_ascii_whitespace())
-            {
-                self.advance(9);
-                self.skip_ws();
+            } else if self.eat_keyword("MAXLENGTH") {
                 if let Some(n) = self.parse_usize() {
-                    facets.push(StringFacet::MaxLength(n));
+                    string_facets.push(StringFacet::MaxLength(n));
                 }
-            } else if self.starts_with_ci("LENGTH")
-                && self
-                    .remaining()
-                    .as_bytes()
-                    .get(6)
-                    .is_none_or(|b| b.is_ascii_whitespace())
-            {
-                self.advance(6);
-                self.skip_ws();
+            } else if self.eat_keyword("LENGTH") {
                 if let Some(n) = self.parse_usize() {
-                    facets.push(StringFacet::Length(n));
+                    string_facets.push(StringFacet::Length(n));
+                }
+            } else if self.eat_keyword("MININCLUSIVE") {
+                if let Some(n) = self.parse_f64() {
+                    numeric_facets.push(NumericFacet::MinInclusive(n));
+                }
+            } else if self.eat_keyword("MAXINCLUSIVE") {
+                if let Some(n) = self.parse_f64() {
+                    numeric_facets.push(NumericFacet::MaxInclusive(n));
+                }
+            } else if self.eat_keyword("MINEXCLUSIVE") {
+                if let Some(n) = self.parse_f64() {
+                    numeric_facets.push(NumericFacet::MinExclusive(n));
+                }
+            } else if self.eat_keyword("MAXEXCLUSIVE") {
+                if let Some(n) = self.parse_f64() {
+                    numeric_facets.push(NumericFacet::MaxExclusive(n));
+                }
+            } else if self.eat_keyword("TOTALDIGITS") {
+                if let Some(n) = self.parse_usize() {
+                    numeric_facets.push(NumericFacet::TotalDigits(n));
+                }
+            } else if self.eat_keyword("FRACTIONDIGITS") {
+                if let Some(n) = self.parse_usize() {
+                    numeric_facets.push(NumericFacet::FractionDigits(n));
                 }
             } else {
                 break;
             }
         }
-        facets
+        (string_facets, numeric_facets)
+    }
+
+    /// An optional run of ShEx regex flag letters after a PATTERN.
+    ///
+    /// Skipping whitespace first is safe because of the boundary check below:
+    /// a following keyword like `MINLENGTH` yields no clean flag run (`mi` is
+    /// followed by `n`, not a separator) and is left for the facet loop.
+    fn parse_pattern_flags(&mut self) -> Option<String> {
+        self.skip_ws();
+        let flags: String = self
+            .remaining()
+            .chars()
+            .take_while(|c| matches!(c, 'i' | 's' | 'm' | 'x'))
+            .collect();
+        // Only treat it as a flag run when it ends at a token boundary,
+        // so a following keyword like `MINLENGTH` is never eaten.
+        let ends_cleanly = self
+            .remaining()
+            .as_bytes()
+            .get(flags.len())
+            .is_none_or(|b| b.is_ascii_whitespace() || *b == b';' || *b == b'}' || *b == b',');
+        if flags.is_empty() || !ends_cleanly {
+            return None;
+        }
+        self.advance(flags.len());
+        Some(flags)
+    }
+
+    /// Parse a decimal number for the numeric facets.
+    fn parse_f64(&mut self) -> Option<f64> {
+        self.skip_ws();
+        let text: String = self
+            .remaining()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+' || *c == 'e')
+            .collect();
+        if text.is_empty() {
+            return None;
+        }
+        let value = text.parse::<f64>().ok()?;
+        self.advance(text.len());
+        Some(value)
     }
 
     // ── IRI / prefixed name helpers ─────────────────────────────────────
@@ -854,5 +934,66 @@ ex:StatusShape {
 "#;
         let schema = parse_shexc(input).unwrap();
         assert_eq!(schema.shapes.len(), 1);
+    }
+
+    /// Numeric facets must reach the schema. They were declared in the AST but
+    /// no parser branch ever constructed one, so `MININCLUSIVE 0` was silently
+    /// dropped and the constraint accepted anything.
+    #[test]
+    fn numeric_facets_are_parsed() {
+        let schema = parse_shexc(
+            r#"PREFIX ex: <http://example.org/>
+               PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+               ex:Person { ex:age xsd:integer MININCLUSIVE 0 MAXINCLUSIVE 120 }"#,
+        )
+        .expect("schema must parse");
+        let decl = schema.find_shape("http://example.org/Person").unwrap();
+        let ShapeExpr::Shape { expression, .. } = &decl.shape_expr else {
+            panic!("expected a shape body");
+        };
+        let Some(TripleExpr::TripleConstraint { value_expr, .. }) = expression.as_ref() else {
+            panic!("expected one triple constraint");
+        };
+        let Some(ShapeExpr::NodeConstraint(nc)) = value_expr.as_deref() else {
+            panic!("expected a node constraint");
+        };
+        assert_eq!(
+            nc.numeric_facets.len(),
+            2,
+            "both numeric facets must reach the schema"
+        );
+    }
+
+    /// A PATTERN's trailing flag letters belong to the pattern, and a following
+    /// keyword must not be mistaken for them.
+    #[test]
+    fn pattern_flags_are_parsed_without_eating_the_next_keyword() {
+        let schema = parse_shexc(
+            r#"PREFIX ex: <http://example.org/>
+               PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+               ex:S { ex:code xsd:string PATTERN "^[a-z]+$" i MINLENGTH 2 }"#,
+        )
+        .expect("schema must parse");
+        let decl = schema.find_shape("http://example.org/S").unwrap();
+        let ShapeExpr::Shape { expression, .. } = &decl.shape_expr else {
+            panic!("expected a shape body");
+        };
+        let Some(TripleExpr::TripleConstraint { value_expr, .. }) = expression.as_ref() else {
+            panic!("expected one triple constraint");
+        };
+        let Some(ShapeExpr::NodeConstraint(nc)) = value_expr.as_deref() else {
+            panic!("expected a node constraint");
+        };
+        let has_flagged_pattern = nc.string_facets.iter().any(
+            |f| matches!(f, StringFacet::Pattern(p, Some(fl)) if p == "^[a-z]+$" && fl == "i"),
+        );
+        assert!(has_flagged_pattern, "flags: {:?}", nc.string_facets);
+        assert!(
+            nc.string_facets
+                .iter()
+                .any(|f| matches!(f, StringFacet::MinLength(2))),
+            "the facet after the flags must still parse: {:?}",
+            nc.string_facets
+        );
     }
 }

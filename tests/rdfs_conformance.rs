@@ -136,6 +136,48 @@ fn test_rdfs5_subproperty_transitivity() {
     );
 }
 
+/// Transitivity must close chains of ANY length. `apply_rdfs5` read both
+/// legs from the default graph only, but its derived triples land in the
+/// target graph — so the fixed-point loop never saw the previous round's
+/// output and closure stopped at three links: for p ⊑ q ⊑ r ⊑ s, `p ⊑ s` was
+/// never derived.
+#[test]
+fn test_rdfs5_closes_chains_longer_than_three() {
+    let s = store_with(
+        "ex:p rdfs:subPropertyOf ex:q . \
+         ex:q rdfs:subPropertyOf ex:r . \
+         ex:r rdfs:subPropertyOf ex:s . \
+         ex:s rdfs:subPropertyOf ex:t .",
+    );
+    materialize(&s);
+    for (sub, sup) in [("p", "s"), ("p", "t"), ("q", "t")] {
+        assert!(
+            ask_in_tg(
+                &s,
+                &format!(
+                    "<http://example.org/{sub}> rdfs:subPropertyOf <http://example.org/{sup}> ."
+                )
+            ),
+            "rdfs5: {sub} ⊑ {sup} must be derived across a 4-link chain"
+        );
+    }
+}
+
+/// `triples_added` is what THIS run wrote. Every materializer reported the
+/// target graph's size instead, so a rerun that derived nothing still claimed
+/// every existing triple as newly added.
+#[test]
+fn test_rdfs_rerun_adds_nothing() {
+    let s = store_with("ex:A rdfs:subClassOf ex:B . ex:x rdf:type ex:A .");
+    let first = RdfsMaterializer::with_target(&s, TG).materialize().unwrap();
+    assert!(first.triples_added > 0, "the first run derives something");
+    let second = RdfsMaterializer::with_target(&s, TG).materialize().unwrap();
+    assert_eq!(
+        second.triples_added, 0,
+        "a rerun over an unchanged store adds nothing (it reported the graph size)"
+    );
+}
+
 // ─── rdfs7: property inheritance ─────────────────────────────────────────────
 
 #[test]

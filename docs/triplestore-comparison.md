@@ -1,6 +1,6 @@
 # RDF Triplestore Performance Comparison
 
-> **Scope:** This document compares `open-triplestore` (built on Oxigraph 0.4 + RocksDB) against
+> **Scope:** This document compares `open-triplestore` (built on Oxigraph 0.5 + RocksDB) against
 > nine widely-used RDF stores across ingestion speed, query latency, scalability, standards
 > compliance, operational maturity, and long-term outlook.
 >
@@ -108,7 +108,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 
 | System | Language | License | Storage Engine | Version (Apr 2026) | Status |
 |--------|----------|---------|---------------|-------------------|--------|
-| **Open Triplestore** | Rust | AGPL-3.0 + Commons Clause | Oxigraph 0.4 + RocksDB | 0.1.x | Active |
+| **Open Triplestore** | Rust | AGPL-3.0 + Commons Clause | Oxigraph 0.5 + RocksDB | 0.6.x | Active |
 | **Oxigraph** (standalone) | Rust | MIT / Apache 2.0 | Custom + RocksDB | 0.4.11 | Active |
 | Apache Jena Fuseki | Java | Apache 2.0 | TDB2 (custom B-tree) | **5.3.0** | Active |
 | Blazegraph | Java | AGPLv3 | WORM journal + custom indices | 2.1.6 (2019) | **Abandoned** |
@@ -168,7 +168,7 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 > ¹ Neptune added full SPARQL Update support in v1.4 (2024).
 > ² `rdf-12` feature flag; open-triplestore and Oxigraph track the SPARQL-star draft.
 > ³ `rdf-12` / `rdf-star` feature flag in oxrdf; triple terms parseable but not fully evaluated.
-> ⁴ Full W3C SPARQL 1.1 conformance test suite in CI (`tests/w3c_sparql11_conformance.rs`).
+> ⁴ A spec-derived SPARQL 1.1 suite (125 tests, `tests/w3c_sparql11_conformance.rs`) runs in CI. The official W3C manifest corpus is *not* vendored or executed; see the generated conformance table in `docs/standards.md` for what is.
 
 ### 4.2 Reasoning, Validation & Inference
 

@@ -1,0 +1,12 @@
+@prefix ex:  <https://example.org/layered/def#> .
+@prefix exd: <https://example.org/layered/values/> .
+@prefix exs: <https://example.org/layered/shapes#> .
+@prefix sh:  <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+exs:BridgeShape a sh:NodeShape ;
+    sh:targetClass ex:Bridge ;
+    sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path ex:status ; sh:minCount 1 ; sh:in ( exd:in-service exd:out-of-service ) ;
+                  sh:message "Every bridge needs a status from the status value list." ] ;
+    sh:property [ sh:path ex:spanMetres ; sh:datatype xsd:decimal ; sh:minInclusive 0 ] .

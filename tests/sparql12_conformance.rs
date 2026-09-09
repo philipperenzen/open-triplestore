@@ -1,26 +1,24 @@
-//! SPARQL 1.2 / RDF-star conformance tests.
+//! SPARQL 1.2 / RDF 1.2 (triple-term) conformance tests.
 //!
-//! IMPORTANT SCOPE NOTE
-//! --------------------
-//! Open Triplestore now pins **oxigraph 0.5**, which moved from the RDF-star CG /
-//! SPARQL-star model to the **RDF 1.2 / SPARQL 1.2** model: *triple terms* written
-//! `<<( s p o )>>` that appear **object-position only**, reified via the
-//! `rdf:reifies` property, plus the `{| |}` annotation syntax.
+//! Open Triplestore pins **oxigraph 0.5**, which implements the **RDF 1.2 /
+//! SPARQL 1.2** model rather than the older RDF-star CG one:
 //!
-//! Most of the *semantic* corner cases below (quoting ≠ asserting, referential
-//! opacity, per-graph isolation, OPTIONAL / NOT-EXISTS over a triple pattern,
-//! nested quoting, the `TRIPLE()` constructor) still hold and pass against the new
-//! engine. The handful that exercised the older RDF-star-CG *accessor* surface —
-//! `isTRIPLE`/`SUBJECT`/`PREDICATE`/`OBJECT` over `<< s p o >>` quoted triples,
-//! including subject-position quoting that RDF 1.2 no longer allows — behave
-//! differently under RDF 1.2 and are `#[ignore]`d below pending a focused SPARQL-1.2
-//! triple-term conformance rewrite. That is exactly the update the previous
-//! "tracked gap" note anticipated once the engine gained RDF-1.2 triple terms.
+//! * a **triple term** is written `<<( s p o )>>` and may appear in **object
+//!   position only**;
+//! * it is attached to a statement through `rdf:reifies`, whose subject (the
+//!   *reifier*) is an ordinary IRI or blank node — the reifier is NOT itself a
+//!   triple term, so `isTRIPLE` is false for it;
+//! * `<< s p o >>` is now **reifier** shorthand: it mints a blank node with
+//!   `rdf:reifies <<( s p o )>>` and does not assert the base triple;
+//! * `s p o {| … |}` asserts the base triple AND attaches a reifier carrying
+//!   the annotations.
 //!
-//! Spec refs: https://www.w3.org/TR/sparql12-query/ , https://www.w3.org/TR/rdf12-concepts/
+//! Quoting is still not asserting, and referential opacity, per-graph
+//! isolation, OPTIONAL / NOT EXISTS over a triple pattern, nested quoting and
+//! the `TRIPLE()` constructor all hold.
 //!
-//! Spec refs: https://www.w3.org/TR/sparql12-query/ ,
-//!            https://w3c.github.io/rdf-star/ (CG report, the model oxigraph ships).
+//! Spec refs: <https://www.w3.org/TR/sparql12-query/>,
+//!            <https://www.w3.org/TR/rdf12-concepts/>
 
 #![cfg(feature = "rdf-12")]
 
@@ -181,26 +179,39 @@ fn star_integer_lexical_canonicalization_in_quoted_triple() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "RDF 1.2 (oxigraph 0.5) redefined triple-term accessor/quoting semantics vs RDF-star-CG; pending a focused SPARQL-1.2 conformance rewrite (see module header)"]
 fn star_accessor_functions() {
     let s = ts();
+    // RDF 1.2: a triple term appears in OBJECT position, reached through
+    // `rdf:reifies`. It is the triple term — not the reifier that points at it —
+    // that satisfies isTRIPLE and carries the accessors.
     upd(
         &s,
         r#"INSERT DATA {
-            << :alice :knows :bob >> :certainty "0.9"^^xsd:decimal .
+            _:r rdf:reifies <<( :alice :knows :bob )>> .
+            _:r :certainty "0.9"^^xsd:decimal .
             :plainStmt :certainty "0.5"^^xsd:decimal .
         }"#,
     );
     let r = sel(
         &s,
         "SELECT ?s ?p ?o WHERE { \
-           ?t :certainty ?c . FILTER(isTRIPLE(?t)) \
+           ?r rdf:reifies ?t . FILTER(isTRIPLE(?t)) \
            BIND(SUBJECT(?t) AS ?s) BIND(PREDICATE(?t) AS ?p) BIND(OBJECT(?t) AS ?o) }",
     );
-    assert_eq!(r.len(), 1, "only the quoted-triple subject passes isTRIPLE");
+    assert_eq!(r.len(), 1, "one triple term is reified");
     assert!(r[0][0].contains("alice"));
     assert!(r[0][1].contains("knows"));
     assert!(r[0][2].contains("bob"));
+
+    // The reifier itself is a blank node, not a triple term.
+    let not_triples = sel(
+        &s,
+        "SELECT ?r WHERE { ?r :certainty ?c . FILTER(isTRIPLE(?r)) }",
+    );
+    assert!(
+        not_triples.is_empty(),
+        "a reifier is not a triple term, got {not_triples:?}"
+    );
 }
 
 #[test]
@@ -238,20 +249,23 @@ fn star_nested_quoted_triple() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "RDF 1.2 (oxigraph 0.5) redefined triple-term accessor/quoting semantics vs RDF-star-CG; pending a focused SPARQL-1.2 conformance rewrite (see module header)"]
 fn star_group_by_quoted_triple() {
     let s = ts();
+    // Group by the TRIPLE TERM. Under RDF 1.2 each reifier is a distinct blank
+    // node, so grouping by the reifier would count three groups of one; the
+    // triple term is what two of these statements share.
     upd(
         &s,
         r#"INSERT DATA {
-            << :alice :knows :bob >>   :src :S1 .
-            << :alice :knows :bob >>   :src :S2 .
-            << :alice :knows :carol >> :src :S1 .
+            _:r1 rdf:reifies <<( :alice :knows :bob )>> .   _:r1 :src :S1 .
+            _:r2 rdf:reifies <<( :alice :knows :bob )>> .   _:r2 :src :S2 .
+            _:r3 rdf:reifies <<( :alice :knows :carol )>> . _:r3 :src :S1 .
         }"#,
     );
     let r = sel(
         &s,
-        "SELECT ?t (COUNT(DISTINCT ?src) AS ?cnt) WHERE { ?t :src ?src . FILTER(isTRIPLE(?t)) } GROUP BY ?t",
+        "SELECT ?t (COUNT(DISTINCT ?src) AS ?cnt) WHERE { \
+           ?r rdf:reifies ?t . ?r :src ?src . FILTER(isTRIPLE(?t)) } GROUP BY ?t",
     );
     assert_eq!(r.len(), 2, "two distinct triple-term groups");
     // Term equality on triple terms is defined; the bob-group must count 2.
@@ -324,15 +338,16 @@ fn star_not_exists_quoted_pattern() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "RDF 1.2 (oxigraph 0.5) redefined triple-term accessor/quoting semantics vs RDF-star-CG; pending a focused SPARQL-1.2 conformance rewrite (see module header)"]
 fn star_property_path_over_chain_to_quoted() {
     let s = ts();
+    // Triple terms sit in object position, so `:describes` can carry one
+    // directly — no reifier needed for this shape.
     upd(
         &s,
         r#"INSERT DATA {
             :chain :next :r1 . :r1 :next :r2 .
-            :r1 :describes << :alice :trusts :bob >> .
-            :r2 :describes << :bob :trusts :carol >> .
+            :r1 :describes <<( :alice :trusts :bob )>> .
+            :r2 :describes <<( :bob :trusts :carol )>> .
         }"#,
     );
     let r = sel(
@@ -349,12 +364,11 @@ fn star_property_path_over_chain_to_quoted() {
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "RDF 1.2 (oxigraph 0.5) redefined triple-term accessor/quoting semantics vs RDF-star-CG; pending a focused SPARQL-1.2 conformance rewrite (see module header)"]
 fn star_construct_quoted_template() {
     let s = ts();
     upd(
         &s,
-        r#"INSERT DATA { :r1 :describes << :alice :age "30"^^xsd:integer >> }"#,
+        r#"INSERT DATA { :r1 :describes <<( :alice :age "30"^^xsd:integer )>> }"#,
     );
     let triples = construct(
         &s,
@@ -402,21 +416,30 @@ fn star_named_graph_isolation() {
 
 // ═══════════════════════════════════════════════════════════
 // (Was a tracked gap.) The RDF 1.2 triple-term surface syntax `<<( )>>` with
-// rdf:reifies is now PARSED by oxigraph 0.5, so the old "is unsupported"
-// assertion no longer holds — ignored pending the focused rewrite that asserts
-// the correct RDF-1.2 stored/queried shape instead.
+// The RDF 1.2 triple-term syntax and `rdf:reifies` are supported. This test
+// asserted the opposite while the engine was on oxigraph 0.4.
 // ═══════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "RDF 1.2 (oxigraph 0.5) now supports the `<<( )>>` triple-term syntax this asserted was unsupported; pending a focused SPARQL-1.2 conformance rewrite (see module header)"]
-fn star_new_triple_term_syntax_unsupported() {
+fn star_new_triple_term_syntax_is_supported() {
     let s = ts();
-    let res = s.update(
+    s.update(
         "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
          INSERT DATA { _:r rdf:reifies <<( <http://ex/a> <http://ex/p> <http://ex/o> )>> }",
+    )
+    .expect("RDF 1.2 triple-term syntax must parse");
+
+    // Stored shape: the reifier points at the triple term, and the base triple
+    // is NOT asserted — quoting is not asserting.
+    let r = sel(
+        &s,
+        "SELECT ?t WHERE { ?r rdf:reifies ?t . FILTER(isTRIPLE(?t)) }",
     );
+    assert_eq!(r.len(), 1, "the triple term is stored and reachable");
+
+    let asserted = sel(&s, "SELECT ?o WHERE { <http://ex/a> <http://ex/p> ?o }");
     assert!(
-        res.is_err(),
-        "RDF 1.2 triple-term syntax <<( )>> is not yet supported by oxigraph 0.4 (tracked gap)"
+        asserted.is_empty(),
+        "reifying a triple must not assert it, got {asserted:?}"
     );
 }

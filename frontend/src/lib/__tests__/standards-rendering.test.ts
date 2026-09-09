@@ -259,10 +259,8 @@ describe('parseSparqlUpdatePreview (SPARQL 1.1 Update)', () => {
 // ── SPARQL 1.1 Query Results CSV ────────────────────────────────────────────────
 
 describe('resultsToCsv (SPARQL 1.1 Query Results CSV)', () => {
-  const results = (vars: string[], rows: Record<string, unknown>[]) => ({
-    head: { vars },
-    results: { bindings: rows },
-  });
+  const results = (vars: string[], rows: Record<string, unknown>[]) =>
+    ({ head: { vars }, results: { bindings: rows } }) as unknown as Parameters<typeof resultsToCsv>[0];
 
   it('writes a header row and quotes each value', () => {
     const csv = resultsToCsv(results(['s', 'o'], [{ s: uri('http://ex/a'), o: lit('Alice') }]));

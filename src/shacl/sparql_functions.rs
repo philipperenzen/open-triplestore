@@ -19,7 +19,7 @@ use oxigraph::model::{GraphName, NamedNodeRef, NamedOrBlankNode, Term as OxTerm,
 use oxrdf::{NamedNode, Term};
 use std::sync::{Arc, OnceLock};
 
-type FnHandler = Arc<dyn Fn(&[Term]) -> Option<Term> + Send + Sync>;
+pub type FnHandler = Arc<dyn Fn(&[Term]) -> Option<Term> + Send + Sync>;
 
 /// Process-wide store for evaluating function bodies. Building a `TripleStore`
 /// (store allocation + `ParallelMirror`/`QueryCache` env reads) per *invocation*

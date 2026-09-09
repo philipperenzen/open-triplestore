@@ -51,6 +51,39 @@ fn unique_suffix(used: &mut HashMap<String, usize>, base: &str) -> String {
 
 /// Snapshot the given live source graphs into version-scoped graphs.
 /// Returns the snapshot→source mappings (snapshot graph IRIs included).
+/// Copy every quad of `from` into `to`, streaming in batches, so a large graph
+/// never has to be held in memory twice. Snapshot, clone and restore used to
+/// collect ALL quads of ALL graphs into one `Vec` before inserting — an OOM
+/// risk exactly on the datasets versioning is meant for. Returns the count.
+fn copy_graph(store: &TripleStore, from: &str, to: &str) -> Result<usize, StoreError> {
+    const BATCH: usize = 50_000;
+    let target = GraphName::NamedNode(
+        NamedNode::new(to).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
+    );
+    let src =
+        NamedNodeRef::new(from).map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?;
+    let affected = vec![to.to_string()];
+    let mut batch: Vec<Quad> = Vec::with_capacity(BATCH);
+    let mut copied = 0usize;
+    for q in store
+        .store()
+        .quads_for_pattern(None, None, None, Some(GraphNameRef::NamedNode(src)))
+    {
+        let q = q?;
+        batch.push(Quad::new(q.subject, q.predicate, q.object, target.clone()));
+        if batch.len() >= BATCH {
+            copied += batch.len();
+            store.bulk_insert_quads(std::mem::take(&mut batch), &affected)?;
+            batch.reserve(BATCH);
+        }
+    }
+    if !batch.is_empty() {
+        copied += batch.len();
+        store.bulk_insert_quads(batch, &affected)?;
+    }
+    Ok(copied)
+}
+
 pub fn snapshot_graphs(
     store: &TripleStore,
     base_url: &str,
@@ -76,22 +109,10 @@ pub fn snapshot_graphs(
     let snap_refs: Vec<&str> = snap_iris.iter().map(|s| s.as_str()).collect();
     store.bulk_delete_graphs(&snap_refs)?;
 
-    // Copy quads from each source graph into its snapshot graph.
-    let mut all_quads: Vec<Quad> = Vec::new();
+    // Copy each source graph into its snapshot graph, streaming.
     for m in &mappings {
-        let target = GraphName::NamedNode(
-            NamedNode::new(&m.snapshot_graph)
-                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
-        );
-        let src_g = GraphNameRef::NamedNode(
-            NamedNodeRef::new(&m.source_graph)
-                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
-        );
-        for q in store.quads_for_graph(src_g)? {
-            all_quads.push(Quad::new(q.subject, q.predicate, q.object, target.clone()));
-        }
+        copy_graph(store, &m.source_graph, &m.snapshot_graph)?;
     }
-    store.bulk_insert_quads(all_quads, &snap_iris)?;
     Ok(mappings)
 }
 
@@ -122,50 +143,40 @@ pub fn clone_version(
     let new_refs: Vec<&str> = new_iris.iter().map(|s| s.as_str()).collect();
     store.bulk_delete_graphs(&new_refs)?;
 
-    let mut all_quads: Vec<Quad> = Vec::new();
     for (old, new) in source_map.iter().zip(new_map.iter()) {
-        let target = GraphName::NamedNode(
-            NamedNode::new(&new.snapshot_graph)
-                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
-        );
-        let src_g = GraphNameRef::NamedNode(
-            NamedNodeRef::new(&old.snapshot_graph)
-                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
-        );
-        for q in store.quads_for_graph(src_g)? {
-            all_quads.push(Quad::new(q.subject, q.predicate, q.object, target.clone()));
-        }
+        copy_graph(store, &old.snapshot_graph, &new.snapshot_graph)?;
     }
-    store.bulk_insert_quads(all_quads, &new_iris)?;
     Ok(new_map)
 }
 
 /// Restore a version's snapshots back onto the dataset's live source graphs.
-/// Each source graph is cleared then re-populated from its snapshot.
+///
+/// Each snapshot is first copied (streaming) into a private staging graph and
+/// then swapped into place with one `MOVE` — a single transaction — so readers
+/// never see the live graph empty or half-written. It used to be cleared
+/// BEFORE the snapshot was copied back, which left a window in which the
+/// dataset's graph was simply gone.
 pub fn restore(
     store: &TripleStore,
     source_map: &[GraphMapping],
 ) -> Result<Vec<String>, StoreError> {
-    let src_iris: Vec<String> = source_map.iter().map(|m| m.source_graph.clone()).collect();
-    let src_refs: Vec<&str> = src_iris.iter().map(|s| s.as_str()).collect();
-    store.bulk_delete_graphs(&src_refs)?;
-
-    let mut all_quads: Vec<Quad> = Vec::new();
+    let mut restored = Vec::with_capacity(source_map.len());
     for m in source_map {
-        let target = GraphName::NamedNode(
-            NamedNode::new(&m.source_graph)
-                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
-        );
-        let snap_g = GraphNameRef::NamedNode(
-            NamedNodeRef::new(&m.snapshot_graph)
-                .map_err(|e| StoreError::Parse(format!("Invalid IRI: {e}")))?,
-        );
-        for q in store.quads_for_graph(snap_g)? {
-            all_quads.push(Quad::new(q.subject, q.predicate, q.object, target.clone()));
+        let staging = format!("urn:ots:restore:{}", uuid::Uuid::new_v4());
+        let copied = copy_graph(store, &m.snapshot_graph, &staging)?;
+        if copied == 0 {
+            // `MOVE SILENT` of a graph that does not exist is a no-op, and would
+            // leave the live graph untouched: an empty snapshot means "empty".
+            store.bulk_delete_graphs(&[m.source_graph.as_str()])?;
+        } else {
+            store.update(&format!(
+                "MOVE SILENT GRAPH <{staging}> TO GRAPH <{}>",
+                m.source_graph
+            ))?;
         }
+        restored.push(m.source_graph.clone());
     }
-    store.bulk_insert_quads(all_quads, &src_iris)?;
-    Ok(src_iris)
+    Ok(restored)
 }
 
 #[cfg(test)]

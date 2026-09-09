@@ -567,3 +567,387 @@ async fn plan_is_tracked_across_rounds_and_stripped_from_the_answer() {
         );
     }
 }
+
+// ─── Saved-query repair: never persist a revision that does not parse ─────────
+
+/// `…/repair` with `save: true` handed the model's output straight to
+/// `add_revision`, which performs no SPARQL check, and then promoted it to the
+/// query's live head — so a bad repair replaced a broken query with a broken
+/// query that was now also the saved one. It also ran outside the LLM guard,
+/// so it spent completions with no rate limit, screening or log row.
+#[tokio::test]
+async fn saved_query_repair_refuses_to_persist_unparseable_output() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let (state, token) = common::admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "d-repair",
+            "Repair",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+
+    // Seed a saved query.
+    let original = "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1";
+    let create = Request::builder()
+        .method(Method::POST)
+        .uri("/api/datasets/d-repair/api-services")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(
+            json!({ "name": "Q1", "slug": "q1", "sparql": original }).to_string(),
+        ))
+        .unwrap();
+    let resp = common::test_app(state.clone())
+        .oneshot(create)
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create saved query: {}",
+        resp.status()
+    );
+
+    let repair = |body: Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/datasets/d-repair/api-services/q1/repair")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let head = |state: &AppState| {
+        open_triplestore::saved_queries::store::SavedQueryStore::new(state.auth_db.pool())
+            .get_by_slug(
+                open_triplestore::saved_queries::models::QueryScope::Dataset,
+                "d-repair",
+                "q1",
+            )
+            .unwrap()
+            .unwrap()
+            .sparql
+            .unwrap_or_default()
+    };
+
+    // The model returns garbage. With save:true that must be refused, and the
+    // query's head must be untouched.
+    script(gw, &["this is not a SPARQL query at all {{{"]);
+    let resp = common::test_app(state.clone())
+        .oneshot(repair(json!({ "save": true, "error": "boom" })))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unparseable repair must not be saved"
+    );
+    assert_eq!(
+        head(&state),
+        original,
+        "the live revision must be untouched"
+    );
+
+    // Without save, the suggestion is returned but flagged.
+    script(gw, &["still not sparql"]);
+    let resp = common::test_app(state.clone())
+        .oneshot(repair(json!({ "save": false, "error": "boom" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp.into_body()).await;
+    assert_eq!(body["valid"], false, "{body}");
+    assert!(body["parseError"].is_string(), "{body}");
+
+    // A parseable repair with save:true becomes the new head.
+    let fixed = "SELECT ?s WHERE { ?s a ?t } LIMIT 5";
+    script(gw, &[fixed]);
+    let resp = common::test_app(state.clone())
+        .oneshot(repair(json!({ "save": true, "error": "boom" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = common::body_json(resp.into_body()).await;
+    assert_eq!(body["valid"], true, "{body}");
+    assert!(body["savedRevision"].is_number(), "{body}");
+    assert_eq!(
+        head(&state),
+        fixed,
+        "a valid repair is promoted to the head"
+    );
+}
+
+/// Spark's stated security property — a model-authored query must not read
+/// outside the caller's graphs — had no test. The model is scripted to query a
+/// graph the caller has no grant on. Whatever rows come back are exactly what
+/// reaches the model in the next request (and the answer's retrieval trail), so
+/// nothing sent to the gateway may carry the secret. The admin control proves
+/// the same scripted query DOES surface the value when the graph is in scope —
+/// i.e. the test can tell a leak from a query that merely failed.
+#[tokio::test]
+async fn model_authored_query_cannot_read_outside_the_callers_scope() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    const SECRET: &str = "urn:secret:graph";
+    const VALUE: &str = "TOP-SECRET-42";
+    let query = format!("SPARQL:\nSELECT ?o WHERE {{ GRAPH <{SECRET}> {{ ?s ?p ?o }} }}");
+
+    let (state, admin) = common::admin_state();
+    state
+        .auth_db
+        .create_dataset(
+            "dsecret",
+            "Secret",
+            None,
+            OwnerType::User,
+            "adm",
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+    state.auth_db.add_dataset_graph("dsecret", SECRET).unwrap();
+    state
+        .store
+        .update(&format!(
+            "INSERT DATA {{ GRAPH <{SECRET}> {{ <urn:s:x> <urn:s:p> \"{VALUE}\" }} }}"
+        ))
+        .unwrap();
+    state
+        .auth_db
+        .create_user(
+            "alice",
+            "alice",
+            "alice@t.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
+        .unwrap();
+    let alice = common::mint_token("alice", "alice", "user");
+
+    // Control: in scope for the admin, the value reaches the model.
+    script(gw, &[&query, "Noted."]);
+    let resp = chat_turn(state.clone(), &admin, "What is in the secret graph?").await;
+    let sent = serde_json::to_string(&*gw.prompts.lock().unwrap()).unwrap();
+    assert!(
+        sent.contains(VALUE) || resp.to_string().contains(VALUE),
+        "control: an in-scope query must surface the value to the model: {resp}"
+    );
+
+    // A caller without a grant: the same query surfaces nothing, anywhere.
+    script(gw, &[&query, "Noted."]);
+    let resp = chat_turn(state, &alice, "What is in the secret graph?").await;
+    let sent = serde_json::to_string(&*gw.prompts.lock().unwrap()).unwrap();
+    assert!(
+        !sent.contains(VALUE),
+        "the secret reached the model in a gateway request: {sent}"
+    );
+    assert!(
+        !resp.to_string().contains(VALUE),
+        "the secret reached the answer or its retrieval trail: {resp}"
+    );
+}
+
+/// A window too small for ALL the vocabulary must not drop ALL of it: blocks
+/// are in priority order and are trimmed from the end until the prompt fits.
+/// This used to be all-or-nothing — one block over budget dropped every block,
+/// which is how a demo-seeded instance at an 8k window handed the model graph
+/// IRIs with no vocabulary and got invented predicates and fabricated answers
+/// back. The test measures the real prompt, then advertises a window that fits
+/// all blocks but the last.
+#[tokio::test]
+async fn small_context_window_trims_vocabulary_lowest_priority_first() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+    const HEADER: &str = "## Graph vocabulary";
+    let section = |system: &str| -> String {
+        let start = system.find(HEADER).expect("a vocabulary section");
+        let rest = &system[start..];
+        let end = rest[1..].find("\n# ").map(|i| i + 1).unwrap_or(rest.len());
+        rest[..end].to_string()
+    };
+    // The server's estimator (chars / 3 + 1) and reserve (CHAT_MAX_TOKENS 3072
+    // + CHAT_PROMPT_MARGIN 2048); if those move, this test says so.
+    let tokens = |s: &str| s.chars().count() / 3 + 1;
+    const RESERVE: usize = 3072 + 2048;
+    let question = "Wat weet je over de Bruggen dataset?";
+
+    // Measure the full prompt at a comfortable window (below 32k, so the
+    // sampling caps are the same as for the small one).
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    *gw.models_payload.lock().unwrap() =
+        Some(json!({"data": [{"id": "measure-window", "max_model_len": 30000}]}));
+    chat_turn_as_model(state.clone(), &token, "measure-window", question).await;
+    let full = {
+        let prompts = gw.prompts.lock().unwrap();
+        prompts[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let full_section = section(&full);
+    let block_count = full_section.matches("\n- <").count();
+    assert_eq!(
+        block_count, 2,
+        "both seeded graphs are described: {full_section}"
+    );
+    let last_start = full_section.rfind("\n- <").unwrap();
+    let last_block = &full_section[last_start..];
+    let iri_of = |block: &str| {
+        let s = block.find("- <").unwrap() + 3;
+        block[s..s + block[s..].find('>').unwrap()].to_string()
+    };
+    let last_iri = iri_of(last_block);
+    let first_iri = iri_of(&full_section);
+    assert_ne!(first_iri, last_iri);
+
+    // A window that fits everything except (half of) the last block.
+    let window = tokens(&full) - tokens(last_block) / 2 + RESERVE;
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    *gw.models_payload.lock().unwrap() =
+        Some(json!({"data": [{"id": "trim-window", "max_model_len": window}]}));
+    let resp = chat_turn_as_model(state, &token, "trim-window", question).await;
+    assert_eq!(resp["answer"], "Dat is Brug 1.");
+    let prompts = gw.prompts.lock().unwrap();
+    let system = prompts[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        tokens(system) <= window - RESERVE,
+        "the trimmed prompt fits the budget"
+    );
+    let trimmed = section(system);
+    assert_eq!(
+        trimmed.matches("\n- <").count(),
+        1,
+        "exactly the last block is dropped, not the whole section: {trimmed}"
+    );
+    assert!(
+        trimmed.contains(&format!("- <{first_iri}>")),
+        "the higher-priority graph keeps its vocabulary: {trimmed}"
+    );
+    assert!(
+        !trimmed.contains(&format!("- <{last_iri}>")),
+        "the lowest-priority graph is the one trimmed: {trimmed}"
+    );
+}
+
+/// The system prompt's example queries must be SPARQL, not Rust format-string
+/// escapes. `CHAT_SYSTEM_PROMPT` is a plain constant interpolated as a VALUE,
+/// yet its examples were written `WHERE {{ GRAPH <g> {{ … }} }}` — so every
+/// model was shown doubled braces as the canonical shape. Small models copy
+/// them verbatim, every query fails to parse, the repair rounds fail the same
+/// way, and the turn ends with `ran_query=false` and the broken query as the
+/// answer (observed live with qwen2.5:1.5b once the vocabulary fit the window).
+#[tokio::test]
+async fn system_prompt_examples_are_sparql_not_format_escapes() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    script(gw, &["Dat is Brug 1.", "Dat is Brug 1."]);
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+    chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    let prompts = gw.prompts.lock().unwrap();
+    let system = prompts[0]["messages"][0]["content"].as_str().unwrap();
+    for esc in ["{{", "}}"] {
+        if let Some(i) = system.find(esc) {
+            let lo = i.saturating_sub(80);
+            let hi = (i + 80).min(system.len());
+            panic!(
+                "the prompt teaches doubled braces ({esc}) — a format escape, not SPARQL: …{}…",
+                &system[lo..hi]
+            );
+        }
+    }
+}
+
+/// After a FAILED round nothing has been retrieved, so a corrected query the
+/// model writes as a ```sparql fence must be run, not shown as a card. The
+/// repair prompt itself invites "a corrected query as a ```sparql block", and
+/// both a 1.5B and a 7.6B model took that path live: round 1 failed on a
+/// syntax error, round 2 was prose plus a *correct* fenced query, and the turn
+/// ended with `ran_query=false` and an answer from memory. The fence gate was
+/// `runs.is_empty()`; its own rationale — "only safe while nothing has been
+/// retrieved yet" — is `!runs.iter().any(|r| r.ok)`.
+#[tokio::test]
+async fn corrected_fence_after_a_failed_round_is_executed() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let broken = "SPARQL:\nSELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> ";
+    let corrected =
+        "SELECT ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }";
+    let fence_reply = format!(
+        "That query was malformed. Here is the corrected one:\n```sparql\n{corrected}\n```\n"
+    );
+    script(
+        gw,
+        &[
+            broken,
+            &fence_reply,
+            "Er zijn 3 bruggen: Brug 1, Brug 2 en Brug 3.",
+        ],
+    );
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    assert_eq!(
+        resp["ran_query"], true,
+        "the corrected fence must be executed after the failed round: {resp}"
+    );
+    assert_eq!(resp["sparql"].as_str(), Some(corrected));
+    let prompts = gw.prompts.lock().unwrap();
+    assert!(
+        prompts.len() >= 3,
+        "three completions: broken query, corrected fence, grounded answer ({})",
+        prompts.len()
+    );
+    let third = prompts[2].to_string();
+    assert!(
+        third.contains("http://ex.org/id/b1") && third.contains("http://ex.org/id/b3"),
+        "the rows of the corrected query reach the model: {third}"
+    );
+}
+
+/// A query identical to one that already failed this turn is not run again:
+/// it fails identically, and re-running it only burns a retrieval round. Live,
+/// a 7.6B model resubmitted the same broken query three times despite the
+/// follow-up saying not to. The repeat is recorded in the trail with its own
+/// error, the store is not consulted, and the model is told in so many words.
+/// The failing query is the exact shape both models produced — an aggregate
+/// projected next to an ungrouped variable — so this also pins the actionable
+/// hint attached to the parser's "variable that is unbound" message.
+#[tokio::test]
+async fn identical_failed_query_is_not_rerun() {
+    let _serial = test_lock().await;
+    let gw = gateway();
+    let broken = "SPARQL:\nSELECT (COUNT(?s) AS ?c) ?s WHERE { GRAPH <http://ex.org/g/instances> { ?s a <http://ex.org/def#Brug> } }";
+    script(gw, &[broken, broken, "Ik kon de vraag niet beantwoorden."]);
+    let (state, token) = common::admin_state();
+    seed_platform(&state);
+
+    let resp = chat_turn(state, &token, "Hoeveel bruggen zijn er?").await;
+    let queries = resp["queries"].as_array().expect("retrieval trail");
+    assert_eq!(queries.len(), 2, "both attempts are in the trail: {resp}");
+    let first = queries[0]["error"].as_str().unwrap_or("");
+    assert!(
+        first.contains("GROUP BY"),
+        "the unbound-variable parse error carries an actionable hint: {first}"
+    );
+    let second = queries[1]["error"].as_str().unwrap_or("");
+    assert!(
+        second.contains("SAME query") && second.contains(first.split(" — ").next().unwrap()),
+        "the repeat is refused with the original error quoted: {second}"
+    );
+    let prompts = gw.prompts.lock().unwrap();
+    let third = prompts[2].to_string();
+    assert!(
+        third.contains("was not run") && third.contains("SAME query"),
+        "the model is told the repeat was not run: {third}"
+    );
+}

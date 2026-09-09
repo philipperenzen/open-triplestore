@@ -17,6 +17,7 @@ use std::sync::Arc;
 use geos::{Geom, Geometry as GeosGeometry};
 use oxrdf::{NamedNode, Term};
 
+use super::crs::Crs;
 use super::datatypes::*;
 use super::vocabulary as vocab;
 
@@ -79,14 +80,79 @@ fn make_fn(iri: &str, f: fn(&[Term]) -> Option<Term>) -> (NamedNode, FnHandler) 
 
 // ─── Argument parsing helpers ───
 
-/// Parse two geometry arguments from the term slice.
+/// Parse two geometry arguments, harmonising their coordinate reference systems.
+///
+/// GeoSPARQL requires the operands of a topological or metric function to be in
+/// a common CRS. Both `<crs>` prefixes used to be stripped and discarded, so
+/// `geof:sfIntersects("<…/28992> POINT(187420 428470)", "POINT(5.86 51.85)")`
+/// compared metres against degrees and returned `false` with no error — a
+/// silently wrong answer, which is the worst kind for a spatial filter.
+///
+/// The second operand is transformed into the first's CRS. When the two name
+/// different CRS and either is one this build cannot reproject, the result is
+/// unbound rather than a comparison of incompatible numbers.
 fn parse_two_geoms(args: &[Term]) -> Option<(GeosGeometry, GeosGeometry)> {
     if args.len() < 2 {
         return None;
     }
-    let g1 = parse_wkt_literal(&args[0])?;
-    let g2 = parse_wkt_literal(&args[1])?;
-    Some((g1, g2))
+
+    let (crs1, crs2) = (term_crs_uri(&args[0]), term_crs_uri(&args[1]));
+    // Identical CRS strings (including both absent — GeoSPARQL's CRS84 default)
+    // need no transform, and this also covers a CRS this build does not know:
+    // comparing two geometries in the SAME unknown CRS is still meaningful.
+    if crs1.as_deref() == crs2.as_deref() {
+        return Some((parse_wkt_literal(&args[0])?, parse_wkt_literal(&args[1])?));
+    }
+
+    let to = crs1.as_deref().map_or(Some(Crs::Wgs84), Crs::from_uri)?;
+    let from = crs2.as_deref().map_or(Some(Crs::Wgs84), Crs::from_uri)?;
+    if from == to {
+        // Different URI spellings of the same CRS (`/4326` vs `:4326`).
+        return Some((parse_wkt_literal(&args[0])?, parse_wkt_literal(&args[1])?));
+    }
+
+    let reprojected = reproject_literal(&args[1], from, to)?;
+    Some((
+        parse_wkt_literal(&args[0])?,
+        parse_wkt_literal(&reprojected)?,
+    ))
+}
+
+/// The CRS URI carried by a geometry literal, if it has a `<crs>` prefix.
+///
+/// Only `geo:wktLiteral` (and the plain strings accepted for convenience) use
+/// that prefix form. A `geo:gmlLiteral` value also starts with `<` — its opening
+/// tag — so it must be excluded, or the tag is mistaken for a CRS URI. GML
+/// carries its CRS in `srsName`, which this build does not yet read: treating it
+/// as unspecified keeps the previous behaviour for GML operands.
+fn term_crs_uri(term: &Term) -> Option<String> {
+    match term {
+        Term::Literal(l) if l.datatype().as_str() != vocab::GML_LITERAL => {
+            extract_crs(l.value()).map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+/// Reproject a geometry literal from `from` to `to`, returning a new literal
+/// carrying the target CRS prefix.
+fn reproject_literal(term: &Term, from: Crs, to: Crs) -> Option<Term> {
+    use geo::MapCoords;
+    use wkt::{ToWkt, TryFromWkt};
+
+    let value = match term {
+        Term::Literal(l) => l.value(),
+        _ => return None,
+    };
+    let geom: geo::Geometry<f64> = geo::Geometry::try_from_wkt_str(extract_wkt(value)).ok()?;
+    let out = geom.map_coords(|c| {
+        let (x, y) = super::crs::transform_xy(from, to, c.x, c.y).unwrap_or((c.x, c.y));
+        geo::Coord { x, y }
+    });
+    Some(Term::Literal(oxrdf::Literal::new_typed_literal(
+        format!("<{}> {}", to.to_uri(), out.wkt_string()),
+        NamedNode::new_unchecked(vocab::WKT_LITERAL),
+    )))
 }
 
 /// Parse a single geometry argument.
@@ -305,12 +371,14 @@ fn rcc8_eq(args: &[Term]) -> Option<Term> {
 // ═══════════════════════════════════════════════════════════════
 
 fn fn_boundary(args: &[Term]) -> Option<Term> {
+    let crs = args.first().and_then(term_crs_uri);
     let g = parse_one_geom(args)?;
     let result = g.boundary().ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_buffer(args: &[Term]) -> Option<Term> {
+    let crs = args.first().and_then(term_crs_uri);
     let g = parse_one_geom(args)?;
 
     // Second arg: radius (xsd:double)
@@ -324,43 +392,57 @@ fn fn_buffer(args: &[Term]) -> Option<Term> {
     let _unit_scale = args.get(2).and_then(parse_uom).unwrap_or(1.0);
 
     let result = g.buffer(radius, 16).ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_convex_hull(args: &[Term]) -> Option<Term> {
+    let crs = args.first().and_then(term_crs_uri);
     let g = parse_one_geom(args)?;
     let result = g.convex_hull().ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_difference(args: &[Term]) -> Option<Term> {
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
+    // CRS the result is expressed in.
+    let crs = args.first().and_then(term_crs_uri);
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.difference(&g2).ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_envelope(args: &[Term]) -> Option<Term> {
+    let crs = args.first().and_then(term_crs_uri);
     let g = parse_one_geom(args)?;
     let result = g.envelope().ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_intersection(args: &[Term]) -> Option<Term> {
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
+    // CRS the result is expressed in.
+    let crs = args.first().and_then(term_crs_uri);
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.intersection(&g2).ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_sym_difference(args: &[Term]) -> Option<Term> {
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
+    // CRS the result is expressed in.
+    let crs = args.first().and_then(term_crs_uri);
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.sym_difference(&g2).ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 fn fn_union(args: &[Term]) -> Option<Term> {
+    // parse_two_geoms harmonises into the FIRST operand's CRS, so that is the
+    // CRS the result is expressed in.
+    let crs = args.first().and_then(term_crs_uri);
     let (g1, g2) = parse_two_geoms(args)?;
     let result = g1.union(&g2).ok()?;
-    geometry_to_wkt_literal(&result)
+    geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -404,7 +486,6 @@ fn uom_metres_per_unit(term: &Term) -> Option<f64> {
 /// (see [`super::crs`]). Returns a `geo:wktLiteral` prefixed with the target CRS, or
 /// `None` if either CRS is unsupported or the geometry does not parse.
 fn fn_transform(args: &[Term]) -> Option<Term> {
-    use super::crs::Crs;
     use geo::MapCoords;
     use wkt::{ToWkt, TryFromWkt};
 

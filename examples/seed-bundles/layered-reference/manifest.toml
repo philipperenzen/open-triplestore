@@ -1,0 +1,82 @@
+# Layered reference bundle — the one-graph-per-role convention end to end, in a
+# deliberately domain-neutral toy domain (an asset registry). It is the
+# mechanism behind the LD-BIM Stage-1 benchmark: a reference *model* layer
+# registered in the data-model registry, an instance dataset that declares
+# conformance to it, SHACL shapes bound to the dataset, and the remaining
+# layers (domain values, linkset, provenance, catalog) as their own graphs.
+# Replace the payloads with NEN 2660-2 / IMBOR (or FHIR / SNOMED) and nothing
+# in the platform changes — see examples/seed-bundles/nen2660-imbor.
+#
+# Loaded by tests/layered_bundle_e2e.rs on every CI run.
+
+id = "layered-reference"
+opt_out_env = "SEED_LAYERED_REFERENCE"
+
+[organisation]
+slug = "layered-reference"
+name = "Layered Reference"
+description = "Owns the layered-convention reference dataset and its model."
+
+# ── The model layer: a registry entry with one published version ────────────
+[[data_models]]
+id = "asset-model"
+title = "Asset model"
+namespace = "https://example.org/layered/def#"
+kind = "model"
+version = "1.0.0"
+description = "Classes (Asset, Bridge, Road) and their properties; the SKOS vocabulary and the value lists ride along as sub-graphs."
+
+[[data_models.graphs]]
+iri = "https://example.org/layered/model"
+role = "model"
+file = "model.ttl"
+
+[[data_models.graphs]]
+iri = "https://example.org/layered/vocabulary"
+role = "vocabulary"
+file = "vocabulary.ttl"
+
+[[data_models.graphs]]
+iri = "https://example.org/layered/domain-values"
+role = "domain-values"
+file = "domain-values.ttl"
+
+# ── The instance dataset, conforming to the model, validated by the shapes ──
+[[datasets]]
+slug = "assets"
+name = "Assets"
+description = "Three bridges; one of them is missing its status, so validation has something to say."
+visibility = "public"
+conforms_to = { model = "asset-model", version = "1.0.0" }
+shape_graphs = ["https://example.org/layered/shapes"]
+
+[[datasets.graphs]]
+iri = "https://example.org/layered/instances"
+role = "instances"
+file = "instances.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/layered/shapes"
+role = "shapes"
+file = "shapes.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/layered/linkset"
+role = "linkset"
+file = "linkset.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/layered/provenance"
+role = "provenance"
+file = "provenance.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/layered/catalog"
+role = "catalog"
+file = "catalog.ttl"
+
+[[datasets.saved_queries]]
+name = "Bridges by span"
+slug = "bridges-by-span"
+description = "Every bridge with its span, longest first."
+sparql = "PREFIX ex: <https://example.org/layered/def#>\nSELECT ?bridge ?name ?span WHERE { GRAPH <https://example.org/layered/instances> { ?bridge a ex:Bridge ; ex:name ?name ; ex:spanMetres ?span } } ORDER BY DESC(?span)"

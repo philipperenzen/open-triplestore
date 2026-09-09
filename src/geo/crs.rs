@@ -9,10 +9,18 @@
 //! ample for visualisation and the conformance fixtures); WGS84↔Web-Mercator is
 //! the exact spherical Mercator formula.
 //!
-//! **Axis order.** Geographic coordinates are handled in WKT/GeoJSON order
-//! `(x = longitude, y = latitude)` throughout, so a transformed geometry can feed
-//! a `[lng, lat]` map layer directly. Projected CRS use `(x = easting,
-//! y = northing)`.
+//! **Axis order.** Internally every geographic coordinate is `(x = longitude,
+//! y = latitude)` — the CRS84 / WKT / GeoJSON convention — so a transformed
+//! geometry can feed a `[lng, lat]` map layer directly. Projected CRS use
+//! `(x = easting, y = northing)`.
+//!
+//! **EPSG:4326 is not CRS84.** The OGC registry defines EPSG:4326 with the
+//! authority's axis order, `(latitude, longitude)`, and GeoSPARQL says a WKT
+//! literal's coordinates are in the order its CRS prescribes. Only the unprefixed
+//! default and `OGC/1.3/CRS84` are lon/lat. This module models the two as
+//! distinct CRS so a literal carrying the `EPSG/0/4326` prefix is read and
+//! written as lat/lon; earlier versions treated both as lon/lat, which
+//! transposed every authority-ordered geometry.
 
 use std::f64::consts::PI;
 
@@ -21,8 +29,12 @@ use std::f64::consts::PI;
 pub enum Crs {
     /// Amersfoort / RD New (EPSG:28992) — easting/northing in metres.
     RdNew,
-    /// WGS84 geographic (EPSG:4326 / OGC:CRS84) — lon/lat in degrees.
+    /// WGS84 geographic in `(lon, lat)` axis order — OGC:CRS84, and GeoSPARQL's
+    /// default for a literal with no CRS prefix.
     Wgs84,
+    /// WGS84 geographic in the authority's `(lat, lon)` axis order — EPSG:4326.
+    /// Same datum as [`Crs::Wgs84`]; only the ordinate order differs.
+    Epsg4326,
     /// Web Mercator (EPSG:3857) — easting/northing in metres.
     WebMercator,
 }
@@ -32,12 +44,10 @@ impl Crs {
     /// common EPSG and OGC forms; returns `None` for an unsupported CRS.
     pub fn from_uri(uri: &str) -> Option<Crs> {
         let u = uri.trim_end_matches('>').trim_start_matches('<');
-        if u.ends_with("CRS84h")
-            || u.ends_with("CRS84")
-            || u.ends_with("/4326")
-            || u.ends_with(":4326")
-        {
+        if u.ends_with("CRS84h") || u.ends_with("CRS84") {
             Some(Crs::Wgs84)
+        } else if u.ends_with("/4326") || u.ends_with(":4326") {
+            Some(Crs::Epsg4326)
         } else if u.ends_with("/28992") || u.ends_with(":28992")
             // EPSG:7415 = RD New (28992) + NAP height: horizontally identical to
             // RD New; the NAP Z ordinate passes through reprojection unchanged.
@@ -51,11 +61,15 @@ impl Crs {
         }
     }
 
-    /// Canonical EPSG CRS URI for this CRS (the form used in GeoSPARQL WKT prefixes).
+    /// Canonical CRS URI for this CRS (the form used in GeoSPARQL WKT prefixes).
+    ///
+    /// [`Crs::Wgs84`] maps to CRS84, not EPSG:4326: labelling lon/lat output
+    /// with the EPSG URI would claim the authority's lat/lon order for it.
     pub fn to_uri(self) -> &'static str {
         match self {
             Crs::RdNew => "http://www.opengis.net/def/crs/EPSG/0/28992",
-            Crs::Wgs84 => "http://www.opengis.net/def/crs/EPSG/0/4326",
+            Crs::Wgs84 => "http://www.opengis.net/def/crs/OGC/1.3/CRS84",
+            Crs::Epsg4326 => "http://www.opengis.net/def/crs/EPSG/0/4326",
             Crs::WebMercator => "http://www.opengis.net/def/crs/EPSG/0/3857",
         }
     }
@@ -68,14 +82,17 @@ pub fn transform_xy(from: Crs, to: Crs, x: f64, y: f64) -> Option<(f64, f64)> {
     if from == to {
         return finite(x, y);
     }
-    // Route everything through WGS84 lon/lat as the pivot.
+    // Route everything through WGS84 lon/lat as the pivot. EPSG:4326 is the
+    // same datum in the opposite axis order, so its "transform" is a swap.
     let (lon, lat) = match from {
         Crs::Wgs84 => (x, y),
+        Crs::Epsg4326 => (y, x),
         Crs::RdNew => rd_to_wgs84(x, y),
         Crs::WebMercator => webmercator_to_wgs84(x, y),
     };
     let (ox, oy) = match to {
         Crs::Wgs84 => (lon, lat),
+        Crs::Epsg4326 => (lat, lon),
         Crs::RdNew => wgs84_to_rd(lon, lat),
         Crs::WebMercator => wgs84_to_webmercator(lon, lat),
     };
@@ -227,6 +244,32 @@ mod tests {
             Some(Crs::WebMercator)
         );
         assert_eq!(Crs::from_uri("urn:nonsense"), None);
+        // EPSG:4326 is the authority's lat/lon order — distinct from CRS84.
+        assert_eq!(
+            Crs::from_uri("http://www.opengis.net/def/crs/EPSG/0/4326"),
+            Some(Crs::Epsg4326)
+        );
+        assert_eq!(
+            Crs::from_uri("urn:ogc:def:crs:EPSG::4326"),
+            Some(Crs::Epsg4326)
+        );
+    }
+
+    /// EPSG:4326 ↔ CRS84 is a pure axis swap on the same datum.
+    #[test]
+    fn epsg4326_is_crs84_with_axes_swapped() {
+        assert_eq!(
+            transform_xy(Crs::Epsg4326, Crs::Wgs84, 52.36, 4.885),
+            Some((4.885, 52.36))
+        );
+        assert_eq!(
+            transform_xy(Crs::Wgs84, Crs::Epsg4326, 4.885, 52.36),
+            Some((52.36, 4.885))
+        );
+        // Going through a projected CRS lands at the same place either way.
+        let (ex, ey) = transform_xy(Crs::Epsg4326, Crs::RdNew, 52.36, 4.885).unwrap();
+        let (wx, wy) = transform_xy(Crs::Wgs84, Crs::RdNew, 4.885, 52.36).unwrap();
+        assert!((ex - wx).abs() < 1e-6 && (ey - wy).abs() < 1e-6);
     }
 
     #[test]

@@ -108,6 +108,15 @@ fn env_nonempty(key: &str) -> Option<String> {
 /// would open a new connection (TCP + TLS handshake) for every completion —
 /// with up to four completions per chat turn that handshake tax is pure added
 /// latency. One pooled client keeps the connection to the gateway alive.
+// Gateway failures — unreachable, or answering with a non-2xx — are 503
+// `ServiceUnavailable`, never 500: the LLM tier is an optional, operator-
+// configured dependency, and `/api/llm/health` already reports it as
+// `reachable: false`. The chat endpoints used to answer a bare "Internal server
+// error" for the same condition, which read as a crash rather than "no gateway".
+/// What to do about an unreachable gateway; appended to every 503.
+const GATEWAY_HINT: &str =
+    "set LLM_GATEWAY_URL to a reachable OpenAI-compatible endpoint (see docs/spark.md)";
+
 fn http() -> &'static reqwest::Client {
     static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
     HTTP.get_or_init(|| {
@@ -145,13 +154,14 @@ pub(crate) async fn chat_completion(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -210,13 +220,14 @@ pub(crate) async fn chat_completion_messages(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -385,13 +396,14 @@ async fn chat_completion_messages_stream(
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
     if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "LLM endpoint returned {}",
+        return Err(AppError::ServiceUnavailable(format!(
+            "LLM gateway returned {}",
             resp.status()
         )));
     }
@@ -509,7 +521,7 @@ async fn shacl_assist(
         "shacl",
         user.as_ref(),
         ip.as_deref(),
-        [description.as_str()],
+        [("user", description.as_str())],
         &description,
     )?;
     let start = Instant::now();
@@ -716,7 +728,7 @@ async fn nl_to_sparql(
         "sparql",
         user.as_ref(),
         ip.as_deref(),
-        [req.question.as_str()],
+        [("user", req.question.as_str())],
         &req.question,
     )?;
     let start = Instant::now();
@@ -1015,7 +1027,7 @@ fn trim_at_parse_error(sparql: &str) -> Option<String> {
 /// Parse-check a query string with the same grammar the engine uses, returning the
 /// parser's message on failure. Undeclared prefixes fail here — which is exactly why
 /// [`finalize_sparql`] runs first.
-fn validate_sparql(sparql: &str) -> Result<(), String> {
+pub(crate) fn validate_sparql(sparql: &str) -> Result<(), String> {
     spargebra::SparqlParser::new()
         .parse_query(sparql)
         .map(|_| ())
@@ -1029,23 +1041,57 @@ fn validate_sparql(sparql: &str) -> Result<(), String> {
 /// without that route simply reject it and the UI ignores the result — the core AI
 /// features work regardless. Proxied so the browser only talks to its own origin.
 async fn forward_feedback(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    headers: HeaderMap,
     Json(signal): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    // Same gate as every other endpoint that reaches the gateway. This one had
+    // none: it forwarded an arbitrary caller-supplied JSON body to the gateway
+    // with the server's API key attached, unauthenticated, unlimited and
+    // unlogged — an open relay to `/v1/signals`. The signal's free-text fields
+    // are screened, since they are what a training pipeline ingests.
+    let user = user.map(|Extension(u)| u);
+    let ip = client_ip(&headers, None);
+    let texts: Vec<(&str, &str)> = signal
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter_map(Value::as_str)
+        .map(|s| ("user", s))
+        .collect();
+    let preview = texts.first().map(|(_, s)| *s).unwrap_or("");
+    guard_gate(
+        &state,
+        "feedback",
+        user.as_ref(),
+        ip.as_deref(),
+        texts.clone(),
+        preview,
+    )?;
+
     let url = format!("{}/v1/signals", gateway_base().trim_end_matches('/'));
     let mut rb = http().post(&url).json(&signal);
     if let Some(key) = api_key() {
         rb = rb.bearer_auth(key);
     }
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("LLM endpoint unreachable at {url}: {e}")))?;
-    let ok = resp.status().is_success();
-    let body: Value = resp
-        .json()
-        .await
-        .unwrap_or_else(|_| json!({"accepted": ok}));
+    let resp = rb.send().await.map_err(|e| {
+        AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
+        ))
+    })?;
+    let status = resp.status();
+    let ok = status.is_success();
+    // A gateway without `/v1/signals` answers 404; that used to be reported as
+    // a delivered signal because the body was parsed without checking the
+    // status. Say what happened instead.
+    let body: Value = if ok {
+        resp.json()
+            .await
+            .unwrap_or_else(|_| json!({"accepted": true}))
+    } else {
+        json!({ "accepted": false, "status": status.as_u16() })
+    };
     Ok(Json(body))
 }
 
@@ -1123,10 +1169,10 @@ canonical per-graph triple count is: \
 Sanity-check aggregates before presenting them: an all-zero result almost always means a wrong \
 variable, not empty graphs — re-query, don't chart it.\n\
 Worked patterns — adapt the IRIs from the Graph vocabulary section, never invent them:\n\
-count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE {{ \
-GRAPH <g> {{ ?b a <Class> ; <yearPredicate> ?year }} }}`\n\
-mappable rows: `SELECT ?el ?label ?wkt WHERE {{ GRAPH <g> {{ ?el rdfs:label ?label ; \
-geo:hasGeometry/geo:asWKT ?wkt }} }} LIMIT 50` — then present with a source:\"query\" map.\n\n\
+count + extreme value: `SELECT (COUNT(DISTINCT ?b) AS ?count) (MIN(?year) AS ?oldest) WHERE { \
+GRAPH <g> { ?b a <Class> ; <yearPredicate> ?year } }`\n\
+mappable rows: `SELECT ?el ?label ?wkt WHERE { GRAPH <g> { ?el rdfs:label ?label ; \
+geo:hasGeometry/geo:asWKT ?wkt } } LIMIT 50` — then present with a source:\"query\" map.\n\n\
 # PRESENTING DATA\n\
 Final answers are markdown, and these fenced blocks render as live interactive widgets — use them whenever \
 they make the answer clearer:\n\
@@ -1603,8 +1649,8 @@ async fn chat_completion_full(
         rb = rb.bearer_auth(key);
     }
     let resp = rb.send().await.map_err(|e| {
-        CompletionFailure::Fatal(AppError::Internal(format!(
-            "LLM endpoint unreachable at {url}: {e}"
+        CompletionFailure::Fatal(AppError::ServiceUnavailable(format!(
+            "LLM gateway unreachable at {url}: {e} — {GATEWAY_HINT}"
         )))
     })?;
     if !resp.status().is_success() {
@@ -1772,12 +1818,15 @@ fn validate_chat_request(req: &ChatRequest) -> Result<(), AppError> {
 /// Blocked requests land in the request log right here, so the admin log shows
 /// them even though no LLM call ever happened. Returns the guard flag to carry
 /// into the final log row (set when something was flagged but allowed).
-fn guard_gate<'a>(
+pub(crate) fn guard_gate<'a>(
     state: &AppState,
     endpoint: &'static str,
     user: Option<&AuthenticatedUser>,
     ip: Option<&str>,
-    texts: impl IntoIterator<Item = &'a str>,
+    // `(role, content)` for EVERY message — the guard decides which checks
+    // apply to which roles. Passing a pre-filtered subset is what let a
+    // client-labelled "assistant" message escape the size caps and blocklist.
+    texts: impl IntoIterator<Item = (&'a str, &'a str)>,
     preview_src: &str,
 ) -> Result<Option<String>, AppError> {
     let blocked = |flag: String, err: AppError| {
@@ -1825,14 +1874,17 @@ fn guard_gate<'a>(
     Ok(verdict.flag)
 }
 
-/// The user-typed content of a chat request: every user-role message. The
-/// assistant's own replies are echoed back by the client each turn and must
-/// not trip the phrase checks.
-fn user_texts(req: &ChatRequest) -> impl Iterator<Item = &str> {
+/// Every message in a chat request, as `(role, content)`.
+///
+/// This used to drop `assistant` messages before the guard saw them. The client
+/// submits the whole transcript on each turn, so that let a caller exempt
+/// unlimited content from the size caps and the blocklist just by labelling it
+/// `"assistant"`. The guard now receives everything and decides per check which
+/// roles a given rule applies to.
+fn guarded_texts(req: &ChatRequest) -> impl Iterator<Item = (&str, &str)> {
     req.messages
         .iter()
-        .filter(|m| m.role != "assistant")
-        .map(|m| m.content.as_str())
+        .map(|m| (m.role.as_str(), m.content.as_str()))
 }
 
 fn last_user_text(req: &ChatRequest) -> &str {
@@ -1898,7 +1950,7 @@ async fn llm_chat(
         "chat",
         user.as_ref(),
         ip.as_deref(),
-        user_texts(&req),
+        guarded_texts(&req),
         last_user_text(&req),
     )?;
     let preview = llm_guard::question_preview(last_user_text(&req));
@@ -1952,7 +2004,7 @@ async fn llm_chat_stream(
         "chat_stream",
         user.as_ref(),
         ip.as_deref(),
-        user_texts(&req),
+        guarded_texts(&req),
         last_user_text(&req),
     )?;
     let preview = llm_guard::question_preview(last_user_text(&req));
@@ -2069,7 +2121,9 @@ async fn next_assistant(
                     }
                     Err(CompletionFailure::Fatal(e)) => return Err(e),
                     Err(CompletionFailure::Status(s2)) => {
-                        return Err(AppError::Internal(format!("LLM endpoint returned {s2}")))
+                        return Err(AppError::ServiceUnavailable(format!(
+                            "LLM gateway returned {s2}"
+                        )))
                     }
                 }
             }
@@ -2120,7 +2174,7 @@ async fn run_chat_turn(
     // a cached gateway probe).
     let window = resolve_context_tokens(&model).await;
     let caps = caps_for_window(window);
-    let vocab = graph_vocab_context(&state, &graph_list, &orientation.graphs, caps).await;
+    let vocab_blocks = graph_vocab_context(&state, &graph_list, &orientation.graphs, caps).await;
     // Question-matched API services again, at the tail this time — the full
     // list is mid-prompt where small models lose it (see relevant_services_hint).
     let services_hint = relevant_services_hint(last_user_text(&req), &service_lines);
@@ -2138,11 +2192,18 @@ async fn run_chat_turn(
         })
         .unwrap_or_default();
 
-    let mut system_content = format!(
-        "{CHAT_SYSTEM_PROMPT}
+    // The system prompt with the first `n` vocabulary blocks; everything else
+    // in it is fixed for the turn.
+    let compose = |vocab_kept: usize| {
+        format!(
+            "{CHAT_SYSTEM_PROMPT}
 \n# PLATFORM CONTEXT\n{context}{vocab}{orient}{services_hint}{memory}",
-        orient = orientation.section
-    );
+            vocab = vocab_section(&vocab_blocks[..vocab_kept]),
+            orient = orientation.section
+        )
+    };
+    let mut kept = vocab_blocks.len();
+    let mut system_content = compose(kept);
 
     // Fit the prompt inside the declared context window, oldest history first.
     // A runtime that truncates silently cuts the START of the prompt — i.e. the
@@ -2151,21 +2212,25 @@ async fn run_chat_turn(
     let mut history: &[ChatMessage] = &req.messages;
     if let Some(window) = window {
         let budget = window.saturating_sub(CHAT_MAX_TOKENS as usize + CHAT_PROMPT_MARGIN);
-        if estimate_tokens(&system_content) > budget && !vocab.is_empty() {
-            // The vocabulary blocks are the largest elastic part of the system
-            // prompt. Dropping them costs answer quality; overflowing the
-            // window costs the protocol itself.
+        // The vocabulary blocks are the largest elastic part of the system
+        // prompt, and they are in priority order (the conversation's graphs
+        // first), so trim from the END one graph at a time until the prompt
+        // fits. This used to be all-or-nothing: one block over budget dropped
+        // EVERY block, and the model — left with graph IRIs but no vocabulary
+        // — invented predicates and reported data as absent, or fabricated an
+        // answer outright (observed live at an 8k window on a demo-seeded
+        // instance). The orientation section and services hint always
+        // survive: both are tiny and answer the question the turn is about.
+        while estimate_tokens(&system_content) > budget && kept > 0 {
+            kept -= 1;
+            system_content = compose(kept);
+        }
+        if kept < vocab_blocks.len() {
             tracing::warn!(
                 window,
-                "chat system prompt exceeds the context-window budget — dropping graph vocabulary"
-            );
-            // The orientation section and services hint survive the vocab
-            // drop: both are tiny and answer the question the turn is
-            // actually about.
-            system_content = format!(
-                "{CHAT_SYSTEM_PROMPT}
-\n# PLATFORM CONTEXT\n{context}{orient}{services_hint}{memory}",
-                orient = orientation.section
+                kept,
+                dropped = vocab_blocks.len() - kept,
+                "chat system prompt exceeds the context-window budget — trimmed graph vocabulary, lowest-priority graphs first"
             );
         }
         let remaining = budget.saturating_sub(estimate_tokens(&system_content));
@@ -2343,10 +2408,16 @@ Continue with the next unmet item, or write the final \
             continue;
         }
 
-        // Before anything has been retrieved a fenced ```sparql block counts as a
-        // request to run it; afterwards it is a query card the user is meant to see.
+        // Until a round has SUCCEEDED a fenced ```sparql block counts as a request
+        // to run it; once rows are in it is a query card the user is meant to see.
+        // The gate used to be `runs.is_empty()`, which also barred the corrected
+        // fence that the repair prompt itself invites after a FAILED round —
+        // models that took that path (a 1.5B and a 7.6B one, live) got a card
+        // instead of results and answered from memory. The per-turn round cap
+        // still bounds how many attempts this can cost.
         let reply = assistant_text(&assistant);
-        let Some(query) = extract_query_request(&reply, runs.is_empty()) else {
+        let nothing_retrieved_yet = !runs.iter().any(|r| r.ok);
+        let Some(query) = extract_query_request(&reply, nothing_retrieved_yet) else {
             break;
         };
         if sink.is_closed() {
@@ -2511,11 +2582,40 @@ async fn execute_chat_query(
         sparql: query.clone(),
     })
     .await;
+    // A query identical to one that already failed this turn fails identically.
+    // Running it again burns a retrieval round for nothing — a 7.6B model
+    // resubmitted the same broken query three times live, despite the follow-up
+    // saying not to — so record it, skip the store, and make the repeat itself
+    // the error the model has to react to.
+    if let Some(prev) = runs.iter().find(|r| !r.ok && r.sparql == query) {
+        let emsg = format!(
+            "this is the SAME query that already failed this turn, and it fails the same \
+             way: {}. Change the query, or answer without it.",
+            prev.error.clone().unwrap_or_default()
+        );
+        sink.send(ChatStreamEvent::QueryResult {
+            round,
+            ok: false,
+            rows: None,
+            truncated: false,
+            error: Some(emsg.clone()),
+        })
+        .await;
+        runs.push(ChatQueryRun {
+            sparql: query,
+            ok: false,
+            error: Some(emsg.clone()),
+            columns: None,
+            rows: None,
+            truncated: false,
+        });
+        return (false, format!("That query was not run: {emsg}"));
+    }
     // Reject invented vocabulary BEFORE running it (see [`absent_iris`] for
     // why candidates are verified against the store and pasted IRIs are
     // exempt).
     let run_result = match validate_sparql(&query) {
-        Err(parse_err) => Err(AppError::BadRequest(format!("invalid SPARQL: {parse_err}"))),
+        Err(parse_err) => Err(AppError::BadRequest(parse_error_message(&parse_err))),
         Ok(()) => {
             let candidates: Vec<String> = unknown_vocab_iris(&query, &known_vocab_iris())
                 .into_iter()
@@ -4006,7 +4106,7 @@ async fn graph_vocab_context(
     graphs: &[String],
     evidence: &[String],
     caps: VocabCaps,
-) -> String {
+) -> Vec<String> {
     // WHICH graphs get a slot matters as much as sampling them reliably. Taking
     // the first N in list order let a handful of huge derived layers (an IFC
     // import's ifcOWL lift is ~700k triples and dozens of graphs) consume every
@@ -4052,7 +4152,7 @@ async fn graph_vocab_context(
         .take(caps.graphs)
         .collect();
     if wanted.is_empty() {
-        return String::new();
+        return Vec::new();
     }
     let mut summaries: HashMap<String, String> = HashMap::new();
     let mut missing: Vec<String> = Vec::new();
@@ -4091,18 +4191,23 @@ async fn graph_vocab_context(
             summaries.insert(g, summary);
         }
     }
-    let blocks: Vec<&str> = wanted
+    // In priority order: the prompt budgeter trims from the END of this list.
+    wanted
         .iter()
         .filter_map(|g| summaries.get(*g))
-        .map(String::as_str)
-        .filter(|s| !s.is_empty())
-        .collect();
+        .filter(|summary| !summary.is_empty())
+        .cloned()
+        .collect()
+}
+
+/// The system prompt's vocabulary section for `blocks` (in priority order);
+/// empty when there are none.
+fn vocab_section(blocks: &[String]) -> String {
     if blocks.is_empty() {
         return String::new();
     }
     format!(
-        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}
-",
+        "\n## Graph vocabulary (sampled — build query patterns from EXACTLY these IRIs)\n{}\n",
         blocks.join("\n")
     )
 }
@@ -4439,8 +4544,9 @@ fn extract_query_request(reply: &str, allow_fence: bool) -> Option<String> {
 /// the `SPARQL:` execution marker. Read strictly, that reply retrieves nothing:
 /// the turn ends, the fence renders as a query card, and the model then answers
 /// from memory. Treating the fence as a directive is only safe while nothing has
-/// been retrieved yet this turn (see [`chat_query_request`]) — once rows are in,
-/// a fenced query is a *presented* query card and must stay one.
+/// been retrieved yet this turn — i.e. no round has succeeded; a failed round
+/// retrieved nothing — because once rows are in, a fenced query is a
+/// *presented* query card and must stay one.
 fn first_sparql_fence(reply: &str) -> Option<String> {
     let mut rest = reply;
     while let Some(open) = rest.find("```") {
@@ -4455,6 +4561,23 @@ fn first_sparql_fence(reply: &str) -> Option<String> {
         rest = &body[end + 3..];
     }
     None
+}
+
+/// The parser's message, plus an actionable hint for the failure both a 1.5B
+/// and a 7.6B model produced live: an aggregate projected next to a plain
+/// variable with no GROUP BY. Oxigraph reports that as "The SELECT contains a
+/// variable that is unbound", which the models could not act on — they resent
+/// the query unchanged.
+fn parse_error_message(parse_err: &str) -> String {
+    let mut msg = format!("invalid SPARQL: {parse_err}");
+    if parse_err.contains("variable that is unbound") {
+        msg.push_str(
+            " — a SELECT that contains an aggregate (COUNT/MIN/MAX/SUM/AVG) may project \
+             ONLY aggregates and GROUP BY variables: add `GROUP BY ?var` for each plain \
+             variable you project, or drop the aggregate.",
+        );
+    }
+    msg
 }
 
 /// Does this text contain a SPARQL *read* query form? Updates are never run

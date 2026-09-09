@@ -308,6 +308,31 @@ pub fn insert_version(
     Ok(())
 }
 
+/// Remove a version's registry triples: its graph map, its own description,
+/// and every pointer the dataset holds to it (`ver:hasVersion`,
+/// `ver:latestPublished`, `ver:latestDraft`). The snapshot graphs themselves
+/// are dropped by the caller (the store's bulk path), which also decides the
+/// policy — published versions are refused unless forced.
+pub fn delete_version(
+    store: &TripleStore,
+    base_url: &str,
+    dataset_id: &str,
+    version: &str,
+) -> Result<(), crate::store::engine::StoreError> {
+    crate::data_models::version_iri::validate_version(version).map_err(|e| {
+        crate::store::engine::StoreError::Parse(format!("version '{version}': {e}"))
+    })?;
+    let ver_iri = version_iri(base_url, dataset_id, version);
+    let ds_iri = dataset_iri(base_url, dataset_id);
+    let q = format!(
+        r#"PREFIX ver: <{VER}>
+        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> ver:graphMap ?e . ?e ?p ?o }} }} ;
+        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ver_iri}> ?p ?o }} }} ;
+        DELETE WHERE {{ GRAPH <{REGISTRY_GRAPH}> {{ <{ds_iri}> ?p <{ver_iri}> }} }}"#
+    );
+    store.update(&q)
+}
+
 pub fn update_version_status(
     store: &TripleStore,
     base_url: &str,

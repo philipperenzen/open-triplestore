@@ -430,7 +430,12 @@
             { value: '', label: $t('pages.datasets.roleUnclassified') },
             { value: 'instances', label: $t('pages.datasets.roleInstancesOption') },
             { value: 'model', label: $t('pages.datasets.roleModelOption') },
+            { value: 'vocabulary', label: $t('pages.datasets.roleVocabularyOption') },
             { value: 'shapes', label: $t('pages.datasets.roleShapesOption') },
+            { value: 'domain-values', label: $t('pages.datasets.roleDomainValuesOption') },
+            { value: 'linkset', label: $t('pages.datasets.roleLinksetOption') },
+            { value: 'provenance', label: $t('pages.datasets.roleProvenanceOption') },
+            { value: 'catalog', label: $t('pages.datasets.roleCatalogOption') },
             { value: 'entailment', label: $t('pages.datasets.roleEntailmentOption') },
             { value: 'system', label: $t('pages.datasets.roleSystemOption') },
           ]} />

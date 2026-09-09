@@ -113,6 +113,9 @@ fn ser_quad(q: &Quad, bn: &dyn Fn(&str) -> String) -> String {
         Term::NamedNode(n) => ser_named(n),
         Term::BlankNode(b) => bn(b.as_str()),
         Term::Literal(l) => l.to_string(),
+        // `Term::Triple` only exists when the oxigraph family has rdf-12 on, so
+        // without `sparql-12` the three arms above are already exhaustive.
+        #[cfg(feature = "sparql-12")]
         _ => "<<triple>>".to_string(),
     };
     match &q.graph_name {
@@ -528,7 +531,7 @@ mod tests {
         assert!(!s.contains("c14n"));
 
         // Two *different* structures must NOT collide (unlike sequential c14n0).
-        let other = stable_relabel(&vec![q_lit(
+        let other = stable_relabel(&[q_lit(
             NamedOrBlankNode::BlankNode(bnode("y")),
             "http://ex/DIFFERENT",
             "v",

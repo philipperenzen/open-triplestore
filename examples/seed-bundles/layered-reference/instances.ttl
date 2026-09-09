@@ -1,0 +1,10 @@
+@prefix ex:  <https://example.org/layered/def#> .
+@prefix exd: <https://example.org/layered/values/> .
+@prefix exv: <https://example.org/layered/vocab/> .
+@prefix id:  <https://example.org/layered/asset/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+id:b1 a ex:Bridge ; ex:name "Waalbrug" ;     ex:kind exv:bridge ; ex:status exd:in-service     ; ex:spanMetres "244.0"^^xsd:decimal .
+id:b2 a ex:Bridge ; ex:name "Snelbinder" ;   ex:kind exv:bridge ; ex:status exd:out-of-service ; ex:spanMetres "190.0"^^xsd:decimal .
+# b3 has no status: the planted violation.
+id:b3 a ex:Bridge ; ex:name "De Oversteek" ; ex:kind exv:bridge ; ex:spanMetres "285.0"^^xsd:decimal .

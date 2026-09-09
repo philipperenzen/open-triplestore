@@ -155,8 +155,16 @@ pub async fn bulk_import(
                     .await
                     .map_err(|e| AppError::BadRequest(format!("meta read error: {e}")))?;
                 if !txt.trim().is_empty() {
+                    // A `meta` part replaces the whole struct; a `dataset_id`
+                    // part sent BEFORE it used to be silently discarded, so the
+                    // import then ran without a dataset (graphs unregistered,
+                    // no commit). Keep it unless the JSON sets its own.
+                    let earlier_dataset = meta.dataset_id.take();
                     meta = serde_json::from_str(&txt)
                         .map_err(|e| AppError::BadRequest(format!("Invalid meta JSON: {e}")))?;
+                    if meta.dataset_id.is_none() {
+                        meta.dataset_id = earlier_dataset;
+                    }
                 }
             }
             "dataset_id" => {
@@ -462,26 +470,17 @@ pub async fn bulk_import(
     let text_outcome = outcome.clone();
     let mut result = tokio::task::spawn_blocking(move || {
         let studio = crate::shacl_studio::store::ShaclStudioStore::new(gate_db.pool());
+        let gate_ctx = crate::shacl_studio::gate::GateContext {
+            main_store: &gate_store,
+            auth_db: &gate_db,
+            studio: &studio,
+            base_url: &gate_base,
+        };
         let gate = WriteGate {
-            applies: Box::new(|g| {
-                crate::shacl_studio::gate::import_gates_apply(
-                    &gate_store,
-                    &gate_db,
-                    &studio,
-                    &gate_base,
-                    g,
-                )
-            }),
+            applies: Box::new(|g| crate::shacl_studio::gate::import_gates_apply(gate_ctx, g)),
             check: Box::new(|g, quads| {
-                crate::shacl_studio::gate::check_import_gates(
-                    &gate_store,
-                    &gate_db,
-                    &studio,
-                    &gate_base,
-                    g,
-                    quads,
-                )
-                .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
+                crate::shacl_studio::gate::check_import_gates(gate_ctx, g, quads)
+                    .map_err(|r| crate::shacl_studio::gate::summarize_report(&r, 5))
             }),
         };
         let res = parse_and_load_bulk_gated(&store, inputs, authorize, before_replace, Some(&gate));
@@ -683,9 +682,13 @@ pub async fn bulk_import(
             let dataset_record = state.auth_db.get_dataset(&ds_id).ok().flatten();
             for (filename, graph_iris) in &ok_files {
                 // Explicit role chosen by the user for this file, if any.
-                let explicit_role = post_roles
-                    .get(filename)
-                    .and_then(|r| crate::auth::models::GraphKind::from_str(r));
+                let explicit_role = post_roles.get(filename).and_then(|r| {
+                    let role = crate::auth::models::GraphKind::from_str(r);
+                    if role.is_none() {
+                        tracing::warn!(dataset = %ds_id, file = %filename, role = %r, "unknown graph role ignored");
+                    }
+                    role
+                });
                 for iri in graph_iris {
                     if let Err(e) = state.auth_db.add_dataset_graph(&ds_id, iri) {
                         tracing::warn!(dataset = %ds_id, graph = %iri, error = %e, "failed to register graph in dataset");
@@ -733,6 +736,46 @@ pub async fn bulk_import(
                     }
                 }
             }
+            // LDES: an import (re)publishes every entity it loaded.
+            {
+                let graphs: Vec<String> = ok_files
+                    .iter()
+                    .flat_map(|(_, g)| g.iter().cloned())
+                    .collect();
+                crate::ldes::capture::publish_all(&state, &ds_id, &graphs);
+                crate::entailment::after_write(&state, &graphs);
+            }
+            // Commit trail for the import: files → dataset graphs. Imports used
+            // to leave no trace, while `GET …/commits` presented the log as the
+            // dataset's complete history.
+            let imported: Vec<String> = ok_files
+                .iter()
+                .flat_map(|(_, g)| g.iter().cloned())
+                .collect();
+            let added: usize = imported
+                .iter()
+                .filter_map(|g| state.store.graph_count_cached(Some(g)))
+                .sum();
+            crate::commit_log::record(
+                &state.store,
+                &state.base_url,
+                crate::commit_log::CommitKind::Import,
+                format!(
+                    "Imported {} file(s) into {} graph(s)",
+                    ok_files.len(),
+                    imported.len()
+                ),
+                Some(&post_user_id),
+                Some(format!(
+                    "{}/dataset/{}",
+                    state.base_url.trim_end_matches('/'),
+                    ds_id
+                )),
+                imported,
+                added,
+                0,
+                None,
+            );
 
             // Rewrite the DCAT metadata named graph so it reflects the newly-registered
             // graphs (void:subset + ots:graphRole triples).

@@ -129,10 +129,15 @@ the group quietly falls back to the default.
 {
   "default_tolerance_ratio": 1.15,
   "tolerances": {
-    "concurrent_": 1.5,                    // genuinely variable; not in the gated subset
+    "concurrent_": 1.5,                    // thread scheduling; provisional, see below
+    "insert_": 1.5,                        // provisional, see below
     "query_alternative_path/10000": 1.5,   // bimodal on this runner; see below
     "query_group_concat/": 1.35,           // both sizes; allocation-heavy, measured +25.5 %
-    "query_simple_lookup/100000": 1.45     // bimodal on this runner; see below
+    "query_simple_lookup/100000": 1.45,    // bimodal on this runner; see below
+    "shacl_validate_": 1.5,                // provisional, see below
+    "shacl_validate_clean/": 2.75,         // merge base measured cache hits; see below
+    "shacl_validate_violations/": 2.75,    // same
+    "update_": 1.5                         // provisional, see below
   },
   "small_benchmark_ns": 1000,           // below 1 µs, a percentage bar means nothing
   "small_benchmark_tolerance": 1.35
@@ -167,10 +172,37 @@ Widening the four benchmarks one at a time would have been the wrong lever — t
 next unrelated PR trips a fifth. If the marginal failures come back at 1.15, the
 fix is a third pass per side rather than a fifth exception.
 
-Three benchmarks still need an exception on top of the default, and only three.
+Three benchmarks need a *measured* exception on top of the default; four group
+prefixes carry a *provisional* one.
+
+The provisional four — `concurrent_`, `insert_`, `update_` and `shacl_validate_`
+— are the groups that joined the gate when the filter widened from
+`query|path|geosparql` to all seven groups. Their 1.5 is not a measured noise
+span: it is a deliberately loose bar so the newly gated groups cannot block a PR
+on noise nobody has yet characterised (thread scheduling in `concurrent/*`, a
+RocksDB store on a shared runner in `shacl/validate_snapshot`, the write path's
+count-index work in `insert/*` and `update/*`). Tighten them once the first
+baseline refresh after the widening has a few gate runs behind it, the same way
+the three below were set — from the observed span, not to make a run pass.
 
 `query_group_concat/*` is allocation-heavy at 1–3 µs and read +25.5 % with nothing
 changed.
+
+`shacl_validate_clean/*` and `shacl_validate_violations/*` (the in-memory SHACL
+micro-benchmarks, 100–1000 focus nodes, two property shapes) carry 2.75 against
+the merge base of the readiness branch for a measured reason: before that branch
+the engine kept a thread-local path cache that rayon workers never invalidated,
+so every iteration after the first replayed the previous run's value lists and
+the benchmark measured cache hits, not validation (the cache was also a stale-read
+hazard: validate → write → validate could serve the old values). The rebuilt
+engine does the work each run — two index probes and the constraint evaluation
+per focus node, ≈2.5 µs on the in-memory source — and reads +83 % to +154 % against
+those cached numbers (base → head, alternating passes on one machine:
+clean/500 598 µs → 1.22 ms, clean/1000 916 µs → 2.33 ms, violations/1000
+1.06 → 2.53 ms). `shacl/validate_snapshot/5000`, which measures the
+RocksDB path with the run index, is flat. Drop these two entries back to the
+group's 1.5 at the first baseline refresh after the branch merges; from then on
+both sides of the gate run the honest engine.
 
 `query_alternative_path/10000` is bimodal the same way `query_simple_lookup/100000`
 is, and for the same reason: it materialises every solution of a two-branch
@@ -193,10 +225,13 @@ help when the two modes are that far apart: whichever side happens to land in th
 fast mode wins, so the *base* drawing a 54 ms sample against the change's 74 ms
 reads as +37 % with nothing to show for it.
 
-It is kept in the gated subset despite that, because it is the only benchmark
-covering the uncached read path (results above the query cache's 10 000-row cap),
-and a loose gate on that path beats none. 1.45 is chosen to sit above the observed
-span rather than to make a particular run pass.
+It is kept in the gated subset despite that: until 2026-09 it was the only read
+benchmark whose result exceeded the query cache's 10 000-row cap, i.e. the only one
+that measured evaluation at all (see *What the read benchmarks measure* below).
+1.45 is chosen to sit above the observed span rather than to make a particular run
+pass. `query_group_concat/` (1.35) and `query_alternative_path/10000` (1.5) were
+measured while the cache was still on, i.e. on replayed results; re-evaluate both
+at the first refresh that runs cache-off.
 
 Add an entry only with measurements behind it — the same table above, from a run
 with no runtime change — rather than nudging a number until CI goes green. If
@@ -220,16 +255,50 @@ map the gate reads, and its absolute numbers are the tracked record of where
 performance actually is over time — which a pure A/B gate cannot tell you, since
 a series of individually-tolerable changes can drift a long way.
 
-### Subset (PR gate) vs full suite
+### Gated set (PR gate) vs full suite
 
-The PR gate runs only a representative slice for speed and to limit noise:
+The PR gate names the benchmarks it grades with one filter, and the same filter
+is what `perf-baseline.yml` re-measures and what the pre-push hook runs under
+`OTS_PERF_FULL=1`:
 
 ```bash
-cargo bench --bench performance --features full -- 'query|path|geosparql'
+cargo bench --bench performance --features full -- 'query|path|geosparql|insert|update|shacl|concurrent'
 ```
 
+That is all seven groups. It began as `query|path|geosparql` — the read path
+only — and was widened once the write path (`insert/*`, `update/*`, including
+the ground-update delta path the HTTP write route takes), SHACL (both the
+in-memory and the RocksDB-snapshot variant) and the concurrency groups had
+regressions worth catching. The three groups that joined later carry a
+provisional 1.5 tolerance (see above) until their noise is measured.
+
+#### What the read benchmarks measure
+
+Every `query/*`, `path/*` and `geosparql/*` benchmark repeats one query on a store
+that nothing writes to between iterations. `TripleStore` keeps a result cache
+(`OTS_QUERY_CACHE`, on by default, generation-keyed), so with the cache on every
+iteration after the first is a hit: an audit on 2026-09-08 (same binary, cache on
+vs `OTS_QUERY_CACHE=off`) found **63 of the 68** read benchmarks measuring the
+cache — `query_group_by/10000` at 1.8 µs against 8.6 ms of evaluation,
+`geosparql_sf_contains/50` at 75 ns against 135 µs, `path_zero_or_more/200` at
+4.6 µs against 6 ms. Only the five whose results are not cacheable (CONSTRUCT, or
+above the row cap) measured the engine. The gate had compared cache hits since the
+cache landed (2026-06).
+
+Since then the bench file builds every store with the result cache **disabled**
+(`fresh_store()` → `with_query_cache(false, …)`), so the numbers are evaluation
+by construction, and every runner (perf.yml, perf-baseline.yml, GitLab, the
+Makefile targets, the pre-push hook) also exports `OTS_QUERY_CACHE=off`, which
+keeps the merge-base side honest while the base commit still has the old bench
+file. One benchmark measures the cached path on purpose — `query/cache_hit`, a
+small query with the cache explicitly enabled — because that path has its own
+regressions to catch (a text scan added in front of the lookup once cost every
+query +250 ns). Read-group numbers in `benches/perf_baseline.json` recorded before
+this change are cache-hit figures and are not comparable with cache-off runs; the
+next refresh replaces them.
+
 The full suite runs only on tags / manual dispatch (see *Refreshing the
-baseline*) — and that job then runs the subset above a **second** time, so the
+baseline*) — and that job then runs the gated set a **second** time, so the
 gated benchmarks are baselined under the same conditions the gate will reproduce.
 A benchmark's timing is not independent of what ran before it in the same process
 (allocator arenas, page cache and CPU state are all warmer after the insert and
@@ -238,17 +307,18 @@ the same code. Left uncorrected that is a constant offset on every gated
 benchmark, and with a +10 % bar it would consume much of the budget before any
 real regression could.
 
-Two reasons for the split:
+Two reasons for keeping an explicit filter:
 
-- **Why a subset on PRs.** The full suite is slow, and every extra benchmark on
-  a shared runner adds variance — a representative subset gives a fast, stable
-  signal on each PR; the exhaustive run is reserved for the controlled baseline
-  job.
+- **Why the gate names its groups.** Every benchmark on a shared runner adds
+  variance and minutes, so the gate lists exactly what it grades; a group is
+  dropped from the filter, never silently, if it turns out to be noise. The
+  exhaustive run (which also covers anything a future group adds before it is
+  gated) is reserved for the controlled baseline job.
 - **Why a name filter, not `--sample-size`.** Sample sizes are **hard-coded**
   per group in [`benches/performance.rs`](../benches/performance.rs) via
   `sample_size(...)`, so Criterion's `--sample-size` CLI flag is **ignored**.
-  Scope and speed are therefore controlled by the benchmark-**name filter**
-  (`query|path|geosparql`), not by trimming sample count.
+  Scope and speed are therefore controlled by the benchmark-**name filter**,
+  not by trimming sample count.
 
 ### Refreshing the baseline (bootstrap and updates)
 
@@ -526,6 +596,161 @@ streaming and are unaffected by the size. Grouped-aggregate shard decomposition
 (§3 — `AVG`→merge `SUM`+`COUNT`) brings this down sharply for datasets *within* the
 in-memory mirror cap, but this 100M tier exceeds it and runs on the persistent store.
 
+#### OTL-scale benchmark — asset-shaped data, deep SHACL, concurrent writers (2026-09)
+
+The tiers above measure generic shapes. This tier measures what an object-type
+library deployment does: `N` assets typed against 40 object types with six
+typed properties, a part-of link and a location — ~9 quads per asset — in one
+named graph on the persistent store; six query shapes with the **result cache
+off** (`OTS_QUERY_CACHE=false`, so every number is an evaluation); SHACL over
+every asset against six property shapes (datatype, minCount, class, pattern,
+`sh:in`, bounds); and a 20-second phase of 4 writers inserting 500-quad
+batches next to 4 readers doing lookups. Harness:
+[`examples/scale_otl.rs`](../examples/scale_otl.rs) (`SCALE_DUMP=<file>` keeps
+the generated Turtle so another store can load the same data;
+[`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) loads it
+into Apache Jena Fuseki in Docker and times the same queries over HTTP).
+Apple M-series laptop, release build.
+
+| | 100k assets (0.9M quads) | 1M assets (9M quads) | Fuseki TDB2, 0.9M quads (HTTP)² |
+|---|--:|--:|--:|
+| Bulk load | 138k quads/s | 83k quads/s (109 s) | —² |
+| lookup (one asset) | 0.07 ms | 0.07 ms | —² |
+| 2-way join, 10k rows | 72 ms | 51 ms | —² |
+| filter + count (scan) | 29 ms | 250 ms | —² |
+| group by + avg (41 groups) | 1.18 s | 9.5 s | —² |
+| property path `partOf+` | 0.08 ms | 0.07 ms | —² |
+| `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
+| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 118 s (76k quads/s) | — |
+| 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+
+² The Docker Fuseki image is amd64-only and the webapp distribution needs a
+login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —
+see the like-for-like table below, which measures both servers the same way.
+
+##### Like for like over HTTP — Open Triplestore vs Apache Jena Fuseki
+
+The in-process numbers above are not comparable with a server measured over
+HTTP, so [`scripts/scale_compare_http.py`](../scripts/scale_compare_http.py)
+runs identical phases against any SPARQL 1.1 Protocol + Graph Store endpoint:
+load by Graph Store `PUT`, the same six queries (median of 5 after a warm-up),
+and 20 s of 4 writers (`INSERT DATA`, 500 quads per request) next to 4
+readers (single-asset lookups). Fuseki is Apache Jena Fuseki 6.2 "main" (the
+no-UI jar, TDB2, `-Xmx4g`, started by
+[`scripts/scale_compare_fuseki.sh`](../scripts/scale_compare_fuseki.sh) with
+`FUSEKI_JAR`); Open Triplestore is the release binary with `OTS_QUERY_CACHE=false`.
+Same machine, same file, one server at a time. SHACL is Jena's `shacl validate`
+command line against the same shapes and data, and the platform's Studio
+pipeline over HTTP.
+
+| 100k assets, 0.9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
+|---|--:|--:|
+| Load (Graph Store PUT, 23 MB Turtle) | 15.0 s (60k quads/s)¹ | 8.2 s (109k quads/s) |
+| Lookup of one asset | 0.7 ms | 3.1 ms |
+| 2-way join, 10k rows | 26 ms | 79 ms |
+| Filter and count (scan) | 8 ms | 46 ms |
+| Group by with average, 41 groups | 64 ms | 377 ms |
+| Property path `partOf+` | 0.7 ms | 3.2 ms |
+| `COUNT(*)` inside `GRAPH` | 0.7 ms | 144 ms |
+| 4 writers + 4 readers, 20 s: quads written | 736 000 (36.8k/s), write p95 85 ms | 49 000 (2.45k/s), write p95 947 ms |
+| same phase: reads | 2 616/s, read p95 2.5 ms | 832/s, read p95 10.4 ms |
+| SHACL, every asset, 6 property shapes | 1.3–2.0 s right after the load, 0.64–0.93 s once the accelerator has published³ (Studio pipeline over HTTP; in-process 1.1–1.3 s / 0.72 s) | 3.5 s (Jena `shacl` CLI) |
+
+¹ Into an empty graph. The platform's Graph Store `PUT` parses the payload
+into a temporary store first (so a malformed body cannot empty the graph) and
+indexes every literal for full-text search; Fuseki does neither. A graph
+clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
+36 s with the chunked clear (before it, 34–60 s for 900k quads).
+
+| 1M assets, 9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
+|---|--:|--:|
+| Load (five 45 MB appends² / one PUT) | 110 s (82k quads/s) | 105 s (85k quads/s) |
+| Lookup of one asset | 1.2 ms | 5.0 ms |
+| 2-way join, 10k rows | 31 ms | 109 ms |
+| Filter and count (scan) | 50 ms | 341 ms |
+| Group by with average, 41 groups | 0.52 s | 5.3 s |
+| Property path `partOf+` | 0.8 ms | 6.5 ms |
+| `COUNT(*)` inside `GRAPH` | 0.5 ms | 1.7 s |
+| 4 writers + 4 readers, 20 s: quads written | 365 500 (18.3k/s), write p95 139 ms | 31 500 (1.6k/s), write p95 1.6 s |
+| same phase: reads | 2 623/s, read p95 2.4 ms | 421/s, read p95 21 ms |
+
+² The Graph Store routes accept bodies up to `OTS_MAX_UPLOAD_MB` (default
+512 MB); the 226 MB file was appended in five 45 MB chunks (`POST`,
+incremental index maintenance), which is also how a client would stream a
+large import. Both tables were taken after a settle (60 s and 150 s) so the
+in-memory query accelerator had been rebuilt — a background tick does that
+once writes go quiet; measured immediately after the 9M-quad import the
+group-by ran on RocksDB at about 11 s.
+
+**Reading the comparison.** Load rates are level at 9M quads; at the small
+tier Fuseki loads faster because its `PUT` neither stages the payload nor
+indexes literals for text search. Every query is faster on Open Triplestore
+at both tiers: point reads and property paths in about a millisecond where
+Fuseki takes 3–6 ms, the join and the scan by 3–7×, and the two aggregates
+the first run lost by an order of magnitude — group-by with `AVG` over
+every asset 64 ms vs 377 ms at 0.9M quads and 0.52 s vs 5.3 s at 9M (the
+sharded, multi-core path), `COUNT(*)` inside `GRAPH` 0.7 ms vs 144 ms and
+0.5 ms vs 1.7 s (the count index). Under concurrent writes the difference is
+structural: Open Triplestore sustains 11–15× Fuseki's write throughput at a
+tenth of its write latency while serving 3–6× its read rate at a quarter to
+a ninth of its read latency. SHACL, the one target the first comparison
+left open, was then profiled and the engine rebuilt (see below): the same
+validation now takes 0.64–0.93 s over HTTP once the accelerator has
+published its RAM copy and 1.3–2.0 s right after a load, against
+Jena's 3.5 s.
+
+³ A validation reads one data source for its whole run: the query
+accelerator's clean in-memory copy when one is published, else one RocksDB
+snapshot. Right after a load the accelerator is still rebuilding (a
+background tick starts it once writes go quiet), so the first runs take the
+snapshot path and share the machine with the rebuild; any store write —
+including creating a shape graph — starts that cycle again.
+
+**SHACL, profiled.** The engine used to run one full SPARQL query per focus
+node and property path (600 000 per run here) — three parses, a fresh
+evaluator with forty custom-function registrations and a store-wide
+`sh:SPARQLFunction` scan, a plan compile, a result-cache mutex that never
+hit — and took a RocksDB snapshot per raw probe under the database's global
+mutex; 73% of the worker CPU was in that pipeline and 25% in lock waits,
+with the data read itself at 4%. Every constraint also re-fetched its value
+nodes. A run now resolves value nodes natively from the quad index (once per
+focus node and property shape), targets and `sh:class` from per-run class
+sets, and on the snapshot path from a per-run adjacency built with one scan
+per shape predicate — no SPARQL on the per-focus-node path at all. The W3C
+SHACL core ratchet and every SHACL suite are unchanged; the result changes
+(a `+` path on a cycle includes the focus, anonymous subclasses count for
+`sh:class` as they did for `sh:targetClass`, an invalid data-graph IRI skips
+only that graph, result order unspecified) are listed in the changelog.
+
+**What the comparison found in the platform** — three per-write costs
+proportional to graph or store size, all fixed on the way: the count index
+rescanned a graph after every load or ground update, the text index dropped
+and re-indexed every literal of a graph after every write, and each
+incremental write committed the text index; plus a stale-read window while
+the in-memory query accelerator rebuilt. Before those fixes the same 20 s
+phase wrote 3 500 quads over HTTP.
+
+
+**What the benchmark found.** The first run wrote 2 000 quads in the 20-second
+mixed phase with a write p95 of 22 s: every load into a named graph ended with
+a full recount of that graph to refresh the count index, so a 500-quad insert
+into a 900k-quad graph cost a 900k-quad scan, and four writers serialised on
+it. The index is now bumped by the batch's exact new-quad count (duplicates
+and already-stored quads excluded with point lookups); the same phase then
+wrote 900 000+ quads (43–46k/s, p95 71–79 ms across runs) with readers at 2 ms p95 — a 430×
+throughput difference from one write-side `O(graph)` step. Bulk load rose
+from 77k to 111k quads/s for the same reason.
+
+**What it did not find.** Nothing in this tier suggests the backend is the
+limit: reads stay lock-free under writes, SHACL scales linearly with the
+number of targets, and the persistent store's load rate holds at 9M quads.
+The one visible cost at the time was `COUNT(*)` inside a `GRAPH` block
+(306 ms, a scan); it is now answered from the count index like the bare
+default-graph form. Per the readiness plan, the trigger for evaluating
+another backend is deep SHACL over
+tens of millions of quads *with concurrent writers* exceeding a single node;
+at this tier the store is well inside that envelope.
+
 **Takeaways.** `COUNT(*)` is **O(1) regardless of size** — 2 µs at 1M *and* at
 100M (the fast-count index lookup). `LIMIT` lookups stay single-digit ms (early
 termination). Full scans grow linearly (~60 ms per 1M triples). RocksDB load is
@@ -612,7 +837,8 @@ graph; Fuseki via GSP; QLever via `qlever-index`), and times the queries with
 **Why not a large multi-store leaderboard?** A fair cross-store benchmark needs
 the *same* hardware, dataset, query mix and protocol; published BSBM/SP2Bench
 figures run on different machines and configurations and are not comparable
-line-for-line. Open Triplestore embeds **Oxigraph 0.4** as its engine, so its raw
+line-for-line. Open Triplestore embeds **Oxigraph** as its engine (0.4.11 when these
+figures were measured; 0.5 today), so its raw
 query/parse throughput tracks Oxigraph's (a modern Rust store competitive with
 RDF4J and Jena on many workloads). The Fuseki comparison is included precisely
 because it could be run here under identical conditions; apply the same recipe to
@@ -1009,6 +1235,21 @@ triples in one transaction.
 deletion. Tests the write-path under a moderately selective DELETE (~10% of
 triples).
 
+### `update/ground_delta`
+
+A ground `INSERT DATA { GRAPH <g> { … } }` of 1 and of 100 quads into a named
+graph that already holds ~100k quads, through `update_targeted_delta` — the
+call `POST …/update` makes. For a ground update (`INSERT DATA` / `DELETE DATA`
+only) that path computes the exact per-graph count delta before executing and
+adjusts the count index by it, so the write costs O(statement) rather than the
+O(graph) recount `TripleStore::update` does after every write (a 500-quad
+insert into a 900k-quad graph used to pay a 900k-quad scan). The quads each
+iteration inserts are deleted again in the untimed setup, so the graph is the
+same size for every sample. `insert/sparql_update` measures the plain `update`
+path on a one-triple graph by contrast — also steady-state now: the previous
+iteration's triple is removed in the setup, where it used to accumulate and
+make the recount grow with the sample count.
+
 ### `geosparql/sf_contains` and `geosparql/distance`
 
 GeoSPARQL custom functions are called once per binding via GEOS C++ library.
@@ -1045,6 +1286,18 @@ focus-node resolution + constraint evaluation when no violations are found.
 Same setup but 20% of records intentionally omit `ex:age` (violating
 `sh:minCount 1`). Tests violation-accumulation overhead compared to the clean
 baseline. Violation objects are collected into a `ValidationReport`.
+
+### `shacl/validate_snapshot`
+
+The two benchmarks above run on the memory backend, so the run reads the live
+store and — at 1 000 nodes × 2 paths = 2 000 probes, under the 20 000-probe
+threshold — never builds the per-run adjacency index. This one opens a RocksDB
+store in a temporary directory with the query accelerator off (its switch is
+read at open time), so the run takes the **snapshot** source, and validates
+5 000 `ex:Person` nodes against five property shapes: 25 000 probes, enough
+for `build_index` to scan the five predicates once and answer every probe from
+the adjacency maps. That is the path a production dataset takes right after a
+load, before the accelerator has published its mirror.
 
 ### `concurrent/reads`
 

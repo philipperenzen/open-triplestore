@@ -134,6 +134,29 @@ pub fn compute_etag(content: &[u8]) -> String {
     format!("\"{}\"", hex::encode(&hash[..8]))
 }
 
+/// The resource's ETag: a hash over its outgoing triples — its full state,
+/// containment included — independent of the negotiated representation.
+///
+/// GET used to hash the RE-SERIALISED, Prefer-filtered body while PUT and PATCH
+/// compared `If-Match` against the raw DESCRIBE hash, so an ETag read from a
+/// response could never satisfy a conditional write: every documented
+/// read→modify→write round-trip ended in 412. One function, used by every verb.
+pub fn resource_etag(store: &TripleStore, iri: &str) -> String {
+    compute_etag(&describe_resource(store, iri).unwrap_or_default())
+}
+
+/// The IRI object of `<subject> <predicate> ?o`, if there is one.
+pub fn object_iri(store: &TripleStore, subject: &str, predicate: &str) -> Option<String> {
+    let q = format!("SELECT ?o WHERE {{ <{subject}> <{predicate}> ?o }} LIMIT 1");
+    match store.query(&q).ok()? {
+        oxigraph::sparql::QueryResults::Solutions(mut s) => match s.next()?.ok()?.get("o") {
+            Some(oxigraph::model::Term::NamedNode(n)) => Some(n.as_str().to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 // ─── Container creation ────────────────────────────────────────────────────────
 
 /// Ensure the container IRI is typed as an LDP Basic Container.

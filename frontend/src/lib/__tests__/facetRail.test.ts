@@ -14,7 +14,7 @@ import en from '../i18n/en.json';
 import FacetRail from '../../components/browse/FacetRail.svelte';
 
 beforeAll(() => {
-  addMessages('en', en as Record<string, unknown>);
+  addMessages('en', en as unknown as Parameters<typeof addMessages>[1]);
   init({ fallbackLocale: 'en', initialLocale: 'en' });
 });
 

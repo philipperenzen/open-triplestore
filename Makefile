@@ -78,20 +78,20 @@ nextest:
 # Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
 # Docker instead. See docs/performance.md.
 bench:
-	cargo bench --bench performance --features "$(FEATURES)"
+	OTS_QUERY_CACHE=off cargo bench --bench performance --features "$(FEATURES)"
 
 ## Re-record the committed perf baseline from a fresh full bench run
 # Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
 # Docker instead. See docs/performance.md.
 bench-baseline:
-	cargo bench --bench performance --features "$(FEATURES)"
+	OTS_QUERY_CACHE=off cargo bench --bench performance --features "$(FEATURES)"
 	python3 scripts/perf_regression.py update --criterion-dir target/criterion --out benches/perf_baseline.json --keep-tolerances
 
 ## Run the fast benchmark subset and check it against the perf baseline
 # Needs a native build — fails on Windows (missing GEOS/pkg-config); build via
 # Docker instead. See docs/performance.md.
 perf-check:
-	cargo bench --bench performance --features "$(FEATURES)" -- 'query|path|geosparql'
+	OTS_QUERY_CACHE=off cargo bench --bench performance --features "$(FEATURES)" -- 'query|path|geosparql|insert|update|shacl|concurrent'
 	python3 scripts/perf_regression.py check --criterion-dir target/criterion --baseline benches/perf_baseline.json
 
 ## Self-test the perf regression checker against fixtures (no build; works on Windows)

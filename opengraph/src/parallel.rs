@@ -364,7 +364,11 @@ fn pattern_has_sum_or_avg(p: &GraphPattern) -> bool {
         GraphPattern::Join { left, right }
         | GraphPattern::LeftJoin { left, right, .. }
         | GraphPattern::Union { left, right }
-        | GraphPattern::Minus { left, right } => {
+        | GraphPattern::Minus { left, right }
+        // LATERAL (SPARQL 1.2 / sep-0006) is enabled in this build; it used to
+        // fall into the `_ => false` arm, so a SUM/AVG inside a lateral
+        // sub-select escaped the fidelity guard.
+        | GraphPattern::Lateral { left, right } => {
             pattern_has_sum_or_avg(left) || pattern_has_sum_or_avg(right)
         }
         // Bgp / Path / Values carry no aggregates.
@@ -773,6 +777,17 @@ fn collect_rowable(pattern: &GraphPattern, out: &mut Vec<TriplePattern>) -> bool
         | GraphPattern::Extend { inner, .. }
         | GraphPattern::Distinct { inner }
         | GraphPattern::Reduced { inner } => collect_rowable(inner, out),
+        // `GRAPH <g> { … }` with a constant graph: every shard holds full quads,
+        // and the partial query reuses the pattern verbatim, so the graph
+        // restriction applies per shard exactly as it does on the whole store.
+        // The subject-locality argument is unchanged — the graph name adds a
+        // constraint on every triple, not a join. (Nearly every query that
+        // arrives over HTTP is graph-scoped, so without this the sharded path
+        // never saw the grouped aggregates it exists for.)
+        GraphPattern::Graph { name, inner } => {
+            matches!(name, spargebra::term::NamedNodePattern::NamedNode(_))
+                && collect_rowable(inner, out)
+        }
         _ => false,
     }
 }
@@ -1484,7 +1499,7 @@ mod tests {
             SparqlEvaluator::new()
                 .parse_query(sparql)
                 .unwrap()
-                .on_store(store)
+                .on_store(&store)
                 .execute()
                 .unwrap(),
         )

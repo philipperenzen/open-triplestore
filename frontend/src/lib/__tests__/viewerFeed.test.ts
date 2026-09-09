@@ -22,7 +22,6 @@ function mockFetch() {
     headers: { get: () => 'application/json' },
     json: async () => ({ dataset_id: 'd', count: 0, elements: [] }),
   });
-  // @ts-expect-error jsdom global
   global.fetch = fetchMock;
   return fetchMock;
 }
