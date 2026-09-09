@@ -374,7 +374,12 @@ fn post_logout_redirect_allowed(db: &AuthDb, client_id: Option<&str>, target: &s
         return false;
     };
     let clients = match client_id {
-        Some(id) => db.get_oauth_client(id).ok().flatten().into_iter().collect::<Vec<_>>(),
+        Some(id) => db
+            .get_oauth_client(id)
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect::<Vec<_>>(),
         None => db.list_oauth_clients().unwrap_or_default(),
     };
     clients
@@ -389,8 +394,11 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .and_then(|c| {
-            c.split(';')
-                .find_map(|p| p.trim().strip_prefix(&format!("{name}=")).map(str::to_string))
+            c.split(';').find_map(|p| {
+                p.trim()
+                    .strip_prefix(&format!("{name}="))
+                    .map(str::to_string)
+            })
         })
 }
 
@@ -429,7 +437,10 @@ pub async fn end_session(
         Some(target) => match req.state.as_deref().filter(|s| !s.is_empty()) {
             Some(st) => {
                 let sep = if target.contains('?') { '&' } else { '?' };
-                format!("{target}{sep}state={}", percent_encoding::utf8_percent_encode(st, percent_encoding::NON_ALPHANUMERIC))
+                format!(
+                    "{target}{sep}state={}",
+                    percent_encoding::utf8_percent_encode(st, percent_encoding::NON_ALPHANUMERIC)
+                )
             }
             None => target.to_string(),
         },

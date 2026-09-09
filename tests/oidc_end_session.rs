@@ -55,7 +55,10 @@ async fn discovery_advertises_end_session_endpoint() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = serde_json::from_str(&body_text(resp.into_body()).await).unwrap();
-    assert_eq!(body["end_session_endpoint"], "http://localhost:7878/oauth/logout");
+    assert_eq!(
+        body["end_session_endpoint"],
+        "http://localhost:7878/oauth/logout"
+    );
 }
 
 #[tokio::test]
@@ -78,8 +81,18 @@ async fn logout_clears_cookies_and_returns_to_registered_client_with_state() {
         "http://localhost:5190/?state=abc%20123"
     );
     let cookies = set_cookie_values(&resp);
-    assert!(cookies.iter().any(|c| c.starts_with("access_token=;") && c.contains("Max-Age=0")), "{cookies:?}");
-    assert!(cookies.iter().any(|c| c.starts_with("refresh_token=;") && c.contains("Max-Age=0")), "{cookies:?}");
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("access_token=;") && c.contains("Max-Age=0")),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("refresh_token=;") && c.contains("Max-Age=0")),
+        "{cookies:?}"
+    );
 }
 
 #[tokio::test]
@@ -96,18 +109,32 @@ async fn logout_refuses_unregistered_destination_and_lands_on_login() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FOUND);
-    assert_eq!(resp.headers()[header::LOCATION].to_str().unwrap(), "http://localhost:7878/login");
+    assert_eq!(
+        resp.headers()[header::LOCATION].to_str().unwrap(),
+        "http://localhost:7878/login"
+    );
     // Even a refused destination still ends the session.
-    assert!(set_cookie_values(&resp).iter().any(|c| c.starts_with("access_token=;")));
+    assert!(set_cookie_values(&resp)
+        .iter()
+        .any(|c| c.starts_with("access_token=;")));
 }
 
 #[tokio::test]
 async fn logout_without_parameters_lands_on_login() {
     let app = test_app(test_state());
     let resp = app
-        .oneshot(Request::builder().method(Method::GET).uri("/oauth/logout").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/oauth/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FOUND);
-    assert_eq!(resp.headers()[header::LOCATION].to_str().unwrap(), "http://localhost:7878/login");
+    assert_eq!(
+        resp.headers()[header::LOCATION].to_str().unwrap(),
+        "http://localhost:7878/login"
+    );
 }

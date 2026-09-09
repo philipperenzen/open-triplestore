@@ -859,7 +859,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route("/oauth/jwks", get(crate::auth::oidc_provider::jwks))
         .route("/oauth/userinfo", get(crate::auth::oidc_provider::userinfo))
         .route("/oauth/token", post(crate::auth::oidc_provider::token))
-        .route("/oauth/logout", get(crate::auth::oidc_provider::end_session))
+        .route(
+            "/oauth/logout",
+            get(crate::auth::oidc_provider::end_session),
+        )
         .route_layer(GovernorLayer {
             config: auth_rate_conf.clone(),
         })
