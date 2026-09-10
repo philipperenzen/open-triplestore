@@ -1,8 +1,10 @@
 //! OWL 2 RL profile — forward-chaining materialization.
 //!
-//! Implements the complete rule set from W3C OWL 2 Profiles, Tables 4–9
-//! (approximately 80 rules), expressed as SPARQL INSERT operations executed
-//! in a fixed-point loop.
+//! Implements the W3C OWL 2 Profiles §4.3 RL/RDF rules (Tables 4–9) as
+//! SPARQL INSERT operations executed in a fixed-point loop: 63 of the 78
+//! rules run ([`IMPLEMENTED_RULES`]); the 15 that do not are listed with
+//! their reason in [`UNIMPLEMENTED_RULES`], and `tests/owl2_rl_conformance.rs`
+//! pins both lists against the specification's inventory.
 //!
 //! Inconsistency-detection rules raise `ReasoningError::Inconsistency` rather
 //! than inserting triples.
@@ -78,6 +80,141 @@ const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
 const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 
 const MAX_ITERATIONS: usize = 500;
+
+/// The OWL 2 RL/RDF rules this engine runs, by their specification names
+/// (OWL 2 Profiles §4.3, Tables 4–9). With [`UNIMPLEMENTED_RULES`] this is
+/// exactly the specification's 78 rules — `tests/owl2_rl_conformance.rs`
+/// asserts it, so a rule cannot appear or disappear without the record.
+pub const IMPLEMENTED_RULES: &[&str] = &[
+    // Table 4 — equality
+    "eq-sym",
+    "eq-trans",
+    "eq-rep-s",
+    "eq-rep-p",
+    "eq-rep-o",
+    "eq-diff1",
+    // Table 5 — property axioms
+    "prp-dom",
+    "prp-rng",
+    "prp-fp",
+    "prp-ifp",
+    "prp-irp",
+    "prp-symp",
+    "prp-asyp",
+    "prp-trp",
+    "prp-spo1",
+    "prp-spo2",
+    "prp-inv1",
+    "prp-inv2",
+    "prp-key",
+    "prp-npa1",
+    "prp-npa2",
+    // Table 6 — classes
+    "cls-nothing2",
+    "cls-int1",
+    "cls-int2",
+    "cls-uni",
+    "cls-com",
+    "cls-svf1",
+    "cls-svf2",
+    "cls-avf",
+    "cls-hv1",
+    "cls-hv2",
+    "cls-maxc1",
+    "cls-maxc2",
+    "cls-maxqc1",
+    "cls-maxqc2",
+    "cls-maxqc3",
+    "cls-maxqc4",
+    "cls-oo",
+    // Table 7 — class axioms
+    "cax-sco",
+    "cax-eqc1",
+    "cax-eqc2",
+    "cax-dw",
+    "cax-adc",
+    // Table 8 — datatypes
+    "dt-type1",
+    "dt-not-type",
+    // Table 9 — schema
+    "scm-cls",
+    "scm-sco",
+    "scm-eqc1",
+    "scm-eqc2",
+    "scm-spo",
+    "scm-eqp1",
+    "scm-eqp2",
+    "scm-dom1",
+    "scm-dom2",
+    "scm-rng1",
+    "scm-rng2",
+    "scm-hv",
+    "scm-svf1",
+    "scm-svf2",
+    "scm-avf1",
+    "scm-avf2",
+    "scm-int",
+    "scm-uni",
+];
+
+/// The RL/RDF rules this engine does not run, each with the reason. Kept
+/// next to [`IMPLEMENTED_RULES`] so the two lists together are the whole
+/// specification and the documentation cannot drift from the code.
+pub const UNIMPLEMENTED_RULES: &[(&str, &str)] = &[
+    ("eq-ref", "reflexive owl:sameAs for every term of every triple: it triples the graph and no other rule needs it"),
+    ("eq-diff2", "owl:AllDifferent / owl:members inconsistency: not implemented"),
+    ("eq-diff3", "owl:AllDifferent / owl:distinctMembers inconsistency: not implemented"),
+    ("prp-ap", "the fixed list of annotation-property axiomatic triples: not implemented"),
+    ("prp-eqp1", "subsumed: scm-eqp1 turns owl:equivalentProperty into rdfs:subPropertyOf and prp-spo1 propagates"),
+    ("prp-eqp2", "subsumed: scm-eqp2 turns owl:equivalentProperty into rdfs:subPropertyOf and prp-spo1 propagates"),
+    ("prp-pdw", "owl:propertyDisjointWith inconsistency: not implemented"),
+    ("prp-adp", "owl:AllDisjointProperties inconsistency: not implemented"),
+    ("cls-thing", "typing every individual owl:Thing: one triple per term, no other rule needs it"),
+    ("cls-nothing1", "explicit owl:Nothing membership inconsistency: not implemented"),
+    ("dt-type2", "typing every literal with its datatype needs literal subjects, which an RDF graph cannot hold"),
+    ("dt-eq", "owl:sameAs between literals with equal values needs literal subjects; every rule compares literals by value already"),
+    ("dt-diff", "owl:differentFrom between literals needs literal subjects"),
+    ("scm-op", "reflexive rdfs:subPropertyOf / owl:equivalentProperty for every object property: no other rule needs it"),
+    ("scm-dp", "reflexive rdfs:subPropertyOf / owl:equivalentProperty for every datatype property: no other rule needs it"),
+];
+
+/// The datatypes of the OWL 2 RL datatype map (OWL 2 Profiles §4.2): what
+/// `dt-type1` declares as `rdfs:Datatype`.
+const RL_DATATYPES: &[&str] = &[
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#PlainLiteral",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#XMLLiteral",
+    "http://www.w3.org/2000/01/rdf-schema#Literal",
+    "http://www.w3.org/2001/XMLSchema#decimal",
+    "http://www.w3.org/2001/XMLSchema#integer",
+    "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+    "http://www.w3.org/2001/XMLSchema#nonPositiveInteger",
+    "http://www.w3.org/2001/XMLSchema#positiveInteger",
+    "http://www.w3.org/2001/XMLSchema#negativeInteger",
+    "http://www.w3.org/2001/XMLSchema#long",
+    "http://www.w3.org/2001/XMLSchema#int",
+    "http://www.w3.org/2001/XMLSchema#short",
+    "http://www.w3.org/2001/XMLSchema#byte",
+    "http://www.w3.org/2001/XMLSchema#unsignedLong",
+    "http://www.w3.org/2001/XMLSchema#unsignedInt",
+    "http://www.w3.org/2001/XMLSchema#unsignedShort",
+    "http://www.w3.org/2001/XMLSchema#unsignedByte",
+    "http://www.w3.org/2001/XMLSchema#float",
+    "http://www.w3.org/2001/XMLSchema#double",
+    "http://www.w3.org/2001/XMLSchema#string",
+    "http://www.w3.org/2001/XMLSchema#normalizedString",
+    "http://www.w3.org/2001/XMLSchema#token",
+    "http://www.w3.org/2001/XMLSchema#language",
+    "http://www.w3.org/2001/XMLSchema#Name",
+    "http://www.w3.org/2001/XMLSchema#NCName",
+    "http://www.w3.org/2001/XMLSchema#NMTOKEN",
+    "http://www.w3.org/2001/XMLSchema#boolean",
+    "http://www.w3.org/2001/XMLSchema#hexBinary",
+    "http://www.w3.org/2001/XMLSchema#base64Binary",
+    "http://www.w3.org/2001/XMLSchema#anyURI",
+    "http://www.w3.org/2001/XMLSchema#dateTime",
+    "http://www.w3.org/2001/XMLSchema#dateTimeStamp",
+];
+const RDFS_DATATYPE: &str = "http://www.w3.org/2000/01/rdf-schema#Datatype";
 
 // ─── Reasoner ─────────────────────────────────────────────────────────────────
 
@@ -167,6 +304,9 @@ impl<'a> Owl2RLReasoner<'a> {
         let initial = count_graph(self.store, &self.target_graph)?;
 
         info!("OWL 2 RL materialization → <{}>", self.target_graph);
+
+        // Table 8 — dt-type1 is constant (the datatype map), so once per run.
+        self.rule_dt_type1()?;
 
         loop {
             iterations += 1;
@@ -274,6 +414,7 @@ impl<'a> Owl2RLReasoner<'a> {
 
     /// Run inconsistency checks.  Returns `Err(Inconsistency)` if any are triggered.
     pub fn check_consistency(&self) -> Result<(), ReasoningError> {
+        self.rule_dt_not_type()?;
         self.rule_eq_diff1()?;
         self.rule_prp_irp()?;
         self.rule_prp_asyp()?;
@@ -510,24 +651,169 @@ impl<'a> Owl2RLReasoner<'a> {
         Ok(())
     }
 
-    /// prp-key: hasKey with single property
-    /// ?c owl:hasKey (?p) . ?x type ?c . ?y type ?c . ?x ?p ?v . ?y ?p ?v → ?x sameAs ?y
+    /// prp-key: `?c owl:hasKey (?p1 … ?pn) . ?x a ?c . ?y a ?c . ?x ?pi ?vi .
+    /// ?y ?pi ?vi` for every key property → `?x owl:sameAs ?y`.
+    ///
+    /// The keys are read first — class and the property set of each list —
+    /// and one INSERT per key joins every one of its properties. The old
+    /// single pattern matched `rdf:first ?p ; rdf:rest rdf:nil` only, so a
+    /// composite key silently produced no owl:sameAs at all.
     fn rule_prp_key(&self) -> Result<(), ReasoningError> {
+        for (class, props) in self.has_keys()? {
+            let mut patterns = String::new();
+            for (i, p) in props.iter().enumerate() {
+                patterns.push_str(&format!("?x <{p}> ?v{i} . ?y <{p}> ?v{i} . "));
+            }
+            let q = format!(
+                r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
+                   WHERE {{
+                       ?x <{RDF_TYPE}> <{class}> .
+                       ?y <{RDF_TYPE}> <{class}> .
+                       {patterns}
+                       FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
+                   }}"#,
+                tg = self.target_graph
+            );
+            self.run_update(&q)?;
+        }
+        Ok(())
+    }
+
+    /// `(class IRI, key property IRIs)` for every `owl:hasKey` list in scope,
+    /// read from the quad index (the scoped graphs, or the default graph when
+    /// unscoped) — the `rdf:rest*` walk is done here rather than as a SPARQL
+    /// property path. Blank-node class expressions are skipped; the order of
+    /// a key's properties does not matter.
+    fn has_keys(&self) -> Result<Vec<(String, Vec<String>)>, ReasoningError> {
+        use oxigraph::model::{GraphNameRef, NamedNodeRef, NamedOrBlankNode, Term};
+        let graphs: Vec<Option<String>> = match self.scope() {
+            Some(scope) => scope.into_iter().map(Some).collect(),
+            None => vec![None],
+        };
+        let has_key = NamedNodeRef::new_unchecked(OWL_HAS_KEY);
+        let first = NamedNodeRef::new_unchecked(RDF_FIRST);
+        let rest = NamedNodeRef::new_unchecked(RDF_REST);
+        let mut keys: Vec<(String, Vec<String>)> = Vec::new();
+        for graph in graphs {
+            let graph_ref = match &graph {
+                Some(g) => match NamedNodeRef::new(g) {
+                    Ok(nn) => GraphNameRef::NamedNode(nn),
+                    Err(_) => continue,
+                },
+                None => GraphNameRef::DefaultGraph,
+            };
+            let object_of = |subject: &NamedOrBlankNode, pred: NamedNodeRef<'_>| {
+                self.store
+                    .store()
+                    .quads_for_pattern(Some(subject.as_ref()), Some(pred), None, Some(graph_ref))
+                    .next()
+                    .and_then(|q| q.ok())
+                    .map(|q| q.object)
+            };
+            for quad in
+                self.store
+                    .store()
+                    .quads_for_pattern(None, Some(has_key), None, Some(graph_ref))
+            {
+                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
+                let NamedOrBlankNode::NamedNode(class) = quad.subject else {
+                    continue;
+                };
+                let mut props: Vec<String> = Vec::new();
+                let mut cell = match quad.object {
+                    Term::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+                    Term::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+                    _ => continue,
+                };
+                // Walk the list; a malformed list simply ends.
+                for _ in 0..64 {
+                    if let NamedOrBlankNode::NamedNode(n) = &cell {
+                        if n.as_str() == RDF_NIL {
+                            break;
+                        }
+                    }
+                    if let Some(Term::NamedNode(p)) = object_of(&cell, first) {
+                        props.push(p.as_str().to_string());
+                    }
+                    cell = match object_of(&cell, rest) {
+                        Some(Term::NamedNode(n)) => NamedOrBlankNode::NamedNode(n),
+                        Some(Term::BlankNode(b)) => NamedOrBlankNode::BlankNode(b),
+                        _ => break,
+                    };
+                }
+                props.sort();
+                props.dedup();
+                if !props.is_empty() {
+                    keys.push((class.as_str().to_string(), props));
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Table 8 — Semantics of Datatypes
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// dt-type1: every datatype of the OWL 2 RL datatype map is an `rdfs:Datatype`.
+    fn rule_dt_type1(&self) -> Result<(), ReasoningError> {
+        let triples: String = RL_DATATYPES
+            .iter()
+            .map(|dt| format!("<{dt}> <{RDF_TYPE}> <{RDFS_DATATYPE}> . "))
+            .collect();
         let q = format!(
-            r#"INSERT {{ GRAPH <{tg}> {{ ?x <{OWL_SAME_AS}> ?y }} }}
-               WHERE {{
-                   ?c <{OWL_HAS_KEY}> ?list .
-                   ?list <{RDF_FIRST}> ?p ;
-                         <{RDF_REST}>  <{RDF_NIL}> .
-                   ?x <{RDF_TYPE}> ?c .
-                   ?y <{RDF_TYPE}> ?c .
-                   ?x ?p ?v .
-                   ?y ?p ?v .
-                   FILTER(?x != ?y) FILTER(isIRI(?x)) FILTER(isIRI(?y))
-               }}"#,
+            "INSERT DATA {{ GRAPH <{tg}> {{ {triples} }} }}",
             tg = self.target_graph
         );
         self.run_update(&q)?;
+        Ok(())
+    }
+
+    /// dt-not-type: a literal whose lexical form is not in the lexical space
+    /// of its datatype (`"abc"^^xsd:integer`) makes the ontology inconsistent.
+    /// Every XSD-typed literal in scope is checked with the same lexical rules
+    /// SHACL's `sh:datatype` uses; oxigraph keeps an ill-formed typed literal
+    /// as its lexical form plus datatype, so it is found here. The scan reads
+    /// the quad index directly (the scoped graphs, or the default graph when
+    /// unscoped) rather than a SPARQL query: a DISTINCT-over-FILTER query
+    /// would take the sharded mirror path, and this check must not depend on
+    /// it.
+    fn rule_dt_not_type(&self) -> Result<(), ReasoningError> {
+        use oxigraph::model::{GraphNameRef, NamedNodeRef, Term};
+        let graphs: Vec<Option<String>> = match self.scope() {
+            Some(scope) => scope.into_iter().map(Some).collect(),
+            None => vec![None],
+        };
+        for graph in graphs {
+            let graph_ref = match &graph {
+                Some(g) => match NamedNodeRef::new(g) {
+                    Ok(nn) => GraphNameRef::NamedNode(nn),
+                    Err(_) => continue,
+                },
+                None => GraphNameRef::DefaultGraph,
+            };
+            for quad in self
+                .store
+                .store()
+                .quads_for_pattern(None, None, None, Some(graph_ref))
+            {
+                let quad = quad.map_err(|e| ReasoningError::Store(e.to_string()))?;
+                if let Term::Literal(lit) = &quad.object {
+                    if lit
+                        .datatype()
+                        .as_str()
+                        .starts_with("http://www.w3.org/2001/XMLSchema#")
+                        && !crate::shacl::constraints::xsd_lexical_valid(lit)
+                    {
+                        return Err(ReasoningError::Inconsistency(format!(
+                            "dt-not-type: {lit} is not in the lexical space of its datatype"
+                        )));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

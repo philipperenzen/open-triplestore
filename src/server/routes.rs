@@ -1749,7 +1749,8 @@ async fn graph_store_post(
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
         let _ = tokio::task::spawn_blocking(move || {
             crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            // A merge only adds quads: the entailment graph is extended, not rebuilt.
+            crate::entailment::after_additive_write(&st, &ent_graphs);
         })
         .await;
     }

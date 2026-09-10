@@ -45,6 +45,8 @@ fn ask_tg(store: &TripleStore, pattern: &str) -> bool {
             "PREFIX rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n\
          PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\
          PREFIX owl:  <http://www.w3.org/2002/07/owl#>\n\
+         PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>\n\
+         PREFIX ex:   <http://example.org/>\n\
          ASK {{ GRAPH <{TG}> {{ {pattern} }} }}"
         ),
     )
@@ -457,4 +459,218 @@ fn test_rl_report_has_positive_count() {
     let s = store_with("ex:Manager rdfs:subClassOf ex:Employee . ex:alice rdf:type ex:Manager .");
     let count = materialize(&s);
     assert!(count > 0, "Materialization should add triples");
+}
+
+// ─── P1 item 2: composite owl:hasKey, Table 8 datatypes, rule inventory ───────
+
+/// prp-key over a composite key: two individuals merge only when EVERY key
+/// property agrees. The old rule matched single-property lists only, so a
+/// composite key silently produced no owl:sameAs.
+#[test]
+fn prp_key_composite_merges_only_when_every_key_property_matches() {
+    let store = store_with(
+        "ex:Person owl:hasKey ( ex:first ex:last ) .
+         ex:a a ex:Person ; ex:first \"Ada\" ; ex:last \"Lovelace\" .
+         ex:b a ex:Person ; ex:first \"Ada\" ; ex:last \"Lovelace\" .
+         ex:c a ex:Person ; ex:first \"Ada\" ; ex:last \"Byron\" .",
+    );
+    materialize(&store);
+    assert!(
+        ask_tg(&store, "ex:a owl:sameAs ex:b"),
+        "both key properties agree: a sameAs b"
+    );
+    assert!(
+        !ask_tg(&store, "ex:a owl:sameAs ex:c"),
+        "one key property differs: no merge"
+    );
+    assert!(!ask_tg(&store, "ex:b owl:sameAs ex:c"));
+}
+
+/// Two keys on one class are independent: either suffices.
+#[test]
+fn prp_key_several_keys_each_fire() {
+    let store = store_with(
+        "ex:Person owl:hasKey ( ex:ssn ) , ( ex:first ex:last ) .
+         ex:a a ex:Person ; ex:ssn \"1\" ; ex:first \"A\" ; ex:last \"B\" .
+         ex:b a ex:Person ; ex:ssn \"1\" ; ex:first \"X\" ; ex:last \"Y\" .
+         ex:c a ex:Person ; ex:ssn \"2\" ; ex:first \"A\" ; ex:last \"B\" .",
+    );
+    materialize(&store);
+    assert!(ask_tg(&store, "ex:a owl:sameAs ex:b"), "same ssn");
+    assert!(ask_tg(&store, "ex:a owl:sameAs ex:c"), "same first+last");
+}
+
+/// dt-type1: the datatypes of the OWL 2 RL datatype map are rdfs:Datatypes.
+#[test]
+fn dt_type1_declares_the_datatype_map() {
+    let store = store_with("ex:x ex:p 1 .");
+    materialize(&store);
+    for dt in ["xsd:integer", "xsd:string", "xsd:dateTime", "xsd:boolean"] {
+        assert!(
+            ask_tg(&store, &format!("{dt} a rdfs:Datatype")),
+            "{dt} is declared an rdfs:Datatype"
+        );
+    }
+}
+
+/// dt-not-type: a literal outside its datatype's lexical space is an
+/// inconsistency; well-formed literals are not.
+#[test]
+fn dt_not_type_flags_an_ill_typed_literal() {
+    let bad = store_with("ex:x ex:age \"abc\"^^xsd:integer .");
+    assert!(
+        check_inconsistency(&bad),
+        "\"abc\"^^xsd:integer is not in the lexical space of xsd:integer"
+    );
+    let good = store_with(
+        "ex:x ex:age \"42\"^^xsd:integer ; ex:when \"2026-01-01T00:00:00Z\"^^xsd:dateTime ; \
+         ex:ok \"true\"^^xsd:boolean ; ex:name \"free text\" ; ex:tag \"hi\"@en .",
+    );
+    let r = Owl2RLReasoner::new(&good).materialize();
+    assert!(r.is_ok(), "well-formed literals are consistent: {r:?}");
+}
+
+/// Identity policy: `sameas-off` skips the Table 4 equality rules; the
+/// default engine keeps them.
+#[test]
+fn identity_policy_off_skips_the_equality_rules() {
+    use open_triplestore::reasoning::identity::IdentityPolicy;
+    let data = "ex:a owl:sameAs ex:b . ex:a ex:p 1 .";
+    let full = store_with(data);
+    materialize(&full);
+    assert!(ask_tg(&full, "ex:b ex:p 1"), "eq-rep-s by default");
+    assert!(ask_tg(&full, "ex:b owl:sameAs ex:a"), "eq-sym by default");
+
+    let off = store_with(data);
+    Owl2RLReasoner::new(&off)
+        .with_identity_policy(IdentityPolicy::Off)
+        .materialize()
+        .unwrap();
+    assert!(!ask_tg(&off, "ex:b ex:p 1"), "sameas-off: no eq-rep-s");
+    assert!(
+        !ask_tg(&off, "ex:b owl:sameAs ex:a"),
+        "sameas-off: no eq-sym"
+    );
+}
+
+/// Typed correspondences are never identity: none of them feeds eq-rep-*.
+#[test]
+fn correspondence_predicates_never_feed_the_equality_rules() {
+    use open_triplestore::reasoning::identity::CORRESPONDENCE_PREDICATES;
+    for pred in CORRESPONDENCE_PREDICATES {
+        let store = store_with(&format!("ex:a <{pred}> ex:b . ex:a ex:p 1 ."));
+        materialize(&store);
+        assert!(
+            !ask_tg(&store, "ex:b ex:p 1"),
+            "<{pred}> must not propagate properties like owl:sameAs"
+        );
+    }
+}
+
+/// The implemented + unimplemented rule lists are exactly the specification's
+/// 78 RL/RDF rules (OWL 2 Profiles §4.3, Tables 4–9) — a two-way inventory,
+/// so a rule cannot be added or dropped without the record following.
+#[test]
+fn rule_inventory_is_the_whole_rl_rule_set() {
+    use open_triplestore::reasoning::owl2_rl::{IMPLEMENTED_RULES, UNIMPLEMENTED_RULES};
+    const SPEC: &[&str] = &[
+        "eq-ref",
+        "eq-sym",
+        "eq-trans",
+        "eq-rep-s",
+        "eq-rep-p",
+        "eq-rep-o",
+        "eq-diff1",
+        "eq-diff2",
+        "eq-diff3",
+        "prp-ap",
+        "prp-dom",
+        "prp-rng",
+        "prp-fp",
+        "prp-ifp",
+        "prp-irp",
+        "prp-symp",
+        "prp-asyp",
+        "prp-trp",
+        "prp-spo1",
+        "prp-spo2",
+        "prp-eqp1",
+        "prp-eqp2",
+        "prp-pdw",
+        "prp-adp",
+        "prp-inv1",
+        "prp-inv2",
+        "prp-key",
+        "prp-npa1",
+        "prp-npa2",
+        "cls-thing",
+        "cls-nothing1",
+        "cls-nothing2",
+        "cls-int1",
+        "cls-int2",
+        "cls-uni",
+        "cls-com",
+        "cls-svf1",
+        "cls-svf2",
+        "cls-avf",
+        "cls-hv1",
+        "cls-hv2",
+        "cls-maxc1",
+        "cls-maxc2",
+        "cls-maxqc1",
+        "cls-maxqc2",
+        "cls-maxqc3",
+        "cls-maxqc4",
+        "cls-oo",
+        "cax-sco",
+        "cax-eqc1",
+        "cax-eqc2",
+        "cax-dw",
+        "cax-adc",
+        "dt-type1",
+        "dt-type2",
+        "dt-eq",
+        "dt-diff",
+        "dt-not-type",
+        "scm-cls",
+        "scm-sco",
+        "scm-eqc1",
+        "scm-eqc2",
+        "scm-op",
+        "scm-dp",
+        "scm-spo",
+        "scm-eqp1",
+        "scm-eqp2",
+        "scm-dom1",
+        "scm-dom2",
+        "scm-rng1",
+        "scm-rng2",
+        "scm-hv",
+        "scm-svf1",
+        "scm-svf2",
+        "scm-avf1",
+        "scm-avf2",
+        "scm-int",
+        "scm-uni",
+    ];
+    assert_eq!(SPEC.len(), 78, "the specification lists 78 rules");
+    let mut all: Vec<&str> = IMPLEMENTED_RULES.to_vec();
+    all.extend(UNIMPLEMENTED_RULES.iter().map(|(r, _)| *r));
+    let mut sorted = all.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), all.len(), "a rule is listed twice");
+    let mut spec: Vec<&str> = SPEC.to_vec();
+    spec.sort_unstable();
+    assert_eq!(
+        sorted, spec,
+        "implemented + unimplemented must be exactly the spec's rules"
+    );
+    for (r, why) in UNIMPLEMENTED_RULES {
+        assert!(!why.is_empty(), "{r} needs a reason");
+    }
+    for must in ["prp-key", "dt-type1", "dt-not-type", "eq-rep-s", "prp-trp"] {
+        assert!(IMPLEMENTED_RULES.contains(&must), "{must} is implemented");
+    }
+    assert_eq!(IMPLEMENTED_RULES.len(), 63);
 }

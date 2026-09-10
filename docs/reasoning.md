@@ -50,10 +50,16 @@ curl -X PUT http://localhost:7878/api/datasets/<id>/entailment \
 In `materialize` mode the regime runs at once and again after every write
 to one of the dataset's graphs (Graph Store, SPARQL Update, imports, restores,
 patches, LDES syncs, property states), over the dataset's conformance layer
-— instance, model, vocabulary, domain-value and linkset graphs — into the
-dataset's own entailment graph `urn:entailment:<regime>:<id>`. The graph is
-rebuilt, not appended to, so consequences of deleted data disappear, and no
-two datasets share inferred triples. `mode: off` clears it.
+— instance, model, vocabulary and domain-value graphs, plus linkset graphs
+when the [identity policy](#identity-policy--what-happens-with-owlsameas)
+is `sameas-full` — into the dataset's own entailment graph
+`urn:entailment:<regime>:<id>`. A write that only **adds** quads (a Graph
+Store `POST`) *extends* the graph: the rules are monotone, so they re-run to
+their fixed point on top of the existing consequences and nothing is cleared.
+Every other write (a `PUT`, a `DELETE`, a SPARQL Update, a restore) rebuilds
+the graph from scratch, so consequences of deleted data disappear. A write
+that left the store's write generation unchanged since the last run triggers
+nothing. No two datasets share inferred triples; `mode: off` clears the graph.
 
 Queries opt in per request:
 

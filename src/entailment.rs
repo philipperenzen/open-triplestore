@@ -120,9 +120,40 @@ fn materialized_datasets_for(
     Ok(out)
 }
 
-/// Re-materialise `regime` for `dataset_id` into its entailment graph.
-/// Returns the number of triples in the entailment graph afterwards.
+/// The store write generation each dataset's entailment graph was last
+/// brought in sync at (a successful run). Process-local: it decides whether
+/// an additive write may *extend* the graph instead of rebuilding it, and it
+/// skips a re-run when nothing was written since the last one.
+fn last_run_generations() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn last_run_generation(dataset_id: &str) -> Option<u64> {
+    last_run_generations()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(dataset_id).copied())
+}
+
+/// Re-materialise `regime` for `dataset_id` into its entailment graph —
+/// cleared and rebuilt from scratch. Returns the number of triples in the
+/// entailment graph afterwards.
 pub fn run_for_dataset(state: &AppState, dataset_id: &str, regime: &str) -> Result<i64, String> {
+    run_for_dataset_with(state, dataset_id, regime, false)
+}
+
+/// As [`run_for_dataset`]; with `extend` the entailment graph is NOT cleared
+/// first: the regime's rules are monotone, so after a write that only added
+/// quads the fixed point re-run on top of the existing consequences is the
+/// same graph a rebuild would produce, minus the rebuild.
+pub fn run_for_dataset_with(
+    state: &AppState,
+    dataset_id: &str,
+    regime: &str,
+    extend: bool,
+) -> Result<i64, String> {
     let ds = state
         .auth_db
         .get_dataset(dataset_id)
@@ -130,14 +161,19 @@ pub fn run_for_dataset(state: &AppState, dataset_id: &str, regime: &str) -> Resu
         .ok_or_else(|| format!("dataset {dataset_id} not found"))?;
     let (sources, identity) = reasoning_sources(state, &ds);
     let target = dataset_entailment_graph(regime, dataset_id);
-    state
-        .store
-        .update(&format!("CLEAR SILENT GRAPH <{target}>"))
-        .map_err(|e| format!("clearing <{target}>: {e}"))?;
+    if !extend {
+        state
+            .store
+            .update(&format!("CLEAR SILENT GRAPH <{target}>"))
+            .map_err(|e| format!("clearing <{target}>: {e}"))?;
+    }
     crate::server::routes::run_regime(state, regime, Some(sources), &target, identity.policy)
         .map_err(|e| format!("{e:?}"))?;
     let n = state.store.graph_count_cached(Some(&target)).unwrap_or(0) as i64;
     let _ = record_run(&state.auth_db, dataset_id, n);
+    if let Ok(mut m) = last_run_generations().lock() {
+        m.insert(dataset_id.to_string(), state.store.write_generation());
+    }
     Ok(n)
 }
 
@@ -146,6 +182,19 @@ pub fn run_for_dataset(state: &AppState, dataset_id: &str, regime: &str) -> Resu
 /// (the write paths already sit in one for the LDES capture). Best-effort;
 /// failures are logged.
 pub fn after_write(state: &AppState, graphs: &[String]) {
+    after_write_kind(state, graphs, false)
+}
+
+/// After a write that only ADDED quads to `graphs` (a Graph Store `POST`):
+/// the affected entailment graphs are extended in place — the rules re-run to
+/// their fixed point on top of the existing consequences — instead of being
+/// cleared and rebuilt. A dataset without a successful run on record since
+/// the process started is rebuilt.
+pub fn after_additive_write(state: &AppState, graphs: &[String]) {
+    after_write_kind(state, graphs, true)
+}
+
+fn after_write_kind(state: &AppState, graphs: &[String], additive: bool) {
     let targets = match materialized_datasets_for(&state.auth_db, graphs) {
         Ok(t) => t,
         Err(e) => {
@@ -153,9 +202,23 @@ pub fn after_write(state: &AppState, graphs: &[String]) {
             return;
         }
     };
+    let generation = state.store.write_generation();
     for (ds, regime) in targets {
-        match run_for_dataset(state, &ds, &regime) {
-            Ok(n) => tracing::debug!("entailment: re-materialised {regime} for {ds}: {n} triples"),
+        let last = last_run_generation(&ds);
+        if last == Some(generation) {
+            tracing::debug!("entailment: {ds} already in sync at generation {generation}");
+            continue;
+        }
+        let extend = additive && last.is_some();
+        match run_for_dataset_with(state, &ds, &regime, extend) {
+            Ok(n) => tracing::debug!(
+                "entailment: {} {regime} for {ds}: {n} triples",
+                if extend {
+                    "extended"
+                } else {
+                    "re-materialised"
+                }
+            ),
             Err(e) => tracing::warn!("entailment: re-materialising {regime} for {ds} failed: {e}"),
         }
     }

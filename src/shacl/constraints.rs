@@ -1370,7 +1370,10 @@ fn parse_xsd_date(s: &str) -> Option<(f64, bool)> {
 /// Whether a literal's lexical form is valid for its (known XSD) datatype —
 /// `"aldi"^^xsd:integer` and `"300"^^xsd:byte` are ill-formed and violate
 /// `sh:datatype`. Unknown datatypes are assumed valid (the engine cannot judge).
-fn xsd_lexical_valid(lit: &Literal) -> bool {
+/// Whether `lit`'s lexical form is in the lexical space of its XSD datatype
+/// (`true` for datatypes without a lexical check). Shared with the OWL 2 RL
+/// `dt-not-type` rule.
+pub(crate) fn xsd_lexical_valid(lit: &Literal) -> bool {
     let Some(local) = lit.datatype().as_str().strip_prefix(XSD) else {
         return true; // rdf:langString, rdf:HTML, custom datatypes: no lexical check
     };

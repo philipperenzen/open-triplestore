@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **OWL 2 RL: composite `owl:hasKey`, the Table 8 datatype rules, and an
+  honest rule inventory.** `prp-key` fires for keys of any length (only
+  single-property keys used to); `dt-type1` declares the datatype map and
+  `dt-not-type` makes an ill-typed literal (`"abc"^^xsd:integer`) an
+  inconsistency; the engine lists the 63 rules it runs and the 15 it does
+  not, with reasons, and `tests/owl2_rl_conformance.rs` pins the two lists
+  against the specification's 78. Per-dataset materialisation is
+  incremental for additive writes: a Graph Store `POST` extends the
+  entailment graph (the rules re-run on top of the existing consequences)
+  instead of clearing and rebuilding it, and a write that changed nothing
+  triggers no run. See docs/owl2-rl.md.
 - **Identity policy — what reasoning does with `owl:sameAs`.** Per
   organisation (inherited by the datasets it owns) and per dataset:
   `sameas-off` (the OWL 2 RL equality rules never run), `sameas-narrow` (the
