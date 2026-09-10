@@ -1,0 +1,58 @@
+# NEN 2660-2 relation profile — the characteristics NEN 2660-2's RDFS does not
+# declare, chosen per Keet et al. (OntoPartS): choosing the wrong part-whole
+# relation, or making the wrong one transitive, yields wrong inferences (a pump
+# *contained in* a service building is not *part of* the building; a pump's
+# housing *is* part of the pump, and so of the pumping station).
+#
+# Only proper parthood (hasPart and its functional/technical sub-relations,
+# which inherit transitivity through rdfs:subPropertyOf) is transitive.
+# Irreflexivity and acyclicity are NOT declared here: OWL 2 DL forbids
+# irreflexive/asymmetric on a transitive property, so they are SHACL shapes
+# (shapes.ttl). Containment, constitution and connection are not transitive.
+@prefix nen2660: <https://w3id.org/nen2660/def#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix prof:    <https://example.org/nen2660-relations/profile#> .
+
+prof: a owl:Ontology ;
+    rdfs:label "NEN 2660-2 relation profile"@en ;
+    rdfs:comment "OWL characteristics for the NEN 2660-2 part-whole, containment, constitution and connection relations. Transitivity only on proper parthood; irreflexivity, acyclicity and spatial consistency are shapes."@en .
+
+# ── Decomposition (parthood) ──────────────────────────────────────────────────
+
+nen2660:hasPart a owl:ObjectProperty , owl:TransitiveProperty ;
+    rdfs:label "has part"@en ;
+    skos:scopeNote "Proper parthood between concrete concepts: the deck is part of the bridge, the bearing part of the deck, so — transitively — the bearing is part of the bridge. Never reflexive, never cyclic (shapes)."@en .
+
+nen2660:hasFunctionalPart a owl:ObjectProperty ;
+    rdfs:subPropertyOf nen2660:hasPart ;
+    rdfs:label "has functional part"@en ;
+    skos:scopeNote "The functional decomposition: a pumping station's function has the pumping function as part. Transitive through hasPart, not on its own."@en .
+
+nen2660:hasTechnicalPart a owl:ObjectProperty ;
+    rdfs:subPropertyOf nen2660:hasPart ;
+    rdfs:label "has technical part"@en ;
+    skos:scopeNote "The technical (physical) decomposition: the housing is a technical part of the pump. Transitive through hasPart, not on its own."@en .
+
+# ── Containment (location, not parthood) ────────────────────────────────────
+
+nen2660:contains a owl:ObjectProperty ;
+    rdfs:label "contains"@en ;
+    skos:scopeNote "A spatial region contains the real objects located in it. Location is not parthood: the pump in the service building is contained in it, not part of it, and containment does not chain through parts. Not transitive; irreflexive by shape; a contained object lies within the region's geometry (shape)."@en .
+
+# ── Constitution ─────────────────────────────────────────────────────────────
+
+nen2660:consistsOf a owl:ObjectProperty ;
+    rdfs:label "consists of"@en ;
+    skos:scopeNote "The matter a real object or mixture is made of (steel, concrete). Constitution is not parthood: the steel is not a part of the beam. Not transitive."@en .
+
+# ── Connection ───────────────────────────────────────────────────────────────
+
+nen2660:connectsObject a owl:ObjectProperty ;
+    rdfs:label "connects object"@en ;
+    skos:scopeNote "A connection or interface connects physical objects. No hierarchy, no transitivity; a connection never connects an object to itself (shape)."@en .
+
+nen2660:connectsPort a owl:ObjectProperty ;
+    rdfs:label "connects port"@en ;
+    skos:scopeNote "A connection or interface connects ports of physical objects. No hierarchy, no transitivity."@en .

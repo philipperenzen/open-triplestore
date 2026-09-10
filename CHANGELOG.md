@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **NEN 2660-2 relation profile and consistency shapes**
+  (`examples/seed-bundles/nen2660-relations`). The part-whole, containment,
+  constitution and connection relations with the characteristics OWL can
+  carry — transitivity on proper parthood (`hasPart` and its functional /
+  technical sub-relations) only, never on `contains`, `consistsOf` or
+  `connects*` — and the ones it cannot as SHACL-SPARQL shapes: a
+  decomposition is acyclic and irreflexive, containment and connection are
+  irreflexive, a part's geometry lies within its whole's and is an RCC8
+  proper part of it, a contained object lies within its region (GeoSPARQL,
+  computed at validation time, never asserted). Ships a sample with planted
+  violations; the shapes and sample run in CI, the NEN 2660-2 RDFS file is
+  fetched. The modelling styleguide gains a part-whole section (Keet et al.).
 - **OWL 2 RL: composite `owl:hasKey`, the Table 8 datatype rules, and an
   honest rule inventory.** `prp-key` fires for keys of any length (only
   single-property keys used to); `dt-type1` declares the datatype map and

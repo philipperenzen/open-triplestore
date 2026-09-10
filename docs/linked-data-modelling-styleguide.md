@@ -296,6 +296,30 @@ Link your terms to existing vocabularies instead of re-inventing them:
 
 Keep cross-vocabulary alignments (linksets) in a **dedicated named graph**, separate from the scheme itself.
 
+### 4.x Part-whole, containment and connection
+
+"Has part" is not one relation (Keet, Fernández-Reyes & Morales-González,
+OntoPartS): an asset has a **physical** decomposition, a **functional** one and
+a **spatial** one, and conflating them makes transitive closure wrong — a pump
+*contained in* a service building is not *part of* the building; a footprint
+*within* a plot is not part of the plot. Pick the relation by what the two ends
+are:
+
+| Both ends | Relation (NEN 2660-2) | Transitive? |
+|---|---|---|
+| concrete objects, one composed of the other | `nen2660:hasPart`, refined as `hasTechnicalPart` (physical) or `hasFunctionalPart` (functional) | yes — proper parthood only |
+| a spatial region and an object located in it | `nen2660:contains` | no — location is not parthood |
+| a real object and the matter it is made of | `nen2660:consistsOf` | no |
+| a connection or interface and the objects / ports it joins | `nen2660:connectsObject`, `nen2660:connectsPort` | no |
+
+OWL can say *transitive*; it cannot say *acyclic* or *irreflexive* on the same
+transitive property (OWL 2 DL forbids it), and it cannot compute topology.
+Those are shapes: `examples/seed-bundles/nen2660-relations` ships the profile
+and SHACL-SPARQL shapes for acyclicity, irreflexivity and spatial consistency
+(a part's geometry within its whole's, an RCC8 proper part of it; a contained
+object within its region — computed with GeoSPARQL at validation time, never
+asserted as data). Do not assert `geo:sfWithin` or an RCC8 relation as a triple.
+
 ---
 
 ## 5. Layer 2 — the Information Model (SHACL constraints)

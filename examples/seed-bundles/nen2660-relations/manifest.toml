@@ -1,0 +1,67 @@
+# NEN 2660-2 part-whole, containment and connection relations — a relation
+# *profile* on top of the NEN 2660-2 RDFS model, plus the consistency shapes
+# OWL cannot express (Keet, Fernández-Reyes & Morales-González, OntoPartS):
+# which relations are transitive and which are not, and that a decomposition
+# is acyclic, irreflexive and spatially consistent — a part's geometry lies
+# within its whole's, an RCC8 proper part of it (computed with GeoSPARQL,
+# never asserted).
+#
+# The NEN 2660-2 RDFS file is NOT vendored: run ./fetch.sh once (it downloads
+# the published file next to this manifest; git-ignored). Until then the
+# bundle is skipped at boot with a warning, like any bundle whose payload is
+# missing. The profile, the shapes and the sample are still exercised on
+# every CI run by tests/nen2660_relations_bundle.rs.
+#
+# Source: NEN 2660-2:2022 — https://github.com/nl-digigo/nen2660 (gh-pages,
+# data/nen2660-rdfs.ttl), downloads page
+# https://nl-digigo.github.io/nen2660/-/downloads/
+
+id = "nen2660-relations"
+opt_out_env = "SEED_NEN2660_RELATIONS"
+
+[organisation]
+slug = "nen2660-relations"
+name = "NEN 2660-2 relations"
+description = "The NEN 2660-2 part-whole, containment and connection relations with their characteristics and consistency shapes."
+
+[[data_models]]
+id = "nen2660-relations"
+title = "NEN 2660-2 relation profile"
+namespace = "https://w3id.org/nen2660/def#"
+kind = "model"
+version = "2022"
+description = "NEN 2660-2:2022 RDFS (hasPart, hasFunctionalPart, hasTechnicalPart, contains, consistsOf, connectsObject, connectsPort) plus a profile declaring which relations are transitive and which are not."
+
+# The published RDFS model (fetched), as the version's base graph.
+[[data_models.graphs]]
+iri = "https://example.org/nen2660-relations/nen2660-rdfs"
+role = "model"
+file = "nen2660-rdfs.ttl"
+
+# The relation profile: OWL characteristics on the NEN 2660-2 relations.
+[[data_models.graphs]]
+iri = "https://example.org/nen2660-relations/profile"
+role = "model"
+file = "relations-profile.ttl"
+
+# A sample asset decomposition conforming to the profile: a bridge with a
+# deck and a bearing, a lamp post, a service area with pumps — with
+# geometries — plus three planted violations (a hasPart cycle, a part whose
+# geometry escapes its whole, a region containing itself).
+[[datasets]]
+slug = "nen2660-relations-sample"
+name = "NEN 2660-2 relations sample"
+description = "A bridge decomposed into deck and bearing, a lamp post, a service area with pumps, with geometries; a cycle, an escaped part and a self-containment planted."
+visibility = "public"
+conforms_to = { model = "nen2660-relations", version = "2022" }
+shape_graphs = ["https://example.org/nen2660-relations/shapes"]
+
+[[datasets.graphs]]
+iri = "https://example.org/nen2660-relations/instances"
+role = "instances"
+file = "instances.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/nen2660-relations/shapes"
+role = "shapes"
+file = "shapes.ttl"
