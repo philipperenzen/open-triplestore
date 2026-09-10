@@ -243,6 +243,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Read isolation is pinned, and the `opengraph` MVCC note corrected.** A
+  `SELECT` joining several patterns sees one committed state for its whole
+  duration — oxigraph 0.5 binds one storage snapshot per query — on RocksDB
+  and in memory alike. `tests/read_isolation.rs` races a writer that flips two
+  properties of every subject in one transaction against a reader joining
+  them and observes no torn read; `opengraph/src/mvcc.rs` no longer claims a
+  snapshot per iterator.
 - **SHACL validation at scale.** The engine ran one full SPARQL round trip
   per focus node and property path (three parses, a fresh evaluator with
   forty custom-function registrations and a store-wide `sh:SPARQLFunction`
