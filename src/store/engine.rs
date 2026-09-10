@@ -19,6 +19,18 @@ use crate::geo::spatial_index::SpatialIndex;
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
 
+/// Outcome of one statement of a [`TripleStore::batch_update`] batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchStatement {
+    /// The batch committed; this statement is applied.
+    Applied,
+    /// This statement failed (parse or execution) and the batch was rolled
+    /// back — nothing in it is applied.
+    Failed(String),
+    /// Another statement failed; this one was rolled back (or never ran).
+    RolledBack,
+}
+
 #[derive(Error, Debug)]
 pub enum StoreError {
     #[error("Storage error: {0}")]
@@ -1085,43 +1097,55 @@ impl TripleStore {
         Some((deltas.into_iter().collect(), inserted, deleted))
     }
 
-    /// Execute multiple SPARQL UPDATE statements in a single batch.
+    /// Execute multiple SPARQL UPDATE statements as ONE transaction.
     ///
-    /// All updates are parsed upfront (fail-fast on syntax errors), then
-    /// executed sequentially. The graph index is rebuilt once at the end,
-    /// amortising overhead across the entire batch (3-7x faster than
-    /// individual `update()` calls).
-    pub fn batch_update(
-        &self,
-        statements: &[String],
-    ) -> Result<Vec<Result<(), String>>, StoreError> {
+    /// Every statement is parsed up front; the parsed updates then run in
+    /// order inside a single oxigraph transaction, so a later statement sees
+    /// the effect of an earlier one and the first failure — at parse time or
+    /// at execution — aborts the whole batch with nothing applied. The graph
+    /// index is rebuilt once at the end, amortising overhead across the batch
+    /// (3-7x faster than individual `update()` calls).
+    ///
+    /// Each statement used to run as its own transaction while the endpoint
+    /// documented the batch as atomic: a mid-batch failure left the earlier
+    /// statements applied.
+    pub fn batch_update(&self, statements: &[String]) -> Result<Vec<BatchStatement>, StoreError> {
         let _w = self.begin_write();
-        // Parse all upfront
-        let parsed: Vec<Result<SpargebraUpdate, String>> = statements
-            .iter()
-            .map(|s| {
-                SparqlParser::new()
-                    .parse_update(s)
-                    .map_err(|e| e.to_string())
-            })
-            .collect();
-
-        let opts = self.query_options();
-        let mut results = Vec::with_capacity(statements.len());
-
-        for update in parsed {
-            match update {
-                Ok(u) => match opts.clone().for_update(u).on_store(&self.store).execute() {
-                    Ok(()) => results.push(Ok(())),
-                    Err(e) => results.push(Err(e.to_string())),
-                },
-                Err(e) => results.push(Err(e)),
+        let rolled_back = |failed_at: usize, err: String| -> Vec<BatchStatement> {
+            (0..statements.len())
+                .map(|i| {
+                    if i == failed_at {
+                        BatchStatement::Failed(err.clone())
+                    } else {
+                        BatchStatement::RolledBack
+                    }
+                })
+                .collect()
+        };
+        // Parse everything first: a syntax error anywhere means nothing runs.
+        let mut parsed: Vec<SpargebraUpdate> = Vec::with_capacity(statements.len());
+        for (i, s) in statements.iter().enumerate() {
+            match SparqlParser::new().parse_update(s) {
+                Ok(u) => parsed.push(u),
+                Err(e) => return Ok(rolled_back(i, e.to_string())),
             }
         }
 
+        let opts = self.query_options();
+        let mut tx = self.store.start_transaction()?;
+        for (i, u) in parsed.into_iter().enumerate() {
+            if let Err(e) = opts.clone().for_update(u).on_transaction(&mut tx).execute() {
+                // Dropping the transaction without `commit` discards every
+                // statement that ran before this one.
+                drop(tx);
+                return Ok(rolled_back(i, e.to_string()));
+            }
+        }
+        tx.commit()?;
+
         // Rebuild graph index once for the entire batch
         self.graph_index.rebuild(&self.store);
-        Ok(results)
+        Ok(vec![BatchStatement::Applied; statements.len()])
     }
 
     /// Load RDF data from a reader with the given format.

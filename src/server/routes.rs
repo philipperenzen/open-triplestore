@@ -1085,7 +1085,8 @@ struct BatchUpdateRequest {
 
 /// POST /sparql/batch — execute multiple SPARQL UPDATE statements in one batch.
 ///
-/// Amortises write-lock acquisition and SPARQL parse overhead across all
+/// The batch is one transaction: either every statement is applied or none
+/// is. Amortises write-lock acquisition and SPARQL parse overhead across all
 /// statements (3-7x faster than individual updates). Max 1000 statements.
 async fn sparql_batch_update(
     State(state): State<AppState>,
@@ -1123,16 +1124,22 @@ async fn sparql_batch_update(
     let results = state.store.batch_update(&resolved)?;
 
     // Build per-statement status
+    use crate::store::engine::BatchStatement;
     let statuses: Vec<serde_json::Value> = results
         .iter()
         .enumerate()
         .map(|(i, r)| match r {
-            Ok(()) => serde_json::json!({ "index": i, "status": "ok" }),
-            Err(e) => serde_json::json!({ "index": i, "status": "error", "error": e }),
+            BatchStatement::Applied => serde_json::json!({ "index": i, "status": "ok" }),
+            BatchStatement::Failed(e) => {
+                serde_json::json!({ "index": i, "status": "error", "error": e })
+            }
+            BatchStatement::RolledBack => {
+                serde_json::json!({ "index": i, "status": "rolled_back" })
+            }
         })
         .collect();
 
-    let all_ok = results.iter().all(|r| r.is_ok());
+    let all_ok = results.iter().all(|r| *r == BatchStatement::Applied);
 
     if all_ok {
         Ok((
@@ -1144,10 +1151,14 @@ async fn sparql_batch_update(
         )
             .into_response())
     } else {
+        // One transaction: a failing statement rolls every other statement
+        // back, so `results` names the failure and marks the rest
+        // `rolled_back`. A 200 with the outcome in the body is kept for
+        // compatibility with the previous per-statement response shape.
         Ok((
             StatusCode::OK,
             Json(serde_json::json!({
-                "status": "partial",
+                "status": "rolled_back",
                 "count": results.len(),
                 "results": statuses,
             })),

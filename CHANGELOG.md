@@ -243,6 +243,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **`/sparql/batch` is one transaction.** The endpoint documented the batch
+  as atomic while each statement ran as its own transaction, so a statement
+  that failed at execution left the earlier ones applied. The statements now
+  run in order on one transaction (each sees the previous ones) and the
+  first failure rolls everything back: `status: ok` is unchanged; a failed
+  batch answers `status: rolled_back` with per-statement `results` — the
+  failing statement `error`, every other one `rolled_back`, never `ok` —
+  instead of `partial`. OpenAPI states the real codes (it promised a 204 the
+  handler never sent); see docs/api-reference.md.
 - **Read isolation is pinned, and the `opengraph` MVCC note corrected.** A
   `SELECT` joining several patterns sees one committed state for its whole
   duration — oxigraph 0.5 binds one storage snapshot per query — on RocksDB

@@ -435,8 +435,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/sparql/batch", vec![
         (M::Post, o("SPARQL", "Batched SPARQL update",
-            "Apply several SPARQL updates atomically in one transaction. Requires authentication.",
-            vec![], vec![("204", "All updates applied"), ("400", "Invalid update"), ("401", "Authentication required")], true)),
+            "Apply several SPARQL updates (`{\"updates\": [\"…\", …]}`, at most 1000) as ONE transaction: either every statement is applied or none is. Statements run in order and each sees the effect of the previous ones. Requires authentication.",
+            vec![], vec![("200", "`status: ok` — every statement applied; or `status: rolled_back` with per-statement `results` (`ok` never appears there: the failing statement is `error` with its message, every other one `rolled_back`) — nothing applied"), ("400", "A statement does not parse or is not authorised for this caller; nothing applied"), ("401", "Authentication required")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
