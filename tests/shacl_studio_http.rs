@@ -416,3 +416,62 @@ async fn a_gating_pipeline_whose_shape_graph_is_missing_refuses_the_write() {
         "a refused PUT must leave the graph unchanged"
     );
 }
+
+/// A gating pipeline whose shape graph carries a `sh:sparql` constraint that
+/// cannot be evaluated (the `sh:select` does not parse) must refuse the write
+/// as a gate-evaluation failure — never wave it through because the broken
+/// constraint produced no violations.
+#[tokio::test]
+async fn a_gating_pipeline_with_a_malformed_sparql_constraint_refuses_the_write() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let sg = create_shape_graph(
+        &app,
+        &token,
+        r#"
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+ex:PersonShape a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:sparql [ sh:message "unbalanced" ;
+              sh:select """SELECT $this WHERE { $this ex:name ?n FILTER( """ ] .
+"#,
+    )
+    .await;
+    let (st, _, txt) = json_req(
+        &app,
+        Method::POST,
+        "/api/shacl/pipelines",
+        &token,
+        json!({
+            "name": "broken-gate",
+            "targets": [{ "kind": "graph", "id": DATA_GRAPH }],
+            "shape_graph_ids": [sg],
+            "gate_writes": true,
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "create gating pipeline: {txt}");
+
+    let gsp_uri = format!("/store?graph={}", url_encode(DATA_GRAPH));
+    let (st, body, txt) = send(
+        &app,
+        Method::PUT,
+        &gsp_uri,
+        &token,
+        "text/turtle",
+        "<http://example.org/bob> a <http://example.org/Person> ; <http://example.org/name> \"Bob\" .",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a gate whose constraint cannot be evaluated must refuse the write: {txt}"
+    );
+    assert_eq!(body["conforms"], false, "{txt}");
+    assert_eq!(
+        state.store.count_graph(Some(DATA_GRAPH)).unwrap(),
+        0,
+        "a refused PUT must not land in the graph"
+    );
+}

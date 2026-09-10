@@ -250,6 +250,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   properties of every subject in one transaction against a reader joining
   them and observes no torn read; `opengraph/src/mvcc.rs` no longer claims a
   snapshot per iterator.
+- **SHACL write gates fail closed on an unevaluable `sh:sparql` constraint.**
+  A `sh:select` that did not parse (or errored at evaluation) produced no
+  violations, so the graph conformed by accident and Graph Store writes gated
+  on it went through with 204 — on the dataset `shacl_on_write` path and on
+  Studio gating pipelines alike. Such a constraint now fails the shape load
+  (an ill-formed shapes graph is an error the caller sees: 422 with a
+  gate-evaluation report), a runtime error is a violation of the focus node,
+  and `load_shapes` no longer drops a shape that fails to load with a warning
+  — which required class/predicate targets of blank-node shapes to resolve
+  through the quad index instead of an invalid `<_:…>` SPARQL IRI. The
+  POST-merge gate (`sh:maxCount 1` on a second value) and the stale-cache race
+  were already closed in #347 and are now pinned by tests.
 - **SHACL validation at scale.** The engine ran one full SPARQL round trip
   per focus node and property path (three parses, a fresh evaluator with
   forty custom-function registrations and a store-wide `sh:SPARQLFunction`

@@ -1488,8 +1488,14 @@ pub(crate) fn validate_on_write(
     .map_err(|e| AppError::Internal(format!("Failed to load shapes into temp store: {e}")))?;
 
     let data_graphs = vec![iri.to_string()];
-    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs)
-        .map_err(|e| AppError::Internal(format!("SHACL validation error: {e}")))?;
+    // Fail closed: a shapes graph the engine cannot evaluate (an ill-formed
+    // shape, a `sh:sparql` that does not parse) refuses the write with the
+    // same 422 report the Studio gates use, not a 500 and never a 204.
+    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs).map_err(|e| {
+        AppError::ValidationFailed(crate::shacl_studio::gate::gate_error(format!(
+            "dataset shapes graph <{shapes_graph_iri}>: {e}"
+        )))
+    })?;
 
     // Continuous mode (Phase 5): record a report for this validate-on-write so it
     // shares the on-demand report history. Best-effort — a storage hiccup (or a

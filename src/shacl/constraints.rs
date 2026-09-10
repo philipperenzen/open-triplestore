@@ -454,24 +454,47 @@ pub(crate) fn evaluate_constraint_with_values(
                 return results;
             }
             let query = bind_this(select, focus_node, view.data_graphs);
-            if let Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) =
-                view.store.query(&query)
-            {
-                for solution in solutions.filter_map(|s| s.ok()) {
-                    let msg = message.as_deref().unwrap_or("SPARQL constraint violated");
-                    let value = solution.get("value").map(|v| v.to_string());
-                    let path_val = solution.get("path").map(|v| v.to_string());
+            // A constraint that cannot be evaluated is a failure, not a pass:
+            // `if let Ok(..)` used to drop the error, so a `sh:select` that did
+            // not parse (or a SELECT that errored at evaluation) produced no
+            // violations and the focus node conformed by accident — and a
+            // write gate built on it waved the write through.
+            let unevaluable = |reason: String| ValidationResult {
+                severity: Severity::Violation,
+                focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
+                path: path_str(),
+                value: None,
+                source_shape: shape_iri.to_string(),
+                source_constraint: "sh:SPARQLConstraint".to_string(),
+                message: format!("SPARQL constraint could not be evaluated: {reason}"),
+            };
+            match view.store.query(&query) {
+                Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
+                    for solution in solutions {
+                        let solution = match solution {
+                            Ok(s) => s,
+                            Err(e) => {
+                                results.push(unevaluable(e.to_string()));
+                                break;
+                            }
+                        };
+                        let msg = message.as_deref().unwrap_or("SPARQL constraint violated");
+                        let value = solution.get("value").map(|v| v.to_string());
+                        let path_val = solution.get("path").map(|v| v.to_string());
 
-                    results.push(ValidationResult {
-                        severity: eff_severity.clone(),
-                        focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
-                        path: path_val.or_else(path_str),
-                        value,
-                        source_shape: shape_iri.to_string(),
-                        source_constraint: "sh:SPARQLConstraint".to_string(),
-                        message: msg.to_string(),
-                    });
+                        results.push(ValidationResult {
+                            severity: eff_severity.clone(),
+                            focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
+                            path: path_val.or_else(path_str),
+                            value,
+                            source_shape: shape_iri.to_string(),
+                            source_constraint: "sh:SPARQLConstraint".to_string(),
+                            message: msg.to_string(),
+                        });
+                    }
                 }
+                Ok(_) => results.push(unevaluable("sh:select must be a SELECT query".to_string())),
+                Err(e) => results.push(unevaluable(e.to_string())),
             }
         }
 
@@ -855,6 +878,22 @@ pub(crate) fn evaluate_constraint_with_values(
 /// injected at the start of the outermost `WHERE { … }` block, so it works in the
 /// SELECT projection and `GROUP BY` of aggregate validators — unlike textual
 /// substitution, which yields invalid SPARQL (`SELECT <iri>` / `GROUP BY <iri>`).
+/// Parse-check a `sh:select` the way it will be run — `$this` bound to a
+/// placeholder focus node, the `sh:prefixes` prologue already prepended — so
+/// a shapes graph whose SPARQL constraint cannot be evaluated fails to load
+/// (and a write gate built on it refuses the write) instead of silently
+/// producing no violations.
+pub(crate) fn check_sparql_constraint(select: &str) -> Result<(), String> {
+    let placeholder = Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(
+        "urn:ots:shacl:focus",
+    ));
+    let query = bind_this(select, &placeholder, &["urn:ots:shacl:data".to_string()]);
+    opengraph::spargebra::SparqlParser::new()
+        .parse_query(&query)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 fn bind_this(select: &str, focus_node: &Term, data_graphs: &[String]) -> String {
     // N-Triples serialisation is valid in VALUES for IRIs and literals.
     let focus_nt = focus_node.to_string();

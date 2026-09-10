@@ -281,10 +281,14 @@ fn load_shapes(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Shape>, St
     let mut shapes = Vec::new();
 
     for shape_iri in &shape_iris {
-        match load_single_shape(store, shapes_graph, shape_iri) {
-            Ok(shape) => shapes.push(shape),
-            Err(e) => warn!("Failed to load shape <{}>: {}", shape_iri, e),
-        }
+        // A shape that cannot be loaded is an ill-formed shapes graph, and
+        // validation against it is an error the caller must see — the write
+        // gate turns it into 422. Dropping the shape with a warning made the
+        // graph conform by omission: a `sh:sparql` constraint that did not
+        // parse silently disabled its whole shape.
+        let shape = load_single_shape(store, shapes_graph, shape_iri)
+            .map_err(|e| format!("failed to load shape <{shape_iri}>: {e}"))?;
+        shapes.push(shape);
     }
 
     Ok(shapes)
@@ -363,15 +367,14 @@ fn load_targets(
 ) -> Result<Vec<Target>, String> {
     let mut targets = Vec::new();
 
+    // Class / predicate targets are resolved through the raw quad index (like
+    // sh:targetNode below), not a SPARQL query with `<{shape_iri}>`: the shape
+    // query also returns blank-node shapes (inline sh:and/sh:or/sh:node
+    // members), for which `<_:…>` is not a valid IRI and the query errored.
+    // `load_shapes` used to drop such shapes with a warning; now that a shape
+    // that fails to load fails the run, the loader must not fail on them.
     // sh:targetClass
-    let classes = execute_select_single(
-        store,
-        &format!(
-            "SELECT ?v WHERE {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}targetClass> ?v }} }}"
-        ),
-        "v",
-    )?;
-    for c in classes {
+    for c in multi_values(store, shapes_graph, shape_iri, &format!("{SH}targetClass")) {
         targets.push(Target::TargetClass(c));
     }
 
@@ -386,26 +389,22 @@ fn load_targets(
     }
 
     // sh:targetSubjectsOf
-    let preds = execute_select_single(
+    for p in multi_values(
         store,
-        &format!(
-            "SELECT ?v WHERE {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}targetSubjectsOf> ?v }} }}"
-        ),
-        "v",
-    )?;
-    for p in preds {
+        shapes_graph,
+        shape_iri,
+        &format!("{SH}targetSubjectsOf"),
+    ) {
         targets.push(Target::TargetSubjectsOf(p));
     }
 
     // sh:targetObjectsOf
-    let preds = execute_select_single(
+    for p in multi_values(
         store,
-        &format!(
-            "SELECT ?v WHERE {{ GRAPH <{shapes_graph}> {{ <{shape_iri}> <{SH}targetObjectsOf> ?v }} }}"
-        ),
-        "v",
-    )?;
-    for p in preds {
+        shapes_graph,
+        shape_iri,
+        &format!("{SH}targetObjectsOf"),
+    ) {
         targets.push(Target::TargetObjectsOf(p));
     }
 
@@ -724,8 +723,16 @@ fn load_constraints(
             // overrides the shape-level severity for this constraint's results.
             let severity =
                 single_value(store, shapes_graph, &sparql_node, &format!("{SH}severity"));
+            let select = format!("{prefixes}{select}");
+            // Fail closed at load time: a `sh:select` that does not parse is an
+            // ill-formed shapes graph, and validation against it must be an
+            // error the caller sees (the write gate turns it into 422), never
+            // a shape that quietly never fires.
+            super::constraints::check_sparql_constraint(&select).map_err(|e| {
+                format!("shape <{shape_iri}>: sh:sparql constraint does not parse: {e}")
+            })?;
             constraints.push(Constraint::SparqlConstraint {
-                select: format!("{prefixes}{select}"),
+                select,
                 message,
                 severity,
             });

@@ -76,7 +76,7 @@ fn seed_existing_graph(
 /// with a `ValidationReport`, an infrastructure failure is reported as a
 /// non-conforming report naming the reason, so the caller's existing 422 path
 /// carries it to the client.
-fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
+pub(crate) fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
     use crate::shacl::report::{Severity, ValidationResult};
     let message = format!(
         "SHACL write gate could not be evaluated, so the write was refused: {reason}. This is a \

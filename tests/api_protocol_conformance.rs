@@ -448,6 +448,17 @@ async fn sparql_update_authenticated_succeeds() {
 /// Build an app whose dataset `d1` validates writes to `urn:data:d1` against a
 /// blank-node property shape requiring `ex:name` on every `ex:Person`.
 async fn app_with_shacl_on_write() -> (Router, String) {
+    app_with_shacl_on_write_shapes(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> . @prefix ex: <http://example.org/> . \
+         ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ; \
+         sh:property [ sh:path ex:name ; sh:minCount 1 ] .",
+    )
+    .await
+}
+
+/// As [`app_with_shacl_on_write`], gating writes to `urn:data:d1` on `shapes`
+/// (Turtle) instead of the default minCount shape.
+async fn app_with_shacl_on_write_shapes(shapes: &str) -> (Router, String) {
     use open_triplestore::auth::models::{OwnerType, Visibility};
     let (state, token) = admin_state();
     state
@@ -478,9 +489,7 @@ async fn app_with_shacl_on_write() -> (Router, String) {
     state
         .store
         .load_str(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> . @prefix ex: <http://example.org/> . \
-             ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ; \
-             sh:property [ sh:path ex:name ; sh:minCount 1 ] .",
+            shapes,
             oxigraph::io::RdfFormat::Turtle,
             Some("urn:shapes:d1"),
         )
@@ -583,4 +592,116 @@ async fn shacl_on_write_post_merge_still_rejects_violations() {
         StatusCode::UNPROCESSABLE_ENTITY,
         "a merge that introduces a violation must still be rejected, got {st}: {body}"
     );
+}
+
+/// The audit's sharper merge probe: a POST that adds a SECOND `ex:name` to a
+/// node that already has one must be rejected under `sh:maxCount 1`. Only a
+/// gate that validates the merged future state (existing graph + payload) can
+/// see the violation — the payload alone carries one name and conforms.
+#[tokio::test]
+async fn shacl_on_write_post_second_value_under_max_count_1_is_422() {
+    let (app, token) = app_with_shacl_on_write_shapes(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> . @prefix ex: <http://example.org/> . \
+         ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ; \
+         sh:property [ sh:path ex:name ; sh:maxCount 1 ] .",
+    )
+    .await;
+    let (st, body, _) = send(
+        &app,
+        Method::PUT,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://example.org/p5> a <http://example.org/Person> ; \
+         <http://example.org/name> \"Ada\" .",
+    )
+    .await;
+    assert!(st.is_success(), "seed PUT must succeed, got {st}: {body}");
+
+    let (st, body, _) = send(
+        &app,
+        Method::POST,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://example.org/p5> a <http://example.org/Person> ; \
+         <http://example.org/name> \"Augusta\" .",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a merge that adds a second value under sh:maxCount 1 must be rejected, got {st}: {body}"
+    );
+    assert_eq!(body_json_value(&body)["conforms"], false, "{body}");
+
+    let (st, graph, _) = send(
+        &app,
+        Method::GET,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        None,
+        Some("application/n-triples"),
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "GET => {st}");
+    assert!(
+        graph.contains("Ada") && !graph.contains("Augusta"),
+        "a rejected POST must leave the graph unchanged: {graph:?}"
+    );
+}
+
+/// A gate that cannot be evaluated must refuse the write. A `sh:sparql`
+/// constraint whose `sh:select` does not parse used to yield no violations
+/// (`if let Ok(..) = store.query(..)` swallowed the error), so the graph
+/// conformed by accident and the write went through with 204.
+#[tokio::test]
+async fn shacl_on_write_gate_with_malformed_sparql_constraint_fails_closed_422() {
+    let (app, token) = app_with_shacl_on_write_shapes(
+        "@prefix sh: <http://www.w3.org/ns/shacl#> . @prefix ex: <http://example.org/> . \
+         ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ; \
+         sh:sparql [ sh:message \"unbalanced\" ; \
+                     sh:select \"\"\"SELECT $this WHERE { $this ex:name ?n FILTER( \"\"\" ] .",
+    )
+    .await;
+    let (st, body, _) = send(
+        &app,
+        Method::PUT,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://example.org/p6> a <http://example.org/Person> ; \
+         <http://example.org/name> \"Bob\" .",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a gate whose SPARQL constraint cannot be evaluated must fail closed, got {st}: {body}"
+    );
+    assert_eq!(body_json_value(&body)["conforms"], false, "{body}");
+
+    let (st, graph, _) = send(
+        &app,
+        Method::GET,
+        graph_uri("urn:data:d1"),
+        Some(&token),
+        None,
+        Some("application/n-triples"),
+        "",
+    )
+    .await;
+    assert!(st.is_success(), "GET => {st}");
+    assert!(
+        !graph.contains("p6"),
+        "a refused PUT must not land in the graph: {graph:?}"
+    );
+}
+
+fn body_json_value(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
 }

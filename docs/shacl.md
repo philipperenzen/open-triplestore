@@ -108,6 +108,8 @@ When `shacl_on_write` is `true` on a dataset and a `shapes_graph_iri` is configu
 
 If validation fails, the write is rejected with **422 Unprocessable Entity** and the JSON report is returned. The store is not modified.
 
+The gate fails **closed**: a gate that cannot be evaluated refuses the write with the same 422 and a report naming the cause, never a 204. That covers a shapes graph that cannot be read or copied, a validation-engine error, and an ill-formed shapes graph — in particular a `sh:sparql` constraint whose `sh:select` does not parse (or errors at evaluation) is a violation of the focus node, not a constraint that silently never fires. Loading such a shapes graph for on-demand validation fails with an error for the same reason.
+
 ### Enable via API
 
 ```bash
