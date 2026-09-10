@@ -132,7 +132,7 @@ libc = "0.2"
 oxigraph = "0.5"
 oxrdf = "0.3"
 # Needed only to name `Iri` in the federation service-handler trait; already in the tree.
-oxiri = "0.2.11"
+oxiri = "0.3.1"
 spargebra = "0.4"
 
 # OpenGraph — our maintained engine layer over Oxigraph. Provides durable
