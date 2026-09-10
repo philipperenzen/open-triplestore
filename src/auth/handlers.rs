@@ -539,7 +539,7 @@ pub(crate) fn auth_cookie_headers(
 }
 
 /// Build `Set-Cookie` headers that clear access and refresh tokens on logout.
-fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
+pub(crate) fn clear_auth_cookie_headers(secure: bool) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let secure_attr = if secure { "; Secure" } else { "" };
     for (name, path) in &[("access_token", "/"), ("refresh_token", "/api/auth")] {

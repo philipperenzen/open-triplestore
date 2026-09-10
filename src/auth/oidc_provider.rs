@@ -27,9 +27,9 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::extract::{Query, State};
+use axum::http::{header::LOCATION, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form, Json};
 use base64::Engine;
 use jsonwebtoken::{
@@ -329,6 +329,7 @@ pub async fn discovery(State(state): State<AppState>) -> Json<serde_json::Value>
         "token_endpoint": format!("{base}/oauth/token"),
         "jwks_uri": format!("{base}/oauth/jwks"),
         "userinfo_endpoint": format!("{base}/oauth/userinfo"),
+        "end_session_endpoint": format!("{base}/oauth/logout"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
@@ -337,6 +338,123 @@ pub async fn discovery(State(state): State<AppState>) -> Json<serde_json::Value>
         "id_token_signing_alg_values_supported": ["ES256"],
         "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
     }))
+}
+
+/// Query parameters of an RP-initiated logout (OpenID Connect RP-Initiated
+/// Logout 1.0). Every field is optional; `id_token_hint` is accepted and
+/// ignored (the browser session cookie is the authority on who is signed in).
+#[derive(Debug, Deserialize)]
+pub struct EndSessionRequest {
+    pub client_id: Option<String>,
+    pub post_logout_redirect_uri: Option<String>,
+    pub state: Option<String>,
+    #[allow(dead_code)]
+    pub id_token_hint: Option<String>,
+}
+
+/// Origin (scheme + host + port) of an absolute URL, or None when unparsable.
+fn url_origin(raw: &str) -> Option<String> {
+    let u = url::Url::parse(raw).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = u.host_str()?;
+    Some(match u.port() {
+        Some(p) => format!("{}://{}:{}", u.scheme(), host, p),
+        None => format!("{}://{}", u.scheme(), host),
+    })
+}
+
+/// A post-logout destination is allowed only on the ORIGIN of a registered
+/// client's redirect URI — the same allowlist that gates the login return leg —
+/// so this endpoint can never be used as an open redirector. With a client_id
+/// the check is scoped to that client; without one, to any registered client.
+fn post_logout_redirect_allowed(db: &AuthDb, client_id: Option<&str>, target: &str) -> bool {
+    let Some(origin) = url_origin(target) else {
+        return false;
+    };
+    let clients = match client_id {
+        Some(id) => db
+            .get_oauth_client(id)
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        None => db.list_oauth_clients().unwrap_or_default(),
+    };
+    clients
+        .iter()
+        .flat_map(|c| c.redirect_uris.iter())
+        .filter_map(|u| url_origin(u))
+        .any(|o| o == origin)
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| {
+            c.split(';').find_map(|p| {
+                p.trim()
+                    .strip_prefix(&format!("{name}="))
+                    .map(str::to_string)
+            })
+        })
+}
+
+/// GET /oauth/logout — the `end_session_endpoint`.
+///
+/// Ends the store's own browser session (revokes the refresh token carried by
+/// the session cookie, clears both auth cookies), then sends the browser to
+/// `post_logout_redirect_uri` when that is on a registered client's origin —
+/// with `state` echoed — or to the store's sign-in page otherwise. Without
+/// this, a client app's "sign out" only dropped its own tokens: the next
+/// "sign in" silently re-authenticated from the surviving store session,
+/// which on a shared machine hands the account to the next person.
+pub async fn end_session(
+    State(state): State<AppState>,
+    State(cookie_config): State<crate::server::CookieConfig>,
+    headers: HeaderMap,
+    Query(req): Query<EndSessionRequest>,
+) -> Response {
+    let db = state.auth_db.clone();
+    if let Some(tok) = cookie_value(&headers, "refresh_token") {
+        if let Ok(claims) = super::jwt::verify_token(&state.jwt_config, &tok) {
+            if claims.token_type == "refresh" {
+                if let Ok(Some(stored)) = db.get_refresh_token_by_hash(&hash_token(&tok)) {
+                    let _ = db.revoke_refresh_token(&stored.id);
+                }
+            }
+        }
+    }
+
+    let base = state.base_url.trim_end_matches('/').to_string();
+    let allowed_target = req
+        .post_logout_redirect_uri
+        .as_deref()
+        .filter(|t| post_logout_redirect_allowed(&db, req.client_id.as_deref(), t));
+    let location = match allowed_target {
+        Some(target) => match req.state.as_deref().filter(|s| !s.is_empty()) {
+            Some(st) => {
+                let sep = if target.contains('?') { '&' } else { '?' };
+                format!(
+                    "{target}{sep}state={}",
+                    percent_encoding::utf8_percent_encode(st, percent_encoding::NON_ALPHANUMERIC)
+                )
+            }
+            None => target.to_string(),
+        },
+        None => format!("{base}/login"),
+    };
+
+    let mut out = super::handlers::clear_auth_cookie_headers(cookie_config.secure);
+    match axum::http::HeaderValue::from_str(&location) {
+        Ok(v) => {
+            out.insert(LOCATION, v);
+            (StatusCode::FOUND, out).into_response()
+        }
+        Err(_) => (StatusCode::BAD_REQUEST, out, "invalid redirect").into_response(),
+    }
 }
 
 /// GET /oauth/jwks
