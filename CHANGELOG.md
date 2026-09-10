@@ -14,6 +14,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Official W3C SPARQL 1.1 test suite in CI.** The query and update
+  sections of `w3c/rdf-tests` (485 entries) are vendored under
+  `tests/fixtures/w3c-sparql11/` and run manifest-driven through the store
+  by `tests/w3c_sparql11_manifests.rs`: 475 pass, 10 known failures (all
+  oxigraph 0.5 evaluator behaviours, listed in docs/conformance/sparql11.md),
+  two-way ratchet with a pass floor. The generated conformance table now
+  scores three vendored corpora.
 - **OTL-scale benchmark.** `examples/scale_otl.rs` generates asset-shaped
   data at scale and measures load, six query shapes (cache off), SHACL over
   every asset and a concurrent writers-plus-readers phase;
