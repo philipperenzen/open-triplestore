@@ -224,3 +224,174 @@ branch, with the container loop described at the top of this file.
 - **No changelog restructuring was committed**: the brief's "draft the 0.6.0
   section" is moot (it exists); what is needed is the maintainer's decision
   on the tag plus the corrections above, which touch security claims.
+
+## Phase P1 — semantics (2026-09-10)
+
+### 1. Identity policy for `owl:sameAs` — implemented (`61da6a2`)
+
+Probe first: the RL engine ran the Table 4 equality rules (`eq-sym`, `eq-trans`,
+`eq-rep-s/p/o`) unconditionally, over every reasoning source including
+`linkset`-role graphs, and the DL bridge's RL phase ran **unscoped** (it built
+its own `Owl2RlReasoner` without `with_sources`, so it read the whole store).
+A cross-dataset `owl:sameAs` in a linkset therefore merged both resources'
+properties into the entailment graph.
+
+Decision record. The brief asked for a per-dataset `identity ∈ {sameas-off,
+sameas-narrow, sameas-full}`. Asked which default a dataset should get, the
+maintainer first clicked `sameas-off` by accident and withdrew it ("do not do
+sameas-off yet"); on re-presentation the instruction was: *configurable per
+dataset or organisation, in settings, with a simple description and example
+for users; disagree if you like*. Implemented as instructed: an
+organisation-level setting inherited by the datasets it owns, a dataset-level
+override, and a built-in fallback of **`sameas-narrow`** (equality rules run,
+only over the dataset's own graphs) — the choice that keeps a single dataset's
+reasoning intact while never letting a linkset merge resources unasked; it is a
+one-line change (`IdentityPolicy::default`) to `sameas-full` if the
+maintainer prefers. The Settings *UI* is `frontend/`, outside this phase's
+edit scope — follow-up: two selects (organisation page, dataset page) over
+`GET/PUT/DELETE /api/organisations/:id/identity` and
+`/api/datasets/:id/identity`; the `GET` answers already carry
+`identity_options` with the user-facing descriptions.
+
+Mechanics: `src/reasoning/identity.rs` (`IdentityPolicy`, the
+`CORRESPONDENCE_PREDICATES` that never feed equality: `prov:specializationOf`,
+`prov:alternateOf`, the SKOS match properties, `rdfs:seeAlso`); the Table 4
+block runs only when `propagates_same_as()`; `entailment.rs` keeps the setting
+in its own lazily created SQLite table (`identity_policy(scope,id)`), computes
+the effective policy (dataset → organisation → default) and filters
+`GraphKind::Linkset` graphs out of the reasoning sources unless the policy is
+`sameas-full`; `GET …/entailment` reports `identity`, `identity_source`,
+`identity_options` and the effective `reasoning_sources`. The DL bridge's RL
+phase is now scoped and carries the policy. Since correspondence predicates are
+not `owl:sameAs`, no rule ever fires on them; the test pins that under every
+policy. Docs: `docs/reasoning.md` (policy table, bridge/BIM example, curl),
+`docs/named-graphs.md` (linkset role), the modelling styleguide (IRI rule
+narrowed; `owl:sameAs` vs `prov:specializationOf` rows). Tests:
+`tests/reasoning_http.rs::identity_policy` (5). No route, status code or JSON
+field changed; the identity endpoints are additions (OpenAPI mounted).
+
+### 2. `owl:hasKey`, OWL 2 RL Table 8, rule inventory, incremental materialisation — implemented (`1a101c9`)
+
+- `prp-key` matched `rdf:first ?p ; rdf:rest rdf:nil` — single-property keys
+  only; a composite key produced no `owl:sameAs` at all (probe:
+  `prp_key_composite_merges_only_when_every_key_property_matches` failed).
+  Keys are now read from the quad index (class + property list per
+  `owl:hasKey`, list walk capped at 64 cells) and one INSERT per key joins
+  every key property.
+- Table 8: `dt-type1` declares the 32 RL datatypes as `rdfs:Datatype`
+  once per run — which is why `dl_empty_store_ok` now expects 32 derived
+  triples on an empty store; `dt-not-type` makes a literal outside its
+  datatype's lexical space (`"abc"^^xsd:integer`) an `Inconsistency`, using
+  the same lexical rules `sh:datatype` uses (`constraints::xsd_lexical_valid`,
+  now `pub(crate)`). `dt-type2`, `dt-eq`, `dt-diff` need literal subjects and
+  are documented as not representable in an RDF store.
+- The module claimed "the complete OWL 2 RL rule set". It runs 63 of the 78
+  RL/RDF rules; `IMPLEMENTED_RULES` / `UNIMPLEMENTED_RULES` (each with its
+  reason) are pinned against the specification's list by
+  `rule_inventory_is_the_whole_rl_rule_set`, and `docs/owl2-rl.md` lists both.
+- Incremental per-dataset materialisation, scoped to the one write that only
+  adds quads: a Graph Store `POST` calls `entailment::after_additive_write`,
+  which extends the entailment graph (rules re-run to fixed point on top of
+  the existing consequences) instead of clearing and rebuilding; every other
+  write still rebuilds. Runs record the store write generation, so a write
+  that changed nothing triggers no run, and an extension is only used after a
+  successful full run.
+
+Tests: `tests/owl2_rl_conformance.rs` (+7; the `ask_tg` helper gained
+`xsd:`/`ex:` prefixes), `tests/owl2_dl_conformance.rs` (expectation updated).
+
+### 3. NEN 2660-2 relation seed bundle — implemented (`40bedc3`)
+
+`examples/seed-bundles/nen2660-relations/`: `relations-profile.ttl` gives
+the seven relations the characteristics OWL can carry — `nen2660:hasPart`
+transitive, `hasFunctionalPart`/`hasTechnicalPart` sub-properties of it (so
+proper parthood is transitive through the hierarchy), `contains`,
+`consistsOf`, `connectsObject`, `connectsPort` plain object properties (Keet,
+Fernández-Reyes & Morales-González: containment, constitution and connection
+are not transitive) — and `shapes.ttl` the ones it cannot, as SHACL-SPARQL:
+acyclic decomposition (`(hasPart|hasFunctionalPart|hasTechnicalPart)+` back
+to `$this`), irreflexive containment/connection, a part's geometry
+`geof:sfWithin` its whole's and an RCC8 proper part of it
+(`rcc8tpp`/`rcc8ntpp`/`rcc8eq`), a contained object within its region. The
+sample decomposes a bridge and plants a cycle, an escaped part, an outside
+pump and a self-containment; `tests/nen2660_relations_bundle.rs` asserts
+exactly those six (shape, focus) results and that `hasPart` is transitive
+under OWL 2 RL while `contains` is not. The NEN 2660-2 RDFS file is fetched
+(`fetch.sh`, maintainer approved the download) and git-ignored; the bundle
+end-to-end test skips green without it. `docs/plugins.md` lists the bundle;
+the styleguide gains "Part-whole, containment and connection".
+
+### 4. SHACL-AF completion and strict SHACLC — implemented (`ccf164a`)
+
+Vendored the W3C SHACL test suite's `sparql/` section (maintainer approved;
+28 files, w3c/data-shapes `9c86396`; PROVENANCE.md updated). First run of the
+new material — components, pre-binding, rule modifiers, strict SHACLC — was
+15/23 on `sparql/`; what the suite found:
+
+- the per-thread constraint-component cache was keyed on (shapes graph,
+  write generation) and served one store's declarations to the next store
+  with the same graph name and generation (every test store). `TripleStore`
+  now has a process-unique `instance_id` (shared by clones) and the key
+  includes it;
+- `bound($this)` → `true` is not a SPARQL `Constraint`; it is `(true)`;
+- `$PATH` in a `sh:sparql` on a property shape was left as a variable and
+  matched every predicate (`sparql/property/sparql-001`);
+- `sh:prefixes` did not follow `owl:imports` (`sparql/node/prefixes-001`);
+- a triple rule's literal object lost its datatype (`sh:object true` was
+  inserted as the string `"true"`) — a pre-existing bug the new
+  `sh:order`/`sh:condition` tests tripped over.
+
+Final: `core` 97 / 1 known-fail / 15 aux skips (unchanged), `sparql` 22 / 1
+/ 0; runner floor 110, skip ceiling 20, `sht:Failure` cases pass when
+validation returns an error. The remaining `sparql` gap is
+`pre-binding/shapesGraph-001` (`$shapesGraph`/`$currentShape`); a constraint
+that uses them fails the shapes graph at load — the honest behaviour for a
+processor that does not expose the shapes graph — rather than passing with
+the variables unbound. The §5.3.2 restrictions (`MINUS`, `VALUES`, `SERVICE`,
+nested `SELECT` not projecting `$this`, `AS $this`) are detected at load time
+by a small lexer (`prebinding_violation`), so an ill-formed shapes graph fails
+to load and the write gate built on it fails closed. SHACLC: `parse` is strict
+(position-naming error), `parse_lenient` keeps the old behaviour,
+`?lenient=true|1` on `PUT …/shapes` and `POST /api/shaclc/parse` selects it —
+a 400 on input that previously produced an *empty* shapes graph and a 200; no
+existing status code or field changed (`docs/api-reference.md`, OpenAPI).
+
+Tests: `tests/shacl_conformance.rs` (+4), `tests/shacl_rules_conformance.rs`
+(+3), `tests/shaclc_conformance.rs` (lenient test replaced by strict + lenient
++ HTTP `?lenient`), `tests/w3c_shacl_conformance.rs` (two sections).
+
+## Checkpoint (2026-09-10, HEAD `ccf164a` + this note)
+
+| Check | Result |
+|---|---|
+| `cargo test --workspace --features full,saml,test-utils,backup-encrypt,alerting,plugin-hello,plugin-accounts-dashboard --locked --no-fail-fast` | 82 test binaries + 5 doc-test runs: **2984 passed, 0 failed, 1 ignored** (`api_comprehensive_test::performance::bulk_insert_100k`, the documented perf stress test); ~11.5 min in the container |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --features <same> -- -D warnings` | clean |
+| `scripts/conformance_table.py --check` | regenerated (test counts; W3C SHACL row 136 cases / 119 pass / 2 known), check passes |
+
+Commits on `feat/improvements` after P0's `d674fad`/`f105ed3`: `61da6a2` item 1,
+`1a101c9` item 2, `40bedc3` item 3, `ccf164a` item 4, then this note.
+Nothing pushed, nothing tagged.
+
+Notes and follow-ups (none blocking):
+
+- `saved_queries::testing::tests::version_bump_records_ok_then_changed` failed
+  once during item 2 (orders by a second-resolution timestamp) and passed on
+  rerun; pre-existing, unrelated, not touched.
+- `scripts/conformance_table.py` labels the W3C SHACL runner "SHACL Core" and
+  prints "floor ≥90"; the runner now covers Core + SHACL-SPARQL with floor 110.
+  `scripts/` is outside this phase's edit scope — a two-constant change
+  (`CORPUS` label, `CORPUS_RUNNERS` floor) for the maintainer.
+- Identity policy Settings UI (`frontend/`, out of scope) — see item 1.
+- `docs/notes/open-triplestore-painpoints.md`, which this log links to, is not
+  in the repository (the programme text lives in the session brief); either
+  commit it or drop the link.
+- The reasoning-source filter for linksets lives in `entailment.rs`
+  (`reasoning_sources`) because `conformance::resolve` is used by
+  non-reasoning callers; a caller that reaches `conformance::resolve(...)
+  .reasoning_sources` directly still sees linksets.
+
+**Handoff:** the next session runs phase P2 — *design notes only*
+(`docs/notes/analytical-mirror-design.md`, `docs/notes/shacl-to-sql-design.md`,
+the repair layer and delta-versioning notes); implementation needs explicit
+approval. Same branch, same container loop.
