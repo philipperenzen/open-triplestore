@@ -8438,6 +8438,19 @@ pub fn reasoning_routes() -> Router<AppState> {
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
+        // Identity policy (owl:sameAs) — per dataset and per organisation.
+        .route(
+            "/api/datasets/:dataset_id/identity",
+            get(crate::entailment::get_dataset_identity)
+                .put(crate::entailment::put_dataset_identity)
+                .delete(crate::entailment::delete_dataset_identity),
+        )
+        .route(
+            "/api/organisations/:org_id/identity",
+            get(crate::entailment::get_org_identity)
+                .put(crate::entailment::put_org_identity)
+                .delete(crate::entailment::delete_org_identity),
+        )
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -8461,6 +8474,7 @@ pub(crate) fn run_regime(
     regime: &str,
     sources: Option<Vec<String>>,
     target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
 ) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
     let _sources: Vec<String> = sources.clone().unwrap_or_default();
     // Apply the scope to whichever reasoner the regime selects.
@@ -8477,7 +8491,7 @@ pub(crate) fn run_regime(
     }
     // Silence unused-variable warnings for the case where no reasoning feature is
     // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, target);
+    let _ = (&state, target, identity);
 
     // Match returns Some(report) for a recognised regime or None for an unknown one.
     // Both branches are always present in the match so no unreachable-code warning fires.
@@ -8495,9 +8509,9 @@ pub(crate) fn run_regime(
         }
         #[cfg(feature = "owl2-rl")]
         "owl2-rl" => {
-            let m =
-                scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
-                    .with_target(target));
+            let m = scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
+                .with_target(target)
+                .with_identity_policy(identity));
             Some(
                 m.materialize()
                     .map_err(|e| AppError::Internal(e.to_string()))?,
@@ -8549,7 +8563,7 @@ pub(crate) fn run_regime(
                 }
                 _ => Box::new(NativeTableauStub),
             };
-            let bridge = ExternalReasonerBridge::new(reasoner);
+            let bridge = ExternalReasonerBridge::new(reasoner).with_identity_policy(identity);
             Some(
                 bridge
                     .materialize(&state.store, &_sources, target)
@@ -8612,6 +8626,10 @@ async fn reasoning_materialize(
     // dataset's named graphs were invisible to this endpoint however it was
     // called. Scoped now: a dataset's conformance layer, explicit graphs the
     // caller may read, or (neither given) the default graph as before.
+    // A dataset run applies the dataset's identity policy (what owl:sameAs
+    // may do, whether linksets are premises); an unscoped run reads whatever
+    // it is given and keeps the full behaviour.
+    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
     let sources: Option<Vec<String>> = if let Some(ds_id) = body.dataset.as_deref() {
         let ds = state
             .auth_db
@@ -8625,7 +8643,8 @@ async fn reasoning_materialize(
         if !visible {
             return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
-        let mut layer = crate::conformance::resolve(&state, &ds).reasoning_sources;
+        let (mut layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
+        identity = effective.policy;
         for g in body.source_graphs.clone().unwrap_or_default() {
             if !check_graph_read_access(&state, Some(&user), &g)
                 .map_err(|e| AppError::Internal(e.to_string()))?
@@ -8651,7 +8670,7 @@ async fn reasoning_materialize(
     } else {
         None
     };
-    let report = run_regime(&state, &body.regime, sources.clone(), &target)?;
+    let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
 
     match report {
         Some(r) => Ok((

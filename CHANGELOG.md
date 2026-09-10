@@ -14,6 +14,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Identity policy — what reasoning does with `owl:sameAs`.** Per
+  organisation (inherited by the datasets it owns) and per dataset:
+  `sameas-off` (the OWL 2 RL equality rules never run), `sameas-narrow` (the
+  built-in default: they run over the dataset's own graphs, `linkset`-role
+  graphs are not premises, so a cross-source sameAs never leaks attributes
+  between representations) or `sameas-full` (the previous behaviour).
+  `GET/PUT/DELETE /api/datasets/:id/identity` and
+  `…/api/organisations/:id/identity`; `GET …/entailment` reports the policy
+  in force, its source and the effective reasoning sources; `PUT
+  …/entailment` accepts `identity`. Typed correspondences
+  (`prov:specializationOf`, `prov:alternateOf`, `skos:*Match`,
+  `rdfs:seeAlso`) never feed the equality rules. The OWL 2 DL reasoner's RL
+  phase now reads the caller's scope (it ran over the default graph only).
+  See docs/reasoning.md.
 - **Official W3C SPARQL 1.1 test suite in CI.** The query and update
   sections of `w3c/rdf-tests` (485 entries) are vendored under
   `tests/fixtures/w3c-sparql11/` and run manifest-driven through the store

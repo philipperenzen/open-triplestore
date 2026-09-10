@@ -97,6 +97,8 @@ pub struct Owl2DLReasoner<'a> {
     sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
+    /// Identity policy handed to the RL phase (see `Owl2RLReasoner`).
+    identity: super::identity::IdentityPolicy,
 }
 
 impl<'a> Owl2DLReasoner<'a> {
@@ -143,11 +145,18 @@ impl<'a> Owl2DLReasoner<'a> {
             target_graph: OWL2_DL_ENTAILMENT_GRAPH.to_string(),
             sources: None,
             detect_inconsistency: true,
+            identity: super::identity::IdentityPolicy::Full,
         }
     }
 
     pub fn with_target(mut self, graph: impl Into<String>) -> Self {
         self.target_graph = graph.into();
+        self
+    }
+
+    /// Identity policy for the RL phase (`sameas-off` skips the equality rules).
+    pub fn with_identity_policy(mut self, policy: super::identity::IdentityPolicy) -> Self {
+        self.identity = policy;
         self
     }
 
@@ -163,9 +172,16 @@ impl<'a> Owl2DLReasoner<'a> {
         let initial = count_graph(self.store, &self.target_graph)?;
 
         // ── Step 1: RL rules ──────────────────────────────────────────────────
-        let rl_report = super::owl2_rl::Owl2RLReasoner::new(self.store)
+        let rl = super::owl2_rl::Owl2RLReasoner::new(self.store)
             .with_target(self.target_graph.clone())
-            .materialize()?;
+            .with_identity_policy(self.identity);
+        // The RL phase reads the same scope as the DL rules. It used to run
+        // unscoped — default graph only — whatever the caller had asked for.
+        let rl = match &self.sources {
+            Some(s) => rl.with_sources(s.clone()),
+            None => rl,
+        };
+        let rl_report = rl.materialize()?;
 
         debug!(
             "OWL 2 DL: RL phase added {} triples in {} iterations",
@@ -554,11 +570,21 @@ impl ExternalReasoner for NativeTableauStub {
 /// calls the external reasoner to load further inferences.
 pub struct ExternalReasonerBridge {
     reasoner: Box<dyn ExternalReasoner>,
+    identity: super::identity::IdentityPolicy,
 }
 
 impl ExternalReasonerBridge {
     pub fn new(reasoner: Box<dyn ExternalReasoner>) -> Self {
-        Self { reasoner }
+        Self {
+            reasoner,
+            identity: super::identity::IdentityPolicy::Full,
+        }
+    }
+
+    /// Identity policy for the native RL/DL phase.
+    pub fn with_identity_policy(mut self, policy: super::identity::IdentityPolicy) -> Self {
+        self.identity = policy;
+        self
     }
 
     /// Run native DL rules first, then optionally delegate to the external
@@ -575,7 +601,9 @@ impl ExternalReasonerBridge {
 
         // ── Step 1: Run the native DL reasoner ───────────────────────────────
         let native_report = {
-            let m = Owl2DLReasoner::new(store).with_target(target_graph);
+            let m = Owl2DLReasoner::new(store)
+                .with_target(target_graph)
+                .with_identity_policy(self.identity);
             // The same scope the native rules read: the caller's layer, not the store.
             if source_graphs.is_empty() {
                 m

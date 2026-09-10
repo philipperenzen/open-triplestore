@@ -162,7 +162,7 @@ IRIs are the most permanent thing you create. A bad IRI outlives the data it nam
 - IRIs **MUST NOT** contain spaces, and **SHOULD NOT** contain characters that need percent-encoding.
 - Prefer **named nodes over blank nodes** for anything that another graph might reference (every concept, class, property, instance of record). Blank nodes are acceptable only for genuinely anonymous structured values (a geometry, a contact card, a SHACL constraint list).
 - An IRI's local name **SHOULD** be opaque-stable: do not encode mutable facts (status, owner, year) into it. Put those in triples.
-- Do not reuse one IRI for two different things. Do not mint two IRIs for one thing — link them with `owl:sameAs` / `skos:exactMatch` if it already happened.
+- Do not reuse one IRI for two different things. Do not mint two IRIs for one thing. If it already happened **within one source** (two IRIs for the same record, under the same registration rules), link them with `owl:sameAs`: the reasoner may then merge them. Between sources — a model element and the asset it stands for, a registration record and the physical object, a footprint and the thing it outlines — use a typed correspondence instead (`prov:specializationOf`, `prov:alternateOf`, `skos:exactMatch` / `closeMatch`), never `owl:sameAs`: identity would propagate every property between the two. See the dataset [identity policy](reasoning.md#identity-policy--what-happens-with-owlsameas).
 
 ### 3.2 Naming conventions
 
@@ -290,7 +290,9 @@ Link your terms to existing vocabularies instead of re-inventing them:
 | `skos:closeMatch` | nearly the same; safe for most uses |
 | `skos:broadMatch` / `skos:narrowMatch` | one is more general than the other |
 | `skos:relatedMatch` | associatively related, no hierarchy |
-| `owl:equivalentClass` / `owl:sameAs` | formally identical class / individual |
+| `owl:equivalentClass` | formally identical class |
+| `owl:sameAs` | two IRIs for **one** individual inside one source; never for links between sources |
+| `prov:specializationOf` / `prov:alternateOf` | a more specific representation of a thing (a model element of an asset) / two representations of one thing in different contexts — a correspondence, not identity |
 
 Keep cross-vocabulary alignments (linksets) in a **dedicated named graph**, separate from the scheme itself.
 

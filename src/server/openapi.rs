@@ -1703,6 +1703,28 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     // ═══════════════════════════════════════════════════════════════════════
     // Reasoning
     // ═══════════════════════════════════════════════════════════════════════
+    mount(paths, "/api/datasets/:dataset_id/identity", vec![
+        (M::Get, o("Reasoning", "Dataset identity policy",
+            "What the dataset's reasoning does with `owl:sameAs`: the policy in force (`sameas-off` — the equality rules never run; `sameas-narrow` — they run over the dataset's own graphs, linkset graphs are not premises; `sameas-full` — every sameAs propagates, linksets included), where it comes from (`dataset`, `organisation`, `default`), the dataset's own setting and the options with descriptions.",
+            vec![pp("dataset_id")], vec![("200", "Effective policy, source, setting, options"), ("404", "Dataset not found")], true)),
+        (M::Put, o("Reasoning", "Set the dataset's identity policy",
+            "Body `{\"policy\": \"sameas-off|sameas-narrow|sameas-full\"}`. Overrides the organisation's setting for this dataset; a dataset in `materialize` mode is re-materialised at once. Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("200", "Effective policy after the change"), ("400", "Unknown policy"), ("403", "Write access required")], true)),
+        (M::Delete, o("Reasoning", "Drop the dataset's identity setting",
+            "The dataset falls back to its organisation's policy, or the built-in default (`sameas-narrow`).",
+            vec![pp("dataset_id")], vec![("200", "Effective policy after the change"), ("403", "Write access required")], true)),
+    ]);
+    mount(paths, "/api/organisations/:org_id/identity", vec![
+        (M::Get, o("Reasoning", "Organisation identity policy",
+            "The `owl:sameAs` policy every dataset the organisation owns inherits unless the dataset sets its own. Members may read it.",
+            vec![pp("org_id")], vec![("200", "Policy, source, setting, options"), ("404", "Organisation not found or not a member")], true)),
+        (M::Put, o("Reasoning", "Set the organisation's identity policy",
+            "Body `{\"policy\": \"sameas-off|sameas-narrow|sameas-full\"}`. Inheriting datasets in `materialize` mode are re-materialised. Organisation admin role required.",
+            vec![pp("org_id")], vec![("200", "Policy after the change"), ("400", "Unknown policy"), ("403", "Organisation admin role required")], true)),
+        (M::Delete, o("Reasoning", "Drop the organisation's identity setting",
+            "Inheriting datasets fall back to the built-in default (`sameas-narrow`).",
+            vec![pp("org_id")], vec![("200", "Policy after the change"), ("403", "Organisation admin role required")], true)),
+    ]);
     mount(paths, "/api/reasoning/materialize", vec![
         (M::Post, o("Reasoning", "Materialise entailments", "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl).",
             vec![], vec![("200", "Reasoning report"), ("401", "Authentication required")], true)),

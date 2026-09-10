@@ -25,6 +25,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use super::common::{count_graph, ReasoningError, ReasoningReport, OWL2_RL_ENTAILMENT_GRAPH};
+use super::identity::IdentityPolicy;
 use crate::store::TripleStore;
 
 // ─── Namespace constants ──────────────────────────────────────────────────────
@@ -89,6 +90,10 @@ pub struct Owl2RLReasoner<'a> {
     sources: Option<Vec<String>>,
     /// If `true`, inconsistency rules raise `ReasoningError::Inconsistency`.
     pub detect_inconsistency: bool,
+    /// What to do with `owl:sameAs`: `sameas-off` skips the Table 4 equality
+    /// rules. The raw engine defaults to `sameas-full`; the per-dataset policy
+    /// is applied by the entailment layer (see `crate::entailment`).
+    identity: IdentityPolicy,
 }
 
 impl<'a> Owl2RLReasoner<'a> {
@@ -135,11 +140,22 @@ impl<'a> Owl2RLReasoner<'a> {
             target_graph: OWL2_RL_ENTAILMENT_GRAPH.to_string(),
             sources: None,
             detect_inconsistency: true,
+            identity: IdentityPolicy::Full,
         }
     }
 
     pub fn with_target(mut self, graph: impl Into<String>) -> Self {
         self.target_graph = graph.into();
+        self
+    }
+
+    /// Apply an identity policy: under `sameas-off` the Table 4 equality rules
+    /// (`eq-sym`, `eq-trans`, `eq-rep-s/p/o`) do not run, so `owl:sameAs`
+    /// stays data and nothing is propagated across it. Whether linkset graphs
+    /// are premises at all is decided by the caller when it chooses the
+    /// sources ([`crate::entailment::reasoning_sources`]).
+    pub fn with_identity_policy(mut self, policy: IdentityPolicy) -> Self {
+        self.identity = policy;
         self
     }
 
@@ -213,12 +229,18 @@ impl<'a> Owl2RLReasoner<'a> {
             self.rule_cls_maxqc4()?;
             self.rule_cls_oo()?;
 
-            // Table 4 — Equality
-            self.rule_eq_sym()?;
-            self.rule_eq_trans()?;
-            self.rule_eq_rep_s()?;
-            self.rule_eq_rep_p()?;
-            self.rule_eq_rep_o()?;
+            // Table 4 — Equality. Skipped under `sameas-off`: owl:sameAs is
+            // then plain data (still derivable by prp-fp/ifp/key, never
+            // propagated). The rules only ever match owl:sameAs — a typed
+            // correspondence (prov:specializationOf, skos:exactMatch, …)
+            // is never a premise here, whatever the policy.
+            if self.identity.propagates_same_as() {
+                self.rule_eq_sym()?;
+                self.rule_eq_trans()?;
+                self.rule_eq_rep_s()?;
+                self.rule_eq_rep_p()?;
+                self.rule_eq_rep_o()?;
+            }
 
             let after = count_graph(self.store, &self.target_graph)?;
             let added = after.saturating_sub(before);
