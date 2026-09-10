@@ -1440,17 +1440,57 @@ impl TripleStore {
         // nothing extra and makes the replace all-or-nothing.
         let quads = self.parse_quads(BufReader::new(data.as_bytes()), format, None, graph_iri)?;
 
-        self.clear_graph_chunked(graph_name)?;
-        if graph_iri.is_some() {
-            // The graph is empty now, so its cached count is exactly zero. The
-            // load below adds its new-quad count on top of whatever the index
-            // holds; leaving the pre-clear count in place made every replace
-            // report old + new (and boot-time re-PUTs compounded it per restart).
-            self.graph_index.remove(graph_iri);
-            self.graph_index.add(graph_iri, 0);
+        // An empty target (a first PUT, the boot-time seed) has nothing a
+        // reader could observe half-replaced and nothing a crash could lose,
+        // so it keeps the bulk loader — 2.4x faster per quad than
+        // `Transaction::insert` (5.3 s vs 12.5 s for 900k quads).
+        let target_is_empty = self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph_name))
+            .next()
+            .is_none();
+        if target_is_empty {
+            if graph_iri.is_some() {
+                self.graph_index.remove(graph_iri);
+                self.graph_index.add(graph_iri, 0);
+            }
+            return self
+                .insert_quads_and_reindex_into(quads, graph_iri, true)
+                .map(|_| ());
         }
-        self.insert_quads_and_reindex_into(quads, graph_iri, true)
-            .map(|_| ())
+
+        // Replace in ONE transaction. Clearing in one transaction and loading
+        // in another let a concurrent reader see the graph empty between the
+        // two, and a crash between the two left it empty for good. Inside the
+        // transaction the target is empty, so every distinct quad is new —
+        // that is the count the graph index gets once the commit is visible.
+        // The cost is one write batch the size of old + new (see
+        // docs/performance.md, "Graph Store PUT replace").
+        let distinct = {
+            let mut seen: std::collections::HashSet<&Quad> =
+                std::collections::HashSet::with_capacity(quads.len());
+            quads.iter().filter(|q| seen.insert(q)).count()
+        };
+        let mut tx = self.store.start_transaction()?;
+        tx.clear_graph(graph_name)?;
+        for q in &quads {
+            tx.insert(q.as_ref());
+        }
+        tx.commit()?;
+        info!("Graph replaced ({distinct} quads)");
+        if graph_iri.is_some() {
+            // The graph now holds exactly the payload's distinct quads.
+            // Leaving the pre-replace count in place made every replace report
+            // old + new (and boot-time re-PUTs compounded it per restart).
+            self.graph_index.remove(graph_iri);
+            self.graph_index.add(graph_iri, distinct);
+        } else {
+            self.graph_index.rebuild(&self.store);
+        }
+        self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
+        Ok(())
     }
 
     /// Graph Store Protocol: POST (merge into) a named graph.

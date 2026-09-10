@@ -243,6 +243,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Fixed
+- **Graph Store `PUT` replaces a graph in one transaction.** The replace
+  cleared the graph in one transaction and bulk-loaded the new quads in
+  another, so a concurrent reader could see the graph empty in between and a
+  crash in between left it empty for good. Clear and insert now commit
+  together: a reader sees the old graph or the new one, never an empty or
+  half-filled one. A first `PUT` into an empty graph keeps the bulk loader.
+  The cost is one write batch the size of old + new (a 900k-quad replace
+  17.7 s → 32.3 s in-process, accepted for the guarantee); see
+  docs/performance.md.
 - **`/sparql/batch` is one transaction.** The endpoint documented the batch
   as atomic while each statement ran as its own transaction, so a statement
   that failed at execution left the earlier ones applied. The statements now

@@ -722,6 +722,28 @@ indexes every literal for full-text search; Fuseki does neither. A graph
 clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
 36 s with the chunked clear (before it, 34–60 s for 900k quads).
 
+**Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph
+is now one transaction — `clear_graph` plus every parsed quad inserted on
+the same `Transaction`, one commit — so a concurrent reader sees the old
+graph or the new one, never an empty or half-filled one, and a crash cannot
+leave the graph empty (`tests/graph_store_put_atomicity.rs`). That costs
+one write batch the size of old + new, and `Transaction::insert` is about
+2.4× slower per quad than the bulk loader. Measured in-process on RocksDB
+(release-dev, mirror and cache off, `examples`-style harness, 900k quads
+replaced by 900k quads, idle machine):
+
+| PUT of 900k quads | before (chunked clear + bulk load) | now (one transaction) |
+|---|--:|--:|
+| into an empty graph (first PUT, boot seed) | 5.6 s | 5.6 s — kept on the bulk loader; nothing to replace |
+| replacing 900k quads | 17.7 s / 18.8 s | 32.3 s / 30.2 s |
+
+The maintainer accepted the +70 % on a large replace for the guarantee
+(the same trade the version restore makes with its staging graph + `MOVE`).
+Memory: the transaction holds old + new until the commit, so a replace of a
+graph with tens of millions of quads needs RAM for two copies of its index
+entries; split such deliveries into `DELETE` + appended `POST`s, or keep them
+on separate graphs, if that is a concern.
+
 | 1M assets, 9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
 |---|--:|--:|
 | Load (five 45 MB appends² / one PUT) | 110 s (82k quads/s) | 105 s (85k quads/s) |
