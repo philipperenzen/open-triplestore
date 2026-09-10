@@ -237,3 +237,147 @@ fn shacl_blank_node_property_shapes_enforced() {
     );
     assert!(violates(&blank, "/b"));
 }
+
+// ─── SHACL-AF §6: custom constraint components ────────────────────────────────
+
+/// A component with an ASK validator on a property shape: `$PATH` is the
+/// property path, `$value` each value node, the parameter its local name.
+#[test]
+fn custom_component_ask_validator_on_a_property_shape() {
+    let shapes = r#"
+ex:MaxWordsComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:maxWords ] ;
+  sh:propertyValidator [ a sh:SPARQLAskValidator ;
+    sh:message "Too many words (max {$maxWords})" ;
+    sh:ask """ASK { $this $PATH ?v . FILTER (?v = $value && STRLEN(REPLACE(STR($value), "[^ ]", "")) < $maxWords) }""" ] .
+ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Doc ;
+  sh:property [ sh:path ex:title ; ex:maxWords 3 ] .
+"#;
+    let data = r#"
+ex:short a ex:Doc ; ex:title "One two" .
+ex:long a ex:Doc ; ex:title "One two three four" .
+"#;
+    let r = run(shapes, data);
+    assert!(!r.conforms);
+    assert!(violates(&r, "ex:long") || r.results.iter().any(|x| x.focus_node.ends_with("long")));
+    assert!(!r.results.iter().any(|x| x.focus_node.ends_with("short")));
+    let res = r
+        .results
+        .iter()
+        .find(|x| x.focus_node.ends_with("long"))
+        .unwrap();
+    assert!(
+        res.source_constraint.ends_with("MaxWordsComponent"),
+        "{res:?}"
+    );
+    assert_eq!(
+        res.message, "Too many words (max 3)",
+        "the message template is rendered"
+    );
+    assert_eq!(res.value.as_deref(), Some("One two three four"));
+}
+
+/// A SELECT validator reports rows as violations; an optional parameter may
+/// be absent, a mandatory one must be present for the component to apply.
+#[test]
+fn custom_component_select_validator_and_optional_parameter() {
+    let shapes = r#"
+ex:LangComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:lang ] ;
+  sh:parameter [ sh:path ex:note ; sh:optional true ] ;
+  sh:propertyValidator [ a sh:SPARQLSelectValidator ;
+    sh:select """SELECT $this ?value WHERE { $this $PATH ?value . FILTER (!isLiteral(?value) || !langMatches(lang(?value), $lang)) }""" ] .
+ex:LabelShape a sh:NodeShape ; sh:targetClass ex:Country ;
+  sh:property [ sh:path ex:label ; ex:lang "de" ] ;
+  sh:property [ sh:path ex:name ; ex:note "no lang parameter: the component does not apply" ] .
+"#;
+    let data = r#"
+ex:nl a ex:Country ; ex:label "Niederlande"@de ; ex:name "Netherlands" .
+ex:be a ex:Country ; ex:label "Belgium"@en ; ex:name "Belgium" .
+"#;
+    let r = run(shapes, data);
+    assert!(!r.conforms);
+    let be: Vec<_> = r
+        .results
+        .iter()
+        .filter(|x| x.focus_node.ends_with("/be"))
+        .collect();
+    assert_eq!(
+        be.len(),
+        1,
+        "one violation for be's English label: {:?}",
+        r.results
+    );
+    assert_eq!(be[0].value.as_deref(), Some("Belgium"));
+    assert!(
+        !r.results.iter().any(|x| x.focus_node.ends_with("/nl")),
+        "{:?}",
+        r.results
+    );
+}
+
+/// Pre-binding: `$this` reaches a FILTER in a UNION branch and a nested
+/// group (the spec's substitution semantics), and `bound($this)` is true.
+#[test]
+fn prebinding_reaches_nested_scopes() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetNode ex:bad , ex:good ;
+  sh:sparql [ sh:select """SELECT $this WHERE { { FILTER (false) } UNION { { FILTER ($this = <http://example.org/bad>) } FILTER bound($this) } }""" ] .
+"#;
+    let r = run(shapes, "ex:bad ex:p 1 . ex:good ex:p 2 .");
+    assert!(violates(&r, "/bad"), "{:?}", r.results);
+    assert!(!violates(&r, "/good"), "{:?}", r.results);
+}
+
+/// The SPARQL features SHACL forbids under pre-binding (MINUS, VALUES,
+/// SERVICE, a nested SELECT not projecting $this, `AS $this`) make the shapes
+/// graph invalid — validation fails, it does not silently pass.
+#[test]
+fn unsupported_prebinding_features_fail_the_shapes_graph() {
+    for (what, select) in [
+        (
+            "MINUS",
+            "SELECT $this WHERE { $this ?p ?o . MINUS { $this ?p \"x\" } }",
+        ),
+        (
+            "VALUES",
+            "SELECT $this WHERE { VALUES ?x { 1 } FILTER($this = <http://example.org/a>) }",
+        ),
+        (
+            "SERVICE",
+            "SELECT $this WHERE { SERVICE <http://example.org/sparql> { $this ?p ?o } }",
+        ),
+        (
+            "nested SELECT *",
+            "SELECT $this WHERE { { SELECT * WHERE { $this ?p ?o } } }",
+        ),
+        (
+            "AS $this",
+            "SELECT $this WHERE { BIND (<http://example.org/a> AS $this) }",
+        ),
+    ] {
+        let shapes = format!(
+            "ex:S a sh:NodeShape ; sh:targetNode ex:a ; sh:sparql [ sh:select \"\"\"{select}\"\"\" ] ."
+        );
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                &format!("{PFX}{shapes}"),
+                RdfFormat::Turtle,
+                Some("urn:shapes"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                &format!("{PFX}ex:a ex:p 1 ."),
+                RdfFormat::Turtle,
+                Some("urn:data"),
+            )
+            .unwrap();
+        let r = validate(&store, "urn:shapes", &["urn:data".to_string()]);
+        assert!(
+            r.is_err(),
+            "{what} must be rejected under pre-binding, got {r:?}"
+        );
+    }
+}

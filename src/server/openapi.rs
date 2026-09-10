@@ -1484,10 +1484,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Upload shapes graph",
-                    "Replace the dataset's SHACL shapes graph.",
-                    vec![],
+                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored.",
+                    vec![qp(
+                        "lenient",
+                        false,
+                        "SHACL-C only: `true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
+                    )],
                     vec![
                         ("204", "Shapes graph updated"),
+                        ("400", "SHACL-C parse error (position named)"),
                         ("401", "Authentication required"),
                     ],
                     true,
@@ -1677,9 +1682,13 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Parse SHACL Compact Syntax",
-                "Parse SHACL-C text and return the equivalent SHACL RDF.",
-                vec![],
-                vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error")],
+                "Parse SHACL-C text and return the equivalent SHACL RDF. Strict by default: unrecognised input is a 400 naming its line and column.",
+                vec![qp(
+                    "lenient",
+                    false,
+                    "`true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
+                )],
+                vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error (position named)")],
                 false,
             ),
         )],

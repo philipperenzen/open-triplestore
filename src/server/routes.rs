@@ -7660,6 +7660,7 @@ pub async fn put_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     _headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -7692,8 +7693,18 @@ pub async fn put_shapes(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/turtle");
     let data = if content_type.contains("shaclc") {
-        crate::shaclc::parse(&raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("SHACLC parse error: {e}")))?
+        // Strict by default: unrecognised SHACLC is a 400, never an emptied
+        // shapes graph. `?lenient=true` restores the drop-what-you-cannot-parse
+        // behaviour for callers that want it.
+        let lenient = query
+            .get("lenient")
+            .is_some_and(|v| v == "true" || v == "1");
+        let parsed = if lenient {
+            crate::shaclc::parse_lenient(&raw)
+        } else {
+            crate::shaclc::parse(&raw)
+        };
+        parsed.map_err(|e| (StatusCode::BAD_REQUEST, e))?
     } else {
         raw
     };
@@ -7786,10 +7797,21 @@ pub async fn infer_dataset(
 ///
 /// Body: SHACLC text (Content-Type: text/shaclc or text/plain)
 /// Response: Turtle (Content-Type: text/turtle)
-pub async fn shaclc_parse(body: Bytes) -> Result<Response, (StatusCode, String)> {
+pub async fn shaclc_parse(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
     let input = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
-    let turtle = crate::shaclc::parse(&input).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let lenient = query
+        .get("lenient")
+        .is_some_and(|v| v == "true" || v == "1");
+    let turtle = if lenient {
+        crate::shaclc::parse_lenient(&input)
+    } else {
+        crate::shaclc::parse(&input)
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], turtle).into_response())
 }
 

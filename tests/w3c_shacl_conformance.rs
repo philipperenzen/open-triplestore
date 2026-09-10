@@ -1,15 +1,18 @@
 //! W3C SHACL test-suite runner over the vendored official suite
-//! (`tests/fixtures/w3c-shacl/core`, see PROVENANCE.md there).
+//! (`tests/fixtures/w3c-shacl/{core,sparql}`, see PROVENANCE.md there).
 //!
 //! Each suite file is self-contained: data + shapes + an `mf:Manifest` entry
-//! (`sht:Validate`) + the expected `sh:ValidationReport`. The runner loads the
-//! file as both shapes graph and data graph (the suite is designed for this —
-//! `sht:dataGraph <>` / `sht:shapesGraph <>` reference the file itself), runs
-//! our validator and compares:
+//! (`sht:Validate`) + the expected `sh:ValidationReport` — or `sht:Failure`,
+//! for the `sparql/pre-binding/unsupported-*` cases whose shapes graph the
+//! validator must reject. The runner loads the file as both shapes graph and
+//! data graph (the suite is designed for this — `sht:dataGraph <>` /
+//! `sht:shapesGraph <>` reference the file itself), runs our validator and
+//! compares:
 //!
 //!   1. `sh:conforms`, and
 //!   2. when non-conforming, the **multiset of violation focus nodes**
-//!      (IRIs/literals by lexical form; blank nodes matched by count).
+//!      (IRIs/literals by lexical form; blank nodes matched by count);
+//!   3. for `sht:Failure`, that validation returned an error.
 //!
 //! This is deliberately one notch below full result-set equality (component
 //! IRIs / paths / values), because our `ValidationResult` reports the source
@@ -28,19 +31,23 @@ use oxigraph::sparql::QueryResults;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const SUITE_ROOT: &str = "tests/fixtures/w3c-shacl/core";
+/// The two vendored sections: SHACL Core, and SHACL-SPARQL (sh:sparql
+/// constraints, constraint components, pre-binding).
+const SUITES: &[&str] = &["core", "sparql"];
+const FIXTURES: &str = "tests/fixtures/w3c-shacl";
 
 /// Tests that currently fail, with the engine gap they sit behind. Keep sorted.
 /// Removing an entry requires the test to actually pass (the ratchet asserts
-/// both directions).
+/// both directions). Keys are `<suite>/<path within the suite>`.
+///
+/// Empirical baseline: 119 pass / 2 known-fail / 15 aux skips
 const KNOWN_FAILURES: &[(&str, &str)] = &[
-    // Empirical baseline: 97 pass / 1 known-fail / 15 aux skips (was 46/52/15
-    // before the typed-term engine refactor — focus and value nodes are now
-    // oxigraph Terms end-to-end, so node-level value constraints, typed-literal
-    // comparison, ill-formed-literal detection, sh:closed property enumeration,
-    // own-path property shapes, nested sh:property, and qualified-shape sibling
-    // disjointness all evaluate per spec). See docs/conformance/shacl.md.
-    ("property/uniqueLang-002.ttl", "oxigraph's storage canonicalises \"1\"^^xsd:boolean to \"true\" (native value encoding), so the spec's literal-\"true\"-only activation of sh:uniqueLang is indistinguishable post-load"),
+    // core: 97 pass / 1 known-fail / 15 aux skips (was 46/52/15 before the
+    // typed-term engine refactor — focus and value nodes are now oxigraph
+    // Terms end-to-end). See docs/conformance/shacl.md.
+    ("core/property/uniqueLang-002.ttl", "oxigraph's storage canonicalises \"1\"^^xsd:boolean to \"true\" (native value encoding), so the spec's literal-\"true\"-only activation of sh:uniqueLang is indistinguishable post-load"),
+    // sparql: 22 pass / 1 known-fail / 0 skips.
+    ("sparql/pre-binding/shapesGraph-001.ttl", "$shapesGraph / $currentShape are not supported (SHACL §5.3.1 leaves them to processors that expose the shapes graph to constraint queries); a constraint using them fails the shapes graph instead of producing the expected report"),
 ];
 
 #[derive(Debug, PartialEq)]
@@ -77,10 +84,23 @@ fn focus_key(term: &oxigraph::model::Term) -> String {
     }
 }
 
-/// Multiset of expected focus nodes + expected conforms, read from the file's
-/// embedded `mf:result` report. Returns `None` when the file declares no
+enum Expected {
+    /// `sh:conforms` and the multiset of expected focus nodes.
+    Report(bool, BTreeMap<String, usize>),
+    /// `mf:result sht:Failure`: the validator must reject the shapes graph.
+    Failure,
+}
+
+/// The file's embedded `mf:result`. Returns `None` when the file declares no
 /// `sht:Validate` entry (e.g. include-only manifests).
-fn expected(store: &TripleStore) -> Option<(bool, BTreeMap<String, usize>)> {
+fn expected(store: &TripleStore) -> Option<Expected> {
+    if let Ok(QueryResults::Boolean(true)) = store.query(
+        "PREFIX sht: <http://www.w3.org/ns/shacl-test#> \
+         PREFIX mf: <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> \
+         ASK { GRAPH <urn:t:shapes> { ?t a sht:Validate ; mf:result sht:Failure } }",
+    ) {
+        return Some(Expected::Failure);
+    }
     let conforms = match store.query(
         "PREFIX sht: <http://www.w3.org/ns/shacl-test#> \
          PREFIX mf: <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> \
@@ -111,7 +131,7 @@ fn expected(store: &TripleStore) -> Option<(bool, BTreeMap<String, usize>)> {
             }
         }
     }
-    Some((conforms, focus))
+    Some(Expected::Report(conforms, focus))
 }
 
 /// Actual focus-node multiset from our report, normalised like `focus_key`.
@@ -128,18 +148,18 @@ fn actual_focus(report: &ValidationReport) -> BTreeMap<String, usize> {
     out
 }
 
-fn run_one(path: &Path) -> Outcome {
+fn run_one(suite: &str, root: &Path, path: &Path) -> Outcome {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Outcome::Skip("unreadable".into());
     };
     // The suite's canonical base: relative IRIs (`<>`, `<minLength-001>`)
     // resolve against the test file's location under datashapes.org.
     let rel = path
-        .strip_prefix(SUITE_ROOT)
+        .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let base = format!("http://datashapes.org/sh/tests/core/{rel}");
+    let base = format!("http://datashapes.org/sh/tests/{suite}/{rel}");
 
     let store = match TripleStore::in_memory() {
         Ok(s) => s,
@@ -152,7 +172,7 @@ fn run_one(path: &Path) -> Outcome {
         }
     }
 
-    let Some((want_conforms, want_focus)) = expected(&store) else {
+    let Some(expected) = expected(&store) else {
         return Outcome::Skip("no sht:Validate entry".into());
     };
 
@@ -187,9 +207,9 @@ fn run_one(path: &Path) -> Outcome {
                     return Outcome::Skip(format!("external graph not found: {stem}"));
                 };
                 let aux_base = format!(
-                    "http://datashapes.org/sh/tests/core/{}",
+                    "http://datashapes.org/sh/tests/{suite}/{}",
                     sibling
-                        .strip_prefix(SUITE_ROOT)
+                        .strip_prefix(root)
                         .unwrap_or(&sibling)
                         .to_string_lossy()
                         .replace('\\', "/")
@@ -205,7 +225,21 @@ fn run_one(path: &Path) -> Outcome {
 
     let report = match validate(&store, "urn:t:shapes", &["urn:t:data".to_string()]) {
         Ok(r) => r,
-        Err(e) => return Outcome::Fail(format!("validate error: {e}")),
+        Err(e) => {
+            return match expected {
+                Expected::Failure => Outcome::Pass,
+                Expected::Report(..) => Outcome::Fail(format!("validate error: {e}")),
+            }
+        }
+    };
+    let (want_conforms, want_focus) = match expected {
+        Expected::Failure => {
+            return Outcome::Fail(format!(
+                "expected the validator to reject the shapes graph (sht:Failure), got a report with conforms={}",
+                report.conforms
+            ))
+        }
+        Expected::Report(c, f) => (c, f),
     };
 
     if report.conforms != want_conforms {
@@ -225,52 +259,80 @@ fn run_one(path: &Path) -> Outcome {
 
 #[test]
 fn w3c_shacl_core_suite() {
-    let mut files = Vec::new();
-    suite_files(Path::new(SUITE_ROOT), &mut files);
-    files.sort();
-    assert!(
-        files.len() > 100,
-        "vendored suite present ({} files found)",
-        files.len()
-    );
-
+    let mut total_files = 0usize;
     let mut pass = 0usize;
     let mut skip = Vec::new();
     let mut unexpected_failures = Vec::new();
     let mut unexpected_passes = Vec::new();
+    let mut seen_known = 0usize;
 
-    for path in &files {
-        let rel = path
-            .strip_prefix(SUITE_ROOT)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let known = KNOWN_FAILURES.iter().find(|(k, _)| *k == rel);
-        match run_one(path) {
-            Outcome::Pass => {
-                pass += 1;
-                if let Some((k, why)) = known {
-                    unexpected_passes.push(format!("{k} (listed as: {why})"));
+    for suite in SUITES {
+        let root = Path::new(FIXTURES).join(suite);
+        let mut files = Vec::new();
+        suite_files(&root, &mut files);
+        files.sort();
+        assert!(
+            !files.is_empty(),
+            "vendored suite `{suite}` present ({} files found)",
+            files.len()
+        );
+        total_files += files.len();
+        let mut suite_pass = 0usize;
+        let mut suite_known = 0usize;
+        let mut suite_skip = 0usize;
+
+        for path in &files {
+            let rel = format!(
+                "{suite}/{}",
+                path.strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            );
+            let known = KNOWN_FAILURES.iter().find(|(k, _)| *k == rel);
+            if known.is_some() {
+                seen_known += 1;
+            }
+            match run_one(suite, &root, path) {
+                Outcome::Pass => {
+                    pass += 1;
+                    suite_pass += 1;
+                    if let Some((k, why)) = known {
+                        unexpected_passes.push(format!("{k} (listed as: {why})"));
+                    }
+                }
+                Outcome::Fail(reason) => {
+                    if known.is_none() {
+                        unexpected_failures.push(format!("{rel}: {reason}"));
+                    } else {
+                        suite_known += 1;
+                    }
+                }
+                Outcome::Skip(reason) => {
+                    suite_skip += 1;
+                    skip.push(format!("{rel}: {reason}"));
                 }
             }
-            Outcome::Fail(reason) => {
-                if known.is_none() {
-                    unexpected_failures.push(format!("{rel}: {reason}"));
-                }
-            }
-            Outcome::Skip(reason) => skip.push(format!("{rel}: {reason}")),
         }
+        println!(
+            "W3C SHACL {suite}: {suite_pass} passed, {suite_known} known-fail, {suite_skip} skipped, {} files",
+            files.len()
+        );
     }
 
     println!(
-        "W3C SHACL core: {pass} passed, {} known-fail, {} skipped, {} total",
+        "W3C SHACL total: {pass} passed, {} known-fail, {} skipped, {total_files} files",
         KNOWN_FAILURES.len(),
-        skip.len(),
-        files.len()
+        skip.len()
     );
     for s in &skip {
         println!("  SKIP {s}");
     }
+    assert_eq!(
+        seen_known,
+        KNOWN_FAILURES.len(),
+        "every KNOWN_FAILURES key must name a vendored file (stale entries?)"
+    );
     assert!(
         unexpected_failures.is_empty(),
         "tests failing that are not in KNOWN_FAILURES:\n  {}",
@@ -283,11 +345,12 @@ fn w3c_shacl_core_suite() {
     );
     // A floor as well as a ratchet. The runner turns an unreadable or
     // unparseable file into a silent `Skip`, so a Turtle-parser regression
-    // would have turned all 113 files into skips and still passed the two
-    // asserts above. 97 pass today; 90 leaves headroom for suite churn.
+    // would have turned every file into a skip and still passed the two
+    // asserts above. 119 pass today (97 core + 22 sparql); 110 leaves headroom
+    // for suite churn.
     assert!(
-        pass >= 90,
-        "only {pass} W3C SHACL core cases passed (floor 90); skips: {}",
+        pass >= 110,
+        "only {pass} W3C SHACL cases passed (floor 110); skips: {}",
         skip.len()
     );
     assert!(

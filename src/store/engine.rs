@@ -244,6 +244,11 @@ pub struct VoidStats {
     pub named_graphs: usize,
 }
 
+fn next_instance_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The core triple store engine wrapping Oxigraph with GeoSPARQL extensions.
 #[derive(Clone)]
 pub struct TripleStore {
@@ -263,6 +268,11 @@ pub struct TripleStore {
     /// Memoises small query results (invalidated on every write); a repeated query
     /// is answered without re-evaluation. See [`QueryCache`].
     query_cache: QueryCache,
+    /// Process-unique id of this store instance, shared by its clones.
+    /// Caches keyed on a store must not survive the store: a new store
+    /// can reuse the old one's address and start at the same write
+    /// generation (every test store does).
+    instance_id: u64,
     /// VoID statistics for the whole store, keyed by the write generation
     /// they were computed at (see [`TripleStore::void_stats`]).
     void_stats_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, VoidStats)>>>,
@@ -332,6 +342,7 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -355,6 +366,7 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -489,6 +501,13 @@ impl TripleStore {
     /// caches key on "has anything changed" instead of rescanning per request.
     pub fn write_generation(&self) -> u64 {
         self.query_cache.generation()
+    }
+
+    /// Process-unique id of this store instance (shared by clones). With
+    /// [`write_generation`](Self::write_generation) it identifies a store
+    /// state for caches that outlive a single call.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     /// Whole-store VoID statistics over default *and* named graphs, cached

@@ -594,3 +594,78 @@ mod http {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }
+
+// ─── sh:order, sh:condition, sh:deactivated (SHACL-AF §4.1–4.2) ───────────────
+
+/// Rules run in ascending `sh:order`: the second rule consumes what the first
+/// produced within one iteration, so a rule chain converges in one round when
+/// ordered and would need the fixed-point loop otherwise. Observable here: a
+/// rule with a higher order that deletes-nothing-but-marks sees the earlier
+/// rule's triple in the same pass.
+#[test]
+fn rules_run_in_sh_order() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:order 2 ;
+            sh:subject sh:this ; sh:predicate ex:second ; sh:object true ;
+            sh:condition ex:HasFirst ] ;
+  sh:rule [ a sh:TripleRule ; sh:order 1 ;
+            sh:subject sh:this ; sh:predicate ex:first ; sh:object true ] .
+ex:HasFirst a sh:NodeShape ; sh:property [ sh:path ex:first ; sh:minCount 1 ] .
+"#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(ask(&store, "ASK { ex:t ex:first true }"), "order 1 fired");
+    assert!(
+        ask(&store, "ASK { ex:t ex:second true }"),
+        "order 2 fired after order 1 (its condition needs ex:first)"
+    );
+    assert_eq!(n, 2);
+}
+
+/// `sh:condition`: a rule fires only for focus nodes that conform to the
+/// condition shape.
+#[test]
+fn rule_condition_filters_focus_nodes() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+  sh:rule [ a sh:TripleRule ; sh:condition ex:Adult ;
+            sh:subject sh:this ; sh:predicate ex:mayVote ; sh:object true ] .
+ex:Adult a sh:NodeShape ; sh:property [ sh:path ex:age ; sh:minInclusive 18 ] .
+"#;
+    let data = "ex:ann a ex:Person ; ex:age 34 . ex:bob a ex:Person ; ex:age 12 .";
+    let store = store_with(shapes, data);
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(
+        ask(&store, "ASK { ex:ann ex:mayVote true }"),
+        "ann conforms to ex:Adult"
+    );
+    assert!(
+        !ask(&store, "ASK { ex:bob ex:mayVote true }"),
+        "bob does not"
+    );
+    assert_eq!(n, 1);
+}
+
+/// A deactivated rule, or a rule on a deactivated shape, does not fire.
+#[test]
+fn deactivated_rules_do_not_fire() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Thing ;
+  sh:rule [ a sh:TripleRule ; sh:deactivated true ;
+            sh:subject sh:this ; sh:predicate ex:fromRule ; sh:object true ] .
+ex:Off a sh:NodeShape ; sh:targetClass ex:Thing ; sh:deactivated true ;
+  sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:fromShape ; sh:object true ] .
+"#;
+    let store = store_with(shapes, "ex:t a ex:Thing .");
+    let n = infer(&store, "urn:shapes", &[]).unwrap();
+    assert!(
+        !ask(&store, "ASK { ex:t ex:fromRule ?x }"),
+        "deactivated rule"
+    );
+    assert!(
+        !ask(&store, "ASK { ex:t ex:fromShape ?x }"),
+        "rule of a deactivated shape"
+    );
+    assert_eq!(n, 0);
+}

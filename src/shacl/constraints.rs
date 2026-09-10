@@ -54,7 +54,7 @@ pub fn display_term(term: &Term) -> String {
 ///
 /// Used by logical constraint operators (sh:not, sh:and, sh:or, sh:xone), sh:node
 /// and sh:qualifiedValueShape.
-fn validate_inline_shape(
+pub(crate) fn validate_inline_shape(
     view: &DataView<'_>,
     shapes: &[Shape],
     focus_node: &Term,
@@ -447,13 +447,23 @@ pub(crate) fn evaluate_constraint_with_values(
             // SHACL-SPARQL: execute the SELECT with $this PRE-BOUND to the focus
             // node; each result row is a violation. $this must be bound (not
             // textually replaced), otherwise it cannot appear in the SELECT
-            // projection or GROUP BY of an aggregate query. We therefore rewrite
-            // `$this` to `?this` and inject `VALUES ?this { <focus> }`.
+            // projection or GROUP BY of an aggregate query; a constant does not
+            // reach a projection but does reach nested scopes. `prebind` does both
+            // (SHACL §5.3.3): constants in the body, the variable kept in the
+            // projection / GROUP BY and bound through an injected VALUES.
             // Blank-node focus nodes cannot be addressed from SPARQL — skip.
             if matches!(focus_node, Term::BlankNode(_)) {
                 return results;
             }
-            let query = bind_this(select, focus_node, view.data_graphs);
+            let query = prebind(
+                select,
+                &[Prebound {
+                    name: "this",
+                    term: focus_node,
+                }],
+                path.map(|p| p.to_sparql()).as_deref(),
+                view.data_graphs,
+            );
             // A constraint that cannot be evaluated is a failure, not a pass:
             // `if let Ok(..)` used to drop the error, so a `sh:select` that did
             // not parse (or a SELECT that errored at evaluation) produced no
@@ -495,6 +505,141 @@ pub(crate) fn evaluate_constraint_with_values(
                 }
                 Ok(_) => results.push(unevaluable("sh:select must be a SELECT query".to_string())),
                 Err(e) => results.push(unevaluable(e.to_string())),
+            }
+        }
+
+        // ---- SHACL-AF constraint component (sh:validator / sh:ask / sh:select) ----
+        Constraint::Custom(cc) => {
+            // Blank-node focus nodes cannot be pre-bound (no SPARQL syntax
+            // addresses a stored blank node) — skipped, as for sh:sparql.
+            if matches!(focus_node, Term::BlankNode(_)) {
+                return results;
+            }
+            let path_sparql = path.map(|p| p.to_sparql());
+            let unevaluable = |reason: String| ValidationResult {
+                severity: Severity::Violation,
+                focus_node: focus_str.get_or_init(|| display_term(focus_node)).clone(),
+                path: path_str(),
+                value: None,
+                source_shape: shape_iri.to_string(),
+                source_constraint: cc.component.clone(),
+                message: format!(
+                    "constraint component <{}> could not be evaluated: {reason}",
+                    cc.component
+                ),
+            };
+            let params: Vec<Prebound<'_>> = cc
+                .params
+                .iter()
+                .map(|(n, t)| Prebound {
+                    name: n.as_str(),
+                    term: t,
+                })
+                .collect();
+            // `{$param}` / `{?param}` in the validator's sh:message.
+            let render = |template: &str, value: Option<&Term>| -> String {
+                let mut m = template.to_string();
+                for p in &params {
+                    let shown = display_term(p.term);
+                    m = m
+                        .replace(&format!("{{${}}}", p.name), &shown)
+                        .replace(&format!("{{?{}}}", p.name), &shown);
+                }
+                let this = display_term(focus_node);
+                m = m.replace("{$this}", &this).replace("{?this}", &this);
+                if let Some(v) = value {
+                    let shown = display_term(v);
+                    m = m.replace("{$value}", &shown).replace("{?value}", &shown);
+                }
+                m
+            };
+            match &cc.validator {
+                CustomValidator::Ask(ask) => {
+                    for v in values.iter() {
+                        if matches!(v, Term::BlankNode(_)) {
+                            continue;
+                        }
+                        let mut vars = vec![
+                            Prebound {
+                                name: "this",
+                                term: focus_node,
+                            },
+                            Prebound {
+                                name: "value",
+                                term: v,
+                            },
+                        ];
+                        vars.extend(params.iter().map(|p| Prebound {
+                            name: p.name,
+                            term: p.term,
+                        }));
+                        let q = prebind(ask, &vars, path_sparql.as_deref(), view.data_graphs);
+                        match view.store.query(&q) {
+                            Ok(oxigraph::sparql::QueryResults::Boolean(true)) => {}
+                            Ok(oxigraph::sparql::QueryResults::Boolean(false)) => {
+                                let message = match &cc.message {
+                                    Some(t) => render(t, Some(v)),
+                                    None => format!(
+                                        "Value does not satisfy constraint component <{}>",
+                                        cc.component
+                                    ),
+                                };
+                                results.push(mk(
+                                    Some(display_term(v)),
+                                    path_str(),
+                                    cc.component.clone(),
+                                    message,
+                                ));
+                            }
+                            Ok(_) => {
+                                results.push(unevaluable("sh:ask must be an ASK query".to_string()))
+                            }
+                            Err(e) => results.push(unevaluable(e.to_string())),
+                        }
+                    }
+                }
+                CustomValidator::Select(select) => {
+                    let mut vars = vec![Prebound {
+                        name: "this",
+                        term: focus_node,
+                    }];
+                    vars.extend(params.iter().map(|p| Prebound {
+                        name: p.name,
+                        term: p.term,
+                    }));
+                    let q = prebind(select, &vars, path_sparql.as_deref(), view.data_graphs);
+                    match view.store.query(&q) {
+                        Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
+                            for solution in solutions {
+                                let solution = match solution {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        results.push(unevaluable(e.to_string()));
+                                        break;
+                                    }
+                                };
+                                let value = solution.get("value").cloned();
+                                let message = match &cc.message {
+                                    Some(t) => render(t, value.as_ref()),
+                                    None => format!(
+                                        "Constraint component <{}> reports a violation",
+                                        cc.component
+                                    ),
+                                };
+                                let path_val = solution.get("path").map(|v| v.to_string());
+                                results.push(mk(
+                                    value.as_ref().map(display_term),
+                                    path_val.or_else(path_str),
+                                    cc.component.clone(),
+                                    message,
+                                ));
+                            }
+                        }
+                        Ok(_) => results
+                            .push(unevaluable("sh:select must be a SELECT query".to_string())),
+                        Err(e) => results.push(unevaluable(e.to_string())),
+                    }
+                }
             }
         }
 
@@ -878,49 +1023,468 @@ pub(crate) fn evaluate_constraint_with_values(
 /// injected at the start of the outermost `WHERE { … }` block, so it works in the
 /// SELECT projection and `GROUP BY` of aggregate validators — unlike textual
 /// substitution, which yields invalid SPARQL (`SELECT <iri>` / `GROUP BY <iri>`).
-/// Parse-check a `sh:select` the way it will be run — `$this` bound to a
+/// Parse-check a `sh:select` the way it will be run — `$this` pre-bound to a
 /// placeholder focus node, the `sh:prefixes` prologue already prepended — so
 /// a shapes graph whose SPARQL constraint cannot be evaluated fails to load
 /// (and a write gate built on it refuses the write) instead of silently
-/// producing no violations.
+/// producing no violations. A query using a feature SHACL forbids under
+/// pre-binding (§5.3.2) is rejected the same way.
 pub(crate) fn check_sparql_constraint(select: &str) -> Result<(), String> {
+    check_prebound_query(select, &["this"], false)
+}
+
+/// As [`check_sparql_constraint`] for a constraint-component validator:
+/// `$this` and (for ASK validators) `$value` are pre-bound, and a
+/// property validator may use `$PATH`.
+pub(crate) fn check_validator_query(query: &str, ask: bool) -> Result<(), String> {
+    let vars: &[&str] = if ask { &["this", "value"] } else { &["this"] };
+    check_prebound_query(query, vars, true)
+}
+
+fn check_prebound_query(query: &str, vars: &[&str], with_path: bool) -> Result<(), String> {
+    // SHACL §5.3.1 leaves `$shapesGraph` / `$currentShape` to processors
+    // that expose the shapes graph to constraint queries; this one does
+    // not, and a constraint that relies on them must fail, not pass with
+    // the variables unbound.
+    for var in ["shapesGraph", "currentShape"] {
+        if mentions_variable(query, var) {
+            return Err(format!(
+                "${var} is not supported (the shapes graph is not pre-bound in constraint queries)"
+            ));
+        }
+    }
+    if let Some(feature) = prebinding_violation(query, vars) {
+        return Err(format!(
+            "{feature} is not supported in a pre-bound SHACL-SPARQL query"
+        ));
+    }
     let placeholder = Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(
         "urn:ots:shacl:focus",
     ));
-    let query = bind_this(select, &placeholder, &["urn:ots:shacl:data".to_string()]);
+    let value = Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(
+        "urn:ots:shacl:value",
+    ));
+    let bound: Vec<Prebound<'_>> = vars
+        .iter()
+        .map(|n| Prebound {
+            name: n,
+            term: if *n == "value" { &value } else { &placeholder },
+        })
+        .collect();
+    let path = with_path.then_some("<urn:ots:shacl:path>");
+    let rewritten = prebind(query, &bound, path, &["urn:ots:shacl:data".to_string()]);
     opengraph::spargebra::SparqlParser::new()
-        .parse_query(&query)
+        .parse_query(&rewritten)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
-fn bind_this(select: &str, focus_node: &Term, data_graphs: &[String]) -> String {
-    // N-Triples serialisation is valid in VALUES for IRIs and literals.
-    let focus_nt = focus_node.to_string();
-    let with_var = select.replace("$this", "?this");
-    let upper = with_var.to_uppercase();
-    let (where_pos, brace_at) = match upper
-        .find("WHERE")
-        .and_then(|wp| with_var[wp..].find('{').map(|br| (wp, wp + br + 1)))
-    {
-        Some(v) => v,
-        // No WHERE block to rewrite into: fall back to textual substitution.
-        None => return select.replace("$this", &focus_nt),
+// ---------------------------------------------------------------------------
+// SHACL-SPARQL pre-binding (SHACL §5.3.3) and its restrictions (§5.3.2)
+// ---------------------------------------------------------------------------
+
+/// A pre-bound variable: its name without the sigil, and its value.
+pub(crate) struct Prebound<'a> {
+    pub name: &'a str,
+    pub term: &'a Term,
+}
+
+/// Rewrite `query` so that every variable in `vars` is pre-bound — evaluated
+/// as if each occurrence were its value (SHACL §5.3.3). Two mechanisms are
+/// combined so that both spec cases work:
+///
+/// * in the query body every `$v` / `?v` becomes the value's constant, so a
+///   `FILTER` in a nested group, a `UNION` branch or a sub-select sees it
+///   (a `VALUES` at the top of the query would not reach those scopes);
+/// * in a `SELECT` projection and in `GROUP BY` the variable is kept, and a
+///   `VALUES ?v { value }` injected at the top of the outermost block binds
+///   it — so `SELECT $this` and aggregate queries work.
+///
+/// `bound($v)` is `(true)`; `$PATH` (property-shape validators) is replaced
+/// textually by `path`; `FROM <g>` clauses scope the query to `data_graphs`.
+pub(crate) fn prebind(
+    query: &str,
+    vars: &[Prebound<'_>],
+    path: Option<&str>,
+    data_graphs: &[String],
+) -> String {
+    let mut text = match path {
+        Some(p) => query.replace("$PATH", p),
+        None => query.to_string(),
     };
-    // `FROM <g>` makes the data graphs the query's default graph — SHACL-SPARQL
-    // evaluates the constraint against the data graph, so default-graph patterns
-    // like `?this ex:p ?v` must resolve there rather than the (empty) default graph.
+    // bound($v) → true, for every pre-bound variable.
+    for v in vars {
+        let lower = text.to_ascii_lowercase();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = lower[i..].find("bound") {
+            let start = i + rel;
+            out.push_str(&text[i..start]);
+            let rest = &text[start + 5..];
+            let trimmed = rest.trim_start();
+            let consumed = |s: &str| {
+                let t = s.trim_start();
+                if !t.starts_with('(') {
+                    return None;
+                }
+                let inner = t[1..].trim_start();
+                let name_ok = inner.starts_with('$') || inner.starts_with('?');
+                if !name_ok {
+                    return None;
+                }
+                let after = &inner[1..];
+                if !after.starts_with(v.name)
+                    || after[v.name.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                {
+                    return None;
+                }
+                let tail = after[v.name.len()..].trim_start();
+                tail.strip_prefix(')').map(|_| s.len() - (tail.len() - 1))
+            };
+            // Only a standalone `bound(` keyword (not e.g. `unbound`).
+            let word_before = out
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if !word_before {
+                if let Some(n) = consumed(trimmed) {
+                    out.push_str("(true)");
+                    i = start + 5 + (rest.len() - trimmed.len()) + n;
+                    continue;
+                }
+            }
+            out.push_str("bound");
+            i = start + 5;
+        }
+        out.push_str(&text[i..]);
+        text = out;
+    }
+    let constants: Vec<(&str, String)> =
+        vars.iter().map(|v| (v.name, v.term.to_string())).collect();
+
+    // Scan once: substitute in the body, keep variables in projection / GROUP
+    // BY, and note where the outermost block opens and where the top-level
+    // WHERE keyword is.
+    let mut out = String::with_capacity(text.len() + 64);
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut in_projection = false;
+    let mut in_group_by = false;
+    let mut prev_kw_group = false;
+    let mut top_where: Option<usize> = None; // position in `out`
+    let mut top_open: Option<usize> = None; // position in `out`, right after `{`
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        // Comments.
+        if c == '#' {
+            let end = text[i..].find('\n').map(|n| i + n).unwrap_or(text.len());
+            out.push_str(&text[i..end]);
+            i = end;
+            continue;
+        }
+        // IRIs.
+        if c == '<' {
+            if let Some(n) = text[i..].find('>') {
+                let seg = &text[i..=i + n];
+                if !seg.contains(char::is_whitespace) {
+                    out.push_str(seg);
+                    i += n + 1;
+                    continue;
+                }
+            }
+        }
+        // String literals (short and long forms).
+        if c == '"' || c == '\'' {
+            let q = c;
+            let long = text[i..].starts_with(&format!("{q}{q}{q}"));
+            let delim = if long {
+                format!("{q}{q}{q}")
+            } else {
+                q.to_string()
+            };
+            let start = i;
+            i += delim.len();
+            loop {
+                if i >= bytes.len() {
+                    break;
+                }
+                if bytes[i] as char == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if text[i..].starts_with(&delim) {
+                    i += delim.len();
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&text[start..i.min(text.len())]);
+            continue;
+        }
+        if c == '{' {
+            depth += 1;
+            in_projection = false;
+            in_group_by = false;
+            out.push(c);
+            i += 1;
+            if depth == 1 && top_open.is_none() {
+                top_open = Some(out.len());
+            }
+            continue;
+        }
+        if c == '}' {
+            depth = depth.saturating_sub(1);
+            in_group_by = false;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // Variables.
+        if (c == '$' || c == '?') && i + 1 < bytes.len() {
+            let name_end = text[i + 1..]
+                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .map(|n| i + 1 + n)
+                .unwrap_or(text.len());
+            let name = &text[i + 1..name_end];
+            if let Some((_, constant)) = constants.iter().find(|(n, _)| *n == name) {
+                if in_projection || in_group_by {
+                    out.push('?');
+                    out.push_str(name);
+                } else {
+                    out.push_str(constant);
+                }
+            } else {
+                out.push_str(&text[i..name_end]);
+            }
+            i = name_end;
+            continue;
+        }
+        // Keywords.
+        if c.is_alphabetic() {
+            let end = text[i..]
+                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .map(|n| i + n)
+                .unwrap_or(text.len());
+            let word = &text[i..end];
+            let upper = word.to_ascii_uppercase();
+            match upper.as_str() {
+                "SELECT" => in_projection = true,
+                "WHERE" => {
+                    in_projection = false;
+                    if depth == 0 && top_where.is_none() {
+                        top_where = Some(out.len());
+                    }
+                }
+                "BY" if prev_kw_group => in_group_by = true,
+                "HAVING" | "ORDER" | "LIMIT" | "OFFSET" | "VALUES" => in_group_by = false,
+                _ => {}
+            }
+            prev_kw_group = upper == "GROUP";
+            out.push_str(word);
+            i = end;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+
+    // Inject VALUES for the projected/grouped variables at the top of the
+    // outermost block, and the FROM clauses before the top-level WHERE (or
+    // before the block when the form is `ASK { … }` / `SELECT … { … }`).
+    let Some(open) = top_open else {
+        return out;
+    };
+    let values: String = constants
+        .iter()
+        .map(|(n, c)| format!(" VALUES ?{n} {{ {c} }}"))
+        .collect();
     let from: String = data_graphs.iter().map(|g| format!("FROM <{g}> ")).collect();
-    // `VALUES` pre-binds $this to the focus node (usable in SELECT/GROUP BY).
-    let values = format!("VALUES ?this {{ {} }} ", focus_nt);
-    let mut q = String::with_capacity(with_var.len() + from.len() + values.len() + 2);
-    q.push_str(&with_var[..where_pos]);
-    q.push_str(&from);
-    q.push_str(&with_var[where_pos..brace_at]);
-    q.push(' ');
-    q.push_str(&values);
-    q.push_str(&with_var[brace_at..]);
-    q
+    let mut result = String::with_capacity(out.len() + values.len() + from.len() + 4);
+    match top_where {
+        Some(w) if w < open => {
+            result.push_str(&out[..w]);
+            result.push_str(&from);
+            result.push_str(&out[w..open]);
+        }
+        _ => {
+            // No WHERE keyword before the block: the block starts at `open - 1`.
+            result.push_str(&out[..open - 1]);
+            result.push_str(&from);
+            result.push_str(&out[open - 1..open]);
+        }
+    }
+    result.push_str(&values);
+    result.push(' ');
+    result.push_str(&out[open..]);
+    result
+}
+
+/// Whether `query` uses the variable `name` (`$name` or `?name`) outside
+/// strings, IRIs and comments.
+fn mentions_variable(query: &str, name: &str) -> bool {
+    let mut i = 0;
+    let bytes = query.as_bytes();
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c == '#' {
+            i = query[i..].find('\n').map(|n| i + n).unwrap_or(query.len());
+            continue;
+        }
+        if c == '<' {
+            if let Some(n) = query[i..].find('>') {
+                if !query[i..=i + n].contains(char::is_whitespace) {
+                    i += n + 1;
+                    continue;
+                }
+            }
+        }
+        if c == '"' || c == '\'' {
+            let q = c;
+            let long = query[i..].starts_with(&format!("{q}{q}{q}"));
+            let delim = if long {
+                format!("{q}{q}{q}")
+            } else {
+                q.to_string()
+            };
+            i += delim.len();
+            while i < bytes.len() && !query[i..].starts_with(&delim) {
+                i += if bytes[i] as char == '\\' { 2 } else { 1 };
+            }
+            i = (i + delim.len()).min(query.len());
+            continue;
+        }
+        if (c == '$' || c == '?') && query[i + 1..].starts_with(name) {
+            let after = query[i + 1 + name.len()..].chars().next();
+            if !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_') {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The SPARQL features SHACL forbids in a pre-bound query (§5.3.2): `MINUS`,
+/// `VALUES`, `SERVICE`, assigning to a pre-bound variable (`AS $this`), and a
+/// nested `SELECT` that does not project `$this` explicitly (`SELECT *`
+/// included). Returns the offending feature.
+pub(crate) fn prebinding_violation(query: &str, vars: &[&str]) -> Option<String> {
+    let bytes = query.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut prev_as = false;
+    let mut nested_select: Option<(Vec<String>, bool)> = None; // (projected names, star)
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c == '#' {
+            i = query[i..].find('\n').map(|n| i + n).unwrap_or(query.len());
+            continue;
+        }
+        if c == '<' {
+            if let Some(n) = query[i..].find('>') {
+                if !query[i..=i + n].contains(char::is_whitespace) {
+                    i += n + 1;
+                    continue;
+                }
+            }
+        }
+        if c == '"' || c == '\'' {
+            let q = c;
+            let long = query[i..].starts_with(&format!("{q}{q}{q}"));
+            let delim = if long {
+                format!("{q}{q}{q}")
+            } else {
+                q.to_string()
+            };
+            i += delim.len();
+            loop {
+                if i >= bytes.len() {
+                    break;
+                }
+                if bytes[i] as char == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if query[i..].starts_with(&delim) {
+                    i += delim.len();
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if c == '{' {
+            depth += 1;
+            if let Some((names, star)) = nested_select.take() {
+                if star || !names.iter().any(|n| n == "this") {
+                    return Some("a nested SELECT that does not project $this".to_string());
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if c == '}' {
+            depth = depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        if c == '*' {
+            if let Some((_, star)) = nested_select.as_mut() {
+                *star = true;
+            }
+            i += 1;
+            continue;
+        }
+        if (c == '$' || c == '?') && i + 1 < bytes.len() {
+            let name_end = query[i + 1..]
+                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .map(|n| i + 1 + n)
+                .unwrap_or(query.len());
+            let name = &query[i + 1..name_end];
+            if prev_as && vars.contains(&name) {
+                return Some(format!("assigning to the pre-bound variable ${name}"));
+            }
+            if let Some((names, _)) = nested_select.as_mut() {
+                names.push(name.to_string());
+            }
+            prev_as = false;
+            i = name_end;
+            continue;
+        }
+        if c.is_alphabetic() {
+            let end = query[i..]
+                .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+                .map(|n| i + n)
+                .unwrap_or(query.len());
+            let upper = query[i..end].to_ascii_uppercase();
+            match upper.as_str() {
+                "MINUS" => return Some("MINUS".to_string()),
+                "VALUES" => return Some("VALUES".to_string()),
+                "SERVICE" => return Some("SERVICE".to_string()),
+                "SELECT" if depth > 0 => nested_select = Some((Vec::new(), false)),
+                "WHERE" => {
+                    if let Some((names, star)) = nested_select.take() {
+                        if star || !names.iter().any(|n| n == "this") {
+                            return Some("a nested SELECT that does not project $this".to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            prev_as = upper == "AS";
+            i = end;
+            continue;
+        }
+        if !c.is_whitespace() && c != '(' && c != ')' {
+            prev_as = false;
+        }
+        i += 1;
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,22 @@ curl -X PUT http://localhost:7878/api/datasets/<dataset_id>/shapes \
      --data-binary @shapes.shaclc
 ```
 
+The parser is **strict**: input it does not recognise — a W3C SHACL-C form this
+parser does not implement, an unknown constraint keyword, plain garbage — is a
+`400` naming the line and column, and the dataset's shapes graph is left as it
+was. (It used to be lenient: unrecognised input was dropped, so a document that
+used unsupported forms could parse to an *empty* shapes graph, and the upload
+replaced the dataset's shapes with nothing while answering 200.) Pass
+`?lenient=true` for the old behaviour — whatever parses is kept, the rest is
+ignored:
+
+```bash
+curl -X PUT 'http://localhost:7878/api/datasets/<dataset_id>/shapes?lenient=true' \
+     -H 'Authorization: Bearer <token>' \
+     -H 'Content-Type: text/shaclc' \
+     --data-binary @shapes.shaclc
+```
+
 ---
 
 ## Retrieving Shapes
@@ -258,7 +274,82 @@ curl -X POST http://localhost:7878/api/datasets/<dataset_id>/infer \
 # → {"inferred_triples": 42}
 ```
 
-Supports `sh:SPARQLRule` and `sh:TripleRule` from SHACL-AF. Inferred triples are written back into the data graph.
+Supports `sh:SPARQLRule` (`sh:construct`) and `sh:TripleRule` (`sh:subject` /
+`sh:predicate` / `sh:object`, with `sh:this` standing for the focus node; a
+literal object keeps its datatype). Inferred triples are written back into the
+data graph, and the rules run to a fixed point. The SHACL-AF rule modifiers are
+honoured:
+
+| Modifier | Effect |
+|---|---|
+| `sh:order` | Rules run in ascending order (default `0`), so a later rule sees what an earlier one produced within the same pass. |
+| `sh:condition` | A shape the focus node must conform to for the rule to fire — below, only adults get `ex:mayVote`. |
+| `sh:deactivated true` | On the rule or on its shape: the rule does not run. |
+
+```turtle
+ex:VoterShape a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:rule [ a sh:TripleRule ; sh:order 1 ; sh:condition ex:Adult ;
+            sh:subject sh:this ; sh:predicate ex:mayVote ; sh:object true ] .
+ex:Adult a sh:NodeShape ;
+  sh:property [ sh:path ex:age ; sh:minInclusive 18 ] .
+```
+
+---
+
+## SPARQL-based constraints and constraint components
+
+### `sh:sparql` and pre-binding
+
+A `sh:SPARQLConstraint` (`sh:select`) is evaluated once per focus node with
+`$this` **pre-bound** as SHACL §5.3 defines it: the focus node reaches every
+scope of the query — a `FILTER` in a nested group or a `UNION` branch, a
+sub-select that projects `$this`, the projection and `GROUP BY` of an aggregate
+— and `bound($this)` is true. On a property shape, `$PATH` is replaced by the
+shape's path. Every solution is a violation; `?value` and `?path` in a solution
+become `sh:value` and `sh:resultPath`.
+
+The features the specification forbids under pre-binding (§5.3.2) — `MINUS`,
+`VALUES`, `SERVICE`, a nested `SELECT` that does not project `$this`
+explicitly (`SELECT *` included), and assigning to a pre-bound variable
+(`… AS $this`) — make the shapes graph **fail to load**, so a constraint that
+uses them fails loudly instead of silently never firing. `$shapesGraph` and
+`$currentShape` are not supported and fail the shapes graph the same way. The
+`sh:prefixes` prologue includes the `sh:declare` declarations of the named
+ontology and of everything it `owl:imports` within the shapes graph.
+
+### Custom constraint components (SHACL-AF §6)
+
+A shapes graph can declare its own reusable constraint components. A shape that
+carries a component's parameter predicates instantiates it:
+
+```turtle
+ex:MaxWordsComponent a sh:ConstraintComponent ;
+  sh:parameter [ sh:path ex:maxWords ] ;
+  sh:propertyValidator [ a sh:SPARQLAskValidator ;
+    sh:message "Too many words (max {$maxWords})" ;
+    sh:ask """ASK { FILTER (STRLEN(REPLACE(STR($value), "[^ ]", "")) < $maxWords) }""" ] .
+
+ex:TitleShape a sh:NodeShape ; sh:targetClass ex:Doc ;
+  sh:property [ sh:path ex:title ; ex:maxWords 3 ] .
+```
+
+* **`sh:parameter`** — one per parameter. Its `sh:path` is the predicate the
+  shape uses, and the path's local name is the SPARQL variable the validator
+  sees (`ex:maxWords` → `$maxWords`). `sh:optional true` makes a parameter
+  optional; a component only applies when every mandatory parameter is present.
+* **Validators** — `sh:nodeValidator` (node shapes), `sh:propertyValidator`
+  (property shapes) or `sh:validator` (either). An `sh:ask` validator runs once
+  per value node with `$this`, `$value` and the parameters pre-bound; `false`
+  is a violation. An `sh:select` validator runs once per focus node; every row
+  is a violation (`?value`, `?path` as for `sh:sparql`). `$PATH` is available
+  in property validators.
+* **`sh:message`** on the validator is the result message, with `{$param}`,
+  `{?param}`, `{$this}` and `{$value}` rendered; `sourceConstraint` names the
+  component.
+
+A component a shape uses without a validator for the shape's kind, or a
+validator that does not parse, fails the shapes graph.
 
 ---
 
@@ -301,8 +392,13 @@ Key SHACLC constructs:
 ### Standalone conversion
 
 ```bash
-# SHACLC text → Turtle
+# SHACLC text → Turtle (strict: unrecognised input is a 400 naming its position)
 curl -X POST http://localhost:7878/api/shaclc/parse \
+     -H 'Content-Type: text/shaclc' \
+     --data-binary @shapes.shaclc
+
+# The same, ignoring unrecognised input instead of failing on it
+curl -X POST 'http://localhost:7878/api/shaclc/parse?lenient=true' \
      -H 'Content-Type: text/shaclc' \
      --data-binary @shapes.shaclc
 

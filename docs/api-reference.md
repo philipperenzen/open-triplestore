@@ -36,3 +36,12 @@ statements sent one by one.
 The 200 on a rolled-back batch keeps the response shape of the earlier
 per-statement report; check `status`, not the HTTP code, to know whether the
 batch landed.
+
+## SHACL Compact Syntax — `?lenient`
+
+`PUT /api/datasets/{dataset_id}/shapes` (with `Content-Type: text/shaclc`) and
+`POST /api/shaclc/parse` parse SHACLC **strictly**: input the grammar does not
+recognise is a `400` whose body names the line, column and offending text, and
+nothing is stored. The optional query parameter `lenient=true` (or `1`) restores
+the previous behaviour, in which unrecognised input is ignored and whatever parsed
+is kept. Status codes and response bodies are otherwise unchanged.

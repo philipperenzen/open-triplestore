@@ -175,14 +175,18 @@ pub fn validate(
 
 /// Apply a shape-declared `sh:message` to the results of one constraint
 /// evaluation. SPARQL constraints keep their own `sh:message` (declared on the
-/// SPARQLConstraint node itself).
+/// SPARQLConstraint node itself), as do constraint components (the
+/// validator's, with its `{$param}` placeholders rendered).
 fn apply_message(
     mut results: Vec<ValidationResult>,
     message: &Option<String>,
     constraint: &Constraint,
 ) -> Vec<ValidationResult> {
     if let Some(msg) = message {
-        if !matches!(constraint, Constraint::SparqlConstraint { .. }) {
+        if !matches!(
+            constraint,
+            Constraint::SparqlConstraint { .. } | Constraint::Custom(_)
+        ) {
             for r in &mut results {
                 r.message = msg.clone();
             }
@@ -226,11 +230,50 @@ pub fn infer(
     for iteration in 0..100 {
         let before = store.len().map_err(|e| e.to_string())?;
 
-        for (_shape_iri, targets, rule_type, rule_body) in &rules {
-            let focus_nodes = resolve_rule_targets(store, targets, data_graphs);
+        for rule in &rules {
+            // One view per rule: the rule's targets and its condition shapes
+            // are prepared together, so the condition check reads the same
+            // snapshot the targets were resolved from.
+            let target_shape = Shape {
+                iri: rule.shape_iri.clone(),
+                shape_type: ShapeType::NodeShape,
+                targets: rule.targets.clone(),
+                constraints: Vec::new(),
+                property_shapes: Vec::new(),
+                severity: None,
+                message: None,
+                deactivated: false,
+            };
+            let mut prepared: Vec<Shape> = Vec::with_capacity(1 + rule.conditions.len());
+            prepared.push(target_shape.clone());
+            prepared.extend(rule.conditions.iter().cloned());
+            let mut view = DataView::new(store, data_graphs);
+            view.prepare(&prepared);
+            let focus_nodes = resolve_targets(&view, &target_shape);
 
             for focus_node in &focus_nodes {
-                apply_rule(store, focus_node, rule_type, rule_body, target_graph)?;
+                // sh:condition: the focus node must conform to every condition
+                // shape (SHACL-AF §4.1), else the rule does not fire for it.
+                let conforms = rule.conditions.iter().all(|c| {
+                    super::constraints::validate_inline_shape(
+                        &view,
+                        &rule.conditions,
+                        focus_node,
+                        c,
+                        &Severity::Violation,
+                    )
+                    .is_empty()
+                });
+                if !conforms {
+                    continue;
+                }
+                apply_rule(
+                    store,
+                    &term_to_lexical(focus_node),
+                    &rule.rule_type,
+                    &rule.body,
+                    target_graph,
+                )?;
             }
         }
 
@@ -739,6 +782,61 @@ fn load_constraints(
         }
     }
 
+    // SHACL-AF §6: constraint components declared in the shapes graph. A shape
+    // that carries a component's parameter predicates instantiates it — with
+    // the node validator on a node shape, the property validator on a property
+    // shape (one with sh:path), or the plain sh:validator — and every mandatory
+    // parameter must be present (§6.2.1) for the component to apply.
+    let is_property_shape =
+        single_value(store, shapes_graph, shape_iri, &format!("{SH}path")).is_some();
+    for comp in constraint_components(store, shapes_graph)?.iter() {
+        let mut params: Vec<(String, Term)> = Vec::new();
+        let mut complete = true;
+        for p in &comp.parameters {
+            match store
+                .objects_for_subject_in_graph(shape_iri, &p.path, Some(shapes_graph))
+                .into_iter()
+                .next()
+            {
+                Some(v) => params.push((p.name.clone(), v)),
+                None if p.optional => {}
+                None => complete = false,
+            }
+        }
+        if params.is_empty() || !complete {
+            continue;
+        }
+        let validator = if is_property_shape {
+            comp.property_validator
+                .clone()
+                .or_else(|| comp.validator.clone())
+        } else {
+            comp.node_validator
+                .clone()
+                .or_else(|| comp.validator.clone())
+        };
+        let Some(validator) = validator else {
+            // A component the shape uses but that has no validator for the
+            // shape's kind is an ill-formed shapes graph (§6.2.2), not a
+            // constraint that quietly never fires.
+            return Err(format!(
+                "shape <{shape_iri}>: constraint component <{}> has no validator for a {} shape",
+                comp.iri,
+                if is_property_shape {
+                    "property"
+                } else {
+                    "node"
+                }
+            ));
+        };
+        constraints.push(Constraint::Custom(Box::new(CustomConstraint {
+            component: comp.iri.clone(),
+            params,
+            validator: validator.query,
+            message: validator.message,
+        })));
+    }
+
     // SHACL-AF: sh:expression node expressions (path + comparison subset). The
     // expression node carries an sh:path and comparison constraints (e.g.
     // sh:minExclusive); values along the path from the focus must satisfy them.
@@ -773,6 +871,150 @@ fn load_constraints(
 /// Load an inline (possibly blank-node) shape by IRI for use in logical constraint
 /// operators, sh:node and sh:qualifiedValueShape. An inline shape carrying its own
 /// `sh:path` is a *property* shape: its constraints apply along that path.
+/// A `sh:parameter` of a constraint component.
+#[derive(Debug, Clone)]
+struct ComponentParameter {
+    /// The parameter predicate a shape uses to supply the value.
+    path: String,
+    /// The SPARQL variable the validator sees: the path's local name (§6.2.1).
+    name: String,
+    optional: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ComponentValidator {
+    query: CustomValidator,
+    message: Option<String>,
+}
+
+/// A `sh:ConstraintComponent` (or an instance of a subclass) declared in the
+/// shapes graph, with its parameters and validators.
+#[derive(Debug, Clone)]
+struct ConstraintComponentDecl {
+    iri: String,
+    parameters: Vec<ComponentParameter>,
+    validator: Option<ComponentValidator>,
+    node_validator: Option<ComponentValidator>,
+    property_validator: Option<ComponentValidator>,
+}
+
+/// (shapes graph, store instance, store write generation, declarations).
+type ComponentCacheEntry = (
+    String,
+    u64,
+    u64,
+    std::sync::Arc<Vec<ConstraintComponentDecl>>,
+);
+
+thread_local! {
+    /// Components of the last shapes graph loaded on this thread, keyed by
+    /// graph, store instance and store write generation: `load_constraints`
+    /// runs once per shape, a shapes graph can hold thousands, and the
+    /// declaration set is the same for all of them.
+    static COMPONENTS: std::cell::RefCell<Option<ComponentCacheEntry>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Every constraint component declared in `shapes_graph` (instances of
+/// `sh:ConstraintComponent` or of one of its subclasses). Validator queries
+/// are parse-checked here, prefixes prepended, so an ill-formed component
+/// fails the shapes graph.
+fn constraint_components(
+    store: &TripleStore,
+    shapes_graph: &str,
+) -> Result<std::sync::Arc<Vec<ConstraintComponentDecl>>, String> {
+    let instance = store.instance_id();
+    let generation = store.write_generation();
+    if let Some(hit) = COMPONENTS.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(g, id, gen, _)| g == shapes_graph && *id == instance && *gen == generation)
+            .map(|(_, _, _, v)| v.clone())
+    }) {
+        return Ok(hit);
+    }
+    let iris = execute_select_single(
+        store,
+        &format!(
+            r#"
+            PREFIX sh: <{SH}>
+            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+            PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+            SELECT DISTINCT ?c WHERE {{
+                GRAPH <{shapes_graph}> {{ ?c rdf:type/rdfs:subClassOf* sh:ConstraintComponent }}
+            }}
+            "#,
+        ),
+        "c",
+    )?;
+    let mut out = Vec::new();
+    for iri in iris.iter().filter(|c| !c.starts_with("_:")) {
+        let mut parameters = Vec::new();
+        for pnode in store
+            .objects_for_subject_in_graph(iri, &format!("{SH}parameter"), Some(shapes_graph))
+            .iter()
+            .map(term_to_lexical)
+        {
+            let Some(path) = single_value(store, shapes_graph, &pnode, &format!("{SH}path")) else {
+                continue;
+            };
+            let name = path
+                .rsplit(['#', '/'])
+                .next()
+                .unwrap_or(path.as_str())
+                .to_string();
+            let optional = single_value(store, shapes_graph, &pnode, &format!("{SH}optional"))
+                .is_some_and(|v| v == "true" || v == "1");
+            parameters.push(ComponentParameter {
+                path,
+                name,
+                optional,
+            });
+        }
+        let load_validator = |pred: &str| -> Result<Option<ComponentValidator>, String> {
+            let Some(vnode) = single_value(store, shapes_graph, iri, &format!("{SH}{pred}")) else {
+                return Ok(None);
+            };
+            let prefixes = sparql_prefixes(store, shapes_graph, &vnode);
+            let message = single_value(store, shapes_graph, &vnode, &format!("{SH}message"));
+            let query = if let Some(ask) =
+                single_value(store, shapes_graph, &vnode, &format!("{SH}ask"))
+            {
+                let q = format!("{prefixes}{ask}");
+                super::constraints::check_validator_query(&q, true).map_err(|e| {
+                    format!("constraint component <{iri}>: sh:{pred} sh:ask does not parse: {e}")
+                })?;
+                CustomValidator::Ask(q)
+            } else if let Some(select) =
+                single_value(store, shapes_graph, &vnode, &format!("{SH}select"))
+            {
+                let q = format!("{prefixes}{select}");
+                super::constraints::check_validator_query(&q, false).map_err(|e| {
+                    format!("constraint component <{iri}>: sh:{pred} sh:select does not parse: {e}")
+                })?;
+                CustomValidator::Select(q)
+            } else {
+                return Err(format!(
+                    "constraint component <{iri}>: sh:{pred} carries neither sh:ask nor sh:select"
+                ));
+            };
+            Ok(Some(ComponentValidator { query, message }))
+        };
+        out.push(ConstraintComponentDecl {
+            iri: iri.clone(),
+            parameters,
+            validator: load_validator("validator")?,
+            node_validator: load_validator("nodeValidator")?,
+            property_validator: load_validator("propertyValidator")?,
+        });
+    }
+    let out = std::sync::Arc::new(out);
+    COMPONENTS.with(|c| {
+        *c.borrow_mut() = Some((shapes_graph.to_string(), instance, generation, out.clone()));
+    });
+    Ok(out)
+}
+
 fn load_inline_shape(
     store: &TripleStore,
     shapes_graph: &str,
@@ -1037,12 +1279,52 @@ enum RuleType {
     TripleRule,
 }
 
-#[allow(clippy::type_complexity)]
-fn load_rules(
+/// A SHACL-AF rule ready to run: its shape's targets, the executable body,
+/// `sh:order` (rules run in ascending order; default 0) and the `sh:condition`
+/// shapes a focus node must conform to for the rule to fire.
+struct Rule {
+    shape_iri: String,
+    targets: Vec<Target>,
+    rule_type: RuleType,
+    body: String,
+    order: f64,
+    conditions: Vec<Shape>,
+}
+
+/// `sh:order`, `sh:condition` and `sh:deactivated` of a rule node
+/// (SHACL-AF §4.1–4.2). `Ok(None)` when the rule — or its shape — is
+/// deactivated.
+fn rule_modifiers(
     store: &TripleStore,
     shapes_graph: &str,
-) -> Result<Vec<(String, Vec<Target>, RuleType, String)>, String> {
-    let mut rules: Vec<(String, Vec<Target>, RuleType, String)> = Vec::new();
+    shape_iri: &str,
+    rule_node: &str,
+) -> Result<Option<(f64, Vec<Shape>)>, String> {
+    let deactivated = |node: &str| {
+        single_value(store, shapes_graph, node, &format!("{SH}deactivated"))
+            .is_some_and(|v| v == "true" || v == "1")
+    };
+    if deactivated(rule_node) || deactivated(shape_iri) {
+        return Ok(None);
+    }
+    let order = single_value(store, shapes_graph, rule_node, &format!("{SH}order"))
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let mut conditions = Vec::new();
+    for cond in store
+        .objects_for_subject_in_graph(rule_node, &format!("{SH}condition"), Some(shapes_graph))
+        .iter()
+        .map(term_to_lexical)
+    {
+        conditions.push(load_inline_shape(store, shapes_graph, &cond).map_err(|e| {
+            format!("rule of shape <{shape_iri}>: sh:condition <{cond}> cannot be loaded: {e}")
+        })?);
+    }
+    Ok(Some((order, conditions)))
+}
+
+fn load_rules(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Rule>, String> {
+    let mut rules: Vec<Rule> = Vec::new();
 
     // SPARQL rules. Discover shapes carrying a CONSTRUCT rule, then resolve the rule
     // node and its sh:prefixes through the raw quad index — the rule node (`sh:rule
@@ -1070,13 +1352,20 @@ fn load_rules(
             if let Some(construct) =
                 single_value(store, shapes_graph, &rule_node, &format!("{SH}construct"))
             {
+                let Some((order, conditions)) =
+                    rule_modifiers(store, shapes_graph, shape_iri, &rule_node)?
+                else {
+                    continue;
+                };
                 let prefixes = sparql_prefixes(store, shapes_graph, &rule_node);
-                rules.push((
-                    shape_iri.clone(),
-                    targets.clone(),
-                    RuleType::SparqlRule,
-                    format!("{prefixes}{construct}"),
-                ));
+                rules.push(Rule {
+                    shape_iri: shape_iri.clone(),
+                    targets: targets.clone(),
+                    rule_type: RuleType::SparqlRule,
+                    body: format!("{prefixes}{construct}"),
+                    order,
+                    conditions,
+                });
             }
         }
     }
@@ -1085,7 +1374,7 @@ fn load_rules(
     let query = format!(
         r#"
         PREFIX sh: <{SH}>
-        SELECT ?shape ?subject ?predicate ?object WHERE {{
+        SELECT ?shape ?rule ?subject ?predicate ?object WHERE {{
             GRAPH <{shapes_graph}> {{
                 ?shape sh:rule ?rule .
                 ?rule sh:subject ?subject ;
@@ -1102,40 +1391,35 @@ fn load_rules(
                 Some(oxigraph::model::Term::NamedNode(nn)) => nn.as_str().to_string(),
                 _ => continue,
             };
+            let rule_node = match solution.get("rule") {
+                Some(t) => term_to_lexical(t),
+                None => continue,
+            };
+            let Some((order, conditions)) =
+                rule_modifiers(store, shapes_graph, &shape_iri, &rule_node)?
+            else {
+                continue;
+            };
             let subject = triple_rule_term(solution.get("subject"));
             let predicate = triple_rule_term(solution.get("predicate"));
             let object = triple_rule_term(solution.get("object"));
 
             let body = format!("{} {} {}", subject, predicate, object);
             let targets = load_targets(store, shapes_graph, &shape_iri).unwrap_or_default();
-            rules.push((shape_iri, targets, RuleType::TripleRule, body));
+            rules.push(Rule {
+                shape_iri,
+                targets,
+                rule_type: RuleType::TripleRule,
+                body,
+                order,
+                conditions,
+            });
         }
     }
 
+    // sh:order: ascending, ties in discovery order (SHACL-AF §4.2).
+    rules.sort_by(|a, b| a.order.total_cmp(&b.order));
     Ok(rules)
-}
-
-fn resolve_rule_targets(
-    store: &TripleStore,
-    targets: &[Target],
-    data_graphs: &[String],
-) -> Vec<String> {
-    let dummy_shape = Shape {
-        iri: String::new(),
-        shape_type: ShapeType::NodeShape,
-        targets: targets.to_vec(),
-        constraints: Vec::new(),
-        property_shapes: Vec::new(),
-        severity: None,
-        message: None,
-        deactivated: false,
-    };
-    let mut view = DataView::new(store, data_graphs);
-    view.prepare(std::slice::from_ref(&dummy_shape));
-    resolve_targets(&view, &dummy_shape)
-        .iter()
-        .map(term_to_lexical)
-        .collect()
 }
 
 /// Apply one rule to one focus node. The number of *new* triples is not measured
@@ -1431,13 +1715,34 @@ fn rdf_list_elements(store: &TripleStore, shapes_graph: &str, head: &str) -> Vec
 /// Without this prologue a SHACL-SPARQL body that uses prefixed names (`da:`, `geo:`,
 /// `geof:` …) fails to parse, and the `if let Ok(..)` guards in evaluation silently
 /// drop the whole constraint/rule/target — see SHACL-SPARQL §5.2 (prefixes mechanism).
+/// The `PREFIX` prologue of a SPARQL-based constraint, rule or validator:
+/// the `sh:declare` declarations of every `sh:prefixes` value and,
+/// transitively, of the ontologies it `owl:imports` (SHACL §5.2.1), as far
+/// as they are in the shapes graph.
 fn sparql_prefixes(store: &TripleStore, shapes_graph: &str, node: &str) -> String {
     let mut out = String::new();
-    for owner in store
+    let mut owners: Vec<String> = store
         .objects_for_subject_in_graph(node, &format!("{SH}prefixes"), Some(shapes_graph))
         .iter()
         .map(term_to_lexical)
-    {
+        .collect();
+    let mut i = 0;
+    while i < owners.len() {
+        let owner = owners[i].clone();
+        i += 1;
+        for imported in store
+            .objects_for_subject_in_graph(
+                &owner,
+                "http://www.w3.org/2002/07/owl#imports",
+                Some(shapes_graph),
+            )
+            .iter()
+            .map(term_to_lexical)
+        {
+            if owners.len() < 64 && !owners.contains(&imported) {
+                owners.push(imported);
+            }
+        }
         for decl in store
             .objects_for_subject_in_graph(&owner, &format!("{SH}declare"), Some(shapes_graph))
             .iter()
@@ -1538,13 +1843,9 @@ fn term_to_lexical(term: &oxigraph::model::Term) -> String {
 fn term_to_string(term: Option<&oxigraph::model::Term>) -> String {
     match term {
         Some(oxigraph::model::Term::NamedNode(nn)) => format!("<{}>", nn.as_str()),
-        Some(oxigraph::model::Term::Literal(lit)) => {
-            if let Some(lang) = lit.language() {
-                format!("\"{}\"@{}", lit.value(), lang)
-            } else {
-                format!("\"{}\"", lit.value())
-            }
-        }
+        // The N-Triples form: datatype kept (`sh:object true` used to be
+        // inserted as the string "true") and quotes/backslashes escaped.
+        Some(oxigraph::model::Term::Literal(lit)) => lit.to_string(),
         Some(oxigraph::model::Term::BlankNode(bn)) => format!("_:{}", bn.as_str()),
         _ => "\"\"".to_string(),
     }

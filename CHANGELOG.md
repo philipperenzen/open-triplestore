@@ -14,6 +14,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SHACL-AF completed — constraint components, spec pre-binding, rule
+  order/condition — and strict SHACLC.** A shapes graph can declare its own
+  constraint components (`sh:ConstraintComponent` + `sh:parameter` + an
+  `sh:validator` / `sh:nodeValidator` / `sh:propertyValidator` with `sh:ask`
+  or `sh:select`; `$PATH`, `$value`, `{$param}` message templates). SPARQL
+  constraints are evaluated with SHACL §5.3 pre-binding — `$this` reaches
+  nested groups and `UNION` branches, `bound($this)` is true — and the
+  features the specification forbids under pre-binding (`MINUS`, `VALUES`,
+  `SERVICE`, a nested `SELECT` not projecting `$this`, `AS $this`) make the
+  shapes graph fail to load instead of silently passing; `$PATH` works in
+  `sh:sparql` on property shapes and `sh:prefixes` follows `owl:imports`.
+  Rules honour `sh:order`, `sh:condition` and `sh:deactivated`, and a triple
+  rule keeps the datatype of a literal object (`sh:object true` used to be
+  inserted as the string `"true"`). The SHACLC parser is strict by default:
+  input it does not recognise is a 400 naming the position, never an emptied
+  shapes graph; `?lenient=true` on `PUT …/shapes` and `POST /api/shaclc/parse`
+  restores the old drop-what-you-cannot-parse behaviour. The W3C SHACL test
+  suite's `sparql/` section is vendored and ratcheted: 22 of 23 pass (119 of
+  121 with `core`). See docs/shacl.md and docs/conformance/shacl.md.
 - **NEN 2660-2 relation profile and consistency shapes**
   (`examples/seed-bundles/nen2660-relations`). The part-whole, containment,
   constitution and connection relations with the characteristics OWL can

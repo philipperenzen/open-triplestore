@@ -19,10 +19,38 @@ use nom::{
 };
 use std::fmt::Write;
 
-/// Parse SHACLC text and return equivalent Turtle.
+/// Parse SHACLC text and return equivalent Turtle. Strict: the whole input
+/// must be consumed. A declaration the grammar does not know — a W3C form
+/// this parser does not implement, an unknown constraint, plain garbage — is
+/// an error naming its position, not input silently dropped: a lenient parse
+/// of such a document produced an EMPTY shapes graph, and an upload of it
+/// replaced the dataset's shapes with nothing while answering 200.
 pub fn parse(input: &str) -> Result<String, String> {
+    parse_with(input, false)
+}
+
+/// The pre-strict behaviour, for callers that opt in (`?lenient=true`):
+/// unrecognised trailing input is ignored and whatever parsed is returned.
+pub fn parse_lenient(input: &str) -> Result<String, String> {
+    parse_with(input, true)
+}
+
+fn parse_with(input: &str, lenient: bool) -> Result<String, String> {
     match parse_shaclc(input) {
-        Ok((_, doc)) => Ok(doc.to_turtle()),
+        Ok((rest, doc)) => {
+            let rest = rest.trim_start();
+            if !lenient && !rest.is_empty() {
+                let offset = input.len() - rest.len();
+                let line = input[..offset].matches('\n').count() + 1;
+                let column = offset - input[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0) + 1;
+                let snippet: String = rest.lines().next().unwrap_or("").chars().take(60).collect();
+                return Err(format!(
+                    "SHACLC parse error: unrecognised input at line {line}, column {column}: `{snippet}` \
+                     (pass ?lenient=true to ignore unrecognised input)"
+                ));
+            }
+            Ok(doc.to_turtle())
+        }
         Err(e) => Err(format!("SHACLC parse error: {}", e)),
     }
 }
