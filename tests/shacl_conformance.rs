@@ -510,3 +510,187 @@ fn a_sparql_target_cannot_reach_outside_the_runs_data_graphs() {
         r.results
     );
 }
+
+// ─── Graph reach: the class hierarchy is read across the run's data graphs ────
+
+/// `sh:targetClass` and `sh:class` are the same specification relation —
+/// "SHACL instance of C in the data graph" (§2.1.3.2 / §4.1.1) — evaluated at
+/// two moments, so they must agree. The subclass chain used to be read per
+/// graph for targets and across all graphs for `sh:class`, so a dataset that
+/// keeps its model in one graph and its instances in another had
+/// `sh:targetClass ex:Asset` target nothing while `sh:class ex:Asset` held.
+/// Nothing in the repository separated a subclass axiom from its type triple,
+/// which is why the disagreement was never observed.
+#[test]
+fn a_subclass_axiom_in_another_graph_still_targets_its_instances() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:S a sh:NodeShape ; sh:targetClass ex:Asset ; sh:property [ sh:path ex:name ; sh:minCount 1 ] ."),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    // The model layer: only the subclass axiom.
+    store
+        .load_str(
+            &format!("{PFX}ex:Bridge rdfs:subClassOf ex:Asset ."),
+            RdfFormat::Turtle,
+            Some("urn:model"),
+        )
+        .unwrap();
+    // The instance layer: only the type triple. No name, so the shape bites.
+    store
+        .load_str(
+            &format!("{PFX}ex:b1 a ex:Bridge ."),
+            RdfFormat::Turtle,
+            Some("urn:instances"),
+        )
+        .unwrap();
+
+    let r = validate(
+        &store,
+        "urn:shapes",
+        &["urn:instances".to_string(), "urn:model".to_string()],
+    )
+    .unwrap();
+    assert!(
+        violates(&r, "/b1"),
+        "a subclass axiom in a sibling data graph must still make ex:b1 a target of ex:Asset: {:?}",
+        r.results
+    );
+
+    // Control: with the model graph out of scope there is no chain to walk and
+    // nothing is targeted. That is a scoping question, not a reach one.
+    let out_of_scope = validate(&store, "urn:shapes", &["urn:instances".to_string()]).unwrap();
+    assert!(
+        out_of_scope.conforms,
+        "without the model graph in scope the superclass target has no instances: {:?}",
+        out_of_scope.results
+    );
+}
+
+/// The same rule written two ways must not give opposite answers in one run.
+/// A `sh:path` used to be evaluated inside each data graph in turn, so a path
+/// that has to cross a graph boundary found nothing, while the identical rule
+/// as a `sh:sparql` constraint sees the graphs merged and finds the value.
+/// This test states today's behaviour so any change to it is deliberate: the
+/// two constructs still disagree, and that is the open question recorded in
+/// docs/notes/improvement-log.md.
+#[test]
+fn a_path_and_an_equivalent_sparql_constraint_disagree_across_graphs() {
+    let store = TripleStore::in_memory().unwrap();
+    let shapes = r#"
+ex:PathShape a sh:NodeShape ; sh:targetNode ex:bridge1 ;
+  sh:property [ sh:path ( ex:hasDeck ex:width ) ; sh:minCount 1 ;
+                sh:message "path: no deck width" ] .
+ex:SparqlShape a sh:NodeShape ; sh:targetNode ex:bridge1 ;
+  sh:sparql [ sh:select """SELECT $this WHERE { FILTER NOT EXISTS { $this <http://example.org/hasDeck>/<http://example.org/width> ?w } }""" ;
+              sh:message "sparql: no deck width" ] .
+"#;
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:bridge1 a ex:Bridge ; ex:hasDeck ex:deck1 ."),
+            RdfFormat::Turtle,
+            Some("urn:instances"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:deck1 ex:width 12 ."),
+            RdfFormat::Turtle,
+            Some("urn:details"),
+        )
+        .unwrap();
+
+    let r = validate(
+        &store,
+        "urn:shapes",
+        &["urn:instances".to_string(), "urn:details".to_string()],
+    )
+    .unwrap();
+    let path_fired = r.results.iter().any(|x| x.message.starts_with("path:"));
+    let sparql_fired = r.results.iter().any(|x| x.message.starts_with("sparql:"));
+    assert!(
+        path_fired,
+        "today a sh:path is confined to one graph per evaluation, so the cross-graph hop finds nothing: {:?}",
+        r.results
+    );
+    assert!(
+        !sparql_fired,
+        "today a sh:sparql constraint sees the graphs merged and finds the width: {:?}",
+        r.results
+    );
+    assert_ne!(
+        path_fired, sparql_fired,
+        "the two spellings of one rule disagree — the incoherence this test exists to pin"
+    );
+
+    // Control: in a single graph the two spellings agree, which is why every
+    // existing fixture and the whole W3C suite miss this.
+    let single = TripleStore::in_memory().unwrap();
+    single
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    single
+        .load_str(
+            &format!("{PFX}ex:bridge1 a ex:Bridge ; ex:hasDeck ex:deck1 . ex:deck1 ex:width 12 ."),
+            RdfFormat::Turtle,
+            Some("urn:data"),
+        )
+        .unwrap();
+    let r1 = validate(&single, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(
+        r1.conforms,
+        "in one graph both spellings find the width: {:?}",
+        r1.results
+    );
+}
+
+/// A recursive shapes graph must still validate. SHACL leaves recursive shapes
+/// undefined (§3.4.3) and this engine bounds its loader at
+/// `MAX_SHAPE_LOAD_DEPTH`; hitting that bound drops the member being loaded,
+/// it does not fail the run. Making every inline-load error fail the shapes
+/// graph briefly made a legitimate `sh:node` cycle unvalidatable — and, through
+/// the write gate, made every write to such a dataset a 422.
+#[test]
+fn a_recursive_shapes_graph_still_validates() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!(
+                "{PFX}ex:A a sh:NodeShape ; sh:targetClass ex:T ; sh:node ex:B ; \
+                 sh:property [ sh:path ex:name ; sh:minCount 1 ] . \
+                 ex:B a sh:NodeShape ; sh:node ex:A ."
+            ),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:x a ex:T ."),
+            RdfFormat::Turtle,
+            Some("urn:data"),
+        )
+        .unwrap();
+
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()])
+        .expect("a recursive shapes graph must return a report, not an error");
+    assert!(
+        violates(&r, "/x"),
+        "the non-recursive constraints of the shape are still enforced: {:?}",
+        r.results
+    );
+}

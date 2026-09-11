@@ -666,7 +666,18 @@ impl<'a> DataView<'a> {
         let computed: Vec<((String, GraphSel), ClassInfo)> = keys
             .par_iter()
             .map(|(class, sel)| {
-                let closure = self.compute_closure(class, *sel);
+                // The `rdfs:subClassOf*` chain is read across every data graph
+                // for BOTH selectors. `sh:targetClass` (§2.1.3.2) and
+                // `sh:class` (§4.1.1) are the same specification relation —
+                // "SHACL instance of C in the data graph" — evaluated at two
+                // moments, so they must agree on the class hierarchy. Reading
+                // the chain per graph made them disagree: a dataset that keeps
+                // `ex:Bridge rdfs:subClassOf ex:Asset` in its model graph and
+                // `ex:b1 a ex:Bridge` in its instances graph had
+                // `sh:targetClass ex:Asset` silently target nothing, while
+                // `sh:class ex:Asset` on the same node held. Only the instance
+                // scan stays per graph.
+                let closure = self.compute_closure(class, GraphSel::All);
                 let instances = match sel {
                     GraphSel::One(i) => Some(Arc::new(self.scan_instances(&closure, *i))),
                     // With a single data graph the "all graphs" instance set is

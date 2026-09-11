@@ -16,6 +16,13 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 /// evaluation time.
 const MAX_SHAPE_LOAD_DEPTH: u32 = 50;
 
+/// Marks the loader's own recursion bound, as opposed to a shape that is
+/// genuinely malformed. A shapes graph may legitimately be recursive (SHACL
+/// §3.4.3 leaves recursive shapes undefined and lets a processor stop), so
+/// hitting the bound drops the member being loaded and leaves the rest of
+/// the run intact; every OTHER load error fails the shapes graph.
+const RECURSION_BOUND: &str = "shape load recursion bound";
+
 thread_local! {
     static SHAPE_LOAD_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
@@ -657,14 +664,16 @@ fn load_constraints(
     // shapes graph: it used to be skipped with `if let Ok(..)`, so a malformed
     // `sh:sparql` inside an `sh:node` body validated nothing and passed.
     for v in multi_values(store, shapes_graph, shape_iri, &format!("{}node", SH)) {
-        let node_shape = load_inline_shape(store, shapes_graph, &v)?;
-        constraints.push(Constraint::Node(Box::new(node_shape)));
+        if let Some(node_shape) = load_member_shape(store, shapes_graph, &v)? {
+            constraints.push(Constraint::Node(Box::new(node_shape)));
+        }
     }
 
     // sh:not
     if let Some(not_iri) = single_value(store, shapes_graph, shape_iri, &format!("{}not", SH)) {
-        let not_shape = load_inline_shape(store, shapes_graph, &not_iri)?;
-        constraints.push(Constraint::Not(Box::new(not_shape)));
+        if let Some(not_shape) = load_member_shape(store, shapes_graph, &not_iri)? {
+            constraints.push(Constraint::Not(Box::new(not_shape)));
+        }
     }
 
     // sh:and (RDF list of shape IRIs)
@@ -672,7 +681,9 @@ fn load_constraints(
     if !and_iris.is_empty() {
         let mut and_shapes = Vec::new();
         for iri in &and_iris {
-            and_shapes.push(load_inline_shape(store, shapes_graph, iri)?);
+            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
+                and_shapes.push(s);
+            }
         }
         if !and_shapes.is_empty() {
             constraints.push(Constraint::And(and_shapes));
@@ -684,7 +695,9 @@ fn load_constraints(
     if !or_iris.is_empty() {
         let mut or_shapes = Vec::new();
         for iri in &or_iris {
-            or_shapes.push(load_inline_shape(store, shapes_graph, iri)?);
+            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
+                or_shapes.push(s);
+            }
         }
         if !or_shapes.is_empty() {
             constraints.push(Constraint::Or(or_shapes));
@@ -696,7 +709,9 @@ fn load_constraints(
     if !xone_iris.is_empty() {
         let mut xone_shapes = Vec::new();
         for iri in &xone_iris {
-            xone_shapes.push(load_inline_shape(store, shapes_graph, iri)?);
+            if let Some(s) = load_member_shape(store, shapes_graph, iri)? {
+                xone_shapes.push(s);
+            }
         }
         if !xone_shapes.is_empty() {
             constraints.push(Constraint::Xone(xone_shapes));
@@ -733,15 +748,16 @@ fn load_constraints(
         .is_some_and(|v| v == "true");
         // Load the value shape inline (named or blank) so an inline `[ … ]` is enforced
         // rather than looked up — and silently skipped — in the top-level shapes list.
-        let qvs_shape = load_inline_shape(store, shapes_graph, &qvs_iri)?;
-        constraints.push(Constraint::QualifiedValueShape {
-            shape: Box::new(qvs_shape),
-            min_count,
-            max_count,
-            disjoint,
-            // Wired by load_property_shapes_inner once all siblings are loaded.
-            sibling_shapes: Vec::new(),
-        });
+        if let Some(qvs_shape) = load_member_shape(store, shapes_graph, &qvs_iri)? {
+            constraints.push(Constraint::QualifiedValueShape {
+                shape: Box::new(qvs_shape),
+                min_count,
+                max_count,
+                disjoint,
+                // Wired by load_property_shapes_inner once all siblings are loaded.
+                sibling_shapes: Vec::new(),
+            });
+        }
     }
 
     // SHACL-AF: sh:sparql constraints. Resolve through the raw quad index so this
@@ -1014,6 +1030,27 @@ fn constraint_components(
     Ok(out)
 }
 
+/// Load an inline member shape (`sh:node`, `sh:not`, an `sh:and`/`sh:or`/
+/// `sh:xone` member, a qualified value shape). `Ok(None)` means the loader's
+/// recursion bound was reached and this member is dropped -- the shapes graph
+/// stays usable, which is what keeps a recursive shapes graph validating and
+/// its dataset writable. Any other error fails the shapes graph, so a
+/// malformed member can never be silently skipped.
+fn load_member_shape(
+    store: &TripleStore,
+    shapes_graph: &str,
+    shape_iri: &str,
+) -> Result<Option<Shape>, String> {
+    match load_inline_shape(store, shapes_graph, shape_iri) {
+        Ok(shape) => Ok(Some(shape)),
+        Err(e) if e.starts_with(RECURSION_BOUND) => {
+            warn!("{e}; the member shape is not enforced for this run");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn load_inline_shape(
     store: &TripleStore,
     shapes_graph: &str,
@@ -1024,7 +1061,7 @@ fn load_inline_shape(
     let (_guard, within_limit) = LoadDepthGuard::enter();
     if !within_limit {
         return Err(format!(
-            "shape load recursion exceeded max depth {MAX_SHAPE_LOAD_DEPTH} at <{shape_iri}>"
+            "{RECURSION_BOUND}: exceeded max depth {MAX_SHAPE_LOAD_DEPTH} at <{shape_iri}>"
         ));
     }
 
@@ -1080,7 +1117,7 @@ fn load_property_shapes_inner(
     let (_guard, within_limit) = LoadDepthGuard::enter();
     if !within_limit {
         return Err(format!(
-            "property-shape load recursion exceeded max depth {MAX_SHAPE_LOAD_DEPTH} at <{shape_iri}>"
+            "{RECURSION_BOUND}: property shape exceeded max depth {MAX_SHAPE_LOAD_DEPTH} at <{shape_iri}>"
         ));
     }
 
@@ -1190,15 +1227,18 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
                 // All SHACL instances of the class across the dataset's data
                 // graphs — including instances of subclasses
                 // (rdf:type/rdfs:subClassOf*, SHACL §2.1.3.1). The type triple
-                // and the subclass chain are confined to one data graph each,
-                // as `GRAPH <g> { ?s rdf:type/rdfs:subClassOf* <C> }` was.
+                // is looked up per data graph; the subclass chain is read
+                // across all of them, so this agrees with `sh:class` on what a
+                // SHACL instance is (see `DataView::prepare`).
                 for i in 0..view.graph_count() {
                     let set = match view.instances_of(class_iri, GraphSel::One(i)) {
                         Some(set) => set,
                         None => {
                             // Not prepared (a target added after `prepare`):
-                            // compute it now from the same source.
-                            let closure = view.subclass_closure(class_iri, GraphSel::One(i));
+                            // compute it now from the same source, with the
+                            // subclass chain read across every data graph as
+                            // `prepare` does — see the note there.
+                            let closure = view.subclass_closure(class_iri, GraphSel::All);
                             std::sync::Arc::new(
                                 closure
                                     .iter()

@@ -7350,13 +7350,41 @@ pub async fn validate_dataset(
     // Shapes graphs stay IN the data set: SHACL allows the shapes graph and
     // data graph to coincide (merged uploads), and excluding them would make
     // a merged shapes+instances graph validate vacuously to "conforms".
-    let data_graphs: Vec<String> = state
+    let mut data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .into_iter()
         .filter(|g| !g.starts_with("urn:system:reports:"))
         .collect();
+
+    // The declared model version's graphs join the data graphs. SHACL reads
+    // the class hierarchy out of the data graph it is given — "all the
+    // rdfs:subClassOf declarations needed to walk the class hierarchy need to
+    // exist in the data graph" (§2.1.3.2), "the data graph is expected to
+    // include all the ontology axioms related to the data" (§3.2) — but model
+    // graphs live in the model registry, not in `dataset_graphs`, so a dataset
+    // that declares `dct:conformsTo` was validated without the model it
+    // conforms to: `sh:targetClass` on a superclass targeted nothing and
+    // `sh:class` on one failed, silently. Reasoning already reads them
+    // (`conformance::reasoning_sources`); validation now does too. Only graphs
+    // the caller may read are added, on the registry's own visibility rule.
+    if let Some(model) = crate::conformance::resolve(&state, &dataset).conforms_to_model {
+        let existing: std::collections::HashSet<&str> =
+            data_graphs.iter().map(String::as_str).collect();
+        let extra: Vec<String> = std::iter::once(model.graph_iri.clone())
+            .chain(model.sub_graphs.iter().cloned())
+            .filter(|g| !existing.contains(g.as_str()))
+            .filter(|g| {
+                crate::conformance::model_graph_readable(
+                    &state,
+                    Some(current_user.user_id.as_str()),
+                    g,
+                )
+            })
+            .collect();
+        data_graphs.extend(extra);
+    }
 
     // Run SHACL validation once per shapes graph and merge into one report.
     let mut reports = Vec::with_capacity(shapes_graphs.len());
