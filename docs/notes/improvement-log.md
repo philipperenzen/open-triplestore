@@ -719,19 +719,97 @@ just judged wrong.
   validated (entailment output, snapshots, reports) are already excluded, and
   the real defect was the opposite one: a missing graph, not a surplus.
 
+### The four follow-ups, closed (2026-09-11)
+
+Raised as out-of-scope follow-ups at the end of the graph-reach work and then
+brought into scope by the maintainer. Commits `912fcea`, `0bcbf39`, `6b3ba5d`,
+`0d8bc06`. One of the four turned out not to be a defect, and the investigation
+found a defect in the probe shipped an hour earlier.
+
+**`sh:closed` is not a sixth reach regime.** It enumerates the focus node's
+outgoing quads in a *single hop*, and every matching quad lives in exactly one
+graph, so "enumerate per graph and union" and "enumerate over the merge" return
+the same set by construction. The same argument retires `sh:targetSubjectsOf`
+and `sh:targetObjectsOf`. Nothing to fix; three tests now assert the
+equivalence rather than argue it. The real divergence is confined to paths with
+an **intermediate node** — a sequence, `zeroOrMorePath` or `oneOrMorePath` —
+which is a much narrower statement than "five regimes" and is now what
+`docs/shacl.md` says.
+
+**The probe shipped in `6ed571d` measured the wrong thing.** It fired only when
+the per-graph evaluation came back *empty*, so it was blind to every lookup
+where the merge merely *adds* values to a non-empty result — precisely the case
+that changes a `sh:maxCount`, `sh:uniqueLang` or `sh:qualifiedMaxCount` answer.
+A zero reading from it was not evidence, which defeats the reason for shipping
+it. It now compares the two result sets, reports a denominator, and runs only
+for paths that can actually cross a boundary. Caught by the follow-up
+investigation, not by a test — there was none to catch it.
+
+**`sh:sparql` and friends now read the run's own source.** A run reads one
+instant (the accelerator copy, else one RocksDB readable transaction), but
+`sh:sparql` constraints, custom-component validators and SPARQL targets went
+through `TripleStore::query` — the live store — so a write landing mid-run was
+visible to half a shapes graph and invisible to the other half. `DataView`
+gained a `query` method that dispatches on its own source, and the four
+data-reading call sites use it. The `sh:pattern` REGEX fallback is deliberately
+left on the store: it is an `ASK` over a `FILTER` that reads no data. The
+evaluator is built once per run from `TripleStore::query_options` and cloned per
+query, because building it scans the store for `sh:SPARQLFunction` definitions —
+the per-probe cost the `DataView` refactor existed to remove.
+`ogc_geosparql_shacl_roundtrip` is the guard: it calls `geof:distance` from
+inside a `sh:sparql` constraint and fails immediately if the options are not
+threaded through. The cost is the result cache and the shard routing for these
+queries, which is the trade every native probe already makes.
+
+**Studio pipelines read the conformed model, and not their own report graph.**
+The model-graph resolution is extracted to
+`conformance::model_graphs_for_dataset`, which takes the store, the auth db and
+the base URL rather than `AppState` — `resolve` only ever used those three — so
+the scheduler can call it, and both validation entry points go through it and
+cannot drift. The pipeline gained `resolve_read_graphs` *beside*
+`resolve_data_graphs` rather than widening it, because that function is the
+pipeline's write surface: it authorises targets, gates inference and decides
+where derived graphs are attached. The split is not cosmetic. `shacl::infer`
+materialises into a named graph only when handed exactly **one** data graph, so
+slipping a model graph into that slice would silently relocate every
+single-graph pipeline's in-place inference into the store's default graph, where
+the run cannot read it back. `run_validation_scoped` and
+`run_validation_capturing` therefore take the read scope and the inference scope
+separately; `run_validation` keeps its signature, so the write-gate call sites
+are untouched.
+
+**A multi-graph SHACL benchmark exists.** Every other SHACL benchmark passes one
+data graph, where the two readings are the same code path, so the gate had zero
+coverage of any of this. `shacl/validate_multigraph` adds `within/1`,
+`within/4` and `crossing/4` over 1 000 assets, with the subclass axiom alone in
+a model graph and the shapes using a sequence path and a `zeroOrMorePath`. Each
+id asserts its violation count inside `b.iter`, because the gate only fails on
+slowdowns — a scoping regression that dropped focus nodes would otherwise be
+reported as an improvement. No CI change: the filter already covers the `shacl`
+group and the `shacl_validate_` prefix already carries a tolerance. The first PR
+produces WARN rows only, since the merge base has no such benchmark.
+
+Tests added across the four: `shacl_conformance` +3 (the `sh:closed` and
+single-hop equivalences, and the IRI-versus-blank-node asymmetry of a composite
+path, which is a genuine divergence nobody had noticed), a `DataView`-level
+snapshot parity unit test that writes from the test thread with no sleeps, and
+`conformance_http` +2 — one driving the whole route to show a superclass target
+conforming vacuously before conformance is declared and reporting after it, the
+other pinning the Studio read/write split. Nothing in the repository previously
+created a Dataset-target pipeline, so that branch of `resolve_data_graphs` had
+never been executed by CI at all.
+
+Still open, and now the only ones: property-path reach still disagrees with
+`sh:sparql` for multi-hop paths (pinned by test, awaiting probe data from a real
+deployment); and `sh:closed`'s expression remains `GraphSel::All` where a
+per-graph loop would read more consistently, which is cosmetic and deliberately
+left.
+
 ### Follow-ups, not done
 
 - Property-path reach still disagrees with `sh:sparql`; pinned by
   `a_path_and_an_equivalent_sparql_constraint_disagree_across_graphs` so any
   change is deliberate. Decide on probe data.
-- Studio pipelines resolve their own data graphs in `src/shacl_studio/exec.rs`,
-  outside this programme's edit scope, so they do not get the model graphs yet
-  and their runs still differ from `POST …/validate`.
-- `sh:closed` is a sixth reach regime (unconditional merge) that no shipped
-  shape exercises.
-- `sh:sparql` constraints and SPARQL targets execute against the live store
-  rather than the run's snapshot or mirror, so they can read a different
-  instant from the rest of the run.
-- No multi-graph SHACL benchmark exists, so the perf gate cannot see a reach
-  change in either direction; the sharding generator and a mixed-path shape set
-  are both already written and merely never combined.
+- ~~Studio pipelines do not get the model graphs~~, ~~`sh:closed` is a sixth
+  regime~~, ~~`sh:sparql` reads the live store~~, ~~no multi-graph benchmark~~ —
+  all four taken into scope by the maintainer and closed; see below.
