@@ -450,13 +450,63 @@ fn a_sparql_target_that_cannot_select_focus_nodes_fails_the_shapes_graph() {
             "{what}: the target must fail the run, got {r:?}"
         );
     }
-    // The well-formed target still selects its focus nodes. It has to name the
-    // data graph itself: a SPARQL target is evaluated against the raw store
-    // (`execute_select_terms`) with no `FROM` prologue for the run's data
-    // graphs, so an unqualified pattern sees only the default graph and
-    // silently matches nothing. That scoping gap is pre-existing, is a
-    // behaviour change to close, and is recorded in the improvement log.
-    let shapes = "ex:S a sh:NodeShape ; sh:target [ sh:select \"SELECT ?this WHERE { GRAPH <urn:data> { ?this a <http://example.org/T> } }\" ] ; sh:property [ sh:path ex:p ; sh:minCount 1 ] .";
+    // The well-formed target still selects its focus nodes. An unqualified
+    // pattern is the right form: the run's data graphs are injected as the
+    // query's `FROM` prologue, so they are its default graph. A `GRAPH` block
+    // would match nothing, because no `FROM NAMED` is injected — the same rule
+    // a `sh:sparql` constraint follows.
+    let shapes = "ex:S a sh:NodeShape ; sh:target [ sh:select \"SELECT ?this WHERE { ?this a <http://example.org/T> }\" ] ; sh:property [ sh:path ex:p ; sh:minCount 1 ] .";
     let r = run(shapes, "ex:a a ex:T .");
     assert!(violates(&r, "/a"), "{:?}", r.results);
+}
+
+/// A SHACL-AF SPARQL target must not see graphs outside the run's data graphs.
+/// It used to run against the bare store, so a `sh:target` in any shapes graph
+/// the caller could write selected focus nodes from every graph in the store —
+/// another tenant's included — and `sh:value` carried their terms back.
+#[test]
+fn a_sparql_target_cannot_reach_outside_the_runs_data_graphs() {
+    let store = TripleStore::in_memory().unwrap();
+    let shapes = "ex:S a sh:NodeShape ; sh:target [ sh:select \"SELECT ?this WHERE { ?this a <http://example.org/T> }\" ] ; sh:property [ sh:path ex:secret ; sh:maxCount 0 ] .";
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:mine a ex:T ; ex:secret \"mine\" ."),
+            RdfFormat::Turtle,
+            Some("urn:data"),
+        )
+        .unwrap();
+    // Another tenant's graph, not in this run's data graphs.
+    store
+        .load_str(
+            &format!("{PFX}ex:theirs a ex:T ; ex:secret \"classified\" ."),
+            RdfFormat::Turtle,
+            Some("urn:other-tenant"),
+        )
+        .unwrap();
+
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]).unwrap();
+    assert!(
+        violates(&r, "/mine"),
+        "the in-scope node is still targeted: {:?}",
+        r.results
+    );
+    assert!(
+        !r.results.iter().any(|x| x.focus_node.contains("theirs")),
+        "a target must not select focus nodes from a graph outside the run: {:?}",
+        r.results
+    );
+    assert!(
+        !r.results
+            .iter()
+            .any(|x| x.value.as_deref() == Some("classified")),
+        "no out-of-scope value may reach the report: {:?}",
+        r.results
+    );
 }

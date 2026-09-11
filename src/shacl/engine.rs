@@ -1225,8 +1225,17 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
                 focus_nodes.extend(view.objects_of(pred_iri, GraphSel::All));
             }
             Target::SparqlTarget(sparql) => {
-                // SHACL-AF custom SPARQL target
-                if let Ok(nodes) = execute_select_terms(view.store, sparql, "this") {
+                // SHACL-AF custom SPARQL target, scoped to the run's data
+                // graphs. It used to run against the bare store: a `sh:target`
+                // in any shapes graph the caller could write selected focus
+                // nodes from EVERY graph in the store, other tenants' included,
+                // and `sh:value` carried their terms back in the report. The
+                // same `FROM <g>` prologue a `sh:sparql` constraint gets
+                // confines it to the graphs this run may read; with no
+                // `FROM NAMED`, a `GRAPH` block inside the target matches
+                // nothing, exactly as for constraints.
+                let scoped = super::constraints::prebind(sparql, &[], None, view.data_graphs);
+                if let Ok(nodes) = execute_select_terms(view.store, &scoped, "this") {
                     focus_nodes.extend(nodes);
                 }
             }
