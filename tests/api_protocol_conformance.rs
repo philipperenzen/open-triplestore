@@ -705,3 +705,67 @@ async fn shacl_on_write_gate_with_malformed_sparql_constraint_fails_closed_422()
 fn body_json_value(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap_or(serde_json::Value::Null)
 }
+
+/// A DB failure while checking for triple security labels must refuse the
+/// read, not serve the graph unfiltered: the gate used to be
+/// `has_triple_security_labels(..).unwrap_or(false)`.
+#[tokio::test]
+async fn gsp_get_fails_closed_when_the_label_table_cannot_be_read() {
+    let (state, token) = admin_state();
+    let db = state.auth_db.clone();
+    let app = test_app(state);
+    let g = graph_uri("http://example.org/labelled");
+
+    let (st, ..) = send(
+        &app,
+        Method::PUT,
+        g.clone(),
+        Some(&token),
+        Some("text/turtle"),
+        None,
+        "<http://ex/s> <http://ex/p> <http://ex/o> .",
+    )
+    .await;
+    assert!(st.is_success(), "seed PUT => {st}");
+    let (st, body, _) = send(
+        &app,
+        Method::GET,
+        g.clone(),
+        Some(&token),
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert!(
+        st.is_success() && body.contains("http://ex/s"),
+        "control read => {st}"
+    );
+
+    // Break the label table underneath the handler.
+    db.pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE triple_security_labels;")
+        .unwrap();
+
+    let (st, body, _) = send(
+        &app,
+        Method::GET,
+        g,
+        Some(&token),
+        None,
+        Some("text/turtle"),
+        "",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a failed label check must refuse the read, got {st}: {body}"
+    );
+    assert!(
+        !body.contains("http://ex/s"),
+        "no graph data may be served when labels cannot be checked"
+    );
+}

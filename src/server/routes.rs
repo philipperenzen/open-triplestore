@@ -1268,11 +1268,20 @@ async fn graph_store_get(
     // Triple-level security label filtering: when the target graph has labels,
     // we have to load+filter+re-serialize, which fundamentally needs the bytes
     // in memory. Otherwise we can stream the dump directly through axum.
+    // Fail closed: if the label table cannot be read, the graph may carry
+    // labels this read cannot apply, so the read is refused rather than served
+    // unfiltered — the rule the endpoint ACL already follows on a DB error.
+    // (`unwrap_or(false)` used to turn that error into an unfiltered 200.)
     let needs_label_filter = match params.graph_iri() {
         Some(iri) => state
             .auth_db
             .has_triple_security_labels(&[iri][..])
-            .unwrap_or(false),
+            .map_err(|e| {
+                tracing::error!(error = %e, graph = iri, "triple-label check failed; refusing the read");
+                AppError::ServiceUnavailable(
+                    "triple security labels could not be checked; the read is refused".to_string(),
+                )
+            })?,
         None => false,
     };
 

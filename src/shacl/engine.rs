@@ -475,7 +475,13 @@ fn load_targets(
             single_value(store, shapes_graph, &target_node, &format!("{SH}select"))
         {
             let prefixes = sparql_prefixes(store, shapes_graph, &target_node);
-            targets.push(Target::SparqlTarget(format!("{prefixes}{select}")));
+            let query = format!("{prefixes}{select}");
+            // A target that does not parse, or does not project ?this, used
+            // to yield no focus nodes — the shape silently validated nothing.
+            // Both fail the shapes graph at load time now.
+            check_sparql_target(&query)
+                .map_err(|e| format!("shape <{shape_iri}>: sh:target <{target_node}> {e}"))?;
+            targets.push(Target::SparqlTarget(query));
         }
     }
 
@@ -647,18 +653,18 @@ fn load_constraints(
 
     // sh:node — loaded inline (named or blank) so inline `sh:node [ … ]` bodies
     // are enforced rather than looked up — and silently skipped — in the
-    // top-level shapes list.
+    // top-level shapes list. A member shape that fails to load fails the
+    // shapes graph: it used to be skipped with `if let Ok(..)`, so a malformed
+    // `sh:sparql` inside an `sh:node` body validated nothing and passed.
     for v in multi_values(store, shapes_graph, shape_iri, &format!("{}node", SH)) {
-        if let Ok(node_shape) = load_inline_shape(store, shapes_graph, &v) {
-            constraints.push(Constraint::Node(Box::new(node_shape)));
-        }
+        let node_shape = load_inline_shape(store, shapes_graph, &v)?;
+        constraints.push(Constraint::Node(Box::new(node_shape)));
     }
 
     // sh:not
     if let Some(not_iri) = single_value(store, shapes_graph, shape_iri, &format!("{}not", SH)) {
-        if let Ok(not_shape) = load_inline_shape(store, shapes_graph, &not_iri) {
-            constraints.push(Constraint::Not(Box::new(not_shape)));
-        }
+        let not_shape = load_inline_shape(store, shapes_graph, &not_iri)?;
+        constraints.push(Constraint::Not(Box::new(not_shape)));
     }
 
     // sh:and (RDF list of shape IRIs)
@@ -666,9 +672,7 @@ fn load_constraints(
     if !and_iris.is_empty() {
         let mut and_shapes = Vec::new();
         for iri in &and_iris {
-            if let Ok(s) = load_inline_shape(store, shapes_graph, iri) {
-                and_shapes.push(s);
-            }
+            and_shapes.push(load_inline_shape(store, shapes_graph, iri)?);
         }
         if !and_shapes.is_empty() {
             constraints.push(Constraint::And(and_shapes));
@@ -680,9 +684,7 @@ fn load_constraints(
     if !or_iris.is_empty() {
         let mut or_shapes = Vec::new();
         for iri in &or_iris {
-            if let Ok(s) = load_inline_shape(store, shapes_graph, iri) {
-                or_shapes.push(s);
-            }
+            or_shapes.push(load_inline_shape(store, shapes_graph, iri)?);
         }
         if !or_shapes.is_empty() {
             constraints.push(Constraint::Or(or_shapes));
@@ -694,9 +696,7 @@ fn load_constraints(
     if !xone_iris.is_empty() {
         let mut xone_shapes = Vec::new();
         for iri in &xone_iris {
-            if let Ok(s) = load_inline_shape(store, shapes_graph, iri) {
-                xone_shapes.push(s);
-            }
+            xone_shapes.push(load_inline_shape(store, shapes_graph, iri)?);
         }
         if !xone_shapes.is_empty() {
             constraints.push(Constraint::Xone(xone_shapes));
@@ -733,16 +733,15 @@ fn load_constraints(
         .is_some_and(|v| v == "true");
         // Load the value shape inline (named or blank) so an inline `[ … ]` is enforced
         // rather than looked up — and silently skipped — in the top-level shapes list.
-        if let Ok(qvs_shape) = load_inline_shape(store, shapes_graph, &qvs_iri) {
-            constraints.push(Constraint::QualifiedValueShape {
-                shape: Box::new(qvs_shape),
-                min_count,
-                max_count,
-                disjoint,
-                // Wired by load_property_shapes_inner once all siblings are loaded.
-                sibling_shapes: Vec::new(),
-            });
-        }
+        let qvs_shape = load_inline_shape(store, shapes_graph, &qvs_iri)?;
+        constraints.push(Constraint::QualifiedValueShape {
+            shape: Box::new(qvs_shape),
+            min_count,
+            max_count,
+            disjoint,
+            // Wired by load_property_shapes_inner once all siblings are loaded.
+            sibling_shapes: Vec::new(),
+        });
     }
 
     // SHACL-AF: sh:sparql constraints. Resolve through the raw quad index so this
@@ -1573,6 +1572,37 @@ fn execute_select_single(
 /// Like [`execute_select_single`], but keeps the full typed terms so target
 /// resolution carries term kind, datatype and language into constraint
 /// evaluation.
+/// A SHACL-AF SPARQL target (`sh:target [ sh:select … ]`) must be a SELECT
+/// that projects `?this` (SHACL-AF §2.1.2); anything else produces no focus
+/// nodes and would let the shape pass over nothing.
+fn check_sparql_target(query: &str) -> Result<(), String> {
+    use opengraph::spargebra::algebra::GraphPattern;
+    use opengraph::spargebra::{Query, SparqlParser};
+    let parsed = SparqlParser::new()
+        .parse_query(query)
+        .map_err(|e| format!("sh:select does not parse: {e}"))?;
+    let Query::Select { pattern, .. } = parsed else {
+        return Err("sh:select must be a SELECT query".to_string());
+    };
+    // Walk the solution-modifier wrappers down to the projection.
+    let mut p = &pattern;
+    loop {
+        match p {
+            GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::Slice { inner, .. }
+            | GraphPattern::OrderBy { inner, .. } => p = inner,
+            GraphPattern::Project { variables, .. } => {
+                if variables.iter().any(|v| v.as_str() == "this") {
+                    return Ok(());
+                }
+                return Err("sh:select must project ?this".to_string());
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
 fn execute_select_terms(store: &TripleStore, query: &str, var: &str) -> Result<Vec<Term>, String> {
     match store.query(query) {
         Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => Ok(solutions

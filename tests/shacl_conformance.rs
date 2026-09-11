@@ -381,3 +381,82 @@ fn unsupported_prebinding_features_fail_the_shapes_graph() {
         );
     }
 }
+
+// ─── Fail closed: inline shapes and SPARQL targets that cannot be loaded ──────
+
+/// An inline `sh:node` body whose constraint cannot be evaluated used to be
+/// skipped at load (`if let Ok(..)`), so the shape validated nothing and
+/// passed. It fails the shapes graph now, like a top-level shape does.
+#[test]
+fn an_inline_sh_node_with_a_malformed_constraint_fails_the_shapes_graph() {
+    let shapes = r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+  sh:node [ sh:sparql [ sh:select "THIS IS NOT SPARQL" ] ] .
+"#;
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:a a ex:T ."),
+            RdfFormat::Turtle,
+            Some("urn:data"),
+        )
+        .unwrap();
+    let r = validate(&store, "urn:shapes", &["urn:data".to_string()]);
+    assert!(
+        r.is_err(),
+        "a malformed inline shape must fail the run, got {r:?}"
+    );
+}
+
+/// A SPARQL target that does not parse, or does not project `?this`, used to
+/// yield no focus nodes — the shape passed over nothing.
+#[test]
+fn a_sparql_target_that_cannot_select_focus_nodes_fails_the_shapes_graph() {
+    for (what, select) in [
+        ("garbage", "THIS IS NOT SPARQL"),
+        (
+            "no ?this",
+            "SELECT ?x WHERE { ?x a <http://example.org/T> }",
+        ),
+    ] {
+        let shapes = format!(
+            "ex:S a sh:NodeShape ; sh:target [ sh:select \"{select}\" ] ; sh:property [ sh:path ex:p ; sh:minCount 1 ] ."
+        );
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                &format!("{PFX}{shapes}"),
+                RdfFormat::Turtle,
+                Some("urn:shapes"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                &format!("{PFX}ex:a a ex:T ."),
+                RdfFormat::Turtle,
+                Some("urn:data"),
+            )
+            .unwrap();
+        let r = validate(&store, "urn:shapes", &["urn:data".to_string()]);
+        assert!(
+            r.is_err(),
+            "{what}: the target must fail the run, got {r:?}"
+        );
+    }
+    // The well-formed target still selects its focus nodes. It has to name the
+    // data graph itself: a SPARQL target is evaluated against the raw store
+    // (`execute_select_terms`) with no `FROM` prologue for the run's data
+    // graphs, so an unqualified pattern sees only the default graph and
+    // silently matches nothing. That scoping gap is pre-existing, is a
+    // behaviour change to close, and is recorded in the improvement log.
+    let shapes = "ex:S a sh:NodeShape ; sh:target [ sh:select \"SELECT ?this WHERE { GRAPH <urn:data> { ?this a <http://example.org/T> } }\" ] ; sh:property [ sh:path ex:p ; sh:minCount 1 ] .";
+    let r = run(shapes, "ex:a a ex:T .");
+    assert!(violates(&r, "/a"), "{:?}", r.results);
+}

@@ -230,8 +230,13 @@ fn fail_bogen_too_close_geosparql() {
 
 #[test]
 fn fail_doorvaarthoogte_expression() {
+    // Both files: shapes-af.ttl's own header says its rule, target and
+    // function bodies use the `ex:prefixes` declaration that lives in
+    // shapes-sparql.ttl. Loading it alone leaves the SPARQL target's query
+    // without its prefixes — which used to be silent (the target produced no
+    // focus nodes and the shape validated nothing) and is now a load error.
     let r = validate_case(
-        &[SHAPES_AF],
+        &[SHAPES_SPARQL, SHAPES_AF],
         include_str!("fixtures/waalbrug/fail/doorvaarthoogte-laag.ttl"),
     );
     assert!(
