@@ -394,4 +394,211 @@ Notes and follow-ups (none blocking):
 **Handoff:** the next session runs phase P2 — *design notes only*
 (`docs/notes/analytical-mirror-design.md`, `docs/notes/shacl-to-sql-design.md`,
 the repair layer and delta-versioning notes); implementation needs explicit
-approval. Same branch, same container loop.
+approval. Same branch, same container loop. *(Run: the SHACL→SQL note was held
+by the maintainer and answered inside the analytical-mirror note — see below.)*
+
+## P0 addendum — item 6 completed, follow-ups closed (2026-09-11)
+
+### 6. Release hygiene — the CHANGELOG corrections (`b7f688b`)
+
+P0 item 6 listed the defects of both sections and stopped, because the
+corrections touch security claims. They are now written, commit by commit
+from `git log 8b25cea..b826db0` (19 commits, `[0.6.0]`) and `b826db0..HEAD`
+(37 commits, `[Unreleased]`), with every kept entry spliced verbatim.
+
+- `[Unreleased] ### Security` said `None.`; it now carries eleven entries for
+  the findings #347 closed (LDP `PATCH` without ACL, SWRL unauthenticated and
+  injectable, `validate-and-commit` cross-tenant graph replace, Studio
+  unscoped introspection reading the default graph, Graph Store reads ignoring
+  `graph_acl` and dumping the default graph to anonymous, triple labels never
+  matching and failing open, endpoint ACL on six routes and never for
+  anonymous, the Spark guard exempting client-labelled assistant turns, remote
+  allowlist raw-prefix matching, private graphs in container export and LDES)
+  plus #293's scoped text-search hits. The last three concern features new in
+  the range, and say so.
+- `### Removed` said `None.`; `f20a87b` removed the invented vocabularies.
+- Missing entries added: #348 (RP-initiated logout, `prompt=none`), the
+  encrypted-backup startup refusal, #321, #265, #267, #288, #295, #290, #264,
+  #262, #296; `[0.6.0]` gained #233's six items, #257's
+  `OTS_OIDC_SESSION_POLICY` / `OTS_OIDC_WRITE_SCOPES` and closed token
+  exchange, and #227's MSRV 1.88 → 1.94.1 with the builder images.
+- Corrected: the perf gate is 1.15, not "+10 %" (#260); jsdom 30 landed on
+  Node 24 (#261), not "held on Node 20"; basemap suppression had the primary
+  path and the fallback the wrong way round; two entries described states that
+  never shipped (the prefix-seeding fix, and `sd:BasicFederatedQuery` not being
+  advertised — it is advertised when an allowlist is configured) and were
+  dropped.
+- **Not decided here:** `v0.6.0` was never tagged and the compare links dangle.
+  That is the maintainer's call (tag `b826db0` retroactively, or fold into
+  0.7.0); the links are untouched. Review the Security entries first.
+
+### Fail-open follow-ups closed (`5954c88`)
+
+The three the P0 log carried forward, each closed the way item 4b closed the
+top-level case — a check that cannot be evaluated is a failure, never a pass.
+
+- The six `if let Ok(load_inline_shape)` call sites propagate: an unloadable
+  `sh:node`, `sh:not`, `sh:and`, `sh:or`, `sh:xone` or qualified-value member
+  fails the shapes graph, which the write gate turns into a 422.
+- A SPARQL target is parse-checked at load and must project `?this`
+  (SHACL-AF §2.1.2); either failure fails the shapes graph. It used to be
+  stored unchecked and its query error ignored at evaluation, so the shape
+  passed over nothing.
+- The Graph Store `GET` label gate refuses the read with 503 when the label
+  table cannot be read, instead of `unwrap_or(false)` serving the graph
+  unfiltered. `docs/security.md` says so.
+
+Two fixtures the change exposed, both fixed rather than worked around:
+`tests/waalbrug_conformance.rs` loaded `shapes-af.ttl` alone although that
+file's own header says its rule, target and function bodies need the
+`ex:prefixes` declaration from `shapes-sparql.ttl` — so its SPARQL target had
+never parsed and that shape validated nothing; and a SPARQL target is
+evaluated against the raw store with no `FROM` prologue for the run's data
+graphs, so a target over a named graph matches nothing unless it names the
+graph itself. The second is pre-existing and a behaviour change to close —
+**follow-up, not done here.**
+
+Tests: `shacl_conformance` (+2), `api_protocol_conformance` (+1, which drops
+the label table underneath the handler). W3C SHACL ratchet unchanged
+(core 97/1/15, sparql 22/1/0).
+
+### Still open after P0 and P1
+
+- **Maintainer decisions (stop conditions):** endpoint ACL default-open for
+  unauthenticated requests (`src/auth/`); triple-label filtering on `/sparql`
+  results (a design change, not a fix — `docs/security.md` states the scope
+  honestly); a rolled-back `/sparql/batch` still answers 200.
+- **Painpoints sub-items the phase specs did not include:** linkset SHACL
+  shapes (no `owl:sameAs` between resources of different `dct:conformsTo`
+  models unless whitelisted); the NEN 2660 "no object is part of two disjoint
+  wholes" shape; the IFC relation mapping to the NEN relation family (that one
+  belongs to P3's IFC lift item).
+- **Already closed by earlier work, contrary to the audit:** SHACLC blank-node
+  property-shape serialisation (pinned in `tests/shaclc_conformance.rs`),
+  SHACL Studio HTTP tests (ten across two files), `prp-trp` (in
+  `IMPLEMENTED_RULES`), licence presentation.
+- **Found while censusing shape graphs, queued as its own task:** the
+  implicit class target ASK is scoped to the shapes graph
+  (`src/shacl/engine.rs:455`), so a node shape that is also a class declared
+  in a *different* graph gets no focus nodes — 27 of the 30 NEN 2660 node
+  shapes validate nothing under that bundle's graph split.
+
+---
+
+## Phase P2 — analytical layer, design notes only (2026-09-11)
+
+Nothing was implemented. Three notes shipped in `d9ca0b7`; the fourth was
+held by the maintainer and answered inside the first.
+
+### Evidence base
+
+Eleven read-only subsystem maps (1 136 file:line facts), a completeness
+critic, eight follow-up reads (533 facts), a four-lens adversarial panel on
+the author's draft position, then two independent drafts per note, judging,
+synthesis, citation verification and repair — all against `ccf164a`. Two
+follow-up findings changed the designs:
+
+- An oxigraph `Transaction` **can** carry quad mutations and a SPARQL Update
+  in one commit, because `PreparedSparqlUpdate::on_transaction` does not
+  commit itself. So a commit record can be atomic on the paths that already
+  hold a transaction (`batch_update`, the PUT replace path) and never on the
+  bulk-loader paths, which ingest SST files.
+- Oxigraph exposes **no** durable sequence number. RocksDB's is bound in the
+  vendored C API (`db/c.cc:2436`) but the `storage` module is private, so the
+  cursor has to be allocated by the platform.
+
+### 2. `docs/notes/shacl-to-sql-design.md` — held by the maintainer
+
+The maintainer asked, before the note was written, whether SHACL→SQL is
+genuinely a good fit and why not SPARQL→SQL; after the evidence sweep the
+steer was: Studio pipelines do validate large instance datasets so it may
+apply, **9M must be measured**, instance data is routinely wrong after a model
+update so bulk revalidation is a real workload, and **the reliable changelog
+comes first**. The recorded decision, in the analytical-mirror note's §1:
+
+1. **Per-quad change capture with a durable cursor is the first deliverable.**
+   It is the prerequisite for any persisted substrate, for delta versions, for
+   exact count-index maintenance and for changed-node scoping of validation.
+2. **SHACL→SQL is deferred pending measurement, not rejected.** The gating
+   experiment is specified: a post-rebuild whole-dataset Studio pipeline run at
+   9M quads, plus the gate-sandbox cost, against thresholds written down now.
+3. **The columnar substrate and `/sql` are not built now.** Adding a DuckDB or
+   DataFusion dependency is outside the programme's edit scope, and a `/sql`
+   endpoint needs `src/auth/middleware.rs`, which is too.
+
+Four claims of the draft position the panel refuted, corrected in the note:
+the write gate is **not** a per-delivery check of one payload (a gated `POST`
+dumps and re-parses the whole target graph and validates every focus node of
+the merge, so it *is* bulk many-targets Core validation on the hottest write
+path; a gated `PUT` validates the whole payload); the engine's graph semantics
+are **not** test-pinned (three disagreeing regimes coexist in one run and no
+test names any of them, so there is no written contract for a second validator
+to be equivalent to — which makes the liability argument stronger, not weaker);
+SHACL Core is **not** a corollary of BGP + FILTER + GROUP BY (`sh:class` and
+`sh:targetClass` need `rdfs:subClassOf*` closures, `zeroOrMorePath` is a
+closure, `sh:node` recursion is bounded unfolding, `sh:closed` enumerates
+predicates); and the builder already compiles RocksDB and GEOS from C++, so a
+bundled C++ engine is an unmeasured cost rather than a new class of problem.
+
+**The operational fact that dominates every number in this area:** the shipped
+`docker-compose.yml` limit of 4 GiB makes the accelerator cap
+`(4 GiB / 4) / 1024 = 1 048 576`, clamped up to the 2 000 000 floor — so a
+default install never accelerates a store above 2M triples, and at 9M the
+accelerator is **off**, where the same group-by takes about 11 s rather than
+0.52 s. The 0.52 s figure was measured on a 54.9 GiB host. Fixing or
+documenting that is the cheapest win in the whole analysis.
+
+### 1, 3, 4. The three notes (`d9ca0b7`)
+
+- **`analytical-mirror-design.md`** — the decision record above; what exists
+  today to build on (the `query_uncached` chain and its insertion point, the
+  publish/stale protocol, `opengraph::parallel::classify`, the count index,
+  the result cache, the memory budget); substrate options with a
+  recommendation; schema derivation and its typing problems; why "fed from the
+  commit log" cannot be built as written; the SPARQL-subset→SQL router with
+  the SPARQL semantics SQL gets wrong by default and a decline-rather-than-
+  differ fidelity policy; the `/sql` endpoint with the readable-graph predicate
+  reproduced as a row filter; publish/stale carry-over for a third copy; the
+  telemetry phase, its thresholds, and how SHACL Core would ride on the
+  translator instead of a separate compiler.
+- **`repair-layer-design.md`** — TGD/EGD rule format with worked examples,
+  chase semantics (restricted chase, labelled nulls, idempotent
+  head-satisfaction, termination budget), where the chase runs and what it
+  sees, the constraint-by-constraint repairability analysis, the proposal
+  artefact, and `POST /api/datasets/:id/repair` proposing an RDF Patch that is
+  never auto-applied — including the gate the existing patch route lacks.
+- **`delta-versioning-design.md`** — the change-capture primitive per mutation
+  primitive (which need a before-image scan and what it costs), where it is
+  persisted without touching the RocksDB layout, the `row`/`seq` split with
+  `seq` assigned inside the commit critical section, versions as checkpoint
+  plus patch chain with lazy materialisation, concurrency, the RDF Patch
+  extensions required, and RDF-star statement provenance with its cost and its
+  downstream breakage budgeted.
+
+## Checkpoint (2026-09-11, HEAD `5954c88` + this note)
+
+| Check | Result |
+|---|---|
+| `cargo test` over the thirteen binaries the P0 follow-ups touch (shacl_conformance, api_protocol_conformance, w3c_shacl_conformance, shacl_studio_http, shacl_pipeline_integration, shacl_rules_conformance, shaclc_conformance, security_shacl_studio, ogc_geosparql_shacl_roundtrip, standards_conformance, standards_demo_e2e, nen2660_relations_bundle, waalbrug_conformance) | **139 passed, 0 failed, 0 ignored**; W3C SHACL 119 pass / 2 known-fail / 15 skips, unchanged |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets --features <same> -- -D warnings` | clean |
+| `scripts/conformance_table.py --check` | regenerated (SHACL Core 13→15, Protocol 16→17), check passes |
+
+The full workspace suite was last run green at P1's checkpoint (2 984 passed);
+this phase's code change is confined to the SHACL loader and one Graph Store
+read path, and the thirteen binaries above cover both.
+
+Commits after P1's `7986ab1`: `b7f688b` the CHANGELOG corrections (P0 item 6),
+`d9ca0b7` the three P2 design notes, `5954c88` the fail-open follow-ups, then
+this note. Nothing pushed, nothing tagged.
+
+**Handoff.** Implementing any P2 item needs explicit approval. If approved, the
+order the notes argue for is: (1) the query and validation telemetry
+(§1.4 of the mirror note — in scope, small, and the only way the go/no-go
+becomes mechanical); (2) per-quad change capture with a durable cursor (phase 1
+of the delta-versioning note); (3) the 9M SHACL measurement; then decide P2-1
+and P2-2 against the thresholds. Otherwise the programme's next phase is P3
+(connectors and standards surface: R2RML SQL sources and joins, Ontop as an
+allow-listed `SERVICE`, IFC lift depth, IDS export, LDES retention, DQV
+shapes). Two things are waiting on the maintainer either way: the `v0.6.0`
+tagging decision, and the three stop-condition items listed above.
