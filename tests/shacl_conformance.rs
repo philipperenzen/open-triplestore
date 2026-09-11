@@ -694,3 +694,61 @@ fn a_recursive_shapes_graph_still_validates() {
         r.results
     );
 }
+
+/// The graph-reach probe measures without changing an answer: the same run
+/// gives the same report with the probe on and off. It exists so a deployment
+/// can find out how often a `sh:path` would resolve differently over the merge
+/// of its data graphs before anyone changes the semantics.
+#[test]
+fn the_graph_reach_probe_changes_no_answer() {
+    // Serialised against other env-reading tests in this binary by construction:
+    // no other test in this file sets OTS_SHACL_REACH_PROBE.
+    let build = || {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                &format!(
+                    "{PFX}ex:S a sh:NodeShape ; sh:targetNode ex:bridge1 ; \
+                     sh:property [ sh:path ( ex:hasDeck ex:width ) ; sh:minCount 1 ] ."
+                ),
+                RdfFormat::Turtle,
+                Some("urn:shapes"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                &format!("{PFX}ex:bridge1 ex:hasDeck ex:deck1 ."),
+                RdfFormat::Turtle,
+                Some("urn:instances"),
+            )
+            .unwrap();
+        store
+            .load_str(
+                &format!("{PFX}ex:deck1 ex:width 12 ."),
+                RdfFormat::Turtle,
+                Some("urn:details"),
+            )
+            .unwrap();
+        store
+    };
+    let graphs = ["urn:instances".to_string(), "urn:details".to_string()];
+
+    let off = validate(&build(), "urn:shapes", &graphs).unwrap();
+    std::env::set_var("OTS_SHACL_REACH_PROBE", "1");
+    let on = validate(&build(), "urn:shapes", &graphs).unwrap();
+    std::env::remove_var("OTS_SHACL_REACH_PROBE");
+
+    assert_eq!(
+        off.conforms, on.conforms,
+        "the probe must not change conformance"
+    );
+    assert_eq!(
+        off.results_count, on.results_count,
+        "the probe must not change the result count"
+    );
+    assert!(
+        !off.conforms,
+        "the fixture is the cross-graph path, which today violates: {:?}",
+        off.results
+    );
+}

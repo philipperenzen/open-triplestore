@@ -89,6 +89,62 @@ curl 'http://localhost:7878/api/datasets/<dataset_id>/shapes?format=shaclc' \
 
 ---
 
+## What a validation run reads
+
+A dataset validation run is given **every registered graph of the dataset**
+except its persisted-report graph — instances, shapes, linkset, provenance,
+catalogue, domain values — plus **the graphs of the data model the dataset
+declares `dct:conformsTo`**. Derived graphs are not included: entailment
+output, version snapshots and report graphs are never registered as dataset
+graphs.
+
+The model graphs are in scope because SHACL reads the class hierarchy out of
+the data graph it is handed: *"all the `rdfs:subClassOf` declarations needed to
+walk the class hierarchy need to exist in the data graph"* (SHACL §2.1.3.2).
+Without them, `sh:targetClass` on a superclass would target nothing and
+`sh:class` against a model term would fail, silently. Only model graphs the
+caller may read are added.
+
+### Multi-graph reach — a known inconsistency
+
+When a run spans more than one data graph, the SHACL constructs do not all read
+the same set of graphs, and **the same logical rule can give opposite answers
+depending on how it is written**:
+
+| Construct | Reads |
+|---|---|
+| `sh:path` (property paths), for an IRI focus node | each data graph separately, results unioned — a path that must cross graphs finds nothing |
+| `sh:path`, for a blank-node or literal focus node | all data graphs merged |
+| `sh:sparql`, `sh:class`, `sh:targetSubjectsOf`, `sh:targetObjectsOf`, `sh:closed` | all data graphs merged |
+| `sh:targetClass` | type triples per graph; the `rdfs:subClassOf*` chain across all graphs |
+
+So a rule expressed as `sh:path ( ex:hasDeck ex:width )` can report a violation
+that the identical rule written as a `sh:sparql` constraint does not. The
+specification defines validation against **one** data graph (§3.4), so the
+merged reading is the faithful one and the per-graph path evaluation is the
+deviation.
+
+**This has not been changed**, because flipping it would alter which SHACL-AF
+rules fire, and inference materialises into your data on an unattended
+schedule. Single-graph runs — which includes every write gate — are unaffected
+either way, since the two readings coincide when there is one graph.
+
+To find out whether it affects your data, set `OTS_SHACL_REACH_PROBE=1`. Each
+run then logs, at warning level, how many value-node lookups found nothing per
+graph but would have found values over the merge:
+
+```
+graph-reach probe: 14 value-node lookups found nothing per data graph but would
+have found 21 value nodes over the merge of them
+```
+
+The probe changes no answer — it measures and discards. It costs one extra path
+evaluation per lookup that found nothing, so leave it off outside an
+investigation. If it reports nothing on your datasets, the inconsistency does
+not reach your data.
+
+---
+
 ## On-Demand Validation
 
 ```bash

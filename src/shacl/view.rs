@@ -102,6 +102,8 @@ pub(crate) struct DataView<'a> {
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
+    /// Graph-reach measurement for this run (see [`ReachProbe`]).
+    pub(crate) reach_probe: ReachProbe,
     /// Per-run adjacency for the shape predicates, built for the snapshot and
     /// live sources when the run is large enough to pay for it (see
     /// [`RunIndex`]). `None` on the mirror source, whose probes are RAM lookups.
@@ -134,6 +136,50 @@ struct RunIndex {
 pub(crate) struct IndexPolicy {
     pub min_probes: usize,
     pub max_quads: usize,
+}
+
+/// Counts, for one validation run, how often a property path finds nothing
+/// inside each data graph separately but WOULD find values over the merge of
+/// them — the observable consequence of evaluating `sh:path` per graph while
+/// `sh:sparql`, `sh:class` and the `subjectsOf`/`objectsOf` targets read the
+/// graphs merged.
+///
+/// It measures; it never changes an answer. The extra evaluation runs only
+/// when the per-graph union came back empty, and its result is counted and
+/// dropped. Off unless `OTS_SHACL_REACH_PROBE` is set to `1` or `true`,
+/// because on a multi-graph run it costs one extra path evaluation per
+/// value-node lookup that found nothing.
+#[derive(Debug, Default)]
+pub(crate) struct ReachProbe {
+    pub(crate) enabled: bool,
+    /// Lookups that found nothing per graph and something over the merge.
+    pub(crate) diverged: std::sync::atomic::AtomicUsize,
+    /// Value nodes the merge would have added, summed over those lookups.
+    pub(crate) extra_values: std::sync::atomic::AtomicUsize,
+}
+
+impl ReachProbe {
+    fn from_env() -> Self {
+        let enabled = std::env::var("OTS_SHACL_REACH_PROBE")
+            .ok()
+            .is_some_and(|v| matches!(v.trim(), "1" | "true"));
+        Self {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// `(diverged lookups, extra value nodes)` observed so far.
+    pub(crate) fn totals(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.diverged.load(Relaxed), self.extra_values.load(Relaxed))
+    }
+
+    pub(crate) fn record(&self, extra: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.diverged.fetch_add(1, Relaxed);
+        self.extra_values.fetch_add(extra, Relaxed);
+    }
 }
 
 impl IndexPolicy {
@@ -211,6 +257,7 @@ impl<'a> DataView<'a> {
             raw,
             graphs,
             classes: HashMap::new(),
+            reach_probe: ReachProbe::from_env(),
             index: None,
         }
     }

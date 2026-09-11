@@ -1538,6 +1538,18 @@ fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Ve
                 }
             }
         }
+        // Measurement only, and only when this lookup found nothing: how often
+        // would the merge of the data graphs have found values that the
+        // per-graph evaluation above cannot see? That is the divergence
+        // between `sh:path` and the constructs that read the graphs merged
+        // (`sh:sparql`, `sh:class`, the subjectsOf/objectsOf targets). The
+        // result is counted and dropped — `out` is returned unchanged.
+        if view.reach_probe.enabled && out.is_empty() {
+            let merged = eval_path_native(view, focus, path, GraphSel::All);
+            if !merged.is_empty() {
+                view.reach_probe.record(merged.len());
+            }
+        }
     } else {
         for t in eval_path_native(view, focus, path, GraphSel::All) {
             if seen.insert(t.clone()) {
