@@ -7369,21 +7369,19 @@ pub async fn validate_dataset(
     // `sh:class` on one failed, silently. Reasoning already reads them
     // (`conformance::reasoning_sources`); validation now does too. Only graphs
     // the caller may read are added, on the registry's own visibility rule.
-    if let Some(model) = crate::conformance::resolve(&state, &dataset).conforms_to_model {
-        let existing: std::collections::HashSet<&str> =
-            data_graphs.iter().map(String::as_str).collect();
-        let extra: Vec<String> = std::iter::once(model.graph_iri.clone())
-            .chain(model.sub_graphs.iter().cloned())
-            .filter(|g| !existing.contains(g.as_str()))
-            .filter(|g| {
-                crate::conformance::model_graph_readable(
-                    &state,
-                    Some(current_user.user_id.as_str()),
-                    g,
-                )
-            })
-            .collect();
-        data_graphs.extend(extra);
+    {
+        let existing: std::collections::HashSet<String> = data_graphs.iter().cloned().collect();
+        data_graphs.extend(
+            crate::conformance::model_graphs_for_dataset(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                &dataset,
+                Some(current_user.user_id.as_str()),
+            )
+            .into_iter()
+            .filter(|g| !existing.contains(g)),
+        );
     }
 
     // Run SHACL validation once per shapes graph and merge into one report.
