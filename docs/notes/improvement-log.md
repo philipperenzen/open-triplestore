@@ -602,3 +602,136 @@ and P2-2 against the thresholds. Otherwise the programme's next phase is P3
 allow-listed `SERVICE`, IFC lift depth, IDS export, LDES retention, DQV
 shapes). Two things are waiting on the maintainer either way: the `v0.6.0`
 tagging decision, and the three stop-condition items listed above.
+
+---
+
+## SHACL graph reach — scope fixed, incoherence measured (2026-09-11)
+
+Raised by the maintainer from the P2 notes' remark that the engine has
+"disagreeing graph-reach regimes with no test pinning any of them". Settled
+with a five-topic investigation (W3C spec, blast radius, performance, peer
+validators, baseline design) and a three-lens adversarial pass, which
+overturned two of the author's starting claims. Commits `58099d9`, `c8280e8`,
+`6ed571d`.
+
+### What the engine actually does
+
+When a run spans several data graphs, the constructs do not read the same
+graphs. `sh:path` is evaluated inside each data graph in turn for an IRI focus
+node and merged for a blank-node or literal one; `sh:sparql`, `sh:class`,
+`sh:targetSubjectsOf`, `sh:targetObjectsOf` and `sh:closed` read the graphs
+merged; `sh:targetClass` took its type triples per graph and, until this
+change, its subclass chain per graph too. So one rule written two ways gave
+opposite answers in a single run, and two constraints on one property shape
+reached into different graph sets.
+
+### What the specification settles
+
+Validation is defined against **one** data graph, fixed before the descent into
+shapes, focus nodes and constraints (§3.4). "Any RDF graph can be a data graph"
+(§3.2) is the whole normative definition; the word *merge* does not appear in
+the Recommendation, and no SHACL term takes a data-graph IRI, so per-graph
+confinement is not expressible at all — only as N separate runs, each with its
+own `sh:conforms`. `sh:targetClass` (§2.1.3.2) and `sh:class` (§4.1.1) are the
+same relation, "SHACL instance of C in the data graph", evaluated at two
+moments: giving them different reach implements one construct two ways. No peer
+validator splits scope per construct — pySHACL merges unconditionally, RDF4J
+merges by default, Jena and TopBraid take a single graph.
+
+### Fixed
+
+- **`58099d9` — SHACL-AF SPARQL targets were unscoped.** `sh:target
+  [ sh:select … ]` ran against the bare store: any caller who could write a
+  shapes graph selected focus nodes from every graph in the store, other
+  tenants' included, and `sh:value` carried their terms back in the report.
+  Targets now get the same `FROM <g>` prologue a `sh:sparql` constraint gets.
+  This was the other half of `5954c88`, which made an unparseable target fail
+  the shapes graph but left its scope open.
+- **`c8280e8` — the conformed model was not in scope, and the subclass chain
+  was read per graph.** Model graphs live in the model registry, never in
+  `dataset_graphs`, so a dataset was validated without the model it declares
+  `dct:conformsTo` — `sh:targetClass` on a superclass targeted nothing and
+  `sh:class` against a model term failed, silently. The declared version's
+  graphs now join the data graphs of `POST …/validate` (filtered by the
+  registry's visibility rule), and the `rdfs:subClassOf*` chain is read across
+  every data graph so targets and `sh:class` agree. The spec asks for exactly
+  this: §2.1.3.2 and §3.2 both say the ontology axioms have to be in the data
+  graph. Nothing in the repository separated a subclass axiom from its type
+  triples, which is why this was never observed.
+- **`c8280e8` — a regression from `5954c88`, caught by the lib suite.** Making
+  every inline-member load error fail the shapes graph turned the loader's own
+  recursion bound into a hard failure, so a legitimate recursive `sh:node`
+  cycle stopped validating — and through the write gate refused *every* write
+  to a dataset using one. The bound is now distinguishable and drops only the
+  member being loaded; every other load error still fails the shapes graph.
+
+### Measured, not changed
+
+`6ed571d` adds `OTS_SHACL_REACH_PROBE=1` (off by default): each run counts the
+value-node lookups that found nothing per graph and would have found values
+over the merge, and logs the totals. It changes no answer — the extra
+evaluation runs only where the per-graph union came back empty, and the result
+is counted and dropped. It is reported through `tracing` and nowhere else,
+because `conforms` is `results.is_empty()` and an informational result would
+flip conformance and break the W3C ratchet. `docs/shacl.md` now states which
+graphs a run reads and carries the reach table, so the inconsistency is
+disclosed rather than latent.
+
+**Why path reach was not flipped**, against the author's initial
+recommendation. Three independent objections, each verified:
+
+1. `shacl::infer` materialises **in place**, `WriteTarget::InPlace` is the
+   default, and the Studio scheduler fires due pipelines every 60 seconds with
+   no human in the loop. A reach change alters which SHACL-AF rules fire, so it
+   changes what is **written into user data**, unattended.
+2. Today the write gate is a sound predictor of the dataset result for path
+   constraints: every gate path passes exactly one data graph, so dataset
+   validation is literally the union of N gate-shaped evaluations. Merging
+   destroys that property.
+3. It cannot be sized. All 121 vendored W3C cases carry exactly one
+   `sht:dataGraph` and the suite has no TriG or N-Quads file; all three gated
+   SHACL benchmarks pass one data graph; and of the four multi-graph corpora in
+   the tree **not one has a shape whose path or target crosses a graph
+   boundary**. A differential baseline over today's corpus would return an
+   all-"same" table and be read as a safety signal. Hence the probe, which
+   answers the question the baseline cannot, from real data.
+
+A per-dataset setting was considered and rejected: no setting value can express
+the status quo, because the split runs *through a single property shape* —
+`sh:path` per graph and `sh:class` merged, one line apart — so shipping a knob
+would mean picking a correct default anyway and then also shipping the position
+just judged wrong.
+
+### Corrections to the author's starting position
+
+- "The layered convention depends on reaching across, which is why `sh:class`
+  already merges" — **false**. Model, vocabulary and domain-value graphs are
+  declared under `[[data_models.graphs]]` and registered to the model registry,
+  not the dataset, so merging across *dataset* graphs never reached them. That
+  is what `c8280e8` fixes; it did not support the merge argument.
+- "The engine has test-pinned semantics a second validator would have to
+  reproduce" — **false**, and the truth is worse: only `sh:datatype` lexical
+  validity is pinned, by the W3C suite. Per-graph hop confinement is named by
+  no test, so there is no written contract to be equivalent to.
+- "Role-filter the data graphs so provenance and linksets are not merged in" —
+  **withdrawn** on the maintainer's challenge that all graphs are data and
+  metadata deserves validating too. The graphs that genuinely should not be
+  validated (entailment output, snapshots, reports) are already excluded, and
+  the real defect was the opposite one: a missing graph, not a surplus.
+
+### Follow-ups, not done
+
+- Property-path reach still disagrees with `sh:sparql`; pinned by
+  `a_path_and_an_equivalent_sparql_constraint_disagree_across_graphs` so any
+  change is deliberate. Decide on probe data.
+- Studio pipelines resolve their own data graphs in `src/shacl_studio/exec.rs`,
+  outside this programme's edit scope, so they do not get the model graphs yet
+  and their runs still differ from `POST …/validate`.
+- `sh:closed` is a sixth reach regime (unconditional merge) that no shipped
+  shape exercises.
+- `sh:sparql` constraints and SPARQL targets execute against the live store
+  rather than the run's snapshot or mirror, so they can read a different
+  instant from the rest of the run.
+- No multi-graph SHACL benchmark exists, so the perf gate cannot see a reach
+  change in either direction; the sharding generator and a mixed-path shape set
+  are both already written and merely never combined.
