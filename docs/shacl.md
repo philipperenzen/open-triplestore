@@ -115,11 +115,19 @@ depending on how it is written**:
 |---|---|
 | `sh:path` (property paths), for an IRI focus node | each data graph separately, results unioned — a path that must cross graphs finds nothing |
 | `sh:path`, for a blank-node or literal focus node | all data graphs merged |
-| `sh:sparql`, `sh:class`, `sh:targetSubjectsOf`, `sh:targetObjectsOf`, `sh:closed` | all data graphs merged |
+| `sh:sparql`, `sh:class` | all data graphs merged |
+| `sh:closed`, `sh:targetSubjectsOf`, `sh:targetObjectsOf` | all data graphs at once — but these are single-hop lookups, so this is the same answer as reading each graph in turn |
 | `sh:targetClass` | type triples per graph; the `rdfs:subClassOf*` chain across all graphs |
 
+Only paths with an **intermediate node** can diverge — a sequence, a
+`zeroOrMorePath` or a `oneOrMorePath`. A single hop matches quads that each
+live in exactly one graph, so reading the graphs one at a time and reading them
+merged give the same answer; `sh:closed` and the `subjectsOf`/`objectsOf`
+targets are therefore never affected.
+
 So a rule expressed as `sh:path ( ex:hasDeck ex:width )` can report a violation
-that the identical rule written as a `sh:sparql` constraint does not. The
+that the identical rule written as a `sh:sparql` constraint does not, and the
+same path answers differently for an IRI focus node and a blank-node one. The
 specification defines validation against **one** data graph (§3.4), so the
 merged reading is the faithful one and the per-graph path evaluation is the
 deviation.

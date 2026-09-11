@@ -1538,17 +1538,21 @@ fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Ve
                 }
             }
         }
-        // Measurement only, and only when this lookup found nothing: how often
-        // would the merge of the data graphs have found values that the
-        // per-graph evaluation above cannot see? That is the divergence
-        // between `sh:path` and the constructs that read the graphs merged
-        // (`sh:sparql`, `sh:class`, the subjectsOf/objectsOf targets). The
-        // result is counted and dropped — `out` is returned unchanged.
-        if view.reach_probe.enabled && out.is_empty() {
+        // Measurement only: how many more value nodes would the merge of the
+        // data graphs yield than the per-graph evaluation above? That is the
+        // divergence between `sh:path` and the constructs that read the graphs
+        // merged (`sh:sparql`, and the class machinery). The result is counted
+        // and dropped — `out` is returned unchanged.
+        //
+        // Only paths that can actually cross a graph boundary are examined; a
+        // single hop matches quads that each live in exactly one graph, so the
+        // two readings agree by construction and probing them would report a
+        // denominator that means nothing.
+        if view.reach_probe.enabled && can_cross_graphs(path) {
             let merged = eval_path_native(view, focus, path, GraphSel::All);
-            if !merged.is_empty() {
-                view.reach_probe.record(merged.len());
-            }
+            let merged: HashSet<Term> = merged.into_iter().collect();
+            view.reach_probe
+                .record(merged.len().saturating_sub(out.len()));
         }
     } else {
         for t in eval_path_native(view, focus, path, GraphSel::All) {
@@ -1558,6 +1562,27 @@ fn get_path_values(view: &DataView<'_>, focus: &Term, path: &PropertyPath) -> Ve
         }
     }
     out
+}
+
+/// Whether evaluating `path` inside each data graph separately can yield a
+/// different set from evaluating it over their merge.
+///
+/// It can only differ when the path has an intermediate node: a hop lands on a
+/// term that the next hop must continue from, and the per-graph evaluation
+/// requires both hops to be in the same graph. A single hop — a predicate, its
+/// inverse, or an optional one — matches quads that each live in exactly one
+/// graph, so the union over graphs is the merged answer.
+fn can_cross_graphs(path: &PropertyPath) -> bool {
+    match path {
+        PropertyPath::Predicate(_) => false,
+        PropertyPath::Inverse(inner) | PropertyPath::ZeroOrOne(inner) => can_cross_graphs(inner),
+        PropertyPath::Alternative(branches) => branches.iter().any(can_cross_graphs),
+        // A sequence of one is still one hop; anything longer has an
+        // intermediate node. A closure repeats its inner path, so it has one
+        // as soon as it can repeat at all.
+        PropertyPath::Sequence(parts) => parts.len() > 1 || parts.iter().any(can_cross_graphs),
+        PropertyPath::ZeroOrMore(_) | PropertyPath::OneOrMore(_) => true,
+    }
 }
 
 /// A plain predicate or its inverse — one quad-index step, whose results are

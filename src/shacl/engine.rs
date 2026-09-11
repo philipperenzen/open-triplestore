@@ -177,16 +177,18 @@ pub fn validate(
     // often a `sh:path` found nothing per data graph where the merge of them
     // would have found values. Reported here and nowhere else — never as a
     // result, because `conforms` is `results.is_empty()`.
-    let (diverged, extra_values) = view.reach_probe.totals();
-    if diverged > 0 {
+    let (diverged, extra_values, examined) = view.reach_probe.totals();
+    if examined > 0 {
         warn!(
             shapes_graph = %shapes_graph,
             data_graphs = data_graphs.len(),
             diverged,
             extra_values,
-            "graph-reach probe: {diverged} value-node lookups found nothing per data graph \
-             but would have found {extra_values} value nodes over the merge of them; \
-             sh:path is evaluated per graph while sh:sparql and sh:class read them merged"
+            examined,
+            "graph-reach probe: of {examined} cross-graph-capable value-node lookups, \
+             {diverged} would yield more values over the merge of the data graphs \
+             ({extra_values} extra value nodes in total); sh:path is evaluated per graph \
+             while sh:sparql and the class machinery read them merged"
         );
     }
 

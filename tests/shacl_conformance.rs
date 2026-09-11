@@ -752,3 +752,158 @@ fn the_graph_reach_probe_changes_no_answer() {
         off.results
     );
 }
+
+/// `sh:closed` reads all data graphs at once while a `sh:path` reads each in
+/// turn, which looks like a sixth reach regime. It is not one: `sh:closed`
+/// enumerates the focus node's outgoing quads in a SINGLE hop, and every
+/// matching quad lives in exactly one graph, so "enumerate per graph and union"
+/// and "enumerate over the merge" return the same set by construction. The same
+/// argument covers `sh:targetSubjectsOf` and `sh:targetObjectsOf`. This test
+/// exists so the equivalence is asserted rather than argued.
+#[test]
+fn sh_closed_reports_the_same_across_graphs_as_within_them() {
+    let shapes = "ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:closed true ; \
+                  sh:property [ sh:path ex:allowed ] .";
+    let split = TripleStore::in_memory().unwrap();
+    split
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    split
+        .load_str(
+            &format!("{PFX}ex:n ex:allowed 1 ; ex:stray \"a\" ."),
+            RdfFormat::Turtle,
+            Some("urn:g1"),
+        )
+        .unwrap();
+    split
+        .load_str(
+            &format!("{PFX}ex:n ex:other \"b\" ."),
+            RdfFormat::Turtle,
+            Some("urn:g2"),
+        )
+        .unwrap();
+    let across = validate(
+        &split,
+        "urn:shapes",
+        &["urn:g1".to_string(), "urn:g2".to_string()],
+    )
+    .unwrap();
+
+    // The same triples in one graph.
+    let merged = run(
+        shapes,
+        "ex:n ex:allowed 1 ; ex:stray \"a\" ; ex:other \"b\" .",
+    );
+
+    let key = |r: &ValidationReport| {
+        let mut v: Vec<String> = r
+            .results
+            .iter()
+            .map(|x| format!("{}|{:?}|{:?}", x.focus_node, x.path, x.value))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        key(&across),
+        key(&merged),
+        "sh:closed is a single hop, so splitting the data across graphs cannot change its report"
+    );
+    assert_eq!(across.results_count, 2, "ex:stray and ex:other: {across:?}");
+}
+
+/// A single-hop path cannot diverge either, for the same reason — so the reach
+/// question is confined to paths with an intermediate node.
+#[test]
+fn a_single_hop_path_reads_the_same_across_graphs_as_within_them() {
+    let shapes =
+        "ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:property [ sh:path ex:p ; sh:minCount 3 ] .";
+    let split = TripleStore::in_memory().unwrap();
+    split
+        .load_str(
+            &format!("{PFX}{shapes}"),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    split
+        .load_str(
+            &format!("{PFX}ex:n ex:p 1, 2 ."),
+            RdfFormat::Turtle,
+            Some("urn:g1"),
+        )
+        .unwrap();
+    split
+        .load_str(
+            &format!("{PFX}ex:n ex:p 3 ."),
+            RdfFormat::Turtle,
+            Some("urn:g2"),
+        )
+        .unwrap();
+    let across = validate(
+        &split,
+        "urn:shapes",
+        &["urn:g1".to_string(), "urn:g2".to_string()],
+    )
+    .unwrap();
+    assert!(
+        across.conforms,
+        "three values spread over two graphs still satisfy minCount 3: {:?}",
+        across.results
+    );
+}
+
+/// The reach of a composite path depends on the KIND of the focus node: an IRI
+/// focus is evaluated inside each data graph in turn, while a blank-node focus
+/// takes the historical merged walk. So the same path over structurally
+/// identical data answers differently for `ex:iri` and for a blank node. Pinned,
+/// not fixed — see docs/notes/improvement-log.md.
+#[test]
+fn a_composite_path_reaches_differently_for_an_iri_and_a_blank_node_focus() {
+    let store = TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            &format!(
+                "{PFX}ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:hasDeck ; \
+                 sh:property [ sh:path ( ex:hasDeck ex:width ) ; sh:minCount 1 ] ."
+            ),
+            RdfFormat::Turtle,
+            Some("urn:shapes"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:iri ex:hasDeck ex:deck1 . [] ex:hasDeck ex:deck2 ."),
+            RdfFormat::Turtle,
+            Some("urn:instances"),
+        )
+        .unwrap();
+    store
+        .load_str(
+            &format!("{PFX}ex:deck1 ex:width 12 . ex:deck2 ex:width 12 ."),
+            RdfFormat::Turtle,
+            Some("urn:details"),
+        )
+        .unwrap();
+
+    let r = validate(
+        &store,
+        "urn:shapes",
+        &["urn:instances".to_string(), "urn:details".to_string()],
+    )
+    .unwrap();
+    assert!(
+        violates(&r, "/iri"),
+        "an IRI focus is confined per graph, so the cross-graph hop finds nothing: {:?}",
+        r.results
+    );
+    assert!(
+        !r.results.iter().any(|x| x.focus_node.starts_with("_:")),
+        "a blank-node focus takes the merged walk and finds the width: {:?}",
+        r.results
+    );
+}
