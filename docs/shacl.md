@@ -98,6 +98,14 @@ declares `dct:conformsTo`**. Derived graphs are not included: entailment
 output, version snapshots and report graphs are never registered as dataset
 graphs.
 
+A run reads **one instant**: the query accelerator's in-memory copy when one
+is published, otherwise a single RocksDB snapshot taken when the run starts.
+`sh:sparql` constraints, custom-component validators and SHACL-AF SPARQL
+targets read that same source, so a write landing mid-run cannot be visible to
+one half of a shapes graph and invisible to the other. Those queries therefore
+do not use the result cache or the accelerator's shard routing — the same trade
+every other probe in the run makes.
+
 The model graphs are in scope because SHACL reads the class hierarchy out of
 the data graph it is handed: *"all the `rdfs:subClassOf` declarations needed to
 walk the class hierarchy need to exist in the data graph"* (SHACL §2.1.3.2).

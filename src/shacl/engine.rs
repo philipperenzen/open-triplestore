@@ -1294,7 +1294,7 @@ fn resolve_targets(view: &DataView<'_>, shape: &Shape) -> Vec<Term> {
                 // `FROM NAMED`, a `GRAPH` block inside the target matches
                 // nothing, exactly as for constraints.
                 let scoped = super::constraints::prebind(sparql, &[], None, view.data_graphs);
-                if let Ok(nodes) = execute_select_terms(view.store, &scoped, "this") {
+                if let Ok(nodes) = execute_select_terms(view, &scoped, "this") {
                     focus_nodes.extend(nodes);
                 }
             }
@@ -1671,8 +1671,9 @@ fn check_sparql_target(query: &str) -> Result<(), String> {
     }
 }
 
-fn execute_select_terms(store: &TripleStore, query: &str, var: &str) -> Result<Vec<Term>, String> {
-    match store.query(query) {
+/// Run a SELECT against the run's own data source and collect one variable.
+fn execute_select_terms(view: &DataView<'_>, query: &str, var: &str) -> Result<Vec<Term>, String> {
+    match view.query(query) {
         Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => Ok(solutions
             .filter_map(|s| s.ok())
             .filter_map(|s| s.get(var).cloned())
@@ -2449,6 +2450,79 @@ mod tests {
         assert!(without.results_count >= 4, "{:?}", summary(&without));
         assert_eq!(summary(&with), summary(&without));
         assert_eq!(summary(&partial), summary(&without));
+    }
+
+    /// A run reads one instant. `sh:sparql` constraints, custom-component
+    /// validators and SHACL-AF SPARQL targets used to go through
+    /// `TripleStore::query` — the LIVE store — while every native probe read
+    /// the snapshot taken when the run started, so a write landing mid-run was
+    /// visible to half a shapes graph and invisible to the other half. Both
+    /// halves now read the view's own source. Deterministic: the write happens
+    /// after the view exists, with no threads and no sleeps.
+    #[test]
+    fn sparql_and_native_probes_read_the_same_snapshot() {
+        use super::super::view::DataView;
+        let dir = tempfile::tempdir().unwrap();
+        let store = TripleStore::open(dir.path()).unwrap();
+        assert!(store.is_persistent());
+        let g = "http://example.org/g";
+        store
+            .load_str(
+                r#"@prefix ex: <http://example.org/> .
+                   ex:a ex:p ex:before ."#,
+                RdfFormat::Turtle,
+                Some(g),
+            )
+            .unwrap();
+
+        let graphs = vec![g.to_string()];
+        let view = DataView::new(&store, &graphs);
+        assert_eq!(
+            view.source_kind(),
+            "snapshot",
+            "the persistent backend must take the snapshot path for this test to mean anything"
+        );
+
+        // A write that lands after the run's snapshot was taken.
+        store
+            .update(
+                "INSERT DATA { GRAPH <http://example.org/g>                  { <http://example.org/a> <http://example.org/p> <http://example.org/after> } }",
+            )
+            .unwrap();
+        assert!(
+            store
+                .query("ASK { GRAPH ?g { ?s ?p <http://example.org/after> } }")
+                .is_ok(),
+            "the write landed in the store"
+        );
+
+        let native = view.step(
+            &Term::NamedNode(oxigraph::model::NamedNode::new_unchecked(
+                "http://example.org/a",
+            )),
+            "http://example.org/p",
+            false,
+            super::super::view::GraphSel::All,
+        );
+        let via_sparql = execute_select_terms(
+            &view,
+            "SELECT ?this FROM <http://example.org/g>              WHERE { <http://example.org/a> <http://example.org/p> ?this }",
+            "this",
+        )
+        .unwrap();
+
+        let mut a: Vec<String> = native.iter().map(term_to_lexical).collect();
+        let mut b: Vec<String> = via_sparql.iter().map(term_to_lexical).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(
+            a, b,
+            "the native probe and the SPARQL route must see the same instant"
+        );
+        assert!(
+            !a.iter().any(|t| t.ends_with("after")),
+            "neither may see a write that landed after the run's snapshot: {a:?}"
+        );
     }
 
     /// The persistent backend takes the snapshot path (one RocksDB readable

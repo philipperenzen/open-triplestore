@@ -102,6 +102,13 @@ pub(crate) struct DataView<'a> {
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
+    /// The run's SPARQL evaluator, built once from the store's own options so
+    /// the GeoSPARQL, 3D, RDF 1.2 and `sh:SPARQLFunction` registrations are
+    /// present. Building it scans the store for user-defined functions, which
+    /// is exactly the per-probe cost this module exists to remove, so it is
+    /// built once here and cloned per query (`SparqlEvaluator` is `Clone`;
+    /// `parse_query` consumes it).
+    evaluator: oxigraph::sparql::SparqlEvaluator,
     /// Graph-reach measurement for this run (see [`ReachProbe`]).
     pub(crate) reach_probe: ReachProbe,
     /// Per-run adjacency for the shape predicates, built for the snapshot and
@@ -273,6 +280,7 @@ impl<'a> DataView<'a> {
             raw,
             graphs,
             classes: HashMap::new(),
+            evaluator: store.query_options(),
             reach_probe: ReachProbe::from_env(),
             index: None,
         }
@@ -443,6 +451,37 @@ impl<'a> DataView<'a> {
     /// queries are bare basic graph patterns, so a plain evaluator — no
     /// GeoSPARQL/SHACL-AF function registration, no `sh:SPARQLFunction`
     /// discovery — is enough. `None` when the query does not parse or run.
+    /// Evaluate a SPARQL query against the run's own data source.
+    ///
+    /// `sh:sparql` constraints, custom-component validators and SHACL-AF
+    /// SPARQL targets used to go through `TripleStore::query`, i.e. the LIVE
+    /// store, while every native probe in the same run read the mirror copy or
+    /// the RocksDB snapshot taken at its start. A write landing mid-run was
+    /// therefore visible to the SPARQL half of a shapes graph and invisible to
+    /// the rest of it, so one run could report against two instants. Routing
+    /// them here makes the run consistent.
+    ///
+    /// The cost is the result cache and the accelerator's shard routing, which
+    /// `TripleStore::query` would have applied and this does not — the same
+    /// trade every native probe in the run already makes.
+    pub(crate) fn query(&self, query: &str) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
+        let prepared = self
+            .evaluator
+            .clone()
+            .parse_query(query)
+            .map_err(|e| e.to_string())?;
+        match &self.raw {
+            RawSource::Snapshot(tx) => prepared.on_transaction(tx).execute(),
+            RawSource::Mirror(store) => prepared.on_store(store).execute(),
+            RawSource::Live(store) => prepared.on_store(store).execute(),
+        }
+        .map_err(|e| e.to_string())
+    }
+
+    /// A bare-evaluator SELECT for the view's own internal scans (instance
+    /// sets, the run index). It deliberately does NOT use [`Self::query`]'s
+    /// evaluator: these patterns call no custom function, and cloning the
+    /// populated evaluator per scan would cost more than building an empty one.
     fn select(&self, query: &str) -> Option<oxigraph::sparql::QuerySolutionIter<'_>> {
         let prepared = oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(query)

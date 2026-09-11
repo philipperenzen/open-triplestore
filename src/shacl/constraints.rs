@@ -478,7 +478,7 @@ pub(crate) fn evaluate_constraint_with_values(
                 source_constraint: "sh:SPARQLConstraint".to_string(),
                 message: format!("SPARQL constraint could not be evaluated: {reason}"),
             };
-            match view.store.query(&query) {
+            match view.query(&query) {
                 Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
                     for solution in solutions {
                         let solution = match solution {
@@ -574,7 +574,7 @@ pub(crate) fn evaluate_constraint_with_values(
                             term: p.term,
                         }));
                         let q = prebind(ask, &vars, path_sparql.as_deref(), view.data_graphs);
-                        match view.store.query(&q) {
+                        match view.query(&q) {
                             Ok(oxigraph::sparql::QueryResults::Boolean(true)) => {}
                             Ok(oxigraph::sparql::QueryResults::Boolean(false)) => {
                                 let message = match &cc.message {
@@ -608,7 +608,7 @@ pub(crate) fn evaluate_constraint_with_values(
                         term: p.term,
                     }));
                     let q = prebind(select, &vars, path_sparql.as_deref(), view.data_graphs);
-                    match view.store.query(&q) {
+                    match view.query(&q) {
                         Ok(oxigraph::sparql::QueryResults::Solutions(solutions)) => {
                             for solution in solutions {
                                 let solution = match solution {
