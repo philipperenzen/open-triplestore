@@ -8,6 +8,10 @@ use oxigraph::model::Term;
 #[derive(Debug, Clone)]
 pub struct Shape {
     pub iri: String,
+    /// `sh:name` — informational for validation, but the only faithful source
+    /// of a specification's name when a shape graph is exported back to an
+    /// exchange format.
+    pub name: Option<String>,
     /// Informational (sh:NodeShape vs own-path property shape); not consulted
     /// during evaluation.
     #[allow(dead_code)]

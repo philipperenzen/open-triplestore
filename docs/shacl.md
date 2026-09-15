@@ -515,6 +515,75 @@ schema:PersonShape
     ] .
 ```
 
+## Exporting to IDS
+
+The inverse of the importer, at `POST /api/shacl/export/ids` with a shapes
+graph in Turtle as the body. `GET /api/shacl/exporters` lists the formats.
+
+```bash
+curl -X POST http://localhost:7878/api/shacl/export/ids \
+     -H 'Authorization: Bearer <token>' \
+     -H 'Content-Type: text/turtle' \
+     --data-binary @shapes.ttl
+# → {"format":"ids","document":"<?xml …","specification_count":2,"losses":[…]}
+
+# the bare document instead of the report
+curl -X POST 'http://localhost:7878/api/shacl/export/ids?raw=true' …
+```
+
+**The report is the default representation, and `losses` is the reason.** IDS's
+whole expressive surface for a requirement is a facet kind, a cardinality of
+`required` / `prohibited` / `optional`, and one value restriction. Most of SHACL
+has no IDS form at all, so an exporter that silently wrote a thinner document
+than the shapes it was given would be actively misleading for a delivery
+contract. Every constraint that cannot be carried is listed, and a shape graph
+from which nothing at all can be expressed is a `422`, not an empty document.
+
+### What survives
+
+| SHACL | IDS |
+|---|---|
+| `sh:targetClass` | `<ids:applicability><ids:entity>` (several classes become an `xs:enumeration`) |
+| `sh:hasValue` | `<ids:value><ids:simpleValue>` |
+| `sh:in` | `<xs:restriction>` with `<xs:enumeration>` |
+| `sh:minInclusive` / `sh:maxInclusive` / `sh:minExclusive` / `sh:maxExclusive` | the matching `xs:` facet |
+| `sh:minLength` / `sh:maxLength` | `<xs:minLength>` / `<xs:maxLength>` |
+| `sh:pattern` without `sh:flags` | `<xs:pattern>` — see the caveat below |
+| `sh:minCount 1` | `cardinality="required"` |
+| `sh:maxCount 0` | `cardinality="prohibited"` |
+| `sh:class` on an inverse `bot:` path | `<ids:partOf>` with its nested entity |
+| the `sh:or ( [ sh:not …-applies ] …-requires )` idiom | the applicability / requirements split |
+
+### What does not
+
+`sh:nodeKind`, `sh:languageIn`, `sh:uniqueLang`, `sh:equals`, `sh:disjoint`,
+`sh:lessThan`, `sh:lessThanOrEquals`, `sh:xone`, `sh:node`, nested
+`sh:property`, `sh:qualifiedValueShape`, `sh:closed`, `sh:sparql`, custom
+constraint components and `sh:expression` have no IDS counterpart. Neither does
+`sh:minCount n` for n > 1 or `sh:maxCount n` for n > 0 — IDS carries no
+multiplicity. A shape targeted by `sh:targetNode`, `sh:targetSubjectsOf`,
+`sh:targetObjectsOf` or a SPARQL target cannot become a specification at all,
+because IDS applicability is class-based.
+
+Three further caveats, each reported in `losses` when it applies:
+
+- **A classification facet is dropped.** `ids:classificationType/system` is
+  mandatory and the importer keeps it only as free text, so it cannot be
+  recovered; synthesising one would emit a document that lies.
+- **`xs:pattern` is implicitly anchored and has no flags**, while `sh:pattern`
+  is an XPath/SPARQL regex. A flagless pattern is exported with a warning that
+  the match semantics differ; a flagged one is dropped.
+- **This is not a general SHACL-to-IDS translator.** It exports shapes written
+  over *this store's* IFC RDF vocabulary — the `props:` / `bot:` convention the
+  IFC lift emits and the IDS importer targets. Shapes produced by other tools
+  will mostly land in the loss list.
+
+The tests pin an import → export → import fixpoint over that shared subset; they
+do not prove the output is schema-valid, because validating against the IDS XSD
+would need a network fetch and an XSD validator, and neither is available here.
+
+---
+
 ## Importing constraint specifications (IDS)
 
 Domain exchange requirements often arrive in their own format. The

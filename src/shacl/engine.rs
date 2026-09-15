@@ -262,6 +262,7 @@ pub fn infer(
             // snapshot the targets were resolved from.
             let target_shape = Shape {
                 iri: rule.shape_iri.clone(),
+                name: None,
                 shape_type: ShapeType::NodeShape,
                 targets: rule.targets.clone(),
                 constraints: Vec::new(),
@@ -322,7 +323,7 @@ pub fn infer(
 // Shape loading
 // ---------------------------------------------------------------------------
 
-fn load_shapes(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Shape>, String> {
+pub(crate) fn load_shapes(store: &TripleStore, shapes_graph: &str) -> Result<Vec<Shape>, String> {
     // Find all node shapes in the shapes graph
     let query = format!(
         r#"
@@ -382,6 +383,7 @@ fn load_single_shape(
 
     // Message
     let message = single_value(store, shapes_graph, shape_iri, &format!("{}message", SH));
+    let name = single_value(store, shapes_graph, shape_iri, &format!("{}name", SH));
 
     // Load direct constraints on the node shape
     let mut constraints = load_constraints(store, shapes_graph, shape_iri)?;
@@ -419,6 +421,7 @@ fn load_single_shape(
 
     Ok(Shape {
         iri: shape_iri.to_string(),
+        name,
         shape_type,
         targets,
         constraints,
@@ -1108,6 +1111,7 @@ fn load_inline_shape(
 
     Ok(Shape {
         iri: shape_iri.to_string(),
+        name: single_value(store, shapes_graph, shape_iri, &format!("{}name", SH)),
         shape_type: ShapeType::NodeShape,
         targets: vec![],
         constraints,

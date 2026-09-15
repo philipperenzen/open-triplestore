@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **SHACL → IDS export**, the inverse of the existing importer:
+  `GET /api/shacl/exporters` and `POST /api/shacl/export/ids` (Turtle in, the
+  report by default, the bare document with `?raw=true`). The response always
+  carries a `losses` list, because IDS can express only a facet kind, a
+  cardinality and one value restriction: everything outside that — `sh:nodeKind`,
+  the logical operators, `sh:sparql`, multiplicities other than 0 and 1, and any
+  target that is not class-based — is named rather than silently dropped, and a
+  shape graph from which nothing can be expressed is a 422 instead of an empty
+  document. Tests pin an import → export → import fixpoint. See docs/shacl.md.
 - **SHACL-AF completed — constraint components, spec pre-binding, rule
   order/condition — and strict SHACLC.** A shapes graph can declare its own
   constraint components (`sh:ConstraintComponent` + `sh:parameter` + an

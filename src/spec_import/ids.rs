@@ -659,6 +659,13 @@ fn entity_classes(applicability: &El, warnings: &mut Vec<String>) -> Vec<String>
     out
 }
 
+/// The importer's own sample document, so the exporter's tests can
+/// round-trip against exactly what this importer produces.
+#[cfg(test)]
+pub(crate) fn tests_sample() -> &'static str {
+    tests::SAMPLE
+}
+
 pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
     if doc.name != "ids" {
         anyhow::bail!("not an IDS document (root element is `{}`)", doc.name);

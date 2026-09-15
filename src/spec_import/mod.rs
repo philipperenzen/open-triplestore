@@ -4,11 +4,19 @@
 //! Turtle plus a report — and buildingSMART IDS ([`ids`]) is the first
 //! implementation; a FHIR-profile or any other importer is the same shape.
 //!
-//! * `GET  /api/shacl/importers`            — the registered formats
+//! The same interface runs in reverse: an exporter takes the typed shapes of
+//! a shape graph and writes the exchange format back out, reporting everything
+//! it could not express rather than emitting a document that quietly says less
+//! than the shapes did.
+//!
+//! * `GET  /api/shacl/importers`             — the registered import formats
 //! * `POST /api/shacl/import/:format`        — convert (and, with
 //!   `?create=true`, create a shape graph from the result)
+//! * `GET  /api/shacl/exporters`             — the registered export formats
+//! * `POST /api/shacl/export/:format`        — Turtle in, the format out
 
 pub mod ids;
+pub mod ids_export;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -58,6 +66,135 @@ pub fn importers() -> &'static [&'static dyn SpecImporter] {
 
 pub fn importer(id: &str) -> Option<&'static dyn SpecImporter> {
     importers().iter().copied().find(|i| i.id() == id)
+}
+
+/// What an exporter produces: the document, how many specifications it
+/// carried, and — the part that matters — everything that could not be
+/// expressed in the target format.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportedSpec {
+    pub document: String,
+    pub specification_count: usize,
+    /// Constraints, paths and targets with no counterpart in the target
+    /// format. Never empty by accident: an exporter that drops something
+    /// records it here, and one that can express nothing at all errors.
+    pub losses: Vec<String>,
+}
+
+pub trait SpecExporter: Send + Sync {
+    /// Route segment and registry key, e.g. `ids`.
+    fn id(&self) -> &'static str;
+    fn label(&self) -> &'static str;
+    fn media_type(&self) -> &'static str;
+    fn file_extension(&self) -> &'static str;
+    fn export(
+        &self,
+        shapes: &[crate::shacl::shapes::Shape],
+        title: &str,
+    ) -> anyhow::Result<ExportedSpec>;
+}
+
+pub fn exporters() -> &'static [&'static dyn SpecExporter] {
+    static IDS: ids_export::IdsExporter = ids_export::IdsExporter;
+    static ALL: [&dyn SpecExporter; 1] = [&IDS];
+    &ALL
+}
+
+pub fn exporter(id: &str) -> Option<&'static dyn SpecExporter> {
+    exporters().iter().copied().find(|e| e.id() == id)
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExporterInfo {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub media_type: &'static str,
+    pub file_extension: &'static str,
+}
+
+/// GET /api/shacl/exporters
+pub async fn list_exporters() -> impl IntoResponse {
+    Json(
+        exporters()
+            .iter()
+            .map(|e| ExporterInfo {
+                id: e.id(),
+                label: e.label(),
+                media_type: e.media_type(),
+                file_extension: e.file_extension(),
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ExportQuery {
+    /// Return the document itself rather than the JSON report.
+    #[serde(default)]
+    pub raw: bool,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExportResponse {
+    pub format: &'static str,
+    #[serde(flatten)]
+    pub spec: ExportedSpec,
+}
+
+/// POST /api/shacl/export/:format — body is a shapes graph in Turtle.
+///
+/// The report is the default representation because the losses are the point:
+/// an exporter that silently produced a thinner document than the shapes it
+/// was given would be worse than useless for a delivery contract. `?raw=true`
+/// returns the bare document for callers that have already read them.
+pub async fn export_spec(
+    Path(format): Path<String>,
+    Query(q): Query<ExportQuery>,
+    body: Bytes,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let exp = exporter(&format).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!(
+                "unknown specification format `{format}`; known: {}",
+                exporters()
+                    .iter()
+                    .map(|e| e.id())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    })?;
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "empty body".to_string()));
+    }
+    let turtle = std::str::from_utf8(&body)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "body is not UTF-8".to_string()))?;
+    let store = crate::store::TripleStore::in_memory()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    store
+        .load_str(turtle, oxigraph::io::RdfFormat::Turtle, Some("urn:export"))
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("shapes do not parse: {e}")))?;
+    let shapes = crate::shacl::engine::load_shapes(&store, "urn:export")
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let title = q.title.clone().unwrap_or_else(|| "Exported shapes".into());
+    let spec = exp
+        .export(&shapes, &title)
+        .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, format!("{format}: {e}")))?;
+    if q.raw {
+        return Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, exp.media_type())],
+            spec.document,
+        )
+            .into_response());
+    }
+    Ok(Json(ExportResponse {
+        format: exp.id(),
+        spec,
+    })
+    .into_response())
 }
 
 #[derive(Debug, Serialize)]
