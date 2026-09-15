@@ -1,0 +1,68 @@
+# W3C Data Quality Vocabulary (DQV) — a quality profile and the shapes that
+# say what a well-formed quality measurement is.
+#
+# DQV is a W3C Working Group Note. Its namespace document declares no
+# cardinality at all (not one owl:*Cardinality or sh: triple), and it ships
+# exactly one dimension instance (dqv:precision), zero categories and zero
+# metrics. So a usable DQV deployment needs two things DQV itself does not
+# give you: a profile naming the categories, dimensions and metrics, and
+# shapes pinning what a measurement must carry. This bundle is both, plus a
+# sample with one planted violation per shape.
+#
+# The DQV namespace document is NOT shipped here: it is already vendored at
+# frontend/public/vocab/dqv.ttl and seeded into the vocabulary registry as
+# `dqv` version 2016-08-26 (src/data_models/seed_vocab.rs). The profile
+# owl:imports it. That version label is the RDF file's dcterms:modified; the
+# W3C Note itself is dated 2016-12-15, and both dates are in the namespace
+# document — do not "correct" one to the other.
+#
+# Source: https://www.w3.org/TR/vocab-dqv/ (ns http://www.w3.org/ns/dqv#)
+
+id = "dqv-quality"
+opt_out_env = "SEED_DQV_QUALITY"
+
+[organisation]
+slug = "dqv-quality"
+name = "DQV quality profile"
+description = "A W3C DQV profile — quality categories, dimensions and metrics — with the SHACL shapes that say what a well-formed quality measurement is."
+
+# The profile: instances of DQV's classes (categories, dimensions, metrics),
+# which is why it is a vocabulary and not a class model.
+[[data_models]]
+id = "dqv-quality-profile"
+title = "DQV quality profile"
+namespace = "https://example.org/dqv-quality/def#"
+kind = "vocabulary"
+version = "1.0.0"
+description = "Quality categories (intrinsic, contextual, accessibility), dimensions (consistency, completeness, availability, and DQV's own precision) and metrics (SHACL conformance, SHACL violation count, triple count, endpoint availability) as DQV instances. DQV itself is the seeded `dqv` vocabulary this profile imports."
+
+[[data_models.graphs]]
+iri = "https://example.org/dqv-quality/profile"
+role = "vocabulary"
+file = "quality-profile.ttl"
+
+# A catalogued dataset and its distribution with conforming measurements,
+# plus seven planted violations — one per shape.
+[[datasets]]
+slug = "dqv-quality-sample"
+name = "DQV quality sample"
+description = "A catalogued dataset and its distribution with conforming quality measurements, plus seven planted violations: a measurement with no metric, one with no computedOn, a metric in no dimension, a dimension in no category, a value whose datatype contradicts its metric, a hasQualityMeasurement/computedOn pair that disagree, and a measurement computed on something that is neither a dataset nor a distribution."
+visibility = "public"
+conforms_to = { model = "dqv-quality-profile", version = "1.0.0" }
+shape_graphs = ["https://example.org/dqv-quality/shapes"]
+
+[[datasets.graphs]]
+iri = "https://example.org/dqv-quality/instances"
+role = "instances"
+file = "instances.ttl"
+
+[[datasets.graphs]]
+iri = "https://example.org/dqv-quality/shapes"
+role = "shapes"
+file = "shapes.ttl"
+
+[[datasets.saved_queries]]
+name = "Quality measurements by dimension"
+slug = "quality-by-dimension"
+description = "Every measurement with the resource it was computed on, its metric, the metric's dimension and the value."
+sparql = "PREFIX dqv: <http://www.w3.org/ns/dqv#>\nSELECT ?resource ?metric ?dimension ?value WHERE {\n  GRAPH <https://example.org/dqv-quality/instances> {\n    ?m a dqv:QualityMeasurement ; dqv:isMeasurementOf ?metric ; dqv:value ?value .\n    OPTIONAL { ?m dqv:computedOn ?resource }\n  }\n  OPTIONAL { ?metric dqv:inDimension ?dimension }\n}\nORDER BY ?resource ?metric"

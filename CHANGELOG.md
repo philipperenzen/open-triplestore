@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A W3C DQV quality bundle** (`examples/seed-bundles/dqv-quality`, on by
+  default, `SEED_DQV_QUALITY=false` to skip): a profile of quality categories,
+  dimensions and metrics — DQV's Note ships one dimension and constrains
+  nothing — and six SHACL shapes saying what a well-formed
+  `dqv:QualityMeasurement` is, two of them SHACL-SPARQL because core cannot
+  check that a value's datatype is the one its metric declares or that
+  `dqv:computedOn` / `dqv:hasQualityMeasurement` agree. The sample plants one
+  violation per shape; the metric IRIs are the ones a validation-run emitter
+  would write.
 - **SHACL → IDS export**, the inverse of the existing importer:
   `GET /api/shacl/exporters` and `POST /api/shacl/export/ids` (Turtle in, the
   report by default, the bare document with `?raw=true`). The response always
