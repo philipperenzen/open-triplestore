@@ -1671,6 +1671,66 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("200", "ShEx validation result"), ("400", "Invalid schema or data")], false)),
     ]);
 
+    // Constraint-specification import/export (buildingSMART IDS today).
+    mount(paths, "/api/shacl/importers", vec![
+        (M::Get, o("Validation", "List specification importers", "Specification formats that can be turned into SHACL shapes. Each entry is `{id, label, media_types}`.",
+            vec![], vec![("200", "Array of importers")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/import/:format",
+        vec![(
+            M::Post,
+            o(
+                "Validation",
+                "Import a constraint specification",
+                "Body is the specification document (for `ids`: an IDS 1.0 XML file). Returns `{format, title, description, turtle, specifications, warnings, shape_graph}`; `warnings` lists everything the importer could not carry. With `?create=true` the result is also stored as a SHACL Studio shape graph and the response is a 201.",
+                vec![
+                    qp("create", false, "`true` also creates a SHACL Studio shape graph from the result (default: false)."),
+                    qp("name", false, "Name for the created shape graph (default: the specification title)."),
+                    qp("visibility", false, "Visibility of the created shape graph: `public` or `private`."),
+                ],
+                vec![
+                    ("200", "Imported shapes (Turtle + per-specification summary)"),
+                    ("201", "Imported and stored as a shape graph"),
+                    ("400", "Empty body"),
+                    ("401", "Authentication required"),
+                    ("404", "Unknown format (the known ids are named)"),
+                    ("422", "The document could not be imported"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/shacl/exporters", vec![
+        (M::Get, o("Validation", "List specification exporters", "Specification formats SHACL shapes can be exported to. Each entry is `{id, label, media_type, file_extension}`.",
+            vec![], vec![("200", "Array of exporters")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/export/:format",
+        vec![(
+            M::Post,
+            o(
+                "Validation",
+                "Export shapes to a constraint specification",
+                "Body is a shapes graph in Turtle. The default response is a JSON report `{format, document, specification_count, losses}` — `losses` names every constraint the target format cannot express, which for IDS is most of SHACL beyond a facet, a required/prohibited cardinality and one value restriction. `?raw=true` returns the bare document with the format's media type. A shapes graph from which nothing can be expressed is a 422, not an empty document.",
+                vec![
+                    qp("raw", false, "`true` returns the document itself instead of the report (default: false)."),
+                    qp("title", false, "Title written into the document (default: `Exported shapes`)."),
+                ],
+                vec![
+                    ("200", "Export report, or the bare document with `?raw=true`"),
+                    ("400", "Empty body, or the Turtle does not parse"),
+                    ("401", "Authentication required"),
+                    ("404", "Unknown format (the known ids are named)"),
+                    ("422", "The shapes could not be loaded, or nothing in them is expressible in the target format"),
+                ],
+                true,
+            ),
+        )],
+    );
+
     // ═══════════════════════════════════════════════════════════════════════
     // SHACL-C
     // ═══════════════════════════════════════════════════════════════════════
