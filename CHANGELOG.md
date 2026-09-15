@@ -14,6 +14,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **IFC lift depth.** The importer keeps its flat BOT / `props:` contract
+  untouched (pinned as exact triples) and emits, beside it: the IFC 4.3
+  facility spine (`IfcBridge`, `IfcRoad`, … as `bot:Zone` plus the lift's own
+  classes, with only the entities new in 4.3 typed under the lift namespace
+  so IFC4 shapes keep matching 4.3 models); quantity sets and every property
+  kind as nodes carrying `qudt:numericValue` / `qudt:hasUnit` from a QUDT 2.1
+  table that never guesses (an unmapped unit is a label and a count);
+  classifications as SKOS concepts and schemes, with the
+  `props:ifcClassification` / `props:ifcMaterial` literals the IDS importer
+  had targeted while nothing emitted them; the NEN 2660-2 relation family
+  beside every BOT edge; and the map conversion as a CRS-qualified point,
+  read and never applied. The vocabulary lives at `{base_url}/ns/ifc-lift#`
+  and ships as the `ifc-lift` seed bundle, which a test holds the emitter to.
+  See docs/geo-3d-platform.md §9.
+- **`{base_url}` in seed bundles.** A manifest's model namespace, graph IRIs,
+  shape bindings and payload text may name `{base_url}`, expanded at seed
+  time to the deployment's base URL, so a bundle can mint IRIs under the
+  instance that serves them.
 - **LDES retention policies** (`ldes:fullLogDuration`, `ldes:versionAmount`,
   `ldes:versionDuration`, `ldes:versionDeleteDuration`, `ldes:startingFrom`),
   declared with `PUT /api/datasets/:id/ldes` as a `retention` object and
@@ -535,6 +553,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **STEP parser: an empty list swallowed every argument after it.** `()` was
+  read as a list holding one unknown byte with the closing paren consumed, so
+  an `IfcProject` written with empty `RepresentationContexts` — most
+  exporters — never had a `UnitsInContext`, and `IfcRelConnectsPathElements`
+  lost its connection types. Nothing had read past those positions before.
 - **Graph Store `PUT` replaces a graph in one transaction.** The replace
   cleared the graph in one transaction and bulk-loaded the new quads in
   another, so a concurrent reader could see the graph empty in between and a

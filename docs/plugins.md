@@ -129,6 +129,12 @@ and IMBOR as payload (files fetched by its `fetch.sh`, not vendored).
   point in boot as the built-in demo seed, after the store is open.
 - Payload paths in a manifest may not be absolute or contain `..` — a bundle
   can only read files inside its own directory.
+- **`{base_url}` placeholder.** A model's `namespace`, every graph IRI,
+  `shape_graphs` and the text of every payload may use `{base_url}`; it
+  expands at seed time to this deployment's base URL (no trailing slash),
+  so a bundle can mint IRIs under the instance that serves them — an
+  ontology at `{base_url}/ns/…#` is dereferenceable on that instance, which
+  no fixed IRI is. The `ifc-lift` bundle uses it.
 
 ### Domain starter profiles
 
@@ -141,6 +147,7 @@ A domain profile is a bundle, not a code change. The repository ships:
 | `nen2660-imbor` | Dutch infrastructure (NEN 2660-2 + IMBOR 2025) | fetched by `fetch.sh` (public downloads); the real-data Stage-1 benchmark |
 | `nen2660-relations` | NEN 2660-2 part-whole, containment and connection relations: a profile (transitivity on proper parthood only) and SHACL-SPARQL consistency shapes (acyclic, irreflexive, part within whole / RCC8 proper part, contained within region) with a sample | profile, shapes and sample vendored and run in CI by `tests/nen2660_relations_bundle.rs`; the NEN 2660-2 RDFS file fetched by `fetch.sh` |
 | `gwsw` | Dutch urban water (GWSW Totaal 1.7.0, RIONED) | `fetch.sh` downloads the CC0 Turtle export from data.gwsw.nl |
+| `ifc-lift` | the IFC importer's own vocabulary: the IFC 4.3 facility spine under `bot:Zone`, typed quantities and properties with QUDT units, classifications, materials, the map conversion — everything the lift emits that BOT, props:, ifcOWL, QUDT, SKOS and NEN 2660-2 do not declare | vendored; minted under `{base_url}/ns/ifc-lift#` at seed time; every lift-namespace term the emitter produces is checked against it by `tests/ifc_lift.rs`; opt out with `SEED_IFC_LIFT=false` |
 | `dqv-quality` | data quality (W3C DQV): a profile of categories, dimensions and metrics, and the shapes that pin what a well-formed `dqv:QualityMeasurement` is — DQV's Note constrains nothing itself | vendored (DQV is already the seeded `dqv` vocabulary); profile, shapes and a seven-violation sample run in CI by `tests/dqv_quality_bundle.rs`; opt out with `SEED_DQV_QUALITY=false` |
 
 CB'23 (material passports) and clinical terminologies such as SNOMED CT are

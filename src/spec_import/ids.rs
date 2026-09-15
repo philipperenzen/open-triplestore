@@ -14,7 +14,7 @@
 //! | attribute `Name` / `GlobalId` / other | `props:ifcName` / `props:ifcGuid` / `props:ifc<Attr>` |
 //! | partOf `IFCRELCONTAINEDINSPATIALSTRUCTURE` | `^bot:containsElement` |
 //! | partOf `IFCRELAGGREGATES` | `^bot:hasSubElement` |
-//! | classification / material | `props:ifcClassification` / `props:ifcMaterial` (convention) |
+//! | classification / material | `props:ifcClassification` / `props:ifcMaterial` (the lift emits both) |
 //!
 //! Value restrictions: `simpleValue` → `sh:hasValue`; `xs:enumeration` →
 //! `sh:in`; `xs:pattern` → `sh:pattern`; bounds → `sh:min/maxInclusive` /
@@ -557,7 +557,8 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
                 ("props:ifcMaterial", "material")
             };
             warnings.push(format!(
-                "{label} facet maps to {path} by convention; the built-in IFC importer does not emit it"
+                "{label} facet maps to {path}, which the IFC lift emits from IfcRelAssociates{} (the reference's Identification / the material's Name); a model lifted before that carries no such value and the requirement fails on it",
+                if f.name == "classification" { "Classification" } else { "Material" }
             ));
             let mut lines = vec![format!("sh:path {path}")];
             if let Some(sys) = f.simple("system") {

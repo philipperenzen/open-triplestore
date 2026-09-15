@@ -189,12 +189,30 @@ pub struct SeedReport {
     pub prefixes_seeded: usize,
 }
 
+/// The placeholder a manifest or payload may use for the deployment's base
+/// URL, so a bundle can mint IRIs under it — an ontology at
+/// `{base_url}/ns/…#` is dereferenceable on the very instance that serves
+/// it, which no fixed IRI is. Expanded at apply time in model namespaces,
+/// graph IRIs, shape-graph bindings and payload text; a bundle without it is
+/// untouched.
+pub const BASE_URL_PLACEHOLDER: &str = "{base_url}";
+
+/// `{base_url}` → the deployment's base URL (no trailing slash).
+pub fn expand_base<'a>(s: &'a str, base_url: &str) -> Cow<'a, str> {
+    if s.contains(BASE_URL_PLACEHOLDER) {
+        Cow::Owned(s.replace(BASE_URL_PLACEHOLDER, base_url.trim_end_matches('/')))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 /// Execute one bundle against the store + identity DB. Idempotent and
 /// best-effort per item: a failing dataset/graph/service is logged and skipped
 /// without aborting the rest. Callers decide whether the bundle runs at all
 /// ([`Bundle::is_disabled`]).
 pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedReport> {
     let mut report = SeedReport::default();
+    let base_url = state.base_url.as_str();
 
     // Prefixes first — independent of dataset/graph state, idempotent (existing
     // registry entries win), so they seed even when everything else pre-exists.
@@ -262,7 +280,7 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
                 base,
                 &dm.id,
                 &dm.title,
-                &dm.namespace,
+                &expand_base(&dm.namespace, base_url),
                 dm.description.as_deref(),
                 true,
                 Some("organisation"),
@@ -283,15 +301,16 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
             }
         }
         for g in &dm.graphs {
+            let iri = expand_base(&g.iri, base_url);
             if let Some((data, fmt)) = &g.data {
                 let empty = state
                     .store
-                    .graph_count_cached(Some(&g.iri))
+                    .graph_count_cached(Some(&iri))
                     .map(|n| n == 0)
                     .unwrap_or(true);
                 if empty {
-                    if let Err(e) = load_graph(state, &g.iri, data, *fmt) {
-                        tracing::warn!(bundle = %bundle.id, graph = %g.iri, error = %e, "failed to load model graph");
+                    if let Err(e) = load_graph(state, &iri, &expand_base(data, base_url), *fmt) {
+                        tracing::warn!(bundle = %bundle.id, graph = %iri, error = %e, "failed to load model graph");
                     } else {
                         report.graphs_loaded += 1;
                     }
@@ -301,7 +320,10 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
         if crate::data_models::registry::get_version(&state.store, base, &dm.id, &dm.version)
             .is_none()
         {
-            let mut iris = dm.graphs.iter().map(|g| g.iri.clone());
+            let mut iris = dm
+                .graphs
+                .iter()
+                .map(|g| expand_base(&g.iri, base_url).into_owned());
             let graph_iri = iris.next().expect("manifest guarantees at least one graph");
             let version = crate::data_models::models::DataModelVersion {
                 data_model_id: dm.id.clone(),
@@ -359,19 +381,20 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
         let mut any_graph_empty = false;
 
         for g in &ds.graphs {
+            let iri = expand_base(&g.iri, base_url);
             // (Re)load the bundled data only while the target graph is empty:
             // a fresh seed, or a previous seed that registered the graph but
             // never populated it. A graph that already holds triples is left
             // untouched, so an admin's edits are never overwritten.
-            let is_empty = state.store.graph_count_cached(Some(&g.iri)).unwrap_or(0) == 0;
+            let is_empty = state.store.graph_count_cached(Some(&iri)).unwrap_or(0) == 0;
             if is_empty {
                 any_graph_empty = true;
                 if let Some((data, fmt)) = &g.data {
-                    if let Err(e) = load_graph(state, &g.iri, data, *fmt) {
+                    if let Err(e) = load_graph(state, &iri, &expand_base(data, base_url), *fmt) {
                         tracing::warn!(
                             "seed bundle '{}': graph <{}> load failed: {e}",
                             bundle.id,
-                            g.iri
+                            iri
                         );
                         continue;
                     }
@@ -381,11 +404,9 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
                     }
                 }
             }
-            let _ = state.auth_db.add_dataset_graph(&ds.slug, &g.iri);
+            let _ = state.auth_db.add_dataset_graph(&ds.slug, &iri);
             if g.role.is_some() {
-                let _ = state
-                    .auth_db
-                    .set_dataset_graph_role(&ds.slug, &g.iri, g.role);
+                let _ = state.auth_db.set_dataset_graph_role(&ds.slug, &iri, g.role);
             }
             report.graphs_registered += 1;
         }
@@ -395,7 +416,11 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
         // RDF set semantics, so a partial earlier load self-heals.
         if any_graph_empty || ds.graphs.is_empty() {
             for q in &ds.quads {
-                if let Err(e) = state.store.load_str(&q.data, q.format, None) {
+                if let Err(e) =
+                    state
+                        .store
+                        .load_str(&expand_base(&q.data, base_url), q.format, None)
+                {
                     tracing::warn!(
                         "seed bundle '{}': quads payload '{}' load failed: {e}",
                         bundle.id,
@@ -477,7 +502,7 @@ pub fn apply_bundle(state: &AppState, bundle: &Bundle) -> anyhow::Result<SeedRep
             }
         }
         for shapes_iri in &ds.shape_graphs {
-            match bind_shape_graph(state, &org_id, ds, shapes_iri) {
+            match bind_shape_graph(state, &org_id, ds, &expand_base(shapes_iri, base_url)) {
                 Ok(()) => report.shape_graphs_bound += 1,
                 Err(e) => {
                     tracing::warn!(bundle = %bundle.id, dataset = %ds.slug, shapes = %shapes_iri, error = %e, "failed to bind shape graph")

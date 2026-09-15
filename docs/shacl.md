@@ -608,7 +608,11 @@ combined with the "requires" shape as `sh:or ( [ sh:not applies ] requires )`
 — SHACL Core throughout. Value restrictions map to `sh:hasValue`, `sh:in`,
 `sh:pattern`, bounds and lengths; cardinality to `sh:minCount 1` /
 `sh:maxCount 0`. Whatever cannot be expressed per node (a specification's
-"at least one such entity must exist"), or relies on a convention the IFC
-importer does not populate (classification, material, predefined types,
-attributes other than Name/GlobalId), is listed under `warnings`.
+"at least one such entity must exist"), or relies on a value the IFC lift
+does not populate (predefined types, attributes other than Name/GlobalId), is
+listed under `warnings`. Classification and material facets target
+`props:ifcClassification` / `props:ifcMaterial`, which the lift emits from
+`IfcRelAssociatesClassification` (the reference's identification) and
+`IfcRelAssociatesMaterial` (the material's name); a model lifted before it
+did carries neither, and the warning says so.
 

@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::names;
 use super::step::{decode_ifc_guid, Arg, Instance, StepFile};
+use super::units::{self, Unit};
 use super::{ConvertOptions, IfcStats};
 
 const BOT: &str = "https://w3id.org/bot#";
@@ -15,13 +16,23 @@ const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 const OTS: &str = "https://opentriplestore.org/ns#";
 const GEO: &str = "http://www.opengis.net/ont/geosparql#";
+const NEN: &str = "https://w3id.org/nen2660/def#";
+const QUDT: &str = "http://qudt.org/schema/qudt/";
+const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+const DCT: &str = "http://purl.org/dc/terms/";
+
+/// Where the lift's own terms live when no base URL can be derived at all.
+pub const LIFT_NS_FALLBACK: &str = "https://opentriplestore.org/ns/ifc-lift#";
 
 // Chunk size for the N-Triples sinks. Each chunk costs a store load round-trip
 // (which rebuilds the graph index), so bigger chunks load multi-million-triple
 // lifts far faster; 32 MB keeps peak memory modest while cutting round-trips ~8×.
 const FLUSH_AT: usize = 32 * 1024 * 1024;
 
-/// ifcOWL namespace for a FILE_SCHEMA id.
+/// ifcOWL namespace for a FILE_SCHEMA id. IFC 4.3 files answer with the IFC4
+/// namespace too: every entity IFC4 already had keeps its IFC4 IRI, and only
+/// the entities new in 4.3 (`names::IFC4X3_ONLY`) go to the lift's own
+/// namespace — see [`entity_class`].
 fn ifcowl_ns(schema: &str) -> &'static str {
     if schema.starts_with("IFC4") {
         "https://standards.buildingsmart.org/IFC/DEV/IFC4/ADD2_TC1/OWL#"
@@ -29,6 +40,47 @@ fn ifcowl_ns(schema: &str) -> &'static str {
         "https://standards.buildingsmart.org/IFC/DEV/IFC2x3/TC1/OWL#"
     }
 }
+
+/// The lift's own namespace, `{base_url}/ns/ifc-lift#`, derived from
+/// `inst_base`: the import writes into `{base_url}/dataset/{id}/building/`,
+/// so the base URL is what precedes `/dataset/`; a custom graph IRI falls
+/// back to its origin; anything else to [`LIFT_NS_FALLBACK`]. The same
+/// namespace is what the `ifc-lift` seed bundle expands `{base_url}` to.
+pub fn lift_namespace(opts: &ConvertOptions) -> String {
+    let base = &opts.inst_base;
+    if let Some(i) = base.find("/dataset/") {
+        return format!("{}/ns/ifc-lift#", &base[..i]);
+    }
+    if let Some(scheme_end) = base.find("://") {
+        let rest = &base[scheme_end + 3..];
+        let host_end = rest.find('/').unwrap_or(rest.len());
+        if host_end > 0 {
+            return format!(
+                "{}{}/ns/ifc-lift#",
+                &base[..scheme_end + 3],
+                &rest[..host_end]
+            );
+        }
+    }
+    LIFT_NS_FALLBACK.to_string()
+}
+
+/// The class IRI an instance is typed with: IFC 4.3-only entities under the
+/// lift namespace, everything else in the schema's ifcOWL namespace.
+fn entity_class(ifc_ns: &str, lift_ns: &str, schema: &str, entity: &str) -> String {
+    let ns = if schema.starts_with("IFC4X3") && names::IFC4X3_ONLY.contains(&entity) {
+        lift_ns
+    } else {
+        ifc_ns
+    };
+    format!("{ns}{}", names::camel(entity))
+}
+
+/// The unit of a value: its own `Unit` reference when it has one, else the
+/// project default for the given unit type.
+type UnitResolver<'a> = dyn Fn(Option<&Arg>, Option<&str>) -> Option<Unit> + 'a;
+/// Writes a resolved unit onto a value node (QUDT IRI, or label + factor).
+type UnitEmitter<'a> = dyn Fn(&mut NtSink<'_>, &str, &Unit, &mut IfcStats) + 'a;
 
 /// A buffered N-Triples writer that flushes through a chunk callback.
 struct NtSink<'a> {
@@ -91,6 +143,10 @@ fn typed_lit(v: &str, dt: &str) -> String {
     format!("{}^^<{XSD}{dt}>", lit(v))
 }
 
+fn double_lit(v: f64) -> String {
+    typed_lit(&format!("{v}"), "double")
+}
+
 /// Keep IRI-safe local names for pset/property names.
 fn sanitize(name: &str) -> String {
     let mut out: String = name
@@ -138,6 +194,11 @@ fn inst_iri(base: &str, inst: &Instance) -> String {
         Some(g) => format!("<{base}{g}>"),
         None => format!("<{base}i{}>", inst.id),
     }
+}
+
+/// A stable IRI *under* an instance IRI: `<…/{guid}/{suffix}>`.
+fn sub_iri(inst_s: &str, suffix: &str) -> String {
+    format!("{}/{suffix}>", inst_s.trim_end_matches('>'))
 }
 
 fn name_arg(inst: &Instance, idx: usize) -> Option<&str> {
@@ -203,7 +264,10 @@ fn dms_to_deg(arg: &Arg) -> Option<f64> {
 // sanctioned path is an AUTHORED heading (`ConvertOptions::model_heading`,
 // stamped below as `ots:modelHeading`): a human states the bearing after
 // checking the rendered model against the real site, exactly like the demo
-// seeds' authored anchors.
+// seeds' authored anchors. The same holds for `IfcMapConversion`'s rotation
+// (IFC 4.3 says TrueNorth shall not be added on top of a map conversion, and
+// the geometry the viewer receives is already placed): it is emitted as an
+// annotation on the map-conversion node, never applied to a geometry.
 
 /// WGS84 anchor from the file's own IfcSite georeference (RefLatitude /
 /// RefLongitude, attributes 9/10), when present and plausible. A site at
@@ -221,6 +285,100 @@ pub fn site_anchor_wkt(file: &StepFile) -> Option<String> {
     Some(format!("POINT({lon} {lat})"))
 }
 
+/// The model's `IfcMapConversion` (IFC4 / IFC 4.3 georeferencing): the map
+/// coordinates of the model origin, the rotation and scale, and the target
+/// `IfcProjectedCRS` — read, never applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapConversion {
+    pub eastings: f64,
+    pub northings: f64,
+    pub orthogonal_height: Option<f64>,
+    /// Degrees, anticlockwise from the map's easting axis to the model's X
+    /// axis: `atan2(XAxisOrdinate, XAxisAbscissa)`.
+    pub rotation_deg: Option<f64>,
+    pub scale: Option<f64>,
+    /// `IfcProjectedCRS.Name`, conventionally `EPSG:<code>`.
+    pub crs_name: Option<String>,
+    /// The EPSG code parsed out of the name.
+    pub epsg: Option<u32>,
+    pub vertical_datum: Option<String>,
+    pub map_projection: Option<String>,
+    pub map_zone: Option<String>,
+}
+
+impl MapConversion {
+    /// The OGC CRS URI of the EPSG code — only when this store's CRS registry
+    /// knows it, so an unrecognised code gets no prefix rather than a wrong
+    /// one.
+    pub fn crs_uri(&self) -> Option<&'static str> {
+        let code = self.epsg?;
+        let uri = format!("http://www.opengis.net/def/crs/EPSG/0/{code}");
+        crate::geo::crs::Crs::from_uri(&uri).map(|c| c.to_uri())
+    }
+
+    /// `<crs> POINT(E N)` — a CRS-qualified WKT literal value, when the CRS
+    /// is recognised.
+    pub fn wkt(&self) -> Option<String> {
+        self.crs_uri()
+            .map(|uri| format!("<{uri}> POINT({} {})", self.eastings, self.northings))
+    }
+
+    /// The origin in WGS84 `(lon, lat)`, when the CRS is recognised.
+    pub fn wgs84(&self) -> Option<(f64, f64)> {
+        let uri = self.crs_uri()?;
+        let from = crate::geo::crs::Crs::from_uri(uri)?;
+        crate::geo::crs::transform_xy(
+            from,
+            crate::geo::crs::Crs::Wgs84,
+            self.eastings,
+            self.northings,
+        )
+    }
+}
+
+/// Read the first `IfcMapConversion` (or `IfcMapConversionScaled`) of a file.
+pub fn map_conversion(file: &StepFile) -> Option<MapConversion> {
+    let mc = file
+        .of_entity("IFCMAPCONVERSION")
+        .next()
+        .or_else(|| file.of_entity("IFCMAPCONVERSIONSCALED").next())?;
+    // (SourceCRS, TargetCRS, Eastings, Northings, OrthogonalHeight,
+    //  XAxisAbscissa, XAxisOrdinate, Scale)
+    let eastings = mc.args.get(2).and_then(Arg::as_f64)?;
+    let northings = mc.args.get(3).and_then(Arg::as_f64)?;
+    let abscissa = mc.args.get(5).and_then(Arg::as_f64);
+    let ordinate = mc.args.get(6).and_then(Arg::as_f64);
+    let target = mc
+        .args
+        .get(1)
+        .and_then(Arg::as_ref_id)
+        .and_then(|id| file.get(id));
+    let crs_name = target.and_then(|t| name_arg(t, 0)).map(str::to_string);
+    let epsg = crs_name.as_deref().and_then(|n| {
+        let (auth, code) = n.split_once(':')?;
+        if auth.trim().eq_ignore_ascii_case("EPSG") {
+            code.trim().parse().ok()
+        } else {
+            None
+        }
+    });
+    Some(MapConversion {
+        eastings,
+        northings,
+        orthogonal_height: mc.args.get(4).and_then(Arg::as_f64),
+        rotation_deg: match (abscissa, ordinate) {
+            (Some(a), Some(o)) if a != 0.0 || o != 0.0 => Some(o.atan2(a).to_degrees()),
+            _ => None,
+        },
+        scale: mc.args.get(7).and_then(Arg::as_f64),
+        crs_name,
+        epsg,
+        vertical_datum: target.and_then(|t| name_arg(t, 3)).map(str::to_string),
+        map_projection: target.and_then(|t| name_arg(t, 4)).map(str::to_string),
+        map_zone: target.and_then(|t| name_arg(t, 5)).map(str::to_string),
+    })
+}
+
 /// Best human label of a rooted instance: Name (arg 2), else LongName for
 /// spatial entities (varies), else None.
 fn label_of(inst: &Instance) -> Option<&str> {
@@ -232,6 +390,171 @@ fn label_of(inst: &Instance) -> Option<&str> {
     })
 }
 
+/// The property-set definitions a `RelatingPropertyDefinition` names: one
+/// reference (IFC2x3, and IFC4's common case), or the IFC4 set form
+/// `IFCPROPERTYSETDEFINITIONSET((#a,#b))`, which `as_ref_id` cannot see.
+fn pset_definition_ids(arg: &Arg, out: &mut Vec<u64>) {
+    match arg {
+        Arg::Ref(id) => out.push(*id),
+        Arg::List(items) => items.iter().for_each(|a| pset_definition_ids(a, out)),
+        Arg::Typed(_, inner) => inner.iter().for_each(|a| pset_definition_ids(a, out)),
+        _ => {}
+    }
+}
+
+/// The `IfcMaterial` leaves behind a `RelatingMaterial`: a material itself,
+/// or the materials of a layer set (usage), profile set (usage), constituent
+/// set or material list.
+fn material_leaves(file: &StepFile, id: u64, out: &mut Vec<u64>, depth: usize) {
+    if depth > 6 {
+        return;
+    }
+    let Some(inst) = file.get(id) else { return };
+    let refs_at = |idx: usize| -> Vec<u64> {
+        match inst.args.get(idx) {
+            Some(Arg::Ref(r)) => vec![*r],
+            Some(Arg::List(items)) => items.iter().filter_map(Arg::as_ref_id).collect(),
+            _ => vec![],
+        }
+    };
+    let next: Vec<u64> = match inst.entity.as_str() {
+        "IFCMATERIAL" => {
+            out.push(id);
+            return;
+        }
+        // (ForLayerSet, …) / (ForProfileSet, …)
+        "IFCMATERIALLAYERSETUSAGE" | "IFCMATERIALPROFILESETUSAGE" => refs_at(0),
+        // (MaterialLayers, …) / (Materials)
+        "IFCMATERIALLAYERSET" | "IFCMATERIALLIST" => refs_at(0),
+        // (Material, LayerThickness, …)
+        "IFCMATERIALLAYER" => refs_at(0),
+        // (Name, Description, MaterialProfiles / MaterialConstituents, …)
+        "IFCMATERIALPROFILESET" | "IFCMATERIALCONSTITUENTSET" => refs_at(2),
+        // (Name, Description, Material, …)
+        "IFCMATERIALPROFILE" | "IFCMATERIALCONSTITUENT" => refs_at(2),
+        _ => vec![],
+    };
+    for n in next {
+        material_leaves(file, n, out, depth + 1);
+    }
+}
+
+/// One link of a classification chain, innermost reference first.
+struct ClassificationRef {
+    concept: String,
+    identification: Option<String>,
+    name: Option<String>,
+    description: Option<String>,
+    location: Option<String>,
+}
+
+struct ClassificationScheme {
+    iri: String,
+    name: Option<String>,
+    source: Option<String>,
+    edition: Option<String>,
+    edition_date: Option<String>,
+    location: Option<String>,
+}
+
+fn is_absolute_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Walk `ReferencedSource` from a reference up to its `IfcClassification`.
+/// IFC2x3 (`ItemReference`) and IFC4 (`Identification`) keep the same
+/// attribute positions, so one reader serves both.
+fn classification_chain(
+    file: &StepFile,
+    base: &str,
+    ref_id: u64,
+) -> Option<(Vec<ClassificationRef>, ClassificationScheme)> {
+    let mut chain = Vec::new();
+    let mut cur = ref_id;
+    let mut scheme_inst = None;
+    for _ in 0..16 {
+        let inst = file.get(cur)?;
+        match inst.entity.as_str() {
+            "IFCCLASSIFICATIONREFERENCE" => {
+                chain.push(inst);
+                match inst.args.get(3).and_then(Arg::as_ref_id) {
+                    Some(next) => cur = next,
+                    None => break,
+                }
+            }
+            "IFCCLASSIFICATION" => {
+                scheme_inst = Some(inst);
+                break;
+            }
+            _ => break,
+        }
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    let scheme_name = scheme_inst.and_then(|s| name_arg(s, 3)).map(str::to_string);
+    let scheme_location = scheme_inst
+        .and_then(|s| name_arg(s, 5))
+        .filter(|l| is_absolute_url(l))
+        .map(str::to_string);
+    let scheme_key = sanitize(scheme_name.as_deref().unwrap_or("classification"));
+    let scheme_iri = scheme_location
+        .clone()
+        .unwrap_or_else(|| format!("{base}classification/{scheme_key}"));
+    let refs = chain
+        .iter()
+        .map(|r| {
+            let location = name_arg(r, 0).map(str::to_string);
+            let identification = name_arg(r, 1).map(str::to_string);
+            let name = name_arg(r, 2).map(str::to_string);
+            let concept = match location.as_deref().filter(|l| is_absolute_url(l)) {
+                Some(l) => l.to_string(),
+                None => format!(
+                    "{base}classification/{scheme_key}/{}",
+                    sanitize(
+                        identification
+                            .as_deref()
+                            .or(name.as_deref())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("ref{}", r.id))
+                            .as_str()
+                    )
+                ),
+            };
+            ClassificationRef {
+                concept,
+                identification,
+                name,
+                description: name_arg(r, 4).map(str::to_string),
+                location,
+            }
+        })
+        .collect();
+    Some((
+        refs,
+        ClassificationScheme {
+            iri: scheme_iri,
+            name: scheme_name,
+            source: scheme_inst.and_then(|s| name_arg(s, 0)).map(str::to_string),
+            edition: scheme_inst.and_then(|s| name_arg(s, 1)).map(str::to_string),
+            edition_date: scheme_inst.and_then(|s| match s.args.get(2) {
+                Some(Arg::Str(d)) if !d.trim().is_empty() => Some(d.clone()),
+                Some(Arg::Ref(d)) => file.get(*d).and_then(|di| {
+                    // IFC2x3 IfcCalendarDate(DayComponent, MonthComponent, YearComponent)
+                    let (d, m, y) = (
+                        di.args.first().and_then(Arg::as_f64)?,
+                        di.args.get(1).and_then(Arg::as_f64)?,
+                        di.args.get(2).and_then(Arg::as_f64)?,
+                    );
+                    Some(format!("{y:04.0}-{m:02.0}-{d:02.0}"))
+                }),
+                _ => None,
+            }),
+            location: scheme_location,
+        },
+    ))
+}
+
 pub fn emit(
     file: &StepFile,
     opts: &ConvertOptions,
@@ -240,6 +563,9 @@ pub fn emit(
 ) -> Result<IfcStats, String> {
     let base = &opts.inst_base;
     let ifc_ns = ifcowl_ns(&file.schema);
+    let lift_ns = lift_namespace(opts);
+    let class_of = |entity: &str| entity_class(ifc_ns, &lift_ns, &file.schema, entity);
+    let lift = |local: &str| iri(&format!("{lift_ns}{local}"));
     let mut stats = IfcStats {
         schema: file.schema.clone(),
         instances: file.instances.len(),
@@ -247,11 +573,15 @@ pub fn emit(
     };
 
     let spatial_class: HashMap<&str, &str> = names::SPATIAL_BOT.iter().copied().collect();
+    let facility_class: HashMap<&str, &str> = names::FACILITY_ZONE.iter().copied().collect();
+    let is_spatial =
+        |entity: &str| spatial_class.contains_key(entity) || facility_class.contains_key(entity);
 
     // ── Containment & aggregation edges ────────────────────────────────────────
     // (parent, child) pairs from the two structural relationship entities.
     let mut contains: Vec<(u64, u64)> = Vec::new(); // spatial → element
     let mut aggregates: Vec<(u64, u64)> = Vec::new(); // object → sub-object
+    let mut connects: Vec<(u64, u64)> = Vec::new(); // element ↔ element
     for inst in file.instances.values() {
         match inst.entity.as_str() {
             "IFCRELCONTAINEDINSPATIALSTRUCTURE" => {
@@ -264,6 +594,8 @@ pub fn emit(
                     }
                 }
             }
+            // IfcRelNests is ordered decomposition (ports, sub-parts); both are
+            // parthood for the BOT and NEN layers.
             "IFCRELAGGREGATES" | "IFCRELNESTS" => {
                 // (GlobalId, OH, Name, Desc, RelatingObject, RelatedObjects)
                 let parent = inst.args.get(4).and_then(Arg::as_ref_id);
@@ -272,6 +604,15 @@ pub fn emit(
                     for k in kids.iter().filter_map(Arg::as_ref_id) {
                         aggregates.push((p, k));
                     }
+                }
+            }
+            "IFCRELCONNECTSPATHELEMENTS" | "IFCRELCONNECTSELEMENTS" => {
+                // (GlobalId, OH, Name, Desc, ConnectionGeometry, RelatingElement, RelatedElement, …)
+                if let (Some(a), Some(b)) = (
+                    inst.args.get(5).and_then(Arg::as_ref_id),
+                    inst.args.get(6).and_then(Arg::as_ref_id),
+                ) {
+                    connects.push((a, b));
                 }
             }
             _ => {}
@@ -283,11 +624,15 @@ pub fn emit(
     let mut element_ids: HashSet<u64> = HashSet::new();
     for &(_, k) in contains.iter().chain(aggregates.iter()) {
         if let Some(inst) = file.get(k) {
-            if !spatial_class.contains_key(inst.entity.as_str()) && inst.entity != "IFCPROJECT" {
+            if !is_spatial(inst.entity.as_str()) && inst.entity != "IFCPROJECT" {
                 element_ids.insert(k);
             }
         }
     }
+    // A node is in the BOT layer when it is spatial or an element.
+    let in_layer = |id: u64| -> bool {
+        element_ids.contains(&id) || file.get(id).is_some_and(|i| is_spatial(i.entity.as_str()))
+    };
 
     // ── BOT layer ───────────────────────────────────────────────────────────────
     let mut bot = NtSink::new(bot_out);
@@ -311,98 +656,108 @@ pub fn emit(
     }
     let root_id = site_or_building_anchor;
 
-    let emit_node =
-        |bot: &mut NtSink, inst: &Instance, bot_class: Option<&str>, is_element: bool| {
-            let s = inst_iri(base, inst);
-            if let Some(cls) = bot_class {
-                bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}{cls}")));
-            }
-            if is_element {
-                bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}Element")));
-            }
-            bot.triple(
-                &s,
-                &iri(RDF_TYPE),
-                &iri(&format!("{ifc_ns}{}", names::camel(&inst.entity))),
-            );
-            // The caller's friendly label wins on the ROOT only (exporters leave
-            // "Site" / "Default" / "Gelaende" there, which then headlines the whole
-            // model in every viewer tree); the file's own name survives as
-            // props:ifcName. Every other element keeps its authored name.
-            let friendly = opts
-                .root_label
-                .as_deref()
-                .filter(|_| Some(inst.id) == root_id);
-            match (friendly, label_of(inst)) {
-                (Some(f), authored) => {
-                    bot.triple(&s, &iri(RDFS_LABEL), &lit(f));
-                    if let Some(a) = authored {
-                        bot.triple(&s, &iri(&format!("{PROPS}ifcName")), &lit(a));
-                    }
+    let emit_node = |bot: &mut NtSink,
+                     inst: &Instance,
+                     bot_class: Option<&str>,
+                     lift_class: Option<&str>,
+                     is_element: bool| {
+        let s = inst_iri(base, inst);
+        if let Some(cls) = bot_class {
+            bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}{cls}")));
+        }
+        if let Some(cls) = lift_class {
+            bot.triple(&s, &iri(RDF_TYPE), &lift(cls));
+        }
+        if is_element {
+            bot.triple(&s, &iri(RDF_TYPE), &iri(&format!("{BOT}Element")));
+        }
+        bot.triple(&s, &iri(RDF_TYPE), &iri(&class_of(&inst.entity)));
+        // The caller's friendly label wins on the ROOT only (exporters leave
+        // "Site" / "Default" / "Gelaende" there, which then headlines the whole
+        // model in every viewer tree); the file's own name survives as
+        // props:ifcName. Every other element keeps its authored name.
+        let friendly = opts
+            .root_label
+            .as_deref()
+            .filter(|_| Some(inst.id) == root_id);
+        match (friendly, label_of(inst)) {
+            (Some(f), authored) => {
+                bot.triple(&s, &iri(RDFS_LABEL), &lit(f));
+                if let Some(a) = authored {
+                    bot.triple(&s, &iri(&format!("{PROPS}ifcName")), &lit(a));
                 }
-                (None, Some(label)) => bot.triple(&s, &iri(RDFS_LABEL), &lit(label)),
-                (None, None) => {}
             }
-            if let Some(g) = guid_of(inst) {
-                bot.triple(&s, &iri(&format!("{PROPS}ifcGuid")), &lit(g));
-                if let Some(uuid) = decode_ifc_guid(g) {
-                    bot.triple(&s, &iri(&format!("{PROPS}uuid")), &lit(&uuid));
-                }
-                // FOG reference into the stored IFC (fragment = GlobalId) so every
-                // element row in the viewer can reach the file it came from. The
-                // node is a STABLE IRI, not a blank node: `_:fog1`-style labels
-                // repeat across separately imported buildings, and a union query
-                // over their graphs joins equal labels into ONE node — so every
-                // building inherited every other building's file URL (the
-                // "duplicate models" bug). Per-GUID IRIs cannot collide.
-                if let Some(url) = &opts.ifc_file_url {
-                    let node = format!("{}/filelink>", s.trim_end_matches('>'));
-                    bot.triple(&s, &iri(&format!("{OMG}hasGeometry")), &node);
-                    bot.triple(&node, &iri(RDF_TYPE), &iri(&format!("{OMG}Geometry")));
-                    let target = if is_element {
-                        format!("{url}#{g}")
-                    } else {
-                        url.clone()
-                    };
+            (None, Some(label)) => bot.triple(&s, &iri(RDFS_LABEL), &lit(label)),
+            (None, None) => {}
+        }
+        if let Some(g) = guid_of(inst) {
+            bot.triple(&s, &iri(&format!("{PROPS}ifcGuid")), &lit(g));
+            if let Some(uuid) = decode_ifc_guid(g) {
+                bot.triple(&s, &iri(&format!("{PROPS}uuid")), &lit(&uuid));
+            }
+            // FOG reference into the stored IFC (fragment = GlobalId) so every
+            // element row in the viewer can reach the file it came from. The
+            // node is a STABLE IRI, not a blank node: `_:fog1`-style labels
+            // repeat across separately imported buildings, and a union query
+            // over their graphs joins equal labels into ONE node — so every
+            // building inherited every other building's file URL (the
+            // "duplicate models" bug). Per-GUID IRIs cannot collide.
+            if let Some(url) = &opts.ifc_file_url {
+                let node = sub_iri(&s, "filelink");
+                bot.triple(&s, &iri(&format!("{OMG}hasGeometry")), &node);
+                bot.triple(&node, &iri(RDF_TYPE), &iri(&format!("{OMG}Geometry")));
+                let target = if is_element {
+                    format!("{url}#{g}")
+                } else {
+                    url.clone()
+                };
+                bot.triple(
+                    &node,
+                    &iri(&fog_ifc_pred),
+                    &format!("{}^^<{XSD}anyURI>", lit(&target)),
+                );
+                // Authored survey rotation (never TrueNorth — see above).
+                if let Some(h) = opts.model_heading.filter(|h| h.is_finite()) {
                     bot.triple(
                         &node,
-                        &iri(&fog_ifc_pred),
-                        &format!("{}^^<{XSD}anyURI>", lit(&target)),
+                        &iri(&format!("{OTS}modelHeading")),
+                        &format!("\"{h}\"^^<{XSD}double>"),
                     );
-                    // Authored survey rotation (never TrueNorth — see above).
-                    if let Some(h) = opts.model_heading.filter(|h| h.is_finite()) {
-                        bot.triple(
-                            &node,
-                            &iri(&format!("{OTS}modelHeading")),
-                            &format!("\"{h}\"^^<{XSD}double>"),
-                        );
-                    }
                 }
             }
-        };
+        }
+    };
 
-    // Spatial structure nodes.
+    // Spatial structure nodes: BOT's four, then the IFC 4.3 facilities BOT
+    // has no class for — a bot:Zone with the lift's own class.
     for inst in file.instances.values() {
         if let Some(cls) = spatial_class.get(inst.entity.as_str()) {
-            emit_node(&mut bot, inst, Some(cls), false);
+            emit_node(&mut bot, inst, Some(cls), None, false);
             match inst.entity.as_str() {
                 "IFCBUILDINGSTOREY" => stats.storeys += 1,
                 "IFCSPACE" => stats.spaces += 1,
                 _ => {}
             }
+        } else if let Some(cls) = facility_class.get(inst.entity.as_str()) {
+            emit_node(&mut bot, inst, Some("Zone"), Some(cls), false);
+            stats.facilities += 1;
         }
     }
     // Element nodes.
     for &id in &element_ids {
         if let Some(inst) = file.get(id) {
-            emit_node(&mut bot, inst, None, true);
+            emit_node(&mut bot, inst, None, None, true);
         }
     }
     stats.elements = element_ids.len();
 
     // Containment edges. Spatial→spatial aggregation uses the canonical BOT
     // predicate AND bot:containsElement so the viewer feed (which walks
-    // containsElement|hasSubElement) sees the full tree.
+    // containsElement|hasSubElement) sees the full tree. Beside every BOT
+    // edge, the NEN 2660-2 relation it means: location (`contains`) is not
+    // parthood (`hasPart`, transitive) and a physical decomposition is
+    // `hasTechnicalPart`. Nothing is removed — the BOT edges are the
+    // contract of the viewer feed, the IDS importer and the Studio shapes.
     let canonical = |parent: &str, child: &str| -> Option<&'static str> {
         match (parent, child) {
             ("IFCSITE", "IFCBUILDING") => Some("hasBuilding"),
@@ -420,34 +775,68 @@ pub fn emit(
         }
         let ps = inst_iri(base, pi);
         let ks = inst_iri(base, ki);
+        let both_spatial = is_spatial(&pi.entity) && is_spatial(&ki.entity);
+        let both_elements = element_ids.contains(&k) && element_ids.contains(&p);
         if let Some(pred) = canonical(&pi.entity, &ki.entity) {
             bot.triple(&ps, &iri(&format!("{BOT}{pred}")), &ks);
             bot.triple(&ps, &iri(&format!("{BOT}containsElement")), &ks);
-        } else if element_ids.contains(&k) && element_ids.contains(&p) {
+        } else if both_elements {
             bot.triple(&ps, &iri(&format!("{BOT}hasSubElement")), &ks);
+        } else if both_spatial {
+            // A bridge and its deck, a site and its road: zone in zone.
+            bot.triple(&ps, &iri(&format!("{BOT}containsZone")), &ks);
+            bot.triple(&ps, &iri(&format!("{BOT}containsElement")), &ks);
         } else {
             bot.triple(&ps, &iri(&format!("{BOT}containsElement")), &ks);
         }
+        let nen = if both_elements {
+            "hasTechnicalPart"
+        } else {
+            "hasPart"
+        };
+        bot.triple(&ps, &iri(&format!("{NEN}{nen}")), &ks);
     }
     for &(p, k) in &contains {
         let (Some(pi), Some(ki)) = (file.get(p), file.get(k)) else {
             continue;
         };
+        let (ps, ks) = (inst_iri(base, pi), inst_iri(base, ki));
+        bot.triple(&ps, &iri(&format!("{BOT}containsElement")), &ks);
+        bot.triple(&ps, &iri(&format!("{NEN}contains")), &ks);
+    }
+    for &(a, b) in &connects {
+        if !(in_layer(a) && in_layer(b)) {
+            continue;
+        }
+        let (Some(ai), Some(bi)) = (file.get(a), file.get(b)) else {
+            continue;
+        };
         bot.triple(
-            &inst_iri(base, pi),
-            &iri(&format!("{BOT}containsElement")),
-            &inst_iri(base, ki),
+            &inst_iri(base, ai),
+            &iri(&format!("{NEN}connectsObject")),
+            &inst_iri(base, bi),
         );
     }
 
     // Anchor geometry on the site/building so the map can place the model —
-    // the caller's anchor wins, else the file's own IfcSite georeference.
-    let anchor_wkt = opts.anchor_wkt.clone().or_else(|| site_anchor_wkt(file));
+    // the caller's anchor wins, else the file's own IfcSite georeference,
+    // else the map conversion's origin reprojected to WGS84.
+    let map_conv = map_conversion(file);
+    let anchor_wkt = opts
+        .anchor_wkt
+        .clone()
+        .or_else(|| site_anchor_wkt(file))
+        .or_else(|| {
+            map_conv
+                .as_ref()
+                .and_then(MapConversion::wgs84)
+                .map(|(lon, lat)| format!("POINT({lon} {lat})"))
+        });
     if let (Some(anchor_id), Some(wkt)) = (site_or_building_anchor, &anchor_wkt) {
         if let Some(inst) = file.get(anchor_id) {
             let s = inst_iri(base, inst);
             // Stable IRI, not a blank node — see the FOG node comment above.
-            let b = format!("{}/anchor>", s.trim_end_matches('>'));
+            let b = sub_iri(&s, "anchor");
             bot.triple(&s, &iri(&format!("{GEO}hasGeometry")), &b);
             bot.triple(&b, &iri(RDF_TYPE), &iri(&format!("{GEO}Geometry")));
             bot.triple(
@@ -458,12 +847,57 @@ pub fn emit(
         }
     }
 
+    // The map conversion itself, as read: the origin in the projected CRS
+    // (a CRS-qualified WKT when the CRS is one this store knows), the height,
+    // the rotation and scale as annotations. It hangs off the root through
+    // its own predicate rather than a second geo:hasGeometry, so a consumer
+    // that takes "the" anchor still gets the WGS84 one.
+    if let (Some(anchor_id), Some(mc)) = (site_or_building_anchor, &map_conv) {
+        if let Some(inst) = file.get(anchor_id) {
+            let s = inst_iri(base, inst);
+            let node = sub_iri(&s, "map-conversion");
+            bot.triple(&s, &lift("mapConversion"), &node);
+            bot.triple(&node, &iri(RDF_TYPE), &lift("MapConversion"));
+            bot.triple(&node, &lift("eastings"), &double_lit(mc.eastings));
+            bot.triple(&node, &lift("northings"), &double_lit(mc.northings));
+            if let Some(h) = mc.orthogonal_height {
+                bot.triple(&node, &lift("orthogonalHeight"), &double_lit(h));
+            }
+            if let Some(r) = mc.rotation_deg {
+                bot.triple(&node, &lift("mapRotation"), &double_lit(r));
+            }
+            if let Some(sc) = mc.scale {
+                bot.triple(&node, &lift("mapScale"), &double_lit(sc));
+            }
+            if let Some(n) = &mc.crs_name {
+                bot.triple(&node, &lift("projectedCrs"), &lit(n));
+            }
+            if let Some(v) = &mc.vertical_datum {
+                bot.triple(&node, &lift("verticalDatum"), &lit(v));
+            }
+            if let Some(v) = &mc.map_projection {
+                bot.triple(&node, &lift("mapProjection"), &lit(v));
+            }
+            if let Some(v) = &mc.map_zone {
+                bot.triple(&node, &lift("mapZone"), &lit(v));
+            }
+            if let Some(wkt) = mc.wkt() {
+                bot.triple(&node, &iri(RDF_TYPE), &iri(&format!("{GEO}Geometry")));
+                bot.triple(
+                    &node,
+                    &iri(&format!("{GEO}asWKT")),
+                    &format!("{}^^<{GEO}wktLiteral>", lit(&wkt)),
+                );
+            }
+            stats.map_conversion = true;
+        }
+    }
+
     // Provenance on the root: where this model came from, its license and the
     // attribution line — real open BIM datasets (Schependomlaan, the KIT
     // models) require credit, and the root element is where viewers look.
     if let Some(inst) = root_id.and_then(|id| file.get(id)) {
         let s = inst_iri(base, inst);
-        const DCT: &str = "http://purl.org/dc/terms/";
         if let Some(src) = &opts.provenance_source {
             bot.triple(&s, &iri(&format!("{DCT}source")), &iri(src));
         }
@@ -475,7 +909,292 @@ pub fn emit(
         }
     }
 
-    // Property sets → direct data properties props:{Pset}_{Prop} on the object.
+    // ── Property sets and quantity sets ────────────────────────────────────────
+    // Property values keep their flat form, props:{Pset}_{Prop} with a typed
+    // literal — the contract of the IDS importer and the Studio shapes — and
+    // gain a node per value carrying the datatype, the IFC measure type and
+    // the unit (its own, else the project default for the measure). Quantity
+    // sets, dropped before, become one node per quantity with a QUDT unit
+    // plus the same flat props:{Qto}_{Name} literal.
+    let project_units = units::project_defaults(file);
+    let emit_unit =
+        |bot: &mut NtSink, node: &str, unit: &Unit, stats: &mut IfcStats| match &unit.qudt {
+            Some(q) => bot.triple(node, &iri(&format!("{QUDT}hasUnit")), &iri(q)),
+            None => {
+                bot.triple(node, &lift("unitLabel"), &lit(&unit.label));
+                if let Some((factor, base_unit)) = &unit.conversion {
+                    bot.triple(node, &lift("conversionFactor"), &double_lit(*factor));
+                    if let Some(b) = base_unit {
+                        bot.triple(node, &lift("conversionUnit"), &iri(b));
+                    }
+                }
+                stats.unmapped_units += 1;
+            }
+        };
+    // The unit of a value: its own `Unit` reference, else the project default
+    // for `unit_type`.
+    let unit_for = |own: Option<&Arg>, unit_type: Option<&str>| -> Option<Unit> {
+        own.and_then(Arg::as_ref_id)
+            .and_then(|id| units::resolve(file, id))
+            .or_else(|| unit_type.and_then(|t| project_units.get(t).cloned()))
+    };
+
+    struct PropCtx<'a> {
+        obj: &'a str,
+        set_name: &'a str,
+        flat_prefix: String,
+        path_prefix: String,
+        complex: Option<&'a str>,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_property(
+        bot: &mut NtSink,
+        stats: &mut IfcStats,
+        file: &StepFile,
+        lift: &dyn Fn(&str) -> String,
+        unit_for: &UnitResolver<'_>,
+        emit_unit: &UnitEmitter<'_>,
+        ctx: &PropCtx<'_>,
+        p: &Instance,
+        depth: usize,
+    ) {
+        let Some(pname) = name_arg(p, 0) else { return };
+        let flat = format!("{PROPS}{}_{}", ctx.flat_prefix, sanitize(pname));
+        let node = format!("{}/{}>", ctx.path_prefix, sanitize(pname));
+        let describe = |bot: &mut NtSink, stats: &mut IfcStats| {
+            bot.triple(ctx.obj, &lift("hasProperty"), &node);
+            bot.triple(&node, &iri(RDF_TYPE), &lift("Property"));
+            bot.triple(&node, &iri(RDFS_LABEL), &lit(pname));
+            bot.triple(&node, &lift("propertySet"), &lit(ctx.set_name));
+            if let Some(c) = ctx.complex {
+                bot.triple(&node, &lift("inComplexProperty"), &lit(c));
+            }
+            stats.properties += 1;
+        };
+        let measure_type = |v: &Arg| -> Option<String> {
+            match v {
+                Arg::Typed(name, _) => Some(names::camel(name).to_string()),
+                _ => None,
+            }
+        };
+        match p.entity.as_str() {
+            // (Name, Description, NominalValue, Unit)
+            "IFCPROPERTYSINGLEVALUE" => {
+                let Some(value) = p.args.get(2) else { return };
+                let Some(obj_nt) = arg_to_literal(value) else {
+                    return;
+                };
+                bot.triple(ctx.obj, &iri(&flat), &obj_nt);
+                describe(bot, stats);
+                bot.triple(&node, &lift("value"), &obj_nt);
+                if let Some(t) = measure_type(value) {
+                    bot.triple(&node, &lift("ifcType"), &lit(&t));
+                }
+                let unit_type = match value {
+                    Arg::Typed(name, _) => units::measure_unit_type(name),
+                    _ => None,
+                };
+                if let Some(u) = unit_for(p.args.get(3), unit_type) {
+                    emit_unit(bot, &node, &u, stats);
+                }
+            }
+            // (Name, Description, EnumerationValues, EnumerationReference)
+            "IFCPROPERTYENUMERATEDVALUE" => {
+                let values: Vec<String> = p
+                    .args
+                    .get(2)
+                    .and_then(Arg::as_list)
+                    .map(|l| l.iter().filter_map(arg_to_literal).collect())
+                    .unwrap_or_default();
+                if values.is_empty() {
+                    return;
+                }
+                for v in &values {
+                    bot.triple(ctx.obj, &iri(&flat), v);
+                }
+                describe(bot, stats);
+                for v in &values {
+                    bot.triple(&node, &lift("value"), v);
+                }
+                if let Some(e) = p
+                    .args
+                    .get(3)
+                    .and_then(Arg::as_ref_id)
+                    .and_then(|id| file.get(id))
+                    .and_then(|e| name_arg(e, 0))
+                {
+                    bot.triple(&node, &lift("enumeration"), &lit(e));
+                }
+            }
+            // (Name, Description, ListValues, Unit)
+            "IFCPROPERTYLISTVALUE" => {
+                let items = p.args.get(2).and_then(Arg::as_list).unwrap_or(&[]);
+                let values: Vec<String> = items.iter().filter_map(arg_to_literal).collect();
+                if values.is_empty() {
+                    return;
+                }
+                for v in &values {
+                    bot.triple(ctx.obj, &iri(&flat), v);
+                }
+                describe(bot, stats);
+                for v in &values {
+                    bot.triple(&node, &lift("value"), v);
+                }
+                if let Some(t) = items.first().and_then(measure_type) {
+                    bot.triple(&node, &lift("ifcType"), &lit(&t));
+                }
+                let unit_type = match items.first() {
+                    Some(Arg::Typed(name, _)) => units::measure_unit_type(name),
+                    _ => None,
+                };
+                if let Some(u) = unit_for(p.args.get(3), unit_type) {
+                    emit_unit(bot, &node, &u, stats);
+                }
+            }
+            // (Name, Description, UpperBoundValue, LowerBoundValue, Unit, SetPointValue)
+            // No single value, so no flat triple: the node carries the bounds.
+            "IFCPROPERTYBOUNDEDVALUE" => {
+                let upper = p.args.get(2).and_then(arg_to_literal);
+                let lower = p.args.get(3).and_then(arg_to_literal);
+                let set_point = p.args.get(5).and_then(arg_to_literal);
+                if upper.is_none() && lower.is_none() && set_point.is_none() {
+                    return;
+                }
+                describe(bot, stats);
+                if let Some(v) = &upper {
+                    bot.triple(&node, &lift("upperBound"), v);
+                }
+                if let Some(v) = &lower {
+                    bot.triple(&node, &lift("lowerBound"), v);
+                }
+                if let Some(v) = &set_point {
+                    bot.triple(&node, &lift("setPoint"), v);
+                }
+                let bound = p.args.get(2).or(p.args.get(3)).or(p.args.get(5));
+                if let Some(t) = bound.and_then(measure_type) {
+                    bot.triple(&node, &lift("ifcType"), &lit(&t));
+                }
+                let unit_type = match bound {
+                    Some(Arg::Typed(name, _)) => units::measure_unit_type(name),
+                    _ => None,
+                };
+                if let Some(u) = unit_for(p.args.get(4), unit_type) {
+                    emit_unit(bot, &node, &u, stats);
+                }
+            }
+            // (Name, Description, UsageName, HasProperties): the nested
+            // properties are flattened as {Pset}_{Complex}_{Prop} and nested
+            // under the complex node's path.
+            "IFCCOMPLEXPROPERTY" => {
+                if depth > 4 {
+                    return;
+                }
+                let Some(inner) = p.args.get(3).and_then(Arg::as_list) else {
+                    return;
+                };
+                let sub = PropCtx {
+                    obj: ctx.obj,
+                    set_name: ctx.set_name,
+                    flat_prefix: format!("{}_{}", ctx.flat_prefix, sanitize(pname)),
+                    path_prefix: node.trim_end_matches('>').to_string(),
+                    complex: Some(pname),
+                };
+                for q in inner.iter().filter_map(Arg::as_ref_id) {
+                    if let Some(qi) = file.get(q) {
+                        emit_property(
+                            bot,
+                            stats,
+                            file,
+                            lift,
+                            unit_for,
+                            emit_unit,
+                            &sub,
+                            qi,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_quantity(
+        bot: &mut NtSink,
+        stats: &mut IfcStats,
+        file: &StepFile,
+        lift: &dyn Fn(&str) -> String,
+        unit_for: &UnitResolver<'_>,
+        emit_unit: &UnitEmitter<'_>,
+        ctx: &PropCtx<'_>,
+        q: &Instance,
+        depth: usize,
+    ) {
+        let Some(qname) = name_arg(q, 0) else { return };
+        match q.entity.as_str() {
+            // (Name, Description, HasQuantities, Discrimination, Quality, Usage)
+            "IFCPHYSICALCOMPLEXQUANTITY" => {
+                if depth > 4 {
+                    return;
+                }
+                let Some(inner) = q.args.get(2).and_then(Arg::as_list) else {
+                    return;
+                };
+                let sub = PropCtx {
+                    obj: ctx.obj,
+                    set_name: ctx.set_name,
+                    flat_prefix: format!("{}_{}", ctx.flat_prefix, sanitize(qname)),
+                    path_prefix: format!("{}/{}", ctx.path_prefix, sanitize(qname)),
+                    complex: Some(qname),
+                };
+                for id in inner.iter().filter_map(Arg::as_ref_id) {
+                    if let Some(qi) = file.get(id) {
+                        emit_quantity(
+                            bot,
+                            stats,
+                            file,
+                            lift,
+                            unit_for,
+                            emit_unit,
+                            &sub,
+                            qi,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+            // (Name, Description, Unit, <Value>, Formula)
+            "IFCQUANTITYLENGTH" | "IFCQUANTITYAREA" | "IFCQUANTITYVOLUME" | "IFCQUANTITYCOUNT"
+            | "IFCQUANTITYWEIGHT" | "IFCQUANTITYTIME" | "IFCQUANTITYNUMBER" => {
+                let Some(value) = q.args.get(3) else { return };
+                let Some(obj_nt) = arg_to_literal(value) else {
+                    return;
+                };
+                let kind = q.entity.trim_start_matches("IFCQUANTITY");
+                let kind = format!("{}{}", &kind[..1], kind[1..].to_ascii_lowercase());
+                let flat = format!("{PROPS}{}_{}", ctx.flat_prefix, sanitize(qname));
+                let node = format!("{}/{}>", ctx.path_prefix, sanitize(qname));
+                bot.triple(ctx.obj, &iri(&flat), &obj_nt);
+                bot.triple(ctx.obj, &lift("hasQuantity"), &node);
+                bot.triple(&node, &iri(RDF_TYPE), &lift("Quantity"));
+                bot.triple(&node, &iri(RDFS_LABEL), &lit(qname));
+                bot.triple(&node, &lift("quantitySet"), &lit(ctx.set_name));
+                bot.triple(&node, &lift("quantityKind"), &lit(&kind));
+                if let Some(c) = ctx.complex {
+                    bot.triple(&node, &lift("inComplexQuantity"), &lit(c));
+                }
+                bot.triple(&node, &iri(&format!("{QUDT}numericValue")), &obj_nt);
+                if let Some(u) = unit_for(q.args.get(2), units::quantity_unit_type(&q.entity)) {
+                    emit_unit(bot, &node, &u, stats);
+                }
+                stats.quantities += 1;
+            }
+            _ => {}
+        }
+    }
+
     for inst in file.instances.values() {
         if inst.entity != "IFCRELDEFINESBYPROPERTIES" {
             continue;
@@ -483,43 +1202,188 @@ pub fn emit(
         let Some(objs) = inst.args.get(4).and_then(Arg::as_list) else {
             continue;
         };
-        let Some(pset_id) = inst.args.get(5).and_then(Arg::as_ref_id) else {
-            continue;
-        };
-        let Some(pset) = file.get(pset_id) else {
-            continue;
-        };
-        if pset.entity != "IFCPROPERTYSET" {
-            continue;
+        let mut defs = Vec::new();
+        if let Some(arg) = inst.args.get(5) {
+            pset_definition_ids(arg, &mut defs);
         }
-        let pset_name = sanitize(name_arg(pset, 2).unwrap_or("Pset"));
-        let Some(props) = pset.args.get(4).and_then(Arg::as_list) else {
+        for def_id in defs {
+            let Some(def) = file.get(def_id) else {
+                continue;
+            };
+            // (GlobalId, OwnerHistory, Name, Description, HasProperties)
+            // (GlobalId, OwnerHistory, Name, Description, MethodOfMeasurement, Quantities)
+            let (members_idx, is_qto) = match def.entity.as_str() {
+                "IFCPROPERTYSET" => (4, false),
+                "IFCELEMENTQUANTITY" => (5, true),
+                _ => continue,
+            };
+            let set_name = name_arg(def, 2).unwrap_or(if is_qto { "Qto" } else { "Pset" });
+            let set_key = sanitize(set_name);
+            let Some(members) = def.args.get(members_idx).and_then(Arg::as_list) else {
+                continue;
+            };
+            for obj in objs.iter().filter_map(Arg::as_ref_id) {
+                let Some(obj_inst) = file.get(obj) else {
+                    continue;
+                };
+                // Only attach to nodes that exist in the BOT layer.
+                if !in_layer(obj) {
+                    continue;
+                }
+                let s = inst_iri(base, obj_inst);
+                let ctx = PropCtx {
+                    obj: &s,
+                    set_name,
+                    flat_prefix: set_key.clone(),
+                    path_prefix: format!(
+                        "{}/{}/{}",
+                        s.trim_end_matches('>'),
+                        if is_qto { "qto" } else { "pset" },
+                        set_key
+                    ),
+                    complex: None,
+                };
+                for m in members.iter().filter_map(Arg::as_ref_id) {
+                    let Some(mi) = file.get(m) else { continue };
+                    if is_qto {
+                        emit_quantity(
+                            &mut bot, &mut stats, file, &lift, &unit_for, &emit_unit, &ctx, mi, 0,
+                        );
+                    } else {
+                        emit_property(
+                            &mut bot, &mut stats, file, &lift, &unit_for, &emit_unit, &ctx, mi, 0,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Materials ──────────────────────────────────────────────────────────────
+    // The matter an element is made of: the lift's own link, the NEN 2660-2
+    // constitution relation (`consistsOf` — not parthood) and the flat
+    // props:ifcMaterial literal the IDS importer already targets.
+    let mut typed_materials: HashSet<u64> = HashSet::new();
+    for inst in file.of_entity("IFCRELASSOCIATESMATERIAL") {
+        // (GlobalId, OH, Name, Desc, RelatedObjects, RelatingMaterial)
+        let Some(objs) = inst.args.get(4).and_then(Arg::as_list) else {
             continue;
         };
+        let Some(mat) = inst.args.get(5).and_then(Arg::as_ref_id) else {
+            continue;
+        };
+        let mut leaves = Vec::new();
+        material_leaves(file, mat, &mut leaves, 0);
         for obj in objs.iter().filter_map(Arg::as_ref_id) {
+            if !in_layer(obj) {
+                continue;
+            }
             let Some(obj_inst) = file.get(obj) else {
                 continue;
             };
-            // Only attach to nodes that exist in the BOT layer.
-            if !element_ids.contains(&obj) && !spatial_class.contains_key(obj_inst.entity.as_str())
-            {
+            let s = inst_iri(base, obj_inst);
+            for &m in &leaves {
+                let Some(mi) = file.get(m) else { continue };
+                let ms = inst_iri(base, mi);
+                bot.triple(&s, &lift("hasMaterial"), &ms);
+                bot.triple(&s, &iri(&format!("{NEN}consistsOf")), &ms);
+                if let Some(n) = name_arg(mi, 0) {
+                    bot.triple(&s, &iri(&format!("{PROPS}ifcMaterial")), &lit(n));
+                }
+                if typed_materials.insert(m) {
+                    bot.triple(&ms, &iri(RDF_TYPE), &lift("Material"));
+                    if let Some(n) = name_arg(mi, 0) {
+                        bot.triple(&ms, &iri(RDFS_LABEL), &lit(n));
+                    }
+                }
+                stats.materials += 1;
+            }
+        }
+    }
+
+    // ── Classifications → SKOS ─────────────────────────────────────────────────
+    // A reference becomes a skos:Concept (notation = Identification, label =
+    // Name) in a skos:ConceptScheme for the IfcClassification, chained with
+    // skos:broader when the file carries the hierarchy. The element links to
+    // the concept, and to the flat props:ifcClassification literal the IDS
+    // importer targets — which nothing emitted before.
+    let mut described_concepts: HashSet<String> = HashSet::new();
+    for inst in file.of_entity("IFCRELASSOCIATESCLASSIFICATION") {
+        // (GlobalId, OH, Name, Desc, RelatedObjects, RelatingClassification)
+        let Some(objs) = inst.args.get(4).and_then(Arg::as_list) else {
+            continue;
+        };
+        let Some(cref) = inst.args.get(5).and_then(Arg::as_ref_id) else {
+            continue;
+        };
+        let Some((chain, scheme)) = classification_chain(file, base, cref) else {
+            continue;
+        };
+        let scheme_iri = iri(&scheme.iri);
+        if described_concepts.insert(scheme.iri.clone()) {
+            bot.triple(
+                &scheme_iri,
+                &iri(RDF_TYPE),
+                &iri(&format!("{SKOS}ConceptScheme")),
+            );
+            if let Some(n) = &scheme.name {
+                bot.triple(&scheme_iri, &iri(&format!("{DCT}title")), &lit(n));
+            }
+            if let Some(v) = &scheme.source {
+                bot.triple(&scheme_iri, &iri(&format!("{DCT}publisher")), &lit(v));
+            }
+            if let Some(v) = &scheme.edition {
+                bot.triple(&scheme_iri, &iri(&format!("{DCT}hasVersion")), &lit(v));
+            }
+            if let Some(v) = &scheme.edition_date {
+                bot.triple(&scheme_iri, &iri(&format!("{DCT}issued")), &lit(v));
+            }
+            if let Some(l) = &scheme.location {
+                bot.triple(&scheme_iri, &iri(&format!("{DCT}source")), &iri(l));
+            }
+        }
+        for (i, r) in chain.iter().enumerate() {
+            let c = iri(&r.concept);
+            if !described_concepts.insert(r.concept.clone()) {
                 continue;
             }
-            let s = inst_iri(base, obj_inst);
-            for prop in props.iter().filter_map(Arg::as_ref_id) {
-                let Some(p) = file.get(prop) else { continue };
-                if p.entity != "IFCPROPERTYSINGLEVALUE" {
-                    continue;
-                }
-                let Some(pname) = name_arg(p, 0) else {
-                    continue;
-                };
-                let Some(value) = p.args.get(2) else { continue };
-                if let Some(obj_nt) = arg_to_literal(value) {
-                    let pred = format!("{PROPS}{}_{}", pset_name, sanitize(pname));
-                    bot.triple(&s, &iri(&pred), &obj_nt);
+            bot.triple(&c, &iri(RDF_TYPE), &iri(&format!("{SKOS}Concept")));
+            if let Some(v) = &r.identification {
+                bot.triple(&c, &iri(&format!("{SKOS}notation")), &lit(v));
+            }
+            if let Some(v) = &r.name {
+                bot.triple(&c, &iri(&format!("{SKOS}prefLabel")), &lit(v));
+            }
+            if let Some(v) = &r.description {
+                bot.triple(&c, &iri(&format!("{SKOS}definition")), &lit(v));
+            }
+            if let Some(l) = r.location.as_deref().filter(|l| is_absolute_url(l)) {
+                if l != r.concept {
+                    bot.triple(&c, &iri(&format!("{DCT}source")), &iri(l));
                 }
             }
+            bot.triple(&c, &iri(&format!("{SKOS}inScheme")), &scheme_iri);
+            match chain.get(i + 1) {
+                Some(parent) => {
+                    bot.triple(&c, &iri(&format!("{SKOS}broader")), &iri(&parent.concept))
+                }
+                None => bot.triple(&c, &iri(&format!("{SKOS}topConceptOf")), &scheme_iri),
+            }
+        }
+        let leaf = &chain[0];
+        for obj in objs.iter().filter_map(Arg::as_ref_id) {
+            if !in_layer(obj) {
+                continue;
+            }
+            let Some(obj_inst) = file.get(obj) else {
+                continue;
+            };
+            let s = inst_iri(base, obj_inst);
+            bot.triple(&s, &lift("hasClassification"), &iri(&leaf.concept));
+            if let Some(v) = leaf.identification.as_deref().or(leaf.name.as_deref()) {
+                bot.triple(&s, &iri(&format!("{PROPS}ifcClassification")), &lit(v));
+            }
+            stats.classifications += 1;
         }
     }
 
@@ -530,11 +1394,7 @@ pub fn emit(
         let mut owl = NtSink::new(ifcowl_out);
         for inst in file.instances.values() {
             let s = inst_iri(base, inst);
-            owl.triple(
-                &s,
-                &iri(RDF_TYPE),
-                &iri(&format!("{ifc_ns}{}", names::camel(&inst.entity))),
-            );
+            owl.triple(&s, &iri(RDF_TYPE), &iri(&class_of(&inst.entity)));
             let attr_names = names::attrs_of(&inst.entity);
             for (i, arg) in inst.args.iter().enumerate() {
                 if matches!(arg, Arg::Null | Arg::Star) {
@@ -658,6 +1518,31 @@ mod tests {
         assert!((s - lat).abs() < 1e-9, "{s}");
         let s2 = dms_to_deg(&Arg::Str("-87, -38, -21, -839999".to_string())).unwrap();
         assert!((s2 - lon).abs() < 1e-9, "{s2}");
+    }
+
+    #[test]
+    fn the_lift_namespace_sits_under_the_base_url() {
+        let ns = |inst_base: &str| {
+            lift_namespace(&ConvertOptions {
+                inst_base: inst_base.into(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            ns("https://data.example.org/dataset/x/building/"),
+            "https://data.example.org/ns/ifc-lift#"
+        );
+        // A path-prefixed deployment keeps its prefix.
+        assert_eq!(
+            ns("https://example.org/ots/dataset/x/building/"),
+            "https://example.org/ots/ns/ifc-lift#"
+        );
+        // A custom graph IRI: the origin.
+        assert_eq!(
+            ns("http://localhost:7878/graphs/site-a#"),
+            "http://localhost:7878/ns/ifc-lift#"
+        );
+        assert_eq!(ns("urn:x:"), LIFT_NS_FALLBACK);
     }
 
     const SAMPLE: &str = "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC2X3'));\nENDSEC;\nDATA;\n\

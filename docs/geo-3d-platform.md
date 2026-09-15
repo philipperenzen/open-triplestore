@@ -117,3 +117,43 @@ The map, 3D scene and Cesium globe are all available as chrome-less
 `/embed/…` pages for iframing into external sites, and every underlying API
 (GeoJSON, 3D Tiles, viewer feed, model files) is directly consumable from any
 web app — see **Embedding & Web Apps** (`docs/embedding.md`).
+
+## 9. IFC → linked data: the lift
+
+An IFC file (`POST /api/datasets/:id/import/ifc`) becomes two graphs: the
+**BOT layer** the platform queries, `…/dataset/{id}/building`, and, when
+asked for, a complete **ifcOWL** instance lift beside it. The BOT layer is
+the contract the viewer feed, the IDS importer and the SHACL Studio `ifc`
+shapes read, and it is stable: `bot:Site/Building/Storey/Space/Element`,
+`bot:hasBuilding/hasStorey/hasSpace/containsElement/hasSubElement`, the
+schema's ifcOWL class on every node, `rdfs:label`, `props:ifcGuid` /
+`props:uuid`, a `fog:asIfc_v4|v2x3` file link per element, the flat
+`props:{Pset}_{Prop}` literal per property, and the WGS84 anchor (a bare
+`POINT(lon lat)`, i.e. CRS84) on the site. Everything below is emitted
+*beside* that, never instead of it — `tests/ifc_lift.rs` pins the contract
+as exact triples.
+
+**The lift's own vocabulary** lives at `{base_url}/ns/ifc-lift#`, under the
+instance that serves the lifted graphs so every term is dereferenceable
+there, and ships as the `ifc-lift` seed bundle (`examples/seed-bundles/ifc-lift`;
+opt out with `SEED_IFC_LIFT=false`). The importer derives the namespace from
+the graph IRI it writes into (`{base_url}/dataset/…` → `{base_url}`; a custom
+target graph → its origin). A test holds the emitter to the ontology: every
+lift-namespace term it produces is declared there.
+
+| What | Emitted as |
+|---|---|
+| IFC 4.3 facilities (`IfcBridge`, `IfcRoad`, `IfcRailway`, `IfcMarineFacility` and their parts) | `bot:Zone` plus `ifcl:Bridge` … `ifcl:BridgePart`; zone-in-zone aggregation is `bot:containsZone` (with the feed edge). buildingSMART published ifcOWL up to IFC4 ADD2, so only the entities new in 4.3 are typed under the lift namespace (`ifcl:IfcAlignment`); every entity IFC4 already had keeps its IFC4 ifcOWL IRI, so shapes written for IFC4 — the IDS importer's output — match 4.3 models |
+| Quantity sets (`IfcElementQuantity`: the seven simple kinds, complex quantities recursed) | `ifcl:hasQuantity` → a node with `qudt:numericValue`, `qudt:hasUnit`, `ifcl:quantitySet`, `ifcl:quantityKind`; plus the flat `props:{Qto}_{Name}` literal |
+| Property values (single, enumerated, list, bounded, complex; the IFC4 set form of `RelatingPropertyDefinition`) | `ifcl:hasProperty` → a node with `ifcl:value`(s), `ifcl:ifcType` (the IFC measure type), the unit, the bounds of a bounded value; the flat literal stays |
+| Units | QUDT 2.1 IRIs, from the project defaults (`IfcUnitAssignment`), a value's own unit, or the measure type's unit type. The prefix composes with the whole unit: KILO+GRAM is `unit:KiloGM`, MILLI+SQUARE_METRE is `unit:MilliM2`. Nothing is guessed — an unmapped unit is `ifcl:unitLabel`, a conversion factor against a mapped base when there is one, and a count in the import stats |
+| Classification (`IfcRelAssociatesClassification`) | a `skos:Concept` per reference (notation, label, definition, `skos:broader` through the chain) in a `skos:ConceptScheme` per `IfcClassification`; absolute `Location`s are kept as the IRIs. The element gets `ifcl:hasClassification` and the flat `props:ifcClassification` literal the IDS importer targets |
+| Material (`IfcRelAssociatesMaterial`, through layer, profile and constituent sets and material lists) | `ifcl:hasMaterial`, `nen2660:consistsOf`, `props:ifcMaterial` |
+| Relations, beside every BOT edge | NEN 2660-2: containment is `nen2660:contains` (location, not parthood), spatial aggregation `nen2660:hasPart`, element decomposition and nesting `nen2660:hasTechnicalPart`, `IfcRelConnectsPathElements` / `IfcRelConnectsElements` `nen2660:connectsObject`. The `nen2660-relations` bundle's shapes run clean over a lifted model |
+| Map conversion (`IfcMapConversion` → `IfcProjectedCRS`) | `ifcl:mapConversion` → a node with eastings, northings, height, `ifcl:mapRotation` (`atan2(XAxisOrdinate, XAxisAbscissa)`, degrees), scale, `ifcl:projectedCrs` and the datums. When the EPSG code is one the CRS registry knows (28992, 7415, 4326, 3857) the node is also a `geo:Geometry` whose `geo:asWKT` is the origin as a CRS-qualified point, and a site without its own `RefLatitude`/`RefLongitude` gets its WGS84 anchor from that origin reprojected; an unknown code gets no CRS prefix. Read, never applied — the geometry a viewer receives is already placed (the TrueNorth argument in `src/ifc/rdf.rs` applies verbatim) |
+
+Not lifted: type-object property sets (`IfcRelDefinesByType`), derived units
+(`IfcDerivedUnit` is always unmapped), and `IfcRelNests` as distinct from
+aggregation (both are parthood here). No IFC 4.3 model exists in the
+repository or the boot seed, so 4.3 behaviour is verified against the
+hand-authored fixtures in `tests/fixtures/ifc` only.
