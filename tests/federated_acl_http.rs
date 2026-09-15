@@ -25,22 +25,26 @@ use tower::ServiceExt as _;
 
 const G: &str = "https://example.org/fed/members-only";
 
-/// Serve `state` on a loopback listener; returns its origin.
-fn serve(state: &mut AppState) -> String {
+/// Bind a loopback listener for `state` and make its origin the base URL.
+/// The listener is returned, not dropped: releasing the port and binding it
+/// again in `start` would let another test binary take it in between.
+fn bind(state: &mut AppState) -> (std::net::TcpListener, String) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     state.base_url = Arc::new(origin.clone());
-    origin
+    (listener, origin)
 }
 
-fn start(listener_origin: &str, state: AppState) {
+/// Serve `state` on the listener from `bind`. The socket is already
+/// listening, so a peer connecting before the thread reaches `serve` waits
+/// in the backlog instead of being refused.
+fn start(listener: std::net::TcpListener, state: AppState) {
     let app = test_app(state);
-    let addr = listener_origin.trim_start_matches("http://").to_string();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            let l = tokio::net::TcpListener::bind(&addr).await.unwrap();
+            let l = tokio::net::TcpListener::from_std(listener).unwrap();
             axum::serve(l, app).await.unwrap();
         });
     });
@@ -74,13 +78,7 @@ async fn query(app: &Router, token: &str, q: &str) -> (StatusCode, usize, String
 async fn identity_assertions_cross_instances_and_authorise_locally() {
     // ── B: the peer. An organisation with a member-only dataset. ──
     let (mut b, _b_token) = admin_state();
-    let origin_b = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let o = format!("http://{}", l.local_addr().unwrap());
-        drop(l);
-        o
-    };
-    b.base_url = Arc::new(origin_b.clone());
+    let (listener_b, origin_b) = bind(&mut b);
     b.auth_db
         .create_organisation("wsv-b", "Waterschap Voorbeeld", "wsv", None, None)
         .unwrap();
@@ -114,7 +112,7 @@ async fn identity_assertions_cross_instances_and_authorise_locally() {
         )
         .unwrap(),
     ));
-    let origin_a = serve(&mut a);
+    let (listener_a, origin_a) = bind(&mut a);
     a.auth_db
         .create_organisation("wsv-a", "Waterschap Voorbeeld", "wsv", None, None)
         .unwrap();
@@ -122,14 +120,14 @@ async fn identity_assertions_cross_instances_and_authorise_locally() {
         .add_org_member("adm", "wsv-a", Role::Member)
         .unwrap();
     let a_app = test_app(a.clone());
-    start(&origin_a, a.clone());
+    start(listener_a, a.clone());
 
     // B trusts A; A may call B.
     let mut ext = AuthExt::disabled();
     ext.trusted_issuers = vec![OidcVerifier::new(origin_a.clone(), Some(origin_b.clone()))];
     b.auth_ext = Arc::new(ext);
     let b_app = test_app(b.clone());
-    start(&origin_b, b.clone());
+    start(listener_b, b.clone());
     std::env::set_var("OTS_REMOTE_ALLOWLIST", format!("{origin_b}/"));
     open_triplestore::federation::init(
         a.oidc_provider
@@ -309,13 +307,8 @@ async fn federated_assertions_never_link_to_local_accounts_or_inherit_their_role
 
     // ── B: a local admin, and an env-OIDC user whose subject a peer could reuse. ──
     let (mut b, _b_token) = admin_state();
-    let origin_b = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let o = format!("http://{}", l.local_addr().unwrap());
-        drop(l);
-        o
-    };
-    b.base_url = Arc::new(origin_b.clone());
+    // B is only driven in-process here; the listener just holds its origin.
+    let (_listener_b, origin_b) = bind(&mut b);
     b.auth_db
         .create_user(
             "loc-admin",
@@ -354,8 +347,8 @@ async fn federated_assertions_never_link_to_local_accounts_or_inherit_their_role
         )
         .unwrap(),
     ));
-    let origin_a = serve(&mut a);
-    start(&origin_a, a.clone());
+    let (listener_a, origin_a) = bind(&mut a);
+    start(listener_a, a.clone());
 
     // B trusts A, and maps the IdP group `app-admins` to admin for its own OIDC users.
     let mut ext = AuthExt::disabled();
