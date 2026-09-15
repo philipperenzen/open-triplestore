@@ -34,11 +34,85 @@ pub struct SyncReport {
     pub dataset_id: String,
     pub graph_iri: String,
     pub nodes_visited: usize,
+    /// Nodes that answered `410 Gone` — compacted away by the publisher's
+    /// retention policy and processed as empty (LDES §3.3).
+    pub nodes_gone: usize,
     pub members_seen: usize,
     pub members_skipped_older: usize,
     pub entities_updated: usize,
     pub entities_deleted: usize,
     pub last_timestamp: Option<String>,
+    /// The retention policy the publisher declares on its root node, kept as
+    /// context (LDES §3.2); `None` when the stream keeps every member.
+    pub retention_policy: Option<RemoteRetention>,
+    /// Anything the client noticed that the caller should know — for now,
+    /// a bookmark older than the publisher's retention window, which means
+    /// members may have been compacted before this mirror saw them.
+    pub warnings: Vec<String>,
+}
+
+/// A publisher's retention policy as read from its root node — the LDES 1.0
+/// properties, or the discouraged-but-supported legacy classes
+/// (`ldes:DurationAgoPolicy` / `ldes:LatestVersionSubset`) folded into the
+/// same fields.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct RemoteRetention {
+    pub policy: String,
+    pub full_log_duration: Option<String>,
+    pub version_amount: Option<u64>,
+    pub version_duration: Option<String>,
+    pub version_delete_duration: Option<String>,
+    pub starting_from: Option<String>,
+    /// The policy used the pre-1.0 classes.
+    pub legacy: bool,
+}
+
+/// The retention policy declared in a document, if any: on the root node
+/// directly or through `tree:viewDescription` — "the client MUST look for a
+/// retention policy in both ways" (LDES §4.4).
+fn retention_of(store: &Store) -> Option<RemoteRetention> {
+    let q = format!(
+        "SELECT ?p ?fl ?va ?vd ?vdd ?sf ?dur ?amt WHERE {{ \
+           {{ ?x <{LDES}retentionPolicy> ?p }} UNION {{ ?v <{TREE}viewDescription>/<{LDES}retentionPolicy> ?p }} \
+           OPTIONAL {{ ?p <{LDES}fullLogDuration> ?fl }} \
+           OPTIONAL {{ ?p <{LDES}versionAmount> ?va }} \
+           OPTIONAL {{ ?p <{LDES}versionDuration> ?vd }} \
+           OPTIONAL {{ ?p <{LDES}versionDeleteDuration> ?vdd }} \
+           OPTIONAL {{ ?p <{LDES}startingFrom> ?sf }} \
+           OPTIONAL {{ ?p a <{LDES}DurationAgoPolicy> ; <{TREE}value> ?dur }} \
+           OPTIONAL {{ ?p a <{LDES}LatestVersionSubset> ; <{LDES}amount> ?amt }} \
+         }}"
+    );
+    let QueryResults::Solutions(sols) = run(store, &q)? else {
+        return None;
+    };
+    let mut out: Option<RemoteRetention> = None;
+    let lit = |t: Option<&Term>| match t {
+        Some(Term::Literal(l)) => Some(l.value().to_string()),
+        _ => None,
+    };
+    for s in sols.flatten() {
+        let r = out.get_or_insert_with(|| RemoteRetention {
+            policy: s.get("p").map(|t| t.to_string()).unwrap_or_default(),
+            ..Default::default()
+        });
+        r.full_log_duration = r.full_log_duration.take().or(lit(s.get("fl")));
+        r.version_amount = r
+            .version_amount
+            .or(lit(s.get("va")).and_then(|v| v.parse().ok()));
+        r.version_duration = r.version_duration.take().or(lit(s.get("vd")));
+        r.version_delete_duration = r.version_delete_duration.take().or(lit(s.get("vdd")));
+        r.starting_from = r.starting_from.take().or(lit(s.get("sf")));
+        if let Some(d) = lit(s.get("dur")) {
+            r.legacy = true;
+            r.full_log_duration.get_or_insert(d);
+        }
+        if let Some(a) = lit(s.get("amt")).and_then(|v| v.parse().ok()) {
+            r.legacy = true;
+            r.version_amount.get_or_insert(a);
+        }
+    }
+    out
 }
 
 /// One member as read from a fragment.
@@ -199,9 +273,49 @@ pub fn sync(
         if visited.len() > 10_000 {
             anyhow::bail!("stream has more than 10 000 nodes; refusing to follow further");
         }
-        let store = fetch_into_store(&doc)?;
+        let store = match fetch_into_store(&doc) {
+            Ok(s) => s,
+            // LDES §3.3: "A client MUST process 410 Gone as a page with an
+            // empty set of relations and an empty set of members."
+            Err(e)
+                if matches!(
+                    e.downcast_ref::<crate::remote::RemoteError>(),
+                    Some(crate::remote::RemoteError::Status { status: 410, .. })
+                ) =>
+            {
+                report.nodes_gone += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         report.nodes_visited += 1;
         let (tp, vp) = paths.get_or_insert_with(|| stream_paths(&store)).clone();
+        // The root node's retention policy is context the client keeps
+        // (LDES §3.2): a bookmark older than the publisher's window means
+        // members may have been compacted before this mirror saw them.
+        if report.retention_policy.is_none() {
+            if let Some(policy) = retention_of(&store) {
+                if let (Some(b), Some(d)) = (
+                    bookmark.as_deref(),
+                    policy
+                        .full_log_duration
+                        .as_deref()
+                        .and_then(|d| super::store::parse_xsd_duration(d).ok()),
+                ) {
+                    if let Ok(at) = chrono::DateTime::parse_from_rfc3339(b) {
+                        if at.with_timezone(&chrono::Utc) < chrono::Utc::now() - d {
+                            report.warnings.push(format!(
+                                "the bookmark {b} predates the publisher's retention window \
+                                 ({}): members created between them may have been compacted \
+                                 away before this sync",
+                                policy.full_log_duration.as_deref().unwrap_or("?")
+                            ));
+                        }
+                    }
+                }
+                report.retention_policy = Some(policy);
+            }
+        }
         for m in members_of(&store, &tp, &vp) {
             report.members_seen += 1;
             if bookmark.as_deref().is_some_and(|b| m.created.as_str() <= b) {

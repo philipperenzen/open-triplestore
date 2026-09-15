@@ -674,6 +674,31 @@ impl AuthDb {
                 synced_at TEXT,
                 PRIMARY KEY (dataset_id, source_url)
             );
+            -- Frozen fragment bounds: once a page is full, its member→node
+            -- assignment is sealed here so retention can delete rows without
+            -- renumbering pages already served as immutable. next_created_at
+            -- is the tree:value of the relation out of the node, recorded at
+            -- sealing time so it survives whatever is pruned later.
+            CREATE TABLE IF NOT EXISTS ldes_nodes (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                node INTEGER NOT NULL,
+                first_id INTEGER NOT NULL,
+                last_id INTEGER NOT NULL,
+                next_created_at TEXT NOT NULL,
+                sealed_at TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, node)
+            );
+            -- The stream's declared retention policy (LDES 1.0 §4.4); no row
+            -- means every member is kept.
+            CREATE TABLE IF NOT EXISTS ldes_retention (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                full_log_duration TEXT,
+                version_amount INTEGER,
+                version_duration TEXT,
+                version_delete_duration TEXT,
+                starting_from TEXT,
+                updated_at TEXT NOT NULL
+            );
 
             -- Per-dataset entailment: selected regime, materialisation mode, last run.
             CREATE TABLE IF NOT EXISTS dataset_entailment (

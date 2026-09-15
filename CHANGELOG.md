@@ -14,6 +14,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **LDES retention policies** (`ldes:fullLogDuration`, `ldes:versionAmount`,
+  `ldes:versionDuration`, `ldes:versionDeleteDuration`, `ldes:startingFrom`),
+  declared with `PUT /api/datasets/:id/ldes` as a `retention` object and
+  published on the root node as an IRI described on every page. Fragments are
+  frozen once full, so a page served as immutable only ever shrinks under
+  retention and never renumbers; a frozen page emptied by the policy answers
+  `410 Gone` with `tree:view` and every relation pointing past it, and full
+  pages carry `<node> ldes:immutable true`. The sync client treats `410` as an
+  empty page, keeps the publisher's policy in its report and warns when its
+  bookmark predates the publisher's window. `tests/ldes_conformance.rs` holds
+  the LDES / Server Primer / TREE rules as one assertion per clause — a probe
+  of the pre-existing surface found everything green except the
+  `ldes:immutable` triple. See docs/ldes.md.
 - **A W3C DQV quality bundle** (`examples/seed-bundles/dqv-quality`, on by
   default, `SEED_DQV_QUALITY=false` to skip): a profile of quality categories,
   dimensions and metrics — DQV's Note ships one dimension and constrains

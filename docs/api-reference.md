@@ -37,6 +37,18 @@ The 200 on a rolled-back batch keeps the response shape of the earlier
 per-statement report; check `status`, not the HTTP code, to know whether the
 batch landed.
 
+## LDES retention — `410 Gone` on a fragment
+
+`PUT /api/datasets/{dataset_id}/ldes` accepts an optional `retention` object
+(see [ldes.md](ldes.md#retention)); the response gains `members_pruned` and
+`retention`. Once a policy is declared, `GET
+/api/datasets/{dataset_id}/ldes/nodes/{n}` can answer **`410 Gone`** for a
+frozen fragment whose members were all removed by it — the body names the
+node the stream continues at. `404` keeps its meaning (no such node, no
+stream). Streams without a policy never answer 410. Full fragments also carry
+`<node> ldes:immutable true`. `POST /api/ldes/sync` reports gain
+`nodes_gone`, `retention_policy` and `warnings`; existing fields are unchanged.
+
 ## SHACL Compact Syntax — `?lenient`
 
 `PUT /api/datasets/{dataset_id}/shapes` (with `Content-Type: text/shaclc`) and

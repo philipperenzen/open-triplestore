@@ -117,12 +117,32 @@ pub fn before(state: &AppState, graphs: &[String]) -> Before {
     }
 }
 
+/// After members were appended to `dataset_id`: seal the pages that filled
+/// and apply the retention policy, if one is declared (debounced unless
+/// `force`). Returns the number of members the policy removed. Best-effort.
+pub fn settle(state: &AppState, dataset_id: &str, force: bool) -> usize {
+    let page_size = match crate::ldes::store::stream(&state.auth_db, dataset_id) {
+        Ok(Some(cfg)) => cfg.page_size,
+        Ok(None) => return 0,
+        Err(e) => {
+            tracing::warn!("ldes: stream lookup failed for {dataset_id}: {e}");
+            return 0;
+        }
+    };
+    if let Err(e) = crate::ldes::store::seal_full_pages(&state.auth_db, dataset_id, page_size) {
+        tracing::warn!("ldes: sealing pages failed for {dataset_id}: {e}");
+    }
+    crate::ldes::store::sweep(&state.auth_db, dataset_id, force)
+}
+
 /// Re-index the graphs captured by [`before`] and append a member per change.
 /// Returns the number of members written. Best-effort: failures are logged.
 pub fn after(state: &AppState, before: Before) -> usize {
     let mut written = 0;
     let now = chrono::Utc::now().to_rfc3339();
+    let mut touched: HashSet<String> = HashSet::new();
     for (graph, dataset, old) in before.graphs {
+        touched.insert(dataset.clone());
         let new = subject_index(&state.store, &graph);
         for (entity, h) in &new {
             if old.get(entity) == Some(h) {
@@ -158,6 +178,11 @@ pub fn after(state: &AppState, before: Before) -> usize {
                 Ok(_) => written += 1,
                 Err(e) => tracing::warn!("ldes: tombstone insert failed for <{entity}>: {e}"),
             }
+        }
+    }
+    if written > 0 {
+        for dataset in &touched {
+            settle(state, dataset, false);
         }
     }
     written
@@ -203,6 +228,9 @@ pub fn publish_all(state: &AppState, dataset_id: &str, graphs: &[String]) -> usi
                 Err(e) => tracing::warn!("ldes: member insert failed for <{entity}>: {e}"),
             }
         }
+    }
+    if written > 0 {
+        settle(state, dataset_id, false);
     }
     written
 }

@@ -1732,6 +1732,111 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Linked Data Event Streams
+    // ═══════════════════════════════════════════════════════════════════════
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/ldes",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Datasets",
+                    "Event stream",
+                    "The dataset's `ldes:EventStream` (Turtle, JSON-LD or N-Triples by `Accept`): its declared paths, `tree:view` to the first node that still has members, and — when declared — the retention policy on that root node as an IRI described in the same document.",
+                    vec![],
+                    vec![("200", "Stream description"), ("404", "No stream, or dataset not visible")],
+                    false,
+                ),
+            ),
+            (
+                M::Put,
+                ob(
+                    "Datasets",
+                    "Enable a stream and declare its retention",
+                    "Enable (or disable) the dataset's event stream. Enabling a stream with no members yet publishes every entity of the non-private graphs. `retention` declares and enforces an LDES 1.0 §4.4 policy: absent leaves it unchanged, `{}` clears it. Full pages are frozen before any member is removed, so a fragment served as immutable only ever shrinks; a fragment emptied by the policy answers 410. A policy is applied when set and after later writes.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("enabled", ObjectBuilder::new().schema_type(Type::Boolean))
+                            .property("page_size", ObjectBuilder::new().schema_type(Type::Integer).description(Some("Members per fragment, 1–10000 (default 100). Already-full pages keep their old size.")))
+                            .property(
+                                "retention",
+                                ObjectBuilder::new()
+                                    .property("full_log_duration", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:fullLogDuration`, an xsd:duration: every member from now back this far is kept.")))
+                                    .property("version_amount", ObjectBuilder::new().schema_type(Type::Integer).description(Some("`ldes:versionAmount` (> 0): the newest N versions of each entity are kept.")))
+                                    .property("version_duration", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:versionDuration`: those versions are kept only this long (needs version_amount).")))
+                                    .property("version_delete_duration", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:versionDeleteDuration`: tombstones are kept this long.")))
+                                    .property("starting_from", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:startingFrom`, an xsd:dateTime with a timezone: nothing older is kept.")))
+                                    .description(Some("The retention policy; `{}` clears it. Durations are the `PnYnMnDTnHnMnS` subset of xsd:duration (a year counts as 365 days, a month as 30).")),
+                            )
+                            .required("enabled"),
+                        json!({ "enabled": true, "page_size": 100, "retention": { "full_log_duration": "P30D", "version_amount": 2, "version_delete_duration": "P7D" } }),
+                    ),
+                    vec![
+                        ("200", "`{dataset_id, enabled, page_size, stream, members_seeded, members_pruned, members, retention}`"),
+                        ("400", "Malformed retention policy"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Dataset not found"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/ldes/nodes/:n",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Event stream fragment",
+                "Fragment `n` (1-based): the stream description, `<node> a tree:Node`, `ldes:immutable true` plus `Cache-Control: immutable` on every page but the last, a `tree:GreaterThanOrEqualToRelation` on `dct:created` to the next fragment that still has members, and the page's members as version objects.",
+                vec![],
+                vec![
+                    ("200", "Fragment"),
+                    ("404", "No such node, or no stream"),
+                    ("410", "The node's members were all removed by the retention policy; the body names where the stream continues"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/ldes/sync",
+        vec![(
+            M::Post,
+            ob(
+                "Datasets",
+                "Sync a remote event stream",
+                "Follow a remote LDES from `url` (origin must be in `OTS_REMOTE_ALLOWLIST`), keep the newest version of each entity and materialise it into `graph_iri` of `dataset_id`; a bookmark makes later runs incremental. A `410 Gone` fragment is processed as an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
+                vec![],
+                json_body(
+                    ObjectBuilder::new()
+                        .property("url", ObjectBuilder::new().schema_type(Type::String))
+                        .property("dataset_id", ObjectBuilder::new().schema_type(Type::String))
+                        .property("graph_iri", ObjectBuilder::new().schema_type(Type::String))
+                        .required("url")
+                        .required("dataset_id")
+                        .required("graph_iri"),
+                    json!({ "url": "https://other.example.org/api/datasets/roads/ldes", "dataset_id": "roads-mirror", "graph_iri": "https://example.org/roads-mirror/instances" }),
+                ),
+                vec![
+                    ("200", "Sync report: nodes_visited, nodes_gone, members_seen, members_skipped_older, entities_updated, entities_deleted, last_timestamp, retention_policy, warnings"),
+                    ("401", "Authentication required"),
+                    ("403", "Write access required, or the origin is not allow-listed"),
+                    ("404", "Dataset not found"),
+                    ("502", "The remote stream could not be read"),
+                ],
+                true,
+            ),
+        )],
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════
     // SHACL-C
     // ═══════════════════════════════════════════════════════════════════════
     mount(
