@@ -140,6 +140,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::handlers::SetResourceGrantRequest,
             // SHACL report types
             crate::shacl::report::ValidationReport,
+            crate::shacl::report::RunMetrics,
             crate::shacl::report::ValidationResult,
             crate::shacl::report::Severity,
             // Route-level types
@@ -4101,6 +4102,25 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     json!({ "new_password": "temp-reset-pass" }),
                 ),
                 vec![("204", "Password reset"), ("403", "Admin role required")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/telemetry",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Workload telemetry",
+                "Which exit of the query path answers (result cache, count index, mirror shards, full copy, engine) with latency percentiles split by the analytical bit; SHACL runs by path, data source and duration; the inter-write gap histogram. Fixed-size rings since start, nothing persisted — the inputs to the analytical-layer decision. See docs/performance.md.",
+                vec![],
+                vec![
+                    ("200", "Telemetry summary"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
                 true,
             ),
         )],

@@ -304,10 +304,13 @@ impl ParallelMirror {
     ///
     /// `options` is a factory (called at most once) so the relatively expensive
     /// `QueryOptions` build is skipped entirely for non-accelerable queries.
+    /// `class` is the parallel classifier's verdict, supplied by the caller,
+    /// which already computed it for the query telemetry.
     pub fn try_query<F>(
         &self,
         store: &Store,
         sparql: &str,
+        class: Option<ParClass>,
         options: F,
     ) -> Option<QueryResults<'static>>
     where
@@ -317,7 +320,7 @@ impl ParallelMirror {
             return None;
         }
         // Only order-insensitive aggregates/ASK are accelerated on the live path.
-        if parallel::classify(sparql) != Some(ParClass::Aggregate) {
+        if class != Some(ParClass::Aggregate) {
             return None;
         }
         let shards = self.get_or_build(store)?;

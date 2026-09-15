@@ -226,6 +226,7 @@ pub fn execute_pipeline(
     }
 
     let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
+    let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");
     let (outcome, inferred_quads) = super::run::run_validation_capturing(
         main_store,
         &shape_graphs,
@@ -496,6 +497,7 @@ pub fn execute_pipeline_dry(
             .all(|g| owner_can_write(auth_db, &pipeline.created_by, g));
 
     let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
+    let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");
     let outcome = super::run::run_validation_scoped(
         main_store,
         &shape_graphs,

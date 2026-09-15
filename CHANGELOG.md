@@ -14,6 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Workload telemetry** (`GET /api/admin/telemetry`, admin): which exit of
+  the query path answered each query — result cache, count index, mirror
+  shards, full copy, engine — with latency percentiles split by an
+  *analytical* bit computed once per uncached evaluation and stamped on the
+  cache entry, so a hit inherits it without a parse; every SHACL run's data
+  source, run index, quads, duration and caller (`dataset`, `gate`,
+  `pipeline`, `engine`), also carried in the report as `metrics` and
+  stored on the run row; and the inter-write gap histogram that decides
+  whether the in-memory mirror can ever publish. Fixed-size rings, nothing
+  persisted but the run-row columns. These are the inputs to the
+  analytical-layer go/no-go thresholds in
+  docs/notes/analytical-mirror-design.md §1.4. See docs/performance.md.
 - **IFC lift depth.** The importer keeps its flat BOT / `props:` contract
   untouched (pinned as exact triples) and emits, beside it: the IFC 4.3
   facility spine (`IfcBridge`, `IfcRoad`, … as `bot:Zone` plus the lift's own

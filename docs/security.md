@@ -22,6 +22,8 @@ Rules apply across the API — `/sparql`, `/store`, `/api/**` and the rest — n
 
 **Default is open**: a request matching no rule is allowed, and role/scope middleware still applies independently. A DB failure while reading rules fails *closed* and records an `acl_error` audit event.
 
+The default is a rule away from closed: matching rules are taken in priority order and the first decides, so a `deny` for `public` on `/**` at priority `0` — and one for `role` = `user` if signed-in non-admins should be denied by default too — closes everything, and `allow` rules at any higher priority open exactly the routes you list above it. Admins are bound by the same rules, so leave `/api/admin/**` allowed for `role` = `admin`.
+
 `ENDPOINT_ACL_ENFORCE=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
 
 ## Named-Graph ACL

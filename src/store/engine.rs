@@ -18,6 +18,8 @@ use crate::geo::index3d::SpatialIndex3D;
 use crate::geo::spatial_index::SpatialIndex;
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
+use crate::store::telemetry::{QueryShape, Served, Telemetry};
+use opengraph::parallel::{self, ParClass};
 
 /// Outcome of one statement of a [`TripleStore::batch_update`] batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +270,9 @@ pub struct TripleStore {
     /// Memoises small query results (invalidated on every write); a repeated query
     /// is answered without re-evaluation. See [`QueryCache`].
     query_cache: QueryCache,
+    /// Workload telemetry: which exit answered each query and how fast,
+    /// validation runs, write spacing. Shared by clones. See [`Telemetry`].
+    telemetry: Arc<Telemetry>,
     /// Process-unique id of this store instance, shared by its clones.
     /// Caches keyed on a store must not survive the store: a new store
     /// can reuse the old one's address and start at the same write
@@ -342,6 +347,7 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            telemetry: Arc::new(Telemetry::new()),
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
@@ -366,6 +372,7 @@ impl TripleStore {
             spatial_index_3d,
             parallel_mirror: ParallelMirror::from_env(),
             query_cache: QueryCache::from_env(),
+            telemetry: Arc::new(Telemetry::new()),
             instance_id: next_instance_id(),
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
@@ -428,6 +435,10 @@ impl TripleStore {
     /// it published clean while missing the committed quads, and generation
     /// checks could not tell a write was in progress at all.
     pub(crate) fn begin_write(&self) -> WriteGuard<'_> {
+        // The outermost guard only: a nested primitive is the same write.
+        if self.parallel_mirror.writes_in_flight() == 0 {
+            self.telemetry.record_write();
+        }
         self.parallel_mirror.write_started();
         self.query_cache.invalidate();
         WriteGuard(self)
@@ -436,6 +447,11 @@ impl TripleStore {
     /// Writes currently in progress (between `begin_write` and its guard's drop).
     pub fn writes_in_flight(&self) -> usize {
         self.parallel_mirror.writes_in_flight()
+    }
+
+    /// The workload telemetry rings (see [`Telemetry`]).
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
     }
 
     /// Whether the store is RocksDB-backed (see the `persistent` field).
@@ -614,18 +630,37 @@ impl TripleStore {
         // put path), so it can never be a hit: nothing about the query text is
         // inspected before the lookup — that scan on every call, hits included,
         // tripled the cost of a cached point query.
-        if let Some(cached) = self.query_cache.get(sparql) {
+        let t0 = std::time::Instant::now();
+        if let Some((cached, shape)) = self.query_cache.get(sparql) {
+            self.telemetry
+                .record_query(Served::CacheHit, t0.elapsed(), shape);
             return Ok(cached);
         }
         // Snapshot the generation BEFORE evaluating: a write that commits while
         // this query runs must invalidate the result, not be stamped onto it.
         let gen = self.query_cache.generation();
-        let results = self.query_uncached(sparql)?;
-        Ok(self.query_cache.put(sparql, gen, results))
+        // The shape bits, once per uncached evaluation: the classifier parses
+        // (the mirror reuses its verdict rather than parsing again), and the
+        // bits are stamped on the cache entry so a hit inherits them.
+        let class = parallel::classify(sparql);
+        let shape = QueryShape {
+            analytical: class == Some(ParClass::Aggregate),
+            aggregate_text: QueryShape::mentions_aggregate(sparql),
+        };
+        let (results, served) = self.query_uncached(sparql, class)?;
+        let results = self.query_cache.put(sparql, gen, results, shape);
+        self.telemetry.record_query(served, t0.elapsed(), shape);
+        Ok(results)
     }
 
-    /// The evaluation pipeline behind [`Self::query`], without the result cache.
-    fn query_uncached(&self, sparql: &str) -> Result<QueryResults<'static>, StoreError> {
+    /// The evaluation pipeline behind [`Self::query`], without the result cache,
+    /// naming the exit that answered. `class` is the parallel classifier's
+    /// verdict, computed by the caller.
+    fn query_uncached(
+        &self,
+        sparql: &str,
+        class: Option<ParClass>,
+    ) -> Result<(QueryResults<'static>, Served), StoreError> {
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -637,7 +672,7 @@ impl TripleStore {
         // tuple build/copy (`InternalTuple::set`, `EncodedTerm::clone`, memcpy) —
         // pure waste when the projection is only a count.
         if let Some(fast) = self.try_fast_count(sparql) {
-            return Ok(fast);
+            return Ok((fast, Served::FastCount));
         }
         // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
         // subject-hash shards (the in-memory mirror) and merged, using every core
@@ -646,9 +681,9 @@ impl TripleStore {
         // shard error, so results are identical to single-store evaluation.
         if let Some(parallel) = self
             .parallel_mirror
-            .try_query(&self.store, sparql, || self.query_options())
+            .try_query(&self.store, sparql, class, || self.query_options())
         {
-            return Ok(parallel);
+            return Ok((parallel, Served::Shards));
         }
         // In-memory full mirror: everything the shards can't decompose (joins,
         // grouped non-COUNT aggregates, large SELECTs) is served from an unsharded
@@ -660,14 +695,14 @@ impl TripleStore {
             .parallel_mirror
             .try_full_query(&self.store, sparql, || self.query_options())
         {
-            return Ok(full);
+            return Ok((full, Served::FullCopy));
         }
         let results = self
             .query_options()
             .parse_query(sparql)?
             .on_store(&self.store)
             .execute()?;
-        Ok(results)
+        Ok((results, Served::Engine))
     }
 
     /// Recognise `SELECT (COUNT(*) AS ?v) WHERE { ?s ?p ?o }` (optionally with a

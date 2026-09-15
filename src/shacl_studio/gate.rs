@@ -94,6 +94,7 @@ pub(crate) fn gate_error(reason: impl std::fmt::Display) -> ValidationReport {
             message,
         }],
         results_count: 1,
+        metrics: None,
     }
 }
 
@@ -390,6 +391,8 @@ fn evaluate_gates(
     graph_iri: &str,
 ) -> Result<(), ValidationReport> {
     let data_graphs = [graph_iri.to_string()];
+    // Every run below is a gate, for the workload telemetry.
+    let _path = crate::store::telemetry::ValidationPathGuard::set("gate");
 
     // Pipeline gates (each at its own severity threshold). Inference is never
     // run here — gating must not mutate any store.
@@ -890,6 +893,7 @@ mod tests {
             conforms: false,
             results: (0..4).map(mk).collect(),
             results_count: 4,
+            metrics: None,
         };
         let s = summarize_report(&report, 2);
         assert!(s.starts_with("4 validation result(s)"), "{s}");

@@ -144,6 +144,7 @@ mod tests {
                 message: "Must be at least 18.".into(),
             }],
             results_count: 1,
+            metrics: None,
         }
     }
 
@@ -239,6 +240,7 @@ mod tests {
             conforms: true,
             results: vec![],
             results_count: 0,
+            metrics: None,
         };
         let ttl = report_to_turtle(&r, "urn:system:reports:test#run-2");
         let store = TripleStore::in_memory().unwrap();

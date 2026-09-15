@@ -67,14 +67,21 @@ pub fn run_validation_scoped(
     run_inference: bool,
 ) -> Result<RunOutcome, String> {
     let mut results = Vec::new();
+    let mut metrics: Option<crate::shacl::report::RunMetrics> = None;
     for shapes_graph in shape_graph_graphs {
         if run_inference {
             let _ = crate::shacl::infer(store, shapes_graph, infer_graphs)?;
         }
         let report = crate::shacl::validate(store, shapes_graph, read_graphs)?;
         results.extend(report.results);
+        metrics = match (metrics.take(), report.metrics) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        };
     }
-    Ok(summarise(results, threshold))
+    let mut outcome = summarise(results, threshold);
+    outcome.report.metrics = metrics;
+    Ok(outcome)
 }
 
 /// Snapshot the union of all quads currently in `data_graphs` (used to diff the
@@ -164,6 +171,7 @@ fn summarise(
             conforms: results.is_empty(),
             results,
             results_count,
+            metrics: None,
         },
         passes,
         violation_count,

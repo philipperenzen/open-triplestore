@@ -78,6 +78,7 @@ pub fn management_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(service_description_handler))
         .route("/health", get(health_check))
+        .route("/api/admin/telemetry", get(admin_telemetry))
         .route("/livez", get(liveness_check))
 }
 
@@ -2030,6 +2031,24 @@ async fn liveness_check() -> impl IntoResponse {
 }
 
 /// GET /health — detailed subsystem probe
+/// GET /api/admin/telemetry — the workload telemetry summary: which exit of
+/// the query path answers and how fast, split by the analytical bit; SHACL
+/// runs by path, source and duration; the inter-write gap histogram. Admins
+/// only: latency distributions and validation scopes describe tenants.
+async fn admin_telemetry(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    match user.as_deref() {
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        )),
+        Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
+        Some(_) => Ok(Json(state.store.telemetry().summary())),
+    }
+}
+
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     // Triplestore — read the maintained O(1) count index, NOT store.len() /
     // named_graphs(), which scan RocksDB (O(total quads)) and can block past the
@@ -7253,15 +7272,21 @@ fn merge_validation_reports(
 ) -> crate::shacl::report::ValidationReport {
     let mut conforms = true;
     let mut results = Vec::new();
+    let mut metrics: Option<crate::shacl::report::RunMetrics> = None;
     for r in reports {
         conforms &= r.conforms;
         results.extend(r.results);
+        metrics = match (metrics.take(), r.metrics) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        };
     }
     let results_count = results.len();
     crate::shacl::report::ValidationReport {
         conforms,
         results,
         results_count,
+        metrics,
     }
 }
 
@@ -7385,11 +7410,16 @@ pub async fn validate_dataset(
     }
 
     // Run SHACL validation once per shapes graph and merge into one report.
+    // The path label is a thread-local and must not outlive this loop: the
+    // awaits below would let it leak onto whatever task runs here next.
     let mut reports = Vec::with_capacity(shapes_graphs.len());
-    for shapes_graph_iri in &shapes_graphs {
-        let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        reports.push(report);
+    {
+        let _path = crate::store::telemetry::ValidationPathGuard::set("dataset");
+        for shapes_graph_iri in &shapes_graphs {
+            let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            reports.push(report);
+        }
     }
     let report = merge_validation_reports(reports);
 
@@ -7484,7 +7514,7 @@ fn persist_validation_run(
         }
     }
     let report_json = serde_json::to_string(report)?;
-    state.auth_db.insert_validation_run(
+    let summary = state.auth_db.insert_validation_run(
         dataset_id,
         report.conforms,
         report.results_count as i64,
@@ -7493,7 +7523,21 @@ fn persist_validation_run(
         info_count,
         &report_json,
         triggered_by,
-    )
+    )?;
+    // What the run read and how long it took, so the history survives a
+    // restart (the telemetry rings do not).
+    if let Some(m) = &report.metrics {
+        if let Err(e) = state.auth_db.set_validation_run_metrics(
+            &summary.id,
+            m.duration_ms as i64,
+            m.quads as i64,
+            &m.source,
+            m.run_index,
+        ) {
+            tracing::warn!("validation run {}: metrics not stored: {e}", summary.id);
+        }
+    }
+    Ok(summary)
 }
 
 /// GET /api/datasets/:dataset_id/validation/latest — latest stored run (full report) or null

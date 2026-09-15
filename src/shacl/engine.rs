@@ -1,5 +1,5 @@
 use super::constraints::{evaluate_constraint, evaluate_constraint_with_values};
-use super::report::{Severity, ValidationReport, ValidationResult};
+use super::report::{RunMetrics, Severity, ValidationReport, ValidationResult};
 use super::shapes::*;
 use super::view::{DataView, GraphSel};
 use crate::store::TripleStore;
@@ -56,6 +56,7 @@ pub fn validate(
         "SHACL validation: shapes_graph=<{}>, data_graphs={:?}",
         shapes_graph, data_graphs
     );
+    let started = std::time::Instant::now();
 
     let shapes = load_shapes(store, shapes_graph)?;
     debug!("Loaded {} shapes", shapes.len());
@@ -192,10 +193,37 @@ pub fn validate(
         );
     }
 
+    // The run's own account of itself: for the report, the run row and the
+    // workload telemetry (docs/notes/analytical-mirror-design.md §1.4).
+    let metrics = RunMetrics {
+        path: crate::store::telemetry::validation_path().to_string(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        quads: data_graphs
+            .iter()
+            .filter_map(|g| store.graph_count_cached(Some(g.as_str())))
+            .map(|n| n as u64)
+            .sum(),
+        graphs: view.graph_count() as u32,
+        source: view.source_kind().to_string(),
+        run_index: view.has_index(),
+    };
+    store
+        .telemetry()
+        .record_validation(crate::store::telemetry::ValidationSample {
+            path: crate::store::telemetry::validation_path(),
+            duration_ms: metrics.duration_ms.min(u32::MAX as u64) as u32,
+            quads: metrics.quads,
+            graphs: metrics.graphs,
+            source: view.source_kind(),
+            run_index: metrics.run_index,
+            results: results_count.min(u32::MAX as usize) as u32,
+        });
+
     Ok(ValidationReport {
         conforms,
         results: all_results,
         results_count,
+        metrics: Some(metrics),
     })
 }
 

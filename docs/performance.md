@@ -1545,6 +1545,65 @@ SELECT ?f WHERE {
 
 ---
 
+## Telemetry
+
+`GET /api/admin/telemetry` (admin) reports what the store has actually been
+asked to do since it started — the inputs to the analytical-layer decision
+in `docs/notes/analytical-mirror-design.md` §1.4, gathered at no measurable
+cost to the paths they describe.
+
+```json
+{
+  "uptime_secs": 86400,
+  "queries": {
+    "total": 412093, "window": 8192,
+    "by_served": { "cache_hit": 6021, "fast_count": 118, "shards": 402, "full_copy": 1290, "engine": 361 },
+    "aggregate_text": 1875,
+    "analytical": { "count": 1533, "share": 0.187, "p50_us": 41, "p95_us": 18300, "p99_us": 91000, "max_us": 402113, "by_served": { "cache_hit": 1100, "shards": 402, "engine": 31 } },
+    "other": { "count": 6659, "share": 0.813, "p50_us": 37, "p95_us": 2210, "p99_us": 14400, "max_us": 88000, "by_served": { "…": 0 } }
+  },
+  "validations": {
+    "total": 91, "window": 91,
+    "by_path": { "dataset": 12, "gate": 70, "pipeline": 9 },
+    "by_source": { "mirror": 9, "snapshot": 12, "live": 70 },
+    "with_run_index": 21, "p50_ms": 14, "p95_ms": 2210, "max_ms": 7150, "max_quads": 9000000
+  },
+  "writes": {
+    "total": 3312,
+    "gaps": [ { "label": "lt_100ms", "upper_ms": 100, "count": 2900 }, { "label": "lt_500ms", "upper_ms": 500, "count": 210 }, "…" ]
+  }
+}
+```
+
+- **Queries.** Every call to the query path records which exit answered —
+  the result cache, the O(1) count index, the shards or the full copy of the
+  in-memory mirror, or the engine itself (RocksDB on a persistent store) —
+  and how long it took. Two shape bits are computed once per *uncached*
+  evaluation and stamped on the cache entry, so a hit inherits them without
+  a parse: `analytical` (the parallel classifier calls the query an
+  aggregate or an `ASK`) and `aggregate_text` (the text mentions `COUNT(` or
+  `GROUP BY`). The cache-hit path pays one lock and a 16-byte write; the
+  `query/cache_hit` benchmark holds it to that. `window` is the ring size
+  (`OTS_TELEMETRY_QUERY_RING`, default 8192); the percentiles describe the
+  window, `total` counts everything.
+- **Validations.** Every SHACL run records its data source (`mirror`,
+  `snapshot`, `live`), whether a run index was built, the quads and graphs
+  in scope, its duration and who asked — `dataset` (the validate route),
+  `gate` (a write gate), `pipeline` (a Studio run) or `engine` (a direct
+  call). The same numbers travel in the report as `metrics` and are stored
+  on the run row (`duration_ms`, `quads`, `source_kind`, `run_index`), so
+  the history survives a restart even though the ring does not.
+- **Writes.** A histogram of the gap between consecutive writes. The
+  in-memory mirror can only publish a rebuilt copy inside a quiet gap of at
+  least the rebuild quiet period, so this distribution — not the write
+  rate — says how often a copy can exist at all.
+
+Nothing here is persisted except the run-row columns; a restart starts the
+rings again. The endpoint is admin-only because latency distributions and
+validation scopes describe an operator's tenants.
+
+---
+
 ## Profiling
 
 To identify bottlenecks in your own workload:

@@ -1027,3 +1027,88 @@ retention work); P5 is the engine decision — fork the evaluator, a QLever
 read backend, or the DuckDB-authoritative mirror — which the P2 notes
 already made conditional on telemetry, change capture and the 9M
 measurement, in that order. Nothing in P3 changed that order.
+
+## Decisions taken after the P3 checkpoint (2026-09-15)
+
+Answered by the maintainer on reading the checkpoint:
+
+- **`v0.6.0` is cut when this branch merges.** `Cargo.toml` already says
+  0.6.0 and the last tag is `v0.5.0`; the auto-tag workflow bumps from the
+  last tag on a release PR whose title says `minor`, requires `Cargo.toml`
+  to already read the new version, and takes the tag message from the
+  `## [0.6.0]` section. So the release-time step is the CHANGELOG fold —
+  turning `[Unreleased]` (P0 to P4) into the dated `[0.6.0]` section, which
+  today holds the never-tagged July cut — done as the last commit before
+  the release PR, not now, so later phases keep adding under `[Unreleased]`.
+  Nothing is tagged or pushed by this programme.
+- **Endpoint ACL: the default stays open, and it is configurable by rules.**
+  A request no rule matches is allowed (role and scope middleware still
+  apply); an operator who wants default-closed adds a low-priority `deny`
+  for `public` (and, if wanted, `user`) on `/**` and allows above it —
+  `docs/security.md` now shows that. No code change; the P0 stop-condition
+  item is closed.
+- **The `/sparql/batch` 200 on a rolled-back batch** is explained in the
+  chat message; the choice (keep 200 for the old `partial` shape, or answer
+  409/422) is still the maintainer's.
+- **Order of work:** P2 (telemetry, then per-quad change capture with a
+  durable cursor, then the 9M measurement), then P4 as a configurable
+  replication temperature — cold / warm / hot, all or some datasets — on the
+  change log P2 produces.
+
+## Phase P2 — build (2026-09-15)
+
+The P2 notes made the analytical-layer decision conditional on three
+measurements, in order: workload telemetry, per-quad change capture with a
+durable cursor, the 9M SHACL run. This section logs them as they ship, one
+commit each.
+
+### 1. Workload telemetry
+
+**Verified first.** Nothing recorded which exit answered a query (result
+cache, count index, mirror shards, full copy, engine); a validation run did
+not know its data source, its scope or its duration; a write did not know
+how long since the previous one. `docs/notes/analytical-mirror-design.md`
+§1.4 names all four as the inputs to its go/no-go thresholds.
+
+**Test first.** `tests/telemetry_http.rs` (2 tests: an end-to-end count of
+exits, inherited shape bits, both validation paths and write gaps; the admin
+gate — red on the missing route and the missing `metrics` field) and seven
+unit tests in `src/store/telemetry.rs` (ring, nearest-rank percentiles, gap
+buckets, the path guard, the text bit).
+
+**What shipped.**
+
+- `src/store/telemetry.rs`: two rings (`OTS_TELEMETRY_QUERY_RING` 8192,
+  `OTS_TELEMETRY_VALIDATION_RING` 1024), counters, the gap histogram, the
+  summary. The query path labels its exit and its elapsed time; two shape
+  bits — the parallel classifier's aggregate verdict and a text scan for
+  `COUNT(` / `GROUP BY` — are computed once per uncached evaluation and
+  stamped on the cache entry, so a hit inherits them. A bit computed on
+  misses only would under-count exactly the repeated aggregates a
+  dashboard fires. The classifier's verdict now travels to the mirror
+  instead of being computed a second time.
+- Every SHACL run records source kind (`mirror` / `snapshot` / `live`),
+  whether a run index was built, quads and graphs in scope, duration, and
+  its path — `dataset`, `gate`, `pipeline` or `engine` — through a
+  thread-local guard the caller sets and drops before any await. The same
+  numbers ride in the report as an additive `metrics` object and are
+  stored on the run row (four nullable columns on `shacl_validation_runs`,
+  `ALTER TABLE`-guarded for existing installs), so the history outlives
+  the rings.
+- Writes record the gap since the previous one into eight buckets, on the
+  outermost write guard only.
+- `GET /api/admin/telemetry` (admin only; 401 / 403) returns the summary.
+  Documented in `docs/performance.md` "Telemetry" and the OpenAPI.
+
+**Cost.** `query/cache_hit/point_lookup` 103.13 ns before, 109.75 ns
+after: +6.4 %, one lock and a 16-byte ring write on the hit path, inside
+the programme's 20 % bound (123.8 ns). No other benchmark touches the
+changed lines.
+
+**Scope note.** `src/auth/db.rs` is touched again (the four run-row
+columns), under the maintainer's earlier allowance for the LDES tables and
+with the same nullable-column pattern; flagged here in case that allowance
+was meant to be narrower.
+
+Also in this commit: `docs/security.md` shows how to make the endpoint
+ACL default-closed with rules (the maintainer's decision above).

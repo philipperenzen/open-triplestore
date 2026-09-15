@@ -828,7 +828,11 @@ impl AuthDb {
                 info_count INTEGER NOT NULL DEFAULT 0,
                 report_json TEXT NOT NULL,
                 triggered_by TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                duration_ms INTEGER,
+                quads INTEGER,
+                source_kind TEXT,
+                run_index INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_dataset ON shacl_validation_runs(dataset_id);
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_ts ON shacl_validation_runs(dataset_id, run_timestamp DESC);
@@ -1168,6 +1172,11 @@ impl AuthDb {
             "ALTER TABLE users ADD COLUMN can_publish INTEGER NOT NULL DEFAULT 0",
             // Migrate legacy 'publisher' role rows: grant can_publish and reset to 'user'
             "UPDATE users SET can_publish=1, role='user' WHERE role='publisher'",
+            // What a validation run read and how long it took (workload telemetry).
+            "ALTER TABLE shacl_validation_runs ADD COLUMN duration_ms INTEGER",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN quads INTEGER",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN source_kind TEXT",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN run_index INTEGER",
             "ALTER TABLE datasets ADD COLUMN conforms_to_model TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_version TEXT",
             "ALTER TABLE datasets ADD COLUMN graph_role TEXT",
@@ -3395,6 +3404,23 @@ impl AuthDb {
     }
 
     // ─── SHACL validation run history ──────────────────────────────────────────
+
+    /// Attach what a validation run read and how long it took.
+    pub fn set_validation_run_metrics(
+        &self,
+        run_id: &str,
+        duration_ms: i64,
+        quads: i64,
+        source_kind: &str,
+        run_index: bool,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE shacl_validation_runs SET duration_ms = ?2, quads = ?3, source_kind = ?4, run_index = ?5 WHERE id = ?1",
+            params![run_id, duration_ms, quads, source_kind, run_index as i32],
+        )?;
+        Ok(())
+    }
 
     /// Persist a validation run and prune to the most recent 50 runs per dataset.
     #[allow(clippy::too_many_arguments)]
@@ -5968,6 +5994,7 @@ mod tests {
             conforms,
             results_count: results.len(),
             results,
+            metrics: None,
         }
     }
 
