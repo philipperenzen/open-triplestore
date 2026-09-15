@@ -813,3 +813,217 @@ left.
 - ~~Studio pipelines do not get the model graphs~~, ~~`sh:closed` is a sixth
   regime~~, ~~`sh:sparql` reads the live store~~, ~~no multi-graph benchmark~~ —
   all four taken into scope by the maintainer and closed; see below.
+
+---
+
+## Phase P3 — connectors and standards surface (2026-09-15)
+
+The maintainer scoped P3 to four items — IFC lift depth, IDS export, LDES
+retention, a DQV shapes bundle — and struck R2RML SQL sources and Ontop as
+an allow-listed `SERVICE` ("for P3 skip"). Decisions taken through the
+question tool before any code: the IFC ontology namespace sits under the
+deployment's base URL; the retention tables may go into `src/auth/db.rs`;
+the DQV bundle is default-on with an opt-out env; the two IDS importer bugs
+found while reading the exporter's target are fixed test-first. Instruction
+for after P3: halt, explain P4 and P5, build neither.
+
+### 1. IDS export, and two importer bugs it exposed (`cf895d3`, `ab077a6`, `f7ba9e0`)
+
+Reading the importer to write its inverse found two defects, each verified
+red against the unfixed code. The occurrence attributes were read from
+`<ids:specification>`, but IDS 1.0 puts `xs:occurs` on the applicability
+element, so for every conformant 1.0 document the prohibited-specification
+branch was dead code and "no entity of this class may exist" was imported as
+an ordinary specification that enforced nothing — unnoticed because the
+importer's own sample writes the attributes in the 0.9 position. And an
+`<ids:entity>` facet inside `<ids:requirements>` was dropped without a
+warning: in that position it constrains the focus node, so it is now a
+node-level `sh:class` (or `sh:not [ sh:class ]` when prohibited).
+
+The exporter is honest by construction. IDS can express a facet kind, a
+cardinality of required/prohibited/optional and one value restriction — most
+of SHACL has no IDS form — so the JSON report with its `losses` list is the
+default representation and the bare document is `?raw=true`; a shapes graph
+from which nothing is expressible is a 422, not an empty schema-valid file.
+It reconstructs the importer's own idioms (the `sh:or ( [ sh:not X-applies ]
+X-requires )` split, the `props:`/`bot:` vocabulary), so import → export →
+import is a fixpoint on the shared subset, which the tests pin. It is not a
+general SHACL-to-IDS translator and the docs say so; nor do the tests claim
+schema validity (that needs the IDS XSD and a validator, neither offline).
+`Shape` gained `sh:name` so the specification name survives. The four routes
+— importers, import, exporters, export — were never in the OpenAPI document;
+they are now.
+
+### 2. The DQV quality bundle (`6951402`)
+
+DQV is a Working Group Note that constrains nothing: no cardinality axiom,
+one shipped dimension, no category, no metric, `dqv:value` without a range
+and untied to `dqv:expectedDataType`. A usable deployment needs a profile
+and shapes; the bundle is both. Six shapes — three SHACL Core, two
+SHACL-SPARQL (core cannot compare a literal's datatype with an IRI read from
+another node, nor check that the `owl:inverseOf` pair `computedOn` /
+`hasQualityMeasurement` agrees), one warning shape for DQV's "generally
+expected" — over a sample with seven planted violations, one per shape, each
+built to fire once. The counts were read from a run before being frozen;
+the profile is validated against its own shapes; the sample minus the
+planted nodes conforms. The profile is not restated in the instances: it is
+the model the dataset conforms to, and since the graph-reach work
+validation reads it alongside — the store-level test does the same. DQV
+itself is not shipped (already vendored and seeded as `dqv`). The metric
+IRIs are the ones a validation-run emitter would write; that emitter is a
+separate, unapproved item.
+
+### 3. LDES retention (`f333bd6`)
+
+The hard part was not the DELETE. Fragments were paged with
+`LIMIT/OFFSET` over the member log while full pages were served with a
+year-long `immutable` cache header: one deleted row would have renumbered
+every page behind that promise, and a client honouring LDES §3.2 would never
+have refetched. So the enabling change comes first: a page is sealed once
+full *and* the next member has arrived (so the relation out of it always has
+a `tree:value`, recorded at sealing so it survives any later prune), a sealed
+node is served from its id range, and the unsealed tail is paged exactly as
+before — an install with no sealed nodes serves byte-identical pages until
+its next write. Retention then deletes rows in place: a sealed page can only
+shrink, never gains a member, never hands one to another page, never changes
+its bound; an emptied sealed page is `410 Gone` (Primer §5.1) naming where
+the stream continues, and `tree:view` and every relation point past it. The
+tail is never 410. Members are kept five minutes past the declared window;
+the sweep is debounced on the write path and forced when the policy is set,
+and retention lag is the safe direction. The policy is published on the root
+node as an IRI described in every page that names it (§4.4: a policy IRI
+"without further statements in the current page" means the view keeps
+nothing). The client treats 410 as an empty page (§3.3), keeps the
+publisher's policy in its report (§3.2) and warns when its bookmark predates
+the publisher's window. `xsd:duration` is hand-parsed (a year is 365 days, a
+month 30; documented). Not supported: `ldes:versionKey`; the legacy classes
+are read, not published.
+
+`tests/ldes_conformance.rs` was written first as a probe of the shipped
+surface, one assertion per clause of the LDES spec, its Server Primer §6 and
+TREE. The plan expected `Vary: Accept` to be red; it was green (a global
+`if_not_present` layer sets it), as were the root-node cardinalities, IRI
+members and well-formed relations. Only `<> ldes:immutable true` was red.
+There is no LDES/TREE corpus to vendor, so these are spec-derived rules —
+the docs and CHANGELOG say so rather than claiming conformance. The two
+tables went into `src/auth/db.rs` with the maintainer's leave; the LDES
+routes joined the OpenAPI document; `docs/api-reference.md` records the new
+410 and the additive fields.
+
+### 4. IFC lift depth (`202845e`, `da98112`)
+
+Characterisation first: three hand-authored STEP fixtures (an IFC 4.3
+bridge with units and a map conversion; an IFC4 wall with every quantity
+and property kind, a Uniclass chain and a material; an IFC2x3 curtain wall
+with the relations) and a test that pins the flat BOT / `props:` contract
+as exact triples before anything was added. Writing the unit resolver
+against the first fixture found a parser bug: `()` was parsed as a list
+holding one unknown byte with the closing paren consumed, so every argument
+after an empty list was swallowed into it — an `IfcProject` written with
+empty `RepresentationContexts` (most exporters) never had a
+`UnitsInContext`, and `IfcRelConnectsPathElements` lost its connection
+types. Nothing had read past those positions before. Fixed first, its own
+commit, test written against the unfixed parser.
+
+The lift is additive throughout — the BOT edges, the flat `props:` literals,
+the ifcOWL class IRIs are the contract of the viewer feed, the IDS importer
+and the Studio shapes, and the characterisation test keeps them. On top:
+
+- **Namespace.** `{base_url}/ns/ifc-lift#`, the maintainer's choice. The
+  emitter derives it from the graph IRI it writes into
+  (`{base_url}/dataset/{id}/building/` → what precedes `/dataset/`; a
+  custom graph IRI → its origin), because `src/imports/ifc.rs`, which
+  builds `ConvertOptions` field by field, is outside the edit scope — a
+  one-line change there would pass it explicitly. The ontology ships as the
+  `ifc-lift` seed bundle; seed bundles gained a `{base_url}` placeholder
+  (namespace, graph IRIs, shape bindings, payload text) so an ontology can
+  be minted under the instance that serves it. A parity test checks every
+  lift-namespace term the emitter produces is declared.
+- **IFC 4.3.** Only the entities new in 4.3 (`names::IFC4X3_ONLY`) are typed
+  under the lift namespace; everything IFC4 already had keeps its IFC4
+  ifcOWL IRI, so shapes written for IFC4 — the IDS importer's output — keep
+  matching 4.3 models. The plan's "route IFC4X3 to the lift namespace"
+  would have broken exactly that. Facilities and their parts are
+  `bot:Zone` plus the lift class, so an infrastructure model has a spatial
+  spine; zone-in-zone aggregation gets `bot:containsZone` beside the feed
+  edge. `IFCALIGNMENT` is no longer typed as an upper-case IRI in a
+  namespace where it does not exist.
+- **Units.** A QUDT 2.1 table for SI units, the prefixed combinations QUDT
+  names (the prefix composes with the whole unit: KILO+GRAM is `KiloGM`,
+  MILLI+SQUARE_METRE is `MilliM2`), and conversion-based units by their
+  conventional names. Nothing is guessed: an unmapped unit is a label, a
+  conversion factor against a mapped base when there is one, and a count in
+  `IfcStats`.
+- **Quantities and properties.** Every `IfcElementQuantity` quantity — the
+  seven simple kinds, complex quantities recursed — becomes a node with
+  `qudt:numericValue` and `qudt:hasUnit` (own unit, else the project
+  default for its kind) plus the flat `props:{Qto}_{Name}` literal. Property
+  values gain a node beside their flat literal with the IFC measure type and
+  the unit (own, else the project default for the measure); enumerated,
+  list, bounded and complex properties, all dropped before, are lifted; the
+  IFC4 set form of `RelatingPropertyDefinition`, which `as_ref_id` could not
+  see, is read.
+- **Classification → SKOS.** A reference chain becomes concepts with
+  notation, label, definition, `skos:broader` and a concept scheme for the
+  `IfcClassification`; absolute `Location`s are kept as the IRIs. The
+  element gets the object link and the flat `props:ifcClassification`
+  literal the IDS importer had targeted for a year without anything
+  emitting it — every imported IDS classification requirement failed
+  vacuously. Same for `props:ifcMaterial`.
+- **NEN 2660-2.** Beside every BOT edge, the relation it means: containment
+  is `contains` (location), spatial aggregation `hasPart`, element
+  decomposition (aggregation and nesting) `hasTechnicalPart`, path
+  connections `connectsObject`, materials `consistsOf`. The P1 relation
+  shapes run clean over a lifted model, and a planted cycle is caught.
+- **Map conversion.** Read, never applied: origin, height, rotation
+  (`atan2(XAxisOrdinate, XAxisAbscissa)`), scale and the projected CRS as
+  annotations on a node under the root; when the EPSG code is one the CRS
+  registry knows, the node is also a `geo:Geometry` with the origin as a
+  CRS-qualified WKT, and a site without its own georeference gets its WGS84
+  anchor from the origin reprojected. An unknown code gets no prefix. The
+  existing bare `POINT(lon lat)` anchor is CRS84 and stays; the TrueNorth
+  argument applies to the rotation verbatim.
+
+`src/docs/mod.rs` is outside the scope, so no `docs/ifc.md`: the lift is
+documented as a section of `docs/geo-3d-platform.md`, the bundle in
+`docs/plugins.md`. No IFC 4.3 model exists in the repository or the boot
+seed; 4.3 behaviour is verified against the fixtures only, and the docs say
+so.
+
+## Checkpoint (2026-09-15, HEAD `da98112` + this note)
+
+| Check | Result |
+|---|---|
+| `cargo test` over the whole main crate (82 binaries) with the full feature list | **2 979 passed, 0 failed, 1 ignored** (the ignored test pre-dates the programme) |
+| `cargo test -p opengraph` | 62 passed, 0 failed |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --all-targets --features <same> -- -D warnings` | clean |
+| `scripts/conformance_table.py --write` | regenerated (README, docs/standards.md) |
+
+P3 commits after `3338233`: `cf895d3` the two IDS importer fixes, `ab077a6`
+the IDS exporter, `f7ba9e0` OpenAPI for the import/export routes,
+`6951402` the DQV bundle, `f333bd6` LDES retention, `202845e` the STEP
+parser fix, `da98112` the IFC lift, then this note. Nothing pushed, nothing
+tagged. A second session (`ots-improvements-ee`) was editing this worktree
+during the IFC work; its uncommitted change to `tests/federated_acl_http.rs`
+is not part of any commit here and was left where it was.
+
+**Follow-ups, not done.** The one-line change in `src/imports/ifc.rs` that
+would pass the lift namespace explicitly instead of deriving it (the file is
+outside this programme's scope); a `docs/ifc.md` of its own once
+`src/docs/mod.rs` may be edited; the validation-run → DQV emitter the bundle
+was designed for; `tree:shape` on streams (the bound shapes would have to be
+wrapped so tombstones and the version-object triples do not violate them,
+and the shape-graph endpoint is not anonymously readable); the endpoint-ACL
+default, the `v0.6.0` tag and the 200-on-rolled-back-batch decisions still
+owned by the maintainer.
+
+**Handoff — P4 and P5 are explained, not built.** The maintainer asked to
+halt before P4. The chat message accompanying this note explains both:
+P4 is a replication design note choosing between RocksDB checkpoint
+shipping (physical, whole-store, needs the identity DB in lockstep) and an
+LDES-following read replica (logical, per dataset, reuses the P3 client and
+retention work); P5 is the engine decision — fork the evaluator, a QLever
+read backend, or the DuckDB-authoritative mirror — which the P2 notes
+already made conditional on telemetry, change capture and the 9M
+measurement, in that order. Nothing in P3 changed that order.
