@@ -14,6 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The 9M-quad SHACL measurement** (`tests/scale_shacl_9m.rs`, an ignored
+  test run on purpose): whole-dataset validation of 1M assets against six
+  property shapes on a persistent store takes 6.3 s with the accelerator
+  on and 13.5 s in the shipped 4 GB container (was 118 s before the engine
+  rebuild); the figures and what they settle are in docs/performance.md.
 - **Per-quad change capture with a durable cursor** (`OTS_CHANGE_CAPTURE=on`,
   off by default): every write records one row per graph it touched — the
   net delta as N-Quads, exact counts above the payload cap, or an honest

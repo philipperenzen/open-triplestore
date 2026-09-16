@@ -681,8 +681,13 @@ Apple M-series laptop, release build.
 | group by + avg (41 groups) | 1.18 s | 9.5 s | —² |
 | property path `partOf+` | 0.08 ms | 0.07 ms | —² |
 | `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
-| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 118 s (76k quads/s) | — |
+| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 6.3 s on the mirror, 13.5 s on RocksDB in the 4g container⁴ (118 s before the engine rebuild) | — |
 | 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+
+⁴ Measured 2026-09-16 with [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs)
+(ignored; run on purpose) on the reference system below, in Docker, release
+build; the row's other 9M cells are the laptop figures of the first run. The
+full measurement is under "The 9M SHACL measurement" further down.
 
 ² The Docker Fuseki image is amd64-only and the webapp distribution needs a
 login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —
@@ -721,6 +726,51 @@ into a temporary store first (so a malformed body cannot empty the graph) and
 indexes every literal for full-text search; Fuseki does neither. A graph
 clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
 36 s with the chunked clear (before it, 34–60 s for 900k quads).
+
+##### The 9M SHACL measurement (2026-09-16)
+
+The analytical-layer notes (`docs/notes/analytical-mirror-design.md` §1.5)
+made the SHACL→SQL question conditional on one number nobody had: whole-
+dataset validation at 9M quads on the deployment's real configuration. The
+harness is [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs), an
+ignored test: 1M OTL assets (the same generator as `examples/scale_otl.rs`,
+~9 quads each, every 10 000th with a bad code) into a persistent store, the
+six property shapes, then `shacl::validate` over the model and instance
+graphs, with the report's `metrics` naming the data source each run took.
+Reference system (AMD Ryzen 9 7900X3D), Docker, release build.
+
+| 1M assets, 9M quads, RocksDB, in-process (release, Docker) | A — mirror on (55 GB budget) | B — the shipped 4g container |
+|---|--:|--:|
+| Load, 1M assets in 50k-asset Turtle chunks | 96.8 s (93k quads/s) | 93.6 s (96k quads/s) |
+| Mirror published after the load | 131 s (one build) | never (over the cap) |
+| SHACL, every asset, 6 property shapes — first run | **6.29 s** (source `mirror`, no run index) | **13.5 s** (source `snapshot`, run index) |
+| — second run | 6.27 s | 13.8 s |
+| — straight after a 500-quad `INSERT DATA` (mirror dirty) | 18.5 s (`snapshot`, run index built to the 8M cap) | 12.4 s (`snapshot`, run index at the 1.8M cap) |
+| Violations found | 100 of 1 000 000 assets, both | 100, both |
+
+Configuration A is `OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000` in a container
+without a memory limit (the RAM-aware cap would have allowed 13.4M on this
+machine anyway); B is `docker run -m 4g`, the shipped default, where the
+accelerator is off at 9M and the run index is capped at `memory/8/300`.
+
+What it settles: the note's thresholds were A ≤ 15 s and B ≤ 60 s for
+SHACL→SQL to stay deferred, and the linear prediction from 0.72 s at 0.9M
+was ≈ 7 s on the mirror. A came in at 6.3 s and B at 13.5 s — the 118 s of
+the first 9M run is the pre-rebuild engine, not the store. So the translator
+stays deferred, and the remaining cost is per run, not per shape: at 9M the
+whole-dataset pipeline run is 6–14 s, which points at changed-node scoping
+of the gate and pipeline runs (validate what a write touched, not the
+dataset) as the next lever. One thing to keep in mind from the after-write
+rows: with the mirror dirty, a budget large enough to build an 8M-quad run
+index (A) spent longer building it than B spent probing RocksDB with a
+1.8M-quad one — the index cap's upper range is not free at this size.
+
+Run it yourself (about eight minutes per configuration, most of it the
+load):
+
+```bash
+OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000 cargo test --release --features full --test scale_shacl_9m -- --ignored --nocapture
+```
 
 **Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph
 is now one transaction — `clear_graph` plus every parsed quad inserted on

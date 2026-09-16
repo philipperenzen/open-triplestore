@@ -1243,3 +1243,56 @@ producer side only. The `late` origin (a graph a primitive discovered while
 running) exists in the finaliser but no primitive uses it yet — every
 primitive knows its targets or says `unknown`. `OTS_CHANGE_CAPTURE=off` is
 the escape hatch if a workload finds a cost this measurement did not.
+
+### 3. The 9M SHACL measurement
+
+**Verified first.** The only 9M SHACL figure in the tree was 118 s,
+in-process, pre-engine-rebuild, accelerator off (`docs/performance.md`, the
+OTL-scale table), and the analytical-mirror note (§1.5) made the SHACL→SQL
+decision conditional on re-measuring it on the deployment's real
+configuration: A (mirror on) ≤ 15 s and B (the shipped 4g container) ≤ 60 s
+keep the translator deferred. Neither `scripts/scale_compare_http.py` (no
+SHACL phase) nor `examples/scale_otl.rs` (no settle, no source label) could
+produce the row, and both live outside the programme's scope.
+
+**Harness.** `tests/scale_shacl_9m.rs`, an `#[ignore]`d integration test —
+the one place in scope where a multi-minute, nine-million-quad run can
+live without touching `scripts/` or `examples/`. It ports the OTL
+generator (40 object types, six typed properties, a part-of link, a
+location, every 10 000th asset with a bad code), loads 1M assets in
+50 000-asset Turtle chunks into a persistent store, waits for the mirror
+to publish (the rebuild is triggered by the first query after writes go
+quiet, so the test issues one and polls `mirror_full_copy()`), validates
+twice, writes 500 quads and validates again. Each phase prints one JSON
+line including the report's `metrics` — the telemetry item's source kind,
+run index flag and engine duration — so a run says which path it took.
+`OTS_SCALE_ASSETS` and `OTS_SCALE_SETTLE_SECS` scale it down for a smoke
+run. **Why `#[ignore]`:** ~8 minutes and ~9M quads per configuration; it is
+a measurement, not a regression test, and runs only when asked
+(`-- --ignored --nocapture`). The conformance table is regenerated for the
+one new test.
+
+**Result** (reference system, AMD Ryzen 9 7900X3D, Docker, release build,
+2026-09-16):
+
+| 1M assets, 9M quads, RocksDB, in-process (release, Docker) | A — mirror on (55 GB budget) | B — the shipped 4g container |
+|---|--:|--:|
+| Load, 1M assets in 50k-asset Turtle chunks | 96.8 s (93k quads/s) | 93.6 s (96k quads/s) |
+| Mirror published after the load | 131 s (one build) | never (over the cap) |
+| SHACL, every asset, 6 property shapes — first run | **6.29 s** (source `mirror`, no run index) | **13.5 s** (source `snapshot`, run index) |
+| — second run | 6.27 s | 13.8 s |
+| — straight after a 500-quad `INSERT DATA` (mirror dirty) | 18.5 s (`snapshot`, run index built to the 8M cap) | 12.4 s (`snapshot`, run index at the 1.8M cap) |
+| Violations found | 100 of 1 000 000 assets, both | 100, both |
+
+**Decision, by the note's own thresholds.** A = 6.3 s (≤ 15; the linear
+prediction was ≈ 7 s), B = 13.5 s (≤ 60): SHACL→SQL stays deferred, T4 does
+not open, and the next lever is changed-node scoping of the gate and
+pipeline runs (mirror note §12) — at 9M a whole-dataset run costs 6–14 s
+whichever path it takes, and a pipeline that revalidates after every edit
+pays that per edit. Two observations for later: the after-write run on
+the large budget (18.5 s) was slower than the capped container's steady
+state (13.5 s) because the run index was built to its 8M ceiling — the
+cap's upper range is not free at this size (`src/shacl/view.rs`); and the
+POST/PUT gate benchmark the note also asked for needs the HTTP harness and
+stays open. Recorded in `docs/performance.md` (the table row, and a new
+"The 9M SHACL measurement" section) and in the note's §1.5.
