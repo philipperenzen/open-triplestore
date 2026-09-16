@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 use oxigraph::io::RdfFormat;
 
 use crate::store::changes::{self, ChangeRow, Extent, State};
+use crate::store::consensus::{self, ClusterConfig};
 use crate::store::engine::{StoreError, TripleStore};
 
 // ─── Configuration ──────────────────────────────────────────────────────────
@@ -53,6 +54,9 @@ pub enum Role {
     None,
     Leader,
     Follower,
+    /// A member of a Raft cluster: leader or follower as the election
+    /// decides (see [`Replication::effective_role`]).
+    Cluster,
 }
 
 /// How often a follower asks. Nothing else differs between the temperatures.
@@ -131,6 +135,8 @@ pub struct ReplicationConfig {
     /// How often a follower checks the leader's identity database for a
     /// change (the temperature's interval, at least 5 s, or an override).
     pub identity_interval: Duration,
+    /// The Raft cluster this node belongs to, for the `cluster` role.
+    pub cluster: Option<ClusterConfig>,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -144,6 +150,14 @@ fn env_opt(name: &str) -> Option<String> {
 pub fn leader_role_configured() -> bool {
     env_opt("OTS_REPLICATION_ROLE")
         .map(|r| r.eq_ignore_ascii_case("leader") || r.eq_ignore_ascii_case("primary"))
+        .unwrap_or(false)
+}
+
+/// True when `OTS_REPLICATION_ROLE=cluster`: the change log stays on (this
+/// node may be elected leader at any time).
+pub fn cluster_role_configured() -> bool {
+    env_opt("OTS_REPLICATION_ROLE")
+        .map(|r| r.eq_ignore_ascii_case("cluster"))
         .unwrap_or(false)
 }
 
@@ -212,7 +226,43 @@ impl ReplicationConfig {
         {
             c.identity_interval = Duration::from_secs(secs.max(1));
         }
+        if c.role == Role::Cluster {
+            match ClusterConfig::parse(
+                env_opt("OTS_REPLICATION_CLUSTER").as_deref(),
+                env_opt("OTS_REPLICATION_CLUSTER_ID").as_deref(),
+                env_opt("OTS_REPLICATION_CLUSTER_SECRET").as_deref(),
+                env_opt("OTS_REPLICATION_ELECTION_MS").as_deref(),
+                env_opt("OTS_REPLICATION_HEARTBEAT_MS").as_deref(),
+            ) {
+                Some(cluster) => c.apply_cluster(cluster),
+                None => {
+                    tracing::error!(
+                        "replication: OTS_REPLICATION_ROLE=cluster needs OTS_REPLICATION_CLUSTER \
+                         (id=url,...), OTS_REPLICATION_CLUSTER_ID (one of them) and \
+                         OTS_REPLICATION_CLUSTER_SECRET; running without a role"
+                    );
+                    c.role = Role::None;
+                }
+            }
+        }
         c
+    }
+
+    /// Join a cluster: the node's name is `node-<id>`, the other members
+    /// are its synchronous followers, and a majority must acknowledge —
+    /// unless the environment set those explicitly.
+    pub fn apply_cluster(&mut self, cluster: ClusterConfig) {
+        self.role = Role::Cluster;
+        if env_opt("OTS_REPLICATION_NODE_ID").is_none() {
+            self.node_id = format!("node-{}", cluster.id);
+        }
+        if self.sync_followers.is_empty() {
+            self.sync_followers = cluster.peer_names();
+            self.sync_required = cluster.majority_peers().max(1);
+        }
+        self.mode = Mode::Hot;
+        self.leader_url = None;
+        self.cluster = Some(cluster);
     }
 
     /// `OTS_REPLICATION_SYNC_FOLLOWERS` (node ids), `_SYNC_REQUIRED` (how
@@ -343,6 +393,7 @@ impl ReplicationConfig {
             sync_required: 1,
             sync_timeout: Duration::from_millis(2000),
             identity_interval: interval.max(Duration::from_secs(5)),
+            cluster: None,
         }
     }
 }
@@ -403,7 +454,10 @@ pub enum SyncOutcome {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Status {
+    /// The role played now (a cluster member reports `leader` or `follower`).
     pub role: Role,
+    /// The role as configured (`cluster` for a member).
+    pub configured_role: Role,
     pub mode: Mode,
     pub scope: String,
     pub leader_url: Option<String>,
@@ -430,6 +484,9 @@ pub struct Status {
     /// Present on a follower: the identity database's replication.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentityStatus>,
+    /// Present on a cluster member: who leads, the term, this node's state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<consensus::View>,
 }
 
 /// The identity database as a follower keeps it: the leader's version it
@@ -505,13 +562,35 @@ impl Replication {
         &self.config
     }
 
+    /// The configured role.
     pub fn role(&self) -> Role {
         self.config.role
     }
 
-    /// A follower refuses every write that is not its own replication.
+    /// The role this node plays now: for a cluster member, whatever the
+    /// election decided — a follower until a leader is known.
+    pub fn effective_role(&self) -> Role {
+        match self.config.role {
+            Role::Cluster => match consensus::view() {
+                Some(v) if v.is_leader => Role::Leader,
+                _ => Role::Follower,
+            },
+            r => r,
+        }
+    }
+
+    /// Where the leader is: the configured URL, or the elected member's.
+    pub fn leader_url(&self) -> Option<String> {
+        match self.config.role {
+            Role::Cluster => consensus::leader_url(),
+            _ => self.config.leader_url.clone(),
+        }
+    }
+
+    /// A follower refuses every write that is not its own replication —
+    /// and so does a cluster member that is not the leader right now.
     pub fn read_only(&self) -> bool {
-        self.config.role == Role::Follower
+        self.effective_role() == Role::Follower
     }
 
     pub fn bookmark(&self) -> Bookmark {
@@ -557,7 +636,8 @@ impl Replication {
     pub fn status(&self) -> Status {
         let b = self.bookmark();
         let l = self.last.lock().unwrap_or_else(|p| p.into_inner());
-        let healthy = match self.config.role {
+        let effective = self.effective_role();
+        let healthy = match effective {
             Role::Follower => l
                 .ok_at
                 .map(|t| t.elapsed() <= self.config.interval * 3 + Duration::from_secs(5))
@@ -565,10 +645,11 @@ impl Replication {
             _ => true,
         };
         Status {
-            role: self.config.role,
+            role: effective,
+            configured_role: self.config.role,
             mode: self.config.mode,
             scope: self.config.scope.describe(),
-            leader_url: self.config.leader_url.clone(),
+            leader_url: self.leader_url(),
             node_id: self.config.node_id.clone(),
             read_only: self.read_only(),
             epoch: b.epoch.clone(),
@@ -583,7 +664,15 @@ impl Replication {
             interval_secs: self.config.interval.as_secs_f64(),
             healthy,
             sync: self.sync_status(),
-            identity: (self.config.role == Role::Follower).then(|| {
+            cluster: self.config.cluster.as_ref().map(|c| {
+                consensus::view().unwrap_or_else(|| consensus::View {
+                    id: c.id,
+                    members: c.members.clone(),
+                    state: "starting".to_string(),
+                    ..Default::default()
+                })
+            }),
+            identity: (effective == Role::Follower).then(|| {
                 let mut s = identity_status();
                 s.interval_secs = self.config.identity_interval.as_secs_f64();
                 s
@@ -593,7 +682,7 @@ impl Replication {
 
     /// Synchronous replication is configured on this node.
     pub fn sync_configured(&self) -> bool {
-        self.config.role == Role::Leader && !self.config.sync_followers.is_empty()
+        self.effective_role() == Role::Leader && !self.config.sync_followers.is_empty()
     }
 
     pub fn sync_status(&self) -> Option<SyncStatus> {
@@ -919,11 +1008,10 @@ impl HttpLeader {
         }
     }
 
-    pub fn from_config(config: &ReplicationConfig) -> Option<Self> {
-        config
-            .leader_url
-            .as_deref()
-            .map(|u| Self::new(u, config.token.as_deref()))
+    /// The leader as it is now: configured, or elected.
+    pub fn for_current_leader(rep: &Replication) -> Option<Self> {
+        rep.leader_url()
+            .map(|u| Self::new(&u, rep.config().token.as_deref()))
     }
 
     fn request(
@@ -1053,7 +1141,7 @@ impl TripleStore {
     /// the bookmark where the last complete page put it.
     pub fn replicate_once(&self, source: &dyn LeaderSource) -> Result<Progress, StoreError> {
         let rep = self.replication();
-        if rep.role() != Role::Follower {
+        if rep.effective_role() != Role::Follower {
             return Err(StoreError::Other(
                 "replicate_once: this node is not a follower".to_string(),
             ));
@@ -1303,16 +1391,26 @@ pub fn replicate_identity_once(
 /// with a leader URL. Called once by `AuthDb::open`.
 pub fn spawn_identity_follower_if_configured(auth: crate::auth::db::AuthDb) {
     let config = ReplicationConfig::from_env();
-    if config.role != Role::Follower {
+    if config.role != Role::Follower && config.role != Role::Cluster {
         return;
     }
-    let Some(http) = HttpLeader::from_config(&config) else {
+    if config.role == Role::Follower && config.leader_url.is_none() {
         return;
-    };
+    }
     let interval = config.identity_interval;
+    let rep = Replication::with_config(config, None);
     let spawned = std::thread::Builder::new()
         .name("replication-identity".into())
         .spawn(move || loop {
+            // A cluster member that leads has nothing to fetch.
+            if rep.effective_role() != Role::Follower {
+                std::thread::sleep(interval);
+                continue;
+            }
+            let Some(http) = HttpLeader::for_current_leader(&rep) else {
+                std::thread::sleep(interval);
+                continue;
+            };
             match replicate_identity_once(&auth, &http) {
                 Ok(true) => {
                     tracing::info!("replication: identity database applied from the leader")
@@ -1334,14 +1432,17 @@ pub fn spawn_identity_follower_if_configured(auth: crate::auth::db::AuthDb) {
 /// node, or when the leader URL is missing (then the status says so).
 pub(crate) fn spawn_follower_if_configured(store: &TripleStore) {
     let rep = store.replication();
-    if rep.role() != Role::Follower {
+    if let Some(cluster) = &rep.config().cluster {
+        consensus::spawn(cluster.clone());
+    }
+    if rep.role() != Role::Follower && rep.role() != Role::Cluster {
         return;
     }
-    let Some(http) = HttpLeader::from_config(rep.config()) else {
+    if rep.role() == Role::Follower && rep.config().leader_url.is_none() {
         rep.record_error("OTS_REPLICATION_LEADER_URL is not set; this follower cannot catch up");
         tracing::warn!("replication: follower without OTS_REPLICATION_LEADER_URL");
         return;
-    };
+    }
     let store = store.clone();
     let config = rep.config().clone();
     let spawned = std::thread::Builder::new()
@@ -1361,6 +1462,16 @@ pub(crate) fn spawn_follower_if_configured(store: &TripleStore) {
                     .unwrap_or(true);
                 if due {
                     last_attempt = Some(Instant::now());
+                    // A cluster member follows whoever leads now, and a
+                    // leader follows nobody.
+                    if store.replication().effective_role() != Role::Follower {
+                        std::thread::sleep(config.poll.min(Duration::from_secs(1)));
+                        continue;
+                    }
+                    let Some(http) = HttpLeader::for_current_leader(store.replication()) else {
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    };
                     let outcome = store.replicate_once(&http);
                     let failed = outcome.is_err();
                     match outcome {

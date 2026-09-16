@@ -4265,6 +4265,35 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+    for (path, what) in [
+        ("/api/replication/raft/vote", "a vote request"),
+        ("/api/replication/raft/append", "an append-entries request"),
+        (
+            "/api/replication/raft/snapshot",
+            "an install-snapshot chunk",
+        ),
+    ] {
+        mount(
+            paths,
+            path,
+            vec![(
+                M::Post,
+                o(
+                    "Replication",
+                    "Raft RPC (cluster members only)",
+                    &format!("The Raft transport between the members of a consensus cluster: {what}, as JSON, authenticated by the shared `X-Cluster-Secret`. Not a user route: 404 on a node that is not a cluster member, 401 without the secret, 503 while the member starts. See docs/operations.md (Consensus)."),
+                    vec![],
+                    vec![
+                        ("200", "The Raft response"),
+                        ("401", "Cluster secret missing or wrong"),
+                        ("404", "Not a cluster member"),
+                        ("503", "Member starting"),
+                    ],
+                    false,
+                ),
+            )],
+        );
+    }
     mount(
         paths,
         "/api/admin/acl/endpoints",

@@ -313,6 +313,8 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_REPLICATION_SYNC_FOLLOWERS` | *(unset: asynchronous)* | On a leader: the follower node ids whose acknowledgement every write waits for. Set it and the leader is synchronous; see [operations.md](operations.md#synchronous-replication). |
 | `OTS_REPLICATION_SYNC_REQUIRED` | `1` | How many of the named followers must have applied a write before it returns; `all` for every one. |
 | `OTS_REPLICATION_IDENTITY_INTERVAL_SECS` | *(temperature, ≥ 5)* | On a follower: how often it checks the leader's manifest for a changed identity database and, when it changed, fetches and applies the snapshot in place. See [operations.md](operations.md#identity-database). |
+| `OTS_REPLICATION_CLUSTER`, `OTS_REPLICATION_CLUSTER_ID`, `OTS_REPLICATION_CLUSTER_SECRET` | *(unset)* | With `OTS_REPLICATION_ROLE=cluster`: every member as `id=url,…`, this node's id, and the secret the members' Raft messages carry. Raft elects the leader; the rest follow hot and acknowledge a majority. See [operations.md](operations.md#consensus). |
+| `OTS_REPLICATION_ELECTION_MS`, `OTS_REPLICATION_HEARTBEAT_MS` | `1500`, a fifth of it | The election timeout's lower bound (the upper is twice it) and the leader's heartbeat. |
 | `OTS_REPLICATION_SYNC_TIMEOUT_MS` | `2000` | How long a write waits for them (50–60000). After it, the write returns degraded — `X-Replication-Ack: degraded` — and the leader recovers by itself when a follower catches up. |
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |

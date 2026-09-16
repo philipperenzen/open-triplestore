@@ -56,10 +56,11 @@ network round trip, not the poll period.
 | `hot` | follower | a read replica: long-polls the leader continuously; lag is a round trip |
 | asynchronous | leader, the default | a write returns as soon as it is durable on the leader; followers catch up at their own pace |
 | synchronous | leader, `OTS_REPLICATION_SYNC_FOLLOWERS` set | a write returns once the required followers have *applied* it, or after the timeout, degraded and visibly so (below) |
+| consensus | every member, `OTS_REPLICATION_ROLE=cluster` | Raft elects the leader and fences the old one; the elected member leads, the others are hot, synchronous followers, and a write is acknowledged by a majority (below) |
 
 Synchronous mode needs hot followers to be usable: a warm follower
 acknowledges once a minute, so every write on its leader would wait the
-timeout out. The consensus variant is not built (see "What is not here").
+timeout out.
 
 ### How it works
 
@@ -182,6 +183,63 @@ in the improvement log (P4, decision 1).
 }
 ```
 
+### Consensus
+
+A cluster is three or more members that elect their leader. Raft — through
+the `openraft` crate — decides exactly one thing here: **who leads**. The
+replicated state machine holds no data; its entries are the membership and
+a heartbeat. The data path is the one above: the elected member records
+every write in its change log, the other members are hot followers of it,
+and every write is acknowledged synchronously by a majority (the leader
+plus half of the rest) before it returns — with the same visible
+degradation when a majority cannot be reached.
+
+| Setting (every member) | Meaning |
+|---|---|
+| `OTS_REPLICATION_ROLE=cluster` | This node is a member. |
+| `OTS_REPLICATION_CLUSTER` | Every member as `id=url`, comma-separated: `1=https://a:7878,2=https://b:7878,3=https://c:7878`. The same list on every member. |
+| `OTS_REPLICATION_CLUSTER_ID` | This node's id in that list. Its follower name is `node-<id>`. |
+| `OTS_REPLICATION_CLUSTER_SECRET` | A shared secret; the Raft messages between members carry it (`X-Cluster-Secret`). Required. |
+| `OTS_REPLICATION_TOKEN` | An admin API token, minted once on any member: the identity database (and so the token) is shipped to every member, and a follower uses it to read the leader. |
+| `OTS_REPLICATION_ELECTION_MS` | The election timeout's lower bound (default 1500; the upper bound is twice that). A leader that misses heartbeats for this long is replaced. |
+| `OTS_REPLICATION_HEARTBEAT_MS` | The leader's heartbeat (default a fifth of the election timeout). |
+
+What happens: every member starts its Raft instance and, on a fresh log,
+proposes the static membership (all of them do; the ones that find a log
+already initialised are told so and carry on). Within an election
+timeout one member is leader. Its status says `role: leader`,
+`configured_role: cluster`; the others say `follower`, follow it hot, and
+answer `503` to writes. **Failover is automatic:** when the leader stops
+or is cut off, the remaining majority elects another within an election
+timeout; the new leader's change log has its own epoch, so the followers
+resynchronise from it once and tail again. **Fencing:** a leader that
+loses contact with the majority steps down by itself and refuses writes
+from the next request on; a client that reaches a stale leader gets a
+`503`, not a lost write. **Quorum writes:** the other members are the
+leader's synchronous followers with `required` set to a majority minus
+the leader itself (one of three, two of five); a write returns once that
+many have applied it, and degrades visibly when they cannot — exactly the
+synchronous mode above, with the follower list and the count derived
+from the cluster.
+
+Two things to know. The Raft log and vote are kept in memory: a restarted
+member rejoins with term 0 and learns the current term from the first
+heartbeat; because the state machine holds no data and the data path
+fences by epoch, the worst a double vote could do is elect a second leader
+for one term, which the epoch handling turns into a resynchronisation,
+not a divergence. And the members talk over the server's own HTTP port
+(`POST /api/replication/raft/vote`, `/append`, `/snapshot`); put those
+paths on the private network — the secret authenticates them, the
+network should hide them.
+
+```json
+"cluster": {
+  "id": 2, "leader": 1, "is_leader": false, "term": 7, "state": "follower",
+  "members": { "1": "https://a:7878", "2": "https://b:7878", "3": "https://c:7878" },
+  "millis_since_quorum_ack": null
+}
+```
+
 ### Identity database
 
 The identity database is shipped as SQLite's own bytes, not as an
@@ -251,7 +309,4 @@ comes back.
 
 ### What is not here
 
-- **Consensus (Raft)** — automatic leader election and a quorum write path.
-  It needs a consensus library, a dependency this programme does not add
-  without the maintainer's decision.
 - **Asset shipping**, as above.

@@ -507,11 +507,7 @@ impl TripleStore {
         // A follower writes only what it replicates.
         if self.replication.read_only() && !replication::applying() {
             return Err(StoreError::ReadOnly(
-                self.replication
-                    .config()
-                    .leader_url
-                    .clone()
-                    .unwrap_or_default(),
+                self.replication.leader_url().unwrap_or_default(),
             ));
         }
         // The outermost guard only: a nested primitive is the same write.

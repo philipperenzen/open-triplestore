@@ -1656,3 +1656,66 @@ database" section in `docs/operations.md` with the three things to know
 
 **Scope note.** `src/auth/db.rs` is touched again, under the maintainer's
 allowance: three methods, two fields and one hook in `open`.
+
+### 2. Consensus: Raft elects the leader, the change log stays the data path
+
+**Decision, and the dependency.** The maintainer asked for a choice with
+dependencies allowed. Chosen: `openraft` 0.9.25 (MIT / Apache-2.0), with
+its `serde` and `storage-v2` features — an async Raft with pluggable
+storage and network traits, a majority quorum, heartbeat and election
+timeouts, and a maintained release line; `raft-rs` (tikv) is a sync core
+that leaves timers, transport and the state loop to the caller, and the
+newer Paxos crates have less mileage. One dependency; twenty transitive
+crates, all permissively licensed.
+
+**What Raft decides, and what it does not.** Only who leads. The
+replicated state machine holds no data — membership and a heartbeat — and
+the log and vote live in memory. The data path is unchanged: the elected
+member records in its change log, the others follow it hot, and a write
+is acknowledged synchronously by a majority (the leader plus half of the
+rest) through the mechanism of item 1, with the follower list and the
+count derived from the cluster. A member that loses leadership is
+read-only from the next request (`effective_role` is read through the
+process-wide view on every write); a member that wins it records and
+serves; followers resynchronise once on the new epoch. This keeps the
+dependency at its strength and the data where P4 put it; routing every
+write through the Raft log would have meant a second on-disk format and a
+rewrite of every primitive.
+
+**Test first** (`tests/consensus.rs`, 3 tests): three in-process members
+through an in-process router elect exactly one leader and all name it;
+the leader goes off the network and stops; the other two elect another in
+a higher term and the survivor follows it. A cluster member's derived
+settings: `node-<id>`, the other members as synchronous followers, a
+majority required, hot, read-only and `follower` until an election says
+otherwise, `cluster` in the status with `starting`. The Raft routes answer
+`404` off a cluster. Two unit tests in `src/store/consensus.rs` (the
+cluster settings and the derived quorum; the empty view).
+
+**What shipped.** `src/store/consensus.rs`: the type configuration, an
+in-memory `RaftLogStorage` and `RaftStateMachine` (snapshots of the
+membership), a `RaftNetwork` over the members' HTTP ports (JSON,
+`X-Cluster-Secret`) or an in-process router for tests, `Member::start`
+(every member proposes the static membership; an initialised log declines
+and carries on), the process-wide `View` kept current from the metrics
+watch, `ClusterConfig` (`OTS_REPLICATION_CLUSTER`, `_CLUSTER_ID`,
+`_CLUSTER_SECRET`, `_ELECTION_MS`, `_HEARTBEAT_MS`), and the member thread
+on its own runtime. `src/store/replication.rs`: `Role::Cluster`,
+`apply_cluster` (the derived name, followers and quorum), `effective_role`
+and a dynamic `leader_url` used by `read_only`, the synchronous wait, the
+follower and identity threads (which now follow whoever leads and skip
+while leading) and the status (`role` as played, `configured_role`,
+`cluster`). `changes.rs`: a member records. The Raft routes in
+`routes.rs`; OpenAPI; `docs/operations.md` (the modes table's consensus
+row and a "Consensus" section), `docs/administration.md`,
+`docs/api-reference.md`, CHANGELOG; `Cargo.toml` and `Cargo.lock`.
+
+**Stated plainly.** The in-memory log and vote: a restarted member rejoins
+with term 0; the election timeout (1.5–3 s) outlasts a restart, and
+because the state machine holds no data and the data path fences by
+epoch, a double vote could at worst elect a second leader for one term,
+which resynchronises rather than diverges. A persistent vote is the first
+thing to add if a status ever shows it. The Raft routes ride the server's
+port: the secret authenticates them and the network should hide them.
+`cargo deny` was not run here (the tool is not in the builder image); the
+new crates are MIT / Apache-2.0 by their manifests.

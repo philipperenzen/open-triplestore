@@ -88,6 +88,9 @@ pub fn management_routes() -> Router<AppState> {
         .route("/api/replication/status", get(replication_status))
         .route("/api/replication/manifest", get(replication_manifest))
         .route("/api/replication/identity", get(replication_identity))
+        .route("/api/replication/raft/vote", post(raft_vote))
+        .route("/api/replication/raft/append", post(raft_append))
+        .route("/api/replication/raft/snapshot", post(raft_snapshot))
         .route("/livez", get(liveness_check))
 }
 
@@ -2293,6 +2296,71 @@ async fn replication_identity(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(([(CONTENT_TYPE, "application/vnd.sqlite3")], bytes))
+}
+
+/// The Raft RPCs of a cluster member, over the server's own port. Not user
+/// routes: the members share `OTS_REPLICATION_CLUSTER_SECRET`, sent as
+/// `X-Cluster-Secret`, compared in constant time. 404 on a node that is not
+/// a cluster member, 503 while the member is starting.
+fn cluster_member(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<&'static crate::store::consensus::Member, (StatusCode, String)> {
+    let Some(cluster) = state.store.replication().config().cluster.as_ref() else {
+        return Err((StatusCode::NOT_FOUND, "not a cluster member".to_string()));
+    };
+    let given = headers
+        .get("x-cluster-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (a, b) = (given.as_bytes(), cluster.secret.as_bytes());
+    let equal = a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0;
+    if !equal {
+        return Err((StatusCode::UNAUTHORIZED, "cluster secret".to_string()));
+    }
+    crate::store::consensus::member().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cluster member starting".to_string(),
+    ))
+}
+
+async fn raft_vote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::VoteRequest<u64>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .vote(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn raft_append(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::AppendEntriesRequest<crate::store::consensus::TypeConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .append_entries(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn raft_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::InstallSnapshotRequest<crate::store::consensus::TypeConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .install_snapshot(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {

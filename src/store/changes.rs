@@ -443,7 +443,8 @@ impl ChangeLog {
     /// off unless `OTS_CHANGE_CAPTURE=on` (its log is not a source).
     pub fn open(dir: Option<&Path>) -> Result<Self, StoreError> {
         let (leader, follower) = (
-            crate::store::replication::leader_role_configured(),
+            crate::store::replication::leader_role_configured()
+                || crate::store::replication::cluster_role_configured(),
             crate::store::replication::follower_role_configured(),
         );
         let on = if leader {
