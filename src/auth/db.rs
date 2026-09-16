@@ -322,6 +322,12 @@ pub struct AuthDb {
     /// uncached path does two SELECTs + a HashSet join each call.
     #[allow(clippy::type_complexity)] // a cache tuple; a type alias would obscure it
     accessible_graphs_cache: Mutex<HashMap<Option<String>, (Instant, Arc<AccessibleGraphs>)>>,
+    /// The file, for a persistent database; the replication watch
+    /// connection opens it read-only.
+    path: Option<std::path::PathBuf>,
+    /// A connection that only ever asks `PRAGMA data_version` (see
+    /// [`Self::data_version`]).
+    watch: Mutex<Option<Connection>>,
 }
 
 impl AuthDb {
@@ -349,9 +355,14 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: Some(path.to_path_buf()),
+            watch: Mutex::new(None),
         };
         db.migrate()?;
         info!("Auth database ready at {}", path.display());
+        // A replication follower keeps this database current from its
+        // leader (does nothing unless the environment configures one).
+        crate::store::replication::spawn_identity_follower_if_configured(db.thread_handle());
         Ok(db)
     }
 
@@ -367,9 +378,81 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: None,
+            watch: Mutex::new(None),
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    // ─── Replication: the database shipped whole ───────────────────────────
+
+    /// A handle for a background thread: the same pool, its own caches.
+    fn thread_handle(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: self.path.clone(),
+            watch: Mutex::new(None),
+        }
+    }
+
+    /// A consistent snapshot of the whole database as SQLite file bytes,
+    /// taken with the online backup API (safe under WAL, no lock on the
+    /// writers). What a replication follower fetches.
+    pub fn snapshot_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let src = self.pool.get()?;
+        let tmp = std::env::temp_dir().join(format!("ots-identity-{}.db", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut dst = Connection::open(&tmp)?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok::<Vec<u8>, anyhow::Error>(std::fs::read(&tmp)?)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
+    /// Replace this database's contents with a snapshot, in place, under the
+    /// open connections — the backup API's destination side, so no file is
+    /// swapped and no pool reopened; every connection sees the new state on
+    /// its next statement. What a replication follower does with the
+    /// leader's identity database.
+    pub fn apply_snapshot(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        if !bytes.starts_with(b"SQLite format 3\0") {
+            anyhow::bail!("not a SQLite database ({} bytes)", bytes.len());
+        }
+        let tmp = std::env::temp_dir().join(format!("ots-identity-{}.db", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, bytes)?;
+        let result = (|| {
+            let src =
+                Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut dst = self.pool.get()?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok::<(), anyhow::Error>(())
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
+    /// SQLite's own change counter for this database: `PRAGMA data_version`
+    /// on a connection kept only for watching, which moves whenever any
+    /// other connection commits. The replication manifest reports it, so a
+    /// follower fetches a snapshot only after a change. `None` for an
+    /// in-memory database, whose single connection sees no "other" commits.
+    pub fn data_version(&self) -> Option<i64> {
+        let path = self.path.as_ref()?;
+        let mut watch = self.watch.lock().unwrap_or_else(|p| p.into_inner());
+        if watch.is_none() {
+            *watch =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+        }
+        let conn = watch.as_ref()?;
+        conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+            .ok()
     }
 
     /// Shared pool accessor — used by the audit logger so it can reuse the

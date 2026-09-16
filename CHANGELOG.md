@@ -27,8 +27,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   timeout, degraded and visibly so (`X-Replication-Ack: sync|degraded` on
   the write routes, `sync` in the status), recovering by itself when a
   follower catches up. `GET /api/admin/changes?wait_ms=` long-polls, which
-  is how a hot follower keeps its lag to a round trip. The consensus
-  variant, identity-database replication and asset shipping: see
+  is how a hot follower keeps its lag to a round trip. The identity
+  database is shipped whole: `GET /api/replication/identity` serves a
+  consistent SQLite snapshot, the manifest carries SQLite's change counter,
+  and a follower applies a changed snapshot in place under its open
+  connections. The consensus variant and asset shipping: see
   docs/operations.md, "Replication".
 - **The 9M-quad SHACL measurement** (`tests/scale_shacl_9m.rs`, an ignored
   test run on purpose): whole-dataset validation of 1M assets against six

@@ -1612,3 +1612,47 @@ the cost is one boolean.
 Synchronous leaders: a round trip per write with a hot follower on a
 healthy link; the timeout when it is not, once, then a lookup per write
 until it returns.
+
+### 3. The identity database, shipped whole
+
+**Decision.** The maintainer chose "WAL" over an application-level log of
+identity events: ship the database's own changes, not a model of them.
+The in-binary form of that is not a stream of WAL frames — a follower
+reads its `auth.db` through open connections, and SQLite does not support
+applying foreign frames underneath them — but the supported equivalent:
+a consistent snapshot from the online backup API, applied in place through
+the same API's destination side. The database is kilobytes to megabytes, so
+a whole snapshot per change costs nothing that matters, and the transport
+can become frame-level later without changing the model.
+
+**Verified first.** `src/backup/mod.rs` already used
+`rusqlite::backup::Backup` for the scheduled backup (source side only);
+nothing read `PRAGMA data_version`; the follower authenticated with
+whatever `auth.db` it had.
+
+**Test first** (`tests/replication.rs` +2): a file-based leader database
+with one user, an in-memory follower database — the first round applies
+the snapshot and the user appears; an unchanged leader makes the next
+round a no-op (`identity_version` unchanged, nothing fetched); a second
+user on the leader moves the version and the next round applies it. Over
+HTTP: `GET /api/replication/identity` is 401 anonymous and answers a
+SQLite file to an admin; the manifest carries `identity_version`.
+
+**What shipped.** `AuthDb::snapshot_bytes` (backup API into a temp file,
+read, removed), `AuthDb::apply_snapshot` (temp file, backup API into a
+pooled connection — every connection sees the new pages on its next
+statement; the accessible-graphs cache invalidated), `AuthDb::data_version`
+(a watch connection kept for `PRAGMA data_version`; `None` in memory, where
+a single connection sees no "other" commits). The manifest gains
+`identity_version`; `LeaderSource::identity_snapshot`; `replicate_identity_once`
+(fetch and apply when the version moved or is unknown; process-wide
+`identity` state in the status); the identity follower thread, started by
+`AuthDb::open` when the environment configures a follower, at
+`OTS_REPLICATION_IDENTITY_INTERVAL_SECS` (the temperature's interval, at
+least 5 s). `GET /api/replication/identity` (admin). Docs: an "Identity
+database" section in `docs/operations.md` with the three things to know
+(`jwt_secret`, local writes overwritten, the audit log comes across),
+`docs/administration.md`, `docs/api-reference.md`, OpenAPI, CHANGELOG.
+
+**Scope note.** `src/auth/db.rs` is touched again, under the maintainer's
+allowance: three methods, two fields and one hook in `open`.

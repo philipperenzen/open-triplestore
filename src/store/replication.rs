@@ -128,6 +128,9 @@ pub struct ReplicationConfig {
     pub sync_required: usize,
     /// How long a write waits for them before it returns degraded.
     pub sync_timeout: Duration,
+    /// How often a follower checks the leader's identity database for a
+    /// change (the temperature's interval, at least 5 s, or an override).
+    pub identity_interval: Duration,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -204,6 +207,11 @@ impl ReplicationConfig {
         c.sync_followers = sync_followers;
         c.sync_required = sync_required;
         c.sync_timeout = sync_timeout;
+        if let Some(secs) =
+            env_opt("OTS_REPLICATION_IDENTITY_INTERVAL_SECS").and_then(|v| v.parse::<u64>().ok())
+        {
+            c.identity_interval = Duration::from_secs(secs.max(1));
+        }
         c
     }
 
@@ -334,6 +342,7 @@ impl ReplicationConfig {
             sync_followers: Vec::new(),
             sync_required: 1,
             sync_timeout: Duration::from_millis(2000),
+            identity_interval: interval.max(Duration::from_secs(5)),
         }
     }
 }
@@ -418,6 +427,33 @@ pub struct Status {
     /// Present on a leader with synchronous followers configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncStatus>,
+    /// Present on a follower: the identity database's replication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityStatus>,
+}
+
+/// The identity database as a follower keeps it: the leader's version it
+/// last applied, when, how often, and the last error.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct IdentityStatus {
+    pub applied_version: Option<i64>,
+    pub applied_at: Option<String>,
+    pub applies: u64,
+    pub last_error: Option<String>,
+    pub interval_secs: f64,
+}
+
+fn identity_state() -> &'static Mutex<IdentityStatus> {
+    static S: OnceLock<Mutex<IdentityStatus>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(IdentityStatus::default()))
+}
+
+/// The identity follower's state (process-wide: one identity database).
+pub fn identity_status() -> IdentityStatus {
+    identity_state()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 pub struct Replication {
@@ -547,6 +583,11 @@ impl Replication {
             interval_secs: self.config.interval.as_secs_f64(),
             healthy,
             sync: self.sync_status(),
+            identity: (self.config.role == Role::Follower).then(|| {
+                let mut s = identity_status();
+                s.interval_secs = self.config.identity_interval.as_secs_f64();
+                s
+            }),
         }
     }
 
@@ -688,10 +729,18 @@ pub struct Manifest {
     pub capture_enabled: bool,
     pub graphs: Vec<Option<String>>,
     pub datasets: Vec<DatasetGraphs>,
+    /// The identity database's change counter (`PRAGMA data_version` on
+    /// the leader), so a follower fetches a snapshot only after a change.
+    #[serde(default)]
+    pub identity_version: Option<i64>,
 }
 
 /// The store half of the manifest; the handler adds the datasets.
-pub fn manifest_of(store: &TripleStore, datasets: Vec<DatasetGraphs>) -> Manifest {
+pub fn manifest_of(
+    store: &TripleStore,
+    datasets: Vec<DatasetGraphs>,
+    identity_version: Option<i64>,
+) -> Manifest {
     let log = store.changes();
     let mut graphs: Vec<Option<String>> =
         store.graph_counts().into_iter().map(|(g, _)| g).collect();
@@ -703,6 +752,7 @@ pub fn manifest_of(store: &TripleStore, datasets: Vec<DatasetGraphs>) -> Manifes
         capture_enabled: log.enabled(),
         graphs,
         datasets,
+        identity_version,
     }
 }
 
@@ -722,6 +772,8 @@ pub trait LeaderSource: Send + Sync {
     /// The graph as N-Triples; `Ok(None)` when the leader does not have it.
     fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String>;
     fn set_cursor(&self, name: &str, seq: i64) -> Result<(), String>;
+    /// The leader's identity database, whole, as SQLite file bytes.
+    fn identity_snapshot(&self) -> Result<Vec<u8>, String>;
 }
 
 /// The leader in the same process: tests, and the shape every source must
@@ -731,6 +783,7 @@ pub trait LeaderSource: Send + Sync {
 pub struct InProcessLeader {
     store: TripleStore,
     datasets: Vec<DatasetGraphs>,
+    identity: Option<std::sync::Arc<crate::auth::db::AuthDb>>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -740,7 +793,14 @@ impl InProcessLeader {
         Self {
             store,
             datasets: Vec::new(),
+            identity: None,
         }
+    }
+
+    /// The leader's identity database, for the identity follower.
+    pub fn with_identity(mut self, auth: std::sync::Arc<crate::auth::db::AuthDb>) -> Self {
+        self.identity = Some(auth);
+        self
     }
 
     pub fn with_datasets(mut self, datasets: Vec<DatasetGraphs>) -> Self {
@@ -752,7 +812,11 @@ impl InProcessLeader {
 #[cfg(any(test, feature = "test-utils"))]
 impl LeaderSource for InProcessLeader {
     fn manifest(&self) -> Result<Manifest, String> {
-        Ok(manifest_of(&self.store, self.datasets.clone()))
+        Ok(manifest_of(
+            &self.store,
+            self.datasets.clone(),
+            self.identity.as_ref().and_then(|a| a.data_version()),
+        ))
     }
 
     fn changes_after(&self, after: i64, limit: usize, _wait: Duration) -> Result<Page, String> {
@@ -782,6 +846,14 @@ impl LeaderSource for InProcessLeader {
         self.store
             .changes()
             .set_cursor(name, seq, Some("in-process"))
+            .map_err(|e| e.to_string())
+    }
+
+    fn identity_snapshot(&self) -> Result<Vec<u8>, String> {
+        self.identity
+            .as_ref()
+            .ok_or_else(|| "this leader has no identity database".to_string())?
+            .snapshot_bytes()
             .map_err(|e| e.to_string())
     }
 }
@@ -890,6 +962,27 @@ impl HttpLeader {
         })
     }
 
+    fn request_bytes(&self, path: &str, accept: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{}{}", self.base, path);
+        let token = self.token.clone();
+        let timeout = self.timeout;
+        blocking(async move {
+            let mut req = client().get(&url).timeout(timeout).header("Accept", accept);
+            if let Some(t) = &token {
+                req = req.bearer_auth(t);
+            }
+            let resp = req.send().await.map_err(|e| format!("{url}: {e}"))?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(format!("{url}: HTTP {}", status.as_u16()));
+            }
+            resp.bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("{url}: {e}"))
+        })
+    }
+
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let text = self
             .request(reqwest::Method::GET, path, "application/json", None)?
@@ -926,6 +1019,10 @@ impl LeaderSource for HttpLeader {
             Some(serde_json::json!({ "seq": seq })),
         )
         .map(|_| ())
+    }
+
+    fn identity_snapshot(&self) -> Result<Vec<u8>, String> {
+        self.request_bytes("/api/replication/identity", "application/vnd.sqlite3")
     }
 }
 
@@ -1159,6 +1256,74 @@ fn selected_graphs(scope: &Scope, manifest: &Manifest) -> Option<HashSet<Option<
                 .flat_map(|d| d.graphs.iter().map(|g| Some(g.clone())))
                 .collect(),
         ),
+    }
+}
+
+// ─── The identity database ──────────────────────────────────────────────────
+
+/// One round of the identity follower: read the leader's manifest and, if
+/// its identity version moved since the last apply (or is unknown), fetch
+/// the snapshot and apply it in place. Returns whether one was applied.
+pub fn replicate_identity_once(
+    auth: &crate::auth::db::AuthDb,
+    source: &dyn LeaderSource,
+) -> Result<bool, String> {
+    let outcome: Result<(bool, Option<i64>), String> = (|| {
+        let m = source.manifest()?;
+        let applied = identity_state()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .applied_version;
+        if m.identity_version.is_some() && m.identity_version == applied {
+            return Ok((false, m.identity_version));
+        }
+        let bytes = source.identity_snapshot()?;
+        auth.apply_snapshot(&bytes).map_err(|e| e.to_string())?;
+        Ok((true, m.identity_version))
+    })();
+    let mut s = identity_state().lock().unwrap_or_else(|p| p.into_inner());
+    match outcome {
+        Ok((applied, version)) => {
+            if applied {
+                s.applied_version = version;
+                s.applied_at = Some(now());
+                s.applies += 1;
+            }
+            s.last_error = None;
+            Ok(applied)
+        }
+        Err(e) => {
+            s.last_error = Some(e.clone());
+            Err(e)
+        }
+    }
+}
+
+/// Start the identity follower when the environment configures a follower
+/// with a leader URL. Called once by `AuthDb::open`.
+pub fn spawn_identity_follower_if_configured(auth: crate::auth::db::AuthDb) {
+    let config = ReplicationConfig::from_env();
+    if config.role != Role::Follower {
+        return;
+    }
+    let Some(http) = HttpLeader::from_config(&config) else {
+        return;
+    };
+    let interval = config.identity_interval;
+    let spawned = std::thread::Builder::new()
+        .name("replication-identity".into())
+        .spawn(move || loop {
+            match replicate_identity_once(&auth, &http) {
+                Ok(true) => {
+                    tracing::info!("replication: identity database applied from the leader")
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("replication: identity database not applied: {e}"),
+            }
+            std::thread::sleep(interval);
+        });
+    if let Err(e) = spawned {
+        tracing::error!("replication: could not start the identity follower thread: {e}");
     }
 }
 

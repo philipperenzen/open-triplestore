@@ -182,18 +182,46 @@ in the improvement log (P4, decision 1).
 }
 ```
 
+### Identity database
+
+The identity database is shipped as SQLite's own bytes, not as an
+application-level log of identity events. The leader serves a consistent
+snapshot of `auth.db` at `GET /api/replication/identity`, taken with
+SQLite's online backup API (safe under WAL, no lock on the writers), and
+its manifest carries `identity_version` — SQLite's own change counter
+(`PRAGMA data_version`, read on a connection kept only for watching), which
+moves whenever anything commits to the database. The follower checks the
+manifest every `OTS_REPLICATION_IDENTITY_INTERVAL_SECS` (the temperature's
+interval, at least 5 s) and, when the version moved, fetches the snapshot
+and applies it **in place** — the backup API's destination side writes the
+pages under the follower's open connections, so no file is swapped, no
+pool reopened, and every connection sees the new state on its next
+statement. The status shows it under `identity`.
+
+Why whole snapshots rather than a stream of WAL frames: a live follower
+reads its database through open connections, and applying foreign WAL
+frames underneath them is not something SQLite supports; the backup API is
+the supported way to replace a live database's pages. The identity database
+is small (kilobytes to a few megabytes), so a whole snapshot per change is
+cheap, and the transport can become frame-level later without changing the
+model. Three things to know:
+
+- Copy `<data-dir>/jwt_secret` from the leader to the follower: tokens the
+  leader issued then validate on the follower. API tokens live in the
+  database and come across with it; `OTS_REPLICATION_TOKEN` should be one
+  minted on the leader.
+- A follower's own identity writes — login timestamps, audit rows, tokens
+  minted on the follower — are overwritten by the next apply. Log in and
+  administer on the leader.
+- The leader's audit log is part of the database and comes across too.
+
 ### What a follower does and does not replicate
 
 - **RDF data**, per graph, per the scope. Version-snapshot graphs
   (`…/version/…`) come across whole (the leader records them `unknown`
   rather than copy them into its log).
-- **Not the identity database** (`auth.db`: users, organisations, datasets,
-  tokens, ACLs). A follower serves data with the identity database it has.
-  For a read replica that must authenticate the same users as the leader,
-  seed it from the leader's backup (`docs/administration.md`, backups
-  include `auth.db`) at bootstrap; keeping it current is the next step of
-  this work (an application-level log of identity changes, or WAL shipping),
-  not this one.
+- **The identity database** (`auth.db`: users, organisations, datasets,
+  tokens, ACLs), shipped whole — see "Identity database" below.
 - **Not the object store.** Point both nodes at the same S3 bucket; with the
   local filesystem store, assets exist only on the node that received them.
 - **Not the text, spatial or accelerator indexes.** Each node rebuilds its
@@ -226,4 +254,4 @@ comes back.
 - **Consensus (Raft)** — automatic leader election and a quorum write path.
   It needs a consensus library, a dependency this programme does not add
   without the maintainer's decision.
-- **Identity database replication** and **asset shipping**, as above.
+- **Asset shipping**, as above.

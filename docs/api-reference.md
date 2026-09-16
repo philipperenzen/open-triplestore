@@ -85,7 +85,8 @@ See `docs/operations.md, "Replication"`. Two new routes, no change to existing o
 | Method | Path | Returns |
 |---|---|---|
 | `GET` | `/api/replication/status` | This node's `role`, `mode`, `scope`, `leader_url`, `node_id`, `read_only`; on a follower also `epoch`, `applied_seq`, `leader_newest_seq`, `lag_rows`, `last_sync_at`, `last_error`, `applied_rows`, `refetched_graphs`, `resyncs`, `interval_secs`, `healthy`. Public, beside `/livez`. |
-| `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph) and `datasets` (`id`, `graphs`). Admin only (`401` / `403`). |
+| `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph), `datasets` (`id`, `graphs`) and `identity_version` (SQLite's change counter of the identity database; `null` for an in-memory one). Admin only (`401` / `403`). |
+| `GET` | `/api/replication/identity` | The identity database, whole, as a consistent SQLite snapshot (`application/vnd.sqlite3`). Admin only (`401` / `403`). |
 
 `GET /api/admin/changes` takes `wait_ms` (at most 30000): when no row is
 above `after`, the request is held until one lands or the wait runs out,

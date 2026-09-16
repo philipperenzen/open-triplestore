@@ -4248,6 +4248,25 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(
         paths,
+        "/api/replication/identity",
+        vec![(
+            M::Get,
+            o(
+                "Replication",
+                "Identity database snapshot",
+                "The identity database (users, organisations, datasets, tokens, rules), whole, as a consistent SQLite file (`application/vnd.sqlite3`) taken with the online backup API. A follower fetches it when the manifest's `identity_version` moves and applies it in place. Admins only.",
+                vec![],
+                vec![
+                    ("200", "The database as SQLite file bytes"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/admin/acl/endpoints",
         vec![
             (

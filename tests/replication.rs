@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
-use open_triplestore::auth::models::{OwnerType, Visibility};
+use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
 use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
 use open_triplestore::store::engine::StoreError;
 use open_triplestore::store::replication::{
@@ -610,4 +610,105 @@ async fn the_change_endpoint_long_polls_and_writes_carry_the_ack_header() {
     let (_, s) = call(&app, Method::GET, "/api/replication/status", None, None).await;
     assert_eq!(s["sync"]["required"], 1, "{s}");
     assert!(s["sync"]["degraded_since"].is_string(), "{s}");
+}
+
+// ─── The identity database ──────────────────────────────────────────────────
+
+/// The leader's identity database is shipped whole and applied in place;
+/// an unchanged leader costs nothing; a change moves SQLite's own counter
+/// and the next round applies it.
+#[test]
+fn the_identity_database_is_shipped_whole_and_applied_in_place() {
+    use open_triplestore::auth::db::AuthDb;
+    use open_triplestore::store::replication::replicate_identity_once;
+    let dir = tempfile::tempdir().unwrap();
+    let leader_auth = std::sync::Arc::new(AuthDb::open(&dir.path().join("auth.db")).unwrap());
+    leader_auth
+        .create_user("u1", "one", "one@test.com", "hash", SystemRole::User)
+        .unwrap();
+    let src = InProcessLeader::new(leader()).with_identity(leader_auth.clone());
+    let follower_auth = AuthDb::in_memory().unwrap();
+    assert!(follower_auth.get_user_by_id("u1").unwrap().is_none());
+
+    assert!(replicate_identity_once(&follower_auth, &src).unwrap());
+    assert_eq!(
+        follower_auth
+            .get_user_by_id("u1")
+            .unwrap()
+            .map(|u| u.username),
+        Some("one".to_string())
+    );
+    // Nothing changed on the leader: nothing is fetched.
+    assert!(!replicate_identity_once(&follower_auth, &src).unwrap());
+    // A change on the leader moves `identity_version`; the next round applies it.
+    leader_auth
+        .create_user("u2", "two", "two@test.com", "hash", SystemRole::User)
+        .unwrap();
+    assert!(replicate_identity_once(&follower_auth, &src).unwrap());
+    assert!(follower_auth.get_user_by_id("u2").unwrap().is_some());
+    // And the follower's own copy still works for its own writes in between.
+    follower_auth
+        .create_user("local", "local", "local@test.com", "hash", SystemRole::User)
+        .unwrap();
+    assert!(follower_auth.get_user_by_id("local").unwrap().is_some());
+}
+
+/// The snapshot endpoint answers a SQLite file to an admin and nothing to
+/// anyone else; the manifest carries the identity version.
+#[tokio::test]
+async fn the_leader_serves_its_identity_database_to_admins() {
+    let (state, token) = admin_state_with_store(leader());
+    let app = test_app(state.clone());
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/replication/identity")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/replication/identity")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/vnd.sqlite3")
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        bytes.starts_with(b"SQLite format 3\0"),
+        "{} bytes",
+        bytes.len()
+    );
+    let (st, m) = call(
+        &app,
+        Method::GET,
+        "/api/replication/manifest",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    assert!(
+        m.get("identity_version").is_some(),
+        "the manifest names the identity version (null in memory): {m}"
+    );
 }

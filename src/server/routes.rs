@@ -87,6 +87,7 @@ pub fn management_routes() -> Router<AppState> {
         )
         .route("/api/replication/status", get(replication_status))
         .route("/api/replication/manifest", get(replication_manifest))
+        .route("/api/replication/identity", get(replication_identity))
         .route("/livez", get(liveness_check))
 }
 
@@ -2273,7 +2274,25 @@ async fn replication_manifest(
     Ok(Json(crate::store::replication::manifest_of(
         &state.store,
         datasets,
+        state.auth_db.data_version(),
     )))
+}
+
+/// GET /api/replication/identity — the identity database, whole, as a
+/// consistent SQLite snapshot (the online backup API). What a follower
+/// applies in place when the manifest's `identity_version` moves. Admins
+/// only: it holds every user, token and rule.
+async fn replication_identity(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let auth = state.auth_db.clone();
+    let bytes = tokio::task::spawn_blocking(move || auth.snapshot_bytes())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([(CONTENT_TYPE, "application/vnd.sqlite3")], bytes))
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
