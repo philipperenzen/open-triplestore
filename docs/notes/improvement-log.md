@@ -1497,3 +1497,36 @@ regenerated for the new binary.
 5. Consensus: which library, if any (a dependency).
 6. Identity database: application-level log in `auth.db`, or WAL shipping outside the binary.
 7. The follower's boot seed: a follower logs the seed's read-only refusals at start; silencing them needs the seed callers (`src/saved_queries/seed.rs`, `src/shacl_studio/seed*.rs` — outside the programme's scope) to skip on a follower.
+
+## Decisions taken after the P4 checkpoint (2026-09-16)
+
+Answered by the maintainer on reading the checkpoint and the recommendation
+for synchronous replication:
+
+1. **Synchronous hot replication: build the recommendation** — named sync
+   followers, a required count, a bounded wait, visible degradation with
+   automatic recovery, the long-poll on the change endpoint — "with short
+   explanations for the configured settings and the modes".
+2. **Consensus: make a choice; dependencies may be added.**
+3. **Identity database: make the best decision; WAL shipping looks good.**
+4. **Change capture on by default**, explained in the configuration and
+   the docs.
+5. **`/sparql/batch`: 422 on a rolled-back batch**, with a message saying
+   what went wrong.
+
+Shipped in this order: 5, 4, 1, 3, 2 — the two small ones first, then the
+three that carry design.
+
+### 5. `/sparql/batch` answers 422 on a rolled-back batch
+
+**Verified first.** The route answered 200 with `status: rolled_back` in the
+body (kept in P0 for the earlier per-statement shape); `tests/sparql_batch_http.rs`
+pinned the 200 and the body. **Test first:** the same test now expects 422
+and a top-level `error` that starts with `statement 1 failed:`. **Shipped:**
+the branch returns `UNPROCESSABLE_ENTITY` and adds `error` — the failing
+statement's index and its message, "nothing was applied" — the rest of the
+body unchanged; OpenAPI, `docs/api-reference.md` (table row and the note on
+the change), CHANGELOG under Changed. 422 rather than 409: the request was
+understood and well-formed, the state did not conflict with it — a
+statement could not be executed. Parse and authorisation failures stay 400
+and 403; a fully applied batch stays 200.

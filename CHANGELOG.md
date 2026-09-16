@@ -431,6 +431,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **`POST /sparql/batch` answers 422 when a statement fails at execution.**
+  The batch is one transaction, so nothing is applied; the body keeps its
+  shape (`status: rolled_back`, per-statement `results`) and gains `error`,
+  which names the failing statement and its message. Earlier builds
+  answered 200 with the same body. Parse and authorisation failures stay
+  400 / 403; a fully applied batch stays 200.
 - **Benchmarks measure the engine, not the result cache.** Every read
   benchmark in `benches/performance.rs` repeats one query on an unchanged
   store; with the result cache on, 63 of the 68 gated read benchmarks measured

@@ -84,10 +84,16 @@ async fn a_statement_that_fails_at_execution_rolls_the_batch_back() {
     .await;
     assert_eq!(
         st,
-        StatusCode::OK,
-        "a rolled-back batch is reported in the body (200 kept for compatibility): {txt}"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a rolled-back batch is 422, nothing applied: {txt}"
     );
     assert_eq!(body["status"], "rolled_back", "{txt}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.starts_with("statement 1 failed:")),
+        "the body says which statement failed and why: {txt}"
+    );
     assert_eq!(body["count"], 3, "{txt}");
     let results = body["results"].as_array().expect("per-statement results");
     assert_eq!(results.len(), 3, "{txt}");

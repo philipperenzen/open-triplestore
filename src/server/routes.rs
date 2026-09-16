@@ -1168,13 +1168,25 @@ async fn sparql_batch_update(
     } else {
         // One transaction: a failing statement rolls every other statement
         // back, so `results` names the failure and marks the rest
-        // `rolled_back`. A 200 with the outcome in the body is kept for
-        // compatibility with the previous per-statement response shape.
+        // `rolled_back`. 422: the request was understood, nothing was
+        // applied, and `error` says which statement failed and why. (The
+        // earlier 200-with-a-body was retired by the maintainer.)
+        let error = results
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match r {
+                BatchStatement::Failed(e) => {
+                    Some(format!("statement {i} failed: {e}; nothing was applied"))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "a statement failed; nothing was applied".to_string());
         Ok((
-            StatusCode::OK,
+            StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
                 "status": "rolled_back",
                 "count": results.len(),
+                "error": error,
                 "results": statuses,
             })),
         )

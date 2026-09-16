@@ -30,12 +30,13 @@ statements sent one by one.
 | Outcome | HTTP | Body |
 |---|---|---|
 | Every statement applied | 200 | `{"status": "ok", "count": N}` |
-| A statement failed at execution (for example `DROP GRAPH` of a graph that does not exist, without `SILENT`) | 200 | `{"status": "rolled_back", "count": N, "results": [{"index": i, "status": "rolled_back"}, …, {"index": k, "status": "error", "error": "…"}, …]}` — nothing was applied; `results` names the failing statement, every other one is reported as `rolled_back`, never `ok` |
+| A statement failed at execution (for example `DROP GRAPH` of a graph that does not exist, without `SILENT`) | **422** | `{"status": "rolled_back", "count": N, "error": "statement k failed: …; nothing was applied", "results": [{"index": i, "status": "rolled_back"}, …, {"index": k, "status": "error", "error": "…"}, …]}` — nothing was applied; `error` says which statement failed and why, `results` marks every other one `rolled_back`, never `ok` |
 | A statement does not parse, or the caller may not write one of its graphs | 400 / 403 | error body; nothing was applied |
 
-The 200 on a rolled-back batch keeps the response shape of the earlier
-per-statement report; check `status`, not the HTTP code, to know whether the
-batch landed.
+A rolled-back batch answers **422 Unprocessable Entity** since 0.6.0 (the
+maintainer's decision of 2026-09-16); earlier builds answered 200 with the
+same body minus `error`. The HTTP code now says whether the batch landed;
+the body still says what went wrong.
 
 ## LDES retention — `410 Gone` on a fragment
 
