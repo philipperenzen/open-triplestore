@@ -4127,6 +4127,92 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(
         paths,
+        "/api/admin/changes",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Change log rows",
+                "Rows of the per-quad change log with a sequence number above `after`, in commit order: one row per graph per write with its extent (`full` carries the added and removed quads as N-Quads, `counts` only the exact counts, `unknown` says the graph changed), the count after the write, origin, kind, actor and commit. `graph` narrows to one graph plus the store-scoped rows every reader must see. Returns `epoch`, `rows` and `next_after` (pass it back as `after`). Admins only. See docs/versioning.md.",
+                vec![
+                    qp("after", false, "Return rows with seq above this (default 0)."),
+                    qp("limit", false, "Rows per page, 1-5000 (default 500)."),
+                    qp("graph", false, "Only this graph's rows, plus store-scoped rows."),
+                ],
+                vec![
+                    ("200", "Rows in commit order"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/changes/status",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Change log status",
+                "Whether capture is on, the epoch, the next sequence number, row counts by state, the oldest and newest sequence numbers, the live cursors, the scan and payload caps and the retention window.",
+                vec![],
+                vec![
+                    ("200", "Status"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/changes/cursors/:name",
+        vec![
+            (
+                M::Put,
+                ob(
+                    "Admin",
+                    "Set a change-log cursor",
+                    "Bookmark a consumer's position (the last sequence number it applied). Retention keeps every row above the lowest live cursor; a cursor expires after OTS_CURSOR_TTL_DAYS without an update.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("seq", ObjectBuilder::new().schema_type(Type::Integer))
+                            .required("seq"),
+                        json!({ "seq": 42 }),
+                    ),
+                    vec![
+                        ("200", "The cursor"),
+                        ("400", "Invalid name or seq beyond the log"),
+                        ("401", "Authentication required"),
+                        ("403", "Admin role required"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Admin",
+                    "Delete a change-log cursor",
+                    "Drop a consumer's bookmark; retention no longer waits for it.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "Admin role required"),
+                        ("404", "No such cursor"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
         "/api/admin/acl/endpoints",
         vec![
             (

@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Per-quad change capture with a durable cursor** (`OTS_CHANGE_CAPTURE=on`,
+  off by default): every write records one row per graph it touched — the
+  net delta as N-Quads, exact counts above the payload cap, or an honest
+  `unknown` — with a dense sequence number in commit order, an epoch per
+  store lineage, open-time repair of rows a crash left pending, and a
+  count check that closes the chain of any graph changed behind the
+  log's back. `GET /api/admin/changes?after=&limit=&graph=`,
+  `GET /api/admin/changes/status`, `PUT`/`DELETE`
+  `/api/admin/changes/cursors/{name}` (admin). Retention keeps every row
+  above the lowest live cursor. The producer side of replication and
+  history; see docs/versioning.md "Change log".
 - **Workload telemetry** (`GET /api/admin/telemetry`, admin): which exit of
   the query path answered each query — result cache, count index, mirror
   shards, full copy, engine — with latency percentiles split by an

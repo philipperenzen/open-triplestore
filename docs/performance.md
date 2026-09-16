@@ -1332,6 +1332,16 @@ path on a one-triple graph by contrast — also steady-state now: the previous
 iteration's triple is removed in the setup, where it used to accumulate and
 make the recount grow with the sample count.
 
+### Change capture and the update benchmarks
+
+The per-quad change log (`OTS_CHANGE_CAPTURE`, off by default) records one
+row per graph per write. Off, the three update groups above and the two
+`insert/sparql_update*` groups measure within run-to-run noise of a tree
+without the log. On, a ground update pays a few microseconds (`insert_data/1`
++7 %, `single_triple` +13 %) and a `WHERE` update pays a scan of its target
+graph plus the payload (`insert_where` ×2.5, `delete_where` ×3–4). The table
+and the reasoning are in [versioning.md](versioning.md#what-it-costs).
+
 ### `geosparql/sf_contains` and `geosparql/distance`
 
 GeoSPARQL custom functions are called once per binding via GEOS C++ library.

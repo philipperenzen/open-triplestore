@@ -57,3 +57,22 @@ recognise is a `400` whose body names the line, column and offending text, and
 nothing is stored. The optional query parameter `lenient=true` (or `1`) restores
 the previous behaviour, in which unrecognised input is ignored and whatever parsed
 is kept. Status codes and response bodies are otherwise unchanged.
+
+## Change log — `/api/admin/changes`
+
+Every write records one row per graph it touched — the net delta as
+N-Quads when it fits, exact counts otherwise, or an honest `unknown` — with
+a dense sequence number in commit order. Capture is off by default
+(`OTS_CHANGE_CAPTURE=on`); with it off, `status` says so and the rows are
+empty. Admin-only, since rows carry quads from every tenant. See `docs/versioning.md` "Change log" for the row format,
+retention and the caps.
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/api/admin/changes?after=<seq>&limit=<n>&graph=<iri>` | `{ "epoch", "rows", "next_after" }` — rows above `after` in commit order (`limit` 1–5000, default 500); `graph` narrows to one graph plus the store-scoped rows |
+| `GET` | `/api/admin/changes/status` | capture on/off, `epoch`, `next_seq`, row counts by state, `oldest_seq` / `newest_seq`, live `cursors`, the caps and retention |
+| `PUT` | `/api/admin/changes/cursors/<name>` with `{ "seq": <n> }` | `200` the cursor; `400` for a bad name (1–64 of `[A-Za-z0-9._-]`) or a `seq` beyond the log |
+| `DELETE` | `/api/admin/changes/cursors/<name>` | `204`, or `404` |
+
+A cursor is a consumer's bookmark: retention never deletes rows above the
+lowest live one, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30) is dropped.

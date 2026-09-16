@@ -1112,3 +1112,134 @@ was meant to be narrower.
 
 Also in this commit: `docs/security.md` shows how to make the endpoint
 ACL default-closed with rules (the maintainer's decision above).
+
+### 2. Per-quad change capture with a durable cursor
+
+**Verified first.** No write left a record of *what* it changed: the commit
+trail (`src/commit_log.rs`) stores counts and graph names per handler call,
+the LDES capture (`src/ldes/capture.rs`) diffs entity indexes for streams
+only, and oxigraph exposes no sequence number (its RocksDB WAL is not a
+public API). The delta-versioning note (§2, §4.3) had settled the shape:
+one row per graph per write, an intent row before the mutation, the
+sequence number taken inside a critical section around the commit so
+`seq` order is commit order, `full` / `counts` / `unknown` extents with
+caps, cursors that pin retention, and open-time repair by probing.
+
+**Test first.** `tests/change_capture.rs` (16 tests, red on a missing
+`changes()` accessor): one per primitive — ground updates as exact net
+rows with post counts; a `DELETE/INSERT WHERE` scanned into a full net
+row; `GRAPH ?g` as a store-scoped unknown; a scan over the cap as a
+graph-scoped unknown, not a guess; a batch as one transaction with
+consecutive sequence numbers that aborts whole; Graph Store `PUT` as the
+net diff, `POST` as only the new quads, `DELETE` as every removed quad;
+bulk primitives one row per graph with duplicates probed out; `store_quad`
+probing before it counts; a streamed default-graph load as an honest
+unknown; dense sequence numbers in commit order; the write context landing
+on the rows; the off switch changing nothing else; a persistent reopen
+that resolves a pending row and reconciles a count the log never saw; and
+the admin API (`GET /api/admin/changes`, `/status`, `PUT`/`DELETE`
+`/cursors/:name`, 401 anonymous). Thirteen unit tests in
+`src/store/changes.rs` (rows and sequencing, the store-scoped row, abort,
+the off switch, nested primitives, the context guard, the payload cap,
+gzip round trip, pending resolution, retention below the lowest cursor,
+the reconcile row, the commit-trail exclusion, the net diff).
+
+**What shipped.**
+
+- `src/store/changes.rs`: the `ChangeLog` — SQLite beside the store
+  (`{data_dir}/changes/changes.db`, WAL, in memory for an in-memory
+  store), `begin` (intent rows, one per target, or one store-scoped row),
+  `commit_with` (the data commit inside the sequence section, then
+  finalisation with payload, counts, post count and `seq`), `abort`,
+  `rows_after` / `rows_after_in`, cursors with a TTL, `sweep` (age below
+  the lowest live cursor), `resolve_pending` (probe added/removed quads;
+  two sequenced rows on one graph, or any store-scoped row, make the
+  committed ones unknown too — their order is unrecoverable),
+  `reconcile_counts` (the last recorded post count per graph against the
+  live index; a disagreement, or a graph the log never saw, gets an
+  `unknown` row with `origin = reconcile`). Payloads are N-Quads, gzipped
+  above 64 KiB; caps `OTS_CHANGE_CAPTURE_MAX_SCAN` / `MAX_PAYLOAD` (250k),
+  `OTS_CHANGE_RETENTION_DAYS` (90), `OTS_CURSOR_TTL_DAYS` (30),
+  `OTS_CHANGE_CAPTURE=off`.
+- `src/store/engine.rs`: every mutation primitive records. Ground updates
+  reuse the existing simulation (`ground_update_delta`: probes, no scan) so
+  their rows are exact; other updates with static targets take a
+  before-image when the targets' summed counts fit the scan cap, run on a
+  transaction (`PreparedSparqlUpdate::on_transaction`), read the
+  after-image through it and diff; `batch_update` likewise over the joined
+  text; `graph_store_put` diffs the pre-image against the distinct new
+  quads; `graph_store_delete` records the removed quads (`counts` on the
+  chunked path); loads record fresh quads per graph, a streamed
+  default-graph load a store-scoped unknown; `bulk_insert_quads` probes per
+  graph and marks version-snapshot graphs unknown rather than copy them;
+  `store_quad` probes first and now keeps the count index exact (it used
+  to lag this path). Nested primitives are suppressed by a thread-local
+  depth/claim on the write guard. The commit trail's own graph is never
+  recorded (its row per commit would double every handler write).
+- Open-time repair in `TripleStore::open`: `resolve_pending`, then
+  `reconcile_counts` against the rebuilt index. `src/store/recovery.rs`: a
+  quarantined store takes `changes/` with it, so the rebuilt store mints a
+  new epoch.
+- Handlers set a `WriteContext` (actor IRI as the commit trail mints it,
+  commit kind) inside the blocking closure that runs the primitive — never
+  across an await (the `IdentityGuard` precedent, delta note §2.3).
+  Registry and commit writes on async threads stay system writes.
+- `GET /api/admin/changes?after=&limit=&graph=` → `{epoch, rows,
+  next_after}`; `GET /api/admin/changes/status`; `PUT` / `DELETE`
+  `/api/admin/changes/cursors/:name`. Admin-only. OpenAPI,
+  `docs/versioning.md` "Change log", `docs/api-reference.md`, CHANGELOG.
+
+**Cost.** Update benchmarks — before (`d29134b`, a detached worktree of
+the same tree, its own bench binary), the default (capture off) and capture
+on — same machine, taken back to back in two pairs; the second pair is the
+table, the first agreed within the baseline's own ±7 % pair-to-pair spread:
+
+| benchmark (in-memory store) | before | capture off (default) | capture on |
+|---|---|---|---|
+| `insert/sparql_update/single_triple` | 74.8 µs | 77.1 µs (+3 %) | 84.2 µs (+13 %) |
+| `insert/sparql_update_batch/10_triples` | 155.3 µs | 155.8 µs (+0 %) | 175.1 µs (+13 %) |
+| `update/ground_delta/insert_data/1` | 14.6 µs | 14.8 µs (+1 %) | 15.7 µs (+7 %) |
+| `update/ground_delta/insert_data/100` | 256.3 µs | 255.7 µs (−0 %) | 266.1 µs (+4 %) |
+| `update/insert_where/100` | 325.8 µs | 334.9 µs (+3 %) | 823.9 µs (+153 %) |
+| `update/insert_where/1000` | 2.79 ms | 2.81 ms (+1 %) | 7.18 ms (+157 %) |
+| `update/insert_where/10000` | 40.15 ms | 39.76 ms (−1 %) | 106.38 ms (+165 %) |
+| `update/delete_where/100` | 219.1 µs | 227.6 µs (+4 %) | 638.9 µs (+192 %) |
+| `update/delete_where/1000` | 1.64 ms | 1.62 ms (−1 %) | 5.66 ms (+246 %) |
+| `update/delete_where/10000` | 19.45 ms | 20.17 ms (+4 %) | 77.77 ms (+300 %) |
+
+Bound: 20 % on any `docs/performance.md` benchmark. **The shipped default
+holds it** (worst +4 %, inside noise). **Capture on does not**, and cannot:
+a `WHERE` update's row needs the target graph read twice and the delta
+serialised, and a ground update's row needs a handful of SQLite statements
+on a 15 µs path. Three things were done about it before settling on opt-in:
+the first measurement (capture on, then the only mode) was ×2–4 across the
+board and +230 % on `insert_data/1`; the statement cache, an in-memory
+sequence counter (durable at sweeps and open-time repair), gzip at the fast
+level and the ground path reusing its own simulation instead of a second
+parse brought the fixed cost from ~33 µs to ~1–9 µs per write; deriving the
+log's targets from the exact delta removed a parse the off path was still
+paying (+28 % on `insert_data/100` with capture off, now −0 %). What is
+left is the scan and the payload, which are the feature. So: **off by
+default, `OTS_CHANGE_CAPTURE=on` to enable**, and the P4 replication mode
+enables it itself. Whether it should become the default is the
+maintainer's call, put to them in the checkpoint; the bound is not
+overridden here.
+
+A unit-level measurement to keep in mind for P4: the fixed per-write cost
+with capture on is ~1–9 µs on the in-memory store (`insert_data/1` +7 %,
+`single_triple` +13 %); on RocksDB it sits beside a per-commit `fsync`.
+
+**Suite.** 3,038 passed / 0 failed / 1 ignored (pre-existing) over 84
+binaries, run with `OTS_CHANGE_CAPTURE=on` so every write path in the
+suite exercised the log; the default path is the old code plus a branch,
+and `tests/change_capture.rs` covers the off switch. The conformance
+table (`scripts/conformance_table.py --write`, README and
+`docs/standards.md`) is regenerated here for both new suites — the
+telemetry commit should have carried its own regeneration and did not.
+
+**Not done, on purpose.** Consumers (the replication follower, the
+history endpoint's `seq_from`/`seq_to`) are the P4 work; the log is the
+producer side only. The `late` origin (a graph a primitive discovered while
+running) exists in the finaliser but no primitive uses it yet — every
+primitive knows its targets or says `unknown`. `OTS_CHANGE_CAPTURE=off` is
+the escape hatch if a workload finds a cost this measurement did not.

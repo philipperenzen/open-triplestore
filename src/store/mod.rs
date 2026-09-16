@@ -1,3 +1,4 @@
+pub mod changes;
 pub mod engine;
 pub mod parallel_mirror;
 pub mod query_cache;

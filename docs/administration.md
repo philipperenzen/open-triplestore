@@ -297,6 +297,11 @@ See [rml.md](rml.md) for the full RML guide.
 | `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL and import quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |
 | `SPARQL_QUERY_TIMEOUT_SECS` | `30` | Per-query/update execution timeout in seconds |
+| `OTS_CHANGE_CAPTURE` | `off` | `on` records every write in the per-quad change log (`<data-dir>/changes/changes.db`), the source for replication and history consumers; see [versioning.md](versioning.md#change-log) for what a row holds and what it costs. |
+| `OTS_CHANGE_CAPTURE_MAX_SCAN` | `250000` | Quads: a `WHERE` update's target graphs are scanned for a before-image only when their summed counts fit; above it the row says `unknown`. |
+| `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
+| `OTS_CHANGE_RETENTION_DAYS` | `90` | Change-log rows older than this are swept — never above the lowest live cursor. |
+| `OTS_CURSOR_TTL_DAYS` | `30` | A change-log cursor not updated for this long stops pinning retention and is dropped. |
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |

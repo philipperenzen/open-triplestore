@@ -156,6 +156,18 @@ fn quarantine_store_files(data_dir: &Path) -> anyhow::Result<PathBuf> {
             }
         }
     }
+    // The change log's epoch is the store's identity: a quarantined store
+    // takes its log along, so nothing recorded before the quarantine can be
+    // applied to the store rebuilt after it (the fresh log mints a new
+    // epoch, and a consumer holding the old one must resynchronise).
+    let changes = data_dir.join("changes");
+    if changes.is_dir() {
+        if let Err(e) = std::fs::rename(&changes, dest.join("changes")) {
+            warn!("could not quarantine the change log: {e}");
+        } else {
+            moved += 1;
+        }
+    }
     info!("quarantined {moved} store file(s) into {}", dest.display());
     Ok(dest)
 }

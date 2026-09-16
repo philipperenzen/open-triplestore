@@ -16,6 +16,7 @@ use crate::geo::functions as geo_fns;
 #[cfg(feature = "geometry3d")]
 use crate::geo::index3d::SpatialIndex3D;
 use crate::geo::spatial_index::SpatialIndex;
+use crate::store::changes::{self, ChangeLog, GraphDelta};
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
 use crate::store::telemetry::{QueryShape, Served, Telemetry};
@@ -55,6 +56,8 @@ pub enum StoreError {
     UnsupportedFormat(String),
     #[error("Graph not found: {0}")]
     GraphNotFound(String),
+    #[error("{0}")]
+    Other(String),
 }
 
 /// How blank nodes are treated when data is imported.
@@ -273,6 +276,9 @@ pub struct TripleStore {
     /// Workload telemetry: which exit answered each query and how fast,
     /// validation runs, write spacing. Shared by clones. See [`Telemetry`].
     telemetry: Arc<Telemetry>,
+    /// Per-quad change capture with a durable cursor. Shared by clones.
+    /// See [`ChangeLog`].
+    changes: Arc<ChangeLog>,
     /// Process-unique id of this store instance, shared by its clones.
     /// Caches keyed on a store must not survive the store: a new store
     /// can reuse the old one's address and start at the same write
@@ -312,6 +318,7 @@ impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
         self.0.parallel_mirror.write_finished();
         self.0.query_cache.invalidate();
+        changes::leave_write();
     }
 }
 
@@ -327,6 +334,25 @@ impl TripleStore {
         graph_index.rebuild(&store);
         let spatial_index = SpatialIndex::new();
         spatial_index.rebuild(&store);
+        // The change log beside the store: settle whatever a crash left
+        // pending, then check every graph's count against the last one the
+        // log recorded, so a write the log never saw closes its chains.
+        let changes = ChangeLog::open(Some(path))?;
+        let contains = |q: &Quad| store.contains(q.as_ref()).unwrap_or(false);
+        match changes.resolve_pending(&contains) {
+            Ok((c, a, u)) if c + a + u > 0 => {
+                info!("change log: {c} pending row(s) committed, {a} aborted, {u} unknown")
+            }
+            Err(e) => tracing::warn!("change log: pending rows not resolved: {e}"),
+            _ => {}
+        }
+        let disagreed = changes.reconcile_counts(&graph_index.all_entries());
+        if !disagreed.is_empty() {
+            tracing::warn!(
+                "change log: {} graph(s) changed outside the log; their chains are closed",
+                disagreed.len()
+            );
+        }
         #[cfg(feature = "geometry3d")]
         let spatial_index_3d = {
             // Defer the (potentially large) WKT-Z scan: a persistent store may
@@ -352,6 +378,7 @@ impl TripleStore {
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            changes: Arc::new(changes),
             persistent: true,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
@@ -377,6 +404,7 @@ impl TripleStore {
             void_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            changes: Arc::new(ChangeLog::open(None)?),
             persistent: false,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
@@ -400,6 +428,24 @@ impl TripleStore {
     /// Override the query-result cache configuration (builder style; tests).
     pub fn with_query_cache(mut self, enabled: bool, max_entries: usize, max_rows: usize) -> Self {
         self.query_cache = QueryCache::new(enabled, max_entries, max_rows);
+        self
+    }
+
+    /// Change capture on, with these caps (builder style; tests): the
+    /// before-image scan cap and the payload cap, in quads. The log becomes
+    /// an in-memory one, on regardless of `OTS_CHANGE_CAPTURE`.
+    pub fn with_change_capture(mut self, max_scan: usize, max_payload: usize) -> Self {
+        self.changes = Arc::new(
+            ChangeLog::in_memory()
+                .map(|l| l.with_caps(max_scan, max_payload))
+                .unwrap_or_else(|_| ChangeLog::disabled()),
+        );
+        self
+    }
+
+    /// Switch change capture off (builder style; tests).
+    pub fn with_change_capture_disabled(mut self) -> Self {
+        self.changes = Arc::new(ChangeLog::disabled());
         self
     }
 
@@ -441,6 +487,7 @@ impl TripleStore {
         }
         self.parallel_mirror.write_started();
         self.query_cache.invalidate();
+        changes::enter_write();
         WriteGuard(self)
     }
 
@@ -452,6 +499,12 @@ impl TripleStore {
     /// The workload telemetry rings (see [`Telemetry`]).
     pub fn telemetry(&self) -> &Telemetry {
         &self.telemetry
+    }
+
+    /// The change log: one row per graph per write, sequenced in commit
+    /// order (see [`ChangeLog`]).
+    pub fn changes(&self) -> &ChangeLog {
+        &self.changes
     }
 
     /// Whether the store is RocksDB-backed (see the `persistent` field).
@@ -797,10 +850,22 @@ impl TripleStore {
         // scans. `None` ⇒ targets can't be bounded (variable graph, CLEAR/DROP/
         // CREATE/LOAD, or a parse miss) ⇒ conservative full rebuild.
         let targets = Self::static_update_targets(sparql);
-        self.query_options()
-            .parse_update(sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // A ground update is simulated first (probes, not a scan), so its
+        // row is the exact net delta; anything else is scanned or unknown.
+        let exact = if self.changes.enabled() && targets.is_some() {
+            self.ground_update_delta(sparql)
+        } else {
+            None
+        };
+        let prepared = self.query_options().parse_update(sparql)?;
+        self.execute_update_captured(
+            "update",
+            prepared,
+            targets.as_deref(),
+            exact
+                .as_ref()
+                .map(|(_, ins, del)| (ins.as_slice(), del.as_slice())),
+        )?;
         match targets {
             Some(targets) => self
                 .graph_index
@@ -808,6 +873,213 @@ impl TripleStore {
             None => self.graph_index.rebuild(&self.store),
         }
         Ok(())
+    }
+
+    // ─── Change capture ───────────────────────────────────────────────────────
+
+    /// Run a prepared update inside one transaction, recording its rows:
+    /// exact when the caller simulated a ground update, a before/after scan
+    /// of the static targets when they are known and small enough, unknown
+    /// otherwise. The commit is the repo's own call, inside the log's
+    /// sequence section, so `seq` order is commit order (delta note §4.3).
+    fn execute_update_captured(
+        &self,
+        origin: &'static str,
+        prepared: oxigraph::sparql::PreparedSparqlUpdate,
+        targets: Option<&[Option<String>]>,
+        exact: Option<(&[Quad], &[Quad])>,
+    ) -> Result<(), StoreError> {
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin(origin, targets, &pre_count);
+        let scan = self.scan_targets(intent.is_some(), targets, exact.is_some());
+        let before: Vec<(Option<String>, Vec<Quad>)> = scan
+            .iter()
+            .flatten()
+            .map(|g| (g.clone(), self.graph_quads(g.as_deref())))
+            .collect();
+        let mut tx = self.store.start_transaction()?;
+        if let Err(e) = prepared.on_transaction(&mut tx).execute() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        let deltas = if intent.is_some() {
+            self.deltas_for(&tx, exact, scan.as_deref(), before, targets)
+        } else {
+            Vec::new()
+        };
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))
+    }
+
+    /// The graphs to scan for a before-image: only when a row will be
+    /// written, the targets are known, no exact delta is in hand, and their
+    /// summed counts fit the scan cap.
+    fn scan_targets(
+        &self,
+        recording: bool,
+        targets: Option<&[Option<String>]>,
+        exact: bool,
+    ) -> Option<Vec<Option<String>>> {
+        if !recording || exact {
+            return None;
+        }
+        let t = targets?;
+        let total: usize = t
+            .iter()
+            .map(|g| self.graph_index.get_count(g.as_deref()).unwrap_or(0))
+            .sum();
+        (total <= self.changes.max_scan()).then(|| t.to_vec())
+    }
+
+    /// The rows of a write, from what is known after it ran and before it
+    /// committed: the exact delta, the before/after diff, or unknown.
+    fn deltas_for(
+        &self,
+        tx: &oxigraph::store::Transaction<'_>,
+        exact: Option<(&[Quad], &[Quad])>,
+        scan: Option<&[Option<String>]>,
+        before: Vec<(Option<String>, Vec<Quad>)>,
+        targets: Option<&[Option<String>]>,
+    ) -> Vec<GraphDelta> {
+        if let Some((added, removed)) = exact {
+            return Self::deltas_by_graph(added, removed, self.changes.max_payload());
+        }
+        if scan.is_some() {
+            return before
+                .into_iter()
+                .map(|(g, pre)| {
+                    let post = Self::tx_graph_quads(tx, g.as_deref());
+                    let (added, removed) = changes::diff_quads(&pre, &post);
+                    let n = post.len();
+                    GraphDelta::full(g, added, removed).with_post_count(n)
+                })
+                .collect();
+        }
+        targets
+            .map(|t| t.iter().map(|g| GraphDelta::unknown(g.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Group an exact delta by graph: full rows when the whole payload fits
+    /// the cap, exact counts per graph otherwise.
+    fn deltas_by_graph(added: &[Quad], removed: &[Quad], max_payload: usize) -> Vec<GraphDelta> {
+        let mut by_graph: std::collections::BTreeMap<Option<String>, (Vec<Quad>, Vec<Quad>)> =
+            std::collections::BTreeMap::new();
+        let full = added.len() + removed.len() <= max_payload;
+        for q in added {
+            let e = by_graph.entry(Self::graph_key_of(q)).or_default();
+            if full {
+                e.0.push(q.clone());
+            }
+        }
+        for q in removed {
+            let e = by_graph.entry(Self::graph_key_of(q)).or_default();
+            if full {
+                e.1.push(q.clone());
+            }
+        }
+        if full {
+            by_graph
+                .into_iter()
+                .map(|(g, (a, r))| GraphDelta::full(g, a, r))
+                .collect()
+        } else {
+            let count = |quads: &[Quad], g: &Option<String>| {
+                quads.iter().filter(|q| Self::graph_key_of(q) == *g).count()
+            };
+            by_graph
+                .into_keys()
+                .map(|g| {
+                    let (a, r) = (count(added, &g), count(removed, &g));
+                    GraphDelta::counts(g, a, r, None)
+                })
+                .collect()
+        }
+    }
+
+    /// The quads that would be new in each graph of `quads` (duplicates
+    /// within the batch and quads already stored do not count). A
+    /// version-snapshot graph is reported unknown rather than have its copy
+    /// stored a second time (delta note §2.2).
+    fn fresh_by_graph(
+        &self,
+        quads: &[Quad],
+        graphs: &[Option<String>],
+    ) -> Result<Vec<GraphDelta>, StoreError> {
+        let mut seen: std::collections::HashSet<&Quad> =
+            std::collections::HashSet::with_capacity(quads.len());
+        let mut fresh: std::collections::BTreeMap<Option<String>, Vec<Quad>> =
+            std::collections::BTreeMap::new();
+        let snapshot = |g: &Option<String>| g.as_deref().is_some_and(|g| g.contains("/version/"));
+        for q in quads {
+            let g = Self::graph_key_of(q);
+            if snapshot(&g) || !seen.insert(q) {
+                continue;
+            }
+            if !self.store.contains(q.as_ref())? {
+                fresh.entry(g).or_default().push(q.clone());
+            }
+        }
+        Ok(graphs
+            .iter()
+            .map(|g| {
+                if snapshot(g) {
+                    return GraphDelta::unknown(g.clone());
+                }
+                let quads = fresh.remove(g).unwrap_or_default();
+                if quads.len() <= self.changes.max_payload() {
+                    GraphDelta::full(g.clone(), quads, Vec::new())
+                } else {
+                    GraphDelta::counts(g.clone(), quads.len(), 0, None)
+                }
+            })
+            .collect())
+    }
+
+    /// The count index as the log's pre-write count: complete after the
+    /// open-time rebuild, so a graph it does not list has no quads.
+    fn pre_count(&self) -> impl Fn(Option<&str>) -> Option<usize> + '_ {
+        move |g| Some(self.graph_index.get_count(g).unwrap_or(0))
+    }
+
+    fn graph_key_of(q: &Quad) -> Option<String> {
+        match &q.graph_name {
+            GraphName::NamedNode(n) => Some(n.as_str().to_string()),
+            _ => None,
+        }
+    }
+
+    fn graph_name_ref(graph: Option<&str>) -> Option<GraphNameRef<'_>> {
+        match graph {
+            None => Some(GraphNameRef::DefaultGraph),
+            Some(iri) => NamedNodeRef::new(iri).ok().map(GraphNameRef::NamedNode),
+        }
+    }
+
+    /// Every quad of a graph, from the store.
+    fn graph_quads(&self, graph: Option<&str>) -> Vec<Quad> {
+        match Self::graph_name_ref(graph) {
+            Some(name) => self
+                .store
+                .quads_for_pattern(None, None, None, Some(name))
+                .flatten()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Every quad of a graph, as an uncommitted transaction sees it.
+    fn tx_graph_quads(tx: &oxigraph::store::Transaction<'_>, graph: Option<&str>) -> Vec<Quad> {
+        match Self::graph_name_ref(graph) {
+            Some(name) => tx
+                .quads_for_pattern(None, None, None, Some(name))
+                .flatten()
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Statically determine the set of graphs a SPARQL UPDATE writes to, so the
@@ -906,10 +1178,8 @@ impl TripleStore {
             }
         }
         let targets = Self::static_update_targets(sparql);
-        self.query_options()
-            .for_update(parsed)
-            .on_store(&self.store)
-            .execute()?;
+        let prepared = self.query_options().for_update(parsed);
+        self.execute_update_captured("update_scoped", prepared, targets.as_deref(), None)?;
         match targets {
             Some(targets) => self
                 .graph_index
@@ -995,10 +1265,25 @@ impl TripleStore {
         } else {
             self.ground_update_delta(sparql)
         };
-        self.query_options()
-            .parse_update(sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // The log's targets: the graphs of the exact delta when there is one
+        // (no second parse of the text), the statically known targets
+        // otherwise, nothing when nothing records.
+        let targets: Option<Vec<Option<String>>> = if !self.changes.enabled() {
+            None
+        } else if let Some((deltas, _, _)) = &exact {
+            Some(deltas.iter().map(|(g, _)| g.clone()).collect())
+        } else {
+            Self::static_update_targets(sparql)
+        };
+        let prepared = self.query_options().parse_update(sparql)?;
+        self.execute_update_captured(
+            "update_targeted",
+            prepared,
+            targets.as_deref(),
+            exact
+                .as_ref()
+                .map(|(_, ins, del)| (ins.as_slice(), del.as_slice())),
+        )?;
         let mut result = None;
         match exact {
             Some((deltas, inserted, deleted)) if !affected_iris.is_empty() => {
@@ -1185,6 +1470,35 @@ impl TripleStore {
             }
         }
 
+        // The batch's rows: exact when every statement is ground (one
+        // simulation over the joined text), a before/after scan of the
+        // static targets when known and small enough, unknown otherwise.
+        let (targets, ground) = if self.changes.enabled() {
+            let joined = statements.join(" ;\n");
+            let targets = Self::static_update_targets(&joined);
+            let ground = if targets.is_some() {
+                self.ground_update_delta(&joined)
+            } else {
+                None
+            };
+            (targets, ground)
+        } else {
+            (None, None)
+        };
+        let exact = ground
+            .as_ref()
+            .map(|(_, ins, del)| (ins.as_slice(), del.as_slice()));
+        let pre_count = self.pre_count();
+        let intent = self
+            .changes
+            .begin("batch_update", targets.as_deref(), &pre_count);
+        let scan = self.scan_targets(intent.is_some(), targets.as_deref(), exact.is_some());
+        let before: Vec<(Option<String>, Vec<Quad>)> = scan
+            .iter()
+            .flatten()
+            .map(|g| (g.clone(), self.graph_quads(g.as_deref())))
+            .collect();
+
         let opts = self.query_options();
         let mut tx = self.store.start_transaction()?;
         for (i, u) in parsed.into_iter().enumerate() {
@@ -1192,10 +1506,19 @@ impl TripleStore {
                 // Dropping the transaction without `commit` discards every
                 // statement that ran before this one.
                 drop(tx);
+                if let Some(intent) = intent {
+                    self.changes.abort(intent);
+                }
                 return Ok(rolled_back(i, e.to_string()));
             }
         }
-        tx.commit()?;
+        let deltas = if intent.is_some() {
+            self.deltas_for(&tx, exact, scan.as_deref(), before, targets.as_deref())
+        } else {
+            Vec::new()
+        };
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
 
         // Rebuild graph index once for the entire batch
         self.graph_index.rebuild(&self.store);
@@ -1232,9 +1555,19 @@ impl TripleStore {
         if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
             // oxigraph 0.5: the bulk loader stages batches and only persists them on
             // an explicit `commit()` — dropping it without committing loses the data.
+            // Streamed straight into the store: the delta is never
+            // materialised, so the row is an honest store-scoped unknown.
+            let parser = Self::parser_for(format, base_iri)?;
+            let intent = self.changes.begin("load_reader", None, &|_| None);
             let mut loader = self.store.bulk_loader();
-            loader.load_from_reader(Self::parser_for(format, base_iri)?, reader)?;
-            loader.commit()?;
+            if let Err(e) = loader.load_from_reader(parser, reader) {
+                if let Some(intent) = intent {
+                    self.changes.abort(intent);
+                }
+                return Err(e.into());
+            }
+            self.changes
+                .commit_unknown(intent, None, || loader.commit().map_err(StoreError::from))?;
             info!("Data loaded successfully (streamed)");
             self.graph_index.rebuild(&self.store);
             self.spatial_index.mark_dirty();
@@ -1332,9 +1665,40 @@ impl TripleStore {
         } else {
             None
         };
+        // The rows: the fresh quads of a named target; per graph unknown for
+        // a default-graph load, whose duplicates were never probed.
+        let (targets, deltas): (Vec<Option<String>>, Vec<GraphDelta>) = match (to_graph, &new_quads)
+        {
+            (Some(g), Some(fresh)) => {
+                let g = Some(g.to_string());
+                let delta = if fresh.len() <= self.changes.max_payload() {
+                    GraphDelta::full(g.clone(), fresh.clone(), Vec::new())
+                } else {
+                    GraphDelta::counts(g.clone(), fresh.len(), 0, None)
+                };
+                (vec![g], vec![delta])
+            }
+            _ => {
+                let mut graphs: Vec<Option<String>> =
+                    quads.iter().map(Self::graph_key_of).collect();
+                graphs.sort();
+                graphs.dedup();
+                let deltas = graphs.iter().cloned().map(GraphDelta::unknown).collect();
+                (graphs, deltas)
+            }
+        };
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin("load", Some(&targets), &pre_count);
         let mut loader = self.store.bulk_loader();
-        loader.load_quads(quads)?;
-        loader.commit()?; // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
+        if let Err(e) = loader.load_quads(quads) {
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        // oxigraph 0.5: stage-then-commit (see load_reader_with_base).
+        self.changes
+            .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
 
         info!("Data loaded successfully");
         let delta = match (to_graph, new_quads) {
@@ -1525,12 +1889,46 @@ impl TripleStore {
                 std::collections::HashSet::with_capacity(quads.len());
             quads.iter().filter(|q| seen.insert(q)).count()
         };
+        // The row is the net diff against the pre-image, which the clear
+        // walks anyway; above the scan cap the row says so.
+        let target = graph_iri.map(str::to_string);
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin(
+            "graph_store_put",
+            Some(std::slice::from_ref(&target)),
+            &pre_count,
+        );
+        let scan = intent.is_some()
+            && self.graph_index.get_count(graph_iri).unwrap_or(usize::MAX)
+                <= self.changes.max_scan();
+        let pre: Vec<Quad> = if scan {
+            self.store
+                .quads_for_pattern(None, None, None, Some(graph_name))
+                .flatten()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut tx = self.store.start_transaction()?;
-        tx.clear_graph(graph_name)?;
+        if let Err(e) = tx.clear_graph(graph_name) {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
         for q in &quads {
             tx.insert(q.as_ref());
         }
-        tx.commit()?;
+        let delta = if scan {
+            let (added, removed) = changes::diff_quads(&pre, &quads);
+            GraphDelta::full(target.clone(), added, removed).with_post_count(distinct)
+        } else {
+            GraphDelta::unknown(target.clone()).with_post_count(distinct)
+        };
+        self.changes.commit_with(intent, vec![delta], || {
+            tx.commit().map_err(StoreError::from)
+        })?;
         info!("Graph replaced ({distinct} quads)");
         if graph_iri.is_some() {
             // The graph now holds exactly the payload's distinct quads.
@@ -1577,15 +1975,7 @@ impl TripleStore {
     /// graph that took ~33 s, and collecting the quads first then deleting
     /// them in 50k-quad transactions takes ~22 s — the same work in RocksDB,
     /// but without one write batch the size of the graph.
-    fn clear_graph_chunked(&self, graph_name: GraphNameRef<'_>) -> Result<(), StoreError> {
-        let quads: Vec<Quad> = self
-            .store
-            .quads_for_pattern(None, None, None, Some(graph_name))
-            .collect::<Result<_, _>>()?;
-        if quads.len() < 100_000 {
-            self.store.clear_graph(graph_name)?;
-            return Ok(());
-        }
+    fn clear_graph_chunked(&self, quads: &[Quad]) -> Result<(), StoreError> {
         for chunk in quads.chunks(50_000) {
             let mut tx = self.store.start_transaction()?;
             for q in chunk {
@@ -1605,7 +1995,37 @@ impl TripleStore {
             ),
             None => GraphNameRef::DefaultGraph,
         };
-        self.clear_graph_chunked(graph_name)?;
+        let quads: Vec<Quad> = self
+            .store
+            .quads_for_pattern(None, None, None, Some(graph_name))
+            .collect::<Result<_, _>>()?;
+        let target = graph_iri.map(str::to_string);
+        let pre_count = self.pre_count();
+        let intent = self.changes.begin(
+            "graph_store_delete",
+            Some(std::slice::from_ref(&target)),
+            &pre_count,
+        );
+        if quads.len() < 100_000 {
+            // One transaction: the removed quads are the row.
+            let delta = GraphDelta::full(target.clone(), Vec::new(), quads).with_post_count(0);
+            self.changes.commit_with(intent, vec![delta], || {
+                self.store.clear_graph(graph_name).map_err(StoreError::from)
+            })?;
+        } else {
+            // Chunked in 50k-quad transactions — the one non-atomic primitive
+            // (delta note §2.4): exact counts once it is through, unknown if
+            // it fails part way.
+            let n = quads.len();
+            if let Err(e) = self.clear_graph_chunked(&quads) {
+                self.changes
+                    .commit_unknown(intent, Some(vec![target]), || Ok::<(), StoreError>(()))?;
+                return Err(e);
+            }
+            let delta = GraphDelta::counts(target.clone(), 0, n, Some(0));
+            self.changes
+                .commit_with(intent, vec![delta], || Ok::<(), StoreError>(()))?;
+        }
         if let Some(iri) = graph_iri {
             let nn = NamedNode::new(iri)
                 .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?;
@@ -1639,10 +2059,42 @@ impl TripleStore {
             .collect::<Vec<_>>()
             .join(" ; ");
 
-        self.query_options()
-            .parse_update(&sparql)?
-            .on_store(&self.store)
-            .execute()?;
+        // The rows: every dropped graph's quads when they fit the scan cap
+        // together, exact counts from the index otherwise.
+        let targets: Vec<Option<String>> = graph_iris.iter().map(|g| Some(g.to_string())).collect();
+        let pre_count = self.pre_count();
+        let intent = self
+            .changes
+            .begin("bulk_delete_graphs", Some(&targets), &pre_count);
+        let total: usize = targets
+            .iter()
+            .map(|g| self.graph_index.get_count(g.as_deref()).unwrap_or(0))
+            .sum();
+        let deltas: Vec<GraphDelta> = targets
+            .iter()
+            .map(|g| {
+                if intent.is_some() && total <= self.changes.max_scan() {
+                    GraphDelta::full(g.clone(), Vec::new(), self.graph_quads(g.as_deref()))
+                        .with_post_count(0)
+                } else {
+                    match self.graph_index.get_count(g.as_deref()) {
+                        Some(n) => GraphDelta::counts(g.clone(), 0, n, Some(0)),
+                        None => GraphDelta::unknown(g.clone()).with_post_count(0),
+                    }
+                }
+            })
+            .collect();
+        let prepared = self.query_options().parse_update(&sparql)?;
+        let mut tx = self.store.start_transaction()?;
+        if let Err(e) = prepared.on_transaction(&mut tx).execute() {
+            drop(tx);
+            if let Some(intent) = intent {
+                self.changes.abort(intent);
+            }
+            return Err(e.into());
+        }
+        self.changes
+            .commit_with(intent, deltas, || tx.commit().map_err(StoreError::from))?;
 
         // Remove from in-memory graph index.
         for iri in graph_iris {
@@ -1663,9 +2115,30 @@ impl TripleStore {
     ) -> Result<(), StoreError> {
         let _w = self.begin_write();
         if !quads.is_empty() {
+            // The rows: per graph, the quads that were new (probed); unknown
+            // for a version-snapshot graph (see `fresh_by_graph`).
+            let mut graphs: Vec<Option<String>> = quads.iter().map(Self::graph_key_of).collect();
+            graphs.sort();
+            graphs.dedup();
+            let pre_count = self.pre_count();
+            let intent = self
+                .changes
+                .begin("bulk_insert_quads", Some(&graphs), &pre_count);
+            let deltas = if intent.is_some() {
+                self.fresh_by_graph(&quads, &graphs)?
+            } else {
+                Vec::new()
+            };
             let mut loader = self.store.bulk_loader();
-            loader.load_quads(quads)?;
-            loader.commit()?; // oxigraph 0.5: stage-then-commit.
+            if let Err(e) = loader.load_quads(quads) {
+                if let Some(intent) = intent {
+                    self.changes.abort(intent);
+                }
+                return Err(e.into());
+            }
+            // oxigraph 0.5: stage-then-commit.
+            self.changes
+                .commit_with(intent, deltas, || loader.commit().map_err(StoreError::from))?;
             self.spatial_index.mark_dirty();
             #[cfg(feature = "geometry3d")]
             self.spatial_index_3d.mark_dirty();
@@ -1725,7 +2198,37 @@ impl TripleStore {
     /// Insert a single quad into the store.
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
         let _w = self.begin_write();
-        self.store.insert(&quad)?;
+        let graph = Self::graph_key_of(&quad);
+        let pre_count = self.pre_count();
+        let intent =
+            self.changes
+                .begin("store_quad", Some(std::slice::from_ref(&graph)), &pre_count);
+        let fresh = !self.store.contains(quad.as_ref())?;
+        let delta = GraphDelta::full(
+            graph.clone(),
+            if fresh {
+                vec![quad.clone()]
+            } else {
+                Vec::new()
+            },
+            Vec::new(),
+        );
+        self.changes.commit_with(intent, vec![delta], || {
+            self.store
+                .insert(&quad)
+                .map(|_| ())
+                .map_err(StoreError::from)
+        })?;
+        // Keep the count index exact for the one-quad path too (it used
+        // to lag this write, which /health tolerated and a chain cannot).
+        if fresh {
+            if self.graph_index.get_count(graph.as_deref()).is_some() {
+                self.graph_index.adjust(graph.as_deref(), 1);
+            } else {
+                self.graph_index
+                    .recount_specific_graphs(&self.store, std::slice::from_ref(&graph));
+            }
+        }
         Ok(())
     }
 

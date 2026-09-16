@@ -79,6 +79,12 @@ pub fn management_routes() -> Router<AppState> {
         .route("/", get(service_description_handler))
         .route("/health", get(health_check))
         .route("/api/admin/telemetry", get(admin_telemetry))
+        .route("/api/admin/changes", get(admin_changes))
+        .route("/api/admin/changes/status", get(admin_changes_status))
+        .route(
+            "/api/admin/changes/cursors/:name",
+            put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
+        )
         .route("/livez", get(liveness_check))
 }
 
@@ -769,9 +775,11 @@ pub(crate) async fn execute_update(
             .unwrap_or_default()
     };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
+    let ctx = write_context(state, user, crate::commit_log::CommitKind::Sparql);
     let delta = tokio::time::timeout(
         timeout,
         tokio::task::spawn_blocking(move || {
+            let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
             store.update_targeted_delta(&effective, &affected, requires_admin)
         }),
     )
@@ -1654,7 +1662,13 @@ async fn graph_store_put(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     run_store_write(&state, "graph store PUT", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_put(graph.as_deref(), &data, format)
     })
     .await?;
@@ -1738,7 +1752,13 @@ async fn graph_store_post(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     let inserted = run_store_write(&state, "graph store POST", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_post_delta(graph.as_deref(), &data, format)
     })
     .await?;
@@ -1812,7 +1832,13 @@ async fn graph_store_delete(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     run_store_write(&state, "graph store DELETE", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_delete(graph.as_deref())
     })
     .await?;
@@ -2046,6 +2072,129 @@ async fn admin_telemetry(
         )),
         Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
         Some(_) => Ok(Json(state.store.telemetry().summary())),
+    }
+}
+
+/// The context the change log stamps on a write's rows: the actor IRI as the
+/// commit trail mints it, and the commit kind. The guard is set inside the
+/// blocking closure that runs the primitive, never across an await.
+fn write_context(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+    kind: crate::commit_log::CommitKind,
+) -> crate::store::changes::WriteContext {
+    crate::store::changes::WriteContext {
+        actor_iri: user.map(|u| format!("{}/users/{}", state.base_url, u.user_id)),
+        commit_iri: None,
+        kind: Some(kind.as_str().to_string()),
+    }
+}
+
+fn require_admin(
+    user: Option<&AuthenticatedUser>,
+) -> Result<&AuthenticatedUser, (StatusCode, String)> {
+    match user {
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        )),
+        Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
+        Some(u) => Ok(u),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    graph: Option<String>,
+}
+
+/// GET /api/admin/changes?after=&limit=&graph= — rows of the change log with
+/// a sequence number above `after`, in commit order; `graph` narrows to one
+/// graph's rows plus the store-scoped rows every reader must see. Admins
+/// only: rows carry quads from every tenant.
+async fn admin_changes(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Query(q): Query<ChangesQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let after = q.after.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(500).clamp(1, 5000);
+    let log = state.store.changes();
+    let rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
+    Ok(Json(serde_json::json!({
+        "epoch": log.epoch(),
+        "rows": rows,
+        "next_after": next_after,
+    })))
+}
+
+/// GET /api/admin/changes/status — the log's epoch, sequence, row states,
+/// cursors and caps.
+async fn admin_changes_status(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    Ok(Json(state.store.changes().status()))
+}
+
+#[derive(Deserialize)]
+struct CursorBody {
+    seq: i64,
+}
+
+/// PUT /api/admin/changes/cursors/:name — bookmark a consumer's position.
+/// Rows at or below the lowest live cursor are what retention keeps.
+async fn admin_changes_set_cursor(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(name): Path<String>,
+    Json(body): Json<CursorBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let u = require_admin(user.as_deref())?;
+    let valid_name = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid_name {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor names are 1-64 characters of [A-Za-z0-9._-]".to_string(),
+        ));
+    }
+    let log = state.store.changes();
+    let last = log.last_seq();
+    if body.seq < 0 || body.seq > last {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("seq must be between 0 and {last}"),
+        ));
+    }
+    log.set_cursor(&name, body.seq, Some(&u.user_id))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    log.cursor(&name).map(Json).ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "cursor not stored".to_string(),
+    ))
+}
+
+/// DELETE /api/admin/changes/cursors/:name — 204, or 404 for a name the log
+/// does not hold.
+async fn admin_changes_delete_cursor(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    if state.store.changes().delete_cursor(&name) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "no such cursor".to_string()))
     }
 }
 
