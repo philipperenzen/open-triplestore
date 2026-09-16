@@ -1458,3 +1458,42 @@ log's (§2 of P2, measured). The one addition to every write path on every
 node is the read-only check in `begin_write`; the update benchmarks were
 not re-run for a branch on an atomic — the P4 checkpoint's suite run and
 the next paired measurement (the sync variant, if approved) will carry it.
+
+## Checkpoint (2026-09-16, HEAD `b650972` + this note)
+
+**Commits since the P2 checkpoint:** `b650972` replication (P4 item 1). One
+item, signed off, no branding. The baseline worktree
+(`C:/Users/phili/Code/ots-bench-base`, detached at `d29134b`) and its target
+volume `ots-bench-base-tgt` are removed with this note; the next paired
+measurement recreates them from whatever HEAD is the baseline then.
+
+**Suite.** 3,053 passed / 2 failed / 2 ignored over 86 binaries at the pre-commit tree — the two failures were one test, the doc-parity check `docs::builtin_parity::every_top_level_doc_is_registered` in the lib and bin test binaries, tripped by a new `docs/replication.md` that `src/docs/mod.rs` (out of scope) would have had to register; the chapter moved into `docs/operations.md` and the docs tests were re-run green; the other 84 binaries were not re-run for a doc move and comment edits. The two ignored are the pre-existing one and the 9M harness (default environment: capture off, no replication
+role). Clippy (`--all-targets -D warnings`) clean. Conformance table
+regenerated for the new binary.
+
+**Where P4 stands against the maintainer's design.**
+
+| Design item | State |
+|---|---|
+| Change log = per-quad capture, deterministic deltas, own counter, atomic-with-data where possible | shipped in P2 (`f97d894`); intent rows, seq in the commit section, epochs |
+| Follower tails `after=<seq>` | shipped: paged polling (500 rows), every poll in `hot`; long-poll/SSE not built — a hot follower's floor is the poll period (500 ms default, 50 ms minimum) |
+| Bulk loads as "graph X replaced at seq N", follower fetches the graph | shipped: `counts` / `unknown` rows, store-scoped rows, count disagreements all end in one Graph Store `GET` |
+| Assets beside the store | not built: share the S3 bucket; local-filesystem assets stay on the node that received them |
+| Identity DB replicated separately | not built: a follower authenticates with the `auth.db` it has; seed from the leader's backup. Options for the maintainer: an application-level log of identity changes (the same shape as the change log, in `src/auth/db.rs`), or WAL shipping (Litestream-style, outside the binary) |
+| Failover / fencing with epochs | shipped: a follower applies only its adopted epoch, resynchronises on any other; promotion = restart with the leader role |
+| `/api/replication/status` beside `/livez` | shipped, public; `healthy` = last successful catch-up within three intervals |
+| Each node rebuilds its own mirror / text index | as designed: the follower's writes go through the normal primitives, so the mirror, text and spatial indexes follow |
+| Temperatures: all / some, cold / medium / hot | shipped: scope `all` / graph list / dataset list; `cold` hourly, `warm` (`medium`) every minute, `hot` every poll; interval override |
+| Hot, asynchronous | shipped (this is what `hot` is) |
+| Hot, synchronous | **not built — needs a decision**: the leader would wait, in its write path, until the cursors of the configured followers reach the write's seq (the ack exists: the cursor PUT). Adds a follower round-trip to every write's latency and needs a policy for a follower that is down (block, degrade to async, fail the write). Measurable against the update benchmarks once decided |
+| Hot, consensus (Raft) | **not built — needs a dependency**: the programme adds none without the maintainer's decision |
+
+**Still the maintainer's** (the P2 list, plus P4's):
+
+1. Change capture default (off; `OTS_REPLICATION_ROLE=leader` turns it on).
+2. `/sparql/batch` 200 on a rolled-back batch (keep, or 409/422).
+3. `v0.6.0` at merge: the CHANGELOG fold is the last commit before the release PR.
+4. Synchronous hot replication: build it (with which down-follower policy), or not.
+5. Consensus: which library, if any (a dependency).
+6. Identity database: application-level log in `auth.db`, or WAL shipping outside the binary.
+7. The follower's boot seed: a follower logs the seed's read-only refusals at start; silencing them needs the seed callers (`src/saved_queries/seed.rs`, `src/shacl_studio/seed*.rs` — outside the programme's scope) to skip on a follower.
