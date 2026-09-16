@@ -1015,6 +1015,39 @@ export async function putShapeGraphTurtle(id: string, body: string, contentType 
   return res.json();
 }
 
+// ─── SQL datasources, RML mappings and materialisation runs ─────────────────
+// Admin-only (src/sources). A datasource response carries the credential
+// REFERENCE (env:/file:/vault:), never a value — there is no password field
+// anywhere in this surface.
+export const listSources = () => request('GET', '/api/sources');
+export const getSource = (id) => request('GET', `/api/sources/${encodeURIComponent(id)}`);
+export const createSource = (body) => request('POST', '/api/sources', body);
+export const updateSource = (id, body) => request('PUT', `/api/sources/${encodeURIComponent(id)}`, body);
+export const deleteSource = (id) => request('DELETE', `/api/sources/${encodeURIComponent(id)}`);
+/// Open a connection and throw it away. Never persists anything.
+export const testSource = (body) => request('POST', '/api/sources/test', body);
+export const introspectSource = (id) => request('GET', `/api/sources/${encodeURIComponent(id)}/introspect`);
+export const previewSourceTable = (id, table, limit = 20) =>
+  request('GET', `/api/sources/${encodeURIComponent(id)}/preview?table=${encodeURIComponent(table)}&limit=${limit}`);
+export const sourceMetrics = () => request('GET', '/api/sources/metrics');
+
+export const listSourceMappings = (sourceId) =>
+  request('GET', sourceId ? `/api/mappings?source=${encodeURIComponent(`urn:source:${sourceId}`)}` : '/api/mappings');
+export const getMapping = (id) => request('GET', `/api/mappings/${encodeURIComponent(id)}`);
+export const createMapping = (body) => request('POST', '/api/mappings', body);
+export const updateMapping = (id, body) => request('PUT', `/api/mappings/${encodeURIComponent(id)}`, body);
+export const deleteMapping = (id) => request('DELETE', `/api/mappings/${encodeURIComponent(id)}`);
+// `request` returns text when the response is not JSON, which the RML
+// endpoint (text/turtle) relies on.
+export const getMappingRml = (id, version?: number) =>
+  request('GET', `/api/mappings/${encodeURIComponent(id)}/rml${version ? `?version=${version}` : ''}`);
+
+export const listSourceRuns = (sourceId) => request('GET', `/api/sources/${encodeURIComponent(sourceId)}/runs`);
+export const startSourceRun = (sourceId, body) => request('POST', `/api/sources/${encodeURIComponent(sourceId)}/runs`, body);
+export const getRun = (runId) => request('GET', `/api/runs/${encodeURIComponent(runId)}`);
+export const rollbackRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/rollback`, {});
+export const deleteRun = (runId) => request('DELETE', `/api/runs/${encodeURIComponent(runId)}`);
+
 // ─── SHACL Studio: validation pipelines ─────────────────────────────────────
 export const listPipelines = () => request('GET', '/api/shacl/pipelines');
 export const createPipeline = (body) => request('POST', '/api/shacl/pipelines', body);

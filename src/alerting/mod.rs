@@ -8,6 +8,8 @@
 //! Failures are logged at WARN but never propagated; alerting must never
 //! break the calling code path.
 
+use crate::secrets::env_secret_opt;
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,7 +50,7 @@ impl AlertConfig {
                 .ok()
                 .and_then(|s| s.parse().ok()),
             smtp_user: std::env::var("ALERT_SMTP_USER").ok(),
-            smtp_pass: std::env::var("ALERT_SMTP_PASS").ok(),
+            smtp_pass: env_secret_opt("ALERT_SMTP_PASS"),
             smtp_from: std::env::var("ALERT_SMTP_FROM").ok(),
             smtp_to: std::env::var("ALERT_SMTP_TO")
                 .ok()

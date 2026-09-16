@@ -205,7 +205,7 @@ fn client() -> &'static reqwest::Client {
 /// A blocking request from synchronous code (the SPARQL evaluator runs on a
 /// blocking thread). It runs on the module's own runtime, on a scoped OS
 /// thread, so it is safe to call from inside or outside a tokio runtime.
-fn blocking<F, T>(fut: F) -> T
+pub(crate) fn blocking<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send,
     T: Send,

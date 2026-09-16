@@ -1033,6 +1033,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
+    // SQL datasources, RML mapping registry and materialisation runs. Admin
+    // only: a datasource carries a pointer to a production credential, and a
+    // run writes instance data (src/sources).
+    let source_routes = crate::sources::routes::source_routes()
+        .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     // Spark chat history + user memory (strictly per-user, so auth required).
     let llm_history_routes = llm_history::llm_history_routes()
         .route_layer(middleware::from_fn_with_state(
@@ -1890,6 +1902,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
+        .merge(source_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
         .merge(llm_history_routes)
@@ -2431,6 +2444,11 @@ pub async fn run(
     // Compile-time plugins (src/plugins.rs): on_boot + any background task,
     // once per process. A no-op with zero `plugin-*` features enabled.
     crate::plugins::boot_plugins(&crate::plugins::plugin_context(&state));
+
+    // Datasource drivers a plugin contributes (PostgreSQL, MySQL, SQL Server
+    // …) join core's SQLite one. Before any datasource is registered or run,
+    // so a dialect is either available from the first request or not at all.
+    crate::sources::connector::register_plugin_connectors();
 
     // Spawn a background task to periodically prune expired PKCE OAuth sessions (L-7)
     {

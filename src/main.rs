@@ -41,9 +41,11 @@ mod reasoning;
 mod remote;
 mod rml;
 mod saved_queries;
+mod secrets;
 mod seed_bundles;
 mod server;
 mod shacl;
+mod sources;
 mod shacl_studio;
 mod shaclc;
 #[cfg(feature = "shex")]
@@ -472,7 +474,15 @@ async fn main() -> anyhow::Result<()> {
     // Initialize asset storage — S3/MinIO if configured, local filesystem otherwise
     let object_store = if let Some(endpoint) = cli.s3_endpoint {
         let access_key = cli.s3_access_key.unwrap_or_default();
-        let secret_key = cli.s3_secret_key.unwrap_or_default();
+        // A secret reference (env:/file:/vault:) is resolved here; a raw value
+        // is refused in the production posture and warned about elsewhere.
+        let secret_key = match cli.s3_secret_key.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v) => secrets::resolve_configured("S3_SECRET_KEY", v)
+                .map_err(|e| anyhow::anyhow!("S3_SECRET_KEY: {e}"))?
+                .expose()
+                .to_string(),
+            None => String::new(),
+        };
         let obj_store = storage::ObjectStore::new(
             &endpoint,
             &cli.s3_bucket,

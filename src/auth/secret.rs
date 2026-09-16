@@ -1,10 +1,21 @@
-//! Symmetric encryption for sensitive credentials stored in the database
-//! (OAuth client secrets, etc.).
+//! Storage for sensitive credentials held in the identity database (OAuth /
+//! OIDC client secrets).
 //!
-//! Uses AES-256-GCM with a 96-bit random nonce.  The encryption key is derived
-//! from the JWT secret via HKDF-SHA256 so no extra key material needs to be
-//! configured.  The stored blob is `nonce (12 bytes) || ciphertext` encoded as
-//! standard base64.
+//! Two forms share the column:
+//!
+//! * a **secret reference** ([`crate::secrets::SecretRef`]) — `env:NAME`,
+//!   `file:/path`, `vault:<mount>/data/<path>#<key>` — stored verbatim and
+//!   resolved at the moment of use. This is the form a production deployment
+//!   uses: the store holds a pointer, rotation happens in the secret store,
+//!   and nothing here ever persists the value.
+//! * a **legacy encrypted blob** — AES-256-GCM with a 96-bit random nonce,
+//!   the key derived from the JWT secret via HKDF-SHA256, encoded as
+//!   `base64(nonce || ciphertext)`. Kept so deployments that predate secret
+//!   references keep working; accepted with a deprecation warning outside the
+//!   production posture and refused inside it.
+//!
+//! The two are told apart by syntax: a reference carries a `:` after a known
+//! scheme, which base64 never produces.
 
 use aes_gcm::{
     aead::{Aead, Generate, KeyInit},
@@ -61,9 +72,60 @@ pub fn decrypt_secret(encoded: &str, jwt_secret: &str) -> anyhow::Result<String>
     String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("UTF-8 decode error: {e}"))
 }
 
+/// Turn a caller-supplied secret into the value to store.
+///
+/// A reference is validated (well-formed **and** resolvable) and stored as
+/// itself. A raw value is refused in the production posture and, elsewhere,
+/// encrypted with a deprecation warning naming `setting`.
+pub fn store_configured_secret(
+    setting: &str,
+    value: &str,
+    jwt_secret: &str,
+) -> anyhow::Result<String> {
+    match crate::secrets::configured(setting, value)? {
+        crate::secrets::ConfiguredSecret::Reference(r) => {
+            crate::secrets::validate(&r)?;
+            Ok(r.to_string())
+        }
+        crate::secrets::ConfiguredSecret::Raw(raw) => encrypt_secret(raw.expose(), jwt_secret),
+    }
+}
+
+/// Read back whatever [`store_configured_secret`] wrote.
+pub fn read_stored_secret(stored: &str, jwt_secret: &str) -> anyhow::Result<String> {
+    if crate::secrets::looks_like_ref(stored) {
+        let reference = crate::secrets::SecretRef::parse(stored)?;
+        return Ok(crate::secrets::resolve(&reference)?.expose().to_string());
+    }
+    decrypt_secret(stored, jwt_secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reference_is_stored_as_itself_and_resolved_on_read() {
+        std::env::set_var("OTS_AUTH_SECRET_TEST", "client-secret-value");
+        let stored =
+            store_configured_secret("client_secret", "env:OTS_AUTH_SECRET_TEST", "jwt").unwrap();
+        assert_eq!(stored, "env:OTS_AUTH_SECRET_TEST", "the pointer is what lands in the database");
+        assert_eq!(
+            read_stored_secret(&stored, "jwt").unwrap(),
+            "client-secret-value"
+        );
+        // An unresolvable pointer is refused at write time, not at login time.
+        assert!(store_configured_secret("client_secret", "env:OTS_AUTH_SECRET_MISSING", "jwt").is_err());
+    }
+
+    #[test]
+    fn a_legacy_blob_still_reads_back() {
+        // Outside the production posture a raw value is encrypted as before.
+        let stored = store_configured_secret("client_secret", "plaintext-secret", "jwt").unwrap();
+        assert_ne!(stored, "plaintext-secret");
+        assert!(!crate::secrets::looks_like_ref(&stored));
+        assert_eq!(read_stored_secret(&stored, "jwt").unwrap(), "plaintext-secret");
+    }
 
     #[test]
     fn round_trip() {
