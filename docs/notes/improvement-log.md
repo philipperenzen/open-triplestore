@@ -1719,3 +1719,41 @@ thing to add if a status ever shows it. The Raft routes ride the server's
 port: the secret authenticates them and the network should hide them.
 `cargo deny` was not run here (the tool is not in the builder image); the
 new crates are MIT / Apache-2.0 by their manifests.
+
+## Checkpoint (2026-09-16, HEAD `f0adb95` + this note)
+
+**Commits since the P4 checkpoint** (the five decisions, in the order they
+shipped): `59c2b30` batch 422 · `0a42699` capture on by default · `9ab2fb2`
+synchronous replication and the long-poll · `3be0f12` the identity database
+shipped whole · `f0adb95` consensus. One item per commit, signed off, no
+branding. `Cargo.toml` and `Cargo.lock` changed once, for `openraft`
+(the maintainer allowed dependencies for the consensus item).
+
+**Suite.** 3,067 passed / 0 failed / 2 ignored (the pre-existing one and the 9M harness) over 87 binaries at `f0adb95`, the default environment. Clippy (`--all-targets -D warnings`) clean at
+every commit. Conformance table regenerated at each commit that added
+tests.
+
+**What the maintainer decided, and what it became.**
+
+| Decision | Shipped as |
+|---|---|
+| 1 Synchronous hot: the recommendation, with the settings and the modes explained | named sync followers, `required` (`all` allowed), a 2 s default timeout, visible degradation (`X-Replication-Ack`, `sync` in the status), automatic recovery, no policy knob; the long-poll on the change endpoint so a hot follower's lag is a round trip; the modes table in `docs/operations.md` |
+| 2 Consensus: make a choice, dependencies allowed | `openraft` 0.9.25; Raft elects and fences, the change log stays the data path; automatic failover; quorum acknowledgement derived from the cluster; the Raft transport over the server's port behind a shared secret |
+| 3 Identity database: WAL-style | the database's own bytes, not an event log: a consistent snapshot from SQLite's backup API, applied in place under the follower's open connections when SQLite's own change counter moves |
+| 4 Change capture on by default, explained | on unless `OTS_CHANGE_CAPTURE=off`; a leader or cluster member always on; a follower off unless asked; the configuration row and the docs say what it is for and what it costs |
+| 5 `/sparql/batch` 422 with a message | 422 on a rolled-back batch, `error` naming the statement and why; 200 for an applied batch, 400/403 for parse and authorisation |
+
+**Still the maintainer's, or worth knowing.**
+
+1. **Persisting the Raft vote.** The log and vote are in memory (the
+   module docs and `docs/operations.md` say why that is safe for an
+   election-only state machine over an epoch-fenced data path). A
+   persistent vote is a small addition if a status ever shows a double
+   election.
+2. **Asset shipping** stays "share the S3 bucket".
+3. **`cargo deny`** was not run on the new crates (not in the builder
+   image); their manifests say MIT / Apache-2.0.
+4. **The boot seed on a follower** still logs its read-only refusals
+   (the seed callers are outside the programme's scope).
+5. **`v0.6.0`**: the CHANGELOG fold is the last commit before the release
+   PR; nothing is tagged or pushed.
