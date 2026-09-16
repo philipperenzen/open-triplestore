@@ -45,6 +45,10 @@ Statuses & exit codes
   IMPROVED   run/baseline  < 0.80 (informational; refresh hint)
   WARN       benchmark in run but not baseline (new bench, not yet bootstrapped), or
              benchmark in baseline but not measured this run (PR gate runs a subset)
+`compare` (the PR gate, several passes a side) adds one condition to REGRESSION: the
+change's fastest pass must also be slower than the merge base's SLOWEST pass. Over the
+tolerance but inside the base's own spread is reported as OK with the spread shown —
+see `cmd_compare`.
 Exit 0 = no regressions, 1 = at least one regression, 2 = operational error (no Criterion
 results found, unreadable/!schema baseline). Finding ZERO estimates is a hard error (exit 2),
 mirroring the existing "fail if the filter matched nothing" guard in .github/workflows/ci.yml
@@ -73,11 +77,13 @@ SMALL_BENCHMARK_TOLERANCE = 1.35
 
 # ─────────────────────────── Criterion parsing ───────────────────────────
 
-def collect_medians(criterion_dirs):
-    """Return {bench_id: median_ns} parsed from <dir>/**/new/estimates.json.
+def collect_median_samples(criterion_dirs):
+    """Return {bench_id: [median_ns, ...]} parsed from <dir>/**/new/estimates.json.
 
     Takes a *list* of Criterion output dirs — one per repeat of the same benchmark
-    run — and keeps the FASTEST median per benchmark.
+    run — and keeps EVERY pass's median per benchmark, in the order the dirs were
+    given. `collect_medians` reduces this to the fastest; `cmd_compare` also needs
+    the slowest, to know how far one side spreads on its own.
 
     Criterion's median is already robust to noise *within* one process: it discards
     nothing, but the outliers it reports are spread across many samples. What it
@@ -86,13 +92,8 @@ def collect_medians(criterion_dirs):
     is the dominant error term here: two runs of the *same commit* against the *same*
     baseline moved a benchmark's ratio by up to 26 percentage points, and 11 of 68
     benchmarks moved by more than 10.
-
-    Interference can only ever make a benchmark look slower, never faster, so the
-    minimum across repeats is the estimator that discards it: whichever run happened
-    to get the quietest machine is the one closest to the true cost. Pass a single
-    dir for the old single-run behaviour.
     """
-    medians = {}
+    samples = {}
     for criterion_dir in criterion_dirs:
         # `mv target/criterion <dest>` NESTS instead of renaming when <dest> already
         # exists — and a restored build cache is enough to leave the destination
@@ -123,9 +124,19 @@ def collect_medians(criterion_dirs):
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 print(f"warning: skipping unreadable estimates file {path}: {exc}", file=sys.stderr)
                 continue
-            previous = medians.get(bench_id)
-            medians[bench_id] = median if previous is None else min(previous, median)
-    return medians
+            samples.setdefault(bench_id, []).append(median)
+    return samples
+
+
+def collect_medians(criterion_dirs):
+    """Return {bench_id: median_ns}: the FASTEST median per benchmark across the dirs.
+
+    Interference can only ever make a benchmark look slower, never faster, so the
+    minimum across repeats is the estimator that discards it: whichever run happened
+    to get the quietest machine is the one closest to the true cost. Pass a single
+    dir for the old single-run behaviour.
+    """
+    return {bench_id: min(medians) for bench_id, medians in collect_median_samples(criterion_dirs).items()}
 
 
 def criterion_filter(bench_ids):
@@ -352,14 +363,36 @@ def cmd_compare(args):
     drift between the two halves of one job, which the repeated passes (`--before`
     / `--after` given once per pass, fastest median wins) absorb.
 
+    Fastest-wins assumes a pass is either quiet or slowed by interference, so that
+    with a few passes each side gets at least one quiet sample. On this runner the
+    5–10 ms allocation-heavy benchmarks do not behave like that: a pass lands in a
+    fast or a slow mode, and with three passes a side one side draws a fast sample
+    the other never gets often enough that some benchmark of the ~10 in that band
+    trips the bar on most runs. Measured on a change whose only runtime diff was a
+    TLS patch bump: `query_minus/10000` read the merge base at 6.87, 5.34 and
+    4.91 ms and the change at 6.66, 7.06 and 6.33 — the change was *faster* in the
+    first pair, then the base drew two fast-mode samples — and fastest-vs-fastest
+    called that +30.6 %.
+
+    So a regression additionally has to clear the merge base's own spread: the
+    change's fastest pass must be slower than the base's SLOWEST pass. With three
+    samples a side that is complete separation of the two sample sets, the
+    smallest outcome a rank test can call significant (p = 1/20); the tolerance
+    ratio stays the bar for how much slower. A benchmark whose sides overlap is
+    reported as ok with the spread shown. More passes can only lower the change's
+    fastest or raise the base's slowest, so an overlapping benchmark can never
+    turn into a regression later and is not worth a confirmation pass.
+
     Tolerances still come from the baseline file, so the `tolerances` map and
     `default_tolerance_ratio` keep working and stay in one place.
     """
     baseline = load_baseline(args.baseline)
     if baseline is None:
         return 2
-    before = collect_medians(args.before)
-    after = collect_medians(args.after)
+    before_samples = collect_median_samples(args.before)
+    after_samples = collect_median_samples(args.after)
+    before = {bench_id: min(m) for bench_id, m in before_samples.items()}
+    after = {bench_id: min(m) for bench_id, m in after_samples.items()}
     for label, got, dirs in (("before", before, args.before), ("after", after, args.after)):
         if not got:
             print(
@@ -376,15 +409,22 @@ def cmd_compare(args):
         except ValueError:
             print("warning: ignoring non-numeric OTS_PERF_TOLERANCE", file=sys.stderr)
 
-    rows, regressions, improvements, warnings = [], 0, 0, 0
+    rows, regressions, improvements, warnings, within_spread = [], 0, 0, 0, 0
     for bench_id in sorted(set(before) | set(after)):
         base_ns, run_ns = before.get(bench_id), after.get(bench_id)
         if run_ns is not None and base_ns is not None and base_ns > 0:
             tol = resolve_tolerance(bench_id, baseline, override, args.force_tolerance,
                                     reference_ns=base_ns)
             ratio = run_ns / base_ns
-            if ratio > tol:
+            base_slowest = max(before_samples[bench_id])
+            if ratio > tol and run_ns > base_slowest:
                 status, regressions = f"REGRESSION (>{tol:.2f}x)", regressions + 1
+            elif ratio > tol:
+                # Over the bar, but the base itself was at least this slow in one
+                # pass: the two sides overlap and the reading is the runner's spread.
+                within_spread += 1
+                status = (f"ok (>{tol:.2f}x, inside the merge base's own spread "
+                          f"{human_ns(base_ns)}–{human_ns(base_slowest)})")
             elif ratio < IMPROVED_RATIO:
                 status, improvements = "IMPROVED", improvements + 1
             else:
@@ -407,6 +447,9 @@ def cmd_compare(args):
         f"**{regressions}** regressions · **{improvements}** improved · "
         f"**{warnings}** warnings"
     )
+    if within_spread:
+        summary += (f" · **{within_spread}** over tolerance but inside the merge base's "
+                    "own spread (not regressions)")
     report = render_markdown(rows, summary).replace(
         "| Benchmark | baseline | this run |", "| Benchmark | merge base | this change |"
     )

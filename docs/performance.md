@@ -106,6 +106,47 @@ python3 scripts/perf_regression.py compare \
 The cost is that the job builds and benches twice — roughly double the wall clock.
 That buys a bar tight enough to be worth having.
 
+### What counts as a regression: over the bar *and* clear of the base's own spread
+
+Within each side the **fastest** pass wins, on the premise that noise only ever
+slows a pass, so a few passes give each side at least one quiet sample. The
+5–10 ms allocation-heavy benchmarks do not behave like that on this runner: a
+pass lands in a fast or a slow mode, and with three passes a side one side draws
+a fast sample the other never gets often enough that *some* benchmark of the ~10
+in that band trips the bar on most runs. Measured on a change whose only runtime
+diff was a TLS patch bump, `query_minus/10000` read
+
+| pass | merge base | change |
+|---|--:|--:|
+| 1 | 6.87 ms | 6.66 ms |
+| 2 | 5.34 ms | 7.06 ms |
+| 3 | 4.91 ms | 6.33 ms |
+
+— the change was *faster* in the first pair, then the base drew two fast-mode
+samples — and fastest-vs-fastest called it **+30.6 %**. The previous run of the
+same change had tripped `query_group_by/10000` the same way; the one before that
+would have tripped something else. A tolerance entry per benchmark cannot fix a
+mechanism.
+
+So `compare` asks for two things before it says REGRESSION: the ratio of the two
+fastest passes is over the tolerance, **and** the change's fastest pass is slower
+than the merge base's **slowest** pass. With three samples a side that is complete
+separation of the two sample sets — the smallest outcome a rank test can call
+significant (p = 1/20) — and the tolerance stays the bar for *how much* slower.
+Over the bar but overlapping is reported as `ok (>1.15x, inside the merge base's
+own spread 4.91 ms–6.87 ms)` and counted separately in the summary, so the reader
+sees the spread that absorbed it.
+
+Two consequences worth knowing. First, more passes can only lower the change's
+fastest or raise the base's slowest, so an overlapping benchmark can never turn
+into a regression later — the screen does not hand it to the confirmation
+re-bench. Second, the rule adapts per benchmark and per run: a stable benchmark
+(`query_minus/1000` spreads ±2.5 %) keeps the plain tolerance bar, while a noisy
+one is bounded by the spread it showed *in this job* rather than by a number
+measured on some earlier runner. The price is that on a noisy benchmark a real
+regression smaller than that spread is not called — which is the honest
+sensitivity: the old rule "detected" those only by also failing clean changes.
+
 Measured on the first run of this design — a PR that changes **no runtime code**,
 so every number below is residual noise:
 
@@ -251,7 +292,10 @@ of its own.
 
 Add an entry only with measurements behind it — the same table above, from a run
 with no runtime change — rather than nudging a number until CI goes green. If
-exceptions start accumulating, a third pass per side is the better lever.
+exceptions start accumulating, a third pass per side is the better lever — and
+since the spread rule above, a noisy benchmark is already bounded by the spread
+it shows in the job itself, so a new entry should be rare: it is for a benchmark
+whose sides *separate* on clean changes, not merely one that reads high.
 
 Benchmarks present on one side but not the other are **soft warnings**, not
 failures, so adding or removing a benchmark does not break the gate.
