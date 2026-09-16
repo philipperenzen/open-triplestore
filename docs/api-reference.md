@@ -76,3 +76,18 @@ retention and the caps.
 
 A cursor is a consumer's bookmark: retention never deletes rows above the
 lowest live one, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30) is dropped.
+
+## Replication — `/api/replication/*` and a follower's `503`
+
+See `docs/operations.md, "Replication"`. Two new routes, no change to existing ones:
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/api/replication/status` | This node's `role`, `mode`, `scope`, `leader_url`, `node_id`, `read_only`; on a follower also `epoch`, `applied_seq`, `leader_newest_seq`, `lag_rows`, `last_sync_at`, `last_error`, `applied_rows`, `refetched_graphs`, `resyncs`, `interval_secs`, `healthy`. Public, beside `/livez`. |
+| `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph) and `datasets` (`id`, `graphs`). Admin only (`401` / `403`). |
+
+On a node started with `OTS_REPLICATION_ROLE=follower`, every write —
+SPARQL Update, Graph Store `PUT`/`POST`/`DELETE`, imports, data writes made
+by the registry — answers `503 Service Unavailable` with the body
+`read-only replica: writes go to the leader at <url>`. Reads are unchanged.
+A node without the role behaves exactly as before.

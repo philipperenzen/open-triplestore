@@ -85,6 +85,8 @@ pub fn management_routes() -> Router<AppState> {
             "/api/admin/changes/cursors/:name",
             put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
         )
+        .route("/api/replication/status", get(replication_status))
+        .route("/api/replication/manifest", get(replication_manifest))
         .route("/livez", get(liveness_check))
 }
 
@@ -786,7 +788,11 @@ pub(crate) async fn execute_update(
     .await
     .map_err(|_| AppError::BadRequest("Update execution timed out".to_string()))?
     .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    .map_err(|e| match e {
+        // A replica refuses every write: 503, not a client error.
+        crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
+        other => AppError::BadRequest(other.to_string()),
+    })?;
     // Writer-pays text-index maintenance: a ground update (INSERT DATA /
     // DELETE DATA) knows its exact quads, so just those documents change;
     // any other update with known target graphs refreshes exactly those; a
@@ -2196,6 +2202,38 @@ async fn admin_changes_delete_cursor(
     } else {
         Err((StatusCode::NOT_FOUND, "no such cursor".to_string()))
     }
+}
+
+/// GET /api/replication/status — this node's role, temperature, scope and,
+/// on a follower, its position and lag. Public, beside `/livez`: a load
+/// balancer or an operator asks a replica how far behind it is without a
+/// token; nothing in it names data.
+async fn replication_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.replication().status())
+}
+
+/// GET /api/replication/manifest — what a follower needs to start or to
+/// resynchronise: the leader's epoch and position, every graph it holds, and
+/// each dataset's graphs (so a follower can select datasets). Admins only.
+async fn replication_manifest(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let datasets = state
+        .auth_db
+        .list_datasets()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| crate::store::replication::DatasetGraphs {
+            graphs: state.auth_db.list_dataset_graphs(&d.id).unwrap_or_default(),
+            id: d.id,
+        })
+        .collect();
+    Ok(Json(crate::store::replication::manifest_of(
+        &state.store,
+        datasets,
+    )))
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {

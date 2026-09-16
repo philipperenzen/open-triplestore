@@ -1355,3 +1355,106 @@ N" with the follower fetching the graph, identity DB replicated separately,
 epoch fencing on failover, `/api/replication/status` beside `/livez`. The
 consensus (Raft) variant needs a dependency and is asked about before
 anything is written for it.
+
+## Phase P4 — replication as configurable temperatures on the change log (2026-09-16)
+
+The maintainer's design, taken as the specification: logical log shipping on
+the per-quad change log P2 produced; a follower tails the rows with a cursor;
+bulk loads travel as "graph X replaced at seq N" with the follower fetching
+the graph; the identity database is replicated separately; failover fences
+with epochs; `/api/replication/status` beside `/livez`; each node rebuilds
+its own indexes; the temperature is decided after the log exists —
+configurable as cold / warm / hot over all or some of the data.
+
+### 1. The follower, the leader's manifest, temperatures and scopes
+
+**Verified first.** No replication of any kind existed: `docs/operations.md`
+and `docs/administration.md` describe backups and a single node; the LDES
+client (P3) follows a stream into one graph and is the closest thing to a
+follower — per dataset, pull-based, no position on the publisher. Background
+loops start in `src/server/mod.rs` (out of scope), so the follower runs its
+own thread from the store constructors, and only when the environment
+configures a follower — tests drive one catch-up at a time.
+
+**Test first.** `tests/replication.rs` (9 tests, red on a missing
+`replication` module): bootstrap from the manifest then tail (deltas, the
+count index following, the cursor set on the leader, `lag_rows` 0,
+`healthy`); `counts`/`unknown` rows fetching the graph whole; a store-scoped
+row resynchronising every graph in scope and dropping a graph the leader
+deleted; a graph scope skipping out-of-scope rows while the cursor still
+advances; a dataset scope resolved through the manifest; an epoch change
+forcing a full resynchronisation; a follower read-only except for what it
+replicates; the temperatures and the environment's spellings; and the HTTP
+surface — the manifest (401 anonymous, the dataset's graphs listed), the
+public status on a leader and on a follower, `503` on a follower's SPARQL
+Update and Graph Store `PUT`, reads unaffected. Four unit tests in
+`src/store/replication.rs` (scope selection through the manifest, the
+bookmark surviving a reopen, health before and after a catch-up, the apply
+guard's nesting). All in-process: an `InProcessLeader` implements the same
+`LeaderSource` trait as the HTTP client, so no test opens a socket.
+
+**What shipped.**
+
+- `src/store/replication.rs`: `Role` (`none` / `leader` / `follower`),
+  `Mode` (`cold` hourly, `warm` every minute — `medium` accepted —, `hot`
+  every poll of 500 ms; an interval override), `Scope` (`all`, graph IRIs
+  with `default`, or the leader's dataset ids resolved through the manifest
+  at every catch-up), `ReplicationConfig::from_env` / `parse`, the
+  `Replication` state (bookmark `{epoch, applied_seq}` persisted atomically
+  as `<data-dir>/replication.json`, counters, last sync/error, `Status`),
+  the `LeaderSource` trait with `HttpLeader` (reqwest on its own runtime,
+  bearer token, `/api/replication/manifest`, `/api/admin/changes`, Graph
+  Store `GET` as N-Triples, `PUT /api/admin/changes/cursors/<node>`) and
+  the `InProcessLeader`, `TripleStore::replicate_once` (adopt the epoch or
+  resynchronise; pages of 500 rows in order; a `full` row applied as a
+  delta with the `post_count` check healing a divergence by fetching the
+  graph; `counts`/`unknown` rows fetching the graph; store-scoped rows
+  resynchronising from a fresh manifest; out-of-scope rows skipped; the
+  bookmark and the leader-side cursor set after every page; at most 200
+  pages per call), and the follower thread.
+- `src/store/engine.rs`: `begin_write` now returns `Result` and refuses on a
+  follower unless the thread is inside an `ApplyGuard` — so every mutation
+  primitive, and every route behind it, is read-only on a follower with one
+  check; `apply_delta_replicated` (insert the added, remove the removed, one
+  transaction, the count index adjusted by what actually changed);
+  `with_replication` (builder); `replication()`. `StoreError::ReadOnly` →
+  `503` (`src/server/error.rs`; the SPARQL Update route, which mapped every
+  store error to `400`, passes it through). `OTS_REPLICATION_ROLE=leader`
+  switches change capture on (`changes.rs`). A quarantine takes
+  `replication.json` with the store (`recovery.rs`).
+- `GET /api/replication/status` (public) and `GET /api/replication/manifest`
+  (admin) in `management_routes()`; OpenAPI; `docs/operations.md` (a new "Replication" chapter),
+  `docs/administration.md` (nine variables), `docs/api-reference.md`,
+  CHANGELOG. `tests/common` gained `test_state_with_store` /
+  `admin_state_with_store` for tests that build their own store.
+
+**Design points worth recording.**
+
+- *Temperature is cadence only.* Cold, warm and hot apply the same rows the
+  same way; only the interval differs. This keeps one code path to test and
+  makes "some datasets, hot" and "everything, cold" the same follower.
+- *Fencing by epoch, not by history.* A follower applies rows only from the
+  epoch it adopted; any other epoch resynchronises whole. Promotion is a
+  restart with the leader role; nothing is un-applied; a node that was
+  behind can be promoted and its followers take its state.
+- *A whole graph, not a replay, for what the log cannot carry.* `counts`,
+  `unknown`, store-scoped rows and count disagreements all end in one
+  Graph Store `GET` — the same primitive, the same test.
+- *Read-only at the engine, not at the router.* The router lives in
+  `src/server/mod.rs`; one check in `begin_write` covers SPARQL Update, the
+  Graph Store, imports, registry data writes and everything added later.
+  Cost on the write path: one atomic load and a thread-local read.
+
+**Not built, stated plainly** (each is a question for the maintainer, in
+the checkpoint): synchronous hot replication (the leader waiting on
+follower cursors before acknowledging a write — the ack exists, the wait
+and its policy do not); consensus (Raft — a dependency); identity database
+replication (a follower authenticates with the `auth.db` it has; seed it
+from the leader's backup); asset shipping (share the S3 bucket); a
+follower's own change log as a source for further followers.
+
+**Cost.** No benchmark exercises a follower; the leader's cost is the change
+log's (§2 of P2, measured). The one addition to every write path on every
+node is the read-only check in `begin_write`; the update benchmarks were
+not re-run for a branch on an atomic — the P4 checkpoint's suite run and
+the next paired measurement (the sync variant, if approved) will carry it.

@@ -4213,6 +4213,40 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(
         paths,
+        "/api/replication/status",
+        vec![(
+            M::Get,
+            o(
+                "Replication",
+                "Replication status",
+                "This node's replication role (`none`, `leader`, `follower`), temperature (`cold`, `warm`, `hot`), scope, and — on a follower — the leader epoch it adopted, the last sequence number it applied, the leader's newest sequence number and the lag in rows, the last catch-up time and error, and `healthy`. Public, beside /livez. See docs/operations.md (Replication).",
+                vec![],
+                vec![("200", "Replication status")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/replication/manifest",
+        vec![(
+            M::Get,
+            o(
+                "Replication",
+                "Replication manifest",
+                "What a follower needs to start or resynchronise: the leader's change-log epoch and newest sequence number, whether capture is on, every graph the store holds (`null` is the default graph) and each dataset's graphs. Admins only.",
+                vec![],
+                vec![
+                    ("200", "Manifest"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
         "/api/admin/acl/endpoints",
         vec![
             (

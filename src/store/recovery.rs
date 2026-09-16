@@ -168,6 +168,15 @@ fn quarantine_store_files(data_dir: &Path) -> anyhow::Result<PathBuf> {
             moved += 1;
         }
     }
+    // The follower's bookmark describes the store it came with.
+    let bookmark = data_dir.join("replication.json");
+    if bookmark.is_file() {
+        if let Err(e) = std::fs::rename(&bookmark, dest.join("replication.json")) {
+            warn!("could not quarantine the replication bookmark: {e}");
+        } else {
+            moved += 1;
+        }
+    }
     info!("quarantined {moved} store file(s) into {}", dest.display());
     Ok(dest)
 }

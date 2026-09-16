@@ -19,6 +19,7 @@ use crate::geo::spatial_index::SpatialIndex;
 use crate::store::changes::{self, ChangeLog, GraphDelta};
 use crate::store::parallel_mirror::ParallelMirror;
 use crate::store::query_cache::QueryCache;
+use crate::store::replication::{self, Replication, ReplicationConfig};
 use crate::store::telemetry::{QueryShape, Served, Telemetry};
 use opengraph::parallel::{self, ParClass};
 
@@ -58,6 +59,8 @@ pub enum StoreError {
     GraphNotFound(String),
     #[error("{0}")]
     Other(String),
+    #[error("read-only replica: writes go to the leader {0}")]
+    ReadOnly(String),
 }
 
 /// How blank nodes are treated when data is imported.
@@ -279,6 +282,9 @@ pub struct TripleStore {
     /// Per-quad change capture with a durable cursor. Shared by clones.
     /// See [`ChangeLog`].
     changes: Arc<ChangeLog>,
+    /// Replication role, temperature, scope and — on a follower — its
+    /// position. See [`Replication`].
+    replication: Arc<Replication>,
     /// Process-unique id of this store instance, shared by its clones.
     /// Caches keyed on a store must not survive the store: a new store
     /// can reuse the old one's address and start at the same write
@@ -379,9 +385,11 @@ impl TripleStore {
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(changes),
+            replication: Arc::new(Replication::from_env(Some(path))),
             persistent: true,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+        .inspect(replication::spawn_follower_if_configured)
     }
 
     /// Create an in-memory store (useful for testing).
@@ -405,9 +413,11 @@ impl TripleStore {
             blank_node_mode: BlankNodeMode::default(),
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(ChangeLog::open(None)?),
+            replication: Arc::new(Replication::from_env(None)),
             persistent: false,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+        .inspect(replication::spawn_follower_if_configured)
     }
 
     /// Set the blank-node durability policy applied on import (builder style).
@@ -449,6 +459,14 @@ impl TripleStore {
         self
     }
 
+    /// Replication role, temperature and scope (builder style; tests). The
+    /// follower's bookmark stays in memory and no follower thread starts:
+    /// tests drive [`Self::replicate_once`] themselves.
+    pub fn with_replication(mut self, config: ReplicationConfig) -> Self {
+        self.replication = Arc::new(Replication::with_config(config, None));
+        self
+    }
+
     /// Override the parallel mirror's rebuild quiet period (builder style;
     /// tests). `0` rebuilds eagerly on the first query after a write.
     ///
@@ -480,7 +498,17 @@ impl TripleStore {
     /// a commit and its notification used to be invisible: a mirror rebuilt in
     /// it published clean while missing the committed quads, and generation
     /// checks could not tell a write was in progress at all.
-    pub(crate) fn begin_write(&self) -> WriteGuard<'_> {
+    pub(crate) fn begin_write(&self) -> Result<WriteGuard<'_>, StoreError> {
+        // A follower writes only what it replicates.
+        if self.replication.read_only() && !replication::applying() {
+            return Err(StoreError::ReadOnly(
+                self.replication
+                    .config()
+                    .leader_url
+                    .clone()
+                    .unwrap_or_default(),
+            ));
+        }
         // The outermost guard only: a nested primitive is the same write.
         if self.parallel_mirror.writes_in_flight() == 0 {
             self.telemetry.record_write();
@@ -488,7 +516,7 @@ impl TripleStore {
         self.parallel_mirror.write_started();
         self.query_cache.invalidate();
         changes::enter_write();
-        WriteGuard(self)
+        Ok(WriteGuard(self))
     }
 
     /// Writes currently in progress (between `begin_write` and its guard's drop).
@@ -505,6 +533,12 @@ impl TripleStore {
     /// order (see [`ChangeLog`]).
     pub fn changes(&self) -> &ChangeLog {
         &self.changes
+    }
+
+    /// This node's replication role and, on a follower, where it stands
+    /// (see [`Replication`]).
+    pub fn replication(&self) -> &Replication {
+        &self.replication
     }
 
     /// Whether the store is RocksDB-backed (see the `persistent` field).
@@ -835,7 +869,7 @@ impl TripleStore {
 
     /// Execute a SPARQL UPDATE operation.
     pub fn update(&self, sparql: &str) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         // Use char-boundary-safe slicing to avoid panics on multi-byte UTF-8 input.
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
@@ -1162,7 +1196,7 @@ impl TripleStore {
     /// over a selected layer (a dataset's own graphs plus the model version it
     /// conforms to) instead of the whole store.
     pub fn update_scoped(&self, sparql: &str, scope: &[String]) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         let mut parsed = spargebra::SparqlParser::new()
             .parse_update(sparql)
             .map_err(|e| StoreError::Parse(format!("scoped update: {e}")))?;
@@ -1250,7 +1284,7 @@ impl TripleStore {
         affected_iris: &[String],
         full_rebuild: bool,
     ) -> Result<Option<QuadDelta>, StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         let prefix_end = (0..=sparql.len().min(200))
             .rfind(|&i| sparql.is_char_boundary(i))
             .unwrap_or(0);
@@ -1449,7 +1483,7 @@ impl TripleStore {
     /// documented the batch as atomic: a mid-batch failure left the earlier
     /// statements applied.
     pub fn batch_update(&self, statements: &[String]) -> Result<Vec<BatchStatement>, StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         let rolled_back = |failed_at: usize, err: String| -> Vec<BatchStatement> {
             (0..statements.len())
                 .map(|i| {
@@ -1550,7 +1584,7 @@ impl TripleStore {
         base_iri: Option<&str>,
         to_graph: Option<&str>,
     ) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         // Fast path: nothing to rewrite and no forced graph → stream directly.
         if self.blank_node_mode == BlankNodeMode::Preserve && to_graph.is_none() {
             // oxigraph 0.5: the bulk loader stages batches and only persists them on
@@ -1646,7 +1680,7 @@ impl TripleStore {
         to_graph: Option<&str>,
         target_is_empty: bool,
     ) -> Result<Vec<Quad>, StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         // A graph-targeted load knows exactly how many quads are new (duplicates
         // within the batch and quads already stored do not count), so the graph
         // index is bumped by that number. Recounting the graph after every load
@@ -1842,7 +1876,7 @@ impl TripleStore {
         // Bracket the whole replace, clear included: the guard nests with the
         // one the load takes, and the mirror must be stale before the graph is
         // emptied, not only before it is refilled.
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         let graph_name = match graph_iri {
             Some(iri) => GraphNameRef::NamedNode(
                 NamedNodeRef::new(iri)
@@ -1987,7 +2021,7 @@ impl TripleStore {
     }
 
     pub fn graph_store_delete(&self, graph_iri: Option<&str>) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         let graph_name = match graph_iri {
             Some(iri) => GraphNameRef::NamedNode(
                 NamedNodeRef::new(iri)
@@ -2041,7 +2075,7 @@ impl TripleStore {
     /// `update_opt()` call, avoiding N separate Oxigraph write transactions.
     /// Graph index entries are removed in one pass after the update.
     pub fn bulk_delete_graphs(&self, graph_iris: &[&str]) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         if graph_iris.is_empty() {
             return Ok(());
         }
@@ -2113,7 +2147,7 @@ impl TripleStore {
         quads: Vec<Quad>,
         affected_graphs: &[String],
     ) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         if !quads.is_empty() {
             // The rows: per graph, the quads that were new (probed); unknown
             // for a version-snapshot graph (see `fresh_by_graph`).
@@ -2196,8 +2230,48 @@ impl TripleStore {
     }
 
     /// Insert a single quad into the store.
+    /// Apply a replicated delta to one graph — the quads a leader's row says
+    /// were added and removed — in one transaction, the count index adjusted
+    /// by what actually changed. Passes the follower's read-only check. Does
+    /// not record to this node's change log: a follower's log is not a source
+    /// (docs/operations.md (Replication)).
+    pub(crate) fn apply_delta_replicated(
+        &self,
+        graph: Option<&str>,
+        added: &[Quad],
+        removed: &[Quad],
+    ) -> Result<(), StoreError> {
+        let _apply = replication::ApplyGuard::enter();
+        let _w = self.begin_write()?;
+        let mut tx = self.store.start_transaction()?;
+        let (mut fresh, mut gone) = (0i64, 0i64);
+        for q in added {
+            if !tx.contains(q.as_ref())? {
+                tx.insert(q.as_ref());
+                fresh += 1;
+            }
+        }
+        for q in removed {
+            if tx.contains(q.as_ref())? {
+                tx.remove(q.as_ref());
+                gone += 1;
+            }
+        }
+        tx.commit()?;
+        if self.graph_index.get_count(graph).is_some() {
+            self.graph_index.adjust(graph, fresh - gone);
+        } else {
+            self.graph_index
+                .recount_specific_graphs(&self.store, &[graph.map(str::to_string)]);
+        }
+        self.spatial_index.mark_dirty();
+        #[cfg(feature = "geometry3d")]
+        self.spatial_index_3d.mark_dirty();
+        Ok(())
+    }
+
     pub fn store_quad(&self, quad: Quad) -> Result<(), StoreError> {
-        let _w = self.begin_write();
+        let _w = self.begin_write()?;
         let graph = Self::graph_key_of(&quad);
         let pre_count = self.pre_count();
         let intent =
@@ -2330,7 +2404,9 @@ impl TripleStore {
 
     /// Rebuild the graph index (e.g. after external writes).
     pub fn rebuild_graph_index(&self) {
-        let _w = self.begin_write();
+        // Not a data write: a follower rebuilds its index like any node.
+        let _apply = replication::ApplyGuard::enter();
+        let Ok(_w) = self.begin_write() else { return };
         self.graph_index.rebuild(&self.store);
     }
 

@@ -302,6 +302,14 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
 | `OTS_CHANGE_RETENTION_DAYS` | `90` | Change-log rows older than this are swept — never above the lowest live cursor. |
 | `OTS_CURSOR_TTL_DAYS` | `30` | A change-log cursor not updated for this long stops pinning retention and is dropped. |
+| `OTS_REPLICATION_ROLE` | `none` | `leader` records every write in the change log and serves followers; `follower` keeps this store read-only and tails a leader. See [operations.md](operations.md#replication). |
+| `OTS_REPLICATION_MODE` | `warm` | A follower's temperature — how often it catches up: `cold` (hourly), `warm` (every minute; `medium` is accepted), `hot` (every poll). |
+| `OTS_REPLICATION_LEADER_URL`, `OTS_REPLICATION_TOKEN` | *(unset)* | The leader's base URL and an admin API token minted there. A follower without a leader URL reports the omission in its status and applies nothing. |
+| `OTS_REPLICATION_GRAPHS` | `all` | The graphs a follower applies: `all`, or a comma-separated list of graph IRIs (`default` for the default graph). |
+| `OTS_REPLICATION_DATASETS` | *(unset)* | Instead of graphs: the leader's dataset ids, resolved to graphs through the leader's manifest at every catch-up. |
+| `OTS_REPLICATION_NODE_ID` | `$HOSTNAME` | This follower's name — the cursor it keeps on the leader, which pins the leader's retention. |
+| `OTS_REPLICATION_POLL_MS` | `500` | The hot poll period (50–60000). |
+| `OTS_REPLICATION_INTERVAL_SECS` | *(temperature)* | A catch-up interval that replaces the temperature's. |
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |

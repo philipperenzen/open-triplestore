@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Replication over the change log** (`OTS_REPLICATION_ROLE=leader|follower`):
+  a follower tails the leader's change log with a cursor and applies rows
+  as deltas, fetches a graph whole when a row says only that it changed,
+  resynchronises on a store-scoped row or an epoch change, and keeps its
+  store read-only (writes answer `503`). Configurable temperature
+  (`cold` / `warm` / `hot` — how often it asks) and scope (all graphs, a
+  list of graphs, or the leader's datasets). `GET /api/replication/status`
+  (public, beside `/livez`) and `GET /api/replication/manifest` (admin).
+  Asynchronous; the synchronous and consensus variants, identity-database
+  replication and asset shipping are not in this release. See
+  docs/operations.md, "Replication".
 - **The 9M-quad SHACL measurement** (`tests/scale_shacl_9m.rs`, an ignored
   test run on purpose): whole-dataset validation of 1M assets against six
   property shapes on a persistent store takes 6.3 s with the accelerator

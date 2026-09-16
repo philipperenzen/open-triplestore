@@ -30,12 +30,18 @@ pub const JWT_SECRET: &str = "test_secret_must_be_32_chars_abcd";
 
 /// Fresh in-memory `AppState`.
 pub fn test_state() -> AppState {
+    test_state_with_store(TripleStore::in_memory().unwrap())
+}
+
+/// A state around a store the test built itself (a follower, a store with
+/// change capture on).
+pub fn test_state_with_store(store: TripleStore) -> AppState {
     let auth_db = Arc::new(AuthDb::in_memory().unwrap());
     let audit = Arc::new(open_triplestore::auth::audit::AuditLogger::new(
         auth_db.pool(),
     ));
     AppState {
-        store: TripleStore::in_memory().unwrap(),
+        store,
         prefix_registry: Arc::new(PrefixRegistry::empty()),
         auth_db,
         audit,
@@ -89,7 +95,12 @@ pub fn mint_token(user_id: &str, username: &str, role: &str) -> String {
 
 /// `(state, super_admin_token)` — the user `adm` is created as a SuperAdmin.
 pub fn admin_state() -> (AppState, String) {
-    let state = test_state();
+    admin_state_with_store(TripleStore::in_memory().unwrap())
+}
+
+/// As [`admin_state`], around a store the test built itself.
+pub fn admin_state_with_store(store: TripleStore) -> (AppState, String) {
+    let state = test_state_with_store(store);
     state
         .auth_db
         .create_user(

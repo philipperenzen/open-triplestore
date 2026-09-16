@@ -215,7 +215,7 @@ pub struct Intent {
 }
 
 /// A row as a consumer reads it.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChangeRow {
     pub row: i64,
     pub seq: Option<i64>,
@@ -423,7 +423,8 @@ impl ChangeLog {
     /// docs/versioning.md for the measured cost), and nothing reads the log
     /// until a consumer is configured.
     pub fn open(dir: Option<&Path>) -> Result<Self, StoreError> {
-        if !env_on("OTS_CHANGE_CAPTURE") {
+        // A leader records by definition: its followers read this log.
+        if !env_on("OTS_CHANGE_CAPTURE") && !crate::store::replication::leader_role_configured() {
             return Ok(Self::disabled());
         }
         Self::open_at(dir)
@@ -1245,6 +1246,11 @@ pub fn decode_quads(blob: Option<&[u8]>) -> Vec<Quad> {
         Some(text) => parse_nquads(&text),
         None => Vec::new(),
     }
+}
+
+/// The quads of a row's N-Quads text (`added` / `removed`); `None` is empty.
+pub fn decode_text(text: Option<&str>) -> Vec<Quad> {
+    text.map(parse_nquads).unwrap_or_default()
 }
 
 /// Parse a row's N-Quads text back into quads.
