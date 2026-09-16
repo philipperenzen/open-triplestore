@@ -1296,3 +1296,62 @@ cap's upper range is not free at this size (`src/shacl/view.rs`); and the
 POST/PUT gate benchmark the note also asked for needs the HTTP harness and
 stays open. Recorded in `docs/performance.md` (the table row, and a new
 "The 9M SHACL measurement" section) and in the note's §1.5.
+
+## Checkpoint (2026-09-16, HEAD `e94d889` + this note)
+
+**Commits since the P3 checkpoint:** `d29134b` telemetry, `f97d894` change
+capture, `e94d889` the 9M measurement — and the peer session's `5f8a6f5`
+(federated ACL listener fix), on the same branch. One item per commit,
+signed off, no branding.
+
+**Suite.** 3,038 passed / 0 failed / 1 ignored over 84 binaries at
+`f97d894`, run with `OTS_CHANGE_CAPTURE=on`. `e94d889` adds one binary with
+one ignored test (the 9M harness) and no other code; the suite was not
+re-run for it. Clippy (`--all-targets -D warnings`) is clean at every
+commit. Conformance table regenerated twice (`f97d894`, `e94d889`).
+
+**Performance bound (20 % on any `docs/performance.md` benchmark).**
+Telemetry: `query/cache_hit` +6.4 %. Change capture: the shipped default
+(off) within run-to-run noise on all ten update benchmarks (worst +4 %);
+capture on exceeds the bound by construction on `WHERE` updates (×2.5–4)
+and is therefore opt-in — the bound was not overridden. Paired
+measurements used a detached worktree of `d29134b` at
+`C:/Users/phili/Code/ots-bench-base` with its own target volume
+(`ots-bench-base-tgt`); it is kept for P4's leader-side measurements and
+removed at the P4 checkpoint.
+
+**What P2 settled.** The analytical-layer decision tree of
+`docs/notes/analytical-mirror-design.md` now has its inputs: telemetry
+collects the analytical share, exits and validation sources; the change
+log exists as the feed the note required before any mirror or SQL
+substrate; and the 9M SHACL row is 6.3 s (mirror) / 13.5 s (4g container),
+inside both thresholds, so SHACL→SQL stays deferred and the next lever is
+changed-node scoping of gate and pipeline runs. Nothing in P2 added a
+dependency or changed a status code, a JSON field or the on-disk store
+format.
+
+**Still the maintainer's.**
+
+1. **Change capture default.** Off, with `OTS_CHANGE_CAPTURE=on`; P4's
+   leader role switches it on itself. Making it the default costs the
+   on-column of the table in §2 above on every write.
+2. **`/sparql/batch` 200 on a rolled-back batch.** Explained in the chat:
+   the endpoint reports per-statement outcomes in the body (`status:
+   rolled_back` on every statement, `error` on the one that failed) and
+   answers 200 because the old `partial` shape did, and clients read the
+   body. A 409 or 422 for "nothing was applied" is the cleaner protocol and
+   a status-code change, reserved for the maintainer.
+3. **Endpoint ACL default open** — closed by the maintainer's answer,
+   `docs/security.md` shows the default-closed rule set.
+4. **`v0.6.0` at merge** — the CHANGELOG fold into a dated `[0.6.0]`
+   section is the last commit before the release PR; nothing is tagged or
+   pushed by this programme.
+
+**Next: P4**, on the maintainer's design — replication as configurable
+temperatures (cold / warm / hot) over all or some graphs, logical log
+shipping on the change log the P2 work produced, the follower tailing
+`/api/admin/changes` with a cursor, bulk loads as "graph replaced at seq
+N" with the follower fetching the graph, identity DB replicated separately,
+epoch fencing on failover, `/api/replication/status` beside `/livez`. The
+consensus (Raft) variant needs a dependency and is asked about before
+anything is written for it.
