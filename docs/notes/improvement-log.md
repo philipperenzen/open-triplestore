@@ -1530,3 +1530,21 @@ the change), CHANGELOG under Changed. 422 rather than 409: the request was
 understood and well-formed, the state did not conflict with it — a
 statement could not be executed. Parse and authorisation failures stay 400
 and 403; a fully applied batch stays 200.
+
+### 4. Change capture on by default
+
+**Decision.** The maintainer chose the default the measurement in P2 §2
+left open: on. **Shipped:** `ChangeLog::open` records unless
+`OTS_CHANGE_CAPTURE=off`; a replication leader records regardless (its
+followers read the log); a replication follower does not unless set to
+`on` (its log is not a source — it would hold only the graphs it fetched
+whole). The unit test of the off switch now pins "on is the default";
+`tests/change_capture.rs` was already explicit through the builder, and the
+full suite had already run with capture on at `f97d894` (3,038 / 0 / 1).
+**Docs:** the configuration row explains what the log is for and what it
+costs; `docs/versioning.md`, `docs/performance.md` (the update benchmarks'
+shipped default now carries the "capture on" column, and the gate compares
+like with like), `docs/api-reference.md`, `docs/operations.md`, CHANGELOG.
+**Cost, restated:** ground updates +4–13 %, `WHERE` updates ×2.5–4 on the
+in-memory benchmarks (P2 §2); on RocksDB the fixed part sits beside a
+per-commit fsync. A write-heavy store with no consumer turns it off.

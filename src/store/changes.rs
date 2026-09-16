@@ -71,6 +71,17 @@ fn env_on(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_off(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// How much of the delta a row carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -418,13 +429,26 @@ fn exec(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> rusqli
 
 impl ChangeLog {
     /// Open the log beside a persistent store (`{dir}/changes/changes.db`),
-    /// or in memory when `dir` is `None`. Capture is off unless
-    /// `OTS_CHANGE_CAPTURE=on`: every write then pays for its row (see
-    /// docs/versioning.md for the measured cost), and nothing reads the log
-    /// until a consumer is configured.
+    /// or in memory when `dir` is `None`. Capture is **on by default**
+    /// (the maintainer's decision, 2026-09-16): every write pays for its
+    /// row (docs/versioning.md has the measured cost) and the log is there
+    /// the day a follower, the history or an audit needs it.
+    /// `OTS_CHANGE_CAPTURE=off` turns it off; a replication leader keeps it
+    /// on regardless (its followers read this log); a follower keeps it
+    /// off unless `OTS_CHANGE_CAPTURE=on` (its log is not a source).
     pub fn open(dir: Option<&Path>) -> Result<Self, StoreError> {
-        // A leader records by definition: its followers read this log.
-        if !env_on("OTS_CHANGE_CAPTURE") && !crate::store::replication::leader_role_configured() {
+        let (leader, follower) = (
+            crate::store::replication::leader_role_configured(),
+            crate::store::replication::follower_role_configured(),
+        );
+        let on = if leader {
+            true
+        } else if follower {
+            env_on("OTS_CHANGE_CAPTURE")
+        } else {
+            !env_off("OTS_CHANGE_CAPTURE")
+        };
+        if !on {
             return Ok(Self::disabled());
         }
         Self::open_at(dir)
@@ -1571,9 +1595,10 @@ mod tests {
 
     #[test]
     fn the_off_switch_records_nothing() {
-        // Off is the default; an explicit off is off as well.
+        // On is the default; an explicit off is off.
         std::env::remove_var("OTS_CHANGE_CAPTURE");
-        assert!(!ChangeLog::open(None).unwrap().enabled());
+        std::env::remove_var("OTS_REPLICATION_ROLE");
+        assert!(ChangeLog::open(None).unwrap().enabled());
         std::env::set_var("OTS_CHANGE_CAPTURE", "off");
         let log = ChangeLog::open(None).unwrap();
         std::env::remove_var("OTS_CHANGE_CAPTURE");

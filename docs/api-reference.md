@@ -63,9 +63,9 @@ is kept. Status codes and response bodies are otherwise unchanged.
 
 Every write records one row per graph it touched — the net delta as
 N-Quads when it fits, exact counts otherwise, or an honest `unknown` — with
-a dense sequence number in commit order. Capture is off by default
-(`OTS_CHANGE_CAPTURE=on`); with it off, `status` says so and the rows are
-empty. Admin-only, since rows carry quads from every tenant. See `docs/versioning.md` "Change log" for the row format,
+a dense sequence number in commit order. Capture is on by default
+(`OTS_CHANGE_CAPTURE=off` turns it off); with it off, `status` says so and
+the rows are empty. Admin-only, since rows carry quads from every tenant. See `docs/versioning.md` "Change log" for the row format,
 retention and the caps.
 
 | Method | Path | Returns |

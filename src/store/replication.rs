@@ -130,10 +130,18 @@ fn env_opt(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// True when `OTS_REPLICATION_ROLE=leader`: the change log turns itself on.
+/// True when `OTS_REPLICATION_ROLE=leader`: the change log stays on.
 pub fn leader_role_configured() -> bool {
     env_opt("OTS_REPLICATION_ROLE")
-        .map(|r| r.eq_ignore_ascii_case("leader"))
+        .map(|r| r.eq_ignore_ascii_case("leader") || r.eq_ignore_ascii_case("primary"))
+        .unwrap_or(false)
+}
+
+/// True when `OTS_REPLICATION_ROLE=follower`: the change log stays off
+/// unless asked for (a follower's log is not a source).
+pub fn follower_role_configured() -> bool {
+    env_opt("OTS_REPLICATION_ROLE")
+        .map(|r| r.eq_ignore_ascii_case("follower") || r.eq_ignore_ascii_case("replica"))
         .unwrap_or(false)
 }
 

@@ -81,9 +81,9 @@ other.
 
 ## Change log
 
-With `OTS_CHANGE_CAPTURE=on`, every write records what it did, per graph,
-in a small SQLite log beside the store (`{data_dir}/changes/changes.db`; in
-memory for an in-memory store).
+Every write records what it did, per graph, in a small SQLite log beside
+the store (`{data_dir}/changes/changes.db`; in memory for an in-memory
+store). Capture is on by default; `OTS_CHANGE_CAPTURE=off` turns it off.
 The log is the source for the replication work and for the dataset history,
 and it is designed so that a consumer can *tail* it: rows carry a dense
 sequence number in commit order, a consumer bookmarks the last one it
@@ -193,11 +193,15 @@ less; the scan cost does not shrink.
 - **Caps.** `OTS_CHANGE_CAPTURE_MAX_SCAN` (250 000) bounds the before-image
   scan; `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` (250 000) bounds the quads a
   `full` row may carry — above it the row is `counts`.
-- **Off by default.** `OTS_CHANGE_CAPTURE=on` turns capture on; a
-  replication mode that needs the log will turn it on itself. Off, the log
-  records nothing and every write path is the one it was. On, each write
-  pays for its row — see the cost table below before enabling it on a
-  write-heavy store.
+- **On by default.** Every node records unless `OTS_CHANGE_CAPTURE=off`;
+  a replication leader records regardless (its followers read this log);
+  a replication follower does not unless asked (`OTS_CHANGE_CAPTURE=on`),
+  because its log is not a source. What the default buys: a follower, the
+  dataset history and an audit can start from the log as it stands, with
+  no reload. What it costs: each write pays for its row — the table above
+  — and a write-heavy store that will never have a consumer can turn it
+  off. Off, the log records nothing and every write path is the one it
+  was.
 - **What is not recorded.** The commit-trail insert itself (its own
   `urn:system:commit-log` graph would otherwise produce a row per row);
   registry writes to the identity database (not RDF); the text, spatial and

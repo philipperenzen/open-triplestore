@@ -297,7 +297,7 @@ See [rml.md](rml.md) for the full RML guide.
 | `RATE_LIMIT_DISABLED` | `false` | Set to `true`/`1` to switch off per-IP rate limiting (auth, SPARQL and import quotas). For trusted/internal deployments and the test/CI harness only — **never enable on a public server**. Secure by default. |
 | `BASE_URL` | `http://localhost:7878` | Base URL used to mint linked-data IRIs (no trailing slash) |
 | `SPARQL_QUERY_TIMEOUT_SECS` | `30` | Per-query/update execution timeout in seconds |
-| `OTS_CHANGE_CAPTURE` | `off` | `on` records every write in the per-quad change log (`<data-dir>/changes/changes.db`), the source for replication and history consumers; see [versioning.md](versioning.md#change-log) for what a row holds and what it costs. |
+| `OTS_CHANGE_CAPTURE` | `on` | Every write is recorded in the per-quad change log (`<data-dir>/changes/changes.db`): one row per graph per write with the net delta, exact counts or an honest `unknown`, a sequence number in commit order, and a cursor per consumer. It is what a replication follower tails and what the history and audits read. `off` stops recording (a write-heavy store with no consumer); a replication leader records regardless; a follower does not unless set to `on`. Cost and format: [versioning.md](versioning.md#change-log). |
 | `OTS_CHANGE_CAPTURE_MAX_SCAN` | `250000` | Quads: a `WHERE` update's target graphs are scanned for a before-image only when their summed counts fit; above it the row says `unknown`. |
 | `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` | `250000` | Quads a `full` row may carry; above it the row keeps exact counts only. |
 | `OTS_CHANGE_RETENTION_DAYS` | `90` | Change-log rows older than this are swept — never above the lowest live cursor. |

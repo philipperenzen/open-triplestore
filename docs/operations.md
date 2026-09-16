@@ -50,8 +50,9 @@ are not built (see "What is not here").
 
 ### How it works
 
-**The leader** sets `OTS_REPLICATION_ROLE=leader`, which switches change
-capture on (`OTS_CHANGE_CAPTURE=on` does the same without the role). It
+**The leader** sets `OTS_REPLICATION_ROLE=leader`, which keeps change
+capture on whatever `OTS_CHANGE_CAPTURE` says (capture is on by default
+anyway). It
 serves three things a follower reads, all under an admin token:
 
 - `GET /api/replication/manifest` — its change-log epoch and newest
@@ -141,8 +142,9 @@ reads checks `lag_rows` and `healthy`.
   own from the data it receives.
 - **Not the follower's own change log.** Applying a delta does not produce
   a row on the follower; a follower is not a leader for further followers.
-  (A follower with `OTS_CHANGE_CAPTURE=on` records the graphs it fetches
-  whole, which is a partial log; leave capture off on followers.)
+  (Capture is on by default elsewhere, but off on a follower unless
+  `OTS_CHANGE_CAPTURE=on`: a follower's log would only hold the graphs it
+  fetched whole, a partial log.)
 - **At boot, a follower logs the seed's refusals.** The boot-time seed (the
   Studio shapes, the bundled demo data) writes to the store; on a follower
   those writes are refused and logged as warnings, and the same graphs

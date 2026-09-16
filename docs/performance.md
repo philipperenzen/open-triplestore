@@ -1384,13 +1384,18 @@ make the recount grow with the sample count.
 
 ### Change capture and the update benchmarks
 
-The per-quad change log (`OTS_CHANGE_CAPTURE`, off by default) records one
-row per graph per write. Off, the three update groups above and the two
+The per-quad change log (`OTS_CHANGE_CAPTURE`, **on by default** since the
+maintainer's decision of 2026-09-16) records one row per graph per write.
+With it off, the three update groups above and the two
 `insert/sparql_update*` groups measure within run-to-run noise of a tree
-without the log. On, a ground update pays a few microseconds (`insert_data/1`
-+7 %, `single_triple` +13 %) and a `WHERE` update pays a scan of its target
-graph plus the payload (`insert_where` ×2.5, `delete_where` ×3–4). The table
-and the reasoning are in [versioning.md](versioning.md#what-it-costs).
+without the log. With it on — the shipped default — a ground update pays a
+few microseconds (`insert_data/1` +7 %, `single_triple` +13 %) and a `WHERE`
+update pays a scan of its target graph plus the payload (`insert_where`
+×2.5, `delete_where` ×3–4). The regression gate compares like with like
+(both sides of a comparison run with the same default), so the change of
+default is not a regression to it; a benchmark of the raw write path sets
+`OTS_CHANGE_CAPTURE=off`. The table and the reasoning are in
+[versioning.md](versioning.md#what-it-costs).
 
 ### `geosparql/sf_contains` and `geosparql/distance`
 
