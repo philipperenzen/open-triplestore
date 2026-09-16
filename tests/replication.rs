@@ -422,3 +422,192 @@ async fn the_leader_publishes_a_manifest_and_the_follower_its_status() {
     .await;
     assert_eq!(st, StatusCode::OK);
 }
+
+// ─── Synchronous replication ────────────────────────────────────────────────
+
+/// A leader with a synchronous follower waits for that follower's cursor to
+/// cover its write. Nobody applies: the write returns after the timeout,
+/// degraded, and says so. A follower that keeps up: the write returns as
+/// soon as the cursor moves, the flag clears, the leader is synchronous
+/// again.
+#[test]
+fn a_synchronous_leader_waits_for_its_follower_and_degrades_visibly_without_one() {
+    let l = TripleStore::in_memory()
+        .unwrap()
+        .with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD)
+        .with_replication(ReplicationConfig::leader().with_sync(&["f1"], 1, 300));
+    assert_eq!(
+        l.replication().ack_state(),
+        Some("sync"),
+        "nothing degraded yet"
+    );
+
+    // No follower has ever acknowledged: the write waits the timeout out.
+    let t = std::time::Instant::now();
+    l.graph_store_put(Some(G1), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    let waited = t.elapsed();
+    assert!(
+        waited >= std::time::Duration::from_millis(300),
+        "{waited:?}"
+    );
+    let s = l.replication().status().sync.expect("configured");
+    assert!(s.degraded_since.is_some(), "{s:?}");
+    assert_eq!(s.degraded_waits, 1);
+    assert_eq!(l.replication().ack_state(), Some("degraded"));
+
+    // While degraded and no follower has caught up, a write does not wait.
+    let t = std::time::Instant::now();
+    l.graph_store_put(Some(G2), &ttl(&[2]), RdfFormat::Turtle)
+        .unwrap();
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(150),
+        "{:?}",
+        t.elapsed()
+    );
+
+    // A follower named f1 catches up in the background, every 20 ms.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = {
+        let l = l.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let f = TripleStore::in_memory().unwrap().with_replication(
+                ReplicationConfig::follower("inprocess", Mode::Hot, Scope::All).with_node_id("f1"),
+            );
+            let src = InProcessLeader::new(l);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = f.replicate_once(&src);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            f
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    // The follower is current: this write is acknowledged well inside the
+    // timeout, and the leader is synchronous again.
+    let t = std::time::Instant::now();
+    l.update(&format!(
+        "INSERT DATA {{ GRAPH <{G1}> {{ <https://example.org/rep/s9> <https://example.org/rep/p> <https://example.org/rep/o9> }} }}"
+    ))
+    .unwrap();
+    let waited = t.elapsed();
+    assert!(waited < std::time::Duration::from_millis(300), "{waited:?}");
+    let s = l.replication().status().sync.expect("configured");
+    assert!(s.degraded_since.is_none(), "{s:?}");
+    assert_eq!(s.acked, vec!["f1".to_string()]);
+    assert_eq!(s.last_confirmed_seq, l.changes().last_seq());
+    assert_eq!(l.replication().ack_state(), Some("sync"));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let f = handle.join().unwrap();
+    assert_eq!(graph(&f, G1), graph(&l, G1));
+}
+
+#[test]
+fn the_synchronous_settings_have_defaults_and_bounds() {
+    let (f, r, t) = ReplicationConfig::parse_sync(Some("a, b ,c"), Some("all"), Some("10"));
+    assert_eq!(f, vec!["a", "b", "c"]);
+    assert_eq!(r, 3, "`all` means every named follower");
+    assert_eq!(t.as_millis(), 50, "the timeout floor");
+    let (_, r, t) = ReplicationConfig::parse_sync(Some("a"), Some("5"), None);
+    assert_eq!(r, 1, "never more than there are");
+    assert_eq!(t.as_millis(), 2000, "the default timeout");
+    let (f, r, _) = ReplicationConfig::parse_sync(None, None, None);
+    assert!(f.is_empty());
+    assert_eq!(r, 1);
+    assert!(!ReplicationConfig::leader()
+        .with_sync(&[], 1, 2000)
+        .sync_followers
+        .iter()
+        .any(|_| true));
+}
+
+/// The long-poll: a request with `wait_ms` and no new row holds until a row
+/// lands, then answers at once; with no write it answers empty after the
+/// wait. A write's response carries the acknowledgement header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_change_endpoint_long_polls_and_writes_carry_the_ack_header() {
+    let (state, token) = admin_state_with_store(
+        TripleStore::in_memory()
+            .unwrap()
+            .with_change_capture(DEFAULT_MAX_SCAN, DEFAULT_MAX_PAYLOAD)
+            .with_replication(ReplicationConfig::leader().with_sync(&["f1"], 1, 100)),
+    );
+    let app = test_app(state.clone());
+
+    // Nothing lands: the wait runs out, the page is empty.
+    let t = std::time::Instant::now();
+    let (st, v) = call(
+        &app,
+        Method::GET,
+        "/api/admin/changes?after=0&wait_ms=200",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["rows"].as_array().unwrap().is_empty(), "{v}");
+    assert!(
+        t.elapsed() >= std::time::Duration::from_millis(200),
+        "{:?}",
+        t.elapsed()
+    );
+
+    // A write lands 100 ms into a 5 s wait: the request answers with it.
+    let writer = {
+        let store = state.store.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::task::spawn_blocking(move || {
+                store
+                    .graph_store_put(Some(G1), &ttl(&[1]), RdfFormat::Turtle)
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        })
+    };
+    let t = std::time::Instant::now();
+    let (st, v) = call(
+        &app,
+        Method::GET,
+        "/api/admin/changes?after=0&wait_ms=5000",
+        Some(&token),
+        None,
+    )
+    .await;
+    writer.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["rows"].as_array().unwrap().len(), 1, "{v}");
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(2000),
+        "{:?}",
+        t.elapsed()
+    );
+
+    // The write route says what the synchronous followers said: nobody
+    // acknowledged, so this leader is degraded.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/store?graph={}", url_encode(G2)))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "text/turtle")
+                .body(Body::from(ttl(&[2])))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        resp.headers()
+            .get("x-replication-ack")
+            .and_then(|v| v.to_str().ok()),
+        Some("degraded")
+    );
+    let (_, s) = call(&app, Method::GET, "/api/replication/status", None, None).await;
+    assert_eq!(s["sync"]["required"], 1, "{s}");
+    assert!(s["sync"]["degraded_since"].is_string(), "{s}");
+}

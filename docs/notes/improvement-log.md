@@ -1548,3 +1548,67 @@ like with like), `docs/api-reference.md`, `docs/operations.md`, CHANGELOG.
 **Cost, restated:** ground updates +4–13 %, `WHERE` updates ×2.5–4 on the
 in-memory benchmarks (P2 §2); on RocksDB the fixed part sits beside a
 per-commit fsync. A write-heavy store with no consumer turns it off.
+
+### 1. Synchronous replication, and the long-poll that makes it usable
+
+**Verified first.** The follower's cursor (`PUT /api/admin/changes/cursors/<node>`,
+set after a page is applied) was already the acknowledgement a synchronous
+leader needs; nothing waited for it, and the follower's floor was its poll
+period (500 ms) because the change endpoint answered at once.
+
+**Test first** (`tests/replication.rs` +3): a leader with one named
+synchronous follower and a 300 ms timeout — a write with nobody applying
+takes the timeout and leaves the leader degraded; the next write, still
+without a follower, does not wait; a follower named `f1` catching up every
+20 ms in a thread makes the next write return well inside the timeout,
+clears the flag, lists `f1` as acknowledged and sets `last_confirmed_seq`.
+The settings' defaults and bounds (`all`, never more than named, the 50 ms
+floor, the 2 s default). The HTTP long-poll: `wait_ms=200` with no write
+answers empty after the wait; a write landing 100 ms into a 5 s wait is
+answered at once; a Graph Store `PUT` on a degraded leader carries
+`X-Replication-Ack: degraded` and the status shows `sync.degraded_since`.
+
+**What shipped.**
+
+- `src/store/changes.rs`: `rows_notified()` (a `tokio::sync::Notify` woken
+  after every finalised write, enabled before the look so nothing is
+  missed), `cursors_at`, and `wait_for_cursors` — a `Condvar` woken by every
+  cursor move, so an acknowledgement is seen when it arrives, not on a
+  poll.
+- `src/store/replication.rs`: `OTS_REPLICATION_SYNC_FOLLOWERS`, `_REQUIRED`
+  (`all` allowed, clamped to the names), `_TIMEOUT_MS` (50–60000, default
+  2000); `after_write` — called by the outermost write guard on a leader,
+  it waits for the required cursors to cover the write's newest sequence
+  number; on timeout it marks the leader degraded once and logs once;
+  **while degraded a write waits only if a follower has caught up to the
+  position before it** (the sign it is back), so a dead follower costs one
+  lookup per write and a returning one gets the full wait and clears the
+  flag. `SyncStatus` in the status; `ack_state()` for the header. The
+  hot follower long-polls (`wait_ms` = its poll period) and asks again
+  immediately after a successful round instead of sleeping.
+- `src/store/engine.rs`: the write guard records the log's position at
+  entry and hands it to `after_write` when the outermost guard drops.
+- `src/server/routes.rs`: `wait_ms` on `GET /api/admin/changes`;
+  `X-Replication-Ack` on SPARQL Update, `/sparql/batch` (the applied case),
+  Graph Store `PUT`/`POST`/`DELETE`. Other write routes reach the store
+  through the same guard and wait the same way; they carry no header, which
+  the status covers.
+- Docs: `docs/operations.md` (the modes table, a "Synchronous replication"
+  section with the settings, the guarantee in one sentence, and why not
+  block or fail), `docs/administration.md`, `docs/api-reference.md`, OpenAPI,
+  CHANGELOG.
+
+**Design points.** The ack is *applied*, not received — the cursor is set
+after the page is applied, so a synchronous success means a reader of the
+follower sees the write (PostgreSQL's `remote_apply`). Failing the write
+after the commit would be a lie and blocking would let a replica take the
+leader down; the degrade-visibly policy is the recommendation the
+maintainer accepted, and it is the only policy — no knob. The wait lives
+in the write guard's drop, so every primitive and every route behind it
+waits the same way with one check; when no synchronous follower is named
+the cost is one boolean.
+
+**Cost.** Asynchronous nodes: one boolean per write in the guard's drop.
+Synchronous leaders: a round trip per write with a hot follower on a
+healthy link; the timeout when it is not, once, then a lookup per write
+until it returns.

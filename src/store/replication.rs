@@ -121,6 +121,13 @@ pub struct ReplicationConfig {
     pub interval: Duration,
     /// Rows per page.
     pub page: usize,
+    /// Synchronous replication (a leader): the node ids of the followers
+    /// whose acknowledgement a write waits for; empty means asynchronous.
+    pub sync_followers: Vec<String>,
+    /// How many of them must have applied a write before it returns.
+    pub sync_required: usize,
+    /// How long a write waits for them before it returns degraded.
+    pub sync_timeout: Duration,
 }
 
 fn env_opt(name: &str) -> Option<String> {
@@ -178,7 +185,12 @@ impl ReplicationConfig {
     /// `OTS_REPLICATION_ROLE`, `_MODE`, `_GRAPHS`, `_DATASETS`, `_LEADER_URL`,
     /// `_TOKEN`, `_NODE_ID`, `_POLL_MS`, `_INTERVAL_SECS`.
     pub fn from_env() -> Self {
-        Self::parse(
+        let (sync_followers, sync_required, sync_timeout) = Self::parse_sync(
+            env_opt("OTS_REPLICATION_SYNC_FOLLOWERS").as_deref(),
+            env_opt("OTS_REPLICATION_SYNC_REQUIRED").as_deref(),
+            env_opt("OTS_REPLICATION_SYNC_TIMEOUT_MS").as_deref(),
+        );
+        let mut c = Self::parse(
             env_opt("OTS_REPLICATION_ROLE").as_deref().unwrap_or("none"),
             env_opt("OTS_REPLICATION_MODE").as_deref().unwrap_or("warm"),
             env_opt("OTS_REPLICATION_GRAPHS").as_deref(),
@@ -188,7 +200,65 @@ impl ReplicationConfig {
             env_opt("OTS_REPLICATION_NODE_ID").as_deref(),
             env_opt("OTS_REPLICATION_POLL_MS").as_deref(),
             env_opt("OTS_REPLICATION_INTERVAL_SECS").as_deref(),
-        )
+        );
+        c.sync_followers = sync_followers;
+        c.sync_required = sync_required;
+        c.sync_timeout = sync_timeout;
+        c
+    }
+
+    /// `OTS_REPLICATION_SYNC_FOLLOWERS` (node ids), `_SYNC_REQUIRED` (how
+    /// many of them, default 1, never more than there are), and
+    /// `_SYNC_TIMEOUT_MS` (default 2000, 50–60000).
+    pub fn parse_sync(
+        followers: Option<&str>,
+        required: Option<&str>,
+        timeout_ms: Option<&str>,
+    ) -> (Vec<String>, usize, Duration) {
+        let followers: Vec<String> = followers
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let required = required
+            .and_then(|v| {
+                if v.trim().eq_ignore_ascii_case("all") {
+                    Some(followers.len())
+                } else {
+                    v.trim().parse::<usize>().ok()
+                }
+            })
+            .unwrap_or(1)
+            .clamp(1, followers.len().max(1));
+        let timeout = Duration::from_millis(
+            timeout_ms
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(2000)
+                .clamp(50, 60_000),
+        );
+        (followers, required, timeout)
+    }
+
+    /// Synchronous replication (builder style; tests).
+    pub fn with_sync(mut self, followers: &[&str], required: usize, timeout_ms: u64) -> Self {
+        let (f, r, t) = Self::parse_sync(
+            Some(&followers.join(",")),
+            Some(&required.to_string()),
+            Some(&timeout_ms.to_string()),
+        );
+        self.sync_followers = f;
+        self.sync_required = r;
+        self.sync_timeout = t;
+        self
+    }
+
+    /// This node's name (builder style; tests).
+    pub fn with_node_id(mut self, node_id: &str) -> Self {
+        self.node_id = node_id.to_string();
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -261,6 +331,9 @@ impl ReplicationConfig {
             poll,
             interval,
             page: 500,
+            sync_followers: Vec::new(),
+            sync_required: 1,
+            sync_timeout: Duration::from_millis(2000),
         }
     }
 }
@@ -282,6 +355,41 @@ struct LastSync {
     ok_at: Option<Instant>,
     error: Option<String>,
     leader_newest_seq: Option<i64>,
+}
+
+/// A synchronous leader's view of its followers.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct SyncStatus {
+    pub followers: Vec<String>,
+    pub required: usize,
+    pub timeout_ms: u64,
+    /// The followers whose cursor covered the last write that waited.
+    pub acked: Vec<String>,
+    /// Set while writes return without the required acknowledgements;
+    /// cleared by the first write that gets them again.
+    pub degraded_since: Option<String>,
+    /// The newest sequence number the required followers confirmed.
+    pub last_confirmed_seq: i64,
+    pub waits: u64,
+    pub degraded_waits: u64,
+}
+
+#[derive(Default)]
+struct SyncState {
+    acked: Vec<String>,
+    degraded_since: Option<String>,
+    last_confirmed_seq: i64,
+    waits: u64,
+    degraded_waits: u64,
+}
+
+/// What a write got from the synchronous followers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// The required followers applied it within the timeout.
+    Synced,
+    /// They did not: the write is durable on the leader only.
+    Degraded,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -307,6 +415,9 @@ pub struct Status {
     /// A leader or an unconfigured node is healthy; a follower is healthy
     /// when its last successful catch-up is younger than three intervals.
     pub healthy: bool,
+    /// Present on a leader with synchronous followers configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncStatus>,
 }
 
 pub struct Replication {
@@ -317,6 +428,7 @@ pub struct Replication {
     applied_rows: AtomicU64,
     refetched_graphs: AtomicU64,
     resyncs: AtomicU64,
+    sync: Mutex<SyncState>,
 }
 
 fn now() -> String {
@@ -345,6 +457,7 @@ impl Replication {
             applied_rows: AtomicU64::new(0),
             refetched_graphs: AtomicU64::new(0),
             resyncs: AtomicU64::new(0),
+            sync: Mutex::new(SyncState::default()),
         }
     }
 
@@ -433,6 +546,101 @@ impl Replication {
             resyncs: self.resyncs.load(Ordering::Relaxed),
             interval_secs: self.config.interval.as_secs_f64(),
             healthy,
+            sync: self.sync_status(),
+        }
+    }
+
+    /// Synchronous replication is configured on this node.
+    pub fn sync_configured(&self) -> bool {
+        self.config.role == Role::Leader && !self.config.sync_followers.is_empty()
+    }
+
+    pub fn sync_status(&self) -> Option<SyncStatus> {
+        if !self.sync_configured() {
+            return None;
+        }
+        let s = self.sync.lock().unwrap_or_else(|p| p.into_inner());
+        Some(SyncStatus {
+            followers: self.config.sync_followers.clone(),
+            required: self.config.sync_required,
+            timeout_ms: self.config.sync_timeout.as_millis() as u64,
+            acked: s.acked.clone(),
+            degraded_since: s.degraded_since.clone(),
+            last_confirmed_seq: s.last_confirmed_seq,
+            waits: s.waits,
+            degraded_waits: s.degraded_waits,
+        })
+    }
+
+    /// What a write's response should say about the synchronous followers:
+    /// `sync` while the required ones keep up, `degraded` while they do
+    /// not, nothing when none are configured. The `X-Replication-Ack`
+    /// header of the write routes.
+    pub fn ack_state(&self) -> Option<&'static str> {
+        if !self.sync_configured() {
+            return None;
+        }
+        let s = self.sync.lock().unwrap_or_else(|p| p.into_inner());
+        Some(if s.degraded_since.is_some() {
+            "degraded"
+        } else {
+            "sync"
+        })
+    }
+
+    /// Called at the end of every outermost write on a leader: wait until
+    /// the required followers' cursors cover the write, or the timeout.
+    /// `seq_before` is the log's position when the write began. While
+    /// degraded, a write does not wait unless a follower has caught up to
+    /// `seq_before` — a dead follower costs one lookup per write, not one
+    /// timeout; a returning one gets the full wait and clears the flag.
+    pub fn after_write(&self, log: &changes::ChangeLog, seq_before: i64) -> Option<SyncOutcome> {
+        if !self.sync_configured() || !log.enabled() {
+            return None;
+        }
+        let seq = log.last_seq();
+        if seq <= seq_before {
+            // The write recorded nothing: nothing to wait for.
+            return None;
+        }
+        let names = &self.config.sync_followers;
+        let required = self.config.sync_required;
+        let degraded = self
+            .sync
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .degraded_since
+            .is_some();
+        let (acked, ok) = if degraded && log.cursors_at(names, seq_before) < required {
+            (log.cursors_at(names, seq), false)
+        } else {
+            log.wait_for_cursors(names, seq, required, self.config.sync_timeout)
+        };
+        let mut s = self.sync.lock().unwrap_or_else(|p| p.into_inner());
+        s.waits += 1;
+        s.acked = names
+            .iter()
+            .filter(|n| log.cursor(n).is_some_and(|c| c.seq >= seq))
+            .cloned()
+            .collect();
+        if ok {
+            s.last_confirmed_seq = seq;
+            if s.degraded_since.take().is_some() {
+                tracing::info!(
+                    "replication: synchronous again at seq {seq} ({acked} of {required} required)"
+                );
+            }
+            Some(SyncOutcome::Synced)
+        } else {
+            s.degraded_waits += 1;
+            if s.degraded_since.is_none() {
+                s.degraded_since = Some(now());
+                tracing::warn!(
+                    "replication: degraded to asynchronous at seq {seq}: {acked} of {required} required followers acknowledged within {:?}",
+                    self.config.sync_timeout
+                );
+            }
+            Some(SyncOutcome::Degraded)
         }
     }
 }
@@ -508,7 +716,9 @@ pub struct Page {
 /// A leader, however reached.
 pub trait LeaderSource: Send + Sync {
     fn manifest(&self) -> Result<Manifest, String>;
-    fn changes_after(&self, after: i64, limit: usize) -> Result<Page, String>;
+    /// Rows after `after`; when there are none, a source that can wait
+    /// holds the request up to `wait` for one to arrive.
+    fn changes_after(&self, after: i64, limit: usize, wait: Duration) -> Result<Page, String>;
     /// The graph as N-Triples; `Ok(None)` when the leader does not have it.
     fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String>;
     fn set_cursor(&self, name: &str, seq: i64) -> Result<(), String>;
@@ -545,7 +755,7 @@ impl LeaderSource for InProcessLeader {
         Ok(manifest_of(&self.store, self.datasets.clone()))
     }
 
-    fn changes_after(&self, after: i64, limit: usize) -> Result<Page, String> {
+    fn changes_after(&self, after: i64, limit: usize, _wait: Duration) -> Result<Page, String> {
         let rows = self.store.changes().rows_after(after, limit);
         let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
         Ok(Page {
@@ -693,8 +903,11 @@ impl LeaderSource for HttpLeader {
         self.get_json("/api/replication/manifest")
     }
 
-    fn changes_after(&self, after: i64, limit: usize) -> Result<Page, String> {
-        self.get_json(&format!("/api/admin/changes?after={after}&limit={limit}"))
+    fn changes_after(&self, after: i64, limit: usize, wait: Duration) -> Result<Page, String> {
+        self.get_json(&format!(
+            "/api/admin/changes?after={after}&limit={limit}&wait_ms={}",
+            wait.as_millis()
+        ))
     }
 
     fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String> {
@@ -787,8 +1000,15 @@ impl TripleStore {
         let mut after = rep.bookmark().applied_seq;
         let mut pages = 0;
         loop {
+            // A hot follower long-polls: the request returns as soon as a
+            // row lands, or after one poll period.
+            let wait = if config.mode == Mode::Hot {
+                config.poll
+            } else {
+                Duration::ZERO
+            };
             let page = source
-                .changes_after(after, config.page)
+                .changes_after(after, config.page, wait)
                 .map_err(StoreError::Other)?;
             if page.epoch != manifest.epoch {
                 // The leader changed under us; the next catch-up adopts it.
@@ -976,7 +1196,9 @@ pub(crate) fn spawn_follower_if_configured(store: &TripleStore) {
                     .unwrap_or(true);
                 if due {
                     last_attempt = Some(Instant::now());
-                    match store.replicate_once(&http) {
+                    let outcome = store.replicate_once(&http);
+                    let failed = outcome.is_err();
+                    match outcome {
                         Ok(p) if p.applied_rows > 0 || p.refetched_graphs > 0 || p.resyncs > 0 => {
                             tracing::info!(
                                 "replication: seq {} ({} rows, {} graphs fetched, {} resyncs)",
@@ -988,6 +1210,10 @@ pub(crate) fn spawn_follower_if_configured(store: &TripleStore) {
                         }
                         Ok(_) => {}
                         Err(e) => tracing::warn!("replication: catch-up failed: {e}"),
+                    }
+                    if config.mode == Mode::Hot && !failed {
+                        // The long-poll paced this round; ask again at once.
+                        continue;
                     }
                 }
                 std::thread::sleep(config.poll.min(Duration::from_secs(1)));

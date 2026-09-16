@@ -4138,6 +4138,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     qp("after", false, "Return rows with seq above this (default 0)."),
                     qp("limit", false, "Rows per page, 1-5000 (default 500)."),
                     qp("graph", false, "Only this graph's rows, plus store-scoped rows."),
+                    qp("wait_ms", false, "Long-poll: when no row is above `after`, hold the request up to this many milliseconds (at most 30000) for one to land, then answer."),
                 ],
                 vec![
                     ("200", "Rows in commit order"),

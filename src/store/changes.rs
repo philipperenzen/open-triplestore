@@ -366,6 +366,11 @@ pub struct ChangeLog {
     cursor_ttl_days: u64,
     rows_since_sweep: AtomicU64,
     path: Option<std::path::PathBuf>,
+    /// Woken after every finalised write: the long-poll on the change
+    /// endpoint waits on it.
+    rows_notify: tokio::sync::Notify,
+    /// Bumped on every cursor move: a synchronous leader waits on it.
+    cursor_moves: (Mutex<u64>, std::sync::Condvar),
 }
 
 const SCHEMA: &str = "
@@ -517,6 +522,8 @@ impl ChangeLog {
             cursor_ttl_days: env_u64("OTS_CURSOR_TTL_DAYS", DEFAULT_CURSOR_TTL_DAYS),
             rows_since_sweep: AtomicU64::new(0),
             path,
+            rows_notify: tokio::sync::Notify::new(),
+            cursor_moves: (Mutex::new(0), std::sync::Condvar::new()),
         })
     }
 
@@ -533,6 +540,8 @@ impl ChangeLog {
             cursor_ttl_days: 0,
             rows_since_sweep: AtomicU64::new(0),
             path: None,
+            rows_notify: tokio::sync::Notify::new(),
+            cursor_moves: (Mutex::new(0), std::sync::Condvar::new()),
         }
     }
 
@@ -747,6 +756,7 @@ impl ChangeLog {
         let _ = tx.commit();
         self.next_seq.store(next, Ordering::Relaxed);
         drop(conn);
+        self.rows_notify.notify_waiters();
         if self.rows_since_sweep.fetch_add(written, Ordering::Relaxed) + written >= SWEEP_EVERY_ROWS
         {
             self.rows_since_sweep.store(0, Ordering::Relaxed);
@@ -809,6 +819,53 @@ impl ChangeLog {
         );
     }
 
+    // ── Waiting ─────────────────────────────────────────────────────────────
+
+    /// A future that resolves when a write is finalised after the call
+    /// (`enable` it before checking for rows, so a row that lands in
+    /// between is not missed). The long-poll of `GET /api/admin/changes`.
+    pub fn rows_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.rows_notify.notified()
+    }
+
+    /// How many of `names` have a cursor at or beyond `seq`.
+    pub fn cursors_at(&self, names: &[String], seq: i64) -> usize {
+        names
+            .iter()
+            .filter(|n| self.cursor(n).is_some_and(|c| c.seq >= seq))
+            .count()
+    }
+
+    /// Wait until `required` of `names` have a cursor at or beyond `seq`,
+    /// or `timeout` passes. Returns how many had, and whether enough did.
+    /// Woken by every cursor move, so a follower's acknowledgement is seen
+    /// as soon as it arrives.
+    pub fn wait_for_cursors(
+        &self,
+        names: &[String],
+        seq: i64,
+        required: usize,
+        timeout: std::time::Duration,
+    ) -> (usize, bool) {
+        let deadline = std::time::Instant::now() + timeout;
+        let (lock, cv) = &self.cursor_moves;
+        let mut seen = lock.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            let acked = self.cursors_at(names, seq);
+            if acked >= required {
+                return (acked, true);
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return (acked, false);
+            }
+            let (guard, _) = cv
+                .wait_timeout(seen, deadline - now)
+                .unwrap_or_else(|p| p.into_inner());
+            seen = guard;
+        }
+    }
+
     // ── Reading ─────────────────────────────────────────────────────────────
 
     /// Rows with a sequence number above `after`, in commit order.
@@ -865,16 +922,13 @@ impl ChangeLog {
         .flatten()
     }
 
-    /// The last sequence number handed out (0 before the first write).
+    /// The last sequence number handed out (0 before the first write). From
+    /// the in-memory counter, so the write path can ask on every write.
     pub fn last_seq(&self) -> i64 {
-        self.lock()
-            .and_then(|c| {
-                c.query_row("SELECT COALESCE(MAX(seq), 0) FROM changes", [], |r| {
-                    r.get(0)
-                })
-                .ok()
-            })
-            .unwrap_or(0)
+        if self.conn.is_none() {
+            return 0;
+        }
+        (self.next_seq.load(Ordering::Relaxed) - 1).max(0)
     }
 
     pub fn status(&self) -> Status {
@@ -952,6 +1006,12 @@ impl ChangeLog {
             params![name, seq, owner, expires, now()],
         )
         .map_err(sql_err)?;
+        {
+            let (lock, cv) = &self.cursor_moves;
+            let mut moves = lock.lock().unwrap_or_else(|p| p.into_inner());
+            *moves += 1;
+            cv.notify_all();
+        }
         Ok(())
     }
 

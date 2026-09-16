@@ -43,10 +43,23 @@ What varies is configurable, on the follower:
 
 Temperature changes *only* how often the follower asks. Cold, warm and hot
 apply the same rows the same way; a cold follower that has not asked for an
-hour applies an hour of rows when it does. This is the asynchronous variant
-of hot replication: the leader never waits for a follower, and a follower is
-as far behind as its last catch-up. The synchronous and consensus variants
-are not built (see "What is not here").
+hour applies an hour of rows when it does. A hot follower long-polls: its
+request for rows is held on the leader until a row lands, so its lag is a
+network round trip, not the poll period.
+
+**The modes, in one place:**
+
+| Mode | Where it is set | What it means |
+|---|---|---|
+| `cold` | follower, `OTS_REPLICATION_MODE` | a disaster-recovery copy: catches up every hour |
+| `warm` (or `medium`) | follower | a reporting replica: catches up every minute |
+| `hot` | follower | a read replica: long-polls the leader continuously; lag is a round trip |
+| asynchronous | leader, the default | a write returns as soon as it is durable on the leader; followers catch up at their own pace |
+| synchronous | leader, `OTS_REPLICATION_SYNC_FOLLOWERS` set | a write returns once the required followers have *applied* it, or after the timeout, degraded and visibly so (below) |
+
+Synchronous mode needs hot followers to be usable: a warm follower
+acknowledges once a minute, so every write on its leader would wait the
+timeout out. The consensus variant is not built (see "What is not here").
 
 ### How it works
 
@@ -124,6 +137,51 @@ reads checks `lag_rows` and `healthy`.
 }
 ```
 
+### Synchronous replication
+
+A leader that names synchronous followers waits, at the end of every
+write, until enough of them have applied it. The acknowledgement is the
+cursor a follower sets on the leader after applying a page — so "applied"
+means visible to a reader of the follower, not merely received.
+
+| Setting (leader) | Default | Meaning |
+|---|---|---|
+| `OTS_REPLICATION_SYNC_FOLLOWERS` | *(unset: asynchronous)* | The node ids (`OTS_REPLICATION_NODE_ID` on each follower) whose acknowledgement a write waits for. |
+| `OTS_REPLICATION_SYNC_REQUIRED` | `1` | How many of them must have applied the write before it returns; `all` for every one. One of two survives a follower outage; `all` does not. |
+| `OTS_REPLICATION_SYNC_TIMEOUT_MS` | `2000` | How long a write waits (50–60000 ms). A hot follower on a healthy link acknowledges in a round trip; the timeout is for the unhealthy case. |
+
+**When the followers keep up**, a successful write means the data is on
+the leader *and* on at least the required followers; the response carries
+`X-Replication-Ack: sync`. **When they do not** — a follower down, a
+partition, a follower that fell behind — the write still succeeds after
+the timeout, because it is already durable on the leader and failing it
+would make a client retry a write that landed. The leader marks itself
+*degraded*: the response carries `X-Replication-Ack: degraded`, the status
+shows `sync.degraded_since`, and a warning is logged once. While degraded,
+writes do not wait the timeout out one by one: a write waits only when a
+follower has caught up to the point before it, which is the sign that it
+is back. The first write those followers acknowledge clears the flag,
+logs the recovery and the leader is synchronous again. Nothing is
+un-applied or replayed.
+
+The guarantee, in one sentence: while `sync.degraded_since` is null, a
+successful write has been applied on at least `required` of the named
+followers; while it is set, a successful write is durable on the leader
+only, and the header on each response says which case a client is in.
+
+Why not block until a follower returns, or fail the write: blocking turns
+a replica outage into a leader outage; failing after the commit would be a
+lie, since the data is already visible on the leader. Both are discussed
+in the improvement log (P4, decision 1).
+
+```json
+"sync": {
+  "followers": ["replica-1", "replica-2"], "required": 1, "timeout_ms": 2000,
+  "acked": ["replica-1"], "degraded_since": null, "last_confirmed_seq": 48213,
+  "waits": 48213, "degraded_waits": 17
+}
+```
+
 ### What a follower does and does not replicate
 
 - **RDF data**, per graph, per the scope. Version-snapshot graphs
@@ -165,10 +223,6 @@ comes back.
 
 ### What is not here
 
-- **Synchronous hot replication** — the leader acknowledging a write only
-  after a follower has applied it. The cursor a follower sets is the ack the
-  leader would wait for; what is missing is the wait in the leader's write
-  path and the policy (which followers, how long, what when one is down).
 - **Consensus (Raft)** — automatic leader election and a quorum write path.
   It needs a consensus library, a dependency this programme does not add
   without the maintainer's decision.

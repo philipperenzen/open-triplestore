@@ -318,13 +318,18 @@ type ShaclFunctions = Arc<Vec<(NamedNode, crate::shacl::sparql_functions::FnHand
 
 /// Brackets one write to the store (see [`TripleStore::begin_write`]). Dropping
 /// it records the write's end on every return path, including errors.
-pub(crate) struct WriteGuard<'a>(&'a TripleStore);
+pub(crate) struct WriteGuard<'a>(&'a TripleStore, i64);
 
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
         self.0.parallel_mirror.write_finished();
         self.0.query_cache.invalidate();
         changes::leave_write();
+        // The outermost guard of a synchronous leader waits for its
+        // followers' acknowledgement of what this write recorded.
+        if self.0.parallel_mirror.writes_in_flight() == 0 {
+            self.0.replication.after_write(&self.0.changes, self.1);
+        }
     }
 }
 
@@ -516,7 +521,7 @@ impl TripleStore {
         self.parallel_mirror.write_started();
         self.query_cache.invalidate();
         changes::enter_write();
-        Ok(WriteGuard(self))
+        Ok(WriteGuard(self, self.changes.last_seq()))
     }
 
     /// Writes currently in progress (between `begin_write` and its guard's drop).

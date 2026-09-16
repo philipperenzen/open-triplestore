@@ -87,6 +87,15 @@ See `docs/operations.md, "Replication"`. Two new routes, no change to existing o
 | `GET` | `/api/replication/status` | This node's `role`, `mode`, `scope`, `leader_url`, `node_id`, `read_only`; on a follower also `epoch`, `applied_seq`, `leader_newest_seq`, `lag_rows`, `last_sync_at`, `last_error`, `applied_rows`, `refetched_graphs`, `resyncs`, `interval_secs`, `healthy`. Public, beside `/livez`. |
 | `GET` | `/api/replication/manifest` | The leader's change-log `epoch`, `newest_seq`, `capture_enabled`, every graph (`graphs`, `null` for the default graph) and `datasets` (`id`, `graphs`). Admin only (`401` / `403`). |
 
+`GET /api/admin/changes` takes `wait_ms` (at most 30000): when no row is
+above `after`, the request is held until one lands or the wait runs out,
+then answered — the long-poll a hot follower uses. On a leader with
+synchronous followers (`OTS_REPLICATION_SYNC_FOLLOWERS`), the write routes —
+SPARQL Update, `/sparql/batch`, Graph Store `PUT`/`POST`/`DELETE` — add
+the response header `X-Replication-Ack: sync` while the required followers
+keep up and `X-Replication-Ack: degraded` while a success means "durable on
+the leader only"; status codes are unchanged.
+
 On a node started with `OTS_REPLICATION_ROLE=follower`, every write —
 SPARQL Update, Graph Store `PUT`/`POST`/`DELETE`, imports, data writes made
 by the registry — answers `503 Service Unavailable` with the body

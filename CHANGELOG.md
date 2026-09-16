@@ -22,8 +22,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`cold` / `warm` / `hot` — how often it asks) and scope (all graphs, a
   list of graphs, or the leader's datasets). `GET /api/replication/status`
   (public, beside `/livez`) and `GET /api/replication/manifest` (admin).
-  Asynchronous; the synchronous and consensus variants, identity-database
-  replication and asset shipping are not in this release. See
+  A leader naming `OTS_REPLICATION_SYNC_FOLLOWERS` is **synchronous**: a
+  write returns once the required followers have applied it, or after a
+  timeout, degraded and visibly so (`X-Replication-Ack: sync|degraded` on
+  the write routes, `sync` in the status), recovering by itself when a
+  follower catches up. `GET /api/admin/changes?wait_ms=` long-polls, which
+  is how a hot follower keeps its lag to a round trip. The consensus
+  variant, identity-database replication and asset shipping: see
   docs/operations.md, "Replication".
 - **The 9M-quad SHACL measurement** (`tests/scale_shacl_9m.rs`, an ignored
   test run on purpose): whole-dataset validation of 1M assets against six

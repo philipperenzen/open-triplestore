@@ -852,7 +852,7 @@ pub(crate) async fn execute_update(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// Graph access a SPARQL UPDATE performs, resolved for per-graph ACL enforcement.
@@ -1157,14 +1157,17 @@ async fn sparql_batch_update(
     let all_ok = results.iter().all(|r| *r == BatchStatement::Applied);
 
     if all_ok {
-        Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "count": results.len(),
-            })),
-        )
-            .into_response())
+        Ok(with_ack(
+            &state,
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "count": results.len(),
+                })),
+            )
+                .into_response(),
+        ))
     } else {
         // One transaction: a failing statement rolls every other statement
         // back, so `results` names the failure and marks the rest
@@ -1721,7 +1724,7 @@ async fn graph_store_put(
         before,
         None,
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// POST /store?graph=... — Merge into graph
@@ -1823,7 +1826,7 @@ async fn graph_store_post(
         0,
         None,
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// DELETE /store?graph=... — Remove a graph
@@ -1894,7 +1897,7 @@ async fn graph_store_delete(
         before.saturating_sub(after),
         None,
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// Keep the text index in step with a Graph Store write, writer-pays: refresh
@@ -2126,6 +2129,9 @@ struct ChangesQuery {
     after: Option<i64>,
     limit: Option<usize>,
     graph: Option<String>,
+    /// Long-poll: when no row is above `after`, hold the request up to
+    /// this long for one to land (at most 30 s).
+    wait_ms: Option<u64>,
 }
 
 /// GET /api/admin/changes?after=&limit=&graph= — rows of the change log with
@@ -2141,7 +2147,16 @@ async fn admin_changes(
     let after = q.after.unwrap_or(0).max(0);
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let log = state.store.changes();
-    let rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    // Register for the wake-up before looking, so a row finalised between
+    // the look and the wait is not missed.
+    let mut notified = Box::pin(log.rows_notified());
+    notified.as_mut().enable();
+    let mut rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    let wait = q.wait_ms.unwrap_or(0).min(30_000);
+    if rows.is_empty() && wait > 0 {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(wait), notified).await;
+        rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    }
     let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
     Ok(Json(serde_json::json!({
         "epoch": log.epoch(),
@@ -2214,6 +2229,19 @@ async fn admin_changes_delete_cursor(
     } else {
         Err((StatusCode::NOT_FOUND, "no such cursor".to_string()))
     }
+}
+
+/// Stamp a write's response with what the synchronous followers said:
+/// `X-Replication-Ack: sync` while the required ones keep up, `degraded`
+/// while a success means "durable on the leader only". Absent when no
+/// synchronous follower is configured.
+fn with_ack(state: &AppState, mut resp: Response) -> Response {
+    if let Some(ack) = state.store.replication().ack_state() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(ack) {
+            resp.headers_mut().insert("x-replication-ack", v);
+        }
+    }
+    resp
 }
 
 /// GET /api/replication/status — this node's role, temperature, scope and,
