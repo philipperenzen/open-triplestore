@@ -773,6 +773,15 @@ impl TripleStore {
         {
             return Ok((parallel, Served::Shards));
         }
+        // The columnar copy's own evaluator (P5): dictionary ids, sorted
+        // permutations of the quads, a binary search per triple pattern. It
+        // takes the work the *full copy* would otherwise do — it is consulted
+        // after the shards, not before, because a decomposable aggregate is
+        // 8–11x faster across the shards' cores than in one evaluator. Every
+        // shape it does not implement exactly is declined and falls through.
+        if let Some(columnar) = self.parallel_mirror.try_columnar_query(&self.store, sparql) {
+            return Ok((columnar, Served::Columnar));
+        }
         // In-memory full mirror: everything the shards can't decompose (joins,
         // grouped non-COUNT aggregates, large SELECTs) is served from an unsharded
         // RAM copy within the cap. RocksDB answers a multi-pattern join with one

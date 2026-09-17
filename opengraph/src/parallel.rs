@@ -88,6 +88,8 @@ pub enum ParAnswer {
     },
     /// ASK-style boolean result.
     Boolean(bool),
+    /// CONSTRUCT-style result: the triples, deduplicated.
+    Graph(Vec<oxrdf::Triple>),
 }
 
 impl ParAnswer {
@@ -96,6 +98,7 @@ impl ParAnswer {
         match self {
             ParAnswer::Solutions { rows, .. } => rows.len(),
             ParAnswer::Boolean(_) => 1,
+            ParAnswer::Graph(t) => t.len(),
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -1531,6 +1534,7 @@ mod tests {
                 r.sort();
                 r
             }
+            ParAnswer::Graph(_) => vec!["<graph>".into()],
         }
     }
 

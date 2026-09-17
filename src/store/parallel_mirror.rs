@@ -44,8 +44,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
+use opengraph::columnar::Columnar;
 use opengraph::parallel::{self, ParAnswer, ParClass, ParallelStore};
-use oxigraph::sparql::{QueryResults, QuerySolution, QuerySolutionIter, SparqlEvaluator, Variable};
+use oxigraph::sparql::{
+    QueryResults, QuerySolution, QuerySolutionIter, QueryTripleIter, SparqlEvaluator, Variable,
+};
 use oxigraph::store::Store;
 use tracing::{debug, warn};
 
@@ -107,6 +110,12 @@ struct Inner {
     /// per row — ~40× slower than the same join in RAM — so serving these reads from
     /// this copy is the single biggest win for non-aggregate queries.
     full: RwLock<Option<Arc<Store>>>,
+    /// The columnar, dictionary-encoded copy with its own evaluator
+    /// (`opengraph::columnar`): consulted first for the queries it accepts.
+    /// `None` before the first build, over the cap, or when switched off.
+    columnar: RwLock<Option<Arc<Columnar>>>,
+    /// `OTS_COLUMNAR_QUERY` (default on): build and consult the columnar copy.
+    columnar_enabled: bool,
     /// Set on every write; the next query rebuilds before using either copy.
     dirty: AtomicBool,
     /// Serializes (re)builds so concurrent queries don't each rebuild.
@@ -203,6 +212,15 @@ impl ParallelMirror {
             inner: Arc::new(Inner {
                 shards: RwLock::new(None),
                 full: RwLock::new(None),
+                columnar: RwLock::new(None),
+                columnar_enabled: std::env::var("OTS_COLUMNAR_QUERY")
+                    .map(|v| {
+                        !matches!(
+                            v.trim().to_ascii_lowercase().as_str(),
+                            "0" | "false" | "off" | "no"
+                        )
+                    })
+                    .unwrap_or(true),
                 dirty: AtomicBool::new(true),
                 build_lock: Mutex::new(()),
                 built_len: AtomicUsize::new(0),
@@ -465,6 +483,9 @@ impl ParallelMirror {
         if let Ok(mut full) = self.inner.full.write() {
             *full = None;
         }
+        if let Ok(mut c) = self.inner.columnar.write() {
+            *c = None;
+        }
         self.inner.built_len.store(0, Ordering::Release);
         self.inner.dirty.store(false, Ordering::Release);
         // An over-cap store silently disabling the accelerator was the cause of
@@ -518,7 +539,16 @@ impl ParallelMirror {
             // Build error: leave the previous state untouched and stay dirty.
             return None;
         };
-        self.publish(ps.clone(), full, total, write_mark);
+        // The columnar copy, from the full copy just built (one pass over
+        // RAM, not a second pass over RocksDB).
+        let columnar = if self.inner.columnar_enabled {
+            Some(Arc::new(Columnar::from_quads(
+                full.iter().filter_map(Result::ok),
+            )))
+        } else {
+            None
+        };
+        self.publish(ps.clone(), full, columnar, total, write_mark);
         debug!(
             "parallel mirror built: {total} triples ({} shards + 1 full copy)",
             self.inner.shard_count
@@ -529,12 +559,22 @@ impl ParallelMirror {
     /// Install freshly built copies. The mirror is marked clean only if no
     /// write landed since `write_mark` was taken at the start of the build;
     /// otherwise it stays dirty and the next quiet window rebuilds again.
-    fn publish(&self, ps: Arc<ParallelStore>, full: Arc<Store>, total: usize, write_mark: u64) {
+    fn publish(
+        &self,
+        ps: Arc<ParallelStore>,
+        full: Arc<Store>,
+        columnar: Option<Arc<Columnar>>,
+        total: usize,
+        write_mark: u64,
+    ) {
         if let Ok(mut shards) = self.inner.shards.write() {
             *shards = Some(ps);
         }
         if let Ok(mut f) = self.inner.full.write() {
             *f = Some(full);
+        }
+        if let Ok(mut c) = self.inner.columnar.write() {
+            *c = columnar;
         }
         self.inner.built_len.store(total, Ordering::Release);
         self.inner.build_count.fetch_add(1, Ordering::Relaxed);
@@ -552,6 +592,27 @@ impl ParallelMirror {
     /// store evaluated by the same engine, so results are identical; it is just in
     /// RAM, avoiding RocksDB's per-row join lookups. Returns `None` (→ persistent
     /// store) for a disabled mirror, an over-cap store, or any evaluation error.
+    /// Try to answer `sparql` from the columnar copy with its own evaluator —
+    /// consulted before the shards and the full copy for every query it
+    /// accepts (see `opengraph::columnar`). Declines, like the full copy,
+    /// `SUM`/`AVG` (IEEE-754 order dependence) so the engine keeps its
+    /// last-ULP answer; declines anything the evaluator does not implement,
+    /// a dirty or over-cap mirror, and any evaluation error.
+    pub fn try_columnar_query(&self, store: &Store, sparql: &str) -> Option<QueryResults<'static>> {
+        if !self.inner.enabled || !self.inner.columnar_enabled {
+            return None;
+        }
+        if parallel::has_sum_or_avg(sparql) || !opengraph::columnar::accepts_text(sparql) {
+            return None;
+        }
+        self.get_or_build(store)?;
+        let columnar = self.inner.columnar.read().ok()?.clone()?;
+        match columnar.query(sparql) {
+            Ok(Some(answer)) => Some(par_answer_to_results(answer)),
+            _ => None,
+        }
+    }
+
     pub fn try_full_query<F>(
         &self,
         store: &Store,
@@ -715,6 +776,9 @@ fn par_answer_to_results(ans: ParAnswer) -> QueryResults<'static> {
                 .into_iter()
                 .map(move |row| Ok(QuerySolution::from((row_vars.clone(), row))));
             QueryResults::Solutions(QuerySolutionIter::new(vars, iter))
+        }
+        ParAnswer::Graph(triples) => {
+            QueryResults::Graph(QueryTripleIter::new(triples.into_iter().map(Ok)))
         }
     }
 }
@@ -1023,7 +1087,7 @@ mod stale_read_tests {
         let ps = Arc::new(build_from_store(&store, 2).unwrap());
         let full = Arc::new(build_full_store(&store).unwrap());
         let mark = mirror.inner.last_write_ms.load(Ordering::Acquire);
-        mirror.publish(ps.clone(), full.clone(), 5, mark);
+        mirror.publish(ps.clone(), full.clone(), None, 5, mark);
         assert!(
             !mirror.inner.dirty.load(Ordering::Acquire),
             "no write during the build: clean"
@@ -1032,7 +1096,7 @@ mod stale_read_tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         mirror.mark_dirty();
         let mark_before_second_build = mark;
-        mirror.publish(ps, full, 5, mark_before_second_build);
+        mirror.publish(ps, full, None, 5, mark_before_second_build);
         assert!(
             mirror.inner.dirty.load(Ordering::Acquire),
             "a write landed during the build: still dirty"

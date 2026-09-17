@@ -108,11 +108,20 @@ async fn the_summary_counts_exits_shape_bits_validations_and_write_gaps() {
     assert!(q["by_served"]["cache_hit"].as_u64().unwrap() >= 2, "{s}");
     assert!(q["by_served"]["fast_count"].as_u64().unwrap() >= 1, "{s}");
     assert!(
-        q["by_served"]["engine"].as_u64().unwrap() + q["by_served"]["full_copy"].as_u64().unwrap()
+        q["by_served"]["engine"].as_u64().unwrap()
+            + q["by_served"]["full_copy"].as_u64().unwrap()
+            + q["by_served"]["columnar"].as_u64().unwrap()
             >= 1,
         "{s}"
     );
-    for exit in ["cache_hit", "fast_count", "shards", "full_copy", "engine"] {
+    for exit in [
+        "cache_hit",
+        "columnar",
+        "fast_count",
+        "shards",
+        "full_copy",
+        "engine",
+    ] {
         assert!(q["by_served"][exit].is_u64(), "every exit is listed: {s}");
     }
     assert!(q["analytical"]["count"].as_u64().unwrap() >= 2, "{s}");

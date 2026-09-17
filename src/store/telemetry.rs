@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 pub enum Served {
     /// The result cache.
     CacheHit,
+    /// The columnar copy's own evaluator (opengraph::columnar).
+    Columnar,
     /// The O(1) per-graph count index (`SELECT (COUNT(*) …) { ?s ?p ?o }`).
     FastCount,
     /// The subject-hash shards of the in-memory mirror.
@@ -29,8 +31,9 @@ pub enum Served {
 }
 
 impl Served {
-    pub const ALL: [Served; 5] = [
+    pub const ALL: [Served; 6] = [
         Served::CacheHit,
+        Served::Columnar,
         Served::FastCount,
         Served::Shards,
         Served::FullCopy,
@@ -40,6 +43,7 @@ impl Served {
     pub fn label(self) -> &'static str {
         match self {
             Served::CacheHit => "cache_hit",
+            Served::Columnar => "columnar",
             Served::FastCount => "fast_count",
             Served::Shards => "shards",
             Served::FullCopy => "full_copy",

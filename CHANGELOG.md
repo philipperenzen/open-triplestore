@@ -14,6 +14,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A columnar copy with its own SPARQL evaluator** (`opengraph::columnar`,
+  on by default; `OTS_COLUMNAR_QUERY=off`): the in-memory mirror keeps a
+  third copy — a term dictionary and three sorted permutations of the quads
+  as flat arrays of ids, about 48 bytes a quad — and answers from it, after
+  the shards and in place of the full copy, the query shapes its evaluator
+  implements exactly. A `LIMIT` now stops the scan rather than trimming a
+  materialised result. Everything else is declined before any data is
+  touched and served as before, so answers are unchanged; two parity suites
+  hold the evaluator to the engine, one of them built from an adversarial
+  review of where it could silently differ. A new telemetry exit,
+  `columnar`. Joins, `OPTIONAL`, `MINUS`, subqueries and limited lookups
+  are 44–79 % faster; the before-and-after table is in docs/performance.md,
+  "The columnar copy".
 - **Replication over the change log** (`OTS_REPLICATION_ROLE=leader|follower`):
   a follower tails the leader's change log with a cursor and applies rows
   as deltas, fetches a graph whole when a row says only that it changed,
