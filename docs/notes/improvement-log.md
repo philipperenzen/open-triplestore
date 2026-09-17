@@ -1757,3 +1757,286 @@ tests.
    (the seed callers are outside the programme's scope).
 5. **`v0.6.0`**: the CHANGELOG fold is the last commit before the release
    PR; nothing is tagged or pushed.
+
+## Phase P5 — the analytical layer, built (2026-09-16)
+
+The maintainer's steer after P2's design notes and P4: implement the SPARQL
+evaluator in opengraph; the QLever implementation, configurable and on by
+default; DuckDB only with an argument for it; a before-and-after measurement.
+Three items — two of code, one of argument.
+
+### 1. A columnar copy with its own SPARQL evaluator
+
+**What it is.** `opengraph/src/columnar/`. `index.rs`: a `Dictionary` (terms to
+`u32` ids, id 0 the default graph) and a `Columnar` of three sorted
+permutations of the quads, graph-first `GSPO`, `GPOS`, `GOSP`, as
+`Vec<[u32; 4]>` (rayon sort, dedup); a triple pattern is a `partition_point`
+range on the permutation whose prefix it binds, `plan` picks the permutation.
+`value.rs`: SPARQL value semantics on decoded terms over `oxsdatatypes`, the
+crate Oxigraph itself uses. `eval.rs`: a static `accepts(&Query)` and an
+`evaluate` over id rows — index nested loops in selectivity order, hash joins,
+the solution modifiers, `GROUP BY`, and the expression language. In the mirror
+(`src/store/parallel_mirror.rs`) it is a third copy, built from the full copy in
+the same rebuild under the same cap and the same dirty protocol; `engine.rs`
+consults it **after the shards and before the full copy**. `Served::Columnar`
+in the telemetry; `OTS_COLUMNAR_QUERY` (on).
+
+**Why an evaluator and not a translator.** The design note (§6.3) found the
+fidelity problems of a SPARQL→SQL path one by one — unbound-aware joins, SPARQL
+value equality against SQL equality, numeric promotion, the mixed-term order —
+each a place a second engine answers differently unless the translator rewrites
+around it. An evaluator has no translator: it implements the semantics once, on
+ids. What it gives up is coverage, and that turned out to be the whole story of
+this item.
+
+**Why it sits after the shards.** The first cut put it first, before the
+shards. That is wrong: a decomposable aggregate is 8–11x faster across the
+shards' sixteen cores (§3) than in one single-threaded evaluator, so putting
+the columnar copy first would have taken that work away from the faster path.
+It belongs where the full copy is — the row-returning joins and ordered results
+that the shards cannot decompose.
+
+**What the review found, and what it cost.** The first version passed a parity
+suite of about a hundred queries. An adversarial review of the module — seven
+independent readings (basic graph patterns and joins; the expression language
+and the value space; aggregation and the modifiers; the acceptance gate; graph
+scoping; performance; the wiring), each finding refuted by a second reader
+before it counted — raised 65 findings and confirmed 52, 38 of them silently
+wrong answers. The parity suite had missed all of them.
+
+Rather than take 38 claims on trust — two of them contradicted each other on
+what `=` does across datatypes — every trigger became a test.
+`opengraph/tests/columnar_corners.rs` runs 74 corner shapes and allows each
+only two outcomes: declined, or equal to the engine. **Thirty-four diverged.**
+The worst, and the one that justifies the whole exercise:
+
+```sparql
+SELECT * WHERE { ?s ex:p/(ex:r|ex:name) ?o }    # engine 5 rows, evaluator 21
+```
+
+The parser emits a sequence with an alternative on one side as two sibling
+algebra nodes joined through a fresh blank node. `eval_bgp` stripped
+blank-node columns at the end of each basic graph pattern, so the join key
+vanished and the join became a cross product — on a 2M-quad mirror, an
+unbounded one.
+
+**What shipped as a result.** Declines where matching the engine exactly was
+not worth the surface, because a decline is always safe — the engine answers:
+property paths the parser cannot fold into a basic graph pattern; `GRAPH ?g`
+over a body that need not bind a triple, or with `?g` reused inside it;
+`SUBSTR`, `STRLANG`, `STRDT` and the date/time accessors; `REGEX`/`REPLACE`
+with computed or `q` flags; and this module's own reserved variable namespace.
+Fixes where the engine's rule was cheap to implement and the corner suite could
+hold it there: an ill-typed literal is a type error everywhere rather than an
+opaque string; a language-tagged literal has no effective boolean value; `=`
+between two well-typed literals of different kinds is **false**, not an error
+(so `!=` keeps the rows the engine keeps), while identical terms are equal
+whatever their datatype — which is what makes `?v <= ?v` hold for every term;
+`ORDER BY` breaks a tie between incomparable literals by lexical form then
+datatype, not the reverse; an error anywhere in a `COUNT`, `MIN` or `MAX` makes
+the whole aggregate unbound; `GROUP_CONCAT` is unbound unless every member is a
+string; `STR()` of a blank node is a type error. The unreachable path expander
+was then removed rather than left to mislead.
+
+**The `LIMIT` budget.** The first measurement caught a 16x regression:
+`query/lookup_with_limit/10000` went from 29 µs to 464 µs, because `Slice`
+evaluated the whole inner pattern and then truncated while the engine stops
+early. The evaluator now carries a row budget down through the operators that
+are one-row-in-one-row-out (`Project`, `BIND`, `GRAPH`) or that can widen it
+arithmetically (`OFFSET` + `LIMIT`, a `UNION`'s two sides); every other
+operator bounds only its own output, because an operator that drops rows needs
+more input than output. Inside a basic graph pattern only the *last* pattern
+may stop early — a row an earlier one produced can still be dropped by a later
+one. The budget is therefore a pure early exit on the same row order, and the
+suite pins that directly: for every shape and every `n`, `LIMIT n` equals the
+first `n` rows of the same query unlimited, and `OFFSET k LIMIT n` the `n`
+after the first `k`. An `ASK` runs with a budget of one row.
+
+**Tests.** `opengraph/tests/columnar_parity.rs` (8): about a hundred queries,
+engine against evaluator, as multisets and in order where the query orders,
+plus the declines and the budget property. `opengraph/tests/columnar_corners.rs`
+(8): the 74 corners above. `tests/columnar_query.rs` (2): the live path — served
+from the copy per the telemetry, equal to a store whose accelerator is off,
+declined shapes fall through, a write dirties the copy. The W3C SPARQL 1.1,
+SPARQLoscope and SPARQL-function conformance suites (20 / 67 / 125) run
+unchanged.
+
+**Measured.** Against `f0adb95` in a detached worktree, same machine, same
+builder image, back to back:
+
+| benchmark | `f0adb95` | this commit | change |
+|---|--:|--:|--:|
+| `query/simple_lookup/100` | 47.9 µs | 19.5 µs | **-59 %** |
+| `query/simple_lookup/1000` | 293.2 µs | 134.4 µs | **-54 %** |
+| `query/simple_lookup/10000` | 3.18 ms | 1.54 ms | **-52 %** |
+| `query/lookup_with_limit/1000` | 25.1 µs | 7.2 µs | **-72 %** |
+| `query/lookup_with_limit/10000` | 30.0 µs | 7.1 µs | **-76 %** |
+| `query/lookup_with_limit/100000` | 34.6 µs | 7.2 µs | **-79 %** |
+| `query/join_2way/100` | 88.8 µs | 36.2 µs | **-59 %** |
+| `query/join_2way/1000` | 691.4 µs | 266.9 µs | **-61 %** |
+| `query/join_2way/10000` | 8.44 ms | 3.12 ms | **-63 %** |
+| `query/join_3way/100` | 135.3 µs | 52.3 µs | **-61 %** |
+| `query/join_3way/1000` | 1.12 ms | 425.3 µs | **-62 %** |
+| `query/join_3way/10000` | 13.29 ms | 4.84 ms | **-64 %** |
+| `query/filter/1000` | 252.5 µs | 292.2 µs | **+16 %** |
+| `query/filter/10000` | 2.52 ms | 2.80 ms | **+11 %** |
+| `query/optional/1000` | 710.9 µs | 326.3 µs | **-54 %** |
+| `query/optional/10000` | 9.46 ms | 3.49 ms | **-63 %** |
+| `query/group_concat/1000` | 657.8 µs | 369.9 µs | **-44 %** |
+| `query/group_concat/10000` | 8.34 ms | 3.91 ms | **-53 %** |
+| `query/subquery/1000` | 782.2 µs | 414.6 µs | **-47 %** |
+| `query/subquery/10000` | 9.12 ms | 4.10 ms | **-55 %** |
+| `query/bind/1000` | 430.1 µs | 365.0 µs | **-15 %** |
+| `query/bind/10000` | 4.58 ms | 3.57 ms | **-22 %** |
+| `query/minus/1000` | 326.9 µs | 155.2 µs | **-53 %** |
+| `query/minus/10000` | 3.60 ms | 1.54 ms | **-57 %** |
+| `query/construct/1000` | 440.7 µs | 353.0 µs | **-20 %** |
+| `query/construct/10000` | 592.2 µs | 338.1 µs | **-43 %** |
+| `query/named_graph/1000` | 344.1 µs | 179.5 µs | **-48 %** |
+| `query/named_graph/10000` | 3.51 ms | 2.32 ms | **-34 %** |
+| `path/sequence/100` | 85.4 µs | 33.2 µs | **-61 %** |
+| `path/sequence/500` | 324.9 µs | 128.8 µs | **-60 %** |
+| `path/sequence/1000` | 633.3 µs | 247.7 µs | **-61 %** |
+| `path/inverse/100` | 49.8 µs | 18.8 µs | **-62 %** |
+| `path/inverse/1000` | 301.9 µs | 132.0 µs | **-56 %** |
+| `path/inverse/10000` | 3.09 ms | 1.40 ms | **-55 %** |
+| `path/negated_property_set/10000` | 15.06 ms | 12.43 ms | **-17 %** |
+| *22 other benchmarks* | | | *within ±10 %* |
+
+33 benchmarks are faster and 2 slower by more than 10 %, with 22 unchanged. The largest gain is `query/lookup_with_limit/100000` at -79 %; the largest loss is `query/filter/1000` at +16 %, inside the programme's 20 % bound.
+
+**Dependencies.** `opengraph` gains `oxsdatatypes = "0.2"` and `regex = "1"`,
+both already in the lock file through Oxigraph and the main crate; nothing new
+is downloaded.
+
+**Stated plainly.** The accepted set is now markedly smaller than the evaluator
+can attempt, and it should stay that way until each declined shape has its own
+corner test proving it. Two of the review's confirmed findings were *not*
+fixed and are not defects in the shipped code because the shapes are declined
+— the cross-product path and the unbounded `expand_path` — but they would
+return the moment property paths are accepted again. The review's remaining
+performance findings (a nested-loop `MINUS` where Oxigraph hash-joins;
+`estimate()` counting per candidate per planning round; `REGEX` recompiled per
+solution; the query parsed more than once on the way in) are real and unfixed;
+none of them regressed a benchmark, so none was worth the risk in this pass.
+
+### 2. QLever as a read backend, fed from the change log
+
+**What.** `src/store/qlever.rs`: a feeder and a router. The feeder is a
+change-log consumer — the same rows a replication follower reads, turned into
+SPARQL Update: `full` rows as `DELETE DATA`/`INSERT DATA` in batches, rows that
+only say a graph changed (counts, `unknown`, store-scoped, blank nodes) as a
+graph replace from the local store, an epoch change as a replace of everything;
+its bookmark is the cursor `qlever`, which pins retention. The router sends a
+query only while the feeder is caught up (bookmark = newest sequence, no write
+in flight) — the mirror's never-stale rule — and only in the shapes the policy
+names: `analytical` (an `ASK`, or a query with an aggregate anywhere in it —
+wider than the shard classifier's verdict, which is `None` for a count over
+`GRAPH ?g`; the first cut used the classifier and the policy test caught it),
+`all`, `first` (before the copies, for measurements), `off`. Any error falls
+through and is kept in the status. `OTS_QLEVER_URL`, `_ENABLED` (on),
+`_ACCESS_TOKEN`, `_ROUTE`, `_BATCH`, `_POLL_MS`, `_TIMEOUT_SECS`; the feeder
+thread starts with the store when a URL is set;
+`GET /api/admin/qlever/status` (admin); the `qlever` telemetry exit. The
+endpoint is a trait — HTTP, or a stand-in in tests.
+
+**Why this shape.** QLever's index is built from a dump, so this is not a
+replica; it is a read backend for the tier the mirror cannot hold, and the feed
+reuses P2's capture and its cursor semantics. The feeder is short because the
+log already says what changed and how well it knows.
+
+**Tests.** `tests/qlever_backend.rs` (3), a stand-in endpoint backed by an
+in-memory store: the first round replaces everything, a ground update is a
+delta, a scanned over-cap update is a graph replace, the router serves only
+when caught up and equals the engine; the policy; the status route. A unit test
+for the analytical shape.
+
+**Not measured live.** A head-to-head against a running QLever needs its Docker
+image (`adfreiburg/qlever`), a download the brief reserves for the maintainer's
+say-so; the `first` route exists for exactly that measurement, and the existing
+Fuseki/QLever comparison in `docs/performance.md` stands unchanged. Two of the
+review's confirmed findings here are **open**, recorded below rather than
+fixed: a graph resync split across several `INSERT DATA` operations turns one
+blank node into several on the remote, and a full resync never clears a graph
+the endpoint holds that the local store no longer does.
+
+### 3. DuckDB: not built, and why
+
+The brief allowed DuckDB only with an argument for it. None survives:
+
+- **What DuckDB would add is a columnar representation with a vectorised
+  engine.** Item 1 provides the representation in-process, without a C++ build,
+  at 48 bytes a quad, with an evaluator that speaks SPARQL directly. The
+  translation a DuckDB path needs — SPARQL to SQL — is exactly where the design
+  note found the fidelity problems (§6.3). Item 1 is the evidence for how
+  expensive that class of problem is: *without* a translator, writing the
+  semantics directly, an adversarial review still found 34 real divergences. A
+  translator to a SQL engine with its own value space and its own null
+  semantics would face all of them and more, and would not have the option this
+  item used — declining.
+- **The workloads DuckDB is best at — scans and aggregates — are already the
+  shards'** at the sizes the mirror holds (8–11x across sixteen cores, §3),
+  which is also why the columnar copy was moved behind them. Above the cap,
+  QLever (item 2) serves them from a proper RDF index with SPARQL fidelity and
+  no translation.
+- **Build cost.** A bundled DuckDB adds a very large C++ compilation to a
+  builder that already produces random cross-compiler faults under RocksDB and
+  GEOS, and a binary size the design note flagged as unmeasured.
+- **The `/sql` endpoint**, the one deliverable that actually needs a SQL engine
+  (§3.2), was not asked for.
+
+If a SQL surface is ever wanted, DataFusion — Apache-2.0, pure Rust, a
+whitelistable logical plan (§3.3) — over the columnar copy's arrays is the
+route, with the design note's §6–7 as its specification. Until then the
+columnar copy and QLever cover the analytical layer's two tiers: under the cap
+in-process, above it out of process.
+
+## Checkpoint (2026-09-17, HEAD `d2236a8` + this note)
+
+**Commits.** `8f8b2e0` the columnar copy and its evaluator · `d2236a8` QLever
+as a read backend. One item per commit, signed off, no branding. The third
+P5 item is an argument, not code, and lives in section 3 above.
+
+**Suite.** 3,080 passed / 0 failed / 2 ignored over 89 binaries (the two
+ignored are the pre-existing one and the 9M harness). Clippy
+(`--all-targets -D warnings`) clean at both commits. The conformance table
+was regenerated at each; the W3C SPARQL 1.1, SPARQLoscope and
+SPARQL-function suites (20 / 67 / 125) run unchanged, which is the check
+that mattered most for an evaluator.
+
+**Dependencies.** `opengraph` gained `oxsdatatypes` only. `regex` was added
+for the evaluator's `REGEX`/`REPLACE` and then removed again when those were
+declined, so the crate ends where it started but for one dependency already
+in the lock file. `cargo deny` was not run (the tool is not in the builder
+image); `oxsdatatypes` is Apache-2.0/MIT by its manifest.
+
+**What the maintainer asked for, and what it became.**
+
+| Asked | Shipped |
+|---|---|
+| Implement the SPARQL evaluator in opengraph | `opengraph::columnar` — dictionary, three sorted permutations, an evaluator over ids, in the mirror as a third copy after the shards; 33 of 57 benchmarks faster by more than 10 %, 2 slower and both inside the 20 % bound |
+| The QLever implementation, configurable, on by default | `src/store/qlever.rs` — a change-log feeder and a route policy, on once `OTS_QLEVER_URL` is set, never serving while behind, every error falling through |
+| DuckDB only with an argument for it | Not built. The argument against is section 3: the representation is now in-process without a C++ build, the scans and aggregates are already the shards', and a SPARQL→SQL translator would face every fidelity problem this item hit *plus* a second value space — without the option of declining |
+| A before-and-after measurement | The paired table in `docs/performance.md` and in section 1, `f0adb95` against `8f8b2e0` in a detached worktree, back to back, median of the rounds |
+
+**Still the maintainer's, or worth knowing.**
+
+1. **The accepted set is narrow on purpose.** Widening it means adding the
+   corner test first: that is what turned 34 silent divergences into 34
+   declines or fixes. Property paths are the obvious candidate, and the
+   cross-product bug (section 1) is what has to be fixed to accept them.
+2. **Two QLever limits are open**, both in the resync path: blank nodes
+   split across `INSERT DATA` batches, and a graph the endpoint holds that
+   the local store no longer does. Neither can serve a wrong answer to a
+   client — the router only reads — but both leave the remote index wrong.
+3. **The review's remaining performance findings are unfixed**: `estimate()`
+   counts per candidate per planning round, and the query is parsed more
+   than once on the way in. Neither regressed a benchmark.
+4. **The flat row layout** (`Vec<Vec<Option<u32>>>` → one flat array with a
+   width) is the next real speed-up, and is what the two `query/filter`
+   regressions are made of.
+5. **The 9M measurement, `cargo deny`, the Raft vote, asset shipping** and
+   **the boot seed on a follower** are unchanged from the P4 checkpoint.
+6. **`v0.6.0`**: the CHANGELOG fold is still the last commit before the
+   release PR; nothing is tagged or pushed.
+

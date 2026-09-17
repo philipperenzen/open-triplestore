@@ -341,3 +341,27 @@ This replaces the held `shacl-to-sql-design.md`. Deferred pending section 1.5; i
 **What "identical" would mean.** The W3C runner compares only `sh:conforms` and the multiset of violation focus nodes (`tests/w3c_shacl_conformance.rs:12-20`); `source_constraint` is a display string (`report.rs:33`), `value` is `lit.value()` without datatype or language (`constraints.rs:47`), order is unspecified, and there is no graph field. Two implementations become comparable only after an additive typed component and graph field on `ValidationResult`. The suite is also a two-way ratchet (`w3c_shacl_conformance.rs:22-24`) whose path fixtures — `path-oneOrMore-001`, `path-zeroOrMore-001`, `path-zeroOrOne-001`, `path-inverse-001`, `path-alternative-001` — are not in `KNOWN_FAILURES` (`:44-51`), so any compiled path must fall back natively, never skip.
 
 **Why a test of the translator, not a separate item.** Every compilable shape above is `GROUP BY`/`HAVING`, `NOT EXISTS`, `COUNT` and `FILTER` over the section 6.1 subset **plus** a materialised closure and a union — the translator's accepted forms plus two constructs it must grow anyway. One translator, one parity corpus, one declined set; a SHACL-specific compiler would fight the same fidelity problems (section 6.3) in a second place, against semantics that are unpinned and internally inconsistent today. If the translator is built, SHACL Core becomes an acceptance test over it: compile the compilable shapes, run both engines on the seeded corpora and the 9M harness, and require identical `conforms` and focus-node multisets. If they differ, the translator is wrong.
+
+---
+
+## 13. Status (2026-09-16): what P5 built against this note
+
+- **The substrate (§3.1, and the first row of §3.3's table): built**, as
+  `opengraph::columnar` — dictionary, three graph-first sorted permutations, no
+  dependency beyond `oxsdatatypes` and `regex` — with a **SPARQL evaluator
+  rather than a translator** (§6). §6.4's fidelity policy holds and is the
+  whole design: decline rather than differ, with parity against the engine as
+  the guard. §6.1's accepted algebra turned out to be the wrong target; what
+  ships is narrower, set by what an adversarial review could not break (the
+  improvement log, P5 item 1).
+- **The feed (§5): built twice.** The columnar copy is rebuilt with the other
+  two under §8's protocol — which answers open question 2: the same cap, the
+  same rebuild, no columnar-only branch. QLever is fed incrementally from the
+  P2 capture with a cursor (§5.2–5.4).
+- **Insertion point (§6.6): after the shards, not before.** The shards'
+  aggregate decomposition is faster than one evaluator; the columnar copy takes
+  the full copy's work.
+- **Not built:** `/sql` (§7), DataFusion or DuckDB (§3.3), class views (§4).
+  The argument against DuckDB is in the improvement log, P5 item 3. Open
+  question 1 (collapsing the copies into one `Copies` swap) is still open, and
+  now covers three copies rather than two.
