@@ -20,6 +20,10 @@ use open_triplestore::store::replication::{Mode, ReplicationConfig, Role};
 use open_triplestore::store::TripleStore;
 use tower::ServiceExt as _;
 
+/// Long enough that a re-election inside the window is not a failure, short
+/// enough that a real hang still ends the test.
+const TIMEOUT: Duration = Duration::from_secs(20);
+
 async fn wait_for<T>(what: &str, timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
     let t = Instant::now();
     loop {
@@ -56,21 +60,23 @@ async fn three_members_elect_one_leader_and_re_elect_when_it_leaves() {
         nodes.push(m);
     }
 
-    // Exactly one leader, and every member names it.
-    let leader = wait_for("a leader", Duration::from_secs(10), || {
-        let leaders: Vec<u64> = nodes
+    // Exactly one leader, and every member names it — asked as one
+    // condition over one snapshot of the views. Finding a leader in one poll
+    // and checking agreement in the next is a race against the cluster: with
+    // an election timeout of 150-300 ms a new election can intervene, and the
+    // member the first poll captured is then stale for good.
+    let leader = wait_for("one leader every member names", TIMEOUT, || {
+        let views: Vec<_> = nodes.iter().map(|n| n.view()).collect();
+        let mut leaders = nodes
             .iter()
-            .filter(|n| n.view().is_leader)
-            .map(|n| n.id)
-            .collect();
-        (leaders.len() == 1).then(|| leaders[0])
-    })
-    .await;
-    wait_for("agreement", Duration::from_secs(10), || {
-        nodes
-            .iter()
-            .all(|n| n.view().leader == Some(leader))
-            .then_some(())
+            .zip(&views)
+            .filter(|(_, v)| v.is_leader)
+            .map(|(n, _)| n.id);
+        let id = leaders.next()?;
+        if leaders.next().is_some() {
+            return None; // Two at once: a term is still settling.
+        }
+        views.iter().all(|v| v.leader == Some(id)).then_some(id)
     })
     .await;
     let v = nodes[(leader - 1) as usize].view();
@@ -81,25 +87,20 @@ async fn three_members_elect_one_leader_and_re_elect_when_it_leaves() {
     // The leader leaves the network and stops: the other two elect another.
     router.remove(leader);
     nodes[(leader - 1) as usize].shutdown().await;
-    let new_leader = wait_for("a new leader", Duration::from_secs(15), || {
-        nodes
+    // The same question, and the same reason to ask it once: a new leader is
+    // only a new leader when the member still standing beside it says so.
+    let new_leader = wait_for("a new leader the survivor follows", TIMEOUT, || {
+        let alive: Vec<_> = nodes.iter().filter(|n| n.id != leader).collect();
+        let views: Vec<_> = alive.iter().map(|n| n.view()).collect();
+        let id = alive
             .iter()
-            .filter(|n| n.id != leader && n.view().is_leader)
-            .map(|n| n.id)
-            .next()
+            .zip(&views)
+            .find(|(_, v)| v.is_leader)
+            .map(|(n, _)| n.id)?;
+        views.iter().all(|v| v.leader == Some(id)).then_some(id)
     })
     .await;
     assert_ne!(new_leader, leader);
-    let survivor = nodes
-        .iter()
-        .find(|n| n.id != leader && n.id != new_leader)
-        .unwrap();
-    wait_for(
-        "the survivor follows the new leader",
-        Duration::from_secs(10),
-        || (survivor.view().leader == Some(new_leader)).then_some(()),
-    )
-    .await;
     let term_after = nodes[(new_leader - 1) as usize].view().term;
     assert!(
         term_after > v.term,
