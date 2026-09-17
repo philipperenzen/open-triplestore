@@ -1829,24 +1829,32 @@ impl TripleStore {
         }
     }
 
+    /// Resolve `from_graph` to the graph the dump/scan helpers read from.
+    fn graph_ref(from_graph: Option<&str>) -> Result<GraphNameRef<'_>, StoreError> {
+        match from_graph {
+            Some(g) => Ok(GraphNameRef::NamedNode(
+                NamedNodeRef::new(g)
+                    .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?,
+            )),
+            None => Ok(GraphNameRef::DefaultGraph),
+        }
+    }
+
     /// Stream all triples from a graph in the specified format into `writer`.
     ///
     /// This is the primitive used by both the buffered [`Self::dump`] helper and
     /// the streaming HTTP response path — callers that want to avoid buffering
     /// multi-MB results in memory can pass an `axum`-backed writer directly.
+    ///
+    /// Emits no `@prefix` header: every IRI is written in full. Callers serving
+    /// Turtle to a human want [`Self::dump_prefixed`] instead.
     pub fn dump_to_writer<W: Write>(
         &self,
         mut writer: W,
         format: RdfFormat,
         from_graph: Option<&str>,
     ) -> Result<(), StoreError> {
-        let graph = match from_graph {
-            Some(g) => GraphNameRef::NamedNode(
-                NamedNodeRef::new(g)
-                    .map_err(|e| StoreError::Parse(format!("Invalid IRI: {}", e)))?,
-            ),
-            None => GraphNameRef::DefaultGraph,
-        };
+        let graph = Self::graph_ref(from_graph)?;
 
         let serializer = RdfSerializer::from_format(format);
         let mut ser = serializer.for_writer(&mut writer);
@@ -1884,6 +1892,144 @@ impl TripleStore {
         let mut buffer: Vec<u8> =
             Vec::with_capacity(approx.saturating_mul(80).min(8 * 1024 * 1024));
         self.dump_to_writer(&mut buffer, format, from_graph)?;
+        Ok(buffer)
+    }
+
+    /// The distinct namespaces the terms of `from_graph` are drawn from.
+    ///
+    /// Each entry is a namespace some term in the graph can actually be written
+    /// against, so a prefix header built from these has no dead lines in it.
+    /// The datatypes Turtle writes implicitly — plain strings, language strings,
+    /// and the numeric/boolean shorthands (`1`, `1.5`, `true`) — are skipped:
+    /// their IRI never reaches the document, so declaring `xsd:` for a graph
+    /// whose only typed literal is `sh:minCount 1` would be exactly such a dead
+    /// line. A datatype outside that set (`xsd:date`, say) is written out, and
+    /// does put its namespace in the header.
+    pub fn graph_namespaces(
+        &self,
+        from_graph: Option<&str>,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        const IMPLICIT_DATATYPES: [&str; 6] = [
+            "http://www.w3.org/2001/XMLSchema#string",
+            "http://www.w3.org/2001/XMLSchema#integer",
+            "http://www.w3.org/2001/XMLSchema#decimal",
+            "http://www.w3.org/2001/XMLSchema#double",
+            "http://www.w3.org/2001/XMLSchema#boolean",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+        ];
+        let graph = Self::graph_ref(from_graph)?;
+        let mut out = std::collections::BTreeSet::new();
+        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+            let quad = quad?;
+            if let NamedOrBlankNode::NamedNode(n) = &quad.subject {
+                collect_namespace(n.as_str(), &mut out);
+            }
+            collect_namespace(quad.predicate.as_str(), &mut out);
+            match &quad.object {
+                Term::NamedNode(n) => collect_namespace(n.as_str(), &mut out),
+                Term::Literal(l) => {
+                    let dt = l.datatype();
+                    if !IMPLICIT_DATATYPES.contains(&dt.as_str()) {
+                        collect_namespace(dt.as_str(), &mut out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Like [`Self::dump_to_writer`], but prepends an `@prefix` header so the
+    /// document reads as CURIEs (`sh:NodeShape`) instead of full IRIs.
+    ///
+    /// `resolve_ns` maps a namespace IRI to the `(label, namespace)` pair to
+    /// declare for it — typically a lookup in the instance's `PrefixRegistry`.
+    /// It is called once per *distinct* namespace in the graph, never per
+    /// triple, because this runs per request. Namespaces it declines keep their
+    /// full IRI form.
+    ///
+    /// The returned namespace need not be the one passed in: a registry knows
+    /// `ex: <http://example.org/>`, while the namespace a Turtle writer splits
+    /// `http://example.org/shapes/PersonShape` at is `.../shapes/`. Declaring
+    /// the shorter, registered namespace still shortens that IRI, because the
+    /// serializer matches declarations by string prefix, longest first. What it
+    /// must never do is declare the *derived* namespace under the registry's
+    /// label — that would re-point every other `ex:` CURIE in the document.
+    ///
+    /// Formats with no prefix header (N-Triples, N-Quads, RDF/XML) fall straight
+    /// through to [`Self::dump_to_writer`]; they would pay for the namespace scan
+    /// and get nothing for it.
+    pub fn dump_prefixed_to_writer<W, F>(
+        &self,
+        mut writer: W,
+        format: RdfFormat,
+        from_graph: Option<&str>,
+        resolve_ns: F,
+    ) -> Result<(), StoreError>
+    where
+        W: Write,
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        if !matches!(format, RdfFormat::Turtle | RdfFormat::TriG) {
+            return self.dump_to_writer(writer, format, from_graph);
+        }
+
+        // The resolver may answer with a namespace SHORTER than the one derived
+        // from the IRI, so a label can be claimed either by the namespace it was
+        // registered for or by some longer namespace falling back to it. Those
+        // are not equal claims: resolving in namespace-string order would let a
+        // derived namespace take `foaf` and leave the real FOAF namespace
+        // undeclared. Exact self-declarations are therefore claimed first, and
+        // fallbacks only fill what is left.
+        let resolved: Vec<(String, String, String)> = self
+            .graph_namespaces(from_graph)?
+            .into_iter()
+            .filter_map(|ns| resolve_ns(&ns).map(|(label, declared)| (ns, label, declared)))
+            .filter(|(_, label, _)| crate::prefixes::is_valid_label(label))
+            .collect();
+
+        let mut serializer = RdfSerializer::from_format(format);
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for exact_first in [true, false] {
+            for (ns, label, declared) in &resolved {
+                if (declared == ns) != exact_first {
+                    continue;
+                }
+                // A label names one namespace only: re-declaring it would
+                // silently re-point every CURIE written against the first.
+                if !taken.insert(label.clone()) {
+                    continue;
+                }
+                serializer = serializer.with_prefix(label, declared).map_err(|e| {
+                    StoreError::Parse(format!("Invalid namespace '{declared}': {e}"))
+                })?;
+            }
+        }
+
+        let graph = Self::graph_ref(from_graph)?;
+        let mut ser = serializer.for_writer(&mut writer);
+        for quad in self.store.quads_for_pattern(None, None, None, Some(graph)) {
+            let quad = quad?;
+            ser.serialize_triple(quad.as_ref())?;
+        }
+        ser.finish()?;
+        Ok(())
+    }
+
+    /// Buffered [`Self::dump_prefixed_to_writer`], for callers that need bytes.
+    pub fn dump_prefixed<F>(
+        &self,
+        format: RdfFormat,
+        from_graph: Option<&str>,
+        resolve_ns: F,
+    ) -> Result<Vec<u8>, StoreError>
+    where
+        F: Fn(&str) -> Option<(String, String)>,
+    {
+        let approx = self.graph_index.get_count(from_graph).unwrap_or(0);
+        let mut buffer: Vec<u8> =
+            Vec::with_capacity(approx.saturating_mul(80).min(8 * 1024 * 1024));
+        self.dump_prefixed_to_writer(&mut buffer, format, from_graph, resolve_ns)?;
         Ok(buffer)
     }
 
@@ -2561,6 +2707,33 @@ impl TripleStore {
     }
 }
 
+// ── Namespace extraction (see TripleStore::graph_namespaces) ─────────────────
+
+/// The namespace part of `iri`: everything up to and including the last `#`,
+/// `/` or `:` that is followed by a local name.
+///
+/// This is the same split a Turtle writer makes when it shortens an IRI, so a
+/// namespace returned here is one the serializer can actually use.
+fn namespace_of(iri: &str) -> Option<&str> {
+    let cut = iri
+        .rfind('#')
+        .or_else(|| iri.rfind('/'))
+        .or_else(|| iri.rfind(':'))?;
+    // A delimiter with nothing after it is the IRI's own end, not a namespace.
+    (cut + 1 < iri.len()).then(|| &iri[..=cut])
+}
+
+/// Record `iri`'s namespace in `out`, if it has one.
+fn collect_namespace(iri: &str, out: &mut std::collections::BTreeSet<String>) {
+    if let Some(ns) = namespace_of(iri) {
+        // Checked before inserting: `insert` alone would allocate a `String` for
+        // every term in the graph, not just the first of each namespace.
+        if !out.contains(ns) {
+            out.insert(ns.to_string());
+        }
+    }
+}
+
 /// Detect RDF format from file extension.
 pub fn detect_format_from_path(path: &Path) -> Result<RdfFormat, StoreError> {
     match path.extension().and_then(|e| e.to_str()) {
@@ -3089,6 +3262,227 @@ mod tests {
             None,
             "parse miss → rebuild"
         );
+    }
+
+    // ── Prefixed serialization ───────────────────────────────────────────────
+
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    const EX: &str = "http://example.org/";
+
+    fn shapes_store() -> TripleStore {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+                 @prefix ex: <http://example.org/> .\n\
+                 ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ; \
+                 sh:name \"people\" ; sh:minCount 1 .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn namespace_of_splits_on_the_last_delimiter() {
+        assert_eq!(
+            namespace_of("http://www.w3.org/ns/shacl#NodeShape"),
+            Some(SH)
+        );
+        assert_eq!(namespace_of("http://example.org/Person"), Some(EX));
+        assert_eq!(namespace_of("urn:example:thing"), Some("urn:example:"));
+        // Nothing follows the delimiter, so there is no local name to shorten.
+        assert_eq!(namespace_of("http://example.org/"), None);
+        assert_eq!(namespace_of("bare"), None);
+    }
+
+    #[test]
+    fn graph_namespaces_lists_only_what_the_graph_uses() {
+        let store = shapes_store();
+        let ns = store.graph_namespaces(Some("urn:g")).unwrap();
+        assert!(ns.contains(SH), "{ns:?}");
+        assert!(ns.contains(EX), "{ns:?}");
+        assert!(
+            ns.contains("http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+            "rdf:type is a term of the graph: {ns:?}"
+        );
+        // Neither the plain string's xsd:string nor the integer's xsd:integer is
+        // ever written out, so xsd has no CURIE to shorten here.
+        assert!(!ns.contains("http://www.w3.org/2001/XMLSchema#"), "{ns:?}");
+
+        // A datatype Turtle *does* write out puts its namespace back in.
+        let dated = TripleStore::in_memory().unwrap();
+        dated
+            .load_str(
+                "<http://e/s> <http://e/p> \
+                 \"2024-01-01\"^^<http://www.w3.org/2001/XMLSchema#date> .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        assert!(dated
+            .graph_namespaces(Some("urn:g"))
+            .unwrap()
+            .contains("http://www.w3.org/2001/XMLSchema#"));
+    }
+
+    #[test]
+    fn a_registered_namespace_keeps_its_own_label_against_a_fallback() {
+        // Both namespaces resolve to the label `foaf`: one because it IS the
+        // registered namespace, the other by falling back to it. Claiming in
+        // namespace-string order would hand the label to whichever sorts first
+        // and leave the real one written out in full.
+        let store = TripleStore::in_memory().unwrap();
+        let g = "urn:g";
+        store
+            .load_str(
+                "<http://a.example/x/Thing> <http://xmlns.com/foaf/0.1/knows> \
+                 <http://xmlns.com/foaf/0.1/Person> .",
+                RdfFormat::NTriples,
+                Some(g),
+            )
+            .unwrap();
+
+        let foaf = "http://xmlns.com/foaf/0.1/";
+        let out = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some(g), |ns| {
+                    if ns == foaf {
+                        Some(("foaf".to_string(), foaf.to_string()))
+                    } else if ns.starts_with("http://a.example/") {
+                        // A fallback: a shorter, registered namespace under the
+                        // same label.
+                        Some(("foaf".to_string(), "http://a.example/".to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            out.contains(&format!("@prefix foaf: <{foaf}>")),
+            "the namespace that owns the label keeps it:\n{out}"
+        );
+        assert!(out.contains("foaf:knows"), "{out}");
+        assert_eq!(
+            out.matches("@prefix foaf:").count(),
+            1,
+            "one label, one namespace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn dump_prefixed_writes_curies_for_resolved_namespaces_only() {
+        let store = shapes_store();
+        let ttl = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    (ns == SH).then(|| ("sh".to_string(), SH.to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(ttl.contains(&format!("@prefix sh: <{SH}>")), "{ttl}");
+        assert!(ttl.contains("sh:NodeShape"), "{ttl}");
+        // Declined by the resolver, so it must still be written in full.
+        assert!(!ttl.contains("@prefix ex:"), "{ttl}");
+        assert!(ttl.contains("<http://example.org/PersonShape>"), "{ttl}");
+        // The plain dump is unchanged: the prefixed path is opt-in.
+        let plain =
+            String::from_utf8(store.dump(RdfFormat::Turtle, Some("urn:g")).unwrap()).unwrap();
+        assert!(!plain.contains("@prefix"), "{plain}");
+    }
+
+    #[test]
+    fn dump_prefixed_declares_a_label_once() {
+        let store = shapes_store();
+        // A resolver that hands every namespace the same label: the second one
+        // must be dropped, not re-point the first namespace's CURIEs.
+        let ttl = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    Some(("v".to_string(), ns.to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ttl.matches("@prefix v:").count(), 1, "{ttl}");
+        // Invalid Turtle labels are refused outright.
+        let bad = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    Some(("1 bad".to_string(), ns.to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!bad.contains("@prefix"), "{bad}");
+    }
+
+    #[test]
+    fn dump_prefixed_declares_the_namespace_the_resolver_returns() {
+        let store = TripleStore::in_memory().unwrap();
+        store
+            .load_str(
+                "<http://example.org/shapes/PersonShape> \
+                 <http://www.w3.org/ns/shacl#targetClass> \
+                 <http://example.org/shapes/Person> .",
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        // Both IRIs split at `.../shapes/`, but the resolver only knows the
+        // shorter `http://example.org/`; declaring the split namespace under
+        // `ex` would misname it.
+        let ttl = String::from_utf8(
+            store
+                .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                    ns.starts_with("http://example.org/")
+                        .then(|| ("ex".to_string(), "http://example.org/".to_string()))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(ttl.contains("@prefix ex: <http://example.org/>"), "{ttl}");
+        assert!(!ttl.contains("<http://example.org/shapes/"), "{ttl}");
+        // The `/` left in the local name is escaped, not dropped.
+        assert!(ttl.contains(r"ex:shapes\/PersonShape"), "{ttl}");
+    }
+
+    #[test]
+    fn dump_prefixed_round_trips_and_leaves_n_triples_alone() {
+        let store = shapes_store();
+        let ttl = store
+            .dump_prefixed(RdfFormat::Turtle, Some("urn:g"), |ns| {
+                (ns == SH).then(|| ("sh".to_string(), SH.to_string()))
+            })
+            .unwrap();
+        let reloaded = TripleStore::in_memory().unwrap();
+        reloaded
+            .load_str(
+                &String::from_utf8(ttl).unwrap(),
+                RdfFormat::Turtle,
+                Some("urn:g"),
+            )
+            .unwrap();
+        let lines = |s: &TripleStore| {
+            let nt =
+                String::from_utf8(s.dump(RdfFormat::NTriples, Some("urn:g")).unwrap()).unwrap();
+            let mut l: Vec<String> = nt.lines().map(str::to_string).collect();
+            l.sort();
+            l
+        };
+        assert_eq!(lines(&reloaded), lines(&store));
+        // A format with no prefix header falls through unchanged.
+        let nt = store
+            .dump_prefixed(RdfFormat::NTriples, Some("urn:g"), |ns| {
+                Some(("sh".to_string(), ns.to_string()))
+            })
+            .unwrap();
+        assert_eq!(nt, store.dump(RdfFormat::NTriples, Some("urn:g")).unwrap());
     }
 }
 

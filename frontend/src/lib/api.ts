@@ -1003,9 +1003,22 @@ export async function getShapeGraphTurtle(id: string, format: 'turtle' | 'shaclc
   return res.text();
 }
 
-/** Save the shape graph's Turtle (or SHACLC via `contentType="text/shaclc"`). */
-export async function putShapeGraphTurtle(id: string, body: string, contentType = 'text/turtle'): Promise<{ version: number }> {
-  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle`, {
+export interface PutShapeGraphTurtleOptions {
+  /** Commit note for the revision. Omitted/blank lets the server name it. */
+  message?: string;
+  /** Body media type — `text/shaclc` to save SHACL Compact syntax. */
+  contentType?: string;
+}
+
+/** Save the shape graph's Turtle (or SHACLC via `contentType: "text/shaclc"`). */
+export async function putShapeGraphTurtle(
+  id: string,
+  body: string,
+  options: PutShapeGraphTurtleOptions = {},
+): Promise<{ version: number }> {
+  const { message = '', contentType = 'text/turtle' } = options;
+  const query = message.trim() ? `?message=${encodeURIComponent(message.trim())}` : '';
+  const res = await fetch(`/api/shacl/shape-graphs/${id}/turtle${query}`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': contentType },

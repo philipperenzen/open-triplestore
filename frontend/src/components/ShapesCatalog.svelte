@@ -16,6 +16,7 @@
   import { Search, X, Plus, Check, Database, FileCode, Layers, FolderInput, BookmarkPlus, Loader2, ChevronRight, ChevronDown, ExternalLink } from 'lucide-svelte';
   import { navigate } from '../lib/router/index.js';
   import { filterByQuery } from '../lib/searchMatch.js';
+  import { shortenIRI } from '../lib/rdf-utils.js';
   import { openPendingViewerTab, showShapesInViewer, viewerConfigured } from '../lib/graphViewer.ts';
   import Select from './Select.svelte';
   import { toastError, toastSuccess } from '../lib/toast.ts';
@@ -96,7 +97,10 @@
     });
   }
 
-  function shortIRI(iri) { const m = String(iri).match(/[^#/]+$/); return m ? m[0] : iri; }
+  // IRIs are displayed as CURIEs via shortenIRI. A local-name-only truncator used
+  // to live here and threw the namespace away, so sh:NodeShape and ex:NodeShape
+  // both rendered as "NodeShape" — every display site below pairs the CURIE with
+  // a title= carrying the full IRI so nothing is lost.
 
   // Hide graphs that hold none of the selected shape kind, so "Node shapes" /
   // "Property shapes" only surfaces graphs that actually have them. NB: the
@@ -183,7 +187,7 @@
   }
 
   async function registerGraph(g) {
-    const name = (prompt('Name for this shape graph:', shortIRI(g.graph)) || '').trim();
+    const name = (prompt('Name for this shape graph:', shortenIRI(g.graph)) || '').trim();
     if (!name) return;
     busy = true;
     try {
@@ -250,7 +254,7 @@
             {#if expanded.has(g.graph)}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}
           </button>
           <Layers size={13} class="grp-icon" />
-          <code class="grp-iri" title={g.graph} on:click={() => toggleExpand(g)} role="presentation">{shortIRI(g.graph)}</code>
+          <code class="grp-iri" title={g.graph} on:click={() => toggleExpand(g)} role="presentation">{shortenIRI(g.graph)}</code>
           {#if kindFilter === 'node'}
             <span class="grp-counts">{(g.node_count || 0).toLocaleString()} <span class="dim">node shape{g.node_count === 1 ? '' : 's'}</span></span>
           {:else if kindFilter === 'property'}
@@ -290,9 +294,9 @@
                   <li class="shape-row" class:sel={selected.has(key(g.graph, s.shape))} on:click={() => toggle(g.graph, s.shape)} role="presentation">
                     <span class="box" class:on={selected.has(key(g.graph, s.shape))}>{#if selected.has(key(g.graph, s.shape))}<Check size={11} />{/if}</span>
                     <span class="kind kind-{s.kind}">{s.kind === 'property' ? 'P' : 'N'}</span>
-                    <span class="shape-name" title={s.shape}>{s.label || shortIRI(s.shape)}</span>
-                    {#each (s.target_classes || []).slice(0, 3) as tc}<span class="chip chip-target"><Database size={9} /> {shortIRI(tc)}</span>{/each}
-                    {#if s.path}<span class="chip chip-path">{shortIRI(s.path)}</span>{/if}
+                    <span class="shape-name" title={s.shape}>{s.label || shortenIRI(s.shape)}</span>
+                    {#each (s.target_classes || []).slice(0, 3) as tc}<span class="chip chip-target" title={tc}><Database size={9} /> {shortenIRI(tc)}</span>{/each}
+                    {#if s.path}<span class="chip chip-path" title={s.path}>{shortenIRI(s.path)}</span>{/if}
                   </li>
                 {/each}
               </ul>

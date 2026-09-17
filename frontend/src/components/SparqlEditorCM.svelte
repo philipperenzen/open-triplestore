@@ -4,11 +4,11 @@
   import { EditorState, Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
-  import { indentOnInput, bracketMatching, foldKeymap } from '@codemirror/language';
+  import { indentOnInput, bracketMatching, foldKeymap, foldGutter } from '@codemirror/language';
   import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
-  import { lintKeymap } from '@codemirror/lint';
+  import { lintKeymap, lintGutter } from '@codemirror/lint';
   import { sparqlLanguage, sparqlAutocomplete } from '../lib/sparql-mode.js';
-  import { turtleLanguage } from '../lib/turtle-mode.js';
+  import { turtleLanguage, turtleAutocomplete, turtleDiagnostics, turtleFolding } from '../lib/turtle-mode.js';
   import { ontologyAwareAutocomplete } from '../lib/ontology/sparqlCompletion.js';
   import { sparqlLinter } from '../lib/ontology/sparqlLint.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -30,6 +30,11 @@
   export let ontologyTerms = null;
   /** Enable sparqljs-based linting. */
   export let lint = false;
+  /**
+   * Turtle mode only: a parse-error message to surface in the editor as a
+   * gutter marker and a squiggle on the offending line.
+   */
+  export let parseError = null;
   /** Optional async fetcher: (sparqlQueryString) => Promise<{head,results}>. Enables live IRI hover info. */
   export let sparqlFetcher = null;
   /** Optional graph IRI(s) to scope hover lookup queries to. */
@@ -71,19 +76,36 @@
   $: { theme; recomputeDark(); }
   $: if (view) view.dispatch({ effects: themeCompartment.reconfigure(buildEditorTheme(isDark, height)) });
 
+  // Turtle used to be served by the SPARQL completer, which offers SELECT /
+  // WHERE / FILTER and `PREFIX x: <…>` — none of them valid in a shapes file.
+  const turtleCompletionExt = mode === 'turtle' ? turtleAutocomplete() : null;
+
   $: completionExt = mode === 'sparql'
     ? ontologyAwareAutocomplete({
         prefixes: ontologyPrefixes || {},
         terms: ontologyTerms || [],
       })
-    : sparqlAutocomplete;
+    : turtleCompletionExt || sparqlAutocomplete;
 
-  $: lintExt = (mode === 'sparql' && lint)
-    ? sparqlLinter({
-        knownIris: new Set((ontologyTerms || []).map(t => t.iri)),
-        resolvePrefix: (p) => (ontologyPrefixes && ontologyPrefixes[p]) || NAMESPACES[p] || lookupPrefixSync(p) || null,
-      })
-    : [];
+  // The shapes editor re-parses on every keystroke, so `parseError` is
+  // reassigned constantly even when the message is unchanged. Rebuild the
+  // linter only on a real change — otherwise every keystroke reconfigures the
+  // compartment, which costs a transaction of its own.
+  let turtleLintExt = [];
+  let lastParseError;
+  $: if (mode === 'turtle' && parseError !== lastParseError) {
+    lastParseError = parseError;
+    turtleLintExt = turtleDiagnostics(parseError);
+  }
+
+  $: lintExt = mode === 'turtle'
+    ? turtleLintExt
+    : (mode === 'sparql' && lint)
+      ? sparqlLinter({
+          knownIris: new Set((ontologyTerms || []).map(t => t.iri)),
+          resolvePrefix: (p) => (ontologyPrefixes && ontologyPrefixes[p]) || NAMESPACES[p] || lookupPrefixSync(p) || null,
+        })
+      : [];
 
   // Reconfigure compartments when the ontology changes
   $: if (view) {
@@ -226,10 +248,18 @@ WHERE {
 
     const executeKeymap = keymap.of([
       { key: 'Ctrl-Enter', mac: 'Cmd-Enter', run() { dispatch('execute', view.state.doc.toString()); return true; } },
+      // Turtle only: the SPARQL workspace has no save of its own, and binding
+      // Mod-s there would swallow the browser's own shortcut for nothing.
+      ...(mode === 'turtle'
+        ? [{ key: 'Mod-s', preventDefault: true, run() { dispatch('save', view.state.doc.toString()); return true; } }]
+        : []),
     ]);
 
     const extensions = [
       lineNumbers(),
+      // A Turtle IRI is one unbreakable token, so a shapes file legitimately has
+      // lines wider than the pane; without wrapping they scroll out of sight.
+      ...(mode === 'turtle' ? [EditorView.lineWrapping, lintGutter(), turtleFolding, foldGutter()] : []),
       highlightActiveLine(),
       history(),
       drawSelection(),

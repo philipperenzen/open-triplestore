@@ -9,6 +9,7 @@
   import Select from '../components/Select.svelte';
   import { isAuthenticated, authInitialized, user } from '../lib/stores.js';
   import { toastError, toastSuccess } from '../lib/toast.ts';
+  import { shortenIRI, loadPrefixCcPrefixes, prefixesVersion } from '../lib/rdf-utils.js';
   import { t } from 'svelte-i18n';
 
   let sets = [];
@@ -40,7 +41,14 @@
     if (!$isAuthenticated) navigate('/login');
   }
 
+  // `shortenIRI` reads a module-level prefix map, which creates no Svelte
+  // dependency. Naming the version store here is what makes these labels
+  // recompute once the ~3700-entry prefix snapshot lands, instead of keeping
+  // the weaker form they were first rendered with.
+  $: curie = ($prefixesVersion, (iri) => shortenIRI(iri));
+
   onMount(async () => {
+    loadPrefixCcPrefixes();
     loading = true;
     try {
       sets = await listShapeGraphs();
@@ -113,12 +121,6 @@
   }
 
   function toggle(set, value) { if (set.has(value)) set.delete(value); else set.add(value); return new Set(set); }
-
-  function shortIRI(iri) {
-    if (!iri) return '';
-    const m = String(iri).match(/[^#/]+$/);
-    return m ? m[0] : iri;
-  }
 
   function relativeTime(iso) {
     if (!iso) return '';
@@ -291,7 +293,7 @@
                 </div>
                 {#if (set.target_classes || []).length}
                   <div class="targets">
-                    {#each set.target_classes.slice(0, 6) as tc}<span class="chip chip-target"><Database size={10} /> {shortIRI(tc)}</span>{/each}
+                    {#each set.target_classes.slice(0, 6) as tc}<span class="chip chip-target" title={tc}><Database size={10} /> {curie(tc)}</span>{/each}
                     {#if set.target_classes.length > 6}<span class="chip chip-more">+{set.target_classes.length - 6}</span>{/if}
                   </div>
                 {/if}

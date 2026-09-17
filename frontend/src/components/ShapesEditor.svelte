@@ -1,5 +1,5 @@
 <script>
-  import { tick } from 'svelte';
+  import { tick, onMount, createEventDispatcher } from 'svelte';
   import { autofocus } from '../lib/actions/autofocus.js';
   import { getShapes, putShapes, inferDataset, getShapeGraphTurtle, putShapeGraphTurtle, getModelContext } from '../lib/api.js';
   import SparqlEditorCM from './SparqlEditorCM.svelte';
@@ -8,8 +8,17 @@
   import { toastError } from '../lib/toast.ts';
   import { SHACL_CONSTRAINT_CARDS, CONSTRAINT_GROUPS } from '../lib/shaclConstraints.ts';
   import { parseShapesGraph } from '../lib/shaclModel.ts';
+  import { emptyShapesTemplate } from '../lib/turtle-mode.ts';
   import AiAssistPanel from './AiAssistPanel.svelte';
   import ShapeBuilder from './ShapeBuilder.svelte';
+
+  /**
+   * Dispatches `saved` with `{ version, message }` after a successful save.
+   * `version` is the shape graph's new revision, or null in legacy dataset mode
+   * where the endpoint reports none. The parent page renders `v{version}` from
+   * its own copy of the record, which otherwise stays at the loaded revision.
+   */
+  const dispatch = createEventDispatcher();
 
   export let datasetId = '';
   /**
@@ -72,13 +81,7 @@
   $: graph = parseShapesGraph(shapesContent);
   $: parseError = graph.parseError || null;
 
-  const EMPTY_TEMPLATE = `# SHACL Shapes Graph
-PREFIX sh: <http://www.w3.org/ns/shacl#>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
-PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-PREFIX ex: <http://example.org/>
-`;
+  const EMPTY_TEMPLATE = emptyShapesTemplate();
 
   // Single source-of-truth identifier across both modes — the editor watches
   // it and reloads when it changes.
@@ -109,16 +112,23 @@ PREFIX ex: <http://example.org/>
 
   $: dirty = !loading && shapesContent !== savedContent;
 
+  /** Optional note stored with the revision; empty means "let the server name it". */
+  let commitMessage = '';
+
   async function saveShapes() {
-    if (!targetKey) return;
+    if (!targetKey || saving) return;
     saving = true;
     saveSuccess = false;
     error = '';
+    const message = commitMessage.trim();
     try {
-      if (shapeGraphId) await putShapeGraphTurtle(shapeGraphId, shapesContent);
-      else await putShapes(datasetId, shapesContent);
+      const res = shapeGraphId
+        ? await putShapeGraphTurtle(shapeGraphId, shapesContent, { message })
+        : await putShapes(datasetId, shapesContent);
       savedContent = shapesContent;
+      commitMessage = '';
       saveSuccess = true;
+      dispatch('saved', { version: res?.version ?? null, message });
       setTimeout(() => (saveSuccess = false), 3000);
     } catch (e) {
       error = e.message;
@@ -127,6 +137,55 @@ PREFIX ex: <http://example.org/>
       saving = false;
     }
   }
+
+  // Neither a reload nor an in-app link would otherwise warn about a dirty
+  // buffer: the Library breadcrumb routes client-side, so `beforeunload` never
+  // fires for it and the edits went away silently.
+  function onBeforeUnload(e) {
+    if (!dirty) return;
+    e.preventDefault();
+    e.returnValue = '';
+  }
+
+  // The editor binds Cmd/Ctrl-S itself, but the shortcut should also work from
+  // the visual builder or the commit-message box. CodeMirror calls
+  // preventDefault on the bindings it handles, so this never double-fires.
+  function onKeydown(e) {
+    if (e.defaultPrevented || e.key !== 's' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+    e.preventDefault();
+    saveShapes();
+  }
+
+  function onDocumentClick(e) {
+    if (!dirty || e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const anchor = e.target instanceof Element ? e.target.closest('a[href]') : null;
+    if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return;
+    const href = anchor.getAttribute('href') || '';
+    if (!href || href.startsWith('#')) return;
+    let dest;
+    try {
+      dest = new URL(anchor.href, window.location.href);
+    } catch {
+      return;
+    }
+    // Only guard navigation that actually leaves this page.
+    if (dest.origin !== window.location.origin || dest.pathname === window.location.pathname) return;
+    if (confirm($t('pages.shaclShapes.discardUnsaved'))) return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  onMount(() => {
+    window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('keydown', onKeydown);
+    document.addEventListener('click', onDocumentClick, true);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('keydown', onKeydown);
+      document.removeEventListener('click', onDocumentClick, true);
+    };
+  });
 
   async function runInfer() {
     // SHACL-AF rule inference materialises triples against a dataset; not
@@ -171,6 +230,19 @@ PREFIX ex: <http://example.org/>
       {/if}
       {#if inferResult !== null}
         <span class="infer-result">{$t('pages.shaclShapes.inferResult', { values: { count: inferResult.inferred_triples ?? inferResult.inferred_count ?? inferResult } })}</span>
+      {/if}
+      {#if shapeGraphId && dirty}
+        <!-- Optional: an empty note still saves, so the common case costs nothing. -->
+        <input
+          class="commit-msg"
+          type="text"
+          maxlength="200"
+          bind:value={commitMessage}
+          placeholder={$t('pages.shaclShapes.commitMessagePlaceholder')}
+          title={$t('pages.shaclShapes.commitMessageTitle')}
+          aria-label={$t('pages.shaclShapes.commitMessageTitle')}
+          on:keydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); saveShapes(); } }}
+        />
       {/if}
       <div class="palette-anchor">
         <button class="btn btn-sm btn-ghost" on:click={() => (paletteOpen = !paletteOpen)} title={$t('pages.shaclShapes.insertConstraintTitle')} class:active={paletteOpen}>
@@ -246,7 +318,15 @@ PREFIX ex: <http://example.org/>
       {#if loading}
         <div class="editor-loading">{$t('system.loading')}</div>
       {:else}
-        <SparqlEditorCM bind:this={editorRef} bind:query={shapesContent} mode="turtle" {height} />
+        <SparqlEditorCM
+          bind:this={editorRef}
+          bind:query={shapesContent}
+          mode="turtle"
+          {height}
+          {parseError}
+          on:save={saveShapes}
+          on:execute={saveShapes}
+        />
         <div class="editor-footer">
           <span class="editor-hint"><Lightbulb size={13} /> {$t('pages.shaclShapes.editorHint')}</span>
         </div>
@@ -296,6 +376,10 @@ PREFIX ex: <http://example.org/>
   .dirty-dot.on-btn { background: #fff; box-shadow: 0 0 0 2px rgba(217,119,6,0.85); margin-left: 0.1rem; }
   .save-btn { position: relative; }
 
+  .commit-msg { width: 190px; max-width: 40vw; font-size: 0.78rem; padding: 0.3rem 0.55rem; border: 1px solid var(--line-soft); border-radius: 8px; background: #fff; color: #1e293b; }
+  .commit-msg::placeholder { color: #94a3b8; }
+  .commit-msg:focus { outline: none; border-color: var(--brand-300, #7ED6D0); box-shadow: 0 0 0 3px rgba(126,214,208,0.25); }
+
   /* Palette */
   .palette-anchor { position: relative; }
   .palette { position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; width: 380px; max-width: 90vw; max-height: 62vh; display: flex; flex-direction: column; background: #fff; border: 1px solid var(--line-soft); border-radius: 12px; box-shadow: 0 12px 32px rgba(15,23,42,0.18); }
@@ -343,6 +427,7 @@ PREFIX ex: <http://example.org/>
   :global(:is([data-theme="dark"], .dark)) .dirty-chip { background: rgba(245,158,11,0.14); border-color: rgba(245,158,11,0.35); color: #fcd34d; }
   :global(:is([data-theme="dark"], .dark)) .dirty-dot { background: #fbbf24; }
   :global(:is([data-theme="dark"], .dark)) .dirty-dot.on-btn { background: #fff; box-shadow: 0 0 0 2px rgba(251,191,36,0.85); }
+  :global(:is([data-theme="dark"], .dark)) .commit-msg { background: var(--bg-soft); color: var(--ink-900); border-color: var(--line-soft); }
   :global(:is([data-theme="dark"], .dark)) .palette { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .input-icon { background: var(--bg-soft); }
   :global(:is([data-theme="dark"], .dark)) .input-icon input { color: var(--ink-900); }

@@ -262,6 +262,30 @@ pub async fn delete_shape_graph(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The `(label, namespace)` to declare for a namespace the graph draws terms
+/// from, or `None` to leave those terms in full IRI form.
+///
+/// An exact registry hit answers itself. Everything else is a namespace derived
+/// by splitting an IRI at its last delimiter, and those routinely have no
+/// registry entry: the registry knows `ex: <http://example.org/>`, while
+/// `http://example.org/shapes/PersonShape` — path-style shape IRIs are the norm
+/// in SHACL — splits at `.../shapes/`. Asking only for an exact match left every
+/// such IRI written out in full. The fallback declares the longest registered
+/// namespace the derived one sits under instead, which the serializer still
+/// matches (it tries declarations longest-namespace-first and escapes what is
+/// left, giving `ex:shapes\/PersonShape`).
+fn resolve_namespace(
+    registry: &crate::prefixes::PrefixRegistry,
+    ns: &str,
+) -> Option<(String, String)> {
+    if let Some(p) = registry.reverse_local(ns) {
+        return Some((p.prefix, p.namespace));
+    }
+    registry
+        .shrink_iri(ns)
+        .map(|(p, _)| (p.prefix, p.namespace))
+}
+
 pub async fn get_shape_graph_turtle(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -280,17 +304,40 @@ pub async fn get_shape_graph_turtle(
         let shaclc = crate::shaclc::serialize(&state.store, &set.graph_iri).map_err(e500)?;
         return Ok((StatusCode::OK, [(CONTENT_TYPE, "text/shaclc")], shaclc).into_response());
     }
+    // Prefixed: this is the document a human reads in the source view, and the
+    // one the visual builder scans for the prefixes it offers. Serialised
+    // without a header it was a wall of full <http://…> IRIs.
     let data = state
         .store
-        .graph_store_get(Some(&set.graph_iri), oxigraph::io::RdfFormat::Turtle)
+        .dump_prefixed(
+            oxigraph::io::RdfFormat::Turtle,
+            Some(&set.graph_iri),
+            |ns| resolve_namespace(&state.prefix_registry, ns),
+        )
         .map_err(e500)?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], data).into_response())
+}
+
+/// Revision notes reach the commit log's RDF, so a caller-supplied one is
+/// bounded and stripped of control characters before it gets there.
+const MAX_REVISION_NOTE: usize = 200;
+
+/// Normalise a caller-supplied revision message, or `None` if nothing is left.
+fn revision_note(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_REVISION_NOTE)
+        .collect();
+    let trimmed = cleaned.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 pub async fn put_shape_graph_turtle(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiErr> {
@@ -307,12 +354,14 @@ pub async fn put_shape_graph_turtle(
     } else {
         raw
     };
+    // Every history entry used to read "Edited": the note was hard-coded here.
+    let note = q.get("message").and_then(|m| revision_note(m));
     let version = write_shapes_revision(
         &state,
         &set.graph_iri,
         &id,
         &turtle,
-        Some("Edited"),
+        Some(note.as_deref().unwrap_or("Edited")),
         &user.user_id,
     )?;
     Ok(Json(serde_json::json!({ "version": version })))

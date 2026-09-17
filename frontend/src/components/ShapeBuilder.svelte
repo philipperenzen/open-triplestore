@@ -39,6 +39,7 @@
   } from 'lucide-svelte';
   import Select from './Select.svelte';
   import Combobox from './Combobox.svelte';
+  import { shortenIRI, expandPrefix, prefixesVersion } from '../lib/rdf-utils.js';
   import { Link } from '../lib/router/index.js';
   import { t as i18nT } from 'svelte-i18n';
 
@@ -50,10 +51,13 @@
   export let onChange = (_ttl) => {};
   export let loading = false;
   /**
-   * Binding target IRIs the containing shape graph is applied to (datasets /
-   * named graphs) — surfaced per shape as a "Used by" line so authors can see
-   * where a shape actually runs. Empty in standalone / dataset-shapes mode.
-   * @type {string[]}
+   * Binding targets the containing shape graph is applied to (datasets / named
+   * graphs) — surfaced per shape as a "Used by" line so authors can see where a
+   * shape actually runs. Empty in standalone / dataset-shapes mode.
+   *
+   * Either a bare IRI string or an already-resolved `{ iri, label?, datasetId? }`
+   * — see parseUsageTarget.
+   * @type {Array<string | { iri?: string, target?: string, label?: string, name?: string, datasetId?: string }>}
    */
   export let usageTargets = [];
 
@@ -82,7 +86,12 @@
     model = withIds(parseShapesGraph(turtle));
     _lastTurtle = turtle;
   }
-  $: curie = makeCurie(model.prefixes || {});
+  // makeCurie also falls back to the well-known / prefix-service tables, which
+  // are plain module state: without naming $prefixesVersion here, every CURIE
+  // rendered before the snapshot lands would keep its weaker form for the life
+  // of the page. disp() and renderPath() both read `curie`, so rebuilding it is
+  // what makes them recompute.
+  $: curie = ($prefixesVersion, makeCurie(model.prefixes || {}));
   $: editable = model.canRoundTrip && !model.parseError;
   $: classOptions = modelContext?.classes || [];
   $: propOptions = modelContext?.properties || [];
@@ -111,18 +120,63 @@
   }
 
   // ── IRI display / expansion ────────────────────────────────────────────────
-  function disp(iri) {
-    if (!iri) return '';
-    const c = curie(iri);
-    return c.startsWith('<') ? iri : c;
+  // disp() feeds editable inputs, so a CURIE it shows must survive expand():
+  // one that does not would be stored verbatim as the IRI the moment the field
+  // is committed, silently corrupting the shape. The abbreviated branch is
+  // checked outright — `expand(c) === iri` — so it is safe by construction.
+  //
+  // The other branch, where the IRI is shown in full, is NOT proven: expand()
+  // sees a bare IRI and cannot tell a scheme from a prefix label, so a value
+  // like `geo:Amsterdam` still expands against the `geo` prefix on commit. The
+  // PN_LOCAL_SHAPE guard below narrows that to tokens a CURIE could plausibly
+  // be, which covers the realistic cases; it is a heuristic, not a proof, and
+  // an IRI shown verbatim has no better form to fall back to anyway.
+  // Reactive rather than a plain function declaration: the markup calls disp()
+  // everywhere, and the compiler cannot see through a function body that `curie`
+  // is what it depends on. Rebuilding disp when curie does is what makes the
+  // rendered CURIEs recompute once the prefix snapshot lands — and for the same
+  // reason the helpers that render CURIEs (targetChipText, constraintChips,
+  // dtValue) take disp as an argument: naming it at the call site is what makes
+  // the markup depend on it.
+  $: disp = makeDisp(curie);
+  function makeDisp(toCurie) {
+    return (iri) => {
+      if (!iri) return '';
+      const c = toCurie(iri);
+      if (c.startsWith('<')) return iri;
+      return expand(c) === iri ? c : iri;
+    };
   }
+  // A CURIE-shaped token: optional prefix label (the empty label is legal Turtle)
+  // + local part. PN_LOCAL_SHAPE is deliberately a LOOSER copy of the
+  // serializer's own local-name rule rather than an import of it: this one only
+  // has to separate "something a CURIE could plausibly be" from "an IRI whose
+  // scheme happens to collide with a prefix label", and being wider than the
+  // emitter is the safe direction — it can only ever expand a token the emitter
+  // would also have been willing to write. A leading digit is legal Turtle
+  // PN_LOCAL, so `foaf:2ndName` is a CURIE the author meant, not a scheme.
+  const CURIE_SHAPE = /^([A-Za-z][\w.+-]*)?:([\s\S]*)$/;
+  const PN_LOCAL_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
   function expand(token) {
     if (!token) return '';
     const t = token.trim();
     if (/^(https?:|urn:|mailto:)/.test(t)) return t;
-    const m = t.match(/^([A-Za-z][\w.-]*):(.*)$/);
-    if (m && model.prefixes[m[1]]) return model.prefixes[m[1]] + m[2];
-    return t;
+    const m = CURIE_SHAPE.exec(t);
+    if (!m) return t;
+    const label = m[1] ?? '';
+    const local = m[2];
+    // The document's own prefixes win: an author who declared the prefix meant
+    // the CURIE, whatever its local part looks like.
+    const declared = model.prefixes?.[label];
+    if (typeof declared === 'string') return declared + local;
+    // They are not the only ones curie() can produce — well-known ones (sh:,
+    // xsd:, foaf:, …) must expand too, or a value shown as a CURIE could not be
+    // typed back in. But only for tokens curie() could actually have EMITTED:
+    // the well-known/service tables also hold labels that are real IRI schemes,
+    // so 'geo:52.37,4.89' (a geo URI disp() shows verbatim) used to come back as
+    // http://www.opengis.net/ont/geosparql#52.37,4.89 on the next commit.
+    if (!PN_LOCAL_SHAPE.test(local)) return t;
+    return expandPrefix(t, model.prefixes) ?? t;
   }
 
   // ── Value type (literal / class / iri / blank / any) ────────────────────────
@@ -251,17 +305,30 @@
   // ── Per-shape "Used by" ────────────────────────────────────────────────────
   // Bindings are graph-wide, so every shape shares the applied-to set; we still
   // render it per shape so the answer to "where does THIS shape run?" is local.
-  function shortIriTail(iri) {
-    const m = String(iri).match(/[^#/]+$/);
-    return m ? m[0] : String(iri);
+  /**
+   * A usage target is EITHER a bare IRI string OR an object the parent has
+   * already resolved — `{ iri, label?, datasetId? }` (`target` is accepted for
+   * `iri`, `name` for `label`). Anything the object doesn't carry we derive from
+   * the IRI, so the line stays correct whichever shape the parent sends.
+   *
+   * The derived label is a last resort: an IRI path segment is a dataset *id*,
+   * not its name, and shortenIRI keeps the namespace that a bare local-name
+   * truncator used to throw away. The full IRI stays in the title=.
+   */
+  function usageIri(u) {
+    if (typeof u === 'string') return u;
+    return String(u?.iri ?? u?.target ?? '');
   }
-  function parseUsageTarget(iri) {
-    const s = String(iri);
-    const g = s.match(/\/dataset\/([^/]+)\/graphs\/(.+)$/);
-    if (g) return { datasetId: g[1], label: `${g[1]} / ${g[2]}` };
-    const d = s.match(/\/dataset\/([^/]+)$/);
-    if (d) return { datasetId: d[1], label: d[1] };
-    return { datasetId: null, label: shortIriTail(s) };
+  function parseUsageTarget(u) {
+    const iri = usageIri(u);
+    const given = u && typeof u === 'object' ? u : null;
+    const g = iri.match(/\/dataset\/([^/]+)\/graphs\/(.+)$/);
+    const d = g ? null : iri.match(/\/dataset\/([^/]+)$/);
+    const datasetId = given?.datasetId ?? (g ? g[1] : d ? d[1] : null);
+    const label =
+      given?.label || given?.name ||
+      (g ? `${g[1]} / ${g[2]}` : d ? d[1] : shortenIRI(iri));
+    return { iri, datasetId, label };
   }
   // Live instance count for a class target in the current dataset scope (only
   // available in dataset mode, where modelContext carries per-class counts).
@@ -290,7 +357,7 @@
   }
 
   // Read-only target chip text, e.g. "targets ex:Person".
-  function targetChipText(tgt, t) {
+  function targetChipText(tgt, t, disp) {
     const v = disp(tgt.value);
     const key = {
       class: 'targetsClass',
@@ -325,13 +392,17 @@
    * skipped (`includeType=false`); read-only rows show everything. Each chip
    * carries the raw SHACL in its tooltip.
    */
-  function constraintChips(p, includeType, t) {
+  function constraintChips(p, includeType, t, disp) {
+    // Chips never wrap, so an IRI disp() could not shorten has to be cut here or
+    // it pushes the whole property row sideways. The chip's title= keeps the
+    // full IRI.
+    const dispChip = (iri) => trunc(disp(iri), 40);
     const L = (k) => t(`components.shapeBuilder.${k}`);
     const c = p.c || {};
     const out = [];
     if (includeType) {
-      if (c.datatype) out.push({ cls: 'chip-type', label: L('chipDatatype'), value: disp(c.datatype), title: `sh:datatype <${c.datatype}>` });
-      if (c.class) out.push({ cls: 'chip-type', label: L('chipClass'), value: disp(c.class), title: `sh:class <${c.class}>` });
+      if (c.datatype) out.push({ cls: 'chip-type', label: L('chipDatatype'), value: dispChip(c.datatype), title: `sh:datatype <${c.datatype}>` });
+      if (c.class) out.push({ cls: 'chip-type', label: L('chipClass'), value: dispChip(c.class), title: `sh:class <${c.class}>` });
       if (c.nodeKind) out.push({ cls: 'chip-type', label: L('chipKind'), value: shortLocal(c.nodeKind), title: `sh:nodeKind <${c.nodeKind}>` });
     }
     if (c.minInclusive != null) out.push({ cls: 'chip-range', label: L('chipMin'), value: String(c.minInclusive), title: `sh:minInclusive ${c.minInclusive}` });
@@ -345,10 +416,10 @@
       const vals = c.in.map((it) => (it.type === 'iri' ? disp(it.value) : `"${it.value}"`));
       out.push({ cls: 'chip-str', label: L('chipIn'), value: trunc(vals.join(', '), 36), title: `sh:in (${vals.join(' ')})` });
     }
-    if (c.hasValue) out.push({ cls: 'chip-str', label: L('chipEquals'), value: c.hasValue.type === 'iri' ? disp(c.hasValue.value) : `"${c.hasValue.value}"`, title: 'sh:hasValue' });
+    if (c.hasValue) out.push({ cls: 'chip-str', label: L('chipEquals'), value: c.hasValue.type === 'iri' ? dispChip(c.hasValue.value) : trunc(`"${c.hasValue.value}"`, 36), title: `sh:hasValue ${c.hasValue.type === 'iri' ? `<${c.hasValue.value}>` : `"${c.hasValue.value}"`}` });
     if (c.languageIn && c.languageIn.length) out.push({ cls: 'chip-str', label: L('chipLang'), value: c.languageIn.join(' '), title: `sh:languageIn (${c.languageIn.join(' ')})` });
     if (c.uniqueLang) out.push({ cls: 'chip-str', label: '', value: L('chipUniqueLang'), title: 'sh:uniqueLang true' });
-    if (c.node) out.push({ cls: 'chip-shape', label: L('chipShape'), value: disp(c.node), title: `sh:node <${c.node}>` });
+    if (c.node) out.push({ cls: 'chip-shape', label: L('chipShape'), value: dispChip(c.node), title: `sh:node <${c.node}>` });
     if (p.logic) {
       for (const op of ['and', 'or', 'xone', 'not']) {
         const n = p.logic[op]?.length;
@@ -362,8 +433,7 @@
   function trunc(s, n) {
     return s.length > n ? s.slice(0, n - 1) + '…' : s;
   }
-
-  function dtValue(iri) {
+  function dtValue(iri, disp) {
     // Normalize the common datatype namespaces even when their prefix isn't
     // declared, so the picker matches an option instead of showing blank.
     let c = disp(iri);
@@ -533,7 +603,7 @@
               {#each shape.targets as tgt}
                 <span class="target-chip" title={targetTitle(tgt)}>
                   {#if tgt.kind === 'class'}<Target size={11} />{:else}<Crosshair size={11} />{/if}
-                  {targetChipText(tgt, $i18nT)}
+                  {targetChipText(tgt, $i18nT, disp)}
                 </span>
               {/each}
             {/if}
@@ -552,9 +622,9 @@
               {#each usageTargets.slice(0, 8) as u}
                 {@const ut = parseUsageTarget(u)}
                 {#if ut.datasetId}
-                  <Link to={`/datasets/${ut.datasetId}`} class="usage-link" title={u}><Database size={10} /> {ut.label}</Link>
+                  <Link to={`/datasets/${ut.datasetId}`} class="usage-link" title={ut.iri}><Database size={10} /> {ut.label}</Link>
                 {:else}
-                  <span class="usage-chip" title={u}>{ut.label}</span>
+                  <span class="usage-chip" title={ut.iri}>{ut.label}</span>
                 {/if}
               {/each}
               {#if usageTargets.length > 8}<span class="usage-chip">+{usageTargets.length - 8}</span>{/if}
@@ -570,7 +640,7 @@
             </div>
           {/if}
           {#each shape.properties as p, pi (p._id)}
-            {@const chips = constraintChips(p, !editable, $i18nT)}
+            {@const chips = constraintChips(p, !editable, $i18nT, disp)}
             <div class="prop" class:complex={p.hasUnsupported}>
               <!-- Line 1: path + name, cardinality summary right-aligned -->
               <div class="prop-line1">
@@ -616,7 +686,7 @@
                     <Select class="sb-sel" size="sm" bind:value={p._vt} on:change={() => applyValueType(p)} title={$i18nT('components.shapeBuilder.valueType')}
                       options={[{ value: 'any', label: $i18nT('components.shapeBuilder.valueAny') }, { value: 'literal', label: $i18nT('components.shapeBuilder.valueLiteral') }, { value: 'class', label: $i18nT('components.shapeBuilder.valueClass') }, { value: 'iri', label: 'IRI' }, { value: 'blank', label: $i18nT('components.shapeBuilder.valueBlankNode') }]} />
                     {#if p._vt === 'literal'}
-                      <Select class="sb-sel" size="sm" value={dtValue(p.c.datatype)} on:change={(e) => { p.c.datatype = expand(e.detail); touch(); }} title={$i18nT('components.shapeBuilder.datatype')} options={DATATYPES} />
+                      <Select class="sb-sel" size="sm" value={dtValue(p.c.datatype, disp)} on:change={(e) => { p.c.datatype = expand(e.detail); touch(); }} title={$i18nT('components.shapeBuilder.datatype')} options={DATATYPES} />
                     {:else if p._vt === 'class'}
                       <Combobox class="sb-grow" suggestions={classSuggestions} value={disp(p.c.class)} placeholder="ex:SomeClass" on:change={(e) => setIri(p.c, 'class', e.detail)} title={$i18nT('components.shapeBuilder.requiredClassTitle')} />
                     {/if}
@@ -766,7 +836,9 @@
 
   .targets { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
   .target-row { display: inline-flex; align-items: center; gap: 0.3rem; }
-  .target-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 600; color: #1d4ed8; background: #dbeafe; padding: 2px 9px; border-radius: 999px; }
+  /* An IRI disp() could not shorten is one unbreakable token — without
+     `anywhere` it would run straight out of the shape card. */
+  .target-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 600; color: #1d4ed8; background: #dbeafe; padding: 2px 9px; border-radius: 999px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 
   .props { display: flex; flex-direction: column; }
   .props-head { padding: 0.55rem 0.85rem 0.1rem; }
@@ -836,9 +908,9 @@
   /* ── Per-shape "Used by" ── */
   .usage { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.15rem; }
   .usage-label { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-400); }
-  :global(.builder .usage-link) { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; text-decoration: none; }
+  :global(.builder .usage-link) { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; text-decoration: none; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   :global(.builder .usage-link:hover) { border-color: #15803d; text-decoration: underline; }
-  .usage-chip { font-size: 0.72rem; font-weight: 500; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; }
+  .usage-chip { font-size: 0.72rem; font-weight: 500; font-family: 'IBM Plex Mono', monospace; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 1px 8px; border-radius: 999px; max-width: 100%; overflow-wrap: anywhere; }
   .count-chip { font-size: 0.68rem; font-weight: 600; color: #0e7490; background: #ecfeff; border: 1px solid #a5f3fc; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
 
   /* ── Value-type hint ── */
