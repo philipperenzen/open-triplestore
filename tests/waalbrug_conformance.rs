@@ -5,8 +5,8 @@
 //! acceptance gate for the GeoSPARQL + SHACL (Core/SPARQL/AF) work: as each engine gap
 //! closes, the corresponding `#[ignore]` is removed.
 //!
-//! Known gaps blocking cases (see docs/notes/recon.md §8), confirmed empirically by the
-//! first R0 run (4 active pass, 8 ignored pending the listed milestone):
+//! Known gaps blocking cases, confirmed empirically by the first R0 run
+//! (4 active pass, 8 ignored pending the listed milestone):
 //!   G1  — sh:prefixes not injected into SHACL-SPARQL bodies → prefixed queries silently skip (R1)
 //!   G2  — complex property paths (sequence/inverse/sh:alternativePath) not parsed from RDF (R2)
 //!   G3  — sh:expression node expressions unimplemented (R5)
