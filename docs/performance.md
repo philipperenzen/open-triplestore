@@ -106,6 +106,47 @@ python3 scripts/perf_regression.py compare \
 The cost is that the job builds and benches twice — roughly double the wall clock.
 That buys a bar tight enough to be worth having.
 
+### What counts as a regression: over the bar *and* clear of the base's own spread
+
+Within each side the **fastest** pass wins, on the premise that noise only ever
+slows a pass, so a few passes give each side at least one quiet sample. The
+5–10 ms allocation-heavy benchmarks do not behave like that on this runner: a
+pass lands in a fast or a slow mode, and with three passes a side one side draws
+a fast sample the other never gets often enough that *some* benchmark of the ~10
+in that band trips the bar on most runs. Measured on a change whose only runtime
+diff was a TLS patch bump, `query_minus/10000` read
+
+| pass | merge base | change |
+|---|--:|--:|
+| 1 | 6.87 ms | 6.66 ms |
+| 2 | 5.34 ms | 7.06 ms |
+| 3 | 4.91 ms | 6.33 ms |
+
+— the change was *faster* in the first pair, then the base drew two fast-mode
+samples — and fastest-vs-fastest called it **+30.6 %**. The previous run of the
+same change had tripped `query_group_by/10000` the same way; the one before that
+would have tripped something else. A tolerance entry per benchmark cannot fix a
+mechanism.
+
+So `compare` asks for two things before it says REGRESSION: the ratio of the two
+fastest passes is over the tolerance, **and** the change's fastest pass is slower
+than the merge base's **slowest** pass. With three samples a side that is complete
+separation of the two sample sets — the smallest outcome a rank test can call
+significant (p = 1/20) — and the tolerance stays the bar for *how much* slower.
+Over the bar but overlapping is reported as `ok (>1.15x, inside the merge base's
+own spread 4.91 ms–6.87 ms)` and counted separately in the summary, so the reader
+sees the spread that absorbed it.
+
+Two consequences worth knowing. First, more passes can only lower the change's
+fastest or raise the base's slowest, so an overlapping benchmark can never turn
+into a regression later — the screen does not hand it to the confirmation
+re-bench. Second, the rule adapts per benchmark and per run: a stable benchmark
+(`query_minus/1000` spreads ±2.5 %) keeps the plain tolerance bar, while a noisy
+one is bounded by the spread it showed *in this job* rather than by a number
+measured on some earlier runner. The price is that on a noisy benchmark a real
+regression smaller than that spread is not called — which is the honest
+sensitivity: the old rule "detected" those only by also failing clean changes.
+
 Measured on the first run of this design — a PR that changes **no runtime code**,
 so every number below is residual noise:
 
@@ -132,6 +173,7 @@ the group quietly falls back to the default.
     "concurrent_": 1.5,                    // thread scheduling; provisional, see below
     "insert_": 1.5,                        // provisional, see below
     "query_alternative_path/10000": 1.5,   // bimodal on this runner; see below
+    "query_group_by/": 1.35,               // both sizes; allocation-heavy, measured +18.6 %
     "query_group_concat/": 1.35,           // both sizes; allocation-heavy, measured +25.5 %
     "query_simple_lookup/100000": 1.45,    // bimodal on this runner; see below
     "shacl_validate_": 1.5,                // provisional, see below
@@ -172,7 +214,7 @@ Widening the four benchmarks one at a time would have been the wrong lever — t
 next unrelated PR trips a fifth. If the marginal failures come back at 1.15, the
 fix is a third pass per side rather than a fifth exception.
 
-Three benchmarks need a *measured* exception on top of the default; four group
+Four benchmarks need a *measured* exception on top of the default; four group
 prefixes carry a *provisional* one.
 
 The provisional four — `concurrent_`, `insert_`, `update_` and `shacl_validate_`
@@ -183,10 +225,21 @@ on noise nobody has yet characterised (thread scheduling in `concurrent/*`, a
 RocksDB store on a shared runner in `shacl/validate_snapshot`, the write path's
 count-index work in `insert/*` and `update/*`). Tighten them once the first
 baseline refresh after the widening has a few gate runs behind it, the same way
-the three below were set — from the observed span, not to make a run pass.
+the four below were set — from the observed span, not to make a run pass.
 
 `query_group_concat/*` is allocation-heavy at 1–3 µs and read +25.5 % with nothing
 changed.
+
+`query_group_by/*` is the same shape — a hash aggregation over the same 10 000
+persons, ~8 ms with the cache off — and read **+18.6 %** (+20.4 % at screening)
+on a PR whose only runtime change was a rustls patch bump (0.23.43 → 0.23.45), a
+crate the in-memory query path never reaches. The merge base alone came in at
+7.61, 7.84 and 8.63 ms across its three interleaved passes, a 1.13× span on
+identical code; the change read 8.76, 9.01 and 9.54 ms, so the fastest-median
+pairing landed at 1.185 while the pass-3 pair, run back to back, was 1.5 % apart.
+`query_group_concat/10000` read +25.6 % in the same run. 1.35 for both sizes,
+matching its sibling and above the worst pairwise reading (9.54 against 7.61 ms,
+1.25×) rather than tuned to the one that tripped.
 
 `shacl_validate_clean/*` and `shacl_validate_violations/*` (the in-memory SHACL
 micro-benchmarks, 100–1000 focus nodes, two property shapes) carry 2.75 against
@@ -231,11 +284,18 @@ that measured evaluation at all (see *What the read benchmarks measure* below).
 1.45 is chosen to sit above the observed span rather than to make a particular run
 pass. `query_group_concat/` (1.35) and `query_alternative_path/10000` (1.5) were
 measured while the cache was still on, i.e. on replayed results; re-evaluate both
-at the first refresh that runs cache-off.
+at the first refresh that runs cache-off. A cache-off gate run (2026-09-15, the
+rustls bump above) has since read `query_group_concat/10000` at +25.6 % on an
+unrelated change, so its 1.35 holds up on the honest engine too;
+`query_alternative_path/10000` read −2.6 % in that run and still needs a span
+of its own.
 
 Add an entry only with measurements behind it — the same table above, from a run
 with no runtime change — rather than nudging a number until CI goes green. If
-exceptions start accumulating, a third pass per side is the better lever.
+exceptions start accumulating, a third pass per side is the better lever — and
+since the spread rule above, a noisy benchmark is already bounded by the spread
+it shows in the job itself, so a new entry should be rare: it is for a benchmark
+whose sides *separate* on clean changes, not merely one that reads high.
 
 Benchmarks present on one side but not the other are **soft warnings**, not
 failures, so adding or removing a benchmark does not break the gate.

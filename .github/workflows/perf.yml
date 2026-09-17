@@ -211,6 +211,12 @@ jobs:
       # can only ever make a benchmark look SLOWER, so adding a third sample and
       # keeping the fastest strictly improves both sides' estimates: a real
       # regression still reproduces, a fluke does not.
+      #
+      # Flagged means over the bar AND clear of the merge base's own spread (the
+      # change's fastest pass slower than the base's slowest — see `cmd_compare`).
+      # A benchmark whose sides overlap is not flagged: another pass can only lower
+      # the change's fastest or raise the base's slowest, so it cannot become a
+      # regression, and re-benching it would be a wasted rebuild.
       - name: Confirm the merge base (pass 3, flagged only)
         if: steps.flagged.outputs.filter != ''
         run: |
