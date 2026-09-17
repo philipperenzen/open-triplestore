@@ -4,8 +4,11 @@
 > nine widely-used RDF stores across ingestion speed, query latency, scalability, standards
 > compliance, operational maturity, and long-term outlook.
 >
-> **Last updated:** performance sections (5–7) re-measured 2026-09-17 against release
-> 0.6.0; the standards matrix and the outlook scores were last reviewed April 2026.
+> **Last updated:** 2026-09-18, against release 0.6.0. Performance (sections 5–7, 10.2,
+> 11.3) re-measured from this project's benchmark suite; the standards score recounted
+> from the matrix in section 4; this project's future-proofness score rescored. Competitor
+> figures and scores are cited or carried from April 2026 — section 2.4 says which is
+> which.
 
 ---
 
@@ -44,11 +47,18 @@
 | 8 | **Apache Jena 5 Fuseki** | Teaching, prototyping | Improved in v5 but still slow at scale |
 | 9 | **Blazegraph** | Legacy Wikidata workloads | Abandoned 2019; Wikimedia migration complete |
 
-**Bottom line for this project:** Open Triplestore ranks **4th overall** and **1st among open-source
-single-binary deployments**. Its ~1 Mt/s bulk ingest (Rust + RocksDB) beats every Java competitor.
-GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID, and RML are standout features rare in open-source stores.
-The primary gap vs. QLever and Virtuoso is scale: those systems are engineered specifically for
-datasets in the tens-of-billions to trillion range.
+**Bottom line for this project:** Open Triplestore ranks **1st among open-source single-binary
+deployments** on standards breadth — **27 of 29** rows in section 4, recounted, against 14 for
+the next open-source store — and its **~465,000 t/s** bulk load (section 5.1, re-measured) beats
+every Java competitor by 1.2–3×. GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID and RML are standout
+features rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
+systems are engineered specifically for datasets in the tens-of-billions to trillion range.
+
+> The overall ranking above is a judgement carried from April 2026, not a re-run: reordering it
+> would need fresh measurements of the other nine systems, which this pass did not make. Section
+> 2.4 says which numbers in this document are measured, cited or scored. The ingest figure was
+> previously given as ~1 Mt/s, which came from a different machine and a fixture five times
+> smaller than the one it timed.
 
 Whether QLever should therefore *be* this project's engine was measured directly in
 2026-09, against the same data on the same machine — it is faster on small-result
@@ -113,7 +123,7 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 ---
 
 
-### 2.4 How the local numbers were produced
+### 2.4 Where each number comes from
 
 Every **Open Triplestore** figure in sections 5–7 is a Criterion median from
 [`benches/performance.rs`](../benches/performance.rs), re-measured on
@@ -128,14 +138,27 @@ docker run --rm -v "$PWD:/app" -v ots_target_rel:/app/target -w /app ots-builder
   cargo bench --bench performance --features full -- query/
 ```
 
-Two things follow from that, and both matter when reading the tables.
+**Not every number here is measured, and the difference matters.** Three kinds
+appear, and each section says which it is:
+
+| Kind | Where | Refreshed |
+|---|---|---|
+| **Measured** — this project's own Criterion benchmarks | sections 5–7, 10.2, 11.3 | 2026-09-18, at the release commit |
+| **Cited** — published third-party results (BSBM, ESWC 2023, vendor figures) | competitor columns throughout, 7.4, 8.x | as dated at each citation; not re-run here |
+| **Scored** — a judgement against the rubric in 13.1, or a reading of a feature matrix | 4.x, 13.2 | this project 2026-09-18; competitors April 2026 |
+
+A competitor column next to a measured Open Triplestore cell is a cited
+estimate, not a head-to-head. Where the two are not comparable — a different
+fixture, a different algorithm — the row says so.
+
+Two more things follow, and both matter when reading the tables.
 
 **The fixture is persons, not triples.** `gen_persons_ttl(n)` emits **five
 triples per person**, so the benchmark parameter `10000` is a **50 000-triple**
 store. Rows below give the triple count, not the parameter.
 
 **These numbers replace figures taken on different hardware.** The previous
-local column was measured on an Apple M3 Pro and several of its entries had no
+Open Triplestore column was measured on an Apple M3 Pro and several of its entries had no
 corresponding benchmark in the suite, so it could not be re-run or checked.
 Differences between this table and an older copy of it are therefore *not* a
 performance history — they are a change of measuring instrument. The
@@ -272,9 +295,13 @@ Legend: ✅ Full support · 🟡 Partial / experimental · ❌ Not supported · 
 
 ### Standards Score (count of full ✅ across all 29 rows above)
 
-> Scores recomputed April 2026 from the tables above (29 rows total across sections 4.1–4.4).
-> Two items remain 🟡 for Open Triplestore: SPARQL 1.2 and RDF 1.2/RDF-star (upstream oxrdf blocker —
-> triple-term evaluation not yet complete). Completing those would raise Open Triplestore to 29/29.
+> **Recounted 2026-09-18** directly from the 29 rows in sections 4.1–4.4 rather than
+> carried forward. Three had drifted since April, where a row was edited without the
+> score being redone: Blazegraph 11 → 10, Neptune 10 → 9, QLever 8 → 7. The other seven
+> were already right.
+>
+> Two items remain 🟡 for Open Triplestore: SPARQL 1.2 and RDF 1.2/RDF-star (upstream oxrdf
+> blocker — triple-term evaluation not yet complete). Completing those would raise it to 29/29.
 
 ```
 Open Triplestore  ███████████████████████████░░   27 / 29  (#1 open-source; only SPARQL 1.2 + RDF-star still 🟡, upstream blocker)
@@ -284,9 +311,9 @@ Virtuoso          ██████████████░░░░░░�
 RDF4J 5           ██████████████░░░░░░░░░░░░░░░   14 / 29  (improved from v4)
 Jena 5            ████████████░░░░░░░░░░░░░░░░░   12 / 29  (improved from v4)
 Oxigraph          ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (lean standalone; open-triplestore extends it)
-Blazegraph        ███████████░░░░░░░░░░░░░░░░░░   11 / 29  (abandoned 2019)
-Neptune           ██████████░░░░░░░░░░░░░░░░░░░   10 / 29
-QLever            ████████░░░░░░░░░░░░░░░░░░░░░    8 / 29  (query speed over breadth)
+Blazegraph        ██████████░░░░░░░░░░░░░░░░░░░   10 / 29  (abandoned 2019)
+Neptune           █████████░░░░░░░░░░░░░░░░░░░░    9 / 29
+QLever            ███████░░░░░░░░░░░░░░░░░░░░░░    7 / 29  (query speed over breadth)
 ```
 
 ---
@@ -379,7 +406,7 @@ All numbers in milliseconds. Dataset sizes are approximate triples in store.
 > is above the in-memory accelerator's cap, where RocksDB answers and the real figure is worse than
 > a linear projection.
 >
-> The earlier local figure in this row (0.04 ms at 100 K triples) was a *point* lookup, not a scan,
+> The figure previously in this row (0.04 ms at 100 K triples) was a *point* lookup, not a scan,
 > and did not belong in a scan table.
 >
 > Competitor numbers are estimated from published BSBM throughput ratios and ESWC 2023 relative
@@ -410,7 +437,7 @@ Simple lookup, measured (ms — lower is better; fixture in triples)
 | Jena 5 TDB2 | ~7 ms | ~12 ms | Improved from v4 (~12/~20 ms) |
 | Neptune | ~50 ms | ~70 ms | Network + managed engine |
 
-> The local cell gives **5 K / 50 K triples** (`query/join_2way`, `query/join_3way` at
+> The Open Triplestore cell gives **5 K / 50 K triples** (`query/join_2way`, `query/join_3way` at
 > parameters 1000 and 10000); competitor cells are published estimates at their own 10 K
 > fixture and are not directly comparable row-to-row. Both joins are answered by the
 > [columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) added in 0.6.0, which
@@ -804,7 +831,7 @@ Scored 1–5 (5 = best) across six dimensions.
 | Runtime longevity | Rust/C++ (no GC, stable ABI) | Java (JVM dependency, GC pauses) |
 | Standards body participation | Active W3C / OGC contributor | Not involved |
 
-### 13.2 Scores (updated April 2026)
+### 13.2 Scores
 
 | System | Dev Activity | SPARQL 1.2 | Cloud-native | Community | Runtime | Standards | **Total /30** |
 |--------|:-----------:|:----------:|:------------:|:---------:|:-------:|:---------:|:-------------:|
@@ -813,27 +840,42 @@ Scored 1–5 (5 = best) across six dimensions.
 | QLever | 5 | 3 | 3 | 4 | 5 | 3 | **23** |
 | Stardog | 4 | 4 | 4 | 4 | 3 | 4 | **23** |
 | Jena 5 | 4 | 4 | 3 | 5 | 2 | 5 | **23** |
-| **Open Triplestore** | 4 | **3** | 3 | **4** | 5 | 3 | **22** ↑ |
+| **Open Triplestore** | 4 | 3 | **4** | 4 | 5 | 3 | **23** ↑ |
 | Virtuoso | 4 | 3 | 3 | 3 | 5 | 3 | **21** |
 | RDF4J 5 | 4 | 4 | 2 | 4 | 2 | 5 | **21** |
 | Blazegraph | 1 | 1 | 1 | 1 | 2 | 2 | **8** |
 
-> Open Triplestore improved from 20 → **22/30**:
-> - SPARQL 1.2 readiness: 2 → 3 (has `rdf-12` feature flag; Oxigraph upstream tracking)
-> - Community: 3 → 4 (Rust ecosystem growth; Oxigraph community active)
+> **Only this project was rescored (2026-09-18).** The other nine carry their April 2026
+> scores: nothing new was measured or read about them in this pass, and inventing movement
+> would be worse than leaving them.
+>
+> Open Triplestore 22 → **23/30**, on one dimension, against the 13.1 rubric:
+>
+> - **Cloud-native trajectory 3 → 4.** Release 0.6.0 ships replication by logical log
+>   shipping (leader and follower, configurable temperature and scope), synchronous
+>   replication that degrades visibly and recovers by itself, whole-database identity
+>   shipping, and Raft consensus with automatic failover — so "single-machine only" is
+>   no longer true (see [operations.md](operations.md#replication)). It is not a 5: there
+>   is no serverless or operator-managed Kubernetes story.
+> - Unchanged: dev activity 4, SPARQL 1.2 readiness 3 (still the upstream oxrdf
+>   triple-term blocker), community 4, runtime 5 (Rust), standards participation 3.
+>
+> Earlier movement, for the record: 20 → 22 in April, from SPARQL 1.2 readiness 2 → 3 and
+> community 3 → 4.
 
 ```
-Future-Proofness Score (out of 30, April 2026)
-────────────────────────────────────────────────
-GraphDB                                     ██████████████████████████████  27
-Neptune                                     █████████████████████████████   26
-QLever                                      ██████████████████████████      23
-Stardog                                     ██████████████████████████      23
-Jena 5                                      ██████████████████████████      23
-Open Triplestore                            █████████████████████████      22  (↑ from 20)
-Virtuoso                                    █████████████████████████       21
-RDF4J 5                                     █████████████████████████       21
-Blazegraph                                  ██████████                       8
+Future-Proofness Score (out of 30)
+─────────────────────────────────────────────────────────────────────────────────
+GraphDB                                     ███████████████████████████    27
+Neptune                                     ██████████████████████████     26
+Open Triplestore                            ███████████████████████        23  (↑ from 22; rescored 2026-09-18)
+QLever                                      ███████████████████████        23
+Stardog                                     ███████████████████████        23
+Jena 5                                      ███████████████████████        23
+Virtuoso                                    █████████████████████          21
+RDF4J 5                                     █████████████████████          21
+Blazegraph                                  ████████                        8
+                                            (competitors: April 2026)
 ```
 
 ### 13.3 Notes by System
@@ -934,7 +976,8 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ### Where Open Triplestore Excels
 
-1. **Ingest speed:** ~1 Mt/s bulk load beats every Java competitor by 2–6×. Only QLever and
+1. **Ingest speed:** ~465,000 t/s bulk load (re-measured, section 5.1) beats every Java
+   competitor by 1.2–3×. Only QLever and
    Neptune (Graviton4 cloud bulk loader) match this.
 
 2. **GeoSPARQL 1.1:** One of only three open-source triplestores with full GeoSPARQL 1.1 support
