@@ -41,7 +41,10 @@ use oxigraph::sparql::QueryResults;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use ots_plugin_api::sources::{ColumnProfile, DetectedPattern, TableKind, TableProfile, ValueKind};
+use ots_plugin_api::sources::{
+    ColumnProfile, DetectedPattern, TableKind, TableProfile, ValueKind,
+    LOW_CARDINALITY_MAX_VALUE_LEN,
+};
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::server::AppState;
@@ -335,7 +338,24 @@ fn column_triples(source_id: &str, table: &str, column: &ColumnProfile) -> Strin
         }
     }
     // The values of a code list, and nothing else that is a value.
-    for (i, v) in column.top_values.iter().enumerate() {
+    //
+    // The ceiling is re-checked here, not only in the driver that read the
+    // values. This is the one place row content can reach the graph the offline
+    // proposer reads, and a driver added later — a plugin, outside this crate —
+    // would otherwise have to remember the rule for it to hold. A column with
+    // any over-long value contributes no list at all, for the same reason the
+    // reader drops it: a list quietly missing a member would let a proposer
+    // build an enumeration that is wrong with nothing to reveal it.
+    let within_ceiling = column
+        .top_values
+        .iter()
+        .all(|v| v.value.chars().count() <= LOW_CARDINALITY_MAX_VALUE_LEN);
+    for (i, v) in column
+        .top_values
+        .iter()
+        .enumerate()
+        .take_while(|_| within_ceiling)
+    {
         let rank = i + 1;
         let node = iri(&value_iri(source_id, table, &column.name, rank));
         out.push_str(&format!(
@@ -1172,6 +1192,40 @@ mod tests {
                 .count_graph(Some(&profile_version_graph_iri("s", 1)))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn the_writer_drops_a_value_list_no_driver_should_have_offered() {
+        // Defence in depth: the driver that reads the values already applies the
+        // ceiling, but a driver added as a plugin lives outside this crate. The
+        // one place row content can reach the graph enforces it too.
+        let mut p = sample_profile();
+        p.columns[1].top_values = vec![
+            ValueCount {
+                value: "short".to_string(),
+                count: 10,
+            },
+            ValueCount {
+                value: "x".repeat(LOW_CARDINALITY_MAX_VALUE_LEN + 1),
+                count: 5,
+            },
+        ];
+        let out = column_triples("s", "t", &p.columns[1]);
+        assert!(
+            !out.contains("dsprof:topValue"),
+            "one over-long value takes the whole list with it: {out}"
+        );
+        assert!(
+            !out.contains("xxxxx"),
+            "and the value itself never lands: {out}"
+        );
+        // A list entirely within the ceiling is still written.
+        p.columns[1].top_values.pop();
+        let ok = column_triples("s", "t", &p.columns[1]);
+        assert!(
+            ok.contains("dsprof:topValue") && ok.contains("short"),
+            "{ok}"
         );
     }
 
