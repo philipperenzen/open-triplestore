@@ -1,6 +1,18 @@
-//! QLever as a read backend (P5): a QLever instance kept current from the
-//! change log answers the analytical queries, configurable and on by
-//! default once a URL is set.
+//! QLever as a read backend (P5): a QLever instance kept current from this
+//! node's change log, which an operator may opt into answering queries.
+//!
+//! **Routing is off by default**, and that is a measured decision rather
+//! than a cautious one. `tests/qlever_live.rs` runs the same 29 query
+//! shapes through the engine and through a real QLever holding the same
+//! 501 000 triples: ten answer differently — six because QLever reports an
+//! `xsd:integer` literal as `xsd:int`, which is a different RDF term, and
+//! four because an unordered `LIMIT` picks a different subset — and two
+//! come back truncated, QLever having answered `200 OK` and appended a
+//! plain-text error into the body after 85 852 of 100 000 rows. On speed,
+//! at a size the in-memory mirror holds, QLever was slower on everything
+//! but one grouped aggregate. Its advantage is the tier above this cap, on
+//! a store far larger than RAM, which is where an operator should turn it
+//! on knowing what changes.
 //!
 //! Two halves. The **feeder** is a consumer of this node's own change log
 //! (the same rows a replication follower reads): `full` rows become
@@ -13,10 +25,10 @@
 //! feeder is caught up (its cursor is the log's newest sequence number and
 //! no write is in flight) — the mirror's never-stale rule — and only for
 //! the shapes the route policy names: `analytical` (an `ASK`, or a query
-//! with an aggregate anywhere in it — the default), `all` (every `SELECT`/`ASK`
-//! after the in-memory copies), `first` (before the copies; the setting for
-//! a head-to-head measurement), `off`. Anything else, and any error, falls
-//! through to the next exit.
+//! with an aggregate anywhere in it), `all` (every `SELECT`/`ASK` after the
+//! in-memory copies), `first` (before the copies; the setting for a
+//! head-to-head measurement), and `off`, **the default**. Anything else,
+//! and any error, falls through to the next exit.
 //!
 //! QLever's index is built from a dump (`qlever index`); the feeder assumes
 //! an index that already holds this store's data and keeps it current
@@ -43,12 +55,14 @@ use crate::store::engine::TripleStore;
 pub enum Route {
     /// An `ASK`, or a query with an aggregate anywhere in it (`GROUP BY`,
     /// `COUNT`, `SUM`, … — whether or not the shards can decompose it),
-    /// after the in-memory copies. The default.
+    /// after the in-memory copies.
     Analytical,
     /// Every `SELECT` / `ASK`, after the in-memory copies.
     All,
     /// Every `SELECT` / `ASK`, before the in-memory copies (measurements).
     First,
+    /// Nothing is routed. **The default**: see the module docs for the
+    /// measurements behind it. The feeder still runs.
     Off,
 }
 
@@ -73,7 +87,7 @@ fn env_opt(name: &str) -> Option<String> {
 
 impl QleverConfig {
     /// `OTS_QLEVER_URL`, `OTS_QLEVER_ENABLED` (default on), `OTS_QLEVER_ACCESS_TOKEN`,
-    /// `OTS_QLEVER_ROUTE` (`analytical` | `all` | `first` | `off`),
+    /// `OTS_QLEVER_ROUTE` (`analytical` | `all` | `first` | `off`; **`off`**),
     /// `OTS_QLEVER_BATCH` (5000), `OTS_QLEVER_POLL_MS` (500), `OTS_QLEVER_TIMEOUT_SECS` (30).
     pub fn from_env() -> Self {
         Self::parse(
@@ -104,11 +118,13 @@ impl QleverConfig {
                 )
             })
             .unwrap_or(false);
+        // Off unless asked, and anything unrecognised is off too: a
+        // mistyped policy must not start routing queries away from the engine.
         let route = match route.map(|r| r.trim().to_ascii_lowercase()).as_deref() {
+            Some("analytical") => Route::Analytical,
             Some("all") => Route::All,
             Some("first") => Route::First,
-            Some("off") | Some("none") => Route::Off,
-            _ => Route::Analytical,
+            _ => Route::Off,
         };
         Self {
             url: url.map(|u| u.trim_end_matches('/').to_string()),
@@ -237,12 +253,15 @@ impl HttpQlever {
 
 impl QleverEndpoint for HttpQlever {
     fn query(&self, sparql: &str) -> Result<QueryResults<'static>, String> {
+        // XML first: QLever's SPARQL-JSON carries a trailing `meta` object
+        // that the JSON parser rejects, and its XML is clean. JSON is still
+        // accepted from an endpoint that ignores the preference.
         let bytes = self.post(
             "application/sparql-query",
-            "application/sparql-results+json",
+            "application/sparql-results+xml, application/sparql-results+json;q=0.9",
             sparql.to_string(),
         )?;
-        parse_results_json(&bytes)
+        parse_results(&bytes)
     }
 
     fn update(&self, sparql: &str) -> Result<(), String> {
@@ -256,8 +275,41 @@ impl QleverEndpoint for HttpQlever {
 }
 
 /// SPARQL JSON results into owned `QueryResults`.
-pub fn parse_results_json(bytes: &[u8]) -> Result<QueryResults<'static>, String> {
-    let parsed = QueryResultsParser::from_format(QueryResultsFormat::Json)
+/// A SPARQL 1.1 Protocol results document, in whichever of the two formats
+/// the endpoint chose to send.
+///
+/// The format is taken from the first non-space byte rather than the
+/// response's content type, because an endpoint that ignores the `Accept`
+/// preference usually mislabels the answer too. A JSON document with members
+/// after `results` — which is what QLever sends — is rejected by the JSON
+/// parser; the query then falls through to the engine, which is why the
+/// client asks for XML first.
+pub fn parse_results(bytes: &[u8]) -> Result<QueryResults<'static>, String> {
+    // QLever reports a failure *during* export by answering `200 OK`,
+    // stopping mid-result and appending this sentinel and a message — its
+    // own comment says HTTP/1.1 leaves it no better way. The truncation
+    // usually breaks the document, so a strict parse would refuse it
+    // anyway; this makes sure a cut that happens to land on a boundary is
+    // refused too, and says why. A partial answer must never be served as
+    // a whole one.
+    if let Some(at) = find_sentinel(bytes) {
+        let tail = String::from_utf8_lossy(&bytes[at..]);
+        let message = tail
+            .lines()
+            .last()
+            .unwrap_or("(no message)")
+            .trim()
+            .to_string();
+        return Err(format!(
+            "the endpoint truncated its answer and reported: {message}"
+        ));
+    }
+    let format = match bytes.iter().find(|b| !b.is_ascii_whitespace()) {
+        Some(b'<') => QueryResultsFormat::Xml,
+        Some(b'{') => QueryResultsFormat::Json,
+        _ => return Err("the endpoint sent neither XML nor JSON results".to_string()),
+    };
+    let parsed = QueryResultsParser::from_format(format)
         .for_reader(bytes)
         .map_err(|e| e.to_string())?;
     match parsed {
@@ -279,6 +331,15 @@ pub fn parse_results_json(bytes: &[u8]) -> Result<QueryResults<'static>, String>
             Ok(QueryResults::Solutions(QuerySolutionIter::new(vars, iter)))
         }
     }
+}
+
+/// QLever's marker for "this result is incomplete and here is why".
+const TRUNCATION_SENTINEL: &[u8] = b"!!!!>>#";
+
+fn find_sentinel(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(TRUNCATION_SENTINEL.len())
+        .position(|w| w == TRUNCATION_SENTINEL)
 }
 
 /// A stand-in for tests: an in-memory store that takes the same updates
@@ -759,7 +820,9 @@ mod tests {
         );
         assert_eq!(c.url.as_deref(), Some("http://qlever:7001"));
         assert!(c.enabled);
-        assert_eq!(c.route, Route::Analytical);
+        // Configured, enabled, and routing nothing until asked: see
+        // `routing_is_off_until_it_is_asked_for`.
+        assert_eq!(c.route, Route::Off);
         assert_eq!(c.batch, 5000);
         let off = QleverConfig::parse(
             Some("http://q"),
@@ -800,6 +863,105 @@ mod tests {
             "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"
         ));
         assert!(!is_select_or_ask("INSERT DATA { <a> <b> <c> }"));
+    }
+
+    /// What a real QLever 2026-09 sends for `SELECT ?s ?n … LIMIT 2`, copied
+    /// from the wire. The JSON form carries a `meta` object after `results`,
+    /// which is why the client prefers the XML form.
+    const QLEVER_JSON: &str = r#"{"head":{"vars":["s","n"]},"results":{"bindings":[{"s":{"type":"uri","value":"http://example.org/p0"},"n":{"type":"literal","value":"Person 0"}},{"s":{"type":"uri","value":"http://example.org/p1"},"n":{"type":"literal","value":"Person 1"}}]},"meta":{"query-time-ms":8,"result-size-total":2}}"#;
+
+    const QLEVER_XML: &str = r#"<?xml version="1.0"?>
+<sparql xmlns="http://www.w3.org/2005/sparql-results#">
+<head>
+  <variable name="s"/>
+  <variable name="n"/>
+</head>
+<results>
+  <result>
+    <binding name="s"><uri>http://example.org/p0</uri></binding>
+    <binding name="n"><literal>Person 0</literal></binding>
+  </result>
+  <result>
+    <binding name="s"><uri>http://example.org/p1</uri></binding>
+    <binding name="n"><literal>Person 1</literal></binding>
+  </result>
+</results>
+</sparql>"#;
+
+    fn rows_of(r: QueryResults<'static>) -> Vec<Vec<String>> {
+        match r {
+            QueryResults::Solutions(s) => s
+                .map(|sol| {
+                    let sol = sol.unwrap();
+                    sol.iter().map(|(_, t)| t.to_string()).collect()
+                })
+                .collect(),
+            _ => panic!("expected solutions"),
+        }
+    }
+
+    /// The endpoint's answer is read whichever of the two formats it sends —
+    /// and QLever's JSON, with its trailing `meta`, is the reason the client
+    /// asks for XML first.
+    #[test]
+    fn the_endpoints_results_are_read_in_either_format() {
+        let xml = parse_results(QLEVER_XML.as_bytes()).expect("XML must parse");
+        let rows = rows_of(xml);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0][1].contains("Person 0"), "{rows:?}");
+
+        // The same document as JSON, without the trailing member, still reads.
+        let plain =
+            QLEVER_JSON.replace(r#","meta":{"query-time-ms":8,"result-size-total":2}}"#, "}");
+        assert_eq!(rows_of(parse_results(plain.as_bytes()).unwrap()).len(), 2);
+
+        // With it, the parser refuses — a decline, never a wrong answer.
+        assert!(
+            parse_results(QLEVER_JSON.as_bytes()).is_err(),
+            "JSON with members after `results` must not be read as an answer"
+        );
+
+        assert!(parse_results(b"not results at all").is_err());
+        assert!(parse_results(b"").is_err());
+    }
+
+    /// A truncated answer is refused, not served short. This is the tail of
+    /// a real 100 000-row `SELECT` that QLever cut off at 85 852 rows while
+    /// answering `200 OK`.
+    #[test]
+    fn a_truncated_answer_is_refused() {
+        let truncated = concat!(
+            "<?xml version=\"1.0\"?>\n",
+            "<sparql xmlns=\"http://www.w3.org/2005/sparql-results#\">\n",
+            "<head><variable name=\"s\"/></head>\n<results>\n",
+            "  <result><binding name=\"s\"><uri>http://example.org/p0</uri></binding></result>\n",
+            "  <result><binding name=\"s\"><uri>http://example.org/p1</uri></bind\n",
+            " !!!!>># An error has occurred while exporting the query result. ",
+            "Unfortunately due to limitations in the HTTP 1.1 protocol, there is ",
+            "no better way to report this than to append it to the incomplete ",
+            "result. The error message was:\nOperation timed out."
+        );
+        let Err(err) = parse_results(truncated.as_bytes()) else {
+            panic!("a truncated answer must not read as a result")
+        };
+        assert!(err.contains("truncated"), "{err}");
+        assert!(err.contains("Operation timed out"), "{err}");
+    }
+
+    /// Routing is off unless asked for, and a policy nobody recognises is off
+    /// rather than a guess — a typo must not send queries away from the engine.
+    #[test]
+    fn routing_is_off_until_it_is_asked_for() {
+        let off = |r: Option<&str>| {
+            QleverConfig::parse(Some("http://q"), None, None, r, None, None, None).route
+        };
+        assert_eq!(off(None), Route::Off);
+        assert_eq!(off(Some("")), Route::Off);
+        assert_eq!(off(Some("analytic")), Route::Off, "a typo is off");
+        assert_eq!(off(Some("yes")), Route::Off);
+        assert_eq!(off(Some("analytical")), Route::Analytical);
+        assert_eq!(off(Some("  ALL  ")), Route::All);
+        assert_eq!(off(Some("first")), Route::First);
     }
 
     #[test]

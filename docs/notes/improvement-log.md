@@ -1991,6 +1991,73 @@ route, with the design note's §6–7 as its specification. Until then the
 columnar copy and QLever cover the analytical layer's two tiers: under the cap
 in-process, above it out of process.
 
+### 4. The live head-to-head, and why QLever no longer routes by default
+
+The maintainer authorised pulling `adfreiburg/qlever` and asked, in the same
+breath, whether a backend that makes the platform less standards-compliant is
+worth having at all. Both questions turned out to have the same answer, and
+neither could have been answered without a running server.
+
+**Set-up.** `tests/qlever_live.rs` (ignored; it needs a server no CI job has,
+and the recipe is in its module docs). QLever 2026-09 indexing the 501 000
+triples `benches/performance.rs` generates, the same data in an in-memory
+store, 29 query shapes through both, solutions compared as multisets.
+
+**Three findings, in the order they mattered.**
+
+1. **The client could not read QLever at all.** 27 of 29 queries came back
+   unreadable. Not QLever's fault: its SPARQL-JSON carries a trailing `meta`
+   object after `results`, which the SPARQL Results JSON parser rejects
+   outright. Every `SELECT` had been silently falling through to the engine.
+   The unit tests had never caught it because the stand-in endpoint in
+   `tests/qlever_backend.rs` is an in-memory store, not an HTTP peer — a fake
+   that was too kind. Fixed by preferring SPARQL Results **XML**, which QLever
+   emits cleanly, and sniffing the format from the first byte rather than
+   trusting the content type. The unit test now carries QLever's real bytes.
+
+2. **QLever answers differently, on ordinary queries.** With the client fixed,
+   17 of 29 shapes diverged. Thirteen because QLever reports an `xsd:integer`
+   literal as `xsd:int` — a different RDF term, so `DATATYPE`, `sameTerm` and
+   `=` all change answer, and every `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`
+   returns a datatype SPARQL does not specify for it. Four more because an
+   unordered `LIMIT` picks a different subset, which SPARQL permits but which
+   still makes the platform's answer depend on whether a backend happens to be
+   configured.
+
+3. **QLever can answer `200 OK` with a partial result.** Two queries came back
+   truncated: QLever streams what it has, then appends `!!!!>>#` and a
+   plain-text message into the body, because — its own words — HTTP/1.1 leaves
+   it no better way to report a failure that happens mid-export. One
+   100 000-row query returned 85 852 rows that way. A lenient client would
+   have served that as the whole answer. `parse_results` now looks for the
+   marker as well as parsing strictly, so the query falls through instead.
+
+**And on speed, at this size, it lost** — `ASK` 0.3 ms against 48 ms, `VALUES`
+79 ms against 6.9 s, `MINUS` 351 ms against 15.5 s, `UNION` 63 ms against
+3.6 s; `DISTINCT` and `REGEX` were the only two where QLever won, at about
+2.2x. That is not a verdict on QLever. Half a million triples is the case its
+index is not built for, and it is precisely the case this store's in-memory
+mirror *is* built for. The measurement says where the boundary is, not that
+one engine is better.
+
+**What changed as a result.** `OTS_QLEVER_ROUTE` now defaults to `off`, and an
+unrecognised value is `off` too, so a typo cannot start routing queries away
+from the engine. Setting `OTS_QLEVER_URL` still starts the feeder — keeping
+someone's index current costs the platform nothing and is what the index is
+for — but no query is answered from QLever until an operator asks, having read
+`docs/operations.md`, "What the measurement found", which now carries the
+numbers above.
+
+**Stated plainly.** This is the maintainer's instinct vindicated: a backend
+that answers differently is a compliance problem, not a tuning knob, and the
+honest default for one is off. The same rule the columnar copy lives under —
+decline rather than differ — could not be applied to QLever, because a remote
+engine's semantics cannot be gated statically. What can be done is refuse a
+truncated answer, refuse to route by default, and write down exactly what an
+operator is accepting. A third open limit joins the two already recorded:
+`CONSTRUCT` is never routed, because QLever answers it in an RDF serialisation
+rather than a results document.
+
 ## Checkpoint (2026-09-17, HEAD `d2236a8` + this note)
 
 **Commits.** `8f8b2e0` the columnar copy and its evaluator · `d2236a8` QLever
@@ -2025,10 +2092,11 @@ image); `oxsdatatypes` is Apache-2.0/MIT by its manifest.
    corner test first: that is what turned 34 silent divergences into 34
    declines or fixes. Property paths are the obvious candidate, and the
    cross-product bug (section 1) is what has to be fixed to accept them.
-2. **Two QLever limits are open**, both in the resync path: blank nodes
-   split across `INSERT DATA` batches, and a graph the endpoint holds that
-   the local store no longer does. Neither can serve a wrong answer to a
-   client — the router only reads — but both leave the remote index wrong.
+2. **Three QLever limits are open**: blank nodes split across `INSERT DATA`
+   batches on a resync, a graph the endpoint holds that the local store no
+   longer does, and `CONSTRUCT`, which is never routed. None can serve a wrong
+   answer to a client, and routing is off by default (section 4), but all
+   three leave the remote index or the route policy less than it looks.
 3. **The review's remaining performance findings are unfixed**: `estimate()`
    counts per candidate per planning round, and the query is parsed more
    than once on the way in. Neither regressed a benchmark.

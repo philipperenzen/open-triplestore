@@ -14,16 +14,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **QLever as a read backend** (`OTS_QLEVER_URL`; on by default once set,
-  `OTS_QLEVER_ENABLED=off` to switch off): a feeder keeps a QLever instance
+- **QLever as a read backend** (`OTS_QLEVER_URL`; the feeder starts when the
+  URL is set, but **routing is off by default** — see below): a feeder keeps a QLever instance
   current from this node's change log — `full` rows as `DELETE DATA` /
   `INSERT DATA`, rows that only say a graph changed as a graph replace, an
   epoch change as a replace of everything, bookmarked as the cursor
-  `qlever` — and a route policy (`OTS_QLEVER_ROUTE`: `analytical` by
-  default, `all`, `first`, `off`) sends it the queries it names, only while
-  the feed is caught up; any error falls through to the engine.
-  `GET /api/admin/qlever/status` (admin) and a telemetry exit, `qlever`.
-  See docs/operations.md, "QLever as a read backend".
+  `qlever` — and a route policy (`OTS_QLEVER_ROUTE`: `off` by default,
+  `analytical`, `all`, `first`) sends it the queries it names, only while
+  the feed is caught up; any error, and any truncated answer, falls through
+  to the engine. Routing is off by default because a measured head-to-head
+  against a real QLever (`tests/qlever_live.rs`) found it answering
+  differently from this store's engine on 13 of 29 query shapes — chiefly by
+  reporting `xsd:integer` literals as `xsd:int` — and slower on all but two
+  at a size the in-memory mirror holds. `GET /api/admin/qlever/status`
+  (admin) and a telemetry exit, `qlever`. See docs/operations.md,
+  "QLever as a read backend".
 - **A columnar copy with its own SPARQL evaluator** (`opengraph::columnar`,
   on by default; `OTS_COLUMNAR_QUERY=off`): the in-memory mirror keeps a
   third copy — a term dictionary and three sorted permutations of the quads
