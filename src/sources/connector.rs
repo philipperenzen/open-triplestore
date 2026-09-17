@@ -127,7 +127,10 @@ mod tests {
                 Err(SourceError::Unsupported("fake".into()))
             }
         }
-        assert!(!register(Arc::new(Fake)), "core's sqlite driver keeps the dialect");
+        assert!(
+            !register(Arc::new(Fake)),
+            "core's sqlite driver keeps the dialect"
+        );
         // …and the original is still the one that answers.
         assert!(get("sqlite").is_some());
     }

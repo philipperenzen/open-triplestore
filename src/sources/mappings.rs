@@ -224,7 +224,11 @@ mod tests {
         assert_eq!(loaded.datasources(), vec!["urn:source:legacy"]);
         let ttl = turtle(&store, "m", 1).expect("serialises");
         assert!(ttl.contains("urn:source:legacy"), "{ttl}");
-        assert_eq!(turtle(&store, "m", 2), None, "an unwritten version is absent");
+        assert_eq!(
+            turtle(&store, "m", 2),
+            None,
+            "an unwritten version is absent"
+        );
     }
 
     #[test]

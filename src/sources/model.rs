@@ -514,7 +514,16 @@ mod tests {
         for ok in ["legacy", "legacy-assets", "a.b_c", "A1"] {
             assert!(valid_id(ok), "{ok}");
         }
-        for bad in ["", "a b", "a/b", "a:b", "a>b", "a#b", "../x", &"x".repeat(129)] {
+        for bad in [
+            "",
+            "a b",
+            "a/b",
+            "a:b",
+            "a>b",
+            "a#b",
+            "../x",
+            &"x".repeat(129),
+        ] {
             assert!(!valid_id(bad), "{bad}");
         }
     }
@@ -537,7 +546,10 @@ mod tests {
         assert!(!json.contains("top-secret-value"));
         // …and the resolved parameters redact it too.
         let params = s.connect_params().unwrap();
-        assert_eq!(params.password.as_ref().unwrap().expose(), "top-secret-value");
+        assert_eq!(
+            params.password.as_ref().unwrap().expose(),
+            "top-secret-value"
+        );
         assert!(!format!("{params:?}").contains("top-secret-value"));
     }
 

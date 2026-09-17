@@ -250,6 +250,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   oxigraph 0.5 evaluator behaviours, listed in docs/conformance/sparql11.md),
   two-way ratchet with a pass floor. The generated conformance table now
   scores three vendored corpora.
+- **SQL sources: datasources, standard RML mappings and store-native runs.**
+  `/api/sources` registers a SQL database as RDF in `urn:system:sources` —
+  dialect, location, a read-only account, a mandatory statement timeout and a
+  **reference** to the credential in an external secret store. Mappings are
+  standard RML stored as one graph per frozen version, whose IRI is the
+  version IRI, so a run's `prov:used` names exactly the triples that executed.
+  A run materialises into a fresh `urn:run:<id>`, records a PROV activity,
+  passes the SHACL write gate on that graph, and only then takes the
+  production role — in one update. A failing gate leaves production untouched
+  and keeps the candidate for inspection; `POST /api/runs/{id}/rollback`
+  re-points the datasource at the graph it served before, without re-running.
+  Drivers sit behind a `SourceConnector` trait in `ots-plugin-api`: SQLite is
+  in core, other dialects arrive as plugins. See [`docs/sources.md`](docs/sources.md).
+- **Secret references.** Every credential the server needs is configured as
+  `env:NAME`, `file:/path` or `vault:<mount>/data/<path>#<key>` (HashiCorp KV
+  v1 and v2, token from `VAULT_TOKEN_FILE` — the Vault Agent sink — or
+  `VAULT_TOKEN`, optional namespace and private CA) and resolved at the moment
+  of use. Resolved values are cached briefly, never persisted, never logged,
+  and stripped from any error that can reach a caller. OIDC client secrets,
+  `LLM_API_KEY`, `SMTP_PASSWORD`, `ALERT_SMTP_PASS` and `S3_SECRET_KEY` all
+  read references now; plaintext still works outside the production posture
+  with a deprecation warning.
+- **Production posture.** `OTS_ENV=production` turns the security rules into
+  startup and registration errors rather than warnings: a raw secret, an
+  unresolvable reference, a missing statement timeout, a datasource host
+  outside `OTS_REMOTE_ALLOWLIST` and a file-backed datasource outside
+  `OTS_SOURCES_DIR` are all refused.
+- **RML: relational logical sources.** `rr:tableName` / `rml:query` over a
+  registered datasource, streamed in batches; `rr:parentTriplesMap` joins
+  resolved by a bounded hash index; R2RML natural datatypes for bare column
+  references; and an RML-FNML function for enumerations with an explicit
+  policy for values the map does not cover (keep as a literal so SHACL flags
+  it, omit, or mint from an absolute template).
 - **OTL-scale benchmark.** `examples/scale_otl.rs` generates asset-shaped
   data at scale and measures load, six query shapes (cache off), SHACL over
   every asset and a concurrent writers-plus-readers phase;

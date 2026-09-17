@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 
-use oxigraph::model::{Literal, NamedNode};
 use ots_plugin_api::sources::ValueKind;
+use oxigraph::model::{Literal, NamedNode};
 
 use super::model::*;
 
@@ -227,8 +227,8 @@ pub fn eval_function(
         return Ok(None);
     }
 
-    let normalize = arg_value(f.first(&format!("{FN_NS}normalize")), row)
-        .unwrap_or_else(|| "none".to_string());
+    let normalize =
+        arg_value(f.first(&format!("{FN_NS}normalize")), row).unwrap_or_else(|| "none".to_string());
     let key = normalize_value(&raw, &normalize)?;
 
     let mut table: HashMap<String, String> = HashMap::new();
@@ -366,16 +366,31 @@ mod tests {
     fn a_missing_column_produces_no_term() {
         let r = row(&[("a", "1")]);
         assert_eq!(
-            eval(&term(TermMapKind::Reference("nope".into()), TermType::Literal), &r, None),
+            eval(
+                &term(TermMapKind::Reference("nope".into()), TermType::Literal),
+                &r,
+                None
+            ),
             None
         );
         assert_eq!(
-            eval(&term(TermMapKind::Template("http://x/{nope}".into()), TermType::IRI), &r, None),
+            eval(
+                &term(
+                    TermMapKind::Template("http://x/{nope}".into()),
+                    TermType::IRI
+                ),
+                &r,
+                None
+            ),
             None
         );
         // …and an empty value is treated the same way.
         assert_eq!(
-            eval(&term(TermMapKind::Reference("e".into()), TermType::Literal), &row(&[("e", "")]), None),
+            eval(
+                &term(TermMapKind::Reference("e".into()), TermType::Literal),
+                &row(&[("e", "")]),
+                None
+            ),
             None
         );
     }
@@ -389,15 +404,30 @@ mod tests {
             ("d".to_string(), ValueKind::Decimal),
         ]);
         assert_eq!(
-            eval(&term(TermMapKind::Reference("n".into()), TermType::Literal), &r, Some(&kinds)).unwrap(),
+            eval(
+                &term(TermMapKind::Reference("n".into()), TermType::Literal),
+                &r,
+                Some(&kinds)
+            )
+            .unwrap(),
             format!("\"42\"^^<{XSD}integer>")
         );
         assert_eq!(
-            eval(&term(TermMapKind::Reference("d".into()), TermType::Literal), &r, Some(&kinds)).unwrap(),
+            eval(
+                &term(TermMapKind::Reference("d".into()), TermType::Literal),
+                &r,
+                Some(&kinds)
+            )
+            .unwrap(),
             format!("\"1.50\"^^<{XSD}decimal>")
         );
         assert_eq!(
-            eval(&term(TermMapKind::Reference("t".into()), TermType::Literal), &r, Some(&kinds)).unwrap(),
+            eval(
+                &term(TermMapKind::Reference("t".into()), TermType::Literal),
+                &r,
+                Some(&kinds)
+            )
+            .unwrap(),
             "\"hello\"",
             "text stays a plain literal"
         );
@@ -413,7 +443,12 @@ mod tests {
         assert_eq!(eval(&tm, &r, Some(&kinds)).unwrap(), "\"42\"");
         // Without kinds (a CSV source) nothing is invented.
         assert_eq!(
-            eval(&term(TermMapKind::Reference("n".into()), TermType::Literal), &r, None).unwrap(),
+            eval(
+                &term(TermMapKind::Reference("n".into()), TermType::Literal),
+                &r,
+                None
+            )
+            .unwrap(),
             "\"42\""
         );
     }
@@ -421,18 +456,32 @@ mod tests {
     #[test]
     fn hostile_values_cannot_break_out_of_a_term() {
         let r = row(&[("v", "a\"b\nc\\d"), ("i", "has space")]);
-        let lit = eval(&term(TermMapKind::Reference("v".into()), TermType::Literal), &r, None).unwrap();
+        let lit = eval(
+            &term(TermMapKind::Reference("v".into()), TermType::Literal),
+            &r,
+            None,
+        )
+        .unwrap();
         assert!(!lit.contains('\n'), "raw newline in a literal: {lit}");
         assert_eq!(lit, r#""a\"b\nc\\d""#);
         // A column with termType IRI that is not a valid IRI yields no term at
         // all, rather than an injected one.
         assert_eq!(
-            eval(&term(TermMapKind::Reference("i".into()), TermType::IRI), &r, None),
+            eval(
+                &term(TermMapKind::Reference("i".into()), TermType::IRI),
+                &r,
+                None
+            ),
             None
         );
         // A template percent-encodes, so the same value is safe there.
         assert_eq!(
-            eval(&term(TermMapKind::Template("http://x/{i}".into()), TermType::IRI), &r, None).unwrap(),
+            eval(
+                &term(TermMapKind::Template("http://x/{i}".into()), TermType::IRI),
+                &r,
+                None
+            )
+            .unwrap(),
             "<http://x/has%20space>"
         );
     }
@@ -440,7 +489,10 @@ mod tests {
     #[test]
     fn escaped_braces_in_a_template_are_literal() {
         let r = row(&[("c", "v")]);
-        assert_eq!(expand_template(r"http://x/\{lit\}/{c}", &r).unwrap(), "http://x/{lit}/v");
+        assert_eq!(
+            expand_template(r"http://x/\{lit\}/{c}", &r).unwrap(),
+            "http://x/{lit}/v"
+        );
     }
 
     #[test]
@@ -478,18 +530,28 @@ mod tests {
         let f = map_fn(&[
             ("value", FunctionArg::Reference("status".into())),
             ("normalize", FunctionArg::Constant("lower_trim".into())),
-            ("mapping", FunctionArg::Constant("active=http://x/Active".into())),
-            ("mapping", FunctionArg::Constant("Retired=http://x/Retired".into())),
+            (
+                "mapping",
+                FunctionArg::Constant("active=http://x/Active".into()),
+            ),
+            (
+                "mapping",
+                FunctionArg::Constant("Retired=http://x/Retired".into()),
+            ),
         ]);
         for raw in ["active", "ACTIVE ", " Active"] {
             assert_eq!(
-                eval_function(&f, &row(&[("status", raw)]), None).unwrap().unwrap(),
+                eval_function(&f, &row(&[("status", raw)]), None)
+                    .unwrap()
+                    .unwrap(),
                 "<http://x/Active>",
                 "{raw}"
             );
         }
         assert_eq!(
-            eval_function(&f, &row(&[("status", "retired")]), None).unwrap().unwrap(),
+            eval_function(&f, &row(&[("status", "retired")]), None)
+                .unwrap()
+                .unwrap(),
             "<http://x/Retired>",
             "map keys are normalised too"
         );
@@ -503,7 +565,9 @@ mod tests {
             ("mapping", FunctionArg::Constant("a=http://x/A".into())),
         ]);
         assert_eq!(
-            eval_function(&f, &row(&[("s", "Weird Value")]), None).unwrap().unwrap(),
+            eval_function(&f, &row(&[("s", "Weird Value")]), None)
+                .unwrap()
+                .unwrap(),
             "\"Weird Value\"",
             "the raw value is kept, not the normalised key"
         );
@@ -519,12 +583,16 @@ mod tests {
         ]);
         let kinds: Kinds = HashMap::from([("code".to_string(), ValueKind::Integer)]);
         assert_eq!(
-            eval_function(&f, &row(&[("code", "7")]), Some(&kinds)).unwrap().unwrap(),
+            eval_function(&f, &row(&[("code", "7")]), Some(&kinds))
+                .unwrap()
+                .unwrap(),
             format!("\"7\"^^<{XSD}integer>")
         );
         // A mapped value is still the IRI, whatever the column type.
         assert_eq!(
-            eval_function(&f, &row(&[("code", "1")]), Some(&kinds)).unwrap().unwrap(),
+            eval_function(&f, &row(&[("code", "1")]), Some(&kinds))
+                .unwrap()
+                .unwrap(),
             "<http://x/One>"
         );
     }
@@ -536,19 +604,28 @@ mod tests {
             ("mapping", FunctionArg::Constant("a=http://x/A".into())),
         ];
         let mut omit = map_fn(&base);
-        omit.params
-            .insert(format!("{FN_NS}unmapped"), vec![FunctionArg::Constant("omit".into())]);
-        assert_eq!(eval_function(&omit, &row(&[("s", "zzz")]), None).unwrap(), None);
+        omit.params.insert(
+            format!("{FN_NS}unmapped"),
+            vec![FunctionArg::Constant("omit".into())],
+        );
+        assert_eq!(
+            eval_function(&omit, &row(&[("s", "zzz")]), None).unwrap(),
+            None
+        );
 
         let mut mint = map_fn(&base);
-        mint.params
-            .insert(format!("{FN_NS}unmapped"), vec![FunctionArg::Constant("template".into())]);
+        mint.params.insert(
+            format!("{FN_NS}unmapped"),
+            vec![FunctionArg::Constant("template".into())],
+        );
         mint.params.insert(
             format!("{FN_NS}unmappedTemplate"),
             vec![FunctionArg::Constant("http://x/status/".into())],
         );
         assert_eq!(
-            eval_function(&mint, &row(&[("s", "zz z")]), None).unwrap().unwrap(),
+            eval_function(&mint, &row(&[("s", "zz z")]), None)
+                .unwrap()
+                .unwrap(),
             "<http://x/status/zz%20z>"
         );
     }
@@ -556,8 +633,10 @@ mod tests {
     #[test]
     fn a_relative_mint_template_is_refused() {
         let mut f = map_fn(&[("value", FunctionArg::Reference("s".into()))]);
-        f.params
-            .insert(format!("{FN_NS}unmapped"), vec![FunctionArg::Constant("template".into())]);
+        f.params.insert(
+            format!("{FN_NS}unmapped"),
+            vec![FunctionArg::Constant("template".into())],
+        );
         f.params.insert(
             format!("{FN_NS}unmappedTemplate"),
             vec![FunctionArg::Constant("status/".into())],
@@ -570,18 +649,24 @@ mod tests {
     fn unknown_functions_and_rules_fail_loudly() {
         let mut f = map_fn(&[("value", FunctionArg::Constant("x".into()))]);
         f.function = "http://example.org/nope".into();
-        assert!(eval_function(&f, &row(&[]), None).unwrap_err().contains("unsupported function"));
+        assert!(eval_function(&f, &row(&[]), None)
+            .unwrap_err()
+            .contains("unsupported function"));
 
         let bad = map_fn(&[
             ("value", FunctionArg::Constant("x".into())),
             ("normalize", FunctionArg::Constant("sideways".into())),
         ]);
-        assert!(eval_function(&bad, &row(&[]), None).unwrap_err().contains("fn:normalize"));
+        assert!(eval_function(&bad, &row(&[]), None)
+            .unwrap_err()
+            .contains("fn:normalize"));
 
         let malformed = map_fn(&[
             ("value", FunctionArg::Constant("x".into())),
             ("mapping", FunctionArg::Constant("no-equals-sign".into())),
         ]);
-        assert!(eval_function(&malformed, &row(&[]), None).unwrap_err().contains("fn:mapping"));
+        assert!(eval_function(&malformed, &row(&[]), None)
+            .unwrap_err()
+            .contains("fn:mapping"));
     }
 }

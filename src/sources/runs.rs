@@ -107,7 +107,10 @@ pub fn connect(
         .and_then(|r| crate::secrets::resolve(r).ok());
     connector::connect(&params).map_err(|e| {
         let scrubbed = scrub(&e.to_string(), source, resolved.as_ref());
-        format!("could not connect to datasource '{}': {scrubbed}", source.id)
+        format!(
+            "could not connect to datasource '{}': {scrubbed}",
+            source.id
+        )
     })
 }
 
@@ -257,8 +260,9 @@ fn gate(
     for shapes in &shape_graphs {
         // A gate that cannot be evaluated must refuse the promotion, not wave
         // it through: the same rule the Graph Store write gate follows.
-        let report = crate::shacl::engine::validate(ctx.store, shapes, &data)
-            .map_err(|e| format!("the write gate could not be evaluated against <{shapes}>: {e}"))?;
+        let report = crate::shacl::engine::validate(ctx.store, shapes, &data).map_err(|e| {
+            format!("the write gate could not be evaluated against <{shapes}>: {e}")
+        })?;
         combined.conforms &= report.conforms;
         combined.results_count += report.results_count;
         combined.results.extend(report.results);
@@ -293,7 +297,10 @@ pub fn rollback(
     actor: Option<&str>,
 ) -> Result<SqlSource, RunError> {
     let current = source.production.as_ref().ok_or_else(|| {
-        RunError::BadRequest(format!("datasource '{}' has no production graph", source.id))
+        RunError::BadRequest(format!(
+            "datasource '{}' has no production graph",
+            source.id
+        ))
     })?;
     if current.run != run.id {
         return Err(RunError::BadRequest(format!(
@@ -370,20 +377,32 @@ pub fn delete(ctx: RunContext<'_>, run: &RunRecord) -> Result<(), RunError> {
 
 fn attach(ctx: RunContext<'_>, dataset_id: &str, graph: &str) {
     if let Err(e) = ctx.auth_db.add_dataset_graph(dataset_id, graph) {
-        tracing::warn!(dataset = dataset_id, graph, "could not register run graph: {e}");
+        tracing::warn!(
+            dataset = dataset_id,
+            graph,
+            "could not register run graph: {e}"
+        );
         return;
     }
     if let Err(e) =
         ctx.auth_db
             .set_dataset_graph_role(dataset_id, graph, Some(GraphKind::Instances))
     {
-        tracing::warn!(dataset = dataset_id, graph, "could not tag run graph role: {e}");
+        tracing::warn!(
+            dataset = dataset_id,
+            graph,
+            "could not tag run graph role: {e}"
+        );
     }
 }
 
 fn detach(ctx: RunContext<'_>, dataset_id: &str, graph: &str) {
     if let Err(e) = ctx.auth_db.remove_dataset_graph(dataset_id, graph) {
-        tracing::warn!(dataset = dataset_id, graph, "could not unregister run graph: {e}");
+        tracing::warn!(
+            dataset = dataset_id,
+            graph,
+            "could not unregister run graph: {e}"
+        );
     }
 }
 
@@ -400,7 +419,11 @@ fn commit(ctx: RunContext<'_>, source: &SqlSource, run: &RunRecord, what: &str) 
         crate::commit_log::CommitKind::Source,
         format!(
             "run {} of mapping '{}' v{} against datasource '{}' {what} ({} rows, {} triples)",
-            run.id, run.mapping_id, run.mapping_version, source.id, run.rows_extracted,
+            run.id,
+            run.mapping_id,
+            run.mapping_version,
+            source.id,
+            run.rows_extracted,
             run.triples_produced
         ),
         actor_id(run.actor.as_deref()).as_deref(),
@@ -463,7 +486,10 @@ pub fn provenance_turtle(store: &TripleStore, run: &RunRecord) -> String {
 pub fn source_provenance_turtle(store: &TripleStore, source_id: &str) -> String {
     use oxigraph::sparql::QueryResults;
 
-    let source = format!("<{}>", crate::store::escape_sparql_iri(&source_iri(source_id)));
+    let source = format!(
+        "<{}>",
+        crate::store::escape_sparql_iri(&source_iri(source_id))
+    );
     let ds = crate::sources::model::DS;
     let query = format!(
         "PREFIX ds: <{ds}>\n\
@@ -641,8 +667,14 @@ mod tests {
         registry::record_rollback(
             &store,
             "legacy",
-            &RunPointer { graph: run_graph_iri("r2"), run: "r2".into() },
-            &RunPointer { graph: run_graph_iri("r1"), run: "r1".into() },
+            &RunPointer {
+                graph: run_graph_iri("r2"),
+                run: "r2".into(),
+            },
+            &RunPointer {
+                graph: run_graph_iri("r1"),
+                run: "r1".into(),
+            },
             Some("http://x/users/adm"),
         )
         .unwrap();
@@ -652,7 +684,10 @@ mod tests {
         assert!(ttl.contains("datasource#Rollback"), "{ttl}");
         assert!(ttl.contains("<urn:run:r1:activity>"), "{ttl}");
         // The generated graph's own entity triples come along.
-        assert!(ttl.contains("<urn:run:r1>") && ttl.contains("prov#wasGeneratedBy"), "{ttl}");
+        assert!(
+            ttl.contains("<urn:run:r1>") && ttl.contains("prov#wasGeneratedBy"),
+            "{ttl}"
+        );
         // Another source's trail is not mixed in.
         assert!(!source_provenance_turtle(&store, "other").contains("datasource#Run"));
     }

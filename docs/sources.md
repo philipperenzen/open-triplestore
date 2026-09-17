@@ -1,0 +1,403 @@
+# SQL Sources
+
+A **datasource** is a SQL database this store may read. A **mapping** says how
+its rows become RDF. A **run** materialises that mapping into a fresh named
+graph, validates it, and promotes it — atomically.
+
+The store is the system of record for all three. Datasources, mappings and
+runs are RDF in the store, versioned and provenance-carrying like everything
+else, so there is no separate registry that the runtime could fall out of step
+with.
+
+Everything on this page is **admin-only**: a datasource holds a pointer to a
+production credential, and its runs write instance data.
+
+---
+
+## The shape of it
+
+```
+┌────────────┐   introspect / profile   ┌──────────────┐
+│  SQL       │ ───────────────────────► │  datasource  │  urn:source:<id>
+│  database  │                          │  registry    │
+└────────────┘                          └──────┬───────┘
+                                               │
+                            ┌──────────────────▼──────────────────┐
+                            │  RML mapping, one graph per version │
+                            │  urn:mapping:<id>:version:<n>       │
+                            └──────────────────┬──────────────────┘
+                                               │  run
+                            ┌──────────────────▼──────────────────┐
+                            │  candidate graph  urn:run:<id>      │
+                            │  + PROV activity  urn:run:<id>:…    │
+                            └──────────────────┬──────────────────┘
+                                   SHACL write gate
+                            ┌──────────────────▼──────────────────┐
+                            │  production role (atomic swap)      │
+                            │  previous graph kept, demoted       │
+                            └─────────────────────────────────────┘
+```
+
+---
+
+## Credentials are references, never values
+
+The store never holds a secret. A datasource's credential is a **reference**
+into an external secret store, resolved at the moment of use:
+
+| Reference | Resolves to |
+|---|---|
+| `env:DB_PASSWORD` | the process environment variable |
+| `file:/run/secrets/db-password` | the file's contents, trailing whitespace trimmed |
+| `vault:secret/data/sources/legacy#password` | HashiCorp Vault **KV v2** |
+| `vault:kv/sources/legacy#password` | HashiCorp Vault **KV v1** |
+
+`aws-sm:`, `gcp-sm:` and `azure-kv:` are reserved and refused with a clear
+message until a provider lands.
+
+Vault is reached at `VAULT_ADDR`, with the token from `VAULT_TOKEN_FILE` (the
+Vault Agent sink, re-read on every resolution so a rotation is picked up) or
+`VAULT_TOKEN`, an optional `VAULT_NAMESPACE`, and an optional `VAULT_CACERT`
+PEM bundle for a private CA. There is no "skip TLS verification".
+
+What this buys you:
+
+- **Nothing to leak.** The stored RDF and every API response carry the
+  reference string. There is no endpoint that returns a credential, because
+  there is no credential to return.
+- **Rotation without a restart.** Change it in the secret store; the next
+  resolution after the cache TTL (`OTS_SECRET_CACHE_TTL_SECS`, default 60)
+  picks it up. Updating a datasource clears the cache immediately.
+- **Broken pointers fail early.** A reference is validated at registration —
+  well-formed *and* resolvable — so a typo is an error the admin sees then,
+  not a failed run at 3am.
+- **Scrubbed errors.** A driver's failure message is stripped of the
+  credential, the database name or path, the host and the account before it
+  reaches a caller.
+
+The same references configure `OIDC` client secrets, `LLM_API_KEY`,
+`SMTP_PASSWORD`, `ALERT_SMTP_PASS` and `S3_SECRET_KEY`. A raw value in any of
+those is accepted outside the production posture with a deprecation warning,
+and refused inside it.
+
+---
+
+## Production posture
+
+Set `OTS_ENV=production` and the security rules become errors rather than
+warnings:
+
+| Condition | Development | Production |
+|---|---|---|
+| Raw secret where a reference is expected | warning | **refused** |
+| Datasource credential is a raw value | **refused** | **refused** |
+| Unresolvable secret reference | **refused** | **refused** |
+| `statementTimeoutMs` omitted | defaults to 30 000 | **refused** |
+| Networked datasource host not on `OTS_REMOTE_ALLOWLIST` | warning | **refused** |
+| File-backed datasource outside `OTS_SOURCES_DIR` | allowed | **refused** |
+| Read-write datasource account | **refused** | **refused** |
+
+A datasource is *always* opened read-only, in every posture — enforced by the
+driver (`SQLITE_OPEN_READ_ONLY`, `SET default_transaction_read_only`, and the
+equivalent per dialect), not by convention.
+
+---
+
+## Dialects
+
+SQLite is compiled into core, so the whole pipeline works without a database
+server. Every other dialect is a plugin that implements `SourceConnector` (see
+[`plugins/api`](../plugins/api/src/sources.rs)) and hands it to the host from
+`Plugin::connectors`, which keeps the driver decision per deployment.
+
+```bash
+curl -s localhost:7878/api/sources/metrics -H "Authorization: Bearer $TOKEN"
+```
+
+Registering an unknown dialect answers 400 and names what the running binary
+does support.
+
+---
+
+## Registering a datasource
+
+```bash
+curl -X POST http://localhost:7878/api/sources \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{
+    "id": "legacy-assets",
+    "name": "Legacy asset database",
+    "dialect": "postgresql",
+    "host": "db.internal", "port": 5432,
+    "database": "assets", "username": "reader",
+    "credential": "vault:secret/data/sources/legacy-assets#password",
+    "readOnly": true,
+    "statementTimeoutMs": 30000,
+    "watermarkColumn": "updated_at",
+    "allowModelAssist": false,
+    "dataset": "assets"
+  }'
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Identifier and IRI segment (`urn:source:<id>`). Letters, digits, `-`, `_`, `.` |
+| `dialect` | `sqlite` in core; others from plugins |
+| `database` | Database name, or the file path for a file-backed dialect |
+| `credential` | A secret **reference**. Omit it entirely when the dialect needs none |
+| `readOnly` | Must be `true` |
+| `statementTimeoutMs` | Per-statement budget. Required in production |
+| `watermarkColumn` | Column incremental runs will read (a later phase) |
+| `allowModelAssist` | Whether the external mapping proposer may send this source's *schema metadata* to a model. Default `false` |
+| `dataset` | Dataset the run graphs are registered to, so they appear in its graph list and SPARQL scope |
+
+Other calls:
+
+| Call | Effect |
+|---|---|
+| `POST /api/sources/test` | Open a connection and throw it away. Persists nothing; answers `{"ok": false, "error": …}` with a scrubbed message when the database will not answer |
+| `GET /api/sources` | Every datasource, with credential **references** |
+| `GET /api/sources/:id/introspect` | Tables and views: columns with generic and native types, nullability, defaults, comments, primary and foreign keys, indexes, row estimate |
+| `GET /api/sources/:id/preview?table=&limit=` | The first rows, unmapped. This is pre-clean source data — admin-only and never cached |
+| `GET /api/sources/:id/provenance` | The datasource's PROV-O trail (every run and rollback) as Turtle |
+| `PUT` / `DELETE /api/sources/:id` | Update (clears the credential cache) / remove. A datasource with mappings is not deleted until they are |
+
+---
+
+## Mappings are standard RML
+
+A mapping is [RML](rml.md) stored as RDF. Each **frozen version** lives in its
+own named graph whose IRI *is* the version IRI, so a run can point at exactly
+the triples that executed:
+
+```
+urn:mapping:products-map              the mapping
+urn:mapping:products-map:version:1    version 1 — and the graph holding its RML
+urn:mapping:products-map:version:2    version 2 — a separate graph
+```
+
+`PUT /api/mappings/:id` with new RML freezes the next version; the old one is
+never rewritten, because runs reference it. A metadata-only edit (title,
+state, shapes graph) keeps the current version.
+
+```bash
+curl -X POST http://localhost:7878/api/mappings \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{
+    "id": "products-map",
+    "title": "Products",
+    "shapesGraph": "https://example.org/shapes/products",
+    "rml": "@prefix rr: <http://www.w3.org/ns/r2rml#> . …"
+  }'
+```
+
+The datasource is read from the RML itself (`rml:source <urn:source:…>`), so
+`source` is optional; supplying it only pins what the mapping already says,
+and a disagreement is an error.
+
+Three rules a mapping must satisfy:
+
+- it reads **exactly one** registered datasource, so a run has one connection
+  and one write gate;
+- every triples map reads that datasource (a file source belongs to the
+  [RML upload path](rml.md), not here);
+- it declares no `rr:graphMap` — the run graph is the unit the write gate
+  validates and the role swap promotes, so every triple has to land in it.
+
+### Relational logical sources
+
+```turtle
+@prefix rr:  <http://www.w3.org/ns/r2rml#> .
+@prefix rml: <http://semweb.mmlab.be/ns/rml#> .
+@prefix ex:  <http://example.org/products/ontology#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+ex:ProductsMap a rr:TriplesMap ;
+  rml:logicalSource [
+    rml:source <urn:source:legacy-assets> ;
+    rml:query "SELECT product_id, name, price, supplier_id FROM products"
+  ] ;
+  rr:subjectMap [ rr:template "http://example.org/products/product_{product_id}" ;
+                  rr:class ex:Product ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ;
+                          rr:objectMap [ rr:column "name" ] ] ;
+  rr:predicateObjectMap [ rr:predicate ex:hasPrice ;
+                          rr:objectMap [ rr:column "price" ; rr:datatype xsd:decimal ] ] ;
+  rr:predicateObjectMap [ rr:predicate ex:suppliedBy ; rr:objectMap [
+      rr:parentTriplesMap ex:SuppliersMap ;
+      rr:joinCondition [ rr:child "supplier_id" ; rr:parent "supplier_id" ] ] ] .
+
+ex:SuppliersMap a rr:TriplesMap ;
+  rml:logicalSource [ rml:source <urn:source:legacy-assets> ; rr:tableName "suppliers" ] ;
+  rr:subjectMap [ rr:template "http://example.org/products/supplier_{supplier_id}" ;
+                  rr:class ex:Supplier ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "name" ] ] .
+```
+
+| Construct | Behaviour |
+|---|---|
+| `rr:tableName` | The whole table or view. The identifier is quoted by the dialect, never interpolated |
+| `rml:query` / `rr:sqlQuery` | Used verbatim; the connection is read-only, so it cannot write |
+| `rr:template`, `rr:column`, `rr:constant` | As in R2RML. A template percent-encodes; `\{` and `\}` are literal braces |
+| `rr:parentTriplesMap` + `rr:joinCondition` | The object is the subject the parent map generates for the joined row |
+| `fnml:functionValue` | An enumeration or code-list lookup — see below |
+| A second triples map on the same source | Just another `rr:TriplesMap`; this is how a nested structure is expressed |
+
+**A SQL NULL produces no triple.** It is an absent column, not an empty value,
+so a missing required value surfaces as a `sh:minCount` violation rather than
+as an empty string in the data.
+
+**Natural datatypes.** A bare `rr:column` with no `rr:datatype` takes the XSD
+type its SQL type implies (`integer`, `decimal`, `double`, `boolean`, `date`,
+`time`, `dateTime`, `hexBinary`). Text, UUID and JSON columns stay plain
+literals — inventing a datatype for them would be a claim the source never
+made. An explicit `rr:datatype` always wins.
+
+**Joins** are resolved with a hash index: the parent triples map's logical
+source is streamed once and its subject terms are indexed by join key, then
+the child streams and looks up. The index is bounded by
+`OTS_SOURCES_JOIN_MAX_ROWS` (default 1 000 000 distinct keys) and a mapping
+that would exceed it is refused by name rather than exhausting memory. A NULL
+join key never matches, following SQL. Pushing the join into the source query
+is a worthwhile optimisation for wide parents and is not implemented yet.
+
+### Enumerations
+
+A code column becomes IRIs through an RML-FNML function, so the value map
+travels with the mapping as RDF:
+
+```turtle
+rr:predicateObjectMap [ rr:predicate ex:hasStatus ; rr:objectMap [
+  fnml:functionValue [
+    rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object fn:mapValue ] ;
+    rr:predicateObjectMap [ rr:predicate fn:value ; rr:objectMap [ rr:column "status" ] ] ;
+    rr:predicateObjectMap [ rr:predicate fn:normalize ; rr:object "lower_trim" ] ;
+    rr:predicateObjectMap [ rr:predicate fn:mapping ; rr:object "active=http://example.org/products/ontology#Active" ] ;
+    rr:predicateObjectMap [ rr:predicate fn:mapping ; rr:object "retired=http://example.org/products/ontology#Retired" ] ;
+    rr:predicateObjectMap [ rr:predicate fn:unmapped ; rr:object "literal" ] ] ] ]
+```
+
+`fn:` is `https://w3id.org/open-triplestore/fn#`.
+
+| Parameter | Values |
+|---|---|
+| `fn:value` | The column (or a constant) to look up |
+| `fn:normalize` | `none` (default), `trim`, `lower`, `upper`, `lower_trim`, `upper_trim`. Applied to the source value **and** to every map key, so `"ACTIVE "` meets `active` |
+| `fn:mapping` | Repeat once per entry, `<value>=<IRI>` |
+| `fn:unmapped` | What to do with a value the map does not cover |
+
+The unmapped policy is explicit, because guessing is worse than any of the
+three answers:
+
+- **`literal`** (the default) — emit the **original** value as a literal, so a
+  `sh:class` or `sh:in` shape reports it. A value the mapping did not
+  anticipate is a finding, not something to hide.
+- **`omit`** — emit nothing.
+- **`template`** — mint an IRI from `fn:unmappedTemplate`, which must be
+  absolute. A relative template is refused: minting under an undeclared prefix
+  would put IRIs in a namespace nobody owns.
+
+---
+
+## Runs
+
+```bash
+curl -X POST http://localhost:7878/api/sources/legacy-assets/runs \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mapping": "products-map", "mode": "full"}'
+```
+
+```json
+{
+  "id": "6f1c…", "graph": "urn:run:6f1c…", "activity": "urn:run:6f1c…:activity",
+  "status": "succeeded", "mode": "full",
+  "mapping": { "id": "products-map", "version": 1, "iri": "urn:mapping:products-map:version:1" },
+  "rowsExtracted": 1204, "triplesProduced": 5310, "graphTriples": 5310,
+  "durationMs": 812, "previousGraph": "urn:run:5a0b…",
+  "shacl": { "conforms": true, "violations": 0 }
+}
+```
+
+What a run does, in order:
+
+1. **Materialise** into a fresh graph `urn:run:<id>`. Rows stream in batches;
+   nothing is ever held whole. Blank-node labels carry the run id, so two runs
+   never share a node.
+2. **Record** a PROV activity at `urn:run:<id>:activity` — `prov:used` the
+   datasource and the mapping *version*, `prov:generated` the graph, the agent,
+   the interval, and the row and triple counts.
+3. **Gate.** The SHACL write gate runs on the candidate graph: the mapping's
+   own `dct:conformsTo` shapes graph, plus the bound dataset's `shacl_on_write`
+   shapes. A gate that cannot be evaluated refuses the promotion, exactly as
+   the Graph Store write gate does. The gate applies to the swap, not to every
+   batch.
+4. **Swap.** The candidate takes the production role for that datasource in a
+   single update, so a reader sees either the old graph or the new one. The
+   previous graph is **kept**, demoted, and unregistered from the dataset.
+
+A failing gate answers **422** with the report and the run record. Production
+is untouched, and the candidate graph stays for inspection — `graphTriples` on
+the run tells you it is still there.
+
+```bash
+# Roll back: re-point, never re-run.
+curl -X POST http://localhost:7878/api/runs/$RUN_ID/rollback -H "Authorization: Bearer $TOKEN"
+```
+
+Rollback returns the datasource pointing at the graph it served before. It
+cannot fail on a source that has since changed or gone away, because it does
+not touch the source at all. The previous and current pointers swap, so you
+can roll forward again. It is recorded as its own `ds:Rollback` activity, and
+it is not a run.
+
+| Call | Effect |
+|---|---|
+| `GET /api/sources/:id/runs` | Run history, newest first |
+| `GET /api/runs/:id` | One run, including `graphTriples` — what its graph holds *now* |
+| `GET /api/runs/:id/provenance` | The run's PROV-O trail as Turtle |
+| `POST /api/runs/:id/rollback` | Re-point the datasource at the previous graph |
+| `DELETE /api/runs/:id` | Delete the run and its graph. **409** while it is in production |
+| `GET /api/sources/metrics` | Rows extracted, triples produced, durations, run outcomes and the SHACL pass rate |
+
+`mode: "watermark"` answers **501**: incremental runs arrive with the
+LDES-fed sync in a later phase.
+
+### Why provenance is served as Turtle
+
+Datasource, mapping and run records live in `urn:system:sources`, which
+belongs to no dataset. The SPARQL endpoint scopes a caller's query to the
+graphs their datasets register, so a system graph is deliberately outside it —
+the same arrangement the commit log uses. `…/provenance` on a run or a
+datasource is how a client reads that trail.
+
+---
+
+## What is not here yet
+
+Stated plainly, because a gap you know about is cheaper than one you discover:
+
+- **YARRRML authoring** — submit RML; `yarrrml` answers a clear 400.
+- **Incremental (watermark) runs** and the LDES feed they publish.
+- **Profiling, drift detection and dry-run classification** — the profile
+  graph, the ontology profile endpoint and the mapping-defect/data-issue split.
+- **Join pushdown** into the source query. Joins work; they use a hash index.
+- **PostgreSQL, MySQL and SQL Server connectors.** The trait and the registry
+  are in place and SQLite exercises them; the drivers are plugins still to be
+  written.
+
+---
+
+## Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OTS_ENV` | *(development)* | `production` makes the security rules above errors rather than warnings |
+| `OTS_SOURCES_DIR` | *(unset)* | Directory a file-backed datasource must live under in production |
+| `OTS_SECRET_CACHE_TTL_SECS` | `60` | How long a resolved secret is reused. `0` disables the cache |
+| `OTS_SOURCES_JOIN_MAX_ROWS` | `1000000` | Cap on distinct join-index keys per parent triples map |
+| `VAULT_ADDR` | *(unset)* | Vault address for `vault:` references |
+| `VAULT_TOKEN_FILE` / `VAULT_TOKEN` | *(unset)* | Vault token; the file form is the Vault Agent sink and is re-read per resolution |
+| `VAULT_NAMESPACE` | *(unset)* | Vault Enterprise namespace |
+| `VAULT_CACERT` | *(unset)* | PEM bundle for a private CA in front of Vault |
+| `OTS_REMOTE_ALLOWLIST` | *(unset)* | Shared with SPARQL federation and LDES sync; a networked datasource's host must be covered in production |
+
+See also: [RML Mapping Guide](rml.md), [SHACL](shacl.md),
+[Named Graphs](named-graphs.md), [Security](security.md).

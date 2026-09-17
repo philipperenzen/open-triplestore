@@ -77,11 +77,7 @@ impl SecretRef {
             reason: reason.to_string(),
         };
         if let Some(name) = s.strip_prefix("env:") {
-            if name.is_empty()
-                || !name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
+            if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 return Err(malformed(
                     "an env: reference names one environment variable (letters, digits, '_')",
                 ));
@@ -139,7 +135,6 @@ impl SecretRef {
             "expected env:NAME, file:/path or vault:<mount>/data/<path>#<key>",
         ))
     }
-
 }
 
 impl fmt::Display for SecretRef {
@@ -404,7 +399,16 @@ mod tests {
 
     #[test]
     fn rejects_malformed_and_reserved_forms() {
-        for bad in ["", "hunter2", "env:", "env:has space", "file:", "vault:secret", "vault:#k", "vault:/#k"] {
+        for bad in [
+            "",
+            "hunter2",
+            "env:",
+            "env:has space",
+            "file:",
+            "vault:secret",
+            "vault:#k",
+            "vault:/#k",
+        ] {
             assert!(
                 matches!(SecretRef::parse(bad), Err(SecretError::Malformed { .. })),
                 "{bad:?} should be malformed"
@@ -431,7 +435,10 @@ mod tests {
         let s2 = resolve(&SecretRef::parse(&format!("file:{}", f.display())).unwrap()).unwrap();
         assert_eq!(s2.expose(), "filesecret", "trailing newline trimmed");
         assert_eq!(
-            redact("login failed for topsecretvalue at db (filesecret)", &[&s, &s2]),
+            redact(
+                "login failed for topsecretvalue at db (filesecret)",
+                &[&s, &s2]
+            ),
             "login failed for [redacted] at db ([redacted])"
         );
         assert!(matches!(
@@ -455,7 +462,11 @@ mod tests {
         std::env::set_var("OTS_SECRETS_TEST_CACHE", "v2");
         assert_eq!(resolve(&r).unwrap().expose(), "v1", "cached");
         clear_cache();
-        assert_eq!(resolve(&r).unwrap().expose(), "v2", "rotation seen after the cache is cleared");
+        assert_eq!(
+            resolve(&r).unwrap().expose(),
+            "v2",
+            "rotation seen after the cache is cleared"
+        );
     }
 
     #[test]

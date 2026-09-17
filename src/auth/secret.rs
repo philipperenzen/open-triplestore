@@ -109,13 +109,18 @@ mod tests {
         std::env::set_var("OTS_AUTH_SECRET_TEST", "client-secret-value");
         let stored =
             store_configured_secret("client_secret", "env:OTS_AUTH_SECRET_TEST", "jwt").unwrap();
-        assert_eq!(stored, "env:OTS_AUTH_SECRET_TEST", "the pointer is what lands in the database");
+        assert_eq!(
+            stored, "env:OTS_AUTH_SECRET_TEST",
+            "the pointer is what lands in the database"
+        );
         assert_eq!(
             read_stored_secret(&stored, "jwt").unwrap(),
             "client-secret-value"
         );
         // An unresolvable pointer is refused at write time, not at login time.
-        assert!(store_configured_secret("client_secret", "env:OTS_AUTH_SECRET_MISSING", "jwt").is_err());
+        assert!(
+            store_configured_secret("client_secret", "env:OTS_AUTH_SECRET_MISSING", "jwt").is_err()
+        );
     }
 
     #[test]
@@ -124,7 +129,10 @@ mod tests {
         let stored = store_configured_secret("client_secret", "plaintext-secret", "jwt").unwrap();
         assert_ne!(stored, "plaintext-secret");
         assert!(!crate::secrets::looks_like_ref(&stored));
-        assert_eq!(read_stored_secret(&stored, "jwt").unwrap(), "plaintext-secret");
+        assert_eq!(
+            read_stored_secret(&stored, "jwt").unwrap(),
+            "plaintext-secret"
+        );
     }
 
     #[test]

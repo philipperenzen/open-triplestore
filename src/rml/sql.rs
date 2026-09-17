@@ -391,7 +391,9 @@ mod tests {
             tls: false,
             options: Default::default(),
         };
-        let c = crate::sources::sqlite::SqliteConnector.connect(&params).unwrap();
+        let c = crate::sources::sqlite::SqliteConnector
+            .connect(&params)
+            .unwrap();
         (dir, c)
     }
 
@@ -460,9 +462,18 @@ mod tests {
     fn a_join_resolves_to_the_parents_subject() {
         let (store, outcome) = run(JOINED, 100);
         assert_eq!(outcome.rows, 5, "3 product rows + 2 supplier rows");
-        assert!(ask(&store, "<http://example.org/p10> ex:supplier <http://example.org/s1> ."));
-        assert!(ask(&store, "<http://example.org/p11> ex:supplier <http://example.org/s1> ."));
-        assert!(ask(&store, "<http://example.org/s1> a ex:Supplier ; ex:label \"Acme\" ."));
+        assert!(ask(
+            &store,
+            "<http://example.org/p10> ex:supplier <http://example.org/s1> ."
+        ));
+        assert!(ask(
+            &store,
+            "<http://example.org/p11> ex:supplier <http://example.org/s1> ."
+        ));
+        assert!(ask(
+            &store,
+            "<http://example.org/s1> a ex:Supplier ; ex:label \"Acme\" ."
+        ));
         // A NULL foreign key joins to nothing, so no triple is emitted.
         assert!(!ask(&store, "<http://example.org/p12> ex:supplier ?o ."));
     }
@@ -475,7 +486,10 @@ mod tests {
             "<http://example.org/p10> ex:qty \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
         ));
         assert!(!ask(&store, "<http://example.org/p11> ex:qty ?q ."));
-        assert!(ask(&store, "<http://example.org/p10> ex:name \"Bolt\" ."), "TEXT stays plain");
+        assert!(
+            ask(&store, "<http://example.org/p10> ex:name \"Bolt\" ."),
+            "TEXT stays plain"
+        );
     }
 
     #[test]
@@ -504,9 +518,15 @@ mod tests {
             "#,
             100,
         );
-        assert!(ask(&store, "<http://example.org/p10> ex:status <http://example.org/Active> ."));
+        assert!(ask(
+            &store,
+            "<http://example.org/p10> ex:status <http://example.org/Active> ."
+        ));
         assert!(
-            ask(&store, "<http://example.org/p11> ex:status <http://example.org/Active> ."),
+            ask(
+                &store,
+                "<http://example.org/p11> ex:status <http://example.org/Active> ."
+            ),
             "'ACTIVE ' normalises onto the same term"
         );
         assert!(
@@ -549,9 +569,20 @@ mod tests {
         .unwrap();
         let (_dir, mut conn) = db();
         let store = TripleStore::in_memory().unwrap();
-        let err = execute_relational(&mapping, conn.as_mut(), &quote, &store, "urn:run:t", 10, "r")
-            .unwrap_err();
-        assert!(err.contains("fn:mapping"), "the mapping error survives the stream: {err}");
+        let err = execute_relational(
+            &mapping,
+            conn.as_mut(),
+            &quote,
+            &store,
+            "urn:run:t",
+            10,
+            "r",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("fn:mapping"),
+            "the mapping error survives the stream: {err}"
+        );
     }
 
     #[test]
@@ -583,10 +614,21 @@ mod tests {
         let mapping = parse_rml(&format!("{PFX}{JOINED}")).unwrap();
         let (_dir, mut conn) = db();
         let store = TripleStore::in_memory().unwrap();
-        let err = execute_relational(&mapping, conn.as_mut(), &quote, &store, "urn:run:t", 10, "r")
-            .unwrap_err();
+        let err = execute_relational(
+            &mapping,
+            conn.as_mut(),
+            &quote,
+            &store,
+            "urn:run:t",
+            10,
+            "r",
+        )
+        .unwrap_err();
         std::env::remove_var(JOIN_MAX_ROWS_ENV);
-        assert!(err.contains("Supplier") && err.contains(JOIN_MAX_ROWS_ENV), "{err}");
+        assert!(
+            err.contains("Supplier") && err.contains(JOIN_MAX_ROWS_ENV),
+            "{err}"
+        );
     }
 
     #[test]
@@ -611,7 +653,10 @@ mod tests {
     #[test]
     fn a_join_key_with_a_null_never_matches() {
         let row: Row = Row::from([("a".to_string(), "1".to_string())]);
-        assert_eq!(join_key(&row, &["a".to_string()]), Some(vec!["1".to_string()]));
+        assert_eq!(
+            join_key(&row, &["a".to_string()]),
+            Some(vec!["1".to_string()])
+        );
         assert_eq!(join_key(&row, &["a".to_string(), "b".to_string()]), None);
     }
 }

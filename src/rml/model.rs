@@ -232,7 +232,11 @@ mod tests {
             "http://w3id.org/rml/SQL2008",
             "http://semweb.mmlab.be/ns/ql#SQL",
         ] {
-            assert_eq!(ReferenceFormulation::from_iri(iri), ReferenceFormulation::Sql, "{iri}");
+            assert_eq!(
+                ReferenceFormulation::from_iri(iri),
+                ReferenceFormulation::Sql,
+                "{iri}"
+            );
         }
         assert_eq!(
             ReferenceFormulation::from_iri("http://semweb.mmlab.be/ns/ql#CSV"),
@@ -260,7 +264,11 @@ mod tests {
             table_name: Some("ignored".into()),
             ..table.clone()
         };
-        assert_eq!(query.sql(&quote).unwrap(), "SELECT 1", "an explicit query wins");
+        assert_eq!(
+            query.sql(&quote).unwrap(),
+            "SELECT 1",
+            "an explicit query wins"
+        );
         let file = LogicalSource {
             source: SourceRef::File("x.csv".into()),
             reference_formulation: ReferenceFormulation::Csv,

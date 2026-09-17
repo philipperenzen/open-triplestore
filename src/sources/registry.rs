@@ -92,7 +92,7 @@ fn delete_subject_sparql(subject: &str) -> String {
 pub fn put_source(store: &TripleStore, source: &SqlSource) -> Result<(), String> {
     let s = iri(&source.iri());
     let mut body = String::new();
-    body.push_str(&format!("    a ds:SqlSource, dcat:DataService ;\n"));
+    body.push_str("    a ds:SqlSource, dcat:DataService ;\n");
     body.push_str(&format!("    ds:id {} ;\n", lit(&source.id)));
     body.push_str(&format!("    dct:title {} ;\n", lit(&source.name)));
     body.push_str(&format!("    ds:dialect {} ;\n", lit(&source.dialect)));
@@ -202,7 +202,9 @@ fn row_to_source(store: &TripleStore, row: &HashMap<String, String>) -> SqlSourc
         // this only happens if the graph was edited by hand.
         credential: get("cred").and_then(|c| SecretRef::parse(&c).ok()),
         read_only: get("ro").map(|v| v == "true").unwrap_or(true),
-        statement_timeout_ms: get("timeout").and_then(|v| v.parse().ok()).unwrap_or(30_000),
+        statement_timeout_ms: get("timeout")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000),
         watermark_column: get("watermark"),
         allow_model_assist: get("assist").map(|v| v == "true").unwrap_or(false),
         tls: get("tls").map(|v| v == "true").unwrap_or(false),
@@ -307,7 +309,10 @@ pub fn put_mapping(store: &TripleStore, m: &MappingRecord) -> Result<(), String>
     body.push_str("    a ds:Mapping ;\n");
     body.push_str(&format!("    ds:id {} ;\n", lit(&m.id)));
     body.push_str(&format!("    dct:title {} ;\n", lit(&m.title)));
-    body.push_str(&format!("    ds:source {} ;\n", iri(&source_iri(&m.source_id))));
+    body.push_str(&format!(
+        "    ds:source {} ;\n",
+        iri(&source_iri(&m.source_id))
+    ));
     body.push_str(&format!(
         "    ds:currentVersion \"{}\"^^xsd:integer ;\n",
         m.version
@@ -659,7 +664,10 @@ mod tests {
         assert_eq!(back.statement_timeout_ms, 30_000);
         assert_eq!(back.watermark_column.as_deref(), Some("updated_at"));
         assert!(back.read_only && !back.allow_model_assist);
-        assert_eq!(back.options.get("sslmode").map(String::as_str), Some("require"));
+        assert_eq!(
+            back.options.get("sslmode").map(String::as_str),
+            Some("require")
+        );
         assert_eq!(back.dataset.as_deref(), Some("ds-1"));
         assert_eq!(list_sources(&store).len(), 1);
     }
@@ -693,10 +701,19 @@ mod tests {
     fn production_swap_replaces_both_pointers_in_one_update() {
         let store = TripleStore::in_memory().unwrap();
         put_source(&store, &sample_source("s")).unwrap();
-        let p1 = RunPointer { graph: "urn:run:a".into(), run: "a".into() };
-        let p2 = RunPointer { graph: "urn:run:b".into(), run: "b".into() };
+        let p1 = RunPointer {
+            graph: "urn:run:a".into(),
+            run: "a".into(),
+        };
+        let p2 = RunPointer {
+            graph: "urn:run:b".into(),
+            run: "b".into(),
+        };
         set_production(&store, "s", Some(&p1), None).unwrap();
-        assert_eq!(get_source(&store, "s").unwrap().production, Some(p1.clone()));
+        assert_eq!(
+            get_source(&store, "s").unwrap().production,
+            Some(p1.clone())
+        );
         set_production(&store, "s", Some(&p2), Some(&p1)).unwrap();
         let back = get_source(&store, "s").unwrap();
         assert_eq!(back.production, Some(p2));
@@ -827,8 +844,14 @@ mod tests {
     #[test]
     fn a_rollback_is_recorded_as_its_own_activity() {
         let store = TripleStore::in_memory().unwrap();
-        let from = RunPointer { graph: "urn:run:b".into(), run: "b".into() };
-        let to = RunPointer { graph: "urn:run:a".into(), run: "a".into() };
+        let from = RunPointer {
+            graph: "urn:run:b".into(),
+            run: "b".into(),
+        };
+        let to = RunPointer {
+            graph: "urn:run:a".into(),
+            run: "a".into(),
+        };
         record_rollback(&store, "legacy", &from, &to, Some("http://x/users/adm")).unwrap();
         let rows = select(
             &store,

@@ -65,11 +65,11 @@ pub mod secrets;
 pub mod seed_bundles;
 pub mod server;
 pub mod shacl;
-pub mod sources;
 pub mod shacl_studio;
 pub mod shaclc;
 #[cfg(feature = "shex")]
 pub mod shex;
+pub mod sources;
 pub mod sparql;
 pub mod spec_import;
 pub mod storage;

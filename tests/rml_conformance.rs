@@ -492,12 +492,18 @@ fn rml_referencing_object_map_parses_but_file_sources_do_not_join() {
     // The surrounding mapping is unaffected: the child's own properties and the
     // parent triples map both produce their triples.
     assert_eq!(
-        count(&store, "SELECT ?o WHERE { <http://example.org/c/1> ex:own \"10\" }"),
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/c/1> ex:own \"10\" }"
+        ),
         1,
         "the child's own predicate-object map still fires"
     );
     assert_eq!(
-        count(&store, "SELECT ?o WHERE { <http://example.org/p/10> foaf:name \"Pat\" }"),
+        count(
+            &store,
+            "SELECT ?o WHERE { <http://example.org/p/10> foaf:name \"Pat\" }"
+        ),
         1,
         "the parent triples map still produces its own triples"
     );
@@ -517,7 +523,10 @@ fn rml_relational_source_is_refused_by_the_file_executor() {
     .expect("a relational mapping parses");
     let store = TripleStore::in_memory().unwrap();
     let err = execute(&m, &HashMap::new(), &store, None).unwrap_err();
-    assert!(err.contains("/api/sources/"), "the error names the path that can run it: {err}");
+    assert!(
+        err.contains("/api/sources/"),
+        "the error names the path that can run it: {err}"
+    );
     assert_eq!(store.len().unwrap(), 0, "nothing was written");
 }
 

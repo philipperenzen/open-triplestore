@@ -32,7 +32,6 @@ use std::path::{Path, PathBuf};
 
 use crate::secrets::{self, SecretError, SecretRef};
 
-
 pub use model::SqlSource;
 
 /// Directory a file-backed datasource must live under in the production
@@ -184,7 +183,9 @@ pub fn validate_source(source: &SqlSource) -> Result<(), ValidationError> {
         return Err(ValidationError::ReadWrite);
     }
     if source.statement_timeout_ms == 0 || source.statement_timeout_ms > MAX_TIMEOUT_MS {
-        return Err(ValidationError::TimeoutRange { max: MAX_TIMEOUT_MS });
+        return Err(ValidationError::TimeoutRange {
+            max: MAX_TIMEOUT_MS,
+        });
     }
     if connector.is_networked() && source.host.as_deref().unwrap_or("").trim().is_empty() {
         return Err(ValidationError::MissingHost);
@@ -281,12 +282,19 @@ mod tests {
         std::env::set_var("OTS_SOURCES_MOD_TEST", "v");
         let ok = parse_credential(Some("env:OTS_SOURCES_MOD_TEST")).unwrap();
         assert!(ok.is_some());
-        assert!(resolves(&SqlSource { credential: ok, ..Default::default() }).is_ok());
+        assert!(resolves(&SqlSource {
+            credential: ok,
+            ..Default::default()
+        })
+        .is_ok());
 
         // A well-formed pointer at nothing parses, then fails to resolve.
         let dangling = parse_credential(Some("env:OTS_SOURCES_MOD_TEST_MISSING")).unwrap();
         assert!(matches!(
-            resolves(&SqlSource { credential: dangling, ..Default::default() }),
+            resolves(&SqlSource {
+                credential: dangling,
+                ..Default::default()
+            }),
             Err(ValidationError::Secret(SecretError::Unresolvable { .. }))
         ));
         assert!(matches!(
@@ -318,7 +326,10 @@ mod tests {
         s.database = "/tmp/x.db".into();
 
         s.id = "bad id".into();
-        assert!(matches!(validate_source(&s).unwrap_err(), ValidationError::Id(_)));
+        assert!(matches!(
+            validate_source(&s).unwrap_err(),
+            ValidationError::Id(_)
+        ));
         s.id = "s".into();
 
         s.dialect = "oracle".into();
@@ -332,7 +343,10 @@ mod tests {
         // SQLite in core this asserts the file-backed branch is exempt.
         let s = sqlite_source("/tmp/x.db");
         assert!(validate_source(&s).is_ok(), "a file source needs no host");
-        assert!(egress_allowed(&s), "a file source has no egress to allowlist");
+        assert!(
+            egress_allowed(&s),
+            "a file source has no egress to allowlist"
+        );
     }
 
     #[test]
@@ -348,6 +362,9 @@ mod tests {
             "a .. segment must not walk out of the root"
         );
         std::env::remove_var(SOURCES_DIR_ENV);
-        assert!(!under_sources_dir(&inside.to_string_lossy()), "unset means refused");
+        assert!(
+            !under_sources_dir(&inside.to_string_lossy()),
+            "unset means refused"
+        );
     }
 }

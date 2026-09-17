@@ -17,8 +17,12 @@ pub(super) fn resolve(reference: &SecretRef) -> Result<Secret, SecretError> {
     match reference {
         SecretRef::Env { name } => match std::env::var(name) {
             Ok(v) if !v.is_empty() => Ok(Secret::new(v)),
-            Ok(_) => Err(unresolvable(format!("environment variable {name} is empty"))),
-            Err(_) => Err(unresolvable(format!("environment variable {name} is not set"))),
+            Ok(_) => Err(unresolvable(format!(
+                "environment variable {name} is empty"
+            ))),
+            Err(_) => Err(unresolvable(format!(
+                "environment variable {name} is not set"
+            ))),
         },
         SecretRef::File { path } => match std::fs::read_to_string(path) {
             Ok(contents) => {
@@ -57,8 +61,9 @@ mod vault {
                     .redirect(reqwest::redirect::Policy::none())
                     .timeout(crate::remote::timeout());
                 if let Ok(ca) = std::env::var(VAULT_CACERT_ENV) {
-                    let pem = std::fs::read(&ca)
-                        .map_err(|e| format!("{VAULT_CACERT_ENV}: cannot read {ca}: {}", e.kind()))?;
+                    let pem = std::fs::read(&ca).map_err(|e| {
+                        format!("{VAULT_CACERT_ENV}: cannot read {ca}: {}", e.kind())
+                    })?;
                     let cert = reqwest::Certificate::from_pem(&pem)
                         .map_err(|e| format!("{VAULT_CACERT_ENV}: not a PEM certificate: {e}"))?;
                     b = b.add_root_certificate(cert);
@@ -71,8 +76,12 @@ mod vault {
 
     fn token() -> Result<String, String> {
         if let Ok(file) = std::env::var(VAULT_TOKEN_FILE_ENV) {
-            let t = std::fs::read_to_string(&file)
-                .map_err(|e| format!("{VAULT_TOKEN_FILE_ENV}: cannot read the token file: {}", e.kind()))?;
+            let t = std::fs::read_to_string(&file).map_err(|e| {
+                format!(
+                    "{VAULT_TOKEN_FILE_ENV}: cannot read the token file: {}",
+                    e.kind()
+                )
+            })?;
             let t = t.trim().to_string();
             if t.is_empty() {
                 return Err(format!("{VAULT_TOKEN_FILE_ENV}: the token file is empty"));
@@ -87,14 +96,21 @@ mod vault {
         }
     }
 
-    pub(super) fn read(mount: &str, path: &str, key: &str, kv_version: u8) -> Result<String, String> {
+    pub(super) fn read(
+        mount: &str,
+        path: &str,
+        key: &str,
+        kv_version: u8,
+    ) -> Result<String, String> {
         let addr = std::env::var(VAULT_ADDR_ENV)
             .ok()
             .map(|a| a.trim().trim_end_matches('/').to_string())
             .filter(|a| !a.is_empty())
             .ok_or_else(|| format!("{VAULT_ADDR_ENV} is not set"))?;
         let token = token()?;
-        let namespace = std::env::var(VAULT_NAMESPACE_ENV).ok().filter(|n| !n.trim().is_empty());
+        let namespace = std::env::var(VAULT_NAMESPACE_ENV)
+            .ok()
+            .filter(|n| !n.trim().is_empty());
         let url = if kv_version == 2 {
             format!("{addr}/v1/{mount}/data/{path}")
         } else {

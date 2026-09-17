@@ -14,7 +14,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use axum::body::Body;
@@ -52,11 +52,16 @@ async fn start_mock_vault() -> String {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if tok != VAULT_TOKEN {
-            return (StatusCode::FORBIDDEN, axum::Json(json!({"errors": ["permission denied"]})));
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({"errors": ["permission denied"]})),
+            );
         }
         (
             StatusCode::OK,
-            axum::Json(json!({"data": {"data": {"password": DB_PASSWORD}, "metadata": {"version": 1}}})),
+            axum::Json(
+                json!({"data": {"data": {"password": DB_PASSWORD}, "metadata": {"version": 1}}}),
+            ),
         )
     }
     let app = Router::new().route("/v1/secret/data/sources/legacy", get(kv2));
@@ -89,7 +94,13 @@ fn fresh_sqlite(name: &str) -> PathBuf {
     path
 }
 
-async fn req(app: &Router, method: Method, uri: &str, token: &str, body: Value) -> (StatusCode, Value, String) {
+async fn req(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value, String) {
     let mut b = Request::builder()
         .method(method)
         .uri(uri)
@@ -121,7 +132,11 @@ async fn put_turtle(app: &Router, token: &str, graph: &str, turtle: &str) {
         )
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "PUT graph {graph}: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "PUT graph {graph}: {}",
+        resp.status()
+    );
 }
 
 async fn sparql_json(app: &Router, token: &str, query: &str) -> Value {
@@ -143,7 +158,6 @@ async fn sparql_json(app: &Router, token: &str, query: &str) -> Value {
     body_json(resp.into_body()).await
 }
 
-
 async fn create_dataset(app: &Router, token: &str, name: &str) -> String {
     let (st, v, txt) = req(
         app,
@@ -157,7 +171,7 @@ async fn create_dataset(app: &Router, token: &str, name: &str) -> String {
     v["id"].as_str().unwrap().to_string()
 }
 
-fn source_body(id: &str, db: &PathBuf, credential: &str, dataset: Option<&str>) -> Value {
+fn source_body(id: &str, db: &Path, credential: &str, dataset: Option<&str>) -> Value {
     let mut b = json!({
         "id": id,
         "name": format!("Source {id}"),
@@ -211,7 +225,13 @@ fn mapping_for(source_id: &str) -> String {
     MAPPING.replace("SOURCE", source_id)
 }
 
-async fn register_mapping(app: &Router, token: &str, id: &str, source_id: &str, shapes: Option<&str>) -> Value {
+async fn register_mapping(
+    app: &Router,
+    token: &str,
+    id: &str,
+    source_id: &str,
+    shapes: Option<&str>,
+) -> Value {
     let mut body = json!({ "id": id, "title": "Products mapping", "rml": mapping_for(source_id) });
     if let Some(s) = shapes {
         body["shapesGraph"] = json!(s);
@@ -232,7 +252,10 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
 
     for (id, credential) in [
         ("src-env", "env:OTS_TEST_DB_PASSWORD".to_string()),
-        ("src-file", format!("file:{}", dir.join("db-password.txt").display())),
+        (
+            "src-file",
+            format!("file:{}", dir.join("db-password.txt").display()),
+        ),
     ] {
         // Test-connection never persists and reports the resolved reference status.
         let (st, v, txt) = req(
@@ -245,9 +268,23 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
         .await;
         assert_eq!(st, StatusCode::OK, "test connection {id}: {txt}");
         assert_eq!(v["ok"], true, "test connection {id}: {txt}");
-        assert!(!txt.contains(DB_PASSWORD), "test response leaked the secret: {txt}");
-        let (st, _, _) = req(&app, Method::GET, &format!("/api/sources/{id}"), &token, Value::Null).await;
-        assert_eq!(st, StatusCode::NOT_FOUND, "test connection must not persist");
+        assert!(
+            !txt.contains(DB_PASSWORD),
+            "test response leaked the secret: {txt}"
+        );
+        let (st, _, _) = req(
+            &app,
+            Method::GET,
+            &format!("/api/sources/{id}"),
+            &token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::NOT_FOUND,
+            "test connection must not persist"
+        );
 
         let (st, v, txt) = req(
             &app,
@@ -258,12 +295,25 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
         )
         .await;
         assert_eq!(st, StatusCode::CREATED, "register {id}: {txt}");
-        assert_eq!(v["credential"], credential, "response carries the reference: {txt}");
+        assert_eq!(
+            v["credential"], credential,
+            "response carries the reference: {txt}"
+        );
         assert_eq!(v["iri"], format!("urn:source:{id}"));
         assert_eq!(v["readOnly"], true);
-        assert!(!txt.contains(DB_PASSWORD), "registration response leaked the secret: {txt}");
+        assert!(
+            !txt.contains(DB_PASSWORD),
+            "registration response leaked the secret: {txt}"
+        );
 
-        let (st, v, txt) = req(&app, Method::GET, &format!("/api/sources/{id}"), &token, Value::Null).await;
+        let (st, v, txt) = req(
+            &app,
+            Method::GET,
+            &format!("/api/sources/{id}"),
+            &token,
+            Value::Null,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{txt}");
         assert_eq!(v["credential"], credential);
         assert!(!txt.contains(DB_PASSWORD), "GET leaked the secret: {txt}");
@@ -284,7 +334,10 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(tables.contains(&"products") && tables.contains(&"suppliers"), "{txt}");
+        assert!(
+            tables.contains(&"products") && tables.contains(&"suppliers"),
+            "{txt}"
+        );
         let products = v["tables"]
             .as_array()
             .unwrap()
@@ -310,8 +363,14 @@ async fn env_and_file_references_connect_and_are_never_expanded() {
     )
     .await;
     let dump = stored.to_string();
-    assert!(dump.contains("env:OTS_TEST_DB_PASSWORD"), "reference stored: {dump}");
-    assert!(!dump.contains(DB_PASSWORD), "stored graph leaked the secret: {dump}");
+    assert!(
+        dump.contains("env:OTS_TEST_DB_PASSWORD"),
+        "reference stored: {dump}"
+    );
+    assert!(
+        !dump.contains(DB_PASSWORD),
+        "stored graph leaked the secret: {dump}"
+    );
 }
 
 #[tokio::test]
@@ -343,7 +402,12 @@ async fn vault_reference_resolves_through_kv_v2() {
         Method::POST,
         "/api/sources",
         &token,
-        source_body("src-vault-bad", &db, "vault:secret/data/sources/legacy#nope", None),
+        source_body(
+            "src-vault-bad",
+            &db,
+            "vault:secret/data/sources/legacy#nope",
+            None,
+        ),
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
@@ -357,7 +421,12 @@ async fn malformed_or_unresolvable_references_are_rejected() {
     let app = test_app(state);
     let db = fresh_sqlite("badrefs");
 
-    for bad in ["env:OTS_DOES_NOT_EXIST_XYZ", "file:/nonexistent/secret", "nonsense", ""] {
+    for bad in [
+        "env:OTS_DOES_NOT_EXIST_XYZ",
+        "file:/nonexistent/secret",
+        "nonsense",
+        "",
+    ] {
         let (st, _, txt) = req(
             &app,
             Method::POST,
@@ -378,7 +447,10 @@ async fn malformed_or_unresolvable_references_are_rejected() {
     body["dialect"] = json!("oracle");
     let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "unknown dialect: {txt}");
-    assert!(txt.contains("sqlite"), "names the available dialects: {txt}");
+    assert!(
+        txt.contains("sqlite"),
+        "names the available dialects: {txt}"
+    );
 }
 
 #[tokio::test]
@@ -400,7 +472,10 @@ async fn connection_failure_messages_are_scrubbed() {
     let msg = v["error"].as_str().unwrap_or("");
     assert!(!msg.is_empty());
     assert!(!msg.contains(DB_PASSWORD), "password in error: {msg}");
-    assert!(!msg.contains("does-not-exist-9f1c"), "database location in error: {msg}");
+    assert!(
+        !msg.contains("does-not-exist-9f1c"),
+        "database location in error: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -409,7 +484,13 @@ async fn sources_are_admin_only() {
     let (state, _admin) = admin_state();
     state
         .auth_db
-        .create_user("usr", "user", "user@test.com", "hash", open_triplestore::auth::models::SystemRole::User)
+        .create_user(
+            "usr",
+            "user",
+            "user@test.com",
+            "hash",
+            open_triplestore::auth::models::SystemRole::User,
+        )
         .unwrap();
     let user = mint_token("usr", "user", "user");
     let app = test_app(state);
@@ -419,7 +500,12 @@ async fn sources_are_admin_only() {
     assert_eq!(st, StatusCode::FORBIDDEN);
     let resp = app
         .clone()
-        .oneshot(Request::builder().uri("/api/sources").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/sources")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -465,11 +551,24 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     assert_eq!(run1["rowsExtracted"], 5, "3 products + 2 suppliers: {txt}");
     let triples1 = run1["triplesProduced"].as_u64().unwrap();
     assert!(triples1 >= 12, "{txt}");
-    let (_, detail1, _) = req(&app, Method::GET, &format!("/api/runs/{run1_id}"), &token, Value::Null).await;
-    assert_eq!(detail1["graphTriples"].as_u64().unwrap(), triples1, "the run graph holds what it produced");
+    let (_, detail1, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{run1_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        detail1["graphTriples"].as_u64().unwrap(),
+        triples1,
+        "the run graph holds what it produced"
+    );
 
     // The generated data: join, typed literal, NULL → no triple, enumeration policy.
-    let q = |ask: &str| format!("PREFIX ex: <http://example.org/products/ontology#> ASK {{ GRAPH <{graph1}> {{ {ask} }} }}");
+    let q = |ask: &str| {
+        format!("PREFIX ex: <http://example.org/products/ontology#> ASK {{ GRAPH <{graph1}> {{ {ask} }} }}")
+    };
     for ask in [
         "<http://example.org/products/product_1> a ex:Product ; ex:suppliedBy <http://example.org/products/supplier_10> .",
         "<http://example.org/products/product_1> ex:hasPrice \"0.25\"^^<http://www.w3.org/2001/XMLSchema#decimal> .",
@@ -516,17 +615,41 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
         "prov#startedAtTime",
         "prov#endedAtTime",
     ] {
-        assert!(prov.contains(expected), "provenance is missing {expected}:\n{prov}");
+        assert!(
+            prov.contains(expected),
+            "provenance is missing {expected}:\n{prov}"
+        );
     }
 
     // The source now points at the run graph, and the dataset holds it as instances.
-    let (st, src, txt) = req(&app, Method::GET, "/api/sources/legacy", &token, Value::Null).await;
+    let (st, src, txt) = req(
+        &app,
+        Method::GET,
+        "/api/sources/legacy",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(src["production"]["graph"], graph1, "{txt}");
     assert_eq!(src["production"]["run"], run1_id, "{txt}");
-    let (_, graphs, txt) = req(&app, Method::GET, &format!("/api/datasets/{ds}/graphs"), &token, Value::Null).await;
-    let entries = graphs.as_array().cloned().or_else(|| graphs["graphs"].as_array().cloned()).unwrap();
-    let entry = entries.iter().find(|e| e["graph_iri"] == graph1).unwrap_or_else(|| panic!("run graph registered: {txt}"));
+    let (_, graphs, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/graphs"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    let entries = graphs
+        .as_array()
+        .cloned()
+        .or_else(|| graphs["graphs"].as_array().cloned())
+        .unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["graph_iri"] == graph1)
+        .unwrap_or_else(|| panic!("run graph registered: {txt}"));
     assert_eq!(entry["graph_role"], "instances");
 
     // ── Second run supersedes the first; the first graph is kept, demoted ──
@@ -543,30 +666,107 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     let graph2 = run2["graph"].as_str().unwrap().to_string();
     assert_ne!(graph2, graph1);
     assert_eq!(run2["previousGraph"], graph1, "{txt}");
-    let (_, src, _) = req(&app, Method::GET, "/api/sources/legacy", &token, Value::Null).await;
+    let (_, src, _) = req(
+        &app,
+        Method::GET,
+        "/api/sources/legacy",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(src["production"]["graph"], graph2);
     assert_eq!(src["previous"]["graph"], graph1);
-    let (_, demoted, txt) = req(&app, Method::GET, &format!("/api/runs/{run1_id}"), &token, Value::Null).await;
-    assert_eq!(demoted["graphTriples"].as_u64().unwrap(), triples1, "demoted graph is kept: {txt}");
-    let (_, graphs, _) = req(&app, Method::GET, &format!("/api/datasets/{ds}/graphs"), &token, Value::Null).await;
-    let entries = graphs.as_array().cloned().or_else(|| graphs["graphs"].as_array().cloned()).unwrap();
+    let (_, demoted, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{run1_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        demoted["graphTriples"].as_u64().unwrap(),
+        triples1,
+        "demoted graph is kept: {txt}"
+    );
+    let (_, graphs, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/graphs"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    let entries = graphs
+        .as_array()
+        .cloned()
+        .or_else(|| graphs["graphs"].as_array().cloned())
+        .unwrap();
     assert!(entries.iter().any(|e| e["graph_iri"] == graph2));
-    assert!(!entries.iter().any(|e| e["graph_iri"] == graph1), "demoted graph left the dataset");
+    assert!(
+        !entries.iter().any(|e| e["graph_iri"] == graph1),
+        "demoted graph left the dataset"
+    );
 
     // ── Rollback re-points, it does not re-run ──
-    let (_, runs_before, _) = req(&app, Method::GET, "/api/sources/legacy/runs", &token, Value::Null).await;
+    let (_, runs_before, _) = req(
+        &app,
+        Method::GET,
+        "/api/sources/legacy/runs",
+        &token,
+        Value::Null,
+    )
+    .await;
     let n_before = runs_before.as_array().unwrap().len();
-    let (st, rb, txt) = req(&app, Method::POST, &format!("/api/runs/{run2_id}/rollback"), &token, Value::Null).await;
+    let (st, rb, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/runs/{run2_id}/rollback"),
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "rollback: {txt}");
     assert_eq!(rb["production"]["graph"], graph1, "{txt}");
-    let (_, src, _) = req(&app, Method::GET, "/api/sources/legacy", &token, Value::Null).await;
+    let (_, src, _) = req(
+        &app,
+        Method::GET,
+        "/api/sources/legacy",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(src["production"]["graph"], graph1);
     assert_eq!(src["production"]["run"], run1_id);
-    let (_, runs_after, _) = req(&app, Method::GET, "/api/sources/legacy/runs", &token, Value::Null).await;
-    assert_eq!(runs_after.as_array().unwrap().len(), n_before, "rollback did not create a run");
-    let (_, graphs, _) = req(&app, Method::GET, &format!("/api/datasets/{ds}/graphs"), &token, Value::Null).await;
-    let entries = graphs.as_array().cloned().or_else(|| graphs["graphs"].as_array().cloned()).unwrap();
-    assert!(entries.iter().any(|e| e["graph_iri"] == graph1 && e["graph_role"] == "instances"));
+    let (_, runs_after, _) = req(
+        &app,
+        Method::GET,
+        "/api/sources/legacy/runs",
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        runs_after.as_array().unwrap().len(),
+        n_before,
+        "rollback did not create a run"
+    );
+    let (_, graphs, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/graphs"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    let entries = graphs
+        .as_array()
+        .cloned()
+        .or_else(|| graphs["graphs"].as_array().cloned())
+        .unwrap();
+    assert!(entries
+        .iter()
+        .any(|e| e["graph_iri"] == graph1 && e["graph_role"] == "instances"));
     assert!(!entries.iter().any(|e| e["graph_iri"] == graph2));
     // The rollback is itself provenance on the source.
     let resp = app
@@ -582,25 +782,74 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let trail = body_text(resp.into_body()).await;
-    assert!(trail.contains("datasource#Rollback"), "no rollback recorded:\n{trail}");
-    assert!(trail.contains(&format!("<urn:run:{run1_id}:activity>")), "{trail}");
+    assert!(
+        trail.contains("datasource#Rollback"),
+        "no rollback recorded:\n{trail}"
+    );
+    assert!(
+        trail.contains(&format!("<urn:run:{run1_id}:activity>")),
+        "{trail}"
+    );
 
     // Metrics summarise the runs.
-    let (st, m, txt) = req(&app, Method::GET, "/api/sources/metrics", &token, Value::Null).await;
+    let (st, m, txt) = req(
+        &app,
+        Method::GET,
+        "/api/sources/metrics",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert!(m["runs"]["total"].as_u64().unwrap() >= 2, "{txt}");
     assert!(m["rowsExtracted"].as_u64().unwrap() >= 10, "{txt}");
 
     // Run details are readable, and a run that is not production can be deleted.
-    let (st, detail, txt) = req(&app, Method::GET, &format!("/api/runs/{run2_id}"), &token, Value::Null).await;
+    let (st, detail, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{run2_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(detail["mapping"]["version"], 1, "{txt}");
-    let (st, _, txt) = req(&app, Method::DELETE, &format!("/api/runs/{run1_id}"), &token, Value::Null).await;
-    assert_eq!(st, StatusCode::CONFLICT, "production graph cannot be deleted: {txt}");
-    let (st, _, txt) = req(&app, Method::DELETE, &format!("/api/runs/{run2_id}"), &token, Value::Null).await;
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/runs/{run1_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "production graph cannot be deleted: {txt}"
+    );
+    let (st, _, txt) = req(
+        &app,
+        Method::DELETE,
+        &format!("/api/runs/{run2_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT, "{txt}");
-    let (st, _, _) = req(&app, Method::GET, &format!("/api/runs/{run2_id}"), &token, Value::Null).await;
-    assert_eq!(st, StatusCode::NOT_FOUND, "the deleted run is gone with its graph");
+    let (st, _, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{run2_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "the deleted run is gone with its graph"
+    );
 
     // Mapping versions: a PUT freezes a new version; runs keep pointing at the old one.
     let (st, m2, txt) = req(
@@ -613,10 +862,27 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
     .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(m2["version"], 2, "{txt}");
-    let (st, _, txt) = req(&app, Method::GET, "/api/mappings/products-map/rml?version=1", &token, Value::Null).await;
+    let (st, _, txt) = req(
+        &app,
+        Method::GET,
+        "/api/mappings/products-map/rml?version=1",
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
-    assert!(txt.contains("ex:name") || txt.contains("ontology#name"), "version 1 is frozen: {txt}");
-    let (_, detail, _) = req(&app, Method::GET, &format!("/api/runs/{run1_id}"), &token, Value::Null).await;
+    assert!(
+        txt.contains("ex:name") || txt.contains("ontology#name"),
+        "version 1 is frozen: {txt}"
+    );
+    let (_, detail, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{run1_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(detail["mapping"]["version"], 1);
 }
 
@@ -670,11 +936,18 @@ async fn failing_shacl_gate_leaves_production_untouched_and_keeps_candidate() {
         json!({ "mapping": "gated-map-2", "mode": "full" }),
     )
     .await;
-    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "gate must fail: {txt}");
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "gate must fail: {txt}"
+    );
     let run = &rejected["run"];
     assert_eq!(run["status"], "rejected", "{txt}");
     assert_eq!(rejected["report"]["conforms"], false, "{txt}");
-    assert!(rejected["report"]["results"].as_array().unwrap().len() >= 3, "{txt}");
+    assert!(
+        rejected["report"]["results"].as_array().unwrap().len() >= 3,
+        "{txt}"
+    );
     let candidate = run["graph"].as_str().unwrap().to_string();
     assert_ne!(candidate, graph1);
 
@@ -682,7 +955,14 @@ async fn failing_shacl_gate_leaves_production_untouched_and_keeps_candidate() {
     let (_, src, _) = req(&app, Method::GET, "/api/sources/gated", &token, Value::Null).await;
     assert_eq!(src["production"]["graph"], graph1);
 
-    let (st, detail, txt) = req(&app, Method::GET, &format!("/api/runs/{}", run["id"].as_str().unwrap()), &token, Value::Null).await;
+    let (st, detail, txt) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{}", run["id"].as_str().unwrap()),
+        &token,
+        Value::Null,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{txt}");
     assert_eq!(detail["status"], "rejected");
     assert_eq!(detail["shacl"]["conforms"], false, "{txt}");
@@ -690,9 +970,23 @@ async fn failing_shacl_gate_leaves_production_untouched_and_keeps_candidate() {
         detail["graphTriples"].as_u64().unwrap() > 0,
         "the candidate graph is kept for inspection: {txt}"
     );
-    let (_, graphs, _) = req(&app, Method::GET, &format!("/api/datasets/{ds}/graphs"), &token, Value::Null).await;
-    let entries = graphs.as_array().cloned().or_else(|| graphs["graphs"].as_array().cloned()).unwrap();
-    assert!(!entries.iter().any(|e| e["graph_iri"] == candidate), "candidate never joined the dataset");
+    let (_, graphs, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/datasets/{ds}/graphs"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    let entries = graphs
+        .as_array()
+        .cloned()
+        .or_else(|| graphs["graphs"].as_array().cloned())
+        .unwrap();
+    assert!(
+        !entries.iter().any(|e| e["graph_iri"] == candidate),
+        "candidate never joined the dataset"
+    );
     assert!(entries.iter().any(|e| e["graph_iri"] == graph1));
 }
 

@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use axum::body::Body;
@@ -29,13 +29,21 @@ fn setup() -> &'static PathBuf {
         std::env::set_var("OTS_SOURCES_DIR", &dir);
         let db = dir.join("assets.db");
         let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO t VALUES (1, 'a');")
-            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO t VALUES (1, 'a');",
+        )
+        .unwrap();
         dir
     })
 }
 
-async fn req(app: &Router, method: Method, uri: &str, token: &str, body: Value) -> (StatusCode, Value, String) {
+async fn req(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value, String) {
     let mut b = Request::builder()
         .method(method)
         .uri(uri)
@@ -53,7 +61,7 @@ async fn req(app: &Router, method: Method, uri: &str, token: &str, body: Value) 
     (status, json, text)
 }
 
-fn sqlite_body(id: &str, db: &PathBuf, credential: &str) -> Value {
+fn sqlite_body(id: &str, db: &Path, credential: &str) -> Value {
     json!({
         "id": id, "name": id, "dialect": "sqlite",
         "database": db.to_string_lossy(),
@@ -69,15 +77,35 @@ async fn raw_password_in_a_production_registration_is_a_400() {
     let app = test_app(state);
     let db = dir.join("assets.db");
 
-    let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, sqlite_body("raw", &db, "hunter2-hunter2")).await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources",
+        &token,
+        sqlite_body("raw", &db, "hunter2-hunter2"),
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
-    assert!(!txt.contains("hunter2-hunter2"), "the refused value is not echoed: {txt}");
+    assert!(
+        !txt.contains("hunter2-hunter2"),
+        "the refused value is not echoed: {txt}"
+    );
 
     // The reference form is accepted in the same posture.
-    let (st, v, txt) = req(&app, Method::POST, "/api/sources", &token, sqlite_body("ok", &db, "env:OTS_TEST_DB_PASSWORD")).await;
+    let (st, v, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources",
+        &token,
+        sqlite_body("ok", &db, "env:OTS_TEST_DB_PASSWORD"),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{txt}");
     assert_eq!(v["credential"], "env:OTS_TEST_DB_PASSWORD");
-    assert_eq!(v["allowlisted"], true, "a local file source is allowlisted by definition: {txt}");
+    assert_eq!(
+        v["allowlisted"], true,
+        "a local file source is allowlisted by definition: {txt}"
+    );
 }
 
 #[tokio::test]
@@ -85,7 +113,11 @@ async fn statement_timeout_is_mandatory_in_production() {
     let dir = setup();
     let (state, token) = admin_state();
     let app = test_app(state);
-    let mut body = sqlite_body("no-timeout", &dir.join("assets.db"), "env:OTS_TEST_DB_PASSWORD");
+    let mut body = sqlite_body(
+        "no-timeout",
+        &dir.join("assets.db"),
+        "env:OTS_TEST_DB_PASSWORD",
+    );
     body.as_object_mut().unwrap().remove("statementTimeoutMs");
     let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
@@ -99,9 +131,19 @@ async fn sqlite_outside_sources_dir_is_refused_in_production() {
     let app = test_app(state);
     let outside = std::env::temp_dir().join(format!("ots-outside-{}.db", uuid::Uuid::new_v4()));
     rusqlite::Connection::open(&outside).unwrap();
-    let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, sqlite_body("outside", &outside, "env:OTS_TEST_DB_PASSWORD")).await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources",
+        &token,
+        sqlite_body("outside", &outside, "env:OTS_TEST_DB_PASSWORD"),
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
-    assert!(!txt.contains(&outside.to_string_lossy().to_string()), "path not echoed: {txt}");
+    assert!(
+        !txt.contains(&outside.to_string_lossy().to_string()),
+        "path not echoed: {txt}"
+    );
 }
 
 #[tokio::test]
@@ -138,12 +180,36 @@ async fn oidc_provider_secret_must_be_a_reference_in_production() {
             "scopes": "openid profile email",
         })
     };
-    let (st, _, txt) = req(&app, Method::POST, "/api/admin/oauth/providers", &token, provider("oidc-client-secret-value")).await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/admin/oauth/providers",
+        &token,
+        provider("oidc-client-secret-value"),
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "raw client secret: {txt}");
     assert!(!txt.contains("oidc-client-secret-value"), "{txt}");
-    let (st, v, txt) = req(&app, Method::POST, "/api/admin/oauth/providers", &token, provider("env:OTS_TEST_CLIENT_SECRET")).await;
+    let (st, v, txt) = req(
+        &app,
+        Method::POST,
+        "/api/admin/oauth/providers",
+        &token,
+        provider("env:OTS_TEST_CLIENT_SECRET"),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "referenced client secret: {txt}");
-    assert!(v.get("client_secret_enc").is_none() && !txt.contains("oidc-client-secret-value"), "{txt}");
-    let (st, _, txt) = req(&app, Method::POST, "/api/admin/oauth/providers", &token, provider("env:OTS_NOT_SET_ANYWHERE_123")).await;
+    assert!(
+        v.get("client_secret_enc").is_none() && !txt.contains("oidc-client-secret-value"),
+        "{txt}"
+    );
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/admin/oauth/providers",
+        &token,
+        provider("env:OTS_NOT_SET_ANYWHERE_123"),
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "unresolvable reference: {txt}");
 }

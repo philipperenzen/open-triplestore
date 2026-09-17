@@ -53,7 +53,10 @@ pub fn source_routes() -> Router<AppState> {
                 .delete(handlers::delete_mapping),
         )
         .route("/api/mappings/:id/rml", get(handlers::get_mapping_rml))
-        .route("/api/runs/:id", get(handlers::get_run).delete(handlers::delete_run))
+        .route(
+            "/api/runs/:id",
+            get(handlers::get_run).delete(handlers::delete_run),
+        )
         .route("/api/runs/:id/provenance", get(handlers::run_provenance))
         .route("/api/runs/:id/rollback", post(handlers::rollback_run))
 }

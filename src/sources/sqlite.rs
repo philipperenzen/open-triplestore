@@ -352,7 +352,10 @@ impl SourceConnection for SqliteConnection {
                 batch.push(out);
                 delivered += 1;
                 if batch.len() >= batch_size {
-                    sink(std::mem::replace(&mut batch, Vec::with_capacity(batch_size)))?;
+                    sink(std::mem::replace(
+                        &mut batch,
+                        Vec::with_capacity(batch_size),
+                    ))?;
                 }
             }
             Ok(())
@@ -441,14 +444,22 @@ mod tests {
         assert!(!name.nullable);
         assert_eq!(name.default.as_deref(), Some("'x'"));
         assert_eq!(
-            child.columns.iter().find(|c| c.name == "when_at").unwrap().generic_type,
+            child
+                .columns
+                .iter()
+                .find(|c| c.name == "when_at")
+                .unwrap()
+                .generic_type,
             ValueKind::DateTime
         );
         assert_eq!(child.foreign_keys.len(), 1);
         assert_eq!(child.foreign_keys[0].ref_table, "parent");
         assert_eq!(child.foreign_keys[0].columns, vec!["parent_id"]);
         assert_eq!(child.foreign_keys[0].ref_columns, vec!["pid"]);
-        assert!(child.indexes.iter().any(|i| i.name == "child_name" && i.unique));
+        assert!(child
+            .indexes
+            .iter()
+            .any(|i| i.name == "child_name" && i.unique));
         assert_eq!(
             tables.iter().find(|t| t.name == "child_v").unwrap().kind,
             TableKind::View
@@ -463,9 +474,15 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let with_amount = rows.iter().find(|r| r["cid"].lexical == "10").unwrap();
         assert_eq!(with_amount["amount"].lexical, "1.5");
-        assert_eq!(with_amount["ratio"].lexical, "2.0", "a whole REAL keeps a fraction");
+        assert_eq!(
+            with_amount["ratio"].lexical, "2.0",
+            "a whole REAL keeps a fraction"
+        );
         let without = rows.iter().find(|r| r["cid"].lexical == "11").unwrap();
-        assert!(!without.contains_key("amount"), "a SQL NULL is an absent key");
+        assert!(
+            !without.contains_key("amount"),
+            "a SQL NULL is an absent key"
+        );
         assert!(!without.contains_key("ratio"));
     }
 
@@ -481,7 +498,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 2);
-        assert_eq!(batches, vec![1, 1], "batch_size 1 delivers one row at a time");
+        assert_eq!(
+            batches,
+            vec![1, 1],
+            "batch_size 1 delivers one row at a time"
+        );
     }
 
     #[test]
@@ -501,7 +522,9 @@ mod tests {
         let (_d, p) = fixture();
         let mut c = SqliteConnector.connect(&p).unwrap();
         // A write through the mapping path is refused by SQLite itself.
-        let err = c.stream("DELETE FROM child", 10, &mut |_| Ok(())).unwrap_err();
+        let err = c
+            .stream("DELETE FROM child", 10, &mut |_| Ok(()))
+            .unwrap_err();
         assert!(matches!(err, SourceError::Query(_)), "{err:?}");
 
         let mut missing = p.clone();
@@ -516,7 +539,10 @@ mod tests {
     fn watermark_reads_the_max_of_a_column() {
         let (_d, p) = fixture();
         let mut c = SqliteConnector.connect(&p).unwrap();
-        assert_eq!(c.max_watermark("child", "cid").unwrap().as_deref(), Some("11"));
+        assert_eq!(
+            c.max_watermark("child", "cid").unwrap().as_deref(),
+            Some("11")
+        );
         assert!(c.server_version().unwrap().unwrap().starts_with("SQLite "));
     }
 

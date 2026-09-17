@@ -442,6 +442,17 @@ const BUILTINS: &[Builtin] = &[
         admin_only: false,
         sort: 54,
     },
+    // Admin-only: the page describes credential handling and the production
+    // posture, which is operator material, and every route it documents is
+    // admin-gated anyway.
+    Builtin {
+        slug: "sources",
+        title: "SQL Sources",
+        category: "Data Exchange",
+        body: include_str!("../../docs/sources.md"),
+        admin_only: true,
+        sort: 55,
+    },
     Builtin {
         slug: "sparql-12",
         title: "SPARQL 1.2 Support",

@@ -149,15 +149,11 @@ fn parse_logical_source(
     // rml:source — a datasource IRI, a file path/URL, or inline data.
     let source_terms = get_objects_typed(store, ls_iri, &format!("{RML}source"), graph);
     let source = match source_terms.into_iter().next() {
-        Some((value, true)) if value.starts_with(DATASOURCE_PREFIX) => {
-            SourceRef::Datasource(value)
-        }
+        Some((value, true)) if value.starts_with(DATASOURCE_PREFIX) => SourceRef::Datasource(value),
         Some((value, _)) => SourceRef::File(value),
         // R2RML's `rr:logicalTable` names no source: the datasource is the
         // one the run supplies. Only legal with a table or query.
-        None if table_name.is_some() || query.is_some() => {
-            SourceRef::Datasource(String::new())
-        }
+        None if table_name.is_some() || query.is_some() => SourceRef::Datasource(String::new()),
         None => return Err("Missing rml:source".to_string()),
     };
 
@@ -549,7 +545,10 @@ mod tests {
             tm.logical_source.source,
             SourceRef::Datasource("urn:source:legacy".into())
         );
-        assert_eq!(tm.logical_source.reference_formulation, ReferenceFormulation::Sql);
+        assert_eq!(
+            tm.logical_source.reference_formulation,
+            ReferenceFormulation::Sql
+        );
         assert_eq!(tm.logical_source.table_name.as_deref(), Some("products"));
         assert!(m.has_sql_source());
         assert_eq!(m.datasources(), vec!["urn:source:legacy"]);
@@ -669,7 +668,10 @@ mod tests {
             f.first("https://w3id.org/open-triplestore/fn#value"),
             Some(&FunctionArg::Reference("status".into()))
         );
-        assert_eq!(f.all("https://w3id.org/open-triplestore/fn#mapping").len(), 2);
+        assert_eq!(
+            f.all("https://w3id.org/open-triplestore/fn#mapping").len(),
+            2
+        );
         assert_eq!(
             f.first("https://w3id.org/open-triplestore/fn#unmapped"),
             Some(&FunctionArg::Constant("literal".into()))

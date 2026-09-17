@@ -59,6 +59,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
         (name = "SHACL-C", description = "SHACL Compact Syntax parsing and serialisation"),
         (name = "Reasoning", description = "OWL 2 / RDFS entailment, SWRL rules and query rewriting"),
         (name = "Mappings", description = "RML mappings from non-RDF sources to RDF"),
+        (name = "Sources", description = "SQL datasources, RML mapping registry and materialisation runs — admin only. Credentials are secret REFERENCES (env:/file:/vault:); no endpoint accepts or returns a credential value."),
         (name = "Assets", description = "File asset management (S3 / local storage)"),
         (name = "Import", description = "Source analysis and bulk data import"),
         (name = "Catalog", description = "DCAT catalogue of datasets, models and vocabularies"),
@@ -88,6 +89,20 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::models::Visibility,
             crate::auth::models::OwnerType,
             crate::auth::models::GraphKind,
+            // SQL datasources, mappings and runs
+            crate::sources::model::SourceRequest,
+            crate::sources::model::SourceResponse,
+            crate::sources::model::MappingRequest,
+            crate::sources::model::MappingResponse,
+            crate::sources::model::MappingJoin,
+            crate::sources::model::MappingState,
+            crate::sources::model::RunRequest,
+            crate::sources::model::RunResponse,
+            crate::sources::model::RunPointer,
+            crate::sources::model::RunStatus,
+            crate::sources::model::RunMode,
+            crate::sources::model::MappingRef,
+            crate::sources::model::ShaclSummary,
             crate::auth::models::Dataset,
             crate::auth::models::SparqlService,
             crate::auth::models::Asset,
@@ -2012,6 +2027,405 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Post, o("Mappings", "Preview RML mapping", "Run an inline RML mapping against sample input and return the generated triples without storing them.",
             vec![], vec![("200", "Generated triples"), ("400", "Invalid mapping"), ("401", "Authentication required")], true)),
     ]);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SQL sources, mappings and runs (admin only — see docs/sources.md)
+    // ═══════════════════════════════════════════════════════════════════════
+    const CRED_NOTE: &str = "The credential is a secret REFERENCE (env:NAME, file:/path, \
+vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns a secret.";
+
+    mount(
+        paths,
+        "/api/sources",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "List datasources",
+                    "Every registered SQL datasource, with its credential reference, whether its \
+                     endpoint passes the egress allowlist, and the graph it currently serves from.",
+                    vec![],
+                    vec![
+                        ("200", "Array of datasources"),
+                        ("401", "Authentication required"),
+                        ("403", "Admin access required"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Register a datasource",
+                    "Register a SQL datasource. The credential reference is validated — \
+                     well-formed and resolvable — before the record is stored. In the production \
+                     posture a raw secret, a missing statement timeout, a host outside the egress \
+                     allowlist and a file outside OTS_SOURCES_DIR are all refused.",
+                    vec![],
+                    vec![
+                        ("201", "Registered"),
+                        (
+                            "400",
+                            "Invalid registration (the message never echoes a secret)",
+                        ),
+                        ("409", "A datasource with this id already exists"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/sources/test",
+        vec![(
+            M::Post,
+            o(
+                "Sources",
+                "Test a connection",
+                "Open a connection with the supplied settings and throw it away. Persists \
+                 nothing. Answers 200 with {\"ok\": false, \"error\": …} when the database will \
+                 not answer; the message is scrubbed of the credential, database, host and user.",
+                vec![],
+                vec![("200", "Probe result"), ("400", "Invalid settings")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/metrics",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Source metrics",
+                "Rows extracted, triples produced, run outcomes, total duration and the SHACL \
+                 pass rate across every datasource.",
+                vec![],
+                vec![("200", "Counters")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get a datasource",
+                    CRED_NOTE,
+                    vec![],
+                    vec![("200", "The datasource"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Sources",
+                    "Update a datasource",
+                    "Omit the credential to keep the reference already registered. Updating \
+                     clears the resolved-secret cache, so a rotation takes effect immediately.",
+                    vec![],
+                    vec![("200", "Updated"), ("400", "Invalid"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Sources",
+                    "Delete a datasource",
+                    "Refused while mappings still reference it.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("404", "Not found"),
+                        ("409", "Mappings still reference this datasource"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/introspect",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Introspect the schema",
+                "Tables and views with columns (generic and native types, nullability, defaults, \
+                 comments), primary and foreign keys, indexes and a row estimate.",
+                vec![],
+                vec![
+                    ("200", "Schema"),
+                    ("404", "Not found"),
+                    ("502", "The datasource did not answer"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/preview",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Preview raw rows",
+                "The first rows of a table, unmapped. This is pre-clean source data.",
+                vec![
+                    qp("table", true, "Table or view name"),
+                    qp("limit", false, "Rows to return (1-1000, default 20)"),
+                ],
+                vec![
+                    ("200", "Rows"),
+                    ("404", "Not found"),
+                    ("502", "The datasource did not answer"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/provenance",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Datasource provenance",
+                "The datasource's PROV-O trail — every run and rollback — as Turtle. Served here \
+                 because these records live in a system graph, outside a caller's SPARQL scope.",
+                vec![],
+                vec![("200", "Turtle"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/sources/:id/runs",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Run history",
+                    "Runs for this datasource, newest first.",
+                    vec![],
+                    vec![("200", "Array of runs"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Start a run",
+                    "Materialise the mapping into a fresh graph urn:run:<id>, record a PROV \
+                     activity, apply the SHACL write gate to that graph, and — only on a pass — \
+                     give it the production role atomically. A failing gate answers 422 with the \
+                     report; production is untouched and the candidate graph is kept.",
+                    vec![],
+                    vec![
+                        ("201", "The run"),
+                        (
+                            "400",
+                            "Unknown mode, or the mapping belongs to another datasource",
+                        ),
+                        ("404", "Datasource or mapping not found"),
+                        ("422", "The SHACL write gate refused the run"),
+                        ("501", "Watermark runs are not available yet"),
+                        ("503", "Server overloaded"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/mappings",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "List mappings",
+                    "Registered RML mappings.",
+                    vec![qp(
+                        "source",
+                        false,
+                        "Filter by datasource IRI (urn:source:<id>)",
+                    )],
+                    vec![("200", "Array of mappings")],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Register a mapping",
+                    "Store RML as version 1, in its own named graph. The datasource is read from \
+                     the RML itself, so 'source' is optional. A mapping must read exactly one \
+                     registered datasource and may not declare rr:graphMap.",
+                    vec![],
+                    vec![
+                        ("201", "Registered"),
+                        ("400", "Invalid RML, or it reads the wrong datasource"),
+                        ("409", "A mapping with this id already exists"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/mappings/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get a mapping",
+                    "Mapping metadata, its current version and its join structure.",
+                    vec![],
+                    vec![("200", "The mapping"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Sources",
+                    "Update a mapping",
+                    "New RML freezes the NEXT version; earlier versions are never rewritten, \
+                     because runs reference them. A metadata-only edit keeps the current version.",
+                    vec![],
+                    vec![
+                        ("200", "Updated"),
+                        ("400", "Invalid RML"),
+                        ("404", "Not found"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Sources",
+                    "Delete a mapping",
+                    "Refused while runs reference it — their provenance would point at nothing.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("404", "Not found"),
+                        ("409", "Runs reference this mapping"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/mappings/:id/rml",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Get a mapping version's RML",
+                "The stored RML as Turtle. Defaults to the current version.",
+                vec![qp("version", false, "Version number (1-based)")],
+                vec![
+                    ("200", "Turtle"),
+                    ("400", "No such version"),
+                    ("404", "Not found"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/runs/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get a run",
+                    "One run, including graphTriples — what its graph holds now, which is how a \
+                     caller tells a kept candidate from a collected one.",
+                    vec![],
+                    vec![("200", "The run"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Sources",
+                    "Delete a run",
+                    "Removes the run record and its graph.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("404", "Not found"),
+                        ("409", "The run is in production"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/runs/:id/provenance",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Run provenance",
+                "The run's PROV-O trail as Turtle.",
+                vec![],
+                vec![("200", "Turtle"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/runs/:id/rollback",
+        vec![(
+            M::Post,
+            o(
+                "Sources",
+                "Roll a run back",
+                "Re-point the datasource at the graph it served before this run. Never re-runs \
+                 the mapping, so it cannot fail on a source that has since changed.",
+                vec![],
+                vec![
+                    ("200", "The datasource, re-pointed"),
+                    ("400", "Not the production run, or nothing to roll back to"),
+                    ("404", "Not found"),
+                ],
+                true,
+            ),
+        )],
+    );
 
     // ═══════════════════════════════════════════════════════════════════════
     // Assets

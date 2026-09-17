@@ -11,7 +11,7 @@
 
   import {
     Home as HomeIcon, Search as SearchIcon,
-    Upload, Database, Building2, BookOpen, HelpCircle, Library,
+    Upload, Database, DatabaseZap, Building2, BookOpen, HelpCircle, Library,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
     Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags
@@ -49,6 +49,8 @@
   // owns the graph viz. Keep a thin redirect so deep-links don't 404.
   const lazyGraphVisualizer  = () => import('./pages/GraphVizRedirect.svelte');
   const lazyDataImport          = () => import('./pages/DataImport.svelte');
+  const lazySources             = () => import('./pages/Sources.svelte');
+  const lazySourceDetail        = () => import('./pages/SourceDetail.svelte');
   const lazyShaclStudio         = () => import('./pages/ShaclStudio.svelte');
   const lazyShapeLibrary        = () => import('./pages/ShapeLibrary.svelte');
   const lazyShapeGraphEditor      = () => import('./pages/ShapeGraphEditor.svelte');
@@ -94,6 +96,7 @@
       titleKey: 'nav.operations',
       items: [
         { to: '/import', labelKey: 'nav.importData', icon: Upload, match: (p) => p.startsWith('/import'), authRequired: true },
+        { to: '/sources', labelKey: 'nav.sqlSources', icon: DatabaseZap, match: (p) => p.startsWith('/sources'), authRequired: true, adminOnly: true },
         { to: '/shacl', labelKey: 'nav.validate', icon: CheckCircle2, match: (p) => p.startsWith('/validation') || p.startsWith('/shacl'), authRequired: true },
       ],
     },
@@ -403,7 +406,7 @@
             <div class="sidebar-heading">{section.titleKey ? $t(section.titleKey) : section.title}</div>
             <nav class="nav-group" aria-label={section.titleKey ? $t(section.titleKey) : section.title}>
               {#each section.items as item}
-                {#if !item.authRequired || authed}
+                {#if (!item.authRequired || authed) && (!item.adminOnly || $isAdmin)}
                 <Link to={item.to} class={`nav-item ${item.match(currentPath) ? 'selected' : ''}`} on:click={navClick}>
                   <svelte:component this={item.icon} size={16} />
                   <span class="nav-item-label">{item.label || $t(item.labelKey)}</span>
@@ -631,6 +634,13 @@
           <LazyPage loader={lazyDataImport} />
         </Route>
         <!-- SHACL Studio: consolidated workspace. -->
+        <!-- SQL sources: datasources, RML mappings and materialisation runs. -->
+        <Route path="/sources">
+          <LazyPage loader={lazySources} />
+        </Route>
+        <Route path="/sources/:id" let:params>
+          <LazyPage loader={lazySourceDetail} id={params.id} />
+        </Route>
         <Route path="/shacl">
           <LazyPage loader={lazyShaclStudio} />
         </Route>

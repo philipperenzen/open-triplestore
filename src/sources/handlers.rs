@@ -100,7 +100,10 @@ fn to_source(
         credential,
         read_only: body.read_only,
         statement_timeout_ms,
-        watermark_column: body.watermark_column.clone().filter(|w| !w.trim().is_empty()),
+        watermark_column: body
+            .watermark_column
+            .clone()
+            .filter(|w| !w.trim().is_empty()),
         allow_model_assist: body.allow_model_assist,
         tls: body.tls,
         options: body.options.clone(),
@@ -185,7 +188,8 @@ pub async fn update_source(
     Path(id): Path<String>,
     Json(body): Json<SourceRequest>,
 ) -> ApiResult<Json<SourceResponse>> {
-    let existing = registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
+    let existing =
+        registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
     let actor = actor_iri(&state, &user);
     let source = to_source(&state, body, id, Some(&existing), &actor)?;
     check_resolvable(&source).await?;
@@ -204,7 +208,8 @@ pub async fn delete_source(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    let source = registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
+    let source =
+        registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
     let mappings = registry::list_mappings(&state.store, Some(&id));
     if !mappings.is_empty() {
         return Err((
@@ -263,7 +268,8 @@ pub async fn introspect_source(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let source = registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
+    let source =
+        registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
     let tables = tokio::task::spawn_blocking(move || {
         let mut conn = runs::connect(&source)?;
         conn.introspect()
@@ -291,7 +297,8 @@ pub async fn preview_source(
     Path(id): Path<String>,
     Query(params): Query<PreviewParams>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let source = registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
+    let source =
+        registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
     let limit = params.limit.unwrap_or(20).clamp(1, 1_000);
     let table = params.table.clone();
     let rows = tokio::task::spawn_blocking(move || {
@@ -303,7 +310,9 @@ pub async fn preview_source(
     .map_err(internal)?
     .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
-    Ok(Json(json!({ "table": params.table, "limit": limit, "rows": rows })))
+    Ok(Json(
+        json!({ "table": params.table, "limit": limit, "rows": rows }),
+    ))
 }
 
 /// `GET /api/sources/:id/provenance` — the datasource's PROV-O trail as Turtle.
@@ -421,8 +430,8 @@ pub async fn create_mapping(
         ));
     }
     let rml = rml_of(&body)?;
-    let parsed = crate::rml::parse_rml(&rml)
-        .map_err(|e| bad(mappings::MappingError::Invalid(e)))?;
+    let parsed =
+        crate::rml::parse_rml(&rml).map_err(|e| bad(mappings::MappingError::Invalid(e)))?;
     // The RML already names the datasource it reads, so `source` is optional:
     // supplying it only pins what the mapping says, and a disagreement is an
     // error rather than a silent re-binding.
@@ -486,7 +495,8 @@ pub async fn update_mapping(
     Path(id): Path<String>,
     Json(body): Json<MappingRequest>,
 ) -> ApiResult<Json<MappingResponse>> {
-    let existing = registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
+    let existing =
+        registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
     let source_id = body
         .source
         .clone()
@@ -520,7 +530,8 @@ pub async fn update_mapping(
         let rml = rml_of(&body)?;
         mappings::validate_rml(&rml, &record.source_id).map_err(bad)?;
         record.version = existing.version + 1;
-        mappings::store_version(&state.store, &record.id, record.version, &rml).map_err(internal)?;
+        mappings::store_version(&state.store, &record.id, record.version, &rml)
+            .map_err(internal)?;
     }
     registry::put_mapping(&state.store, &record).map_err(internal)?;
     commit_mapping(&state, &user, &record, "updated");
@@ -533,7 +544,8 @@ pub async fn delete_mapping(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    let mapping = registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
+    let mapping =
+        registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
     let used_by: Vec<String> = registry::list_runs(&state.store, None)
         .into_iter()
         .filter(|r| r.mapping_id == mapping.id)
@@ -565,7 +577,8 @@ pub async fn get_mapping_rml(
     Path(id): Path<String>,
     Query(params): Query<VersionParam>,
 ) -> ApiResult<Response> {
-    let mapping = registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
+    let mapping =
+        registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
     let version = params.version.unwrap_or(mapping.version);
     if version == 0 || version > mapping.version {
         return Err(bad(format!(
@@ -622,14 +635,26 @@ pub async fn create_run(
         )
     })?;
 
-    let source = registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
+    let source =
+        registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
     let mapping_id = body.mapping.trim_start_matches("urn:mapping:").to_string();
     let mapping = registry::get_mapping(&state.store, &mapping_id)
         .ok_or_else(|| not_found("mapping", &mapping_id))?;
-    let mode = match body.mode.as_deref().unwrap_or("full").trim().to_ascii_lowercase().as_str() {
+    let mode = match body
+        .mode
+        .as_deref()
+        .unwrap_or("full")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "full" => RunMode::Full,
         "watermark" | "incremental" => RunMode::Watermark,
-        other => return Err(bad(format!("unknown run mode '{other}'; expected full or watermark"))),
+        other => {
+            return Err(bad(format!(
+                "unknown run mode '{other}'; expected full or watermark"
+            )))
+        }
     };
     let batch_size = body.batch_size.unwrap_or(1_000);
     let model_version = body.model_version.clone();
@@ -651,7 +676,11 @@ pub async fn create_run(
     .map_err(internal)?;
 
     match outcome {
-        Ok(record) => Ok((StatusCode::CREATED, Json(RunResponse::of(&state.store, &record))).into_response()),
+        Ok(record) => Ok((
+            StatusCode::CREATED,
+            Json(RunResponse::of(&state.store, &record)),
+        )
+            .into_response()),
         Err(RunError::Gate { run, report }) => Ok((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
