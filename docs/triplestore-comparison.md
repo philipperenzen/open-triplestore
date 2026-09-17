@@ -4,7 +4,8 @@
 > nine widely-used RDF stores across ingestion speed, query latency, scalability, standards
 > compliance, operational maturity, and long-term outlook.
 >
-> **Last updated:** April 2026
+> **Last updated:** performance sections (5–7) re-measured 2026-09-17 against release
+> 0.6.0; the standards matrix and the outlook scores were last reviewed April 2026.
 
 ---
 
@@ -108,6 +109,41 @@ Neptune Graviton4:   r8g.4xlarge (16 vCPU / 128 GB RAM), 2024 AWS benchmark
 - Blazegraph has had no release since May 2019; its numbers reflect peak historical capability.
 - Jena 5 and RDF4J 5 were major releases (2024); their numbers are significantly better than
   Jena 4 / RDF4J 4 published in older comparisons.
+
+---
+
+
+### 2.4 How the local numbers were produced
+
+Every **Open Triplestore** figure in sections 5–7 is a Criterion median from
+[`benches/performance.rs`](../benches/performance.rs), re-measured on
+2026-09-17 at the release commit, on the reference system documented in
+[performance.md](performance.md#reference-system-numbers-in-this-doc-unless-noted)
+— AMD Ryzen 9 7900X3D, 24 logical CPUs, inside the project's Docker builder
+image, `--release`. Each row names the benchmark id and the fixture it ran on,
+so any figure here can be reproduced with:
+
+```bash
+docker run --rm -v "$PWD:/app" -v ots_target_rel:/app/target -w /app ots-builder \
+  cargo bench --bench performance --features full -- query/
+```
+
+Two things follow from that, and both matter when reading the tables.
+
+**The fixture is persons, not triples.** `gen_persons_ttl(n)` emits **five
+triples per person**, so the benchmark parameter `10000` is a **50 000-triple**
+store. Rows below give the triple count, not the parameter.
+
+**These numbers replace figures taken on different hardware.** The previous
+local column was measured on an Apple M3 Pro and several of its entries had no
+corresponding benchmark in the suite, so it could not be re-run or checked.
+Differences between this table and an older copy of it are therefore *not* a
+performance history — they are a change of measuring instrument. The
+release-over-release history lives in
+[performance.md](performance.md) and in the
+[perf gate](performance.md#performance-regression-gate), which compares a
+change against its own merge base in one job rather than against a stored
+number.
 
 ---
 
@@ -264,7 +300,7 @@ ingestion path. Numbers below are triples/second.
 
 | System | Throughput | Dataset | Notes |
 |--------|-----------|---------|-------|
-| **Open Triplestore** | **~1,000,000 t/s** | 100 K triples, M3 Pro | Oxigraph BulkLoader → RocksDB SSTable |
+| **Open Triplestore** | **~465,000 t/s** | 500 K triples (`insert/bulk_loader/100000`, 1.07 s) | `load_str` into an in-memory store; the persistent path pays RocksDB write amplification on top |
 | QLever | ~1,500,000+ t/s | DBLP 390M triples | C++ inverted-index construction |
 | Amazon Neptune (Graviton4) | ~1,000,000 t/s† | 2B triples (bulk CSV) | 4.7× improvement on r8g instances (2024) |
 | GraphDB | ~500,000 t/s | BSBM 100M triples | Parallel Loader, consistent at scale |
@@ -281,10 +317,10 @@ ingestion path. Numbers below are triples/second.
 Bulk Load Throughput (triples/sec — higher is better)
 ─────────────────────────────────────────────────────
 QLever          ██████████████████████████████  1,500,000+
-Local Store     ████████████████████            1,000,000
 Neptune (r8g)   ████████████████████            1,000,000
 GraphDB         ██████████                        500,000
 Stardog         ██████████                        500,000
+Local Store     █████████                         465,000
 Virtuoso        ████████                          400,000
 RDF4J 5         ███████                           350,000
 Blazegraph      █████                             250,000
@@ -298,7 +334,7 @@ per statement reduces per-triple cost significantly.
 
 | System | Single-triple cost | Single-triple t/s | 10-triple batch t/s |
 |--------|-------------------|-------------------|---------------------|
-| **Open Triplestore** | ~42 µs | **~24,000 t/s** | **~182,000 t/s** |
+| **Open Triplestore** | ~86 µs | **~11,600 t/s** | **~57,000 t/s** |
 | Virtuoso | ~50–80 µs | ~12,500–20,000 t/s | ~80,000–150,000 t/s |
 | GraphDB | ~80–120 µs | ~8,000–12,000 t/s | ~60,000–90,000 t/s |
 | Blazegraph | ~60–100 µs | ~10,000–16,000 t/s | — (abandoned) |
@@ -306,8 +342,14 @@ per statement reduces per-triple cost significantly.
 | Jena 5 TDB2 | ~150–300 µs | ~3,000–6,500 t/s | ~20,000–50,000 t/s |
 | Neptune | ~1–5 ms | ~200–1,000 t/s (API round-trip) | — |
 
-**Key insight:** Batching 10 triples per INSERT DATA statement reduces per-triple cost ~7× on
-open-triplestore by amortising the SPARQL parser. Use the bulk loader for initial loading.
+**Key insight:** Batching 10 triples per INSERT DATA statement reduces per-triple cost
+**~4.9×** on open-triplestore (86 µs → 17.5 µs) by amortising the SPARQL parser. Use the bulk
+loader for initial loading — it is another ~8× faster again.
+
+Both figures are with the per-quad [change log](versioning.md#change-log) **on**, which is the
+shipped default: every write records what it changed so replication, history and audits have a
+source. `OTS_CHANGE_CAPTURE=off` removes that cost for a write-heavy store with no consumer.
+(`insert/sparql_update/single_triple`, `insert/sparql_update_batch/10_triples`.)
 
 ---
 
@@ -319,7 +361,7 @@ All numbers in milliseconds. Dataset sizes are approximate triples in store.
 
 | System | 100 K triples | 1 M triples | 10 M triples | 100 M triples |
 |--------|:---:|:---:|:---:|:---:|
-| **Open Triplestore** | **0.04** | ~0.4 | ~4 | ~94 |
+| **Open Triplestore** | **~2.8** | ~28 | ~280 | ~2,800 |
 | QLever | ~0.01 | ~0.1 | ~0.8 | ~8 |
 | Virtuoso | ~0.1 | ~0.5 | ~3 | ~30 |
 | GraphDB | ~0.5 | ~1 | ~8 | ~80 |
@@ -329,29 +371,36 @@ All numbers in milliseconds. Dataset sizes are approximate triples in store.
 | Jena 5 TDB2 | ~1 | ~5 | ~40 | ~400 |
 | Neptune | ~50 | ~60 | ~80 | ~150 (network-bounded) |
 
-> Local numbers measured directly with Criterion. Competitor numbers are estimated from published
-> BSBM throughput ratios and ESWC 2023 relative rankings. Neptune includes ~40 ms network RTT.
-> RDF4J 5 and Jena 5 numbers reflect ~2× improvements over prior v4 benchmarks.
+> **Read this row carefully.** A full scan that *returns every match* is bounded by the number of
+> rows it materialises, not by the store size, so it scales with the answer. The measured anchors
+> are `query/simple_lookup`: **19.4 µs** over 500 triples, **130 µs** over 5 K, **1.39 ms** over
+> 50 K and **57.1 ms** over 500 K — roughly 0.57 µs per row returned. The 100 K-to-100 M row above
+> extrapolates that rate; only the shape up to 500 K triples was measured here, and the 100 M tier
+> is above the in-memory accelerator's cap, where RocksDB answers and the real figure is worse than
+> a linear projection.
+>
+> The earlier local figure in this row (0.04 ms at 100 K triples) was a *point* lookup, not a scan,
+> and did not belong in a scan table.
+>
+> Competitor numbers are estimated from published BSBM throughput ratios and ESWC 2023 relative
+> rankings, and are not re-measured here. Neptune includes ~40 ms network RTT. RDF4J 5 and Jena 5
+> numbers reflect ~2× improvements over prior v4 benchmarks.
 
 ```
-Simple Lookup at 10 M triples (ms — lower is better)
-─────────────────────────────────────────────────────
-QLever       ▓                              0.8 ms
-Virtuoso     ▓▓▓                            3 ms
-Local Store  ▓▓▓▓                           4 ms
-GraphDB      ▓▓▓▓▓▓▓▓                       8 ms
-Stardog      ▓▓▓▓▓▓▓▓▓▓                    10 ms
-Blazegraph   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓              15 ms
-RDF4J 5      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   25 ms
-Jena 5       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 40 ms
-Neptune      ~80 ms (network RTT dominates)
+Simple lookup, measured (ms — lower is better; fixture in triples)
+──────────────────────────────────────────────────────────────────
+500      ▏                                    0.019 ms
+5 K      ▏                                    0.130 ms
+50 K     ▓                                    1.39 ms
+500 K    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓   57.1 ms
+                          (query/simple_lookup, returning every match)
 ```
 
 ### 6.2 Two-Way and Three-Way Joins
 
-| System | 2-way join (10 K) | 3-way join (10 K) | Join strategy |
+| System | 2-way join | 3-way join | Join strategy |
 |--------|:-----------------:|:-----------------:|---------------|
-| **Open Triplestore** | **1.82 ms** | **2.52 ms** | Nested-loop; S-P-O index probe |
+| **Open Triplestore** | **266 µs** / **3.03 ms** | **422 µs** / **4.71 ms** | Columnar copy: hash join on dictionary ids |
 | QLever | ~0.5 ms | ~0.7 ms | Hash join + inverted index |
 | Virtuoso | ~2 ms | ~3 ms | Vectorized hash join |
 | GraphDB | ~3 ms | ~5 ms | RDF4J join planner |
@@ -361,28 +410,39 @@ Neptune      ~80 ms (network RTT dominates)
 | Jena 5 TDB2 | ~7 ms | ~12 ms | Improved from v4 (~12/~20 ms) |
 | Neptune | ~50 ms | ~70 ms | Network + managed engine |
 
-### 6.3 SPARQL 1.1 Operators (open-triplestore, 10K triples)
+> The local cell gives **5 K / 50 K triples** (`query/join_2way`, `query/join_3way` at
+> parameters 1000 and 10000); competitor cells are published estimates at their own 10 K
+> fixture and are not directly comparable row-to-row. Both joins are answered by the
+> [columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) added in 0.6.0, which
+> made them **~60 % faster** than the engine-on-RAM path that preceded it.
 
-| Operator | Latency | Notes |
-|----------|---------|-------|
-| VALUES inline join | 1.92 ms | ~5% faster than 2-way join |
-| BIND expression | 1.31 ms | Near-free vs. plain scan |
-| MINUS set-difference | 2.13 ms | Hash-set approach |
-| NOT EXISTS correlated | 4.2 ms | ~2× MINUS cost |
-| CONSTRUCT graph build | 3.1 ms | +~20% vs. SELECT |
-| Named GRAPH ?g scan | 5.6 ms | Unbound GRAPH variable |
-| GROUP_CONCAT | 3.6 ms | +~15% vs. COUNT/AVG |
+### 6.3 SPARQL 1.1 Operators (open-triplestore, 50 K triples)
+
+| Operator | Latency | Benchmark | Notes |
+|----------|---------|-----------|-------|
+| VALUES inline join | 2.43 ms | `query/values/10000` | Bound set joined against the scan |
+| BIND expression | 3.60 ms | `query/bind/10000` | One computed term per solution |
+| MINUS set-difference | 1.49 ms | `query/minus/10000` | Hash anti-join on dictionary ids |
+| NOT EXISTS correlated | 8.68 ms | `query/not_exists/10000` | **5.8× MINUS** — prefer MINUS where both express the query |
+| CONSTRUCT graph build | 329 µs | `query/construct/10000` | Filtered to one subject; builds triples, not rows |
+| Named GRAPH ?g scan | 2.32 ms | `query/named_graph/10000` | Unbound GRAPH variable |
+| GROUP_CONCAT | 3.77 ms | `query/group_concat/10000` | Grouped string concatenation |
+| OPTIONAL left-join | 3.36 ms | `query/optional/10000` | |
+| Subquery | 4.06 ms | `query/subquery/10000` | Inner aggregate joined outward |
 
 ### 6.4 Filter Performance
 
-| Query Type | Open Triplestore | Competitor Avg |
-|-----------|:-----------------:|:--------------:|
-| Numeric FILTER (10 K) | 1.12 ms | 3–8 ms |
-| REGEX FILTER (10 K) | 8.2 ms | 20–60 ms |
-| OPTIONAL left-join (10 K) | 1.93 ms | 4–10 ms |
+| Query Type | Open Triplestore (50 K triples) | Benchmark | Competitor Avg (their 10 K) |
+|-----------|:---:|---|:---:|
+| Numeric FILTER | 2.82 ms | `query/filter/10000` | 3–8 ms |
+| REGEX FILTER | 1.67 ms | `query/regex_filter/10000` | 20–60 ms |
+| OPTIONAL left-join | 3.36 ms | `query/optional/10000` | 4–10 ms |
 
-**REGEX is universally expensive.** Open Triplestore's 8.2 ms is competitive; STRSTARTS() is
-~7× faster than REGEX on the same data.
+**REGEX is not the expensive one here.** On this fixture the regular expression is anchored and
+rejects most rows early, so it costs *less* than the numeric filter, which keeps three quarters of
+them and pays to materialise the survivors. The general point still holds elsewhere: an unanchored
+REGEX over long literals is the expensive shape, and `STRSTARTS()` is the cheaper way to express a
+prefix test.
 
 ---
 
@@ -392,19 +452,23 @@ Neptune      ~80 ms (network RTT dominates)
 
 | Query | Open Triplestore | Jena 5 | GraphDB | QLever | Virtuoso |
 |-------|:-----------------:|:------:|:-------:|:------:|:--------:|
-| COUNT(*) 10 K triples | 1.41 ms | ~6 ms | ~4 ms | ~0.4 ms | ~2 ms |
-| COUNT(*) 100 K triples | 14.1 ms | ~60 ms | ~40 ms | ~3 ms | ~15 ms |
-| GROUP BY + AVG (10 K) | 3.10 ms | ~12 ms | ~8 ms | ~0.8 ms | ~4 ms |
-| GROUP_CONCAT (10 K) | 3.60 ms | ~15 ms | ~9 ms | ~1 ms | ~5 ms |
-| Subquery / scalar MAX (10 K) | 3.84 ms | ~15 ms | ~10 ms | ~1 ms | ~5 ms |
+| `COUNT(*)`, any store size | **3.8 µs** | ~6 ms | ~4 ms | ~0.4 ms | ~2 ms |
+| GROUP BY + COUNT (50 K) | 8.00 ms | ~12 ms | ~8 ms | ~0.8 ms | ~4 ms |
+| GROUP_CONCAT (50 K) | 3.77 ms | ~15 ms | ~9 ms | ~1 ms | ~5 ms |
+| Subquery / scalar (50 K) | 4.06 ms | ~15 ms | ~10 ms | ~1 ms | ~5 ms |
 
-> Jena 5 numbers ~2× better than Jena 4 (~25–30 ms range).
+> `COUNT(*)` over the whole store is **O(1)**: a maintained per-graph count index answers it
+> without touching the data, so it reads 3.8 µs at 5 K, 50 K and 500 K triples alike
+> (`query/count_star/{1000,10000,100000}`). That is a different algorithm from every other column
+> here, not a faster scan — the competitor figures are scans. The grouped rows are
+> `query/group_by/10000`, `query/group_concat/10000` and `query/subquery/10000`, and are answered
+> across the mirror's subject-hash shards. Jena 5 numbers ~2× better than Jena 4 (~25–30 ms range).
 
 ```
 COUNT(*) at 100 K triples (ms — lower is better)
 ─────────────────────────────────────────────────
+Local Store  ▏                           0.0038 ms  (O(1) count index)
 QLever       ▓▓▓                          3 ms
-Local Store  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓              14 ms
 Virtuoso     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓             15 ms
 GraphDB      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ 40 ms
 Jena 5       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ (~60 ms)
@@ -412,17 +476,20 @@ Jena 5       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓�
 
 ### 7.2 Property Paths
 
-| Pattern | Local (50 LIMIT) | Notes |
-|---------|:----------------:|-------|
-| `ex:next+` transitive | 382 µs | BFS; O(edges visited) |
-| `ex:next*` zero-or-more | 407 µs | +7% over + (identity solutions) |
-| `(ex:next/ex:next)` sequence | 88 µs | Compile to 2-way join |
-| `^ex:next` inverse | 92 µs | O-P-S index; same cost as forward |
-| `(ex:name\|ex:email)` alternative | 2.12 ms | UNION rewrite |
-| `!(ex:name\|ex:age)` negated set | 1.09 ms/1K | Full scan + NOT IN predicate |
+| Pattern | Local | Benchmark | Notes |
+|---------|:---:|---|-------|
+| `ex:next+` transitive | 310 µs / 1.12 ms / 4.60 ms | `query/transitive_path/{50,100,200}` | BFS; O(edges visited), superlinear in depth |
+| `ex:next*` zero-or-more | 332 µs / 1.20 ms / 4.58 ms | `path/zero_or_more/{50,100,200}` | ~5 % over `+` at depth 50, level beyond |
+| `(ex:next/ex:next)` sequence | 34 µs / 131 µs / 252 µs | `path/sequence/{100,500,1000}` | Folded into one basic graph pattern; linear |
+| `^ex:next` inverse | 18 µs / 131 µs / 1.40 ms | `path/inverse/{100,1000,10000}` | Same cost as forward |
+| `(ex:name\|ex:email)` alternative | 701 µs / 9.01 ms | `query/alternative_path/{1000,10000}` | UNION rewrite; declined by the columnar copy |
+| `!(ex:name\|ex:age)` negated set | 1.10 ms / 14.26 ms | `path/negated_property_set/{1000,10000}` | Full scan + NOT IN predicate |
 
-Property path evaluation is unavoidably O(reachable subgraph) for transitive paths.
-QLever uses a dedicated BFS engine and is ~3–5× faster for deep transitive paths.
+Sequence and inverse paths fold into a basic graph pattern and are answered by the
+[columnar copy](performance.md#4-the-columnar-copy-opengraphcolumnar) — about **60 % faster** in
+0.6.0. Alternatives and unbounded paths are declined by it and answered by the engine, so they are
+unchanged. Transitive evaluation is unavoidably O(reachable subgraph); QLever uses a dedicated BFS
+engine and is ~3–5× faster for deep transitive paths.
 
 ### 7.3 SPARQL 1.2 Draft Features
 
