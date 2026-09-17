@@ -217,6 +217,31 @@ pub trait SourceConnection: Send {
     /// `MAX(column)` of `table`, as a lexical value, for incremental runs.
     fn max_watermark(&mut self, table: &str, column: &str) -> Result<Option<String>, SourceError>;
 
+    /// Column sets that are unique in `table`, primary key first.
+    ///
+    /// A join planner needs this and nothing else: a join whose parent columns
+    /// cover a unique key matches at most one parent row, so it can be pushed
+    /// into the child's query without duplicating child rows. The default
+    /// derives it from [`Self::introspect`]; a connector whose introspection is
+    /// expensive (row estimates, comments) should override it with a cheaper
+    /// catalogue query.
+    fn unique_keys(&mut self, table: &str) -> Result<Vec<Vec<String>>, SourceError> {
+        let tables = self.introspect()?;
+        let Some(t) = tables.iter().find(|t| t.name == table) else {
+            return Ok(Vec::new());
+        };
+        let mut keys = Vec::new();
+        if !t.primary_key.is_empty() {
+            keys.push(t.primary_key.clone());
+        }
+        for index in &t.indexes {
+            if index.unique && !index.columns.is_empty() && !keys.contains(&index.columns) {
+                keys.push(index.columns.clone());
+            }
+        }
+        Ok(keys)
+    }
+
     /// The server's version string, when the dialect reports one.
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {
         Ok(None)

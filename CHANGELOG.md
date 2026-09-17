@@ -278,11 +278,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   outside `OTS_REMOTE_ALLOWLIST` and a file-backed datasource outside
   `OTS_SOURCES_DIR` are all refused.
 - **RML: relational logical sources.** `rr:tableName` / `rml:query` over a
-  registered datasource, streamed in batches; `rr:parentTriplesMap` joins
-  resolved by a bounded hash index; R2RML natural datatypes for bare column
-  references; and an RML-FNML function for enumerations with an explicit
+  registered datasource, streamed in batches; R2RML natural datatypes for bare
+  column references; and an RML-FNML function for enumerations with an explicit
   policy for values the map does not cover (keep as a literal so SHACL flags
   it, omit, or mint from an absolute template).
+- **Join planning.** `rr:parentTriplesMap` is pushed into the child's query
+  when the catalogue proves the parent's join columns cover a unique key — so
+  the join cannot duplicate a child row — and falls back to a bounded hash
+  index otherwise. Pushing down on a non-unique key would multiply the child
+  row and re-emit its own triples once per match, so the planner declines
+  unless it can prove otherwise.
+- **YARRRML authoring.** A mapping may be submitted as `yarrrml` instead of
+  `rml` and is translated on the way in; only RML is stored, so there is one
+  representation to version, diff, gate and execute. Includes a code-list
+  extension for SQL enumerations. Constructs outside the translated subset are
+  errors naming the construct, not silent omissions.
+- **Incremental runs.** `mode: "watermark"` copies the graph in production,
+  re-maps only the rows past the recorded cursor, and replaces those entities
+  wholesale — so the candidate is still a complete graph and the SHACL gate,
+  the atomic swap and rollback all behave as they do for a full run. The cursor
+  lives in the run log, so a rollback cannot silently strip rows it has passed.
+- **LDES members from runs.** A run whose dataset has a stream enabled now
+  publishes the entities it wrote, after the swap. A full run publishes every
+  entity, an incremental one only what moved. Previously a materialisation run
+  published nothing at all.
+- **SHACL Studio: prefixes, links and the editor.** Shape-graph Turtle is
+  served with an `@prefix` header resolved from the instance's prefix registry,
+  so IRIs read as CURIEs instead of full `<http://…>` in both the source view
+  and the visual builder; only namespaces the graph actually uses are declared.
+  The Studio pages now shorten IRIs through the shared helper (with the full
+  IRI on hover) instead of four private last-segment truncators, and resolve
+  dataset names instead of showing raw ids. A dataset's "effective shapes" link
+  pointed at a route that does not exist and went to a blank page. The editor
+  gains line wrapping, a Turtle/SHACL completer, parse errors as positioned
+  diagnostics, Cmd-S, an unsaved-changes guard, and a per-save revision message
+  (every revision previously read "Edited").
 - **OTL-scale benchmark.** `examples/scale_otl.rs` generates asset-shaped
   data at scale and measures load, six query shapes (cache off), SHACL over
   every asset and a concurrent writers-plus-readers phase;

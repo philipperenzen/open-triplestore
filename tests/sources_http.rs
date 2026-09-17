@@ -851,6 +851,38 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
         "the deleted run is gone with its graph"
     );
 
+    // Deleting the run `previous` pointed at must not leave a rollback target
+    // that no longer exists: the pointer is cleared with the run.
+    let (_, src, txt) = req(
+        &app,
+        Method::GET,
+        "/api/sources/legacy",
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        src["production"]["run"], run1_id,
+        "production is untouched by the delete: {txt}"
+    );
+    assert!(
+        src.get("previous").is_none(),
+        "the dangling previous pointer was cleared: {txt}"
+    );
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/runs/{run1_id}/rollback"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::BAD_REQUEST,
+        "with nothing to roll back to, rollback refuses rather than dangling: {txt}"
+    );
+
     // Mapping versions: a PUT freezes a new version; runs keep pointing at the old one.
     let (st, m2, txt) = req(
         &app,
@@ -1017,7 +1049,8 @@ async fn run_refuses_a_mapping_bound_to_another_source() {
     )
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
-    // Watermark mode is a later phase and says so.
+    // An incremental run builds on the graph in production; without one there
+    // is nothing to build on, and it says so rather than silently running full.
     let (st, _, txt) = req(
         &app,
         Method::POST,
@@ -1026,5 +1059,211 @@ async fn run_refuses_a_mapping_bound_to_another_source() {
         json!({ "mapping": "alpha-map", "mode": "watermark" }),
     )
     .await;
-    assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{txt}");
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(
+        txt.contains("full"),
+        "the message names the way forward: {txt}"
+    );
+}
+
+#[tokio::test]
+async fn a_watermark_run_re_maps_only_what_moved_and_keeps_the_rest() {
+    // A table-sourced mapping, so the catalogue can confirm the cursor column
+    // exists. A `rml:query` source is opaque to it and is read in full.
+    const TABLE_MAPPING: &str = r#"
+@prefix rr:  <http://www.w3.org/ns/r2rml#> .
+@prefix rml: <http://semweb.mmlab.be/ns/rml#> .
+@prefix ex:  <http://example.org/products/ontology#> .
+
+ex:ProductsMap a rr:TriplesMap ;
+  rml:logicalSource [ rml:source <urn:source:inc> ; rr:tableName "products" ] ;
+  rr:subjectMap [ rr:template "http://example.org/products/product_{product_id}" ; rr:class ex:Product ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "name" ] ] .
+
+ex:SuppliersMap a rr:TriplesMap ;
+  rml:logicalSource [ rml:source <urn:source:inc> ; rr:tableName "suppliers" ] ;
+  rr:subjectMap [ rr:template "http://example.org/products/supplier_{supplier_id}" ; rr:class ex:Supplier ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "name" ] ] .
+"#;
+    sources_dir();
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let db = fresh_sqlite("incremental");
+    let ds = create_dataset(&app, &token, "incremental").await;
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources",
+        &token,
+        source_body("inc", &db, "env:OTS_TEST_DB_PASSWORD", Some(&ds)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/mappings",
+        &token,
+        json!({ "id": "inc-map", "title": "Incremental", "rml": TABLE_MAPPING }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "register mapping: {txt}");
+
+    // A full run establishes production and records the cursor.
+    let (st, full, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources/inc/runs",
+        &token,
+        json!({ "mapping": "inc-map", "mode": "full" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    assert_eq!(full["rowsExtracted"], 5, "3 products + 2 suppliers");
+    assert_eq!(
+        full["watermark"], "2026-01-03",
+        "a full run records the cursor an incremental one resumes from: {txt}"
+    );
+    let full_triples = full["triplesProduced"].as_u64().unwrap();
+
+    // One row changes and one appears, both past the cursor.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "UPDATE products SET name = 'Bolt Mk2', updated_at = '2026-02-01' WHERE product_id = 1;
+             INSERT INTO products VALUES (4, 'Rivet', 0.40, 'active', 20, '2026-02-02');",
+        )
+        .unwrap();
+    }
+
+    let (st, inc, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources/inc/runs",
+        &token,
+        json!({ "mapping": "inc-map", "mode": "watermark" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "incremental run: {txt}");
+    assert_eq!(inc["status"], "succeeded");
+    assert_eq!(inc["mode"], "watermark");
+    assert_eq!(
+        inc["rowsExtracted"], 4,
+        "2 changed products + 2 suppliers, which carry no watermark column: {txt}"
+    );
+    assert_eq!(inc["watermark"], "2026-02-02", "the cursor advanced: {txt}");
+
+    let graph = inc["graph"].as_str().unwrap().to_string();
+    let ask = |pattern: &str| {
+        format!(
+            "PREFIX ex: <http://example.org/products/ontology#> ASK {{ GRAPH <{graph}> {{ {pattern} }} }}"
+        )
+    };
+
+    // The untouched rows came along from the previous graph…
+    let v = sparql_json(
+        &app,
+        &token,
+        &ask("<http://example.org/products/product_2> ex:name \"Nut\" ."),
+    )
+    .await;
+    assert_eq!(
+        v["boolean"], true,
+        "an unchanged entity survives the increment"
+    );
+    // …the changed one was re-mapped…
+    let v = sparql_json(
+        &app,
+        &token,
+        &ask("<http://example.org/products/product_1> ex:name \"Bolt Mk2\" ."),
+    )
+    .await;
+    assert_eq!(
+        v["boolean"], true,
+        "the changed entity carries its new value"
+    );
+    // …and its stale value is gone, rather than sitting beside the new one.
+    let v = sparql_json(
+        &app,
+        &token,
+        &ask("<http://example.org/products/product_1> ex:name \"Bolt\" ."),
+    )
+    .await;
+    assert_eq!(
+        v["boolean"], false,
+        "the superseded value was replaced, not merged"
+    );
+    // …and the new row is there.
+    let v = sparql_json(
+        &app,
+        &token,
+        &ask("<http://example.org/products/product_4> ex:name \"Rivet\" ."),
+    )
+    .await;
+    assert_eq!(v["boolean"], true);
+
+    // The candidate is a COMPLETE graph, so the gate, the swap and rollback all
+    // behave as they do for a full run.
+    let inc_id = inc["id"].as_str().unwrap().to_string();
+    let (_, detail, _) = req(
+        &app,
+        Method::GET,
+        &format!("/api/runs/{inc_id}"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert!(
+        detail["graphTriples"].as_u64().unwrap() > full_triples,
+        "the increment added an entity to the whole graph, it did not replace it: {detail}"
+    );
+    let (_, src, _) = req(&app, Method::GET, "/api/sources/inc", &token, Value::Null).await;
+    assert_eq!(src["production"]["run"], inc_id);
+
+    let (st, rb, txt) = req(
+        &app,
+        Method::POST,
+        &format!("/api/runs/{inc_id}/rollback"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{txt}");
+    assert_eq!(
+        rb["production"]["run"], full["id"],
+        "rollback returns the pre-increment graph"
+    );
+}
+
+#[tokio::test]
+async fn a_watermark_run_needs_a_watermark_column() {
+    sources_dir();
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let db = fresh_sqlite("nocursor");
+    let mut body = source_body("nocursor", &db, "env:OTS_TEST_DB_PASSWORD", None);
+    body.as_object_mut().unwrap().remove("watermarkColumn");
+    let (st, _, txt) = req(&app, Method::POST, "/api/sources", &token, body).await;
+    assert_eq!(st, StatusCode::CREATED, "{txt}");
+    register_mapping(&app, &token, "nocursor-map", "nocursor", None).await;
+    let (st, _, _) = req(
+        &app,
+        Method::POST,
+        "/api/sources/nocursor/runs",
+        &token,
+        json!({ "mapping": "nocursor-map", "mode": "full" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    let (st, _, txt) = req(
+        &app,
+        Method::POST,
+        "/api/sources/nocursor/runs",
+        &token,
+        json!({ "mapping": "nocursor-map", "mode": "watermark" }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{txt}");
+    assert!(txt.contains("watermarkColumn"), "{txt}");
 }

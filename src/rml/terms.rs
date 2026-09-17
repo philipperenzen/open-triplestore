@@ -141,6 +141,22 @@ fn natural_datatype_for(tm: &TermMap, kinds: Option<&Kinds>) -> Option<&'static 
     natural_datatype(*kinds?.get(col)?)
 }
 
+/// Evaluate a term map that can only produce an IRI, in N-Triples form.
+///
+/// Separate from [`eval_term`] because it needs no blank-node state: the join
+/// planner builds a parent subject out of columns carried along on a child row,
+/// and a blank-node subject there would mint one node per CHILD row instead of
+/// per parent row. Returns `None` for any term map that is not IRI-typed, which
+/// is how the planner declines to push such a join down.
+pub fn eval_iri_term(tm: &TermMap, row: &Row, kinds: Option<&Kinds>) -> Option<String> {
+    if tm.term_type != TermType::IRI {
+        return None;
+    }
+    let mut unused = BlankNodes::new("unused");
+    let mut no_bnodes = HashMap::new();
+    eval_term(tm, row, kinds, &mut unused, &mut no_bnodes)
+}
+
 /// Evaluate a term map that must yield an IRI, returning it without the angle
 /// brackets (for a graph name, or a run's target graph).
 pub fn eval_iri(
@@ -483,6 +499,31 @@ mod tests {
             )
             .unwrap(),
             "<http://x/has%20space>"
+        );
+    }
+
+    #[test]
+    fn eval_iri_term_refuses_anything_that_is_not_an_iri() {
+        let r = row(&[("id", "7")]);
+        let iri = term(TermMapKind::Template("http://x/{id}".into()), TermType::IRI);
+        assert_eq!(eval_iri_term(&iri, &r, None).unwrap(), "<http://x/7>");
+        // A blank-node subject must not be minted from a child row, so the
+        // planner is told "no" rather than handed a fresh node.
+        let bn = term(TermMapKind::Template("n{id}".into()), TermType::BlankNode);
+        assert_eq!(eval_iri_term(&bn, &r, None), None);
+        let lit = term(TermMapKind::Reference("id".into()), TermType::Literal);
+        assert_eq!(eval_iri_term(&lit, &r, None), None);
+        // A column the row does not supply still yields nothing.
+        assert_eq!(
+            eval_iri_term(
+                &term(
+                    TermMapKind::Template("http://x/{nope}".into()),
+                    TermType::IRI
+                ),
+                &r,
+                None
+            ),
+            None
         );
     }
 

@@ -10,6 +10,8 @@
 //! re-runs the mapping, so it cannot fail on a source that has since changed
 //! or gone away.
 
+use std::collections::HashSet;
+
 use crate::auth::db::AuthDb;
 use crate::auth::models::GraphKind;
 use crate::secrets::Secret;
@@ -31,8 +33,6 @@ pub struct RunContext<'a> {
 pub enum RunError {
     /// The request cannot be carried out as asked (400).
     BadRequest(String),
-    /// Not in this phase (501).
-    NotImplemented(String),
     /// Materialised but refused by the write gate (422). The candidate graph
     /// named by `run.graph` is kept for inspection.
     Gate {
@@ -46,9 +46,7 @@ pub enum RunError {
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunError::BadRequest(m) | RunError::NotImplemented(m) | RunError::Failed(m) => {
-                f.write_str(m)
-            }
+            RunError::BadRequest(m) | RunError::Failed(m) => f.write_str(m),
             RunError::Gate { .. } => f.write_str("the SHACL write gate refused the run"),
         }
     }
@@ -114,6 +112,210 @@ pub fn connect(
     })
 }
 
+/// Compare two watermark values the way their column orders them.
+///
+/// Numeric when both parse as numbers — a lexicographic `"9" > "10"` would
+/// stall an integer-keyed cursor forever — and lexicographic otherwise, which
+/// is correct for ISO-8601 timestamps and for zero-padded identifiers.
+fn watermark_max(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => {
+            let greater = match (a.parse::<f64>(), b.parse::<f64>()) {
+                (Ok(x), Ok(y)) => x >= y,
+                _ => a >= b,
+            };
+            Some(if greater { a } else { b })
+        }
+        (some, None) | (None, some) => some,
+    }
+}
+
+/// The tables a mapping reads that actually carry `column`, and the highest
+/// value the source currently holds for it.
+///
+/// One introspection call, so the cursor is read from the catalogue rather than
+/// guessed from the mapping.
+fn watermark_state(
+    mapping: &crate::rml::model::RmlMapping,
+    conn: &mut dyn ots_plugin_api::sources::SourceConnection,
+    column: &str,
+) -> Result<(HashSet<String>, Option<String>), String> {
+    let wanted: HashSet<String> = mapping
+        .triples_maps
+        .iter()
+        .filter(|tm| tm.logical_source.query.is_none())
+        .filter_map(|tm| tm.logical_source.table_name.clone())
+        .collect();
+    let tables = conn
+        .introspect()
+        .map_err(|e| format!("reading the schema to locate the watermark column: {e}"))?;
+
+    let mut carrying = HashSet::new();
+    let mut high: Option<String> = None;
+    for t in tables.iter().filter(|t| wanted.contains(&t.name)) {
+        if !t.columns.iter().any(|c| c.name == column) {
+            continue;
+        }
+        carrying.insert(t.name.clone());
+        high = watermark_max(high, conn.max_watermark(&t.name, column).ok().flatten());
+    }
+    if carrying.is_empty() {
+        return Err(format!(
+            "no table this mapping reads has a column named '{column}', so there is nothing to \
+             track incrementally"
+        ));
+    }
+    Ok((carrying, high))
+}
+
+/// Replace, per IRI subject, whatever `delta` holds into `target`.
+///
+/// An incremental run re-maps a changed row in full, so the row's previous
+/// triples have to go: merging would leave the old value of every field the
+/// update changed sitting beside the new one. Blank-node subjects are not
+/// matched across graphs, so an entity identified only by a blank node is
+/// appended rather than replaced.
+fn apply_delta(store: &TripleStore, target: &str, delta: &str) -> Result<(), String> {
+    let t = crate::store::escape_sparql_iri(target);
+    let d = crate::store::escape_sparql_iri(delta);
+    store
+        .update(&format!(
+            "DELETE {{ GRAPH <{t}> {{ ?s ?p ?o }} }} \
+             WHERE {{ GRAPH <{d}> {{ ?s ?x ?y }} GRAPH <{t}> {{ ?s ?p ?o }} }};\n\
+             INSERT {{ GRAPH <{t}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{d}> {{ ?s ?p ?o }} }}"
+        ))
+        .map_err(|e| format!("applying the increment into <{target}>: {e}"))
+}
+
+/// Copy every triple of `from` into `to`.
+fn copy_graph(store: &TripleStore, from: &str, to: &str) -> Result<(), String> {
+    let f = crate::store::escape_sparql_iri(from);
+    let t = crate::store::escape_sparql_iri(to);
+    store
+        .update(&format!(
+            "INSERT {{ GRAPH <{t}> {{ ?s ?p ?o }} }} WHERE {{ GRAPH <{f}> {{ ?s ?p ?o }} }}"
+        ))
+        .map_err(|e| format!("copying <{from}> into <{to}>: {e}"))
+}
+
+/// The IRI subjects a graph names.
+fn subjects_of(store: &TripleStore, graph: &str) -> Vec<String> {
+    use oxigraph::sparql::QueryResults;
+    let g = crate::store::escape_sparql_iri(graph);
+    let Ok(QueryResults::Solutions(sols)) = store.query(&format!(
+        "SELECT DISTINCT ?s WHERE {{ GRAPH <{g}> {{ ?s ?p ?o }} FILTER(isIRI(?s)) }}"
+    )) else {
+        return Vec::new();
+    };
+    sols.flatten()
+        .filter_map(|b| match b.get("s") {
+            Some(oxigraph::model::Term::NamedNode(n)) => Some(n.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Publish the entities a run changed to the dataset's LDES stream.
+///
+/// Gated on the stream being enabled, so a deployment that does not publish
+/// pays nothing. Only the changed entities are published: a run graph is new
+/// every time, so the store's own before/after capture — which diffs one graph
+/// against itself — cannot see what actually moved.
+fn publish_members(
+    ctx: RunContext<'_>,
+    source: &SqlSource,
+    graph: &str,
+    entities: &[String],
+) -> u64 {
+    let Some(dataset_id) = source.dataset.as_deref() else {
+        return 0;
+    };
+    match crate::ldes::store::stream(ctx.auth_db, dataset_id) {
+        Ok(Some(cfg)) if cfg.enabled => {}
+        _ => return 0,
+    }
+    let now = registry::now();
+    let mut published = 0u64;
+    for entity in entities {
+        let nt = crate::ldes::capture::describe_entity(ctx.store, graph, entity);
+        if nt.is_empty() {
+            continue;
+        }
+        if crate::ldes::store::insert_member(
+            ctx.auth_db,
+            dataset_id,
+            entity,
+            graph,
+            &now,
+            false,
+            &nt,
+        )
+        .is_ok()
+        {
+            published += 1;
+        }
+    }
+    published
+}
+
+/// Build an incremental candidate: the graph in production, with the entities
+/// whose rows moved past the cursor re-mapped over the top.
+///
+/// Returns the row/triple counts of the INCREMENT (not of the whole graph), the
+/// entities it replaced, and the cursor the next run resumes from.
+#[allow(clippy::too_many_arguments)]
+fn materialise_increment(
+    ctx: RunContext<'_>,
+    rml: &crate::rml::model::RmlMapping,
+    conn: &mut dyn ots_plugin_api::sources::SourceConnection,
+    quote: &dyn Fn(&str) -> String,
+    graph: &str,
+    previous: &RunPointer,
+    column: &str,
+    cursor: &str,
+    batch_size: usize,
+    run_id: &str,
+) -> Result<(crate::rml::sql::SqlOutcome, Vec<String>, Option<String>), String> {
+    let (tables, high) = watermark_state(rml, conn, column)?;
+    let scratch = format!("{graph}:delta");
+    let filter = crate::rml::sql::RowFilter {
+        column: column.to_string(),
+        greater_than: cursor.to_string(),
+        tables,
+    };
+
+    let outcome = crate::rml::sql::execute_relational_filtered(
+        rml,
+        conn,
+        quote,
+        ctx.store,
+        &scratch,
+        batch_size,
+        run_id,
+        Some(&filter),
+    );
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = ctx.store.bulk_delete_graphs(&[scratch.as_str()]);
+            return Err(e);
+        }
+    };
+
+    let changed = subjects_of(ctx.store, &scratch);
+    let result = copy_graph(ctx.store, &previous.graph, graph)
+        .and_then(|()| apply_delta(ctx.store, graph, &scratch));
+    let _ = ctx.store.bulk_delete_graphs(&[scratch.as_str()]);
+    result?;
+
+    // The cursor only advances past rows this run actually consumed.
+    Ok((
+        outcome,
+        changed,
+        watermark_max(Some(cursor.to_string()), high),
+    ))
+}
+
 /// Run `mapping` against `source` and, if the gate passes, promote the result.
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
@@ -125,17 +327,41 @@ pub fn execute(
     batch_size: usize,
     actor: Option<&str>,
 ) -> Result<RunRecord, RunError> {
-    if mode == RunMode::Watermark {
-        return Err(RunError::NotImplemented(
-            "watermark runs arrive with incremental sync; use mode 'full'".to_string(),
-        ));
-    }
     if mapping.source_id != source.id {
         return Err(RunError::BadRequest(format!(
             "mapping '{}' is registered against datasource '{}', not '{}'",
             mapping.id, mapping.source_id, source.id
         )));
     }
+
+    // An incremental run builds on the graph currently in production and needs
+    // a cursor to resume from. Both come from the run log, so the first run of
+    // a source is always a full one.
+    let increment = if mode == RunMode::Watermark {
+        let column = source.watermark_column.clone().ok_or_else(|| {
+            RunError::BadRequest(format!(
+                "datasource '{}' declares no watermarkColumn, so there is nothing to read \
+                 incrementally",
+                source.id
+            ))
+        })?;
+        let previous = source.production.clone().ok_or_else(|| {
+            RunError::BadRequest(
+                "an incremental run builds on the graph in production, and this datasource has \
+                 none yet; run mode 'full' first"
+                    .to_string(),
+            )
+        })?;
+        let cursor = registry::last_watermark(ctx.store, &source.id).ok_or_else(|| {
+            RunError::BadRequest(
+                "no previous run recorded a watermark to resume from; run mode 'full' first"
+                    .to_string(),
+            )
+        })?;
+        Some((column, previous, cursor))
+    } else {
+        None
+    };
 
     let rml = mappings::load(ctx.store, &mapping.id, mapping.version)
         .map_err(|e| RunError::BadRequest(e.to_string()))?;
@@ -154,15 +380,41 @@ pub fn execute(
     let clock = std::time::Instant::now();
 
     let quote = |ident: &str| connector.quote_identifier(ident);
-    let outcome = crate::rml::execute_relational(
-        &rml,
-        conn.as_mut(),
-        &quote,
-        ctx.store,
-        &graph,
-        batch_size,
-        &run_id,
-    );
+    // A full run materialises everything into the fresh graph. An incremental
+    // one copies the graph in production and replaces only the entities whose
+    // rows moved — so the candidate is still a complete graph, and the gate,
+    // the swap and rollback all keep working exactly as they do for a full run.
+    let materialised = match &increment {
+        None => {
+            let watermark = source.watermark_column.as_deref().and_then(|c| {
+                watermark_state(&rml, conn.as_mut(), c)
+                    .map(|(_, high)| high)
+                    .unwrap_or(None)
+            });
+            crate::rml::execute_relational(
+                &rml,
+                conn.as_mut(),
+                &quote,
+                ctx.store,
+                &graph,
+                batch_size,
+                &run_id,
+            )
+            .map(|o| (o, Vec::new(), watermark))
+        }
+        Some((column, previous, cursor)) => materialise_increment(
+            ctx,
+            &rml,
+            conn.as_mut(),
+            &quote,
+            &graph,
+            previous,
+            column,
+            cursor,
+            batch_size,
+            &run_id,
+        ),
+    };
 
     let mut record = RunRecord {
         id: run_id.clone(),
@@ -178,7 +430,7 @@ pub fn execute(
         ..Default::default()
     };
 
-    let outcome = match outcome {
+    let (outcome, changed, watermark) = match materialised {
         Ok(o) => o,
         Err(e) => {
             // A partial candidate graph is not evidence of anything; drop it.
@@ -194,6 +446,7 @@ pub fn execute(
     };
     record.rows_extracted = outcome.rows;
     record.triples_produced = outcome.triples;
+    record.watermark = watermark;
 
     // ── The write gate applies to the candidate graph, not to every batch ──
     let report = gate(ctx, source, mapping, &graph).map_err(RunError::Failed)?;
@@ -217,8 +470,17 @@ pub fn execute(
     }
 
     record.status = Some(RunStatus::Succeeded);
-    registry::put_run(ctx.store, &record).map_err(RunError::Failed)?;
     promote(ctx, source, &record).map_err(RunError::Failed)?;
+    // Published after the swap, so a member never points at a graph that is not
+    // yet the one being served. A full run publishes every entity it wrote; an
+    // incremental one publishes only what moved.
+    let entities = if increment.is_some() {
+        changed
+    } else {
+        subjects_of(ctx.store, &graph)
+    };
+    record.ldes_members = publish_members(ctx, source, &graph, &entities);
+    registry::put_run(ctx.store, &record).map_err(RunError::Failed)?;
     commit(ctx, source, &record, "materialised and promoted");
     Ok(record)
 }

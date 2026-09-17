@@ -377,6 +377,53 @@ impl SourceConnection for SqliteConnection {
             .flatten())
     }
 
+    /// Overridden so the join planner does not trigger the row-estimate
+    /// `COUNT(*)` that full introspection runs per table.
+    fn unique_keys(&mut self, table: &str) -> Result<Vec<Vec<String>>, SourceError> {
+        let q = quote(table);
+        let mut keys: Vec<Vec<String>> = Vec::new();
+
+        let mut pk: Vec<(i64, String)> = Vec::new();
+        for c in self.strings(&format!("PRAGMA table_info({q})"))? {
+            let name = c.get(1).cloned().flatten().unwrap_or_default();
+            let pos = c
+                .get(5)
+                .cloned()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
+            if pos > 0 {
+                pk.push((pos, name));
+            }
+        }
+        pk.sort_by_key(|(pos, _)| *pos);
+        if !pk.is_empty() {
+            keys.push(pk.into_iter().map(|(_, c)| c).collect());
+        }
+
+        for i in self.strings(&format!("PRAGMA index_list({q})"))? {
+            if i.get(2).cloned().flatten().as_deref() != Some("1") {
+                continue;
+            }
+            let idx_name = i.get(1).cloned().flatten().unwrap_or_default();
+            // A partial unique index does not constrain every row, so it is not
+            // a key the planner may rely on. `PRAGMA index_list` reports that in
+            // its `partial` column.
+            if i.get(4).cloned().flatten().as_deref() == Some("1") {
+                continue;
+            }
+            let cols: Vec<String> = self
+                .strings(&format!("PRAGMA index_info({})", quote(&idx_name)))?
+                .into_iter()
+                .filter_map(|r| r.get(2).cloned().flatten())
+                .collect();
+            if !cols.is_empty() && !keys.contains(&cols) {
+                keys.push(cols);
+            }
+        }
+        Ok(keys)
+    }
+
     fn server_version(&mut self) -> Result<Option<String>, SourceError> {
         Ok(self
             .strings("SELECT sqlite_version()")?
@@ -533,6 +580,25 @@ mod tests {
             panic!("a missing database file cannot open");
         };
         assert!(!err.to_string().contains("9f1c"), "path leaked: {err}");
+    }
+
+    #[test]
+    fn unique_keys_reports_the_primary_key_and_unique_indexes() {
+        let (_d, p) = fixture();
+        let mut c = SqliteConnector.connect(&p).unwrap();
+        let keys = c.unique_keys("child").unwrap();
+        assert!(
+            keys.contains(&vec!["cid".to_string()]),
+            "primary key: {keys:?}"
+        );
+        assert!(
+            keys.contains(&vec!["name".to_string()]),
+            "unique index: {keys:?}"
+        );
+        // A non-unique column is not a key, and an unknown table is empty
+        // rather than an error — the planner treats both as "cannot push down".
+        assert!(!keys.contains(&vec!["parent_id".to_string()]), "{keys:?}");
+        assert!(c.unique_keys("no_such_table").unwrap().is_empty());
     }
 
     #[test]

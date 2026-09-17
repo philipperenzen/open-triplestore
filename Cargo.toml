@@ -279,6 +279,11 @@ quick-xml = "0.42"
 # Seed bundle manifests (src/seed_bundles/manifest.rs)
 toml = "1"
 
+# YARRRML and the legacy sql2rdf mapping format are YAML (src/sources/yarrrml).
+# A parser, not a serde data format: those documents have variable shape, so
+# they are walked as a tree rather than deserialised into fixed structs.
+yaml-rust2 = "0.13"
+
 # Compile-time plugin architecture (src/plugins.rs). The API crate is always
 # present (the registry/mount code needs its types); individual plugin crates
 # are optional, enabled by their own `plugin-<name>` feature.

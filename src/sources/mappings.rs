@@ -38,8 +38,10 @@ pub enum MappingError {
          write gate validates and the role swap promotes, so every triple has to land in it"
     )]
     GraphMap,
-    #[error("YARRRML authoring is not available yet; submit RML (Turtle) as 'rml'")]
-    YarrrmlUnavailable,
+    #[error("supply either 'rml' or 'yarrrml', not both — they would disagree")]
+    BothForms,
+    #[error("the YARRRML could not be translated: {0}")]
+    Yarrrml(String),
     #[error("{0}")]
     Storage(String),
 }

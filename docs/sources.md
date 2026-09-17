@@ -146,7 +146,7 @@ curl -X POST http://localhost:7878/api/sources \
 | `credential` | A secret **reference**. Omit it entirely when the dialect needs none |
 | `readOnly` | Must be `true` |
 | `statementTimeoutMs` | Per-statement budget. Required in production |
-| `watermarkColumn` | Column incremental runs will read (a later phase) |
+| `watermarkColumn` | Column incremental runs resume from. Must be monotonic — a timestamp or an ascending id |
 | `allowModelAssist` | Whether the external mapping proposer may send this source's *schema metadata* to a model. Default `false` |
 | `dataset` | Dataset the run graphs are registered to, so they appear in its graph list and SPARQL scope |
 
@@ -192,6 +192,66 @@ curl -X POST http://localhost:7878/api/mappings \
 The datasource is read from the RML itself (`rml:source <urn:source:…>`), so
 `source` is optional; supplying it only pins what the mapping already says,
 and a disagreement is an error.
+
+### Authoring in YARRRML
+
+`yarrrml` is accepted instead of `rml` and translated on the way in. **Only RML
+is stored**, so there is exactly one mapping representation to version, diff,
+gate and execute. The YAML is not kept and not round-tripped: a stored mapping
+is RDF, and pretending otherwise would create a second source of truth.
+
+```yaml
+prefixes:
+  ex: http://example.org/products/ontology#
+  prod: http://example.org/products/
+
+mappings:
+  product:
+    table: products                     # or `query:`, or a named `sources:` entry
+    s: prod:product_$(product_id)
+    po:
+      - [a, ex:Product]
+      - [ex:name, $(name)]
+      - [ex:hasPrice, $(price), xsd:decimal]
+      - p: ex:suppliedBy
+        o:
+          mapping: supplier
+          condition:
+            function: equal
+            parameters:
+              - [str1, $(supplier_id)]
+              - [str2, $(supplier_id)]
+      - p: ex:hasStatus                 # an extension — see below
+        o:
+          value: $(status)
+          normalize: lower_trim
+          values: {active: ex:Active, retired: ex:Retired}
+          unmapped: literal
+  supplier:
+    table: suppliers
+    s: prod:supplier_$(supplier_id)
+    po: [[ex:name, $(name)]]
+```
+
+A mapping with no source of its own binds to the datasource it is being
+registered against, which is the common case when authoring from the Sources
+workspace.
+
+Translated: `prefixes`; named and inline `sources` (`access` naming a
+datasource, with `table` or `query`); `s`/`subject` and `po`/`predicateobjects`;
+the `[p, o]`, `[p, o, datatype]` and `{p:, o:}` forms; `a` for `rdf:type`;
+`$(column)` references and templates; constant IRIs; the `~iri` and `~lang`
+suffixes; and joins through `o: {mapping:, condition:}` with `equal`.
+
+One extension beyond the YARRRML spec, because the engine supports it and a SQL
+source needs it: the code-list form shown above (`values:`, `normalize:`,
+`unmapped:`) translates to the same RML-FNML function a hand-written mapping
+would use.
+
+Anything outside that subset is an error naming the construct, rather than a
+silent omission that surfaces later as missing triples. In particular, a
+document that declares two sources for one mapping, or that chooses its own
+graph, is refused with the reason.
 
 Three rules a mapping must satisfy:
 
@@ -251,13 +311,28 @@ type its SQL type implies (`integer`, `decimal`, `double`, `boolean`, `date`,
 literals — inventing a datatype for them would be a claim the source never
 made. An explicit `rr:datatype` always wins.
 
-**Joins** are resolved with a hash index: the parent triples map's logical
-source is streamed once and its subject terms are indexed by join key, then
-the child streams and looks up. The index is bounded by
-`OTS_SOURCES_JOIN_MAX_ROWS` (default 1 000 000 distinct keys) and a mapping
-that would exceed it is refused by name rather than exhausting memory. A NULL
-join key never matches, following SQL. Pushing the join into the source query
-is a worthwhile optimisation for wide parents and is not implemented yet.
+**Joins** are planned per reference, one of two ways:
+
+- **Pushed down** when the parent's join columns cover a unique key of the
+  parent table. A `LEFT JOIN` then matches at most one parent row, so it cannot
+  duplicate a child row, and the parent's subject columns ride along on the
+  child's own query. No second scan of the parent, and no memory held for it.
+- **Hash index** otherwise: the parent's logical source is streamed once and its
+  subject terms are indexed by join key, then the child streams and looks up.
+  The index is bounded by `OTS_SOURCES_JOIN_MAX_ROWS` (default 1 000 000
+  distinct keys); a mapping that would exceed it is refused by name rather than
+  exhausting memory.
+
+The unique-key condition is what makes the two interchangeable. Pushing a join
+down on a non-unique parent key would multiply the child row — changing the row
+count, inflating the triple count, and re-emitting every one of the child's own
+predicate-object maps once per match. So a join is pushed down only when the
+catalogue proves it safe: the parent must read a named table (an `rml:query`
+parent is opaque), its join columns must cover a primary key or a unique index,
+and its subject must be an IRI (a blank-node subject has to be minted once per
+parent row, not once per child row).
+
+A NULL join key never matches, following SQL.
 
 ### Enumerations
 
@@ -357,8 +432,54 @@ it is not a run.
 | `DELETE /api/runs/:id` | Delete the run and its graph. **409** while it is in production |
 | `GET /api/sources/metrics` | Rows extracted, triples produced, durations, run outcomes and the SHACL pass rate |
 
-`mode: "watermark"` answers **501**: incremental runs arrive with the
-LDES-fed sync in a later phase.
+### Incremental runs
+
+`mode: "watermark"` re-maps only the rows that moved. It needs two things the
+first run establishes: a `watermarkColumn` on the datasource, and a graph in
+production. Until both exist, it answers 400 naming which is missing rather
+than quietly running a full one.
+
+```bash
+curl -X POST http://localhost:7878/api/sources/legacy-assets/runs \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mapping": "products-map", "mode": "watermark"}'
+```
+
+What it does differently:
+
+1. The graph currently in production is **copied** into the fresh run graph.
+2. Only rows past the cursor are read — the child query is bounded by
+   `<watermarkColumn> > <last watermark>`. A triples map whose source the
+   catalogue cannot confirm carries that column (an `rml:query` source, or a
+   reference table that simply has not got it) is read in full.
+3. Those rows are re-mapped into a scratch graph, and every **IRI subject** it
+   names is replaced wholesale in the candidate. Merging instead would leave
+   the old value of every field the update changed sitting beside the new one.
+4. From there it is an ordinary run: the SHACL gate validates the whole
+   candidate graph, the swap is atomic, and rollback re-points.
+
+So an incremental run saves the expensive part — reading and mapping the whole
+source — while keeping every invariant a full run has. It still pays one
+graph-to-graph copy inside the store, which is what buys it the full-graph
+gate and a rollback target.
+
+The cursor comes from the run log, not from the datasource, so rolling back to
+an older graph does not silently strip rows the cursor has already passed. It
+advances only past rows a run actually consumed, and is reported as
+`watermark` on the run. Values are compared numerically when both parse as
+numbers, so an integer-keyed cursor does not stall at `"9" > "10"`.
+
+An entity identified only by a blank node is appended rather than replaced —
+blank nodes are not matched across graphs. Give an entity an IRI if incremental
+runs are to update it.
+
+### LDES
+
+When the bound dataset has a stream enabled, a run publishes the entities it
+wrote as stream members after the swap, so a member never points at a graph
+that is not yet being served. A full run publishes every entity; an incremental
+one publishes only what moved. With no stream enabled, nothing is published and
+the run pays nothing. The count is reported as `ldesMembers` on the run.
 
 ### Why provenance is served as Turtle
 
@@ -374,11 +495,10 @@ datasource is how a client reads that trail.
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **YARRRML authoring** — submit RML; `yarrrml` answers a clear 400.
-- **Incremental (watermark) runs** and the LDES feed they publish.
 - **Profiling, drift detection and dry-run classification** — the profile
   graph, the ontology profile endpoint and the mapping-defect/data-issue split.
-- **Join pushdown** into the source query. Joins work; they use a hash index.
+- **The legacy `mapping.sql2rdf.yaml` converter.** YARRRML is translated; the
+  older bespoke format is a separate one-time migration.
 - **PostgreSQL, MySQL and SQL Server connectors.** The trait and the registry
   are in place and SQLite exercises them; the drivers are plugins still to be
   written.

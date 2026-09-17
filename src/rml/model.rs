@@ -190,6 +190,32 @@ pub enum FunctionArg {
     Reference(String),
 }
 
+/// The `{column}` placeholders in a template, in order, de-duplicated.
+pub fn template_columns(template: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // An escaped brace is literal text, not a placeholder.
+            chars.next();
+            continue;
+        }
+        if c == '{' {
+            let mut col = String::new();
+            for inner in chars.by_ref() {
+                if inner == '}' {
+                    break;
+                }
+                col.push(inner);
+            }
+            if !col.is_empty() && !out.contains(&col) {
+                out.push(col);
+            }
+        }
+    }
+    out
+}
+
 /// A term map: constant, template, or column/reference.
 #[derive(Debug, Clone)]
 pub struct TermMap {
@@ -199,6 +225,18 @@ pub struct TermMap {
     pub datatype: Option<String>,
     /// Optional language tag for literals
     pub language: Option<String>,
+}
+
+impl TermMap {
+    /// The columns this term map reads. A join planner projects exactly these
+    /// from the parent side, rather than dragging the whole parent row along.
+    pub fn referenced_columns(&self) -> Vec<String> {
+        match &self.kind {
+            TermMapKind::Reference(c) => vec![c.clone()],
+            TermMapKind::Template(t) => template_columns(t),
+            TermMapKind::Constant(_) => Vec::new(),
+        }
+    }
 }
 
 /// How the term value is produced.
@@ -246,6 +284,34 @@ mod tests {
             ReferenceFormulation::from_iri("http://example.org/Custom"),
             ReferenceFormulation::Other(_)
         ));
+    }
+
+    #[test]
+    fn template_columns_skips_escapes_and_dedupes() {
+        assert_eq!(template_columns("http://x/{a}/{b}/{a}"), vec!["a", "b"]);
+        assert_eq!(template_columns("no placeholders"), Vec::<String>::new());
+        assert_eq!(template_columns(r"literal \{brace\} {c}"), vec!["c"]);
+    }
+
+    #[test]
+    fn referenced_columns_covers_every_term_map_kind() {
+        let tm = |kind| TermMap {
+            kind,
+            term_type: TermType::IRI,
+            datatype: None,
+            language: None,
+        };
+        assert_eq!(
+            tm(TermMapKind::Template("http://x/{a}/{b}".into())).referenced_columns(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            tm(TermMapKind::Reference("c".into())).referenced_columns(),
+            vec!["c"]
+        );
+        assert!(tm(TermMapKind::Constant("http://x/c".into()))
+            .referenced_columns()
+            .is_empty());
     }
 
     #[test]

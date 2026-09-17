@@ -402,6 +402,12 @@ pub struct RunRecord {
     pub conforms: Option<bool>,
     pub violations: u64,
     pub error: Option<String>,
+    /// The highest watermark this run consumed. The next incremental run
+    /// resumes from it, so it is the run's durable cursor.
+    pub watermark: Option<String>,
+    /// Entities the run published to the dataset's LDES stream, when one is
+    /// enabled.
+    pub ldes_members: u64,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -431,6 +437,10 @@ pub struct RunResponse {
     pub shacl: Option<ShaclSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The cursor the next incremental run resumes from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<String>,
+    pub ldes_members: u64,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -492,6 +502,8 @@ impl From<&RunRecord> for RunResponse {
                 violations: r.violations,
             }),
             error: r.error.clone(),
+            watermark: r.watermark.clone(),
+            ldes_members: r.ldes_members,
         }
     }
 }

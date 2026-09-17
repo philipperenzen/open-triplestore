@@ -482,6 +482,15 @@ pub fn put_run(store: &TripleStore, r: &RunRecord) -> Result<(), String> {
     if let Some(e) = &r.error {
         body.push_str(&format!("    ds:error {} ;\n", lit(e)));
     }
+    if let Some(w) = &r.watermark {
+        body.push_str(&format!("    ds:watermark {} ;\n", lit(w)));
+    }
+    if r.ldes_members > 0 {
+        body.push_str(&format!(
+            "    ds:ldesMembers \"{}\"^^xsd:integer ;\n",
+            r.ldes_members
+        ));
+    }
     body.push_str(&format!("    dct:created {} .\n", lit(&r.started_at)));
 
     // The graph the run produced is the PROV entity, so provenance can be
@@ -503,7 +512,7 @@ pub fn put_run(store: &TripleStore, r: &RunRecord) -> Result<(), String> {
 fn run_select(filter: &str) -> String {
     format!(
         "{}SELECT ?id ?source ?mapping ?version ?modelVersion ?status ?mode ?rows ?triples ?duration \
-         ?started ?ended ?actor ?conforms ?violations ?error ?previous \
+         ?started ?ended ?actor ?conforms ?violations ?error ?previous ?watermark ?members \
          WHERE {{ GRAPH <{SOURCES_GRAPH}> {{\n\
            ?a a ds:Run ; ds:id ?id ; ds:source ?source ; ds:mapping ?mapping ;\n\
               ds:status ?status ; ds:mode ?mode ; prov:startedAtTime ?started .\n\
@@ -519,6 +528,8 @@ fn run_select(filter: &str) -> String {
            OPTIONAL {{ ?a ds:violations ?violations }}\n\
            OPTIONAL {{ ?a ds:error ?error }}\n\
            OPTIONAL {{ ?a ds:previousGraph ?previous }}\n\
+           OPTIONAL {{ ?a ds:watermark ?watermark }}\n\
+           OPTIONAL {{ ?a ds:ldesMembers ?members }}\n\
          }} }} ORDER BY DESC(?started)",
         prefixes()
     )
@@ -549,8 +560,23 @@ fn row_to_run(row: &HashMap<String, String>) -> RunRecord {
         conforms: get("conforms").map(|v| v == "true"),
         violations: get("violations").and_then(|v| v.parse().ok()).unwrap_or(0),
         error: get("error"),
+        watermark: get("watermark"),
+        ldes_members: get("members").and_then(|v| v.parse().ok()).unwrap_or(0),
         id,
     }
+}
+
+/// The cursor an incremental run resumes from: the highest watermark any
+/// successful run of this source reached.
+///
+/// Read from the run log rather than kept on the source, so a rollback to an
+/// older graph does not silently strip rows the cursor has already passed —
+/// the log is the history, and the cursor is a fact about it.
+pub fn last_watermark(store: &TripleStore, source_id: &str) -> Option<String> {
+    list_runs(store, Some(source_id))
+        .into_iter()
+        .filter(|r| r.status == Some(RunStatus::Succeeded))
+        .find_map(|r| r.watermark)
 }
 
 pub fn get_run(store: &TripleStore, id: &str) -> Option<RunRecord> {

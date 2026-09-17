@@ -27,6 +27,7 @@ pub mod registry;
 pub mod routes;
 pub mod runs;
 pub mod sqlite;
+pub mod yarrrml;
 
 use std::path::{Path, PathBuf};
 

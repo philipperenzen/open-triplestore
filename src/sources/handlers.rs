@@ -398,14 +398,27 @@ pub async fn list_mappings(
 }
 
 /// The RML a request supplies, in whichever authoring form.
-fn rml_of(body: &MappingRequest) -> ApiResult<String> {
-    if body.yarrrml.is_some() {
-        return Err(bad(mappings::MappingError::YarrrmlUnavailable));
+///
+/// YARRRML is translated here and only RML is stored, so the store has one
+/// mapping representation to version, diff, gate and execute. `source_hint` is
+/// the datasource the mapping is being registered against, which a YARRRML
+/// document may leave implicit.
+fn rml_of(body: &MappingRequest, source_hint: Option<&str>) -> ApiResult<String> {
+    let yarrrml = body
+        .yarrrml
+        .as_deref()
+        .map(str::trim)
+        .filter(|y| !y.is_empty());
+    let rml = body.rml.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    match (yarrrml, rml) {
+        (Some(_), Some(_)) => Err(bad(mappings::MappingError::BothForms)),
+        (Some(y), None) => super::yarrrml::to_rml(y, source_hint)
+            .map_err(|e| bad(mappings::MappingError::Yarrrml(e.to_string()))),
+        (None, Some(r)) => Ok(r.to_string()),
+        (None, None) => Err(bad(
+            "a mapping needs its RML as Turtle in 'rml', or YARRRML in 'yarrrml'",
+        )),
     }
-    body.rml
-        .clone()
-        .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| bad("a mapping needs its RML, as Turtle, in 'rml'"))
 }
 
 /// `POST /api/mappings`
@@ -429,7 +442,11 @@ pub async fn create_mapping(
             format!("mapping '{id}' already exists; update it with PUT"),
         ));
     }
-    let rml = rml_of(&body)?;
+    let source_hint = body
+        .source
+        .as_deref()
+        .map(|s| s.trim_start_matches("urn:source:"));
+    let rml = rml_of(&body, source_hint)?;
     let parsed =
         crate::rml::parse_rml(&rml).map_err(|e| bad(mappings::MappingError::Invalid(e)))?;
     // The RML already names the datasource it reads, so `source` is optional:
@@ -527,7 +544,7 @@ pub async fn update_mapping(
 
     // Only new RML mints a version; a metadata-only edit keeps the current one.
     if body.rml.is_some() || body.yarrrml.is_some() {
-        let rml = rml_of(&body)?;
+        let rml = rml_of(&body, Some(record.source_id.as_str()))?;
         mappings::validate_rml(&rml, &record.source_id).map_err(bad)?;
         record.version = existing.version + 1;
         mappings::store_version(&state.store, &record.id, record.version, &rml)
@@ -611,7 +628,6 @@ fn commit_mapping(state: &AppState, user: &AuthenticatedUser, m: &MappingRecord,
 fn run_error(e: RunError) -> (StatusCode, String) {
     match e {
         RunError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-        RunError::NotImplemented(m) => (StatusCode::NOT_IMPLEMENTED, m),
         RunError::Failed(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         RunError::Gate { .. } => (
             StatusCode::UNPROCESSABLE_ENTITY,
