@@ -23,6 +23,7 @@ pub mod connector;
 pub mod handlers;
 pub mod mappings;
 pub mod model;
+pub mod profile;
 pub mod registry;
 pub mod routes;
 pub mod runs;

@@ -31,7 +31,9 @@ use super::store::ShaclStudioStore;
 /// The single system graph holding every shape↔target binding.
 pub const VALIDATION_GRAPH: &str = "urn:system:validation-layer";
 
-const OTS: &str = "https://opentriplestore.org/ns#";
+/// Public so a caller batching its own binding query cannot drift from the
+/// namespace the writer uses.
+pub const OTS: &str = "https://opentriplestore.org/ns#";
 const DCT: &str = "http://purl.org/dc/terms/";
 
 fn col0(store: &TripleStore, q: &str) -> Vec<String> {

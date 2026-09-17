@@ -491,12 +491,85 @@ datasource is how a client reads that trail.
 
 ---
 
+## Profiling
+
+A mapping proposer has to know what a column actually contains, not just what
+its type says. It also must never see the database: the programme's rule is
+that only schema metadata and low-cardinality value lists leave the deployment.
+So **the store profiles and the proposer reads the profile**.
+
+```bash
+curl -X POST http://localhost:7878/api/sources/legacy-assets/profile \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tables": ["products", "suppliers"]}'
+```
+
+| Call | Effect |
+|---|---|
+| `POST /api/sources/:id/profile` | Re-profile into a **new version**. The optional `tables` array narrows what is scanned; an unknown name is a 400, and so is a body that does not parse — on the one endpoint whose mitigation for a large replica is narrowing, a malformed body must not quietly mean "scan everything" |
+| `GET /api/sources/:id/profile` | The newest profile as Turtle. `?version=n` serves an older one |
+
+Each run writes its own versioned graph, so **the drift baseline is the
+previous version** and drift is the version diff this store already computes.
+A profiling run is a PROV activity beside the run and rollback activities, and
+carries no values — a clock tick must not read as a change.
+
+Per column the profile records the distinct and NULL counts and the cardinality
+ratio between them, the average length for text, min/max/mean/p50/p99 for
+numbers, and a detected lexical shape (email, IRI, UUID, date, code, phone)
+with the confidence and the sample size behind it. A detection is a sampled
+claim, not a datatype claim, and is reported as one.
+
+Each table also carries a **structural hash** over its columns, types,
+nullability and keys — not its row counts, or it would change on every insert
+and tell you nothing. A re-map only has to revisit the tables whose hash moved.
+
+**What never leaves.** Values appear only as the top-k of a genuinely
+low-cardinality column, which is the point of a code list. A column whose
+values are longer than a code plausibly is (`LOW_CARDINALITY_MAX_VALUE_LEN`,
+128 characters) yields no value list at all, rather than a truncated one: a
+list missing a member silently would let a proposer build an enumeration that
+is wrong with no way to tell. Free-text columns get no numeric summary.
+
+Aggregation happens in SQL. Profiling never streams a table into the server,
+and listing the catalogue does not count rows.
+
+### The ontology profile
+
+The other half of the matching problem: what the target model declares.
+
+```bash
+curl http://localhost:7878/api/models/asset-model/versions/1.2.0/profile \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Computed with a fixed set of SPARQL queries over the version's graphs and the
+shapes that apply — never one query per class, per shape or per sub-graph.
+Returns classes with their labels, definitions and **full superclass chains**;
+properties with domain, range and datatype; every SHACL property shape
+**flattened**, so a reader never walks `sh:node` or `sh:property` itself; and
+enumerations from `owl:oneOf`, from SKOS concept schemes and from `sh:in`.
+
+Shapes are found in the version's own graphs and through the SHACL Studio
+validation layer, and every entry says which. A bound shape graph the Studio
+has a record for is admitted only when the caller may read that shape set:
+being bound to a readable model version is not consent to read a private one.
+
+Two calls on unchanged data return byte-identical JSON — the field names are a
+contract an external proposer depends on.
+
+---
+
 ## What is not here yet
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **Profiling, drift detection and dry-run classification** — the profile
-  graph, the ontology profile endpoint and the mapping-defect/data-issue split.
+- **Drift detection** — the profile graphs and the version diff are in place;
+  comparing them and opening a re-map ticket is not.
+- **Dry-run classification** — the mapping-defect vs data-issue split, and the
+  gates config graph behind it.
+- **Studio: Explore, Map and Dry-run.** Connect and Runs are built; the
+  profile-backed screens are not.
 - **The legacy `mapping.sql2rdf.yaml` converter.** YARRRML is translated; the
   older bespoke format is a separate one-time migration.
 - **PostgreSQL, MySQL and SQL Server connectors.** The trait and the registry

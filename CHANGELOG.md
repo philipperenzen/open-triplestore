@@ -302,6 +302,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   publishes the entities it wrote, after the swap. A full run publishes every
   entity, an incremental one only what moved. Previously a materialisation run
   published nothing at all.
+- **Source profiling.** `POST /api/sources/{id}/profile` writes a versioned
+  profile graph per datasource — per-column distinct and NULL counts,
+  cardinality, length and numeric summaries, a sampled lexical-shape detection
+  with its confidence, and a structural hash per table that moves when the
+  schema does and not when a row is inserted. Aggregated in SQL, never by
+  streaming a table into the server. Values appear only as the top-k of a
+  genuinely low-cardinality column, and a column whose values are too long to
+  be codes yields none at all rather than a truncated list. Reusing csvw: for
+  structure and void: for counts, with a small `dsprof:` namespace for the
+  statistics.
+- **Ontology profile.** `GET /api/models/{id}/versions/{v}/profile` returns a
+  model version flattened for a mapping proposer: classes with full superclass
+  chains, properties with domain/range/datatype, every SHACL property shape
+  flattened past `sh:node`, and enumerations from `owl:oneOf`, SKOS schemes and
+  `sh:in`. A fixed number of queries whatever the size of the ontology, with
+  byte-identical output for unchanged data. A bound shape graph is included
+  only when the caller may read that shape set.
 - **SHACL Studio: prefixes, links and the editor.** Shape-graph Turtle is
   served with an `@prefix` header resolved from the instance's prefix registry,
   so IRIs read as CURIEs instead of full `<http://…>` in both the source view

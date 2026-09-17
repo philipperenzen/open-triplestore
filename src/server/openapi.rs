@@ -2255,6 +2255,80 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
     );
     mount(
         paths,
+        "/api/sources/:id/profile",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Sources",
+                    "Get the newest profile",
+                    "The datasource's newest profile graph as Turtle. `?version=n` serves an \
+                     older one. Served here rather than over SPARQL because a profile graph \
+                     belongs to no dataset and is therefore outside a caller's query scope.",
+                    vec![qp(
+                        "version",
+                        false,
+                        "Profile version (1-based); defaults to the newest",
+                    )],
+                    vec![
+                        ("200", "Turtle"),
+                        ("400", "No such version"),
+                        ("404", "Datasource not found, or never profiled"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Post,
+                o(
+                    "Sources",
+                    "Re-profile a datasource",
+                    "Write a new profile version: per-column distinct and NULL counts, \
+                     cardinality, length and numeric summaries, a sampled lexical-shape \
+                     detection, and a structural hash per table. An optional `tables` array \
+                     narrows what is scanned. Values appear only as the top-k of a genuinely \
+                     low-cardinality column, and never for a column whose values are longer than \
+                     a code plausibly is.",
+                    vec![],
+                    vec![
+                        ("201", "Counts and hashes for what was profiled"),
+                        ("400", "Unknown table, or a body that does not parse"),
+                        ("404", "Datasource not found"),
+                        ("502", "The datasource did not answer"),
+                        ("503", "Server overloaded"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/models/:id/versions/:ver/profile",
+        vec![(
+            M::Get,
+            o(
+                "Models",
+                "Ontology profile of a model version",
+                "The version flattened for a mapping proposer: classes with their full \
+                 superclass chains, properties with domain, range and datatype, every SHACL \
+                 property shape flattened past sh:node, and enumerations from owl:oneOf, SKOS \
+                 concept schemes and sh:in. A fixed number of SPARQL queries whatever the size \
+                 of the ontology, and byte-identical output for unchanged data. A shape graph \
+                 reached through the validation layer is included only when the caller may read \
+                 that shape set.",
+                vec![],
+                vec![
+                    ("200", "The profile"),
+                    ("404", "Unknown model or version, or not readable"),
+                ],
+                true,
+            ),
+        )],
+    );
+
+    mount(
+        paths,
         "/api/mappings",
         vec![
             (

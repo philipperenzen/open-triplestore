@@ -220,6 +220,12 @@ pub async fn delete_source(
             ),
         ));
     }
+    // Before the record itself, so a failure here leaves the datasource
+    // registered rather than orphaning its profiles: a profile left behind
+    // outlives the database it describes, and re-registering the id would
+    // continue its version sequence and serve the previous database's
+    // code-list values as this datasource's history.
+    super::profile::delete_profiles(&state.store, &id).map_err(internal)?;
     registry::delete_source(&state.store, &id).map_err(internal)?;
     audit(&state, &user, &source, "deleted");
     Ok(StatusCode::NO_CONTENT)

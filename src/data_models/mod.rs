@@ -10,6 +10,7 @@ pub mod diff;
 pub mod handlers;
 pub mod merge;
 pub mod models;
+pub mod profile;
 pub mod registry;
 pub mod routes;
 pub mod seed_vocab;

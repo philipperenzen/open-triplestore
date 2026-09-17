@@ -59,4 +59,8 @@ pub fn source_routes() -> Router<AppState> {
         )
         .route("/api/runs/:id/provenance", get(handlers::run_provenance))
         .route("/api/runs/:id/rollback", post(handlers::rollback_run))
+        // Each feature owns its own router, so adding one is a change to that
+        // module rather than to this list.
+        .merge(super::profile::routes())
+        .merge(crate::data_models::profile::routes())
 }
