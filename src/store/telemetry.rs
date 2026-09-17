@@ -20,6 +20,8 @@ pub enum Served {
     CacheHit,
     /// The columnar copy's own evaluator (opengraph::columnar).
     Columnar,
+    /// A QLever read backend kept current from the change log.
+    Qlever,
     /// The O(1) per-graph count index (`SELECT (COUNT(*) …) { ?s ?p ?o }`).
     FastCount,
     /// The subject-hash shards of the in-memory mirror.
@@ -31,9 +33,10 @@ pub enum Served {
 }
 
 impl Served {
-    pub const ALL: [Served; 6] = [
+    pub const ALL: [Served; 7] = [
         Served::CacheHit,
         Served::Columnar,
+        Served::Qlever,
         Served::FastCount,
         Served::Shards,
         Served::FullCopy,
@@ -44,6 +47,7 @@ impl Served {
         match self {
             Served::CacheHit => "cache_hit",
             Served::Columnar => "columnar",
+            Served::Qlever => "qlever",
             Served::FastCount => "fast_count",
             Served::Shards => "shards",
             Served::FullCopy => "full_copy",

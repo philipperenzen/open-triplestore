@@ -18,6 +18,7 @@ use crate::geo::index3d::SpatialIndex3D;
 use crate::geo::spatial_index::SpatialIndex;
 use crate::store::changes::{self, ChangeLog, GraphDelta};
 use crate::store::parallel_mirror::ParallelMirror;
+use crate::store::qlever::{self, Qlever, QleverConfig, QleverEndpoint};
 use crate::store::query_cache::QueryCache;
 use crate::store::replication::{self, Replication, ReplicationConfig};
 use crate::store::telemetry::{QueryShape, Served, Telemetry};
@@ -285,6 +286,8 @@ pub struct TripleStore {
     /// Replication role, temperature, scope and — on a follower — its
     /// position. See [`Replication`].
     replication: Arc<Replication>,
+    /// A QLever read backend fed from the change log. See [`Qlever`].
+    qlever: Arc<Qlever>,
     /// Process-unique id of this store instance, shared by its clones.
     /// Caches keyed on a store must not survive the store: a new store
     /// can reuse the old one's address and start at the same write
@@ -391,10 +394,12 @@ impl TripleStore {
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(changes),
             replication: Arc::new(Replication::from_env(Some(path))),
+            qlever: Arc::new(Qlever::from_env()),
             persistent: true,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
         .inspect(replication::spawn_follower_if_configured)
+        .inspect(qlever::spawn_feeder_if_configured)
     }
 
     /// Create an in-memory store (useful for testing).
@@ -419,10 +424,12 @@ impl TripleStore {
             cache_id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             changes: Arc::new(ChangeLog::open(None)?),
             replication: Arc::new(Replication::from_env(None)),
+            qlever: Arc::new(Qlever::from_env()),
             persistent: false,
             shacl_functions: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
         .inspect(replication::spawn_follower_if_configured)
+        .inspect(qlever::spawn_feeder_if_configured)
     }
 
     /// Set the blank-node durability policy applied on import (builder style).
@@ -455,6 +462,17 @@ impl TripleStore {
                 .map(|l| l.with_caps(max_scan, max_payload))
                 .unwrap_or_else(|_| ChangeLog::disabled()),
         );
+        self
+    }
+
+    /// A QLever read backend with an explicit endpoint (builder style;
+    /// tests pass a stand-in). No feeder thread starts: tests feed by hand.
+    pub fn with_qlever(
+        mut self,
+        config: QleverConfig,
+        endpoint: Option<Arc<dyn QleverEndpoint>>,
+    ) -> Self {
+        self.qlever = Arc::new(Qlever::with_endpoint(config, endpoint));
         self
     }
 
@@ -540,6 +558,11 @@ impl TripleStore {
     /// (see [`Replication`]).
     pub fn replication(&self) -> &Replication {
         &self.replication
+    }
+
+    /// The QLever read backend, configured or not (see [`Qlever`]).
+    pub fn qlever(&self) -> &Qlever {
+        &self.qlever
     }
 
     /// Whether the store is RocksDB-backed (see the `persistent` field).
@@ -762,6 +785,11 @@ impl TripleStore {
         if let Some(fast) = self.try_fast_count(sparql) {
             return Ok((fast, Served::FastCount));
         }
+        // A QLever backend on the `first` route: before the in-memory copies
+        // (the setting for a head-to-head measurement).
+        if let Some(r) = self.qlever.try_query(self, sparql, class, true) {
+            return Ok((r, Served::Qlever));
+        }
         // Multi-core path: a decomposable aggregate / `ASK` is evaluated across
         // subject-hash shards (the in-memory mirror) and merged, using every core
         // instead of one. Returns `None` — falling through to the single-store
@@ -793,6 +821,11 @@ impl TripleStore {
             .try_full_query(&self.store, sparql, || self.query_options())
         {
             return Ok((full, Served::FullCopy));
+        }
+        // A QLever backend on the `analytical` or `all` route: after the
+        // in-memory copies, before RocksDB — the over-cap store's analytics.
+        if let Some(r) = self.qlever.try_query(self, sparql, class, false) {
+            return Ok((r, Served::Qlever));
         }
         let results = self
             .query_options()

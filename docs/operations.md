@@ -310,3 +310,88 @@ comes back.
 ### What is not here
 
 - **Asset shipping**, as above.
+
+## QLever as a read backend
+
+[QLever](https://github.com/ad-freiburg/qlever) answers joins over hundreds of
+millions of triples from sorted permutations on disk — what this store's
+in-memory copies cannot do above their cap (`OTS_PARALLEL_QUERY_MAX_TRIPLES`;
+[performance.md](performance.md#3-wired-into-the-live-sparql-path-parallelmirror)).
+Open Triplestore can keep a QLever instance current from its own
+[change log](versioning.md#change-log) and send it the queries a route policy
+names. It is **on by default once `OTS_QLEVER_URL` is set**
+(`OTS_QLEVER_ENABLED=off` keeps the setting and switches it off), and it never
+changes an answer: a query goes to QLever only while the feed is caught up, only
+in the shapes the policy names, and any error — a query QLever rejects, a
+timeout, an instance that is down — falls through to the next exit of the query
+path. Nothing in the store depends on it.
+
+### Setting it up
+
+1. **Build the index from a dump.** A [backup](administration.md#backups)
+   carries `rdf.nq.gz`, every named graph as N-Quads, which QLever indexes as it
+   is. Follow QLever's own instructions for the index build and the server (the
+   `qlever` control script and a `Qleverfile`, or `IndexBuilderMain` and
+   `ServerMain` directly), and give the server an **access token**: SPARQL
+   Update on a running QLever requires one, and the feeder works through SPARQL
+   Update.
+2. **Point this node at it.** `OTS_QLEVER_URL=http://qlever:7001` and
+   `OTS_QLEVER_ACCESS_TOKEN=<the token>`; restart. The feeder starts with the
+   store, replaces every graph once — so the index need not be exact, only
+   present — and from then on applies the change log.
+3. **Watch it.** `GET /api/admin/qlever/status` (admin) says whether the feed is
+   caught up, where it stands, when it last synced, its last error, and how many
+   queries QLever served or failed; `GET /api/admin/telemetry` counts the
+   `qlever` exit.
+
+### The feed
+
+The feeder is a consumer of this node's change log, like a replication follower:
+it reads the rows after its bookmark — the cursor `qlever`, which pins the log's
+retention — and turns each into SPARQL Update against QLever. A `full` row
+becomes `DELETE DATA` / `INSERT DATA` in batches of `OTS_QLEVER_BATCH` quads; a
+row that only says a graph changed — exact counts above the payload cap, an
+honest `unknown`, or a row whose quads carry blank nodes, whose labels do not
+survive a round trip — becomes a replace of that graph from the local store; a
+store-scoped row or a change of the log's epoch replaces everything. The feeder
+polls every `OTS_QLEVER_POLL_MS` and needs change capture, which is on by
+default; a node with `OTS_CHANGE_CAPTURE=off` reports the omission as the
+status's `last_error` and feeds nothing.
+
+### The route policy
+
+`OTS_QLEVER_ROUTE` says which queries QLever sees and where in the query path —
+always after the result cache and the O(1) count:
+
+| Policy | What goes to QLever |
+|---|---|
+| `analytical` (default) | an `ASK`, or a query with an aggregate anywhere in it (`GROUP BY`, `COUNT`, `SUM`, …), after the in-memory copies — with the mirror published, what the copies decline; above the cap, every such query |
+| `all` | every `SELECT` and `ASK`, after the in-memory copies |
+| `first` | every `SELECT` and `ASK`, before the in-memory copies — the setting for a head-to-head measurement, not for production |
+| `off` | nothing; the feed keeps running |
+
+A query is sent only while the feed is **caught up**: its bookmark is the log's
+newest sequence number and no write is in flight. During a write, and until the
+feeder has applied it, queries take the next exit. `CONSTRUCT`, `DESCRIBE`,
+updates, and anything QLever answers with an error never come from QLever: the
+error is kept in the status and the query falls through.
+
+### Cost, and what it is not
+
+The feeder costs one HTTP request per batch, and a graph replace sends the graph
+whole. Routing adds a round trip to QLever and the parse of its result. QLever's
+SPARQL is not Oxigraph's: it answers the standard and the platform's own
+queries, but a feature it lacks comes back as an error and the query takes the
+engine — so `all` on a workload of unusual shapes buys little. It is a read
+backend, not a replica: it holds no identity database, serves none of this
+server's routes, and can be dropped at any time. **It has not been measured
+against a running QLever here**; the `first` route exists for exactly that
+comparison, and the Fuseki/QLever figures in
+[performance.md](performance.md#comparison-with-apache-jena-fuseki-and-qlever)
+were taken separately.
+
+Two limits are known and not yet fixed: a graph resync split across several
+`INSERT DATA` operations turns one blank node into several on the remote, and a
+full resync does not clear a graph the endpoint holds that the local store no
+longer does. Both are harmless on a store whose graphs are re-fed, and both are
+recorded in `docs/notes/improvement-log.md`.

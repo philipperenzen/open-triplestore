@@ -317,6 +317,13 @@ See [rml.md](rml.md) for the full RML guide.
 | `OTS_REPLICATION_ELECTION_MS`, `OTS_REPLICATION_HEARTBEAT_MS` | `1500`, a fifth of it | The election timeout's lower bound (the upper is twice it) and the leader's heartbeat. |
 | `OTS_REPLICATION_SYNC_TIMEOUT_MS` | `2000` | How long a write waits for them (50–60000). After it, the write returns degraded — `X-Replication-Ack: degraded` — and the leader recovers by itself when a follower catches up. |
 | `OTS_COLUMNAR_QUERY` | `on` | The in-memory mirror's third copy: a term dictionary and sorted permutations of the quads with an evaluator of its own, consulted after the shards and before the full copy for the query shapes it implements exactly, declining the rest. `off` leaves the two engine copies. See [performance.md](performance.md#4-the-columnar-copy-opengraphcolumnar). |
+| `OTS_QLEVER_URL` | *(unset)* | A QLever endpoint kept current from this node's change log and sent the queries `OTS_QLEVER_ROUTE` names. Unset: no QLever. See [operations.md](operations.md#qlever-as-a-read-backend). |
+| `OTS_QLEVER_ENABLED` | `on` | `off` keeps the URL configured but neither feeds nor routes. |
+| `OTS_QLEVER_ACCESS_TOKEN` | *(unset)* | QLever's access token, sent as a bearer token with every update; SPARQL Update on QLever requires it. |
+| `OTS_QLEVER_ROUTE` | `analytical` | Which queries QLever sees: `analytical` (an `ASK` or a query with an aggregate, after the in-memory copies), `all` (every `SELECT`/`ASK`, after the copies), `first` (before the copies; for measurements), `off`. |
+| `OTS_QLEVER_BATCH` | `5000` | Quads per `INSERT DATA` / `DELETE DATA` statement the feeder sends (100–100000). |
+| `OTS_QLEVER_POLL_MS` | `500` | How often the feeder reads the change log (50–60000). |
+| `OTS_QLEVER_TIMEOUT_SECS` | `30` | Per-request timeout for queries and updates sent to QLever (1–600). |
 | `S3_ENDPOINT` | *(unset — local filesystem)* | S3/MinIO endpoint URL. If unset, assets are stored in `<data-dir>/assets/` |
 | `S3_BUCKET` | `triplestore-assets` | S3 bucket name |
 | `S3_ACCESS_KEY` | | S3 access key |

@@ -14,6 +14,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **QLever as a read backend** (`OTS_QLEVER_URL`; on by default once set,
+  `OTS_QLEVER_ENABLED=off` to switch off): a feeder keeps a QLever instance
+  current from this node's change log — `full` rows as `DELETE DATA` /
+  `INSERT DATA`, rows that only say a graph changed as a graph replace, an
+  epoch change as a replace of everything, bookmarked as the cursor
+  `qlever` — and a route policy (`OTS_QLEVER_ROUTE`: `analytical` by
+  default, `all`, `first`, `off`) sends it the queries it names, only while
+  the feed is caught up; any error falls through to the engine.
+  `GET /api/admin/qlever/status` (admin) and a telemetry exit, `qlever`.
+  See docs/operations.md, "QLever as a read backend".
 - **A columnar copy with its own SPARQL evaluator** (`opengraph::columnar`,
   on by default; `OTS_COLUMNAR_QUERY=off`): the in-memory mirror keeps a
   third copy — a term dictionary and three sorted permutations of the quads

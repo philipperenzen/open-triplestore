@@ -91,6 +91,7 @@ pub fn management_routes() -> Router<AppState> {
         .route("/api/replication/raft/vote", post(raft_vote))
         .route("/api/replication/raft/append", post(raft_append))
         .route("/api/replication/raft/snapshot", post(raft_snapshot))
+        .route("/api/admin/qlever/status", get(qlever_status))
         .route("/livez", get(liveness_check))
 }
 
@@ -2246,6 +2247,17 @@ fn with_ack(state: &AppState, mut resp: Response) -> Response {
         }
     }
     resp
+}
+
+/// GET /api/admin/qlever/status — the QLever read backend: configured,
+/// the route policy, the feeder's position and whether it is caught up,
+/// queries served and failed. Admins only.
+async fn qlever_status(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    Ok(Json(state.store.qlever().status(&state.store)))
 }
 
 /// GET /api/replication/status — this node's role, temperature, scope and,

@@ -1234,7 +1234,9 @@ The first two increments — a tested engine capability *and* its wiring — are
 Next:
 
 * **Persistent shards** so the accelerator works beyond the in-memory cap (today
-  large/100M-tier stores fall back to the persistent store).
+  large/100M-tier stores fall back to the persistent store — or, when one is
+  configured, to a QLever instance fed from the change log: `docs/operations.md`,
+  "QLever as a read backend").
 
 ---
 
@@ -1728,7 +1730,7 @@ cost to the paths they describe.
   "uptime_secs": 86400,
   "queries": {
     "total": 412093, "window": 8192,
-    "by_served": { "cache_hit": 6021, "fast_count": 118, "shards": 402, "columnar": 1104, "full_copy": 186, "engine": 361 },
+    "by_served": { "cache_hit": 6021, "fast_count": 118, "shards": 402, "columnar": 1104, "full_copy": 186, "engine": 349, "qlever": 12 },
     "aggregate_text": 1875,
     "analytical": { "count": 1533, "share": 0.187, "p50_us": 41, "p95_us": 18300, "p99_us": 91000, "max_us": 402113, "by_served": { "cache_hit": 1100, "shards": 402, "engine": 31 } },
     "other": { "count": 6659, "share": 0.813, "p50_us": 37, "p95_us": 2210, "p99_us": 14400, "max_us": 88000, "by_served": { "…": 0 } }
@@ -1748,8 +1750,8 @@ cost to the paths they describe.
 
 - **Queries.** Every call to the query path records which exit answered —
   the result cache, the O(1) count index, the shards, the columnar copy or
-  the full copy of the in-memory mirror, or the engine itself (RocksDB on a
-  persistent store) —
+  the full copy of the in-memory mirror, a QLever backend, or the engine
+  itself (RocksDB on a persistent store) —
   and how long it took. Two shape bits are computed once per *uncached*
   evaluation and stamped on the cache entry, so a hit inherits them without
   a parse: `analytical` (the parallel classifier calls the query an
