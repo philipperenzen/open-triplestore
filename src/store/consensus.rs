@@ -381,6 +381,9 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 impl Client {
+    // openraft's `RaftNetwork` trait fixes this return type, so the large
+    // `RPCError` cannot be boxed here without unboxing it at every call site.
+    #[allow(clippy::result_large_err)]
     async fn post<
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,

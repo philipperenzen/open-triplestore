@@ -44,7 +44,10 @@ fn stores() -> (Store, Columnar) {
     (store, columnar)
 }
 
-fn engine(store: &Store, q: &str) -> (Vec<String>, Vec<Vec<Option<String>>>, Option<bool>) {
+/// A header, the solutions as rendered rows, and the boolean of an `ASK`.
+type Answer = (Vec<String>, Vec<Vec<Option<String>>>, Option<bool>);
+
+fn engine(store: &Store, q: &str) -> Answer {
     let r = SparqlEvaluator::new()
         .parse_query(q)
         .unwrap()
@@ -95,10 +98,7 @@ fn render(t: &Term) -> String {
     }
 }
 
-fn columnar(
-    c: &Columnar,
-    q: &str,
-) -> Option<(Vec<String>, Vec<Vec<Option<String>>>, Option<bool>)> {
+fn columnar(c: &Columnar, q: &str) -> Option<Answer> {
     match c.query(q).unwrap()? {
         ParAnswer::Solutions { variables, rows } => Some((
             variables.iter().map(|v| v.as_str().to_string()).collect(),
