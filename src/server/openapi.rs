@@ -4296,25 +4296,6 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     }
     mount(
         paths,
-        "/api/admin/qlever/status",
-        vec![(
-            M::Get,
-            o(
-                "Admin",
-                "QLever backend status",
-                "The QLever read backend (OTS_QLEVER_URL): whether it is configured and enabled, the route policy (`analytical`, `all`, `first`, `off`), the feeder's epoch and position and whether it is caught up with the change log, the last sync and error, and how many queries it served or failed. See docs/operations.md (QLever).",
-                vec![],
-                vec![
-                    ("200", "QLever status"),
-                    ("401", "Authentication required"),
-                    ("403", "Admin role required"),
-                ],
-                true,
-            ),
-        )],
-    );
-    mount(
-        paths,
         "/api/admin/acl/endpoints",
         vec![
             (

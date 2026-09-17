@@ -978,6 +978,75 @@ GraphDB, Virtuoso or RDF4J on your own hardware for an apples-to-apples result.
 
 ---
 
+### Could QLever be the engine?
+
+The table above puts QLever within 1.1–1.7× of this store on six aggregate
+queries at 501k triples, and it is the fastest open-source SPARQL engine most
+people can name. It is a fair question whether it should *be* the engine rather
+than sit beside it, and in 2026-09 the question was asked properly: a QLever
+backend was built, fed from the change log, and measured against the engine on
+the same data. The backend was then removed. What it measured is worth keeping,
+because the question will come round again.
+
+The harness ran 29 query shapes through both, on the same 501k triples,
+comparing solutions as multisets rather than eyeballing timings.
+
+**What QLever does better.**
+
+* **Scale.** Its index is disk-resident and built for hundreds of millions to
+  billions of triples. This store's accelerator is bounded by
+  `OTS_PARALLEL_QUERY_MAX_TRIPLES` and switches off above it, leaving RocksDB
+  to answer a multi-pattern join one point lookup per result row. That tier —
+  data far larger than RAM — is exactly where QLever is built to win and where
+  this store is weakest.
+* **Small-result aggregates**, even at this size. `COUNT`, `GROUP BY` and
+  `DISTINCT` came back level or ahead (`DISTINCT` 48 ms against 105 ms).
+* **Memory per triple.** A C++ engine with a compressed disk index against an
+  in-RAM mirror is not a close contest.
+
+**What would have to be solved first.**
+
+* **It changes the terms.** QLever reports an `xsd:integer` literal as
+  `xsd:int`. In RDF those are different terms, so `DATATYPE(?x)` returns
+  something else, `sameTerm` and `=` change answer, and every `COUNT`, `SUM`,
+  `AVG`, `MIN` and `MAX` comes back carrying a datatype SPARQL does not specify
+  for it. Thirteen of the 29 shapes differed for this reason alone. For a
+  platform whose SHACL, reasoning and conformance suites all turn on exact term
+  identity, this is not a tuning matter.
+* **Large results are its weak spot.** The queries that lost were the ones
+  returning many rows: `VALUES` + join over 20 000 rows took 6.9 s against
+  79 ms, `MINUS` over 90 000 rows 15.5 s against 351 ms, `UNION` over 20 000
+  rows 3.6 s against 63 ms. The engine work is not the problem; the result
+  export is. Two 100 000-row queries did not finish at all.
+* **A partial result can arrive as `200 OK`.** When export fails midway QLever
+  streams what it has, then appends a marker and a plain-text message into the
+  body — its own text says HTTP/1.1 leaves it no better channel. One
+  100 000-row query returned 85 852 rows that way. Any client must parse
+  strictly and look for that marker, or it will serve a partial answer as a
+  whole one.
+* **Its SPARQL-JSON is not quite the standard's**: a trailing `meta` member
+  after `results`, which a conforming parser rejects. Its XML is clean, so a
+  client should ask for XML.
+* **Everything else the platform is.** Transactional writes, SHACL on write,
+  GeoSPARQL, reasoning, per-graph access control, the Graph Store protocol,
+  LDES, backups — all of it is built on the Oxigraph store's semantics and its
+  transaction API. Replacing the read path is a fraction of the work.
+
+**The honest conclusion.** QLever is a credible engine for a store far larger
+than RAM, and a poor fit as a drop-in for this one, because the cost is paid in
+answer fidelity rather than in effort. It would become the right choice if two
+things changed: if this platform needed to serve a tier the in-memory mirror
+cannot reach, and if QLever's term handling matched the standard exactly, or
+could be made to by configuration. Until then the boundary is where the
+[columnar copy](#4-the-columnar-copy-opengraphcolumnar) and the persistent
+shards sit — in-process, at a size we can hold, with answers the engine itself
+would give.
+
+The measurement harness and the backend were removed with the decision; both
+are in the history, and `docs/notes/improvement-log.md` records how they ran if
+anyone wants to repeat it.
+
+
 ## Parallel & multi-core execution
 
 A single SPARQL query in Oxigraph runs on **one thread** — its evaluator has no
@@ -1234,9 +1303,8 @@ The first two increments — a tested engine capability *and* its wiring — are
 Next:
 
 * **Persistent shards** so the accelerator works beyond the in-memory cap (today
-  large/100M-tier stores fall back to the persistent store — or, when one is
-  configured, to a QLever instance fed from the change log: `docs/operations.md`,
-  "QLever as a read backend").
+  large/100M-tier stores fall back to the persistent store). This is the tier
+  a different engine would be for — see "Could QLever be the engine?" below.
 
 ---
 
@@ -1730,7 +1798,7 @@ cost to the paths they describe.
   "uptime_secs": 86400,
   "queries": {
     "total": 412093, "window": 8192,
-    "by_served": { "cache_hit": 6021, "fast_count": 118, "shards": 402, "columnar": 1104, "full_copy": 186, "engine": 349, "qlever": 12 },
+    "by_served": { "cache_hit": 6021, "fast_count": 118, "shards": 402, "columnar": 1104, "full_copy": 186, "engine": 361 },
     "aggregate_text": 1875,
     "analytical": { "count": 1533, "share": 0.187, "p50_us": 41, "p95_us": 18300, "p99_us": 91000, "max_us": 402113, "by_served": { "cache_hit": 1100, "shards": 402, "engine": 31 } },
     "other": { "count": 6659, "share": 0.813, "p50_us": 37, "p95_us": 2210, "p99_us": 14400, "max_us": 88000, "by_served": { "…": 0 } }
@@ -1750,8 +1818,8 @@ cost to the paths they describe.
 
 - **Queries.** Every call to the query path records which exit answered —
   the result cache, the O(1) count index, the shards, the columnar copy or
-  the full copy of the in-memory mirror, a QLever backend, or the engine
-  itself (RocksDB on a persistent store) —
+  the full copy of the in-memory mirror, or the engine itself (RocksDB on
+  a persistent store) —
   and how long it took. Two shape bits are computed once per *uncached*
   evaluation and stamped on the cache entry, so a hit inherits them without
   a parse: `analytical` (the parallel classifier calls the query an

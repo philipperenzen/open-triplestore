@@ -2058,6 +2058,45 @@ operator is accepting. A third open limit joins the two already recorded:
 `CONSTRUCT` is never routed, because QLever answers it in an RDF serialisation
 rather than a results document.
 
+### 5. The QLever backend, dropped
+
+The maintainer's call after reading section 4, and the right one: a backend
+that cannot be trusted to answer identically is not a feature with a caveat,
+it is a second source of truth. Routing it off by default would have left a
+switch in the product whose honest label was "make this store less
+standards-compliant". So the code is gone — `src/store/qlever.rs`, its two
+test binaries, the feeder, the route policy, the admin status route, the
+`qlever` telemetry exit and the seven `OTS_QLEVER_*` settings.
+
+**What was kept.** The measurement, which is the valuable part, as
+`docs/performance.md`, "Could QLever be the engine?" — placed beside the
+Fuseki/QLever head-to-head that was already there, because that is where the
+question gets asked. It records what QLever does better (disk-resident scale,
+small-result aggregates, memory per triple) and what would have to be solved
+first (the `xsd:integer` → `xsd:int` term change; result export collapsing on
+large answers and reporting a partial result as `200 OK`; a non-standard
+trailing member in its SPARQL-JSON; and the fact that this platform's writes,
+SHACL, GeoSPARQL, reasoning and access control all sit on the Oxigraph store's
+semantics, so replacing the read path is a fraction of the work).
+`docs/triplestore-comparison.md`, which already ranks QLever first for scale,
+now points at it.
+
+**What this cost, and what it bought.** Two commits of work removed. It bought
+a measured answer to a question that would otherwise have been settled by
+reputation — QLever is the fastest engine most people can name, and at this
+store's scale it lost on nineteen of twenty-nine shapes, thirteen of them on
+fidelity rather than speed — and it bought the four columnar-evaluator lessons
+that came out of the same harness. Neither was reachable without building the
+thing. Building something in order to measure it, and then deleting it, is a
+legitimate outcome.
+
+**The lesson worth carrying.** The unit tests passed the whole time, because
+the stand-in endpoint was an in-memory store rather than an HTTP peer. A fake
+that is too kind hides the entire integration: the real client could not read
+a single `SELECT` from a real server. Where a feature's whole purpose is to
+talk to something else, at least one test has to talk to the real thing, even
+if it can only ever be run by hand.
+
 ## Checkpoint (2026-09-17, HEAD `d2236a8` + this note)
 
 **Commits.** `8f8b2e0` the columnar copy and its evaluator · `d2236a8` QLever
@@ -2082,7 +2121,7 @@ image); `oxsdatatypes` is Apache-2.0/MIT by its manifest.
 | Asked | Shipped |
 |---|---|
 | Implement the SPARQL evaluator in opengraph | `opengraph::columnar` — dictionary, three sorted permutations, an evaluator over ids, in the mirror as a third copy after the shards; 33 of 57 benchmarks faster by more than 10 %, 2 slower and both inside the 20 % bound |
-| The QLever implementation, configurable, on by default | `src/store/qlever.rs` — a change-log feeder and a route policy, on once `OTS_QLEVER_URL` is set, never serving while behind, every error falling through |
+| The QLever implementation, configurable, on by default | Built, measured against a real QLever, and then **dropped** (sections 4 and 5). It answered differently from the engine on 13 of 29 shapes, chiefly by reporting `xsd:integer` as `xsd:int`. The evaluation survives in `docs/performance.md`, "Could QLever be the engine?" |
 | DuckDB only with an argument for it | Not built. The argument against is section 3: the representation is now in-process without a C++ build, the scans and aggregates are already the shards', and a SPARQL→SQL translator would face every fidelity problem this item hit *plus* a second value space — without the option of declining |
 | A before-and-after measurement | The paired table in `docs/performance.md` and in section 1, `f0adb95` against `8f8b2e0` in a detached worktree, back to back, median of the rounds |
 
@@ -2092,11 +2131,9 @@ image); `oxsdatatypes` is Apache-2.0/MIT by its manifest.
    corner test first: that is what turned 34 silent divergences into 34
    declines or fixes. Property paths are the obvious candidate, and the
    cross-product bug (section 1) is what has to be fixed to accept them.
-2. **Three QLever limits are open**: blank nodes split across `INSERT DATA`
-   batches on a resync, a graph the endpoint holds that the local store no
-   longer does, and `CONSTRUCT`, which is never routed. None can serve a wrong
-   answer to a client, and routing is off by default (section 4), but all
-   three leave the remote index or the route policy less than it looks.
+2. **QLever is gone** (section 5). Nothing is open against it; the question
+   of whether it should be the engine is answered, with numbers, in
+   `docs/performance.md`.
 3. **The review's remaining performance findings are unfixed**: `estimate()`
    counts per candidate per planning round, and the query is parsed more
    than once on the way in. Neither regressed a benchmark.

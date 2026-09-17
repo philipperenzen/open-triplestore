@@ -49,6 +49,13 @@ GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID, and RML are standout features rare in ope
 The primary gap vs. QLever and Virtuoso is scale: those systems are engineered specifically for
 datasets in the tens-of-billions to trillion range.
 
+Whether QLever should therefore *be* this project's engine was measured directly in
+2026-09, against the same data on the same machine — it is faster on small-result
+aggregates and built for a scale this store cannot reach, but it reports `xsd:integer`
+literals as `xsd:int`, which changes RDF term identity, and its result export collapses
+on large answers. See
+[performance.md, "Could QLever be the engine?"](performance.md#could-qlever-be-the-engine).
+
 ---
 
 ## 2. Methodology & Data Sources

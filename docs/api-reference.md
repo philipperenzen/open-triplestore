@@ -103,16 +103,3 @@ SPARQL Update, Graph Store `PUT`/`POST`/`DELETE`, imports, data writes made
 by the registry — answers `503 Service Unavailable` with the body
 `read-only replica: writes go to the leader at <url>`. Reads are unchanged.
 A node without the role behaves exactly as before.
-
-## QLever backend — `/api/admin/qlever/status`
-
-See `docs/operations.md (QLever as a read backend)`. One new route, no change to
-existing ones:
-
-| Method | Path | Returns |
-|---|---|---|
-| `GET` | `/api/admin/qlever/status` | `configured`, `enabled`, `url`, `route` (`analytical` / `all` / `first` / `off`), `epoch`, `applied_seq`, `caught_up`, `last_sync_at`, `last_error`, `applied_rows`, `replaced_graphs`, `resyncs`, `queries_served`, `queries_failed`. Admin only (`401` / `403`). |
-
-`GET /api/admin/telemetry` reports two more exits under `by_served`: `columnar`
-(the in-memory columnar copy) and `qlever`. `/sparql` answers are the same
-whichever exit serves them.
