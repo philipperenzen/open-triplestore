@@ -1,8 +1,10 @@
 <script>
-  // Sub-navigation pinned above every /shacl/* page. Keeps the four Studio
-  // surfaces (Overview · Shapes · Pipelines · Results) one click from each
-  // other, satisfying the "one consistent SHACL workspace" goal.
-  import { LayoutDashboard, FileCode, Workflow, ListChecks } from 'lucide-svelte';
+  // Sub-navigation pinned above every /shacl/* page. Keeps the Studio surfaces
+  // (Overview · Shapes · Pipelines · Results) one click from each other,
+  // satisfying the "one consistent SHACL workspace" goal. Datasets sits
+  // alongside them because shapes are always validated against one, and the
+  // catalogue is where a user goes next.
+  import { LayoutDashboard, FileCode, Workflow, ListChecks, Database } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
   import { location } from '../lib/locationStore.js';
@@ -12,6 +14,9 @@
     { to: '/shacl/shapes',     labelKey: 'components.shaclStudioNav.tabShapes',    icon: FileCode,        match: (p) => p.startsWith('/shacl/shapes') },
     { to: '/shacl/pipelines',  labelKey: 'components.shaclStudioNav.tabPipelines', icon: Workflow,        match: (p) => p.startsWith('/shacl/pipelines') },
     { to: '/shacl/results',    labelKey: 'components.shaclStudioNav.tabResults',   icon: ListChecks,      match: (p) => p.startsWith('/shacl/results') || p.startsWith('/validation') },
+    // Exact-or-child, so a dataset detail page highlights Datasets while none of
+    // the /shacl/* or /validation paths above can fall into it.
+    { to: '/datasets',         labelKey: 'components.shaclStudioNav.tabDatasets',  icon: Database,        match: (p) => p === '/datasets' || p.startsWith('/datasets/') },
   ];
 
   $: path = $location.pathname;
@@ -28,10 +33,17 @@
 </nav>
 
 <style>
-  .studio-nav { display: flex; gap: 0.25rem; padding: 0.4rem; background: var(--surface, #fff); border: 1px solid var(--line-soft); border-radius: 12px; margin-bottom: 0.85rem; }
-  :global(.studio-nav .tab) { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.85rem; border-radius: 8px; color: #64748b; font-weight: 600; font-size: 0.85rem; text-decoration: none; transition: background 0.12s, color 0.12s; }
+  /* Five tabs no longer fit a narrow main column on one line, so the bar wraps
+     rather than overflowing its card. */
+  .studio-nav { display: flex; flex-wrap: wrap; gap: 0.25rem; padding: 0.4rem; background: var(--surface, #fff); border: 1px solid var(--line-soft); border-radius: 12px; margin-bottom: 0.85rem; }
+  :global(.studio-nav .tab) { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.45rem 0.85rem; border-radius: 8px; color: #64748b; font-weight: 600; font-size: 0.85rem; text-decoration: none; white-space: nowrap; transition: background 0.12s, color 0.12s; }
   :global(.studio-nav .tab:hover) { background: #f1f5f9; color: #334155; }
   :global(.studio-nav .tab[data-active="true"]) { background: #ecfeff; color: #0e7490; }
+
+  /* Once a row wraps, tabs share it evenly instead of leaving a ragged edge. */
+  @media (max-width: 900px) {
+    :global(.studio-nav .tab) { flex: 1 1 auto; justify-content: center; padding: 0.45rem 0.6rem; }
+  }
 
   :global(:is([data-theme="dark"], .dark)) .studio-nav { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark) .studio-nav .tab) { color: var(--ink-500); }

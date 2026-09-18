@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import {
     listDatasets, validateDataset, updateDatasetShacl, getDataset, getOrganisation,
-    listAccessibleShapeGraphs, listOrganisations,
+    listAccessibleShapeGraphs, listShapeGraphs, listOrganisations,
     getLatestValidationRun, getValidationHistory, getValidationRun, listLatestValidationRuns,
     listPublicUsers, getGeoStats,
   } from '../lib/api.js';
@@ -20,6 +20,9 @@
 
   let organisations = [];
   let accessibleShapeGraphs = [];
+  // The SHACL Library, i.e. the same shape graphs the Shapes view lists. Fetched
+  // once for the page because every dataset row offers the same set.
+  let shapeLibrary = [];
   let userMap = {}; // user id -> display name, for resolving dataset owners
 
   let backDatasetId = null;
@@ -85,6 +88,7 @@
       // Always resolve the current user's own datasets, even if not public.
       if ($user?.id) userMap[String($user.id)] = $user.display_name || $user.username;
       try { const r = await listAccessibleShapeGraphs(); accessibleShapeGraphs = r?.shape_graphs || []; } catch {}
+      try { shapeLibrary = (await listShapeGraphs()) || []; } catch {}
       datasets = await listDatasets();
       if (backDatasetId) {
         datasets = datasets.filter(d => d.id === backDatasetId);
@@ -216,6 +220,41 @@
   $: shapeSourceDatasetIds = new Set((accessibleShapeGraphs || []).map(sg => String(sg.dataset_id)).filter(s => s && s !== 'undefined'));
   $: noShapesIds = new Set(datasets.filter(d => !d.shapes_graph_iri && !shapeSourceDatasetIds.has(String(d.id))).map(d => d.id));
 
+  // What the inline "link shapes" picker offers. The Library comes first: those
+  // are the shape graphs the Shapes view shows and the ones a user has just
+  // authored, and each carries the `graph_iri` that `updateDatasetShacl` stores
+  // as `shapes_graph_iri`. Shape graphs older than the Library have no entry
+  // there, so the IRIs other datasets already point at are folded in behind
+  // them under their dataset's name — nothing that used to be linkable stops
+  // being linkable. The shape count disambiguates similarly named graphs.
+  $: shapeLinkOptions = (() => {
+    const opts = [];
+    const seen = new Set();
+    for (const sg of shapeLibrary || []) {
+      if (!sg.graph_iri || seen.has(sg.graph_iri)) continue;
+      seen.add(sg.graph_iri);
+      const count = sg.shape_count ?? 0;
+      const noun = count === 1 ? $t('pages.shapeLibrary.shapeSingular') : $t('pages.shapeLibrary.shapePlural');
+      opts.push({ value: sg.graph_iri, label: `${sg.name || sg.graph_iri} · ${count} ${noun}` });
+    }
+    // One dataset can expose several shapes-role graphs, and then its name alone
+    // names none of them; the IRI's last segment is what tells them apart.
+    const nameUses = {};
+    for (const sg of accessibleShapeGraphs || []) {
+      if (sg.shapes_graph_iri) nameUses[sg.dataset_name] = (nameUses[sg.dataset_name] || 0) + 1;
+    }
+    for (const sg of accessibleShapeGraphs || []) {
+      if (!sg.shapes_graph_iri || seen.has(sg.shapes_graph_iri)) continue;
+      seen.add(sg.shapes_graph_iri);
+      const tail = sg.shapes_graph_iri.split(/[/#]/).filter(Boolean).pop();
+      const label = sg.dataset_name
+        ? (nameUses[sg.dataset_name] > 1 ? `${sg.dataset_name} · ${tail}` : sg.dataset_name)
+        : sg.shapes_graph_iri;
+      opts.push({ value: sg.shapes_graph_iri, label });
+    }
+    return opts;
+  })();
+
   // Global summary across datasets (uses persisted summaries + freshly run reports).
   $: summary = (() => {
     const s = { conforms: 0, violations: 0, warnings: 0, infos: 0, validated: 0, total: datasets.length, noShapes: 0 };
@@ -330,13 +369,13 @@
                   <span class="pill pill-error"><AlertTriangle size={11} /> {$t('system.error')}</span>
                 {:else if noShapesIds.has(ds.id)}
                   <span class="pill pill-muted">{$t('pages.validation.noShapes')}</span>
-                  {#if accessibleShapeGraphs.some((sg) => sg.shapes_graph_iri)}
+                  {#if shapeLinkOptions.length}
                     <div class="inline-shapes-picker" on:click|stopPropagation role="presentation">
                       <Select
                         size="sm"
                         value=""
                         placeholder={$t('pages.validation.linkShapesPlaceholder')}
-                        options={accessibleShapeGraphs.filter((sg) => sg.shapes_graph_iri).map((sg) => ({ value: sg.shapes_graph_iri, label: sg.dataset_name || sg.shapes_graph_iri }))}
+                        options={shapeLinkOptions}
                         on:change={(e) => { if (e.detail) linkShapes(ds, e.detail); }}
                       />
                     </div>

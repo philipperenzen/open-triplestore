@@ -3794,7 +3794,8 @@
       "tabOverview": "Overzicht",
       "tabShapes": "Shapes",
       "tabPipelines": "Pipelines",
-      "tabResults": "Resultaten"
+      "tabResults": "Resultaten",
+      "tabDatasets": "Datasets"
     },
     "shapeBuilder": {
       "nodeKind": {
