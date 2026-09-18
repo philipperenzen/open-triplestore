@@ -718,10 +718,13 @@ impl TripleStore {
         // put path), so it can never be a hit: nothing about the query text is
         // inspected before the lookup — that scan on every call, hits included,
         // tripled the cost of a cached point query.
-        let t0 = std::time::Instant::now();
+        // Ask before reading the clock: `Instant::now()` and the ring's lock
+        // were 40 % of a cache hit, and only a sampled query needs either.
+        // The exit counters are exact regardless.
+        let t0 = self.telemetry.should_time().then(std::time::Instant::now);
         if let Some((cached, shape)) = self.query_cache.get(sparql) {
             self.telemetry
-                .record_query(Served::CacheHit, t0.elapsed(), shape);
+                .record_query(Served::CacheHit, t0.map(|t| t.elapsed()), shape);
             return Ok(cached);
         }
         // Snapshot the generation BEFORE evaluating: a write that commits while
@@ -738,7 +741,7 @@ impl TripleStore {
             };
             let results = self.query_cache.put(sparql, gen, fast, shape);
             self.telemetry
-                .record_query(Served::FastCount, t0.elapsed(), shape);
+                .record_query(Served::FastCount, t0.map(|t| t.elapsed()), shape);
             return Ok(results);
         }
         // The shape bits, once per uncached evaluation: the classifier parses
@@ -751,7 +754,8 @@ impl TripleStore {
         };
         let (results, served) = self.query_uncached(sparql, class)?;
         let results = self.query_cache.put(sparql, gen, results, shape);
-        self.telemetry.record_query(served, t0.elapsed(), shape);
+        self.telemetry
+            .record_query(served, t0.map(|t| t.elapsed()), shape);
         Ok(results)
     }
 

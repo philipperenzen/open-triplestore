@@ -31,7 +31,10 @@ pub enum Served {
 }
 
 impl Served {
-    pub const ALL: [Served; 6] = [
+    /// How many exits there are — the width of the counter array.
+    pub const COUNT: usize = 6;
+
+    pub const ALL: [Served; Self::COUNT] = [
         Served::CacheHit,
         Served::Columnar,
         Served::FastCount,
@@ -39,6 +42,18 @@ impl Served {
         Served::FullCopy,
         Served::Engine,
     ];
+
+    /// This exit's slot in the counter array.
+    pub fn index(self) -> usize {
+        match self {
+            Served::CacheHit => 0,
+            Served::Columnar => 1,
+            Served::FastCount => 2,
+            Served::Shards => 3,
+            Served::FullCopy => 4,
+            Served::Engine => 5,
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -143,6 +158,10 @@ impl<T> Ring<T> {
     }
 }
 
+/// One query in this many is timed and pushed to the latency ring; every query
+/// is counted. `OTS_TELEMETRY_TIMING_STRIDE` overrides it.
+const DEFAULT_TIMING_STRIDE: usize = 8;
+
 /// Default ring sizes; `OTS_TELEMETRY_QUERY_RING` and
 /// `OTS_TELEMETRY_VALIDATION_RING` override them.
 pub const DEFAULT_QUERY_RING: usize = 8192;
@@ -150,9 +169,20 @@ pub const DEFAULT_VALIDATION_RING: usize = 1024;
 
 pub struct Telemetry {
     started: Instant,
+    /// Timed samples, for the percentiles. One query in
+    /// [`Telemetry::timing_stride`] lands here: reading the clock and taking
+    /// this lock was 40 % of a cache hit's 111 ns, and a fixed-size window is
+    /// a sample whether or not it is filled from every query.
     queries: Mutex<Ring<QuerySample>>,
     validations: Mutex<Ring<ValidationSample>>,
     query_total: AtomicU64,
+    /// One exact counter per exit, for all time — not the ring's window.
+    /// A relaxed add is cheap enough to do on every query, which keeps
+    /// `by_served` exact while the latencies are sampled.
+    by_served: [AtomicU64; Served::COUNT],
+    /// Counts queries, to pick every Nth for timing.
+    timing_tick: AtomicU64,
+    timing_stride: u64,
     validation_total: AtomicU64,
     writes: AtomicU64,
     /// Milliseconds since `started` of the last write, 0 before the first.
@@ -188,6 +218,9 @@ impl Telemetry {
             queries: Mutex::new(Ring::new(queries)),
             validations: Mutex::new(Ring::new(validations)),
             query_total: AtomicU64::new(0),
+            by_served: std::array::from_fn(|_| AtomicU64::new(0)),
+            timing_tick: AtomicU64::new(0),
+            timing_stride: env_usize("OTS_TELEMETRY_TIMING_STRIDE", DEFAULT_TIMING_STRIDE) as u64,
             validation_total: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             last_write_ms: AtomicU64::new(0),
@@ -201,8 +234,22 @@ impl Telemetry {
 
     /// One query answered. The hot path (a cache hit) pays one lock and a
     /// 16-byte write.
-    pub fn record_query(&self, served: Served, elapsed: Duration, shape: QueryShape) {
+    /// Whether this query should be timed. Ask *before* reading the clock:
+    /// the point is to skip `Instant::now()` for the queries that are not
+    /// sampled, which on a cache hit is most of the saving.
+    pub fn should_time(&self) -> bool {
+        self.timing_tick
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(self.timing_stride)
+    }
+
+    /// Record a query. The total and the per-exit count are exact; `elapsed`
+    /// is `None` for a query [`Telemetry::should_time`] did not pick, and
+    /// only a timed one reaches the latency ring.
+    pub fn record_query(&self, served: Served, elapsed: Option<Duration>, shape: QueryShape) {
         self.query_total.fetch_add(1, Ordering::Relaxed);
+        self.by_served[served.index()].fetch_add(1, Ordering::Relaxed);
+        let Some(elapsed) = elapsed else { return };
         let sample = QuerySample {
             served,
             elapsed_us: elapsed.as_micros().min(u32::MAX as u128) as u32,
@@ -253,12 +300,13 @@ impl Telemetry {
         let window = queries.len();
         let (analytical, other): (Vec<&QuerySample>, Vec<&QuerySample>) =
             queries.iter().partition(|q| q.shape.analytical);
+        // Exact, for all time, from the counters — not from the sampled ring.
         let mut by_served: BTreeMap<String, u64> = BTreeMap::new();
         for s in Served::ALL {
-            by_served.insert(s.label().to_string(), 0);
-        }
-        for q in &queries {
-            *by_served.entry(q.served.label().to_string()).or_default() += 1;
+            by_served.insert(
+                s.label().to_string(),
+                self.by_served[s.index()].load(Ordering::Relaxed),
+            );
         }
         let aggregate_text = queries.iter().filter(|q| q.shape.aggregate_text).count() as u64;
         Summary {
@@ -454,12 +502,40 @@ mod tests {
         )
     }
 
+    /// Counts are exact and cover everything; latencies are a sample. The two
+    /// were one mechanism until the perf gate measured what a clock read and a
+    /// mutex cost a 111 ns cache hit.
+    #[test]
+    fn exits_are_counted_exactly_and_latencies_sampled() {
+        let t = Telemetry::with_capacity(64, 2);
+        let stride = t.timing_stride as u32;
+        assert!(stride > 1, "the default stride should sample");
+
+        // Record four strides' worth of cache hits, timing only the ones the
+        // telemetry itself picks — which is what `query` does.
+        let rounds = stride * 4;
+        for i in 0..rounds {
+            let timed = t.should_time();
+            let (s, d, sh) = q(Served::CacheHit, i, false);
+            t.record_query(s, timed.then_some(d), sh);
+        }
+        let s = t.summary();
+
+        // Exact: every query, whether or not it was timed.
+        assert_eq!(s.queries.total, rounds as u64);
+        assert_eq!(s.queries.by_served["cache_hit"], rounds as u64);
+        // An exit that never ran is present and zero, not missing.
+        assert_eq!(s.queries.by_served["shards"], 0);
+        // Sampled: one in `stride` reached the ring.
+        assert_eq!(s.queries.other.count, 4, "one per stride");
+    }
+
     #[test]
     fn the_ring_keeps_the_newest_capacity_samples() {
         let t = Telemetry::with_capacity(4, 2);
         for i in 0..10u32 {
             let (s, d, sh) = q(Served::Engine, i, false);
-            t.record_query(s, d, sh);
+            t.record_query(s, Some(d), sh);
         }
         let s = t.summary();
         assert_eq!(s.queries.total, 10);
@@ -478,7 +554,7 @@ mod tests {
             q(Served::Engine, 40, false),
             q(Served::FastCount, 3, false),
         ] {
-            t.record_query(s, d, sh);
+            t.record_query(s, Some(d), sh);
         }
         let s = t.summary();
         assert_eq!(s.queries.analytical.count, 2);

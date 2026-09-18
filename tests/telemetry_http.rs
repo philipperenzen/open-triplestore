@@ -40,6 +40,12 @@ async fn get_telemetry(app: &axum::Router, token: Option<&str>) -> (StatusCode, 
 
 #[tokio::test]
 async fn the_summary_counts_exits_shape_bits_validations_and_write_gaps() {
+    // The latency ring is a *sample* — one query in `OTS_TELEMETRY_TIMING_STRIDE`
+    // is timed, so that reading the clock is not 40 % of a cache hit. This test
+    // asserts on what is in that sample, so it asks for every query to be timed.
+    // The exit counts and the total are exact either way, and are asserted below
+    // without this.
+    std::env::set_var("OTS_TELEMETRY_TIMING_STRIDE", "1");
     let (state, token) = admin_state();
     // Seeding the bundles is a burst of writes; the DQV bundle gives a dataset
     // with bound shapes for the validate route.

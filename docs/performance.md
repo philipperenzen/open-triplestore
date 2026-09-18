@@ -1834,10 +1834,18 @@ cost to the paths they describe.
   evaluation and stamped on the cache entry, so a hit inherits them without
   a parse: `analytical` (the parallel classifier calls the query an
   aggregate or an `ASK`) and `aggregate_text` (the text mentions `COUNT(` or
-  `GROUP BY`). The cache-hit path pays one lock and a 16-byte write; the
-  `query/cache_hit` benchmark holds it to that. `window` is the ring size
-  (`OTS_TELEMETRY_QUERY_RING`, default 8192); the percentiles describe the
-  window, `total` counts everything.
+  `GROUP BY`).
+
+  **The counts are exact; the latencies are a sample.** `total` and
+  `by_served` are relaxed atomic counters covering every query since the
+  process started — not the ring's window — so a dashboard firing one query
+  all day cannot push the rest of the day's exits out of view. The percentiles
+  come from a fixed-size ring (`OTS_TELEMETRY_QUERY_RING`, default 8192,
+  reported as `window`), filled by one query in `OTS_TELEMETRY_TIMING_STRIDE`
+  (default 8). That split is what the `query/cache_hit` benchmark forced:
+  reading the clock and taking the ring's lock costs about 40 ns, which on a
+  111 ns cache hit was 40 % of the work, so a query that is not sampled never
+  reads the clock at all. Set the stride to 1 to time every query.
 - **Validations.** Every SHACL run records its data source (`mirror`,
   `snapshot`, `live`), whether a run index was built, the quads and graphs
   in scope, its duration and who asked — `dataset` (the validate route),
