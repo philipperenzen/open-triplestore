@@ -2413,3 +2413,64 @@ summarise, and the chapters stay the source. In-app links stay without
 fragments (`/docs/operations`, not `#replication`) because the README and
 the in-app renderer slug headings differently; the README's own links use
 GitHub's slugs.
+
+### 4. The Operations page: `/admin/operations`
+
+**What it is.** One admin page, in the sidebar under *Admin* beside AI
+Requests, that reads the three status bodies — `/api/replication/status`
+(public), `/api/admin/telemetry` and `/api/admin/changes/status` — every
+five seconds while it is open and visible, with a pause. Four cards:
+
+- **Replication** — a one-word state (*not replicating*, *leader*, *in
+  sync*, *catching up*, *stale*, *error*) with a sentence under it saying
+  what that means for reads and writes, then the facts: role (and the
+  configured role when a cluster member reports a different one),
+  temperature with what it means, scope, node, leader, epoch, applied
+  against the leader's newest, rows behind, last catch-up as a relative
+  time, the interval, rows applied, graphs fetched whole, resyncs, the
+  identity database's applied version; the synchronous-follower block
+  and the consensus view when the body carries them.
+- **Queries** — total (exact), timed samples, the analytical share, p95
+  of the rest; then *which exit answered*, one row per exit in try order
+  with a plain-words meaning ("the same query text was answered recently
+  and nothing has been written since…"), exact count and share bar; then
+  the latency table for analytical and other queries with the sampling
+  stated in the sentence above it, so nobody reads a p99 of a sample as
+  a p99 of everything.
+- **SHACL validations** and **Writes** side by side: who asked and from
+  which data source; the inter-write gap histogram with readable ranges
+  ("100 ms – 500 ms", "≥ 5 s") and the sentence that says why it matters
+  (the mirror needs a quiet window).
+- **Change log** — *Capturing* or *Off*, and when off, the explanation:
+  the default, the ×2.5–4 price of a `WHERE` update, how to turn it on,
+  and that a leader keeps it on. Then epoch, next sequence, rows by state,
+  oldest–newest, size, retention, caps, and the cursors table with each
+  consumer's distance behind the newest row and the lowest cursor named
+  as the retention floor.
+
+**How it is built.** The page is `frontend/src/pages/AdminOperations.svelte`,
+on the `AdminLlm` pattern (same admin guard, same lazy route). Everything
+that computes is in `frontend/src/lib/operations.ts` — the exit ordering
+and shares, the replication state machine, the gap ranges, the lowest
+cursor, and the formatters (µs, ms, bytes, uptime, relative time through
+`Intl.RelativeTimeFormat` in the viewer's language, percentages) — with
+twenty tests in `operations.test.ts`, so the words on the page are the
+only part that is not unit-tested. The three API calls are in `api.ts`
+with their body shapes in comments. Every string is in `en.json` and
+`nl.json`, key sets checked equal. The README's Pages table gains the row.
+
+**The state machine, since it is the one judgement call.** A follower is
+*in sync* when healthy with zero rows behind; *catching up* when healthy
+with rows behind or with the lag still unknown (the leader not yet asked),
+and also when unhealthy with nothing applied and nothing failed yet, which
+is a bootstrap in progress rather than staleness; *stale* when unhealthy
+after a successful catch-up with no error recorded; *error* when unhealthy
+with an error, which the page shows verbatim. A follower started without
+its token lands on *error* with the `401` in view, which is the failure
+the compose example most invites.
+
+**Verified**: `npm run lint` (no errors in the touched files), `npm run
+test` (774 passed, 61 files), `npm run typecheck`, `npm run build` (the
+page is its own chunk), and the page opened against the running example —
+the leader with its cursor table, the follower in sync, then the follower
+without a token showing the error state.

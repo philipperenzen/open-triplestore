@@ -86,6 +86,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   follower's token, follower up, a write on the leader appearing on the
   follower within a round trip, a write on the follower refused with 503.
   `.env.example` documents the follower's knobs.
+- **An Operations page in the web UI** (`/admin/operations`, admin): this
+  node's replication state in one word with what it means for reads and
+  writes, its lag and last catch-up; which exit answered each query, each
+  exit explained in plain words, with exact counts and sampled latencies;
+  SHACL validations by caller and data source; the inter-write gap
+  histogram; and the change log — off with the reason and the switch, or
+  capturing with its rows, retention and every consumer's cursor. Refreshes
+  every five seconds while open. English and Dutch.
 - **IFC lift depth.** The importer keeps its flat BOT / `props:` contract
   untouched (pinned as exact triples) and emits, beside it: the IFC 4.3
   facility spine (`IfcBridge`, `IfcRoad`, … as `bot:Zone` plus the lift's own

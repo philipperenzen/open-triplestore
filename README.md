@@ -302,6 +302,7 @@ A full-featured browser interface is bundled with the server at `http://localhos
 | `/organisations` | Organisation management (requires auth) |
 | `/settings` | Profile, password change, API token management (requires auth) |
 | `/admin/users` | User management — create, edit role/status, reset password, deactivate (requires admin+) |
+| `/admin/operations` | Operations — replication role, lag and last catch-up; which exit answered each query and how fast; SHACL validations; write gaps; the change log with its cursors (requires admin+) |
 
 ### Development
 

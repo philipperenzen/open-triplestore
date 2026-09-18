@@ -850,6 +850,22 @@ export const adminLlmRequests = (opts: { limit?: number; offset?: number; status
 export const adminLlmStats = () =>
   request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
 
+// ─── Operations: replication, workload telemetry, the change log ─────────────
+// Public, beside /livez: { role, configured_role, mode, scope, leader_url,
+// node_id, read_only, epoch, applied_seq, leader_newest_seq, lag_rows,
+// last_sync_at, last_error, applied_rows, refetched_graphs, resyncs,
+// interval_secs, healthy, sync?, identity?, cluster? }
+export const replicationStatus = () =>
+  request('GET', '/api/replication/status');
+// Admin: { uptime_secs, queries: { total, window, by_served, analytical, other },
+// validations: {...}, writes: { total, gaps } } — see docs/performance.md "Telemetry".
+export const adminTelemetry = () =>
+  request('GET', '/api/admin/telemetry');
+// Admin: { enabled, epoch, next_seq, rows, committed, pending, unknown,
+// oldest_seq, newest_seq, cursors, max_scan, max_payload, retention_days, size_bytes }
+export const adminChangesStatus = () =>
+  request('GET', '/api/admin/changes/status');
+
 // ─── OIDC provider (this store as the identity provider for client apps) ─────
 // decision: 'check' → { client_name, scope, requires_consent };
 // decision: 'approve' → { redirect_to } (single-use code minted).
