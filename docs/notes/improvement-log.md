@@ -2297,6 +2297,15 @@ asks for none; a unit test pins the health window; and
 write land a second later, and asserts the row came back inside the
 hold. Red on all three before the change.
 
+**What the e2e test then found.** The compose demo seeds 39 graphs — one
+under the limiter's burst of 40 — so its bootstrap never reached the wait
+path at all, and the first version of the wait had a hole the demo could
+not show: a `Retry-After: 0` was slept for zero, and all eight attempts
+went inside a few milliseconds. `tests/replication_e2e.rs`, with 44
+graphs behind the real limiter, failed on the 41st fetch. A zero is now a
+second, and the e2e bootstrap takes the five seconds the arithmetic says
+it should.
+
 **And a third, from the identity e2e test.** With the leader's identity
 database file-backed (as deployed), "nothing changed on the leader, so
 nothing is fetched" failed over HTTP: the follower's own requests were
