@@ -21,6 +21,9 @@ use axum::http::{header, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use common::*;
+use open_triplestore::auth::jwt::{generate_api_token, hash_token};
+use open_triplestore::auth::models::ApiScope;
+use open_triplestore::server::AppState;
 use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
 use open_triplestore::store::replication::{HttpLeader, Mode, ReplicationConfig, Role, Scope};
 use open_triplestore::store::TripleStore;
@@ -49,6 +52,27 @@ fn graph(store: &TripleStore, g: &str) -> BTreeSet<String> {
         .into_iter()
         .map(|q| format!("{} {} {}", q.subject, q.predicate, q.object))
         .collect()
+}
+
+/// An admin API token minted on the leader for user `adm` — what the compose
+/// example puts in `OTS_REPLICATION_TOKEN` — rather than a session JWT: the
+/// API-token path is the one that stamps `last_used_at` on every request,
+/// which is what moved the identity version under the follower's own polling.
+fn mint_api_token(state: &AppState) -> String {
+    let raw = generate_api_token();
+    state
+        .auth_db
+        .create_api_token(
+            "repl-tok",
+            "adm",
+            "replica",
+            &hash_token(&raw),
+            &format!("{}...", &raw[..11]),
+            &[ApiScope::Read, ApiScope::Admin],
+            None,
+        )
+        .unwrap();
+    raw
 }
 
 /// Counts the `429`s the leader hands out, so the test can say the limiter
@@ -122,14 +146,15 @@ fn a_follower_bootstraps_through_the_leaders_rate_limiter_and_tails_it_live() {
     let base = serve(leader_app.clone());
 
     // ── The follower: hot, every graph, the leader's token ───────────────
+    let api_token = mint_api_token(&leader_state);
     let mut config = ReplicationConfig::follower(&base, Mode::Hot, Scope::All);
-    config.token = Some(token.clone());
+    config.token = Some(api_token.clone());
     config.node_id = "e2e-follower".to_string();
     let (follower_state, _) =
         admin_state_with_store(TripleStore::in_memory().unwrap().with_replication(config));
     let follower = &follower_state.store;
     let follower_app = test_app(follower_state.clone());
-    let http = HttpLeader::new(&base, Some(&token));
+    let http = HttpLeader::new(&base, Some(&api_token));
 
     // ── 1. Bootstrap, through the limiter ────────────────────────────────
     let t = Instant::now();
@@ -141,7 +166,12 @@ fn a_follower_bootstraps_through_the_leaders_rate_limiter_and_tails_it_live() {
         p.refetched_graphs >= GRAPHS,
         "every graph fetched whole: {p:?}"
     );
-    if std::env::var("RATE_LIMIT_DISABLED").is_err() {
+    // The server reads only these two spellings as "off".
+    let limiter_off = matches!(
+        std::env::var("RATE_LIMIT_DISABLED").as_deref(),
+        Ok("1") | Ok("true")
+    );
+    if !limiter_off {
         assert!(
             throttled.load(Ordering::SeqCst) > 0,
             "44 graph fetches must trip a limiter with a burst of 40; the test \
@@ -299,13 +329,13 @@ fn the_identity_database_comes_across_over_http() {
             SystemRole::SuperAdmin,
         )
         .unwrap();
-    let token = mint_token("adm", "admin", "super_admin");
+    let api_token = mint_api_token(&leader_state);
     leader_state
         .auth_db
         .create_user("u1", "one", "one@test.com", "hash", SystemRole::User)
         .unwrap();
     let base = serve(test_app(leader_state.clone()));
-    let http = HttpLeader::new(&base, Some(&token));
+    let http = HttpLeader::new(&base, Some(&api_token));
 
     let follower_auth = AuthDb::in_memory().unwrap();
     assert!(follower_auth.get_user_by_id("u1").unwrap().is_none());
@@ -324,7 +354,9 @@ fn the_identity_database_comes_across_over_http() {
     // the token is valid on both nodes.
     assert!(follower_auth.get_user_by_id("adm").unwrap().is_some());
 
-    // Nothing changed on the leader: the manifest says so and nothing is fetched.
+    // Nothing changed on the leader: the manifest says so and nothing is
+    // fetched — the follower's own token use, which stamps `last_used_at` at
+    // most once a minute, did not move the version between the two rounds.
     assert!(!replicate_identity_once(&follower_auth, &http).unwrap());
 
     // A change on the leader moves its version; the next round applies it.
