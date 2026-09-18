@@ -464,6 +464,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **The README and the overview page now lead to what the store can do
+  under load and in production**: Highlights rows for the in-memory
+  accelerator, the change log (with why it is off by default), replication
+  and failover, and workload telemetry, each linking to its chapter; a
+  Quick Start paragraph for the read-replica compose file; and, on the
+  in-app overview, capability bullets for change log & replication and for
+  observability, plus a "running it for others?" starting point.
 - **`POST /sparql/batch` answers 422 when a statement fails at execution.**
   The batch is one transaction, so nothing is applied; the body keeps its
   shape (`status: rolled_back`, per-statement `results`) and gains `error`,

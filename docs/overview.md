@@ -16,6 +16,8 @@ A self-hosted, feature-complete RDF triplestore with a full web interface. Built
 - **Asset Management** — Store binary assets (images, 3D/CAD, point clouds, geo files, PDFs, spreadsheets, audio/video) alongside a dataset and get typed RDF metadata extracted automatically — dimensions, SHA-256 checksums, geo bounding boxes, page counts — all dereferenceable as linked data. See [Datasets](/docs/datasets).
 - **AI Assistance** — Natural-language → SPARQL plus **Spark**, a grounded chat assistant with an interactive answer canvas, served by a pluggable LLM gateway; every accept / edit / reject is fed back to improve the model. Hidden gracefully when no gateway is configured. See [Spark Chat Assistant](/docs/spark) and [API Services & AI Queries](/docs/api-services).
 - **Authentication** — JWT sessions for browser users, long-lived bearer API tokens for programmatic access, plus OAuth 2.0 / OIDC provider integration. See [Authentication & API Tokens](/docs/auth).
+- **Change Log & Replication** — Every write can be recorded per graph, in commit order, in a log a consumer tails with a cursor. A **leader** ships that log to **followers**: read-only replicas that catch up every hour (cold), every minute (warm) or within a round trip (hot), optionally with synchronous acknowledgement or Raft consensus; failover is by epoch. See [Versioning → Change log](/docs/versioning) and [Operations → Replication](/docs/operations).
+- **Observability** — `/health` and `/livez` for probes, a public `/api/replication/status` for load balancers, and workload telemetry for admins: which exit answered each query (the result cache, the count index, the shards, the columnar copy, the full copy, or the engine), sampled latencies, validation and write-gap histograms — all on the **Operations** page under *Admin*. See [Performance → Telemetry](/docs/performance).
 
 ## Where to start
 
@@ -23,4 +25,5 @@ A self-hosted, feature-complete RDF triplestore with a full web interface. Built
 - Loading data? See [Supported RDF Formats](/docs/formats) and [Import Auto-Detection](/docs/import).
 - Integrating programmatically? See the [API Reference](/docs/api-reference) and [API Services & AI Queries](/docs/api-services).
 - Curious what's implemented? See [Supported Standards](/docs/standards).
+- Running it for others? [Operations](/docs/operations) covers health probes, backups, rate limits and replication — with a two-container leader-and-follower example you can start in two commands — and the **Operations** page under *Admin* shows what this node is doing right now.
 - Want a guided tour? Every fresh install seeds a public **Open Triplestore** demo organisation — one dataset per standard, each with runnable API Services — so you can explore SPARQL, SHACL, GeoSPARQL and reasoning immediately. (A full multi-app demo walkthrough lives in the OTL Suite workspace repository under `docs/demo-guide/`; it is not part of this repository.)

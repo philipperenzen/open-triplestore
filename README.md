@@ -90,6 +90,10 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
+| **In-memory query accelerator** | Over a persistent store, an in-RAM mirror answers most reads: subject shards for aggregates, an O(1) count index, and a columnar copy with its own evaluator for joins and lookups. Every query is routed to the cheapest exit that gives the engine's exact answer, and anything else goes to the engine ([docs](docs/performance.md#4-the-columnar-copy-opengraphcolumnar)) |
+| **Change log** | Every write recorded per graph in commit order, with sequence numbers a consumer can tail and bookmark. Off by default — a `WHERE` update pays ×2.5–4 for its before/after diff — and on whenever there is a consumer ([docs](docs/versioning.md#change-log)) |
+| **Replication & failover** | A leader ships its change log to cold, warm or hot followers: read-only replicas that catch up hourly, every minute, or within a round trip. Synchronous acknowledgement and Raft consensus are opt-in; failover is by epoch. Two-container example in [`docker-compose.replication.yml`](docker-compose.replication.yml) ([docs](docs/operations.md#replication)) |
+| **Workload telemetry** | Which exit answered each query (exact counts), sampled latencies for analytical and other queries, validation and write-gap histograms — `GET /api/admin/telemetry`, and the **Operations** page in the web UI ([docs](docs/performance.md#telemetry)) |
 | **HTTP protocols** | SPARQL Protocol + Graph Store HTTP Protocol (RFC 7230) + LDP 1.0 |
 | **Docker-ready** | Multi-stage image; non-root runtime; health-check built-in |
 
@@ -173,6 +177,15 @@ docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
 ```
 
 Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
+
+**Optional — a read replica.** [`docker-compose.replication.yml`](docker-compose.replication.yml) is a separate two-container stack: a leader and a hot follower that tails the leader's change log and answers reads a round trip behind. It comes up in two steps because the follower authenticates with an API token minted on the leader:
+
+```bash
+docker compose -f docker-compose.replication.yml up -d leader     # then mint a token, add it to .env, and
+docker compose -f docker-compose.replication.yml up -d follower   # → curl localhost:7879/api/replication/status
+```
+
+The walkthrough — including a write on the leader showing up on the follower — is in [docs/operations.md](docs/operations.md#try-it-a-leader-and-a-hot-follower-with-docker-compose).
 
 ### Native (requires Rust 1.94.1+)
 

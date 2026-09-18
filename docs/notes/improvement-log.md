@@ -2385,3 +2385,31 @@ graphs, so the walkthrough's first version, which queried the ad-hoc
 graph with SPARQL, showed nothing on the leader either; the walkthrough
 now reads the graph the way the follower does, under the same token, and
 says why. The follower refused its write with `503` and the leader's URL.
+
+### 3. The docs point at what P2–P5 built
+
+**The gap.** `docs/operations.md`, `docs/versioning.md` and
+`docs/performance.md` describe replication, the change log, the columnar
+copy and telemetry in full — and nothing led there. The README's
+`## Highlights` table had 26 rows and none for any of them; `docs/overview.md`
+(the first page of the in-app documentation) listed capabilities up to
+authentication and stopped; the Quick Start did not mention that a replica
+exists.
+
+**What changed.** Four Highlights rows — the in-memory accelerator (shards,
+count index, columnar copy, and the routing rule that keeps the engine's
+answer), the change log (with the ×2.5–4 reason it is off by default in
+the row itself, so nobody turns it on without knowing the price),
+replication and failover (linking the compose example), and workload
+telemetry (naming the Operations page) — each linking to its chapter.
+The Quick Start gains an "Optional — a read replica" paragraph beside the
+LLM and mail options, with the two commands and a link to the walkthrough.
+`docs/overview.md` gains two capability bullets (change log & replication;
+observability, naming every exit a query can take) and a "running it for
+others?" starting point.
+
+**What did not change.** No chapter was rewritten: the rows and bullets
+summarise, and the chapters stay the source. In-app links stay without
+fragments (`/docs/operations`, not `#replication`) because the README and
+the in-app renderer slug headings differently; the README's own links use
+GitHub's slugs.
