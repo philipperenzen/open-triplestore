@@ -470,8 +470,8 @@
   .auth-gate h2 { font-size: 1.3rem; font-weight: 600; margin: 0; }
   .auth-gate p { color: var(--ink-600); max-width: 30rem; margin: 0; }
   :global(.auth-gate-icon) { color: var(--ink-400); }
-  .owner-chip { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; }
-  .owner-chip-name { max-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .owner-chip { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .owner-chip-name { max-width: 7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .error { color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; padding: 0.6rem 0.8rem; border-radius: 10px; font-size: 0.85rem; }
 
@@ -499,9 +499,16 @@
   .dataset-row:hover { border-color: #7ED6D0; background: #f0fdfa; }
   .dataset-row.selected { border-color: #2F7A8C; background: linear-gradient(135deg, rgba(126,214,208,0.15), rgba(255,255,255,0.6)); box-shadow: inset 0 0 0 1px rgba(47,122,140,0.25); }
 
-  .row-main { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }
-  .row-title { display: flex; align-items: center; gap: 0.35rem; min-width: 0; color: #475569; }
-  .ds-name { font-weight: 600; font-size: 0.88rem; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-main { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; flex-wrap: wrap; }
+  /* The title takes the row and the status wraps under it when the panel is
+     narrow — it carries a pill plus a shapes picker and would otherwise
+     leave the name nothing. */
+  .row-title { display: flex; align-items: center; gap: 0.35rem; min-width: 0; flex: 1 1 11rem; color: #475569; }
+  /* `overflow: hidden` zeroes a flex item's automatic minimum size, so the
+     name would otherwise shrink to 0 while the owner chip (overflow visible,
+     minimum = its content) keeps everything. The floor is the name's; the
+     chip is what yields. */
+  .ds-name { flex: 1 1 auto; min-width: 4.5rem; font-weight: 600; font-size: 0.88rem; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .row-status { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
   .ran-at { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.68rem; color: #94a3b8; }
 
