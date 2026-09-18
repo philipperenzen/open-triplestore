@@ -35,7 +35,7 @@ What varies is configurable, on the follower:
 | | Environment | Values |
 |---|---|---|
 | **Role** | `OTS_REPLICATION_ROLE` | `none` (default), `leader`, `follower` |
-| **Temperature** — how often a follower asks | `OTS_REPLICATION_MODE` | `cold` (every hour), `warm` (every minute, the default; `medium` is accepted), `hot` (every poll, `OTS_REPLICATION_POLL_MS`, default 500) |
+| **Temperature** — how often a follower asks | `OTS_REPLICATION_MODE` | `cold` (every hour), `warm` (every minute, the default; `medium` is accepted), `hot` (long-polls: a request for rows is held on the leader up to 25 s and answered the moment a row lands; `OTS_REPLICATION_POLL_MS`, default 500, paces the retry after a failure) |
 | **Scope** — what a follower applies | `OTS_REPLICATION_GRAPHS` / `OTS_REPLICATION_DATASETS` | `all` (default); a comma-separated list of graph IRIs (`default` for the default graph); or a list of the leader's dataset ids, resolved to graphs through the leader's manifest at every catch-up |
 | Leader | `OTS_REPLICATION_LEADER_URL`, `OTS_REPLICATION_TOKEN` | the leader's base URL and an admin API token minted there |
 | Identity | `OTS_REPLICATION_NODE_ID` | this follower's name (default: `HOSTNAME`, else `follower`); the cursor it keeps on the leader |
@@ -45,7 +45,10 @@ Temperature changes *only* how often the follower asks. Cold, warm and hot
 apply the same rows the same way; a cold follower that has not asked for an
 hour applies an hour of rows when it does. A hot follower long-polls: its
 request for rows is held on the leader until a row lands, so its lag is a
-network round trip, not the poll period.
+network round trip, not the poll period. The hold is 25 s at most (the
+leader caps a long-poll at 30 s), which is what lets a hot follower live
+under the leader's rate limiter: idle, it costs the leader a request
+every 25 s or so rather than two a second.
 
 **The modes, in one place:**
 
@@ -102,10 +105,13 @@ From then on each catch-up:
      graphs the leader no longer lists are dropped;
    - a row for a graph outside the scope is skipped; the cursor advances
      over it;
-3. after every page, bookmarks the last applied sequence number — locally
+3. bookmarks the last applied sequence number — locally
    (`<data-dir>/replication.json`, so a restart continues where it stopped)
-   and on the leader (`PUT /api/admin/changes/cursors/<node-id>`), so the
-   leader's retention never sweeps a row this follower still needs.
+   after every page and after every row that fetched a graph whole, so a
+   page of bulk-load rows that takes minutes shows its progress in the
+   status; and on the leader after every page
+   (`PUT /api/admin/changes/cursors/<node-id>`), so the leader's retention
+   never sweeps a row this follower still needs.
 
 **Epochs and failover.** The leader's change log has an epoch — a name for
 the store's lineage. A follower applies rows only from the epoch it adopted;
@@ -123,7 +129,8 @@ that was behind — its followers get its state, whole.
 role, temperature and scope; on a follower the adopted epoch, the applied
 and the leader's newest sequence numbers, the lag in rows, the last catch-up
 time and error, and `healthy` — true while the last successful catch-up is
-younger than three intervals. A load balancer that must not route stale
+younger than three intervals (plus the long-poll hold, on a hot follower).
+A load balancer that must not route stale
 reads checks `lag_rows` and `healthy`.
 
 ```json
@@ -297,15 +304,28 @@ model. Three things to know:
 ### Sizing and cost
 
 A follower's catch-up costs the leader one manifest read and one page read
-per 500 rows, plus a Graph Store read per graph fetched whole. Hot followers
-poll every 500 ms; a leader with many hot followers pays that many small
-requests per second. The change log itself costs the leader what
+per 500 rows, plus a Graph Store read per graph fetched whole. A hot
+follower keeps one request held on the leader at a time and asks again the
+moment it is answered, so idle it costs a request every 25 s; a leader with
+many hot followers holds one request per follower. The change log itself
+costs the leader what
 [versioning.md](versioning.md#what-it-costs) measured: a few microseconds
 per ground update, a scan of the target graph per `WHERE` update.
 Retention on the leader (`OTS_CHANGE_RETENTION_DAYS`, 90) never sweeps above
 the lowest live cursor, and a cursor idle for `OTS_CURSOR_TTL_DAYS` (30)
 expires — a follower away longer than that resynchronises whole when it
 comes back.
+
+A follower is a client of the leader's [rate limiter](#rate-limiting) like
+any other at its address: the Graph Store reads a bootstrap makes are
+limited to a burst of 40 and one a second after that. When the leader
+answers `429`, the follower waits the `Retry-After` out and sends the same
+request again — bounded to eight waits of at most 30 s each — so a
+bootstrap of many graphs proceeds at the limiter's sustained rate rather
+than restarting from the first graph. A leader whose only clients are its
+followers can lift the limit (`RATE_LIMIT_DISABLED`, or trusted proxy
+ranges so the limit applies per real client) and let a bootstrap run at
+full speed.
 
 ### What is not here
 

@@ -2234,3 +2234,85 @@ image); `oxsdatatypes` is Apache-2.0/MIT by its manifest.
 6. **`v0.6.0`**: the CHANGELOG fold is still the last commit before the
    release PR; nothing is tagged or pushed.
 
+
+## Decisions taken after the P5 checkpoint (2026-09-18)
+
+The maintainer's question after the checkpoint was not about the engine
+but about whether anyone would find what P2–P5 built: the docs were
+thorough and undiscoverable (no README row, no overview bullet), the web
+UI had no page for replication, telemetry or the change log, and there
+was no example of a follower that did not start with reading a 300-line
+chapter. Three items, one commit each — an example, the docs that point at
+it, and the page — and, first, the bug the example found.
+
+### 1. The example found a bug: a follower against the leader's rate limiter
+
+**What happened.** The first run of the compose example (section 2) never
+bootstrapped. The follower's status read `last_error:
+".../api/replication/manifest: HTTP 429"`, `resyncs: 161`, `healthy:
+false`, nothing applied, three minutes in. The leader's per-IP limiter on
+the Graph Store and API routes (a burst of 40, one token a second) was
+answering the follower's bootstrap — one `GET /store?graph=` per graph,
+and the seeded demo organisation has more than forty graphs — with `429`
+and a `Retry-After`. The follower's client turned any non-2xx into an
+error, the catch-up failed, and the next tick, 500 ms later, started the
+bootstrap again from the manifest and the first graph, which is what kept
+the bucket empty. In-process, the P4 tests drive the follower through a
+`LeaderSource` that never rate-limits, so nothing had seen it.
+
+**The fix** (`src/store/replication.rs`, `HttpLeader`): one helper,
+`send_waiting_out_429`, under both request paths. A `429` is waited out for
+its `Retry-After` (a second when absent *or zero* — the leader's limiter
+writes whole seconds, truncated, so `0` means "under a second"; 30 s at
+most) and the *same*
+request is sent again, up to `RETRY_AFTER_ATTEMPTS` (8) times; any other
+failure is returned as before. A bootstrap now proceeds at the limiter's
+sustained rate — a graph a second after the burst — and the follower's
+`resyncs` reads 1.
+
+**Test-first**: `tests/replication_http.rs`, a local axum listener that
+throttles the first N answers of a route and then behaves. Red on the
+missing constant; green on five cases — the wait and the retry of the same
+request (the hit counter reads 3, the clock reads ≥ 2 s), the bytes route,
+the bound (a permanent `429` with `Retry-After: 0` fails after exactly
+`RETRY_AFTER_ATTEMPTS + 1` requests), a missing header meaning a second,
+and a `500` returned at once with no retry. `docs/operations.md`, "Sizing
+and cost", says what a follower does under the limiter and that a leader
+whose only clients are followers can lift it.
+
+**The second symptom, found by the re-run.** With the wait-out in place
+the example bootstrapped in 16 s and then stalled: every catch-up after it
+ended in `HTTP 429 after waiting out 8 Retry-After answers`, and the
+write on the leader never reached the follower. A hot follower held its
+long-poll for one poll period — 500 ms — and read the manifest before
+each, four requests a second against a limiter that sustains one. The
+hold is now `LONG_POLL`, 25 s (the leader caps a long-poll at 30 s): the
+leader answers the moment a row lands whatever the hold, so the lag is
+the same round trip, and an idle hot follower costs a request every 25 s.
+Health allows for the hold (a hot follower 20 s into one is not stale).
+Test-first again: a recording `LeaderSource` in `tests/replication.rs`
+asserts the hold a hot follower asks for (20–30 s) and that a warm one
+asks for none; a unit test pins the health window; and
+`tests/replication_e2e.rs` (section 5) has the follower ask first and the
+write land a second later, and asserts the row came back inside the
+hold. Red on all three before the change.
+
+**A fourth, from the walkthrough while the leader was still seeding.**
+Run before the leader's first-boot seed had finished lifting its IFC
+demos, the follower sat two minutes into one page — every row a
+whole-graph fetch at the limiter's one a second — with `applied_seq`
+frozen at the page's start and `healthy: false`, while applying rows the
+whole time. The bookmark moved only per page. A row that fetched a graph
+whole is now bookmarked at once and restarts the health window
+(`note_progress`); delta rows, microseconds each, stay bookmarked by the
+page. Test-first: an observing `LeaderSource` records the follower's
+position at every fetch and expects the previous row, not the page's
+start (`[3, 3, 3]` before, `[3, 4, 5]` after). And the compose example
+now sets `SEED_IFC_URL=` on both nodes, so it depends on no download and
+the follower's first catch-up is the demo organisation, not minutes of
+lifts; the walkthrough says so.
+
+**Not changed:** the limiter itself. Exempting replication routes or admin
+tokens from it would be a policy change on the leader's public surface;
+honouring `Retry-After` is what any client should do, and it makes the
+example work with the defaults.

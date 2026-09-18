@@ -22,7 +22,9 @@
 //!   retention never sweeps a row the follower still needs.
 //!
 //! **Temperature** changes only how often the follower asks: `cold` every
-//! hour, `warm` every minute, `hot` every poll (500 ms). **Scope** changes
+//! hour, `warm` every minute, `hot` continuously — a long-poll held on the
+//! leader up to [`LONG_POLL`] and answered the moment a row lands. **Scope**
+//! changes
 //! what it applies: every graph, a list of graphs, or the graphs of a list of
 //! the leader's datasets (resolved through the manifest at each catch-up).
 //! A follower is **read-only**: every mutation primitive refuses with
@@ -67,7 +69,8 @@ pub enum Mode {
     Cold,
     /// A reporting replica: catch up every minute.
     Warm,
-    /// A read replica: catch up every poll (500 ms), asynchronously.
+    /// A read replica: long-poll the leader continuously; the lag is a
+    /// round trip.
     Hot,
 }
 
@@ -119,7 +122,8 @@ pub struct ReplicationConfig {
     pub token: Option<String>,
     /// This node's name: the cursor it keeps on the leader.
     pub node_id: String,
-    /// The hot poll period.
+    /// A hot follower's pacing after a failed catch-up, and its health
+    /// interval; the request for rows itself is held for [`LONG_POLL`].
     pub poll: Duration,
     /// How often the follower catches up (the temperature, or an override).
     pub interval: Duration,
@@ -619,6 +623,13 @@ impl Replication {
         l.leader_newest_seq = Some(leader_newest_seq);
     }
 
+    /// Progress inside a catch-up: the health window restarts from now,
+    /// without calling the catch-up complete.
+    fn note_progress(&self) {
+        let mut l = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        l.ok_at = Some(Instant::now());
+    }
+
     fn record_error(&self, e: &str) {
         let mut l = self.last.lock().unwrap_or_else(|p| p.into_inner());
         l.at = Some(now());
@@ -629,10 +640,18 @@ impl Replication {
         let b = self.bookmark();
         let l = self.last.lock().unwrap_or_else(|p| p.into_inner());
         let effective = self.effective_role();
+        // A hot follower's request is held on the leader for up to
+        // `LONG_POLL` when nothing lands, and its last success is that old
+        // while it is held; the window allows for the hold.
+        let hold = if self.config.mode == Mode::Hot {
+            LONG_POLL
+        } else {
+            Duration::ZERO
+        };
         let healthy = match effective {
             Role::Follower => l
                 .ok_at
-                .map(|t| t.elapsed() <= self.config.interval * 3 + Duration::from_secs(5))
+                .map(|t| t.elapsed() <= self.config.interval * 3 + hold + Duration::from_secs(5))
                 .unwrap_or(false),
             _ => true,
         };
@@ -983,6 +1002,64 @@ fn encode(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
 
+/// How long a hot follower asks the leader to hold its request for rows
+/// when none are waiting. Under the leader's 30 s cap on a long-poll
+/// (`wait_ms`), and long enough that an idle hot follower — one request
+/// for rows and one manifest read per hold — stays well under the leader's
+/// per-IP limiter, which sustains one request a second. The leader answers
+/// the moment a row lands whatever the hold, so the lag is unchanged.
+pub const LONG_POLL: Duration = Duration::from_secs(25);
+
+/// How many `429 Too Many Requests` answers one request waits out before it
+/// is given up on.
+pub const RETRY_AFTER_ATTEMPTS: usize = 8;
+
+/// The longest a single `Retry-After` is honoured for.
+const RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
+
+/// Send the request `build` makes, waiting out the leader's `429`s.
+///
+/// The leader rate-limits a follower like any other client of its address,
+/// and says when to come back (`Retry-After`). A follower that took a `429`
+/// as a failed catch-up restarted the catch-up on its next tick — its
+/// bootstrap from the first graph again — which is what kept the limiter
+/// drained, so a leader with more graphs than the limiter's burst never got
+/// a follower past bootstrap. Waiting the header out and sending the *same*
+/// request again lets a bootstrap proceed at the limiter's sustained rate
+/// instead. Bounded, so a leader that never stops saying `429` is an error
+/// rather than a hang; any other failure is returned as it is.
+async fn send_waiting_out_429(
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, String> {
+    let mut waited = 0;
+    loop {
+        let resp = build().send().await.map_err(|e| format!("{url}: {e}"))?;
+        if resp.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(resp);
+        }
+        if waited == RETRY_AFTER_ATTEMPTS {
+            return Err(format!(
+                "{url}: HTTP 429 after waiting out {waited} Retry-After answers"
+            ));
+        }
+        // The leader's limiter writes whole seconds, truncated, so a `0`
+        // means "under a second" — and at one token a second, a second is
+        // the shortest wait that is sure to find one. Retrying at once
+        // spent all eight attempts inside a few milliseconds.
+        let secs = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(1);
+        let wait = Duration::from_secs(secs.max(1)).min(RETRY_AFTER_MAX);
+        tracing::debug!("replication: {url} answered 429; waiting {wait:?} as told");
+        tokio::time::sleep(wait).await;
+        waited += 1;
+    }
+}
+
 /// The leader named by `OTS_REPLICATION_LEADER_URL`, called with
 /// `OTS_REPLICATION_TOKEN` (an admin API token minted on the leader).
 pub struct HttpLeader {
@@ -1017,17 +1094,20 @@ impl HttpLeader {
         let token = self.token.clone();
         let timeout = self.timeout;
         blocking(async move {
-            let mut req = client()
-                .request(method, &url)
-                .timeout(timeout)
-                .header("Accept", accept);
-            if let Some(t) = &token {
-                req = req.bearer_auth(t);
-            }
-            if let Some(b) = body {
-                req = req.json(&b);
-            }
-            let resp = req.send().await.map_err(|e| format!("{url}: {e}"))?;
+            let build = || {
+                let mut req = client()
+                    .request(method.clone(), &url)
+                    .timeout(timeout)
+                    .header("Accept", accept);
+                if let Some(t) = &token {
+                    req = req.bearer_auth(t);
+                }
+                if let Some(b) = &body {
+                    req = req.json(b);
+                }
+                req
+            };
+            let resp = send_waiting_out_429(&url, build).await?;
             let status = resp.status();
             if status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
@@ -1047,11 +1127,14 @@ impl HttpLeader {
         let token = self.token.clone();
         let timeout = self.timeout;
         blocking(async move {
-            let mut req = client().get(&url).timeout(timeout).header("Accept", accept);
-            if let Some(t) = &token {
-                req = req.bearer_auth(t);
-            }
-            let resp = req.send().await.map_err(|e| format!("{url}: {e}"))?;
+            let build = || {
+                let mut req = client().get(&url).timeout(timeout).header("Accept", accept);
+                if let Some(t) = &token {
+                    req = req.bearer_auth(t);
+                }
+                req
+            };
+            let resp = send_waiting_out_429(&url, build).await?;
             let status = resp.status();
             if !status.is_success() {
                 return Err(format!("{url}: HTTP {}", status.as_u16()));
@@ -1178,9 +1261,13 @@ impl TripleStore {
         let mut pages = 0;
         loop {
             // A hot follower long-polls: the request returns as soon as a
-            // row lands, or after one poll period.
+            // row lands, or after `LONG_POLL`. The hold is long on purpose:
+            // it is what keeps an idle hot follower to a request every few
+            // tens of seconds — under the leader's per-IP limiter — rather
+            // than two a second, which the limiter cut off right after the
+            // bootstrap. The lag is the same round trip either way.
             let wait = if config.mode == Mode::Hot {
-                config.poll
+                LONG_POLL
             } else {
                 Duration::ZERO
             };
@@ -1198,8 +1285,20 @@ impl TripleStore {
             let n = page.rows.len();
             for row in &page.rows {
                 let Some(seq) = row.seq else { continue };
+                let fetched_before = progress.refetched_graphs;
                 self.apply_row(source, row, &selected, &manifest, &mut progress)?;
                 after = seq;
+                // A row that fetched a graph whole took a round trip — and,
+                // under the leader's limiter, a second. Bookmark it at once
+                // and let health see the progress: a page of such rows can
+                // take minutes, and a position frozen at the page's start
+                // read as stale while rows were being applied the whole
+                // time. Delta rows apply in microseconds and are bookmarked
+                // by the page.
+                if progress.refetched_graphs > fetched_before {
+                    rep.set_bookmark(Some(manifest.epoch.clone()), after);
+                    rep.note_progress();
+                }
             }
             if n > 0 {
                 rep.set_bookmark(Some(manifest.epoch.clone()), after);
@@ -1548,6 +1647,34 @@ mod tests {
         assert!(s.healthy);
         assert_eq!(s.lag_rows, Some(7));
         assert!(Replication::disabled().status().healthy);
+    }
+
+    /// A hot follower's request is held on the leader for tens of seconds
+    /// when nothing lands, and its last success is that old while it is
+    /// held. Health has to allow for the hold, or an idle hot follower would
+    /// read as stale between rows.
+    #[test]
+    fn a_hot_follower_held_on_a_long_poll_is_still_healthy() {
+        let r = Replication::with_config(
+            ReplicationConfig::follower("http://leader", Mode::Hot, Scope::All),
+            None,
+        );
+        r.record_ok(0);
+        r.last.lock().unwrap().ok_at = Some(Instant::now() - Duration::from_secs(20));
+        assert!(r.status().healthy, "20 s into a hold is not stale");
+        r.last.lock().unwrap().ok_at = Some(Instant::now() - Duration::from_secs(120));
+        assert!(!r.status().healthy, "two minutes is");
+
+        // A warm follower's window is its interval, three times over.
+        let w = Replication::with_config(
+            ReplicationConfig::follower("http://leader", Mode::Warm, Scope::All),
+            None,
+        );
+        w.record_ok(0);
+        w.last.lock().unwrap().ok_at = Some(Instant::now() - Duration::from_secs(120));
+        assert!(w.status().healthy);
+        w.last.lock().unwrap().ok_at = Some(Instant::now() - Duration::from_secs(300));
+        assert!(!w.status().healthy);
     }
 
     #[test]

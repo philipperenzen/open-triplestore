@@ -624,6 +624,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **A follower waits out the leader's rate limiter instead of restarting its
+  bootstrap.** The leader answers `429` with `Retry-After` to a follower
+  like to any client of its address; the follower took that as a failed
+  catch-up and started again from the first graph on its next tick, which
+  kept the limiter drained — a leader with more graphs than the limiter's
+  burst (40) never got a follower past bootstrap. The client now honours
+  `Retry-After` — a `0`, which the limiter writes for any sub-second wait,
+  is read as a second — and sends the same request again, bounded (eight
+  waits, 30 s each at most), so a bootstrap proceeds at the limiter's
+  sustained rate.
+  And a hot follower's long-poll is held up to 25 s (it was one poll
+  period, 500 ms): the leader still answers the moment a row lands, but an
+  idle hot follower now costs it a request every 25 s instead of two a
+  second — the rate at which the same limiter had cut the tailing off
+  right after the bootstrap, so the leader's writes never arrived. And a
+  row that fetched a graph whole is bookmarked at once rather than at the
+  end of its page: under the limiter a page of bulk-load rows takes a
+  second a row, and a status frozen at the page's start read as stale
+  while the follower was applying rows the whole time.
 - **STEP parser: an empty list swallowed every argument after it.** `()` was
   read as a list holding one unknown byte with the closing paren consumed, so
   an `IfcProject` written with empty `RepresentationContexts` — most

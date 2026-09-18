@@ -18,7 +18,8 @@ use open_triplestore::auth::models::{OwnerType, SystemRole, Visibility};
 use open_triplestore::store::changes::{DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_SCAN};
 use open_triplestore::store::engine::StoreError;
 use open_triplestore::store::replication::{
-    DatasetGraphs, InProcessLeader, Mode, ReplicationConfig, Role, Scope,
+    DatasetGraphs, InProcessLeader, LeaderSource, Manifest, Mode, Page, ReplicationConfig, Role,
+    Scope,
 };
 use open_triplestore::store::TripleStore;
 use oxigraph::io::RdfFormat;
@@ -711,4 +712,177 @@ async fn the_leader_serves_its_identity_database_to_admins() {
         m.get("identity_version").is_some(),
         "the manifest names the identity version (null in memory): {m}"
     );
+}
+
+// ─── How long a hot follower is willing to wait ─────────────────────────────
+
+/// A leader that remembers how long each request for rows was willing to
+/// wait, and otherwise behaves like the in-process leader.
+struct Recording {
+    inner: InProcessLeader,
+    waits: std::sync::Mutex<Vec<std::time::Duration>>,
+}
+
+impl LeaderSource for Recording {
+    fn manifest(&self) -> Result<Manifest, String> {
+        self.inner.manifest()
+    }
+    fn changes_after(
+        &self,
+        after: i64,
+        limit: usize,
+        wait: std::time::Duration,
+    ) -> Result<Page, String> {
+        self.waits.lock().unwrap().push(wait);
+        self.inner.changes_after(after, limit, wait)
+    }
+    fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String> {
+        self.inner.graph_ntriples(graph)
+    }
+    fn set_cursor(&self, name: &str, seq: i64) -> Result<(), String> {
+        self.inner.set_cursor(name, seq)
+    }
+    fn identity_snapshot(&self) -> Result<Vec<u8>, String> {
+        self.inner.identity_snapshot()
+    }
+}
+
+/// A hot follower's request for rows is held on the leader for tens of
+/// seconds, not for one poll period: the leader answers the moment a row
+/// lands either way, so the lag is the same round trip, but an idle hot
+/// follower costs its leader a request every few tens of seconds rather than
+/// two a second — which is what let a hot follower run through the leader's
+/// per-IP limiter (a sustained one request a second) in the first place.
+/// Warm and cold followers do not wait at all: they ask and go.
+#[test]
+fn a_hot_follower_long_polls_for_tens_of_seconds_and_a_warm_one_not_at_all() {
+    let l = leader();
+    l.graph_store_put(Some(G1), &ttl(&[1]), RdfFormat::Turtle)
+        .unwrap();
+    let src = Recording {
+        inner: InProcessLeader::new(l.clone()),
+        waits: Default::default(),
+    };
+
+    follower(Scope::All).replicate_once(&src).unwrap();
+    let hot = src.waits.lock().unwrap().clone();
+    assert!(!hot.is_empty());
+    assert!(
+        hot.iter().all(|w| *w >= std::time::Duration::from_secs(20)),
+        "a hot follower asks the leader to hold its request: {hot:?}"
+    );
+    assert!(
+        hot.iter().all(|w| *w <= std::time::Duration::from_secs(30)),
+        "…but not past the leader's 30 s cap on a long-poll: {hot:?}"
+    );
+
+    src.waits.lock().unwrap().clear();
+    TripleStore::in_memory()
+        .unwrap()
+        .with_replication(ReplicationConfig::follower(
+            "inprocess",
+            Mode::Warm,
+            Scope::All,
+        ))
+        .replicate_once(&src)
+        .unwrap();
+    let warm = src.waits.lock().unwrap().clone();
+    assert!(
+        warm.iter().all(|w| w.is_zero()),
+        "a warm follower asks and goes: {warm:?}"
+    );
+}
+
+// ─── A long page does not freeze the follower's position ────────────────────
+
+/// A leader that, at every whole-graph fetch, looks at where the follower
+/// says it is — the way an operator reading `/api/replication/status` would
+/// while a page of bulk-load rows is being applied.
+struct Observing {
+    inner: InProcessLeader,
+    follower: TripleStore,
+    seen: std::sync::Mutex<Vec<i64>>,
+}
+
+impl LeaderSource for Observing {
+    fn manifest(&self) -> Result<Manifest, String> {
+        self.inner.manifest()
+    }
+    fn changes_after(
+        &self,
+        after: i64,
+        limit: usize,
+        wait: std::time::Duration,
+    ) -> Result<Page, String> {
+        self.inner.changes_after(after, limit, wait)
+    }
+    fn graph_ntriples(&self, graph: Option<&str>) -> Result<Option<String>, String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(self.follower.replication().status().applied_seq);
+        self.inner.graph_ntriples(graph)
+    }
+    fn set_cursor(&self, name: &str, seq: i64) -> Result<(), String> {
+        self.inner.set_cursor(name, seq)
+    }
+    fn identity_snapshot(&self) -> Result<Vec<u8>, String> {
+        self.inner.identity_snapshot()
+    }
+}
+
+/// A row that fetched a graph whole took a round trip — and, under the
+/// leader's rate limiter, a second — so the follower bookmarks it at once
+/// rather than at the end of the page: a page of bulk-load rows can take
+/// minutes, and a status frozen at the page's start read as stale while the
+/// follower was applying rows the whole time. Delta rows apply in
+/// microseconds and are bookmarked by the page, as before.
+#[test]
+fn a_row_that_fetched_a_graph_whole_is_bookmarked_at_once() {
+    // Caps of one quad and graphs of three: every scanned update is an
+    // unknown row, which the follower answers by fetching the graph whole.
+    let l = TripleStore::in_memory().unwrap().with_change_capture(1, 1);
+    let graphs = [
+        "https://example.org/rep/b1",
+        "https://example.org/rep/b2",
+        "https://example.org/rep/b3",
+    ];
+    for g in &graphs {
+        l.graph_store_put(Some(g), &ttl(&[1, 2, 3]), RdfFormat::Turtle)
+            .unwrap();
+    }
+    let f = follower(Scope::All);
+    let src = Observing {
+        inner: InProcessLeader::new(l.clone()),
+        follower: f.clone(),
+        seen: Default::default(),
+    };
+    f.replicate_once(&src).unwrap();
+    let start = f.replication().status().applied_seq;
+
+    // Three scanned updates: three unknown rows, one per graph, in order.
+    for g in &graphs {
+        l.update(&format!(
+            "INSERT {{ GRAPH <{g}> {{ ?s <https://example.org/rep/q> ?o }} }} WHERE {{ GRAPH <{g}> {{ ?s <https://example.org/rep/p> ?o }} }}"
+        ))
+        .unwrap();
+    }
+    let rows: Vec<i64> = l
+        .changes()
+        .rows_after(start, 10)
+        .iter()
+        .filter_map(|r| r.seq)
+        .collect();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+
+    src.seen.lock().unwrap().clear();
+    let p = f.replicate_once(&src).unwrap();
+    assert_eq!(p.refetched_graphs, 3, "{p:?}");
+    let seen = src.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![start, rows[0], rows[1]],
+        "at each fetch the follower's position is the previous row, not the page's start"
+    );
+    assert_eq!(f.replication().status().applied_seq, rows[2]);
 }
