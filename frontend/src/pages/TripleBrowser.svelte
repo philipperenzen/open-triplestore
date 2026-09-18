@@ -25,6 +25,8 @@
   import { copyOrWarn } from '../lib/clipboard.js';
   import { buildScopeParams as scopeParamsFor, isPinnedVersion as isPinned, loadScope, saveScope, reconcileScope } from '../lib/browseScope.js';
   import { collapseClosure } from '../lib/graphCollapse';
+  import { decideExpansion, EXPAND_MESSAGE_KEY } from '../lib/graphExpand';
+  import { toastInfo, toastSuccess, toastError, dismiss as dismissToast } from '../lib/toast';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
   import Combobox from '../components/Combobox.svelte';
@@ -242,6 +244,30 @@
     clearTimeout(browseGraphHintTimer);
     browseGraphHintTimer = setTimeout(() => { browseGraphHint = ''; }, 4000);
   }
+  // Every user-initiated expansion says what it did, because three of its four
+  // outcomes change nothing on the canvas and used to be indistinguishable from a
+  // broken control: neighbours that were all drawn already, a node whose expansion
+  // came back with the restored working state, and a node with nothing left in
+  // scope. The previous toast is dismissed first — one inspector click can expand a
+  // blank node and each of its blank children, and a stack of toasts over the graph
+  // is its own kind of noise.
+  let lastExpandToastId = 0;
+  function announceExpansion(decision) {
+    if (lastExpandToastId) dismissToast(lastExpandToastId);
+    const key = EXPAND_MESSAGE_KEY[decision.outcome];
+    if (decision.outcome === 'added') {
+      lastExpandToastId = toastSuccess($i18nT(key, { values: { n: decision.added } }));
+    } else {
+      lastExpandToastId = toastInfo($i18nT(key));
+    }
+  }
+  // A failed neighbourhood fetch is the fourth way an expansion used to go silent:
+  // the catch below swallows the error, so without this the double-click simply did
+  // nothing.
+  function announceExpansionFailure() {
+    if (lastExpandToastId) dismissToast(lastExpandToastId);
+    lastExpandToastId = toastError($i18nT('pages.tripleBrowser.errorLoading'));
+  }
   // Reactive set of currently expanded IRIs for GraphCanvas badge
   $: browseExpandedIris = new Set(browseExpandedUris.keys());
   // Reactive set of fully-exhausted IRIs (both in + out queried) — hides + badge
@@ -351,36 +377,49 @@
     browseExpandedDirs = new Map(browseExpandedDirs).set(key, dirs);
   }
 
-  async function browseExpandUri(uri, direction = 'both') {
-    if (!uri || uri.startsWith('_:') || (!uri.includes('://') && !uri.startsWith('urn:'))) return;
+  // `announce` is set by the gestures the user drives directly — double-click and
+  // the context menu — and left off for the bulk expansions behind "load more",
+  // which have their own progress indicator and would otherwise toast ten times.
+  async function browseExpandUri(uri, direction = 'both', { announce = false } = {}) {
+    if (!uri || uri.startsWith('_:') || (!uri.includes('://') && !uri.startsWith('urn:'))) return null;
+    // Photograph the canvas before expanding: what is drawn, and whether this node
+    // already carries an expansion — including one restored from the saved working
+    // state, which is the case that made a double-click look dead after a reload.
+    const presentIds = new Set(graphNodes.map(n => n.data.id));
+    const wasExpanded = browseExpandedUris.has(uri);
     browseExpandingUri = uri;
     try {
       const dirsToAdd = direction === 'both' ? ['in', 'out'] : [direction];
       const cacheKey = `${uri}::${direction}`;
+      let newNodes, newEdges;
       if (browseExpansionCache.has(cacheKey)) {
-        const { nodes, edges } = browseExpansionCache.get(cacheKey);
-        applyExpansion(uri, dirsToAdd, nodes, edges);
-        return;
+        ({ nodes: newNodes, edges: newEdges } = browseExpansionCache.get(cacheKey));
+      } else {
+        // Fetch the node's neighbourhood through the SAME scoped browse endpoint as
+        // the initial load, so dataset/org/version scope is honoured. (The global
+        // /sparql endpoint ignores the browse scope, which is why expansion loaded
+        // nothing when scoped to a dataset or pinned to a version.) Outgoing = exact
+        // subject match, incoming = exact object match; run concurrently for "both".
+        const scope = buildExpandScopeParams();
+        const outPromise = (direction === 'both' || direction === 'out')
+          ? browseTriples({ limit: '120', offset: '0', ...scope, filters: JSON.stringify([{ field: 'subject', value: uri, mode: 'exact' }]) })
+          : Promise.resolve(null);
+        const inPromise  = (direction === 'both' || direction === 'in')
+          ? browseTriples({ limit: '40', offset: '0', ...scope, filters: JSON.stringify([{ field: 'object', value: uri, mode: 'exact' }]) })
+          : Promise.resolve(null);
+        const [outRes, inRes] = await Promise.all([outPromise, inPromise]);
+        const rows = [...(outRes?.triples || []), ...(inRes?.triples || [])];
+        ({ nodes: newNodes, edges: newEdges } = graphResultsToElements(rows, 'subject', 'predicate', 'object', 300));
+        browseExpansionCache = new Map(browseExpansionCache).set(cacheKey, { nodes: newNodes, edges: newEdges });
       }
-
-      // Fetch the node's neighbourhood through the SAME scoped browse endpoint as
-      // the initial load, so dataset/org/version scope is honoured. (The global
-      // /sparql endpoint ignores the browse scope, which is why expansion loaded
-      // nothing when scoped to a dataset or pinned to a version.) Outgoing = exact
-      // subject match, incoming = exact object match; run concurrently for "both".
-      const scope = buildExpandScopeParams();
-      const outPromise = (direction === 'both' || direction === 'out')
-        ? browseTriples({ limit: '120', offset: '0', ...scope, filters: JSON.stringify([{ field: 'subject', value: uri, mode: 'exact' }]) })
-        : Promise.resolve(null);
-      const inPromise  = (direction === 'both' || direction === 'in')
-        ? browseTriples({ limit: '40', offset: '0', ...scope, filters: JSON.stringify([{ field: 'object', value: uri, mode: 'exact' }]) })
-        : Promise.resolve(null);
-      const [outRes, inRes] = await Promise.all([outPromise, inPromise]);
-      const rows = [...(outRes?.triples || []), ...(inRes?.triples || [])];
-      const { nodes: newNodes, edges: newEdges } = graphResultsToElements(rows, 'subject', 'predicate', 'object', 300);
-      browseExpansionCache = new Map(browseExpansionCache).set(cacheKey, { nodes: newNodes, edges: newEdges });
       applyExpansion(uri, dirsToAdd, newNodes, newEdges);
-    } catch {}
+      const decision = decideExpansion(newNodes, presentIds, wasExpanded);
+      if (announce) announceExpansion(decision);
+      return decision;
+    } catch {
+      if (announce) announceExpansionFailure();
+      return null;
+    }
     finally { browseExpandingUri = null; }
   }
 
@@ -389,32 +428,45 @@
   // /api/browse/resource endpoint resolves a stored blank node natively via the
   // quad store. Pass the browse scope so dataset/version-snapshot blank nodes
   // resolve in the same scope as the initial load.
-  async function browseExpandBnode(bnodeId) {
-    if (!bnodeId) return;
+  async function browseExpandBnode(bnodeId, { announce = false } = {}) {
+    if (!bnodeId) return null;
+    const presentIds = new Set(graphNodes.map(n => n.data.id));
+    const wasExpanded = browseExpandedUris.has(bnodeId);
     browseExpandingUri = bnodeId;
     try {
       const cacheKey = `bnode::${bnodeId}`;
+      let newNodes, newEdges;
       if (browseExpansionCache.has(cacheKey)) {
-        const { nodes, edges } = browseExpansionCache.get(cacheKey);
-        applyExpansion(bnodeId, ['in', 'out'], nodes, edges);
-        return;
+        ({ nodes: newNodes, edges: newEdges } = browseExpansionCache.get(cacheKey));
+      } else {
+        const res = await browseResource(`_:${bnodeId}`, buildExpandScopeParams());
+        // Mirror ResourceDetail.buildGraph: anchor each row on this blank node and
+        // include its nested blank-node descriptions so they don't dead-end.
+        const rows = [];
+        for (const row of (res?.outgoing || []))
+          rows.push({ s: { type: 'bnode', value: bnodeId }, p: row.p, o: row.o });
+        for (const row of (res?.incoming || []))
+          rows.push({ s: row.s, p: row.p, o: { type: 'bnode', value: bnodeId } });
+        for (const [id, brows] of Object.entries(res?.bnodes || {}))
+          for (const row of (brows || []))
+            rows.push({ s: { type: 'bnode', value: id }, p: row.p, o: row.o });
+        ({ nodes: newNodes, edges: newEdges } = graphResultsToElements(rows));
+        // A blank node that resolves to nothing keeps its own wording — the hint is
+        // the feedback here, so no toast on top of it.
+        if (!newNodes.length) {
+          flashGraphHint($i18nT('pages.tripleBrowser.expandBnodeEmpty'));
+          return { outcome: 'empty', added: 0 };
+        }
+        browseExpansionCache = new Map(browseExpansionCache).set(cacheKey, { nodes: newNodes, edges: newEdges });
       }
-      const res = await browseResource(`_:${bnodeId}`, buildExpandScopeParams());
-      // Mirror ResourceDetail.buildGraph: anchor each row on this blank node and
-      // include its nested blank-node descriptions so they don't dead-end.
-      const rows = [];
-      for (const row of (res?.outgoing || []))
-        rows.push({ s: { type: 'bnode', value: bnodeId }, p: row.p, o: row.o });
-      for (const row of (res?.incoming || []))
-        rows.push({ s: row.s, p: row.p, o: { type: 'bnode', value: bnodeId } });
-      for (const [id, brows] of Object.entries(res?.bnodes || {}))
-        for (const row of (brows || []))
-          rows.push({ s: { type: 'bnode', value: id }, p: row.p, o: row.o });
-      const { nodes, edges } = graphResultsToElements(rows);
-      if (!nodes.length) { flashGraphHint($i18nT('pages.tripleBrowser.expandBnodeEmpty')); return; }
-      browseExpansionCache = new Map(browseExpansionCache).set(cacheKey, { nodes, edges });
-      applyExpansion(bnodeId, ['in', 'out'], nodes, edges);
-    } catch {}
+      applyExpansion(bnodeId, ['in', 'out'], newNodes, newEdges);
+      const decision = decideExpansion(newNodes, presentIds, wasExpanded);
+      if (announce) announceExpansion(decision);
+      return decision;
+    } catch {
+      if (announce) announceExpansionFailure();
+      return null;
+    }
     finally { browseExpandingUri = null; }
   }
 
@@ -453,9 +505,12 @@
     browseExpansionCache = nextCache;
   }
 
+  // Both canvas expand gestures arrive here — the double-click and the inspector's
+  // automatic load of an unexpanded blank node — so both report their outcome the
+  // same way.
   function handleBrowseNodeExpand(e) {
-    if (e.detail.fullIri) browseExpandUri(e.detail.fullIri);
-    else if (e.detail.nodeType === 'bnode') browseExpandBnode(e.detail.id);
+    if (e.detail.fullIri) browseExpandUri(e.detail.fullIri, 'both', { announce: true });
+    else if (e.detail.nodeType === 'bnode') browseExpandBnode(e.detail.id, { announce: true });
   }
 
   // Clicking an edge surfaces the FULL predicate definition — richer than a node
@@ -519,10 +574,10 @@
     else if (action === 'loadMore') loadMoreGraphTriples();
     else if (browseCtxNodeData) {
       const data = browseCtxNodeData;
-      if      (action === 'expandOut')   browseExpandUri(data.fullIri, 'out');
-      else if (action === 'expandIn')    browseExpandUri(data.fullIri, 'in');
-      else if (action === 'expandBoth')  browseExpandUri(data.fullIri, 'both');
-      else if (action === 'expandBnode') browseExpandBnode(data.id);
+      if      (action === 'expandOut')   browseExpandUri(data.fullIri, 'out',  { announce: true });
+      else if (action === 'expandIn')    browseExpandUri(data.fullIri, 'in',   { announce: true });
+      else if (action === 'expandBoth')  browseExpandUri(data.fullIri, 'both', { announce: true });
+      else if (action === 'expandBnode') browseExpandBnode(data.id, { announce: true });
       else if (action === 'collapse')    browseCollapseUri(data.fullIri || data.id);
       else if (action === 'copyIri')     void copyOrWarn(data.fullIri);
       else if (action === 'remove')      graphCanvas?.removeNode(data.id);
