@@ -89,6 +89,7 @@
     "refresh": "Refresh",
     "copy": "Copy",
     "copied": "Copied!",
+    "copyFailed": "Couldn't copy — select the text and press Ctrl/Cmd + C",
     "error": "Error",
     "success": "Success",
     "warning": "Warning",
@@ -3071,6 +3072,7 @@
       "graph": "Graph",
       "defaultGraph": "default",
       "copyNTriple": "Copy as N-Triple",
+      "copyIri": "Copy IRI",
       "noResults": "No results."
     },
     "chat": {

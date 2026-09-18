@@ -89,6 +89,7 @@
     "refresh": "Vernieuwen",
     "copy": "Kopiëren",
     "copied": "Gekopieerd!",
+    "copyFailed": "Kopiëren lukte niet — selecteer de tekst en druk op Ctrl/Cmd + C",
     "error": "Fout",
     "success": "Gelukt",
     "warning": "Waarschuwing",
@@ -3071,6 +3072,7 @@
       "graph": "Graaf",
       "defaultGraph": "standaard",
       "copyNTriple": "Kopiëren als N-Triple",
+      "copyIri": "IRI kopiëren",
       "noResults": "Geen resultaten."
     },
     "chat": {

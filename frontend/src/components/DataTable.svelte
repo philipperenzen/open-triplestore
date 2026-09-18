@@ -8,9 +8,9 @@
   import { shortenIRI, toNTriples } from '../lib/rdf-utils.js';
   import RdfTerm from './RdfTerm.svelte';
   import TermPopover from './ontology/TermPopover.svelte';
-  import { Copy } from 'lucide-svelte';
+  import { Check, Copy } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
-  import { copyToClipboard } from '../lib/clipboard.js';
+  import { copyOrWarn } from '../lib/clipboard.js';
 
   /**
    * @typedef {Object} RdfTermLike
@@ -80,7 +80,36 @@
   function copyTriple(tr) {
     const line = toNTriples([tr]);
     dispatch('copy', { triple: tr, text: line });
-    void copyToClipboard(line);
+    void copyOrWarn(line);
+  }
+
+  // Per-term copying. Every cell shows the PREFIXED form (rdf:type, not the IRI),
+  // so selecting the text by hand never yields what someone wants to paste; and
+  // the predicate and graph cells are chips rather than RdfTerms, so before this
+  // they carried no copy control at all. One identical button therefore lives
+  // here, in all four columns, and RdfTerm's own is suppressed in this table so a
+  // cell never grows two of them.
+  function copyTextOf(term) {
+    if (!term || typeof term.value !== 'string') return '';
+    // A blank node only means anything in its N-Triples form.
+    return term.type === 'bnode' ? `_:${term.value}` : term.value;
+  }
+  const isIri = (term) => term?.type === 'uri' || term?.type === 'iri';
+  const copyLabelOf = (term) =>
+    isIri(term) ? $t('components.dataTable.copyIri') : $t('components.rdfTerm.copyValue');
+
+  // Which cell last confirmed a copy, as `row:column`, so the tick replaces the
+  // icon in that one button only.
+  let copiedCell = '';
+  let copiedTimer;
+  async function copyTerm(cell, term) {
+    const text = copyTextOf(term);
+    if (!text) return;
+    if (await copyOrWarn(text)) {
+      copiedCell = cell;
+      clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => (copiedCell = ''), 1500);
+    }
   }
 
   $: isEmpty = mode === 'triples'
@@ -127,32 +156,84 @@
         {#each triples as tr, i (rowKey(i))}
           <tr class="triple-row" class:row-in={animateRows} style={rowDelay(i)}>
             <td class="term-cell">
-              <RdfTerm term={tr.subject} graph={tr.graph?.value || ''} />
+              <div class="cell">
+                <span class="cell-body">
+                  <RdfTerm term={tr.subject} graph={tr.graph?.value || ''} copyable={false} />
+                </span>
+                {#if copyTextOf(tr.subject)}
+                  <button
+                    class="copy-iri"
+                    class:copied={copiedCell === `${i}:s`}
+                    title={copiedCell === `${i}:s` ? $t('system.copied') : copyLabelOf(tr.subject)}
+                    aria-label={copyLabelOf(tr.subject)}
+                    on:click|stopPropagation={() => copyTerm(`${i}:s`, tr.subject)}
+                  >{#if copiedCell === `${i}:s`}<Check size={12} />{:else}<Copy size={12} />{/if}</button>
+                {/if}
+              </div>
             </td>
             <td class="pred-cell">
-              <TermPopover iri={tr.predicate?.value || ''} variant="rich">
-                <span
-                  class="predicate"
-                  title={tr.predicate?.value}
-                  style="color:{predicateColor(tr.predicate?.value)}; background:{predicateBg(tr.predicate?.value)}"
-                >{shortenIRI(tr.predicate?.value || '')}</span>
-              </TermPopover>
+              <div class="cell">
+                <span class="cell-body">
+                  <TermPopover iri={tr.predicate?.value || ''} variant="rich">
+                    <span
+                      class="predicate"
+                      title={tr.predicate?.value}
+                      style="color:{predicateColor(tr.predicate?.value)}; background:{predicateBg(tr.predicate?.value)}"
+                    >{shortenIRI(tr.predicate?.value || '')}</span>
+                  </TermPopover>
+                </span>
+                {#if copyTextOf(tr.predicate)}
+                  <button
+                    class="copy-iri"
+                    class:copied={copiedCell === `${i}:p`}
+                    title={copiedCell === `${i}:p` ? $t('system.copied') : copyLabelOf(tr.predicate)}
+                    aria-label={copyLabelOf(tr.predicate)}
+                    on:click|stopPropagation={() => copyTerm(`${i}:p`, tr.predicate)}
+                  >{#if copiedCell === `${i}:p`}<Check size={12} />{:else}<Copy size={12} />{/if}</button>
+                {/if}
+              </div>
             </td>
             <td class="term-cell">
-              {#if tr.object?.type === 'uri' || tr.object?.type === 'iri'}
-                <TermPopover iri={tr.object.value} variant="compact" trigger="hover">
-                  <RdfTerm term={tr.object} graph={tr.graph?.value || ''} />
-                </TermPopover>
-              {:else}
-                <RdfTerm term={tr.object} graph={tr.graph?.value || ''} />
-              {/if}
+              <div class="cell">
+                <span class="cell-body">
+                  {#if tr.object?.type === 'uri' || tr.object?.type === 'iri'}
+                    <TermPopover iri={tr.object.value} variant="compact" trigger="hover">
+                      <RdfTerm term={tr.object} graph={tr.graph?.value || ''} copyable={false} />
+                    </TermPopover>
+                  {:else}
+                    <RdfTerm term={tr.object} graph={tr.graph?.value || ''} copyable={false} />
+                  {/if}
+                </span>
+                {#if copyTextOf(tr.object)}
+                  <button
+                    class="copy-iri"
+                    class:copied={copiedCell === `${i}:o`}
+                    title={copiedCell === `${i}:o` ? $t('system.copied') : copyLabelOf(tr.object)}
+                    aria-label={copyLabelOf(tr.object)}
+                    on:click|stopPropagation={() => copyTerm(`${i}:o`, tr.object)}
+                  >{#if copiedCell === `${i}:o`}<Check size={12} />{:else}<Copy size={12} />{/if}</button>
+                {/if}
+              </div>
             </td>
             <td class="graph-cell">
-              {#if tr.graph?.value}
-                <span class="graph-tag" title={tr.graph.value}>{shortenIRI(tr.graph.value)}</span>
-              {:else}
-                <span class="graph-default">{$t('components.dataTable.defaultGraph')}</span>
-              {/if}
+              <div class="cell">
+                <span class="cell-body">
+                  {#if tr.graph?.value}
+                    <span class="graph-tag" title={tr.graph.value}>{shortenIRI(tr.graph.value)}</span>
+                  {:else}
+                    <span class="graph-default">{$t('components.dataTable.defaultGraph')}</span>
+                  {/if}
+                </span>
+                {#if copyTextOf(tr.graph)}
+                  <button
+                    class="copy-iri"
+                    class:copied={copiedCell === `${i}:g`}
+                    title={copiedCell === `${i}:g` ? $t('system.copied') : copyLabelOf(tr.graph)}
+                    aria-label={copyLabelOf(tr.graph)}
+                    on:click|stopPropagation={() => copyTerm(`${i}:g`, tr.graph)}
+                  >{#if copiedCell === `${i}:g`}<Check size={12} />{:else}<Copy size={12} />{/if}</button>
+                {/if}
+              </div>
             </td>
             <td class="actions-col">
               <button class="row-action" title={$t('components.dataTable.copyNTriple')} on:click={() => copyTriple(tr)}>
@@ -210,6 +291,26 @@
   }
   .triple-row:hover td { background: #f8faff; }
 
+  /* A row of [term | copy], so the copy button keeps its place at the end of the
+     cell instead of being pushed past the `overflow: hidden` edge by a long term. */
+  .cell { display: flex; align-items: center; gap: 0.3rem; min-width: 0; }
+  .cell-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Quiet but present, in all four columns: the copy affordance used to be
+     invisible until hover, which is why it was reported as missing. */
+  .copy-iri {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; padding: 0;
+    background: none; border: none; border-radius: 4px;
+    color: #cbd5e1; cursor: pointer; opacity: 0.6;
+    transition: color 0.1s, opacity 0.1s, background 0.1s;
+  }
+  .triple-row:hover .copy-iri { opacity: 1; }
+  .copy-iri:hover, .copy-iri:focus-visible { color: #4a90d9; background: #e8f2fc; opacity: 1; }
+  .copy-iri:focus-visible { outline: 2px solid #4a90d9; outline-offset: 1px; }
+  .copy-iri.copied { color: #4caf50; opacity: 1; }
+
   .term-cell { max-width: 280px; }
   .pred-cell { max-width: 180px; }
   .graph-cell { max-width: 140px; }
@@ -256,6 +357,10 @@
   :global(:is([data-theme="dark"], .dark)) .triple-row:hover td { background: rgba(126,214,208,0.06); }
   :global(:is([data-theme="dark"], .dark)) .graph-tag { color: var(--ink-600); background: rgba(255,255,255,0.06); }
   :global(:is([data-theme="dark"], .dark)) .graph-default { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .copy-iri { color: var(--ink-500); }
+  :global(:is([data-theme="dark"], .dark)) .copy-iri:hover,
+  :global(:is([data-theme="dark"], .dark)) .copy-iri:focus-visible { color: #60a5fa; background: rgba(59,130,246,0.15); }
+  :global(:is([data-theme="dark"], .dark)) .copy-iri.copied { color: #5fd39a; }
   :global(:is([data-theme="dark"], .dark)) .row-action { color: var(--ink-500); }
   :global(:is([data-theme="dark"], .dark)) .row-action:hover { color: #60a5fa; background: rgba(59,130,246,0.15); }
   :global(:is([data-theme="dark"], .dark)) .empty-state { color: var(--ink-600); }
