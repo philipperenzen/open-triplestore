@@ -485,6 +485,51 @@ fn triple_patterns(p: &GraphPattern) -> usize {
     }
 }
 
+/// Whether a `Group` sits anywhere below `p` — which makes a filter above it
+/// a `HAVING`, testing one row per group rather than one per solution.
+fn contains_group(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Group { .. } => true,
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::Lateral { left, right } => contains_group(left) || contains_group(right),
+        GraphPattern::LeftJoin { left, right, .. } => contains_group(left) || contains_group(right),
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => contains_group(inner),
+        _ => false,
+    }
+}
+
+/// Whether a `FILTER` in `p` tests *solutions* rather than groups. A `HAVING`
+/// — a filter above a `GROUP BY` — runs once per group and costs nothing worth
+/// declining for; a filter on raw solutions decodes every candidate row.
+fn has_row_filter(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Filter { inner, .. } => !contains_group(inner) || has_row_filter(inner),
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::Lateral { left, right } => has_row_filter(left) || has_row_filter(right),
+        GraphPattern::LeftJoin { left, right, .. } => has_row_filter(left) || has_row_filter(right),
+        GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. } => has_row_filter(inner),
+        _ => false,
+    }
+}
+
 /// A `LIMIT` over more than one triple pattern. The budget reaches only the
 /// last pattern of a basic graph pattern — an earlier one's rows can still be
 /// dropped by a later one — so every stage but the last is materialised in
@@ -573,21 +618,56 @@ fn orders_before_limiting(p: &GraphPattern) -> bool {
 }
 
 pub fn evaluate(idx: &Columnar, query: &Query) -> Result<Option<ParAnswer>, String> {
-    if accepts(query).is_err() {
+    if declines_on_cost(idx, query) {
         return Ok(None);
     }
-    if let Query::Select {
+    evaluate_semantics(idx, query)
+}
+
+/// The cost-based declines, separately from the semantic ones.
+///
+/// These say nothing about whether this evaluator *can* answer a query — it
+/// can, identically — only that the engine answers it faster, which the
+/// benchmarks measured shape by shape. They are a routing policy, so
+/// [`evaluate_semantics`] skips them and the parity suite holds the evaluator
+/// to the engine's answer for these shapes too.
+fn declines_on_cost(idx: &Columnar, query: &Query) -> bool {
+    let Query::Select {
         pattern, dataset, ..
     } = query
+    else {
+        return false;
+    };
     {
         if dataset.is_none() && bulk_scan_rows(idx, pattern).is_some_and(|n| n > BULK_SCAN_ROWS) {
-            return Ok(None);
+            return true;
         }
         // An `ORDER BY` has to see every row anyway, so a limit above one costs
         // the engine the same full evaluation and this copy keeps the shape.
         if limited_over_several_patterns(pattern) && !orders_before_limiting(pattern) {
-            return Ok(None);
+            return true;
         }
+        // A filter over a single triple pattern. Finding rows is this copy's
+        // advantage — a binary search on a sorted permutation of ids — and
+        // testing them is its disadvantage, because each candidate has to go
+        // back through the dictionary to become a term the filter can read. A
+        // join pays for that decode many times over; one pattern has nothing
+        // to pay it with, and the gate measured `query/filter` slower on three
+        // consecutive runs (+19 %, +15 %, +40 %). Declined for speed, not
+        // fidelity: a filtered *join* keeps the shape, and so does an
+        // unfiltered single pattern.
+        if has_row_filter(pattern) && triple_patterns(pattern) <= 1 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Evaluate without the cost-based declines: what this evaluator answers when
+/// it is asked, which is what the parity suite checks against the engine.
+pub fn evaluate_semantics(idx: &Columnar, query: &Query) -> Result<Option<ParAnswer>, String> {
+    if accepts(query).is_err() {
+        return Ok(None);
     }
     match query {
         Query::Select {

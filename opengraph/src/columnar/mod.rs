@@ -31,7 +31,7 @@ pub mod eval;
 pub mod index;
 pub mod value;
 
-pub use eval::{accepts, evaluate};
+pub use eval::{accepts, evaluate, evaluate_semantics};
 pub use index::{Columnar, Dictionary, DEFAULT_GRAPH};
 
 use crate::parallel::ParAnswer;
@@ -40,6 +40,20 @@ use spargebra::SparqlParser;
 impl Columnar {
     /// Evaluate `sparql`. `Ok(None)` when the query is declined (the caller
     /// evaluates elsewhere); `Err` on a parse or evaluation failure.
+    /// Evaluate `sparql` ignoring the cost-based declines — the shapes the
+    /// engine simply answers faster. Those are a routing policy, not a limit
+    /// on what this evaluator can answer, so the parity suite goes through
+    /// here and holds it to the engine's answer for them too.
+    pub fn query_semantics(&self, sparql: &str) -> Result<Option<ParAnswer>, String> {
+        if uses_reserved_names(sparql) {
+            return Ok(None);
+        }
+        let query = SparqlParser::new()
+            .parse_query(sparql)
+            .map_err(|e| e.to_string())?;
+        evaluate_semantics(self, &query)
+    }
+
     pub fn query(&self, sparql: &str) -> Result<Option<ParAnswer>, String> {
         if uses_reserved_names(sparql) {
             return Ok(None);

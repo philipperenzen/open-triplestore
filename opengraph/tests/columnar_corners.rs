@@ -141,7 +141,10 @@ fn engine(store: &Store, q: &str) -> Result<Answer, String> {
 }
 
 fn columnar(c: &Columnar, q: &str) -> Option<Answer> {
-    match c.query(q).ok()?? {
+    // `query_semantics`, not `query`: a shape the copy declines for *speed*
+    // must still be correct when it is asked, and this suite is about
+    // correctness. The routing policy is pinned in columnar_parity.rs.
+    match c.query_semantics(q).ok()?? {
         ParAnswer::Solutions { variables, rows } => Some((
             variables.iter().map(|v| v.as_str().to_string()).collect(),
             rows.iter()

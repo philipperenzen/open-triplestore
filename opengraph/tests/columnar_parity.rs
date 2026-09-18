@@ -99,7 +99,10 @@ fn render(t: &Term) -> String {
 }
 
 fn columnar(c: &Columnar, q: &str) -> Option<Answer> {
-    match c.query(q).unwrap()? {
+    // Semantics, not routing: a shape the copy declines for *speed* is still
+    // held to the engine's answer here. `a_filter_over_one_pattern_is_left_to_the_engine`
+    // and `a_limited_join_is_left_to_the_engine` pin the routing policy itself.
+    match c.query_semantics(q).unwrap()? {
         ParAnswer::Solutions { variables, rows } => Some((
             variables.iter().map(|v| v.as_str().to_string()).collect(),
             rows.iter()
@@ -441,7 +444,9 @@ fn a_zero_budget_is_a_bound_not_an_absence() {
 #[test]
 fn a_limited_join_is_left_to_the_engine() {
     let (_, c) = stores();
-    let declined = |q: &str| columnar(&c, &format!("{P}{q}")).is_none();
+    // Through `query`, not `columnar`: this is the routing policy, and the
+    // helper deliberately bypasses it to check semantics.
+    let declined = |q: &str| c.query(&format!("{P}{q}")).unwrap().is_none();
 
     // One pattern: the budget stops the scan, so the copy keeps it.
     assert!(!declined("SELECT ?n WHERE { ?s ex:name ?n } LIMIT 5"));
@@ -469,4 +474,41 @@ fn a_limited_join_is_left_to_the_engine() {
     assert!(!declined(
         "SELECT ?n ?a WHERE { ?s ex:name ?n ; ex:age ?a } ORDER BY ?n LIMIT 5"
     ));
+}
+
+/// Finding rows is this copy's advantage; testing them is not. A `FILTER` turns
+/// each candidate id back into a term through the dictionary — a cost a join
+/// pays for many times over and a single triple pattern has nothing to pay with.
+/// The gate measured `query/filter` slower on three consecutive runs, so that
+/// shape goes to the engine. A *speed* decision, made in `evaluate`, which is
+/// why it is checked through `query` rather than `query_semantics`.
+#[test]
+fn a_filter_over_one_pattern_is_left_to_the_engine() {
+    let (_, c) = stores();
+    let declined = |q: &str| c.query(&format!("{P}{q}")).unwrap().is_none();
+
+    // One pattern plus a filter on its rows: nothing pays for the decode.
+    assert!(declined("SELECT ?a WHERE { ?s ex:age ?a FILTER(?a > 30) }"));
+    assert!(declined(
+        "SELECT ?n WHERE { ?s ex:name ?n FILTER(STRLEN(?n) > 3) }"
+    ));
+
+    // One pattern, no filter: find and emit, which is what it is good at.
+    assert!(!declined("SELECT ?a WHERE { ?s ex:age ?a }"));
+    // A filtered join: the join saving pays for the decode many times over.
+    assert!(!declined(
+        "SELECT ?n ?a WHERE { ?s ex:name ?n ; ex:age ?a FILTER(?a > 30) }"
+    ));
+    // HAVING is a filter over *groups* — one test per group, not per solution.
+    assert!(!declined(
+        "SELECT ?t (COUNT(?s) AS ?c) WHERE { ?s ex:type ?t } GROUP BY ?t HAVING (COUNT(?s) > 1)"
+    ));
+
+    // And the evaluator still answers every one of them correctly when asked:
+    // the decline is routing, not a gap. (`assert_same` goes through
+    // `query_semantics`, so the lists above already cover these shapes.)
+    assert_same(
+        &format!("{P}SELECT ?a WHERE {{ ?s ex:age ?a FILTER(?a > 30) }}"),
+        false,
+    );
 }
