@@ -132,6 +132,9 @@ fn a_cluster_member_follows_until_elected_and_acknowledges_by_majority() {
     assert_eq!(c.node_id, "node-2");
     assert_eq!(c.sync_followers, vec!["node-1", "node-3"]);
     assert_eq!(c.sync_required, 1);
+    // A member follows hot, so its interval is its poll — not the warm
+    // minute the environment's default would give it.
+    assert_eq!(c.interval, c.poll);
     assert_eq!(c.mode, Mode::Hot);
     let store = TripleStore::in_memory().unwrap().with_replication(c);
     let rep = store.replication();

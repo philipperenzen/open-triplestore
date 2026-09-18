@@ -257,6 +257,15 @@ impl ReplicationConfig {
             self.sync_required = cluster.majority_peers().max(1);
         }
         self.mode = Mode::Hot;
+        // A member follows hot: its request for rows is held on the leader
+        // and asked again the moment it is answered, so its interval is its
+        // poll — not the warm minute `parse` gave it before the cluster was
+        // known, which left a member blind for the rest of every minute
+        // after its hold — unless the environment set an interval on purpose.
+        if env_opt("OTS_REPLICATION_INTERVAL_SECS").is_none() {
+            self.interval = Mode::Hot.default_interval(self.poll);
+            self.identity_interval = self.interval.max(Duration::from_secs(5));
+        }
         self.leader_url = None;
         self.cluster = Some(cluster);
     }
@@ -1015,7 +1024,19 @@ pub const LONG_POLL: Duration = Duration::from_secs(25);
 pub const RETRY_AFTER_ATTEMPTS: usize = 8;
 
 /// The longest a single `Retry-After` is honoured for.
-const RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
+pub const RETRY_AFTER_MAX: Duration = Duration::from_secs(30);
+
+/// The wait a `429` asks for: its `Retry-After` in seconds; a second when
+/// the header is missing, unreadable or `0` — the leader's limiter writes
+/// whole seconds, truncated, so `0` means "under a second", and at one
+/// token a second a second is the shortest wait sure to find one; and
+/// never more than [`RETRY_AFTER_MAX`].
+pub fn retry_after_wait(header: Option<&str>) -> Duration {
+    let secs = header
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(1);
+    Duration::from_secs(secs.max(1)).min(RETRY_AFTER_MAX)
+}
 
 /// Send the request `build` makes, waiting out the leader's `429`s.
 ///
@@ -1043,17 +1064,13 @@ async fn send_waiting_out_429(
                 "{url}: HTTP 429 after waiting out {waited} Retry-After answers"
             ));
         }
-        // The leader's limiter writes whole seconds, truncated, so a `0`
-        // means "under a second" — and at one token a second, a second is
-        // the shortest wait that is sure to find one. Retrying at once
-        // spent all eight attempts inside a few milliseconds.
-        let secs = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(1);
-        let wait = Duration::from_secs(secs.max(1)).min(RETRY_AFTER_MAX);
+        // Retrying a `0` at once spent all eight attempts inside a few
+        // milliseconds; `retry_after_wait` reads it as a second.
+        let wait = retry_after_wait(
+            resp.headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+        );
         tracing::debug!("replication: {url} answered 429; waiting {wait:?} as told");
         tokio::time::sleep(wait).await;
         waited += 1;
@@ -1390,6 +1407,10 @@ impl TripleStore {
         for g in &leader_graphs {
             self.refetch_graph(source, g.as_deref())?;
             fetched += 1;
+            // Each fetch is a round trip — and, under the leader's limiter, a
+            // second — so a resync of many graphs reports its progress the way
+            // the row path does, rather than reading as stale until it ends.
+            self.replication().note_progress();
         }
         let local: Vec<Option<String>> = self.graph_counts().into_iter().map(|(g, _)| g).collect();
         for g in local {

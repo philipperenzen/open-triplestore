@@ -19,7 +19,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use open_triplestore::store::replication::{HttpLeader, LeaderSource, RETRY_AFTER_ATTEMPTS};
+use open_triplestore::store::replication::{
+    retry_after_wait, HttpLeader, LeaderSource, RETRY_AFTER_ATTEMPTS, RETRY_AFTER_MAX,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -187,6 +189,29 @@ fn a_missing_retry_after_still_waits_and_retries() {
     assert_eq!(m.epoch, "e1");
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     assert!(t.elapsed() >= Duration::from_secs(1), "{:?}", t.elapsed());
+}
+
+/// The header's value is what is waited, not a flat second: a `3` waits
+/// three, and the reading is pinned as a function so the cap is too.
+#[test]
+fn the_retry_after_value_is_honoured_and_capped() {
+    let (hits, base) = leader(1, "3", StatusCode::OK);
+    let t = Instant::now();
+    HttpLeader::new(&base, Some("tok"))
+        .manifest()
+        .expect("the second answer is the manifest");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert!(
+        t.elapsed() >= Duration::from_secs(3),
+        "a 3 is three seconds, not one: {:?}",
+        t.elapsed()
+    );
+
+    assert_eq!(retry_after_wait(None), Duration::from_secs(1));
+    assert_eq!(retry_after_wait(Some("0")), Duration::from_secs(1));
+    assert_eq!(retry_after_wait(Some(" 3 ")), Duration::from_secs(3));
+    assert_eq!(retry_after_wait(Some("soon")), Duration::from_secs(1));
+    assert_eq!(retry_after_wait(Some("999")), RETRY_AFTER_MAX);
 }
 
 #[test]
