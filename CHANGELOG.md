@@ -79,6 +79,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   persisted but the run-row columns. These are the inputs to the
   analytical-layer go/no-go thresholds in
   docs/notes/analytical-mirror-design.md §1.4. See docs/performance.md.
+- **A replication example you can start in two commands**:
+  `docker-compose.replication.yml` is a stand-alone leader-and-hot-follower
+  stack — one shared `JWT_SECRET`, separate volumes, nothing else — with
+  the walkthrough in docs/operations.md, "Try it": leader up, mint the
+  follower's token, follower up, a write on the leader appearing on the
+  follower within a round trip, a write on the follower refused with 503.
+  `.env.example` documents the follower's knobs.
 - **IFC lift depth.** The importer keeps its flat BOT / `props:` contract
   untouched (pinned as exact triples) and emits, beside it: the IFC 4.3
   facility spine (`IfcBridge`, `IfcRoad`, … as `bot:Zone` plus the lift's own

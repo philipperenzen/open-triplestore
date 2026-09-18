@@ -1,0 +1,117 @@
+# Open Triplestore — a leader and a hot follower on one machine.
+#
+# A stand-alone example of replication (docs/operations.md, "Replication"):
+# the leader records every write in its change log and the follower tails
+# it, keeping a read-only copy that is one network round trip behind. The
+# file is independent of docker-compose.yml on purpose — no MinIO, no mail,
+# no LLM — so it starts with one secret. Both nodes share JWT_SECRET: a
+# session or API token minted on the leader is then valid on the follower,
+# whose identity database is a copy of the leader's.
+#
+# The follower authenticates with an admin API token minted on the leader,
+# and the leader has to be running before one can be minted, so the stack
+# comes up in two steps. The full walkthrough — with a write that shows up
+# on the follower and a write on the follower that is refused — is in
+# docs/operations.md under "Try it".
+#
+#   cp .env.example .env
+#   printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+#   docker compose -f docker-compose.replication.yml up -d leader
+#   # register the first user (it becomes super_admin) and mint the token:
+#   curl -s -X POST localhost:7878/api/auth/register -H 'Content-Type: application/json' \
+#        -d '{"username":"admin","email":"admin@example.org","password":"<choose one>"}'
+#   curl -s -X POST localhost:7878/api/auth/tokens -H 'Content-Type: application/json' \
+#        -H 'Authorization: Bearer <access_token from the reply>' \
+#        -d '{"name":"replica-1","scopes":["read","admin"]}'
+#   printf 'OTS_REPLICATION_TOKEN=%s\n' '<token from the reply>' >> .env
+#   docker compose -f docker-compose.replication.yml up -d follower
+#   curl -s localhost:7879/api/replication/status      # "lag_rows": 0, "healthy": true
+#
+# Ports: the leader on 7878, the follower on 7879, loopback only (see the
+# note in docker-compose.yml). LEADER_PORT / FOLLOWER_PORT in .env move them.
+# Both services build the image from this checkout; to run the published
+# image instead, comment out the `build: .` line below and set
+# OTS_IMAGE=ghcr.io/philipperenzen/open-triplestore:latest in .env.
+
+x-node: &node
+  build: .
+  image: ${OTS_IMAGE:-open-triplestore:local}
+  restart: unless-stopped
+  # Bound the container so a large import is a clean OOM rather than host
+  # thrash, and so the in-RAM query accelerator sizes its cap to the budget.
+  mem_limit: ${TRIPLESTORE_MEM_LIMIT:-4g}
+  healthcheck:
+    # /livez is pure liveness; /api/replication/status is what to read for
+    # lag and health (below), it is public on both nodes.
+    test: ["CMD", "curl", "-f", "http://localhost:7878/livez"]
+    interval: 30s
+    timeout: 5s
+    start_period: 180s
+    retries: 3
+
+services:
+  leader:
+    <<: *node
+    ports:
+      - "${TRIPLESTORE_BIND:-127.0.0.1}:${LEADER_PORT:-7878}:7878"
+    volumes:
+      - leader_data:/data
+    environment:
+      - RUST_LOG=info
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
+      - AUTH_DB_PATH=/data/auth.db
+      - BASE_URL=${LEADER_BASE_URL:-http://localhost:7878}
+      # The first boot seeds a demo organisation. An empty SEED_IFC_URL
+      # leaves out the IFC building demos — several downloads and minutes
+      # of lifting that the example does not need and the follower would
+      # otherwise spend its first minutes fetching. Set SEED_IFC_URL to a
+      # model URL, or drop the line, to have them.
+      - SEED_IFC_URL=${SEED_IFC_URL:-}
+      # The leader keeps change capture on whatever OTS_CHANGE_CAPTURE says
+      # (docs/versioning.md, "Change log") and serves its manifest, its rows
+      # and whole graphs to followers under an admin token.
+      - OTS_REPLICATION_ROLE=leader
+      # Optional: wait for the follower to *apply* each write before answering
+      # it (docs/operations.md, "Synchronous replication"). Needs a hot follower.
+      # - OTS_REPLICATION_SYNC_FOLLOWERS=replica-1
+
+  follower:
+    <<: *node
+    ports:
+      - "${TRIPLESTORE_BIND:-127.0.0.1}:${FOLLOWER_PORT:-7879}:7878"
+    volumes:
+      - follower_data:/data
+    environment:
+      - RUST_LOG=info
+      # The same secret as the leader: tokens issued there validate here.
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
+      - AUTH_DB_PATH=/data/auth.db
+      - BASE_URL=${FOLLOWER_BASE_URL:-http://localhost:7879}
+      - SEED_IFC_URL=${SEED_IFC_URL:-}
+      # A follower's store is read-only: every write answers 503 and names
+      # the leader. Reads, SPARQL, the web UI and SHACL validation all work.
+      - OTS_REPLICATION_ROLE=follower
+      - OTS_REPLICATION_LEADER_URL=http://leader:7878
+      # An admin API token minted on the leader (step two above). Until it
+      # is set the follower still starts and answers reads; its status shows
+      # the refused catch-up under `last_error` and `healthy: false`.
+      - OTS_REPLICATION_TOKEN=${OTS_REPLICATION_TOKEN:-}
+      # How often the follower asks: hot long-polls the leader and is one
+      # round trip behind; warm catches up every minute, cold every hour.
+      - OTS_REPLICATION_MODE=${OTS_REPLICATION_MODE:-hot}
+      # This follower's name — also the cursor it keeps on the leader, which
+      # retention there never sweeps past.
+      - OTS_REPLICATION_NODE_ID=${OTS_REPLICATION_NODE_ID:-replica-1}
+      # What it applies: everything, by default. Narrow it to a list of graph
+      # IRIs or of the leader's dataset ids:
+      # - OTS_REPLICATION_GRAPHS=http://example.org/graph/a,default
+      # - OTS_REPLICATION_DATASETS=ds_123
+    depends_on:
+      leader:
+        condition: service_healthy
+
+volumes:
+  leader_data:
+    driver: local
+  follower_data:
+    driver: local

@@ -2340,3 +2340,48 @@ lifts; the walkthrough says so.
 tokens from it would be a policy change on the leader's public surface;
 honouring `Retry-After` is what any client should do, and it makes the
 example work with the defaults.
+
+### 2. A replication example: `docker-compose.replication.yml`
+
+**What it is.** A stand-alone compose file — a leader on 7878 and a hot
+follower on 7879, one shared `JWT_SECRET`, two data volumes, and nothing
+else: no MinIO, no mail, no LLM, so it needs one secret and starts in two
+commands. It is not a profile of `docker-compose.yml` on purpose: the main
+stack's `:?` guards on the MinIO credentials would make the example demand
+three secrets it does not use.
+
+**Why two steps.** The follower authenticates with an admin API token
+minted on the leader, and the token can only be minted once the leader is
+up. So the header of the file and the "Try it" walkthrough in
+`docs/operations.md` do it in that order: leader up → register the first
+user (super_admin) → mint a token with scopes `read,admin` → put it in
+`.env` → follower up. The follower's `OTS_REPLICATION_TOKEN` interpolates
+with `:-` rather than `:?` so that `up leader` does not fail on a token
+that cannot exist yet; a follower started without one still serves reads
+and shows the refused catch-up in `/api/replication/status`, which the
+walkthrough calls out rather than hides.
+
+**What the walkthrough shows.** Bootstrap (the seeded demo organisation
+comes across whole), `lag_rows: 0`, a `INSERT DATA` on the leader read
+back from the follower, and a write on the follower answering `503` with
+the leader's URL. The `.env.example` gains the follower's knobs
+(`OTS_REPLICATION_TOKEN`, mode, node id, the two host ports, `OTS_IMAGE`
+for running the published image instead of building).
+
+**Verified by running it — four times.** The image built from this
+branch, the two containers under a throwaway project on spare host ports,
+every command of the walkthrough as written. The first run found the
+follower looping on `429` (section 1); the second, with the wait-out,
+bootstrapped in 16 s and stalled on the same limiter at steady state; the
+third bootstrapped and was still a page deep in the seed's IFC lifts two
+minutes later, with a status that said stale; the fourth, with the IFC
+demos left out of the seed and per-row bookmarks, followed the seed at a
+graph a second and read `lag_rows: 0` once it finished; the fifth, started
+after the seed as the walkthrough now has it, fetched the demo's 116
+graphs whole in 129 s — the limiter's pace — and read `lag_rows: 0`,
+`resyncs: 1`. The write then showed up on the follower within the second
+— through the Graph Store: `/sparql` scopes a query to dataset
+graphs, so the walkthrough's first version, which queried the ad-hoc
+graph with SPARQL, showed nothing on the leader either; the walkthrough
+now reads the graph the way the follower does, under the same token, and
+says why. The follower refused its write with `503` and the leader's URL.

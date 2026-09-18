@@ -65,6 +65,90 @@ Synchronous mode needs hot followers to be usable: a warm follower
 acknowledges once a minute, so every write on its leader would wait the
 timeout out.
 
+### Try it: a leader and a hot follower with Docker Compose
+
+[`docker-compose.replication.yml`](../docker-compose.replication.yml) is a
+stand-alone stack — a leader on port 7878 and a hot follower on 7879, one
+shared `JWT_SECRET`, separate data volumes, nothing else — that shows
+every piece of this chapter in a few minutes. The follower needs an
+admin API token minted on the leader, so the stack comes up in two steps.
+
+**1. The leader, and a token for the follower.**
+
+```bash
+cp .env.example .env
+printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+docker compose -f docker-compose.replication.yml up -d leader
+
+# The first registered user is the super_admin; the reply carries an access token.
+curl -s -X POST localhost:7878/api/auth/register -H 'Content-Type: application/json' \
+     -d '{"username":"admin","email":"admin@example.org","password":"<choose one>"}'
+# Mint the follower's token with that access token. The reply's `token` is shown once.
+curl -s -X POST localhost:7878/api/auth/tokens -H 'Content-Type: application/json' \
+     -H 'Authorization: Bearer <access_token>' \
+     -d '{"name":"replica-1","scopes":["read","admin"]}'
+printf 'OTS_REPLICATION_TOKEN=%s\n' '<token>' >> .env
+```
+
+**2. The follower.** It bootstraps — reads the leader's manifest, fetches
+every graph whole, adopts the epoch — and then long-polls. The demo
+organisation the leader seeded on its first boot is what comes across
+(the compose file leaves the IFC building demos out of that seed with an
+empty `SEED_IFC_URL`, so the leader is not still lifting models while
+the follower bootstraps; the leader's rate limiter allows a follower one
+whole-graph fetch a second past its burst).
+
+```bash
+docker compose -f docker-compose.replication.yml up -d follower
+curl -s localhost:7879/api/replication/status
+# "role":"follower", "mode":"hot", "epoch":"…", "lag_rows":0, "healthy":true
+```
+
+The bootstrap fetches every graph whole — the seeded demo is about a
+hundred graphs — at one a second past the leader's rate-limiter burst of
+40, so allow a minute or two before the status reads `lag_rows: 0`. The
+leader also goes on seeding — vocabularies, shapes, the demo datasets —
+for about a minute after it is up; a follower started during that applies
+the seed's rows as they land, at the same pace, and `applied_rows` climbs
+until the seed is done.
+
+**3. A write on the leader shows up on the follower.** Capture is on
+because the leader role turns it on; the follower applies the row within a
+round trip. The graph is read through the Graph Store, under the same
+token — `/sparql` scopes a query to the graphs of datasets the caller may
+see, so an ad-hoc graph is invisible there on either node, while the Graph
+Store reads any graph an admin asks for (it is how the follower itself
+reads a graph whole).
+
+```bash
+curl -s -X POST localhost:7878/sparql -H 'Authorization: Bearer <access_token>' \
+     -H 'Content-Type: application/sparql-update' \
+     --data 'INSERT DATA { GRAPH <urn:demo:replicated> { <urn:s> <urn:p> "hello" } }'
+curl -s 'localhost:7879/store?graph=urn:demo:replicated' \
+     -H 'Authorization: Bearer <access_token>' -H 'Accept: application/n-triples'
+# <urn:s> <urn:p> "hello" .   — and /api/replication/status counts one more applied row
+```
+
+**4. A write on the follower is refused.** The follower is read-only and
+says where writes go:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:7879/sparql \
+     -H 'Authorization: Bearer <access_token>' -H 'Content-Type: application/sparql-update' \
+     --data 'INSERT DATA { <urn:s> <urn:p> "no" }'
+# 503 — read-only replica: writes go to the leader at http://leader:7878
+```
+
+The same access token works on both nodes because they share the secret and
+the follower's identity database is a copy of the leader's
+([below](#identity-database)). The web UI on either port shows the same
+data; the **Operations** page under *Admin* shows this node's role, lag and
+last catch-up, the leader's change-log status, and the follower's cursor as
+the leader sees it. `OTS_REPLICATION_MODE=warm` in `.env` turns the
+follower into a once-a-minute reporting replica; uncommenting
+`OTS_REPLICATION_SYNC_FOLLOWERS=replica-1` on the leader makes every write
+wait for the follower to apply it.
+
 ### How it works
 
 **The leader** sets `OTS_REPLICATION_ROLE=leader`, which turns change
