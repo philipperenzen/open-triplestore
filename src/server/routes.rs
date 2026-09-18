@@ -3394,25 +3394,13 @@ fn resolve_scope_graphs(
         return Ok(ScopeGraphs::Set(vec![graph.clone()]));
     }
 
-    if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some() {
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
+    if let Some(ds_ids) = scope_dataset_ids(
+        state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
         let scoped = scope_dataset_graphs(state, &ds_ids, &versions_map, user_id, is_admin)?;
         return Ok(if scoped.is_empty() {
             ScopeGraphs::Empty
@@ -3462,14 +3450,17 @@ pub struct BrowseTripleParams {
     /// can access.
     pub dataset_id: Option<String>,
     /// Comma-separated list of dataset IDs. Scopes results to the union of all
-    /// named graphs registered under those datasets. When present, takes
-    /// precedence over `dataset_id`. Non-admin users are additionally restricted
-    /// to graphs they can access.
+    /// named graphs registered under those datasets. Unioned with `dataset_id`
+    /// and with the organisation scopes below. Non-admin users are additionally
+    /// restricted to graphs they can access.
     pub dataset_ids: Option<String>,
     /// Scope browse results to all named graphs of all datasets owned by this
-    /// organisation ID. Non-admin users are additionally restricted to graphs
-    /// they can access.
+    /// organisation ID. Unioned with any dataset scope rather than overridden by
+    /// it. Non-admin users are additionally restricted to graphs they can access.
     pub org_id: Option<String>,
+    /// Comma-separated list of organisation IDs, for a scope spanning several
+    /// organisations. Unioned with `org_id` and with the dataset scopes.
+    pub org_ids: Option<String>,
     /// Optional per-dataset version map: comma-separated `datasetId:version`
     /// pairs. For a dataset with a pinned version, results come from that
     /// version's snapshot graphs instead of its live graphs. Datasets absent
@@ -3491,11 +3482,14 @@ pub struct BrowseResourceParams {
     /// `BrowseTripleParams` so the graph view can expand a resource within the
     /// same scope as the initial browse load. `graph` takes precedence.
     pub dataset_id: Option<String>,
-    /// Comma-separated dataset IDs; union of their named graphs. Takes
-    /// precedence over `dataset_id`.
+    /// Comma-separated dataset IDs; union of their named graphs, unioned in turn
+    /// with `dataset_id` and the organisation scopes.
     pub dataset_ids: Option<String>,
     /// Scope to all datasets owned by this organisation ID.
     pub org_id: Option<String>,
+    /// Comma-separated organisation IDs, for a scope spanning several
+    /// organisations.
+    pub org_ids: Option<String>,
     /// Per-dataset version pins (comma-separated `datasetId:version`). A pinned
     /// dataset is read from its version snapshot graphs instead of live graphs.
     pub versions: Option<String>,
@@ -3652,6 +3646,77 @@ fn private_snapshot_graphs(
             .collect(),
         None => std::collections::HashSet::new(),
     }
+}
+
+/// Split a comma-separated id list, dropping surrounding whitespace and empty
+/// entries — `a, ,b` names two ids, and a lone `,` names none.
+fn split_id_csv(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The dataset ids a browse request is scoped to: everything named by
+/// `dataset_id` and `dataset_ids`, plus every dataset of every organisation
+/// named by `org_id` and `org_ids`, deduplicated.
+///
+/// These four used to be resolved by an if/else chain, so a request that named
+/// both datasets and an organisation — what the triple browser sends as soon as
+/// a user picks some datasets *and* an organisation — silently lost the
+/// organisation, and both the rows and the facets came back covering the
+/// datasets alone. They name one scope together.
+///
+/// `None` means the request carried no dataset/organisation scope at all, which
+/// is not the same as an empty union: an organisation with no datasets, or an
+/// empty `dataset_ids`, has always narrowed the request to nothing rather than
+/// widening it to everything, and still does.
+///
+/// Authorisation is deliberately left to `scope_dataset_graphs`, which every
+/// caller applies to the whole list: a dataset reached through an organisation
+/// is filtered exactly like one named directly, so a wider scope can never mean
+/// a wider view.
+fn scope_dataset_ids(
+    state: &AppState,
+    dataset_id: Option<&str>,
+    dataset_ids: Option<&str>,
+    org_id: Option<&str>,
+    org_ids: Option<&str>,
+) -> Result<Option<Vec<String>>, AppError> {
+    if dataset_id.is_none() && dataset_ids.is_none() && org_id.is_none() && org_ids.is_none() {
+        return Ok(None);
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(id) = dataset_id {
+        ids.push(id.to_string());
+    }
+    if let Some(csv) = dataset_ids {
+        ids.extend(split_id_csv(csv));
+    }
+    for org in org_id
+        .map(str::to_string)
+        .into_iter()
+        .chain(org_ids.map(split_id_csv).unwrap_or_default())
+    {
+        ids.extend(
+            state
+                .auth_db
+                .list_datasets_by_org(&org)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter()
+                .map(|ds| ds.id),
+        );
+    }
+
+    // A dataset named directly and again through its organisation is still one
+    // dataset. `scope_dataset_graphs` deduplicates the graphs it returns, so this
+    // is not what keeps rows from appearing twice; it spares the repeated
+    // per-dataset resolution and authorisation behind each duplicate id.
+    ids.sort();
+    ids.dedup();
+    Ok(Some(ids))
 }
 
 /// Resolve the scoped named-graph set for a set of datasets, honouring an
@@ -4212,30 +4277,16 @@ pub async fn browse_triples(
                 g = graph, bgp = bgp, fc = fc,
             )),
         )
-    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
-    {
-        // Resolve the set of dataset IDs in scope, then collect their graphs —
-        // each dataset's graphs come from its pinned version snapshot (if any) or
-        // its live graphs. Shared across the dataset_ids / org_id / dataset_id cases.
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
-
+    } else if let Some(ds_ids) = scope_dataset_ids(
+        &state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
+        // The datasets in scope are the union of the dataset and organisation
+        // parameters; their graphs come from each dataset's pinned version
+        // snapshot (if any) or its live graphs.
         let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
 
         if scoped.is_empty() {
@@ -4532,8 +4583,13 @@ pub async fn browse_resource(
             }
         }
         vec![graph.clone()]
-    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
-    {
+    } else if let Some(ds_ids) = scope_dataset_ids(
+        &state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
         // Honour the browse scope (dataset/org + version pins), mirroring
         // browse_triples → resolve_scope_graphs, so expanding a resource in the
         // graph view reads the same (possibly version-snapshot) graphs as the
@@ -4544,24 +4600,6 @@ pub async fn browse_resource(
             .as_deref()
             .map(parse_versions_map)
             .unwrap_or_default();
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
         let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
         if scoped.is_empty() {
             return Ok(Json(serde_json::json!({

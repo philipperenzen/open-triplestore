@@ -59,6 +59,35 @@ nothing is stored. The optional query parameter `lenient=true` (or `1`) restores
 the previous behaviour, in which unrecognised input is ignored and whatever parsed
 is kept. Status codes and response bodies are otherwise unchanged.
 
+## Browse scope — `dataset_id`, `dataset_ids`, `org_id`, `org_ids`
+
+`GET /api/browse/triples`, `/api/browse/facets` and `/api/browse/resource` take
+the same scope parameters:
+
+| Parameter | Scope it contributes |
+|---|---|
+| `dataset_id` | one dataset's named graphs |
+| `dataset_ids` | a comma-separated list of dataset ids |
+| `org_id` | every dataset owned by that organisation |
+| `org_ids` | a comma-separated list of organisation ids (**new**) |
+
+The four **union**: the request is scoped to the datasets named directly *plus*
+every dataset of every organisation named, deduplicated. Earlier builds resolved
+them in precedence order instead, so a request carrying both `dataset_ids` and
+`org_id` — what the triple browser sends whenever a user picks datasets and an
+organisation — silently dropped the organisation, from the rows and from the
+"terms in scope" facets alike. Each parameter used on its own behaves exactly as
+before.
+
+A scope that resolves to no dataset (an organisation with no datasets, an
+unknown id, an empty list) still means "nothing in scope", never "everything";
+a request with none of the four parameters is unscoped as before. Access control
+is unchanged: every dataset in the union is filtered by the caller's
+visibility and graph permissions, whether it was named directly or reached
+through an organisation, so widening the scope never widens what a caller can
+read. `versions` pins still apply per dataset, however that dataset entered the
+scope.
+
 ## Change log — `/api/admin/changes`
 
 Every write records one row per graph it touched — the net delta as
