@@ -25,7 +25,7 @@
 #        -d '{"name":"replica-1","scopes":["read","admin"]}'
 #   printf 'OTS_REPLICATION_TOKEN=%s\n' '<token from the reply>' >> .env
 #   docker compose -f docker-compose.replication.yml up -d follower
-#   curl -s localhost:7879/api/replication/status      # "lag_rows": 0, "healthy": true
+#   curl -s localhost:7879/api/replication/status      # after the bootstrap, a minute or two: "lag_rows": 0, "healthy": true
 #
 # Ports: the leader on 7878, the follower on 7879, loopback only (see the
 # note in docker-compose.yml). LEADER_PORT / FOLLOWER_PORT in .env move them.

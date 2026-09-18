@@ -658,9 +658,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sustained rate.
   And a hot follower's long-poll is held up to 25 s (it was one poll
   period, 500 ms): the leader still answers the moment a row lands, but an
-  idle hot follower now costs it a request every 25 s instead of two a
-  second — the rate at which the same limiter had cut the tailing off
-  right after the bootstrap, so the leader's writes never arrived. And a
+  idle hot follower now costs it a handful of small requests per 25 s
+  instead of four a second — the rate at which the same limiter had cut
+  the tailing off right after the bootstrap, so the leader's writes never
+  arrived. Its lag stays a round trip while the leader's writes leave
+  room under the limiter (about one every three seconds sustained);
+  faster than that it is paced by the limiter and applies rows in pages. And a
   row that fetched a graph whole is bookmarked at once rather than at the
   end of its page: under the limiter a page of bulk-load rows takes a
   second a row, and a status frozen at the page's start read as stale
@@ -670,8 +673,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identity database's version at every request its follower made — so
   the follower fetched the whole identity database again at every check,
   every five seconds on a hot follower. The stamp is bookkeeping; once a
-  minute keeps it useful and keeps the follower's polling out of the
-  version it watches.
+  minute keeps it useful and means the follower's own polling moves the
+  version it watches at most once a minute.
 - **STEP parser: an empty list swallowed every argument after it.** `()` was
   read as a list holding one unknown byte with the closing paren consumed, so
   an `IfcProject` written with empty `RepresentationContexts` — most

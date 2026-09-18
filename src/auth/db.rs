@@ -6005,7 +6005,8 @@ mod tests {
     /// The last-used stamp is written at most once a minute per token: a
     /// client that authenticates twice a second — a replication follower —
     /// must not turn every request into a write, nor move the identity
-    /// database's version (which the follower watches) with its own polling.
+    /// database's version (which the follower watches) more than once a
+    /// minute with its own polling.
     /// A file-backed database, so there is a `data_version` to watch.
     #[test]
     fn the_last_used_stamp_is_written_at_most_once_a_minute() {

@@ -2288,7 +2288,12 @@ long-poll for one poll period — 500 ms — and read the manifest before
 each, four requests a second against a limiter that sustains one. The
 hold is now `LONG_POLL`, 25 s (the leader caps a long-poll at 30 s): the
 leader answers the moment a row lands whatever the hold, so the lag is
-the same round trip, and an idle hot follower costs a request every 25 s.
+the same round trip while the leader's writes leave room under the
+limiter (a catch-up with rows is three requests: about a write every
+three seconds sustained; faster, the follower is paced by the limiter and
+applies rows in pages), and an idle hot follower costs about seven small
+requests per 25 s — the held request and a manifest read per catch-up,
+plus the identity check's manifest read every 5 s.
 Health allows for the hold (a hot follower 20 s into one is not stale).
 Test-first again: a recording `LeaderSource` in `tests/replication.rs`
 asserts the hold a hot follower asks for (20–30 s) and that a warm one
@@ -2297,9 +2302,11 @@ asks for none; a unit test pins the health window; and
 write land a second later, and asserts the row came back inside the
 hold. Red on all three before the change.
 
-**What the e2e test then found.** The compose demo seeds 39 graphs — one
-under the limiter's burst of 40 — so its bootstrap never reached the wait
-path at all, and the first version of the wait had a hole the demo could
+**What the e2e test then found.** In the run that showed the stall the
+follower had started seconds into the leader's first-boot seed, when the
+leader held 39 graphs — one under the limiter's burst of 40 (the finished
+seed holds about 116) — so that bootstrap never reached the wait path at
+all, and the first version of the wait had a hole the demo could
 not show: a `Retry-After: 0` was slept for zero, and all eight attempts
 went inside a few milliseconds. `tests/replication_e2e.rs`, with 44
 graphs behind the real limiter, failed on the 41st fetch. A zero is now a
@@ -2368,7 +2375,7 @@ the leader's URL. The `.env.example` gains the follower's knobs
 (`OTS_REPLICATION_TOKEN`, mode, node id, the two host ports, `OTS_IMAGE`
 for running the published image instead of building).
 
-**Verified by running it — four times.** The image built from this
+**Verified by running it — five times.** The image built from this
 branch, the two containers under a throwaway project on spare host ports,
 every command of the walkthrough as written. The first run found the
 follower looping on `429` (section 1); the second, with the wait-out,

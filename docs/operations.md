@@ -47,8 +47,17 @@ hour applies an hour of rows when it does. A hot follower long-polls: its
 request for rows is held on the leader until a row lands, so its lag is a
 network round trip, not the poll period. The hold is 25 s at most (the
 leader caps a long-poll at 30 s), which is what lets a hot follower live
-under the leader's rate limiter: idle, it costs the leader a request
-every 25 s or so rather than two a second.
+under the leader's [rate limiter](#rate-limiting): idle, it costs the
+leader about seven small requests per 25 s — the held request and a
+manifest read per catch-up, and the identity check's manifest read every
+5 s — rather than four a second. The lag stays a round trip while the
+leader's writes leave room under that limiter: a catch-up that carries
+rows costs three requests, so up to about a write every three seconds
+sustained; faster than that the follower is paced by the limiter — it
+waits its `Retry-After` and applies rows in pages of up to 500 — and its
+lag grows with the backlog until the writes slow down. A leader whose
+clients are its followers can lift the limit (see [Sizing and
+cost](#sizing-and-cost)).
 
 **The modes, in one place:**
 
@@ -355,10 +364,10 @@ is small (kilobytes to a few megabytes), so a whole snapshot per change is
 cheap, and the transport can become frame-level later without changing the
 model. Three things to know:
 
-- The follower's own requests do not move the version it watches: an
-  API token's `last_used_at` is stamped at most once a minute, so a
-  follower polling with its token does not make itself fetch the
-  database again at every check.
+- The follower's own requests move the version it watches at most once a
+  minute: an API token's `last_used_at` is stamped no more often than
+  that, so a follower polling with its token fetches the database again
+  at most once a minute rather than at every check.
 - Copy `<data-dir>/jwt_secret` from the leader to the follower: tokens the
   leader issued then validate on the follower. API tokens live in the
   database and come across with it; `OTS_REPLICATION_TOKEN` should be one
@@ -394,9 +403,10 @@ model. Three things to know:
 A follower's catch-up costs the leader one manifest read and one page read
 per 500 rows, plus a Graph Store read per graph fetched whole. A hot
 follower keeps one request held on the leader at a time and asks again the
-moment it is answered, so idle it costs a request every 25 s; a leader with
-many hot followers holds one request per follower. The change log itself
-costs the leader what
+moment it is answered, so idle it costs about seven small requests per
+25 s (the held request, a manifest read per catch-up, and the identity
+check's manifest read every 5 s); a leader with many hot followers holds
+one request per follower. The change log itself costs the leader what
 [versioning.md](versioning.md#what-it-costs) measured: a few microseconds
 per ground update, a scan of the target graph per `WHERE` update.
 Retention on the leader (`OTS_CHANGE_RETENTION_DAYS`, 90) never sweeps above
