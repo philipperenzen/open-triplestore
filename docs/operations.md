@@ -271,6 +271,10 @@ is small (kilobytes to a few megabytes), so a whole snapshot per change is
 cheap, and the transport can become frame-level later without changing the
 model. Three things to know:
 
+- The follower's own requests do not move the version it watches: an
+  API token's `last_used_at` is stamped at most once a minute, so a
+  follower polling with its token does not make itself fetch the
+  database again at every check.
 - Copy `<data-dir>/jwt_secret` from the leader to the follower: tokens the
   leader issued then validate on the follower. API tokens live in the
   database and come across with it; `OTS_REPLICATION_TOKEN` should be one

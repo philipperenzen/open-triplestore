@@ -643,6 +643,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   end of its page: under the limiter a page of bulk-load rows takes a
   second a row, and a status frozen at the page's start read as stale
   while the follower was applying rows the whole time.
+- **An API token's `last_used_at` is written at most once a minute.** It
+  was rewritten on every request, which on a replication leader moved the
+  identity database's version at every request its follower made — so
+  the follower fetched the whole identity database again at every check,
+  every five seconds on a hot follower. The stamp is bookkeeping; once a
+  minute keeps it useful and keeps the follower's polling out of the
+  version it watches.
 - **STEP parser: an empty list swallowed every argument after it.** `()` was
   read as a list holding one unknown byte with the closing paren consumed, so
   an `IfcProject` written with empty `RepresentationContexts` — most

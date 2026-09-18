@@ -2297,6 +2297,21 @@ asks for none; a unit test pins the health window; and
 write land a second later, and asserts the row came back inside the
 hold. Red on all three before the change.
 
+**And a third, from the identity e2e test.** With the leader's identity
+database file-backed (as deployed), "nothing changed on the leader, so
+nothing is fetched" failed over HTTP: the follower's own requests were
+moving the version. Every API-token request rewrote the token's
+`last_used_at` — a write, and so a `data_version` step — and the
+follower checks the manifest with that token every five seconds. The
+demo confirmed it: `identity.applies: 33` in 22 minutes, the version at
+1291, and with the follower stopped the version stood still across three
+samples. `AuthDb::update_api_token_last_used` now stamps at most once a
+minute (`WHERE last_used_at IS NULL OR last_used_at < now − 60 s`), which
+also spares every API-token client an fsync per request. A unit test on
+a file-backed database pins both the stamp and that `data_version` does
+not move on the throttled call; the e2e identity test asserts the round
+with nothing changed fetches nothing.
+
 **A fourth, from the walkthrough while the leader was still seeding.**
 Run before the leader's first-boot seed had finished lifting its IFC
 demos, the follower sat two minutes into one page — every row a

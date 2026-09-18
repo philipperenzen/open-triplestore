@@ -2843,12 +2843,20 @@ impl AuthDb {
         Ok(())
     }
 
+    /// Stamp `last_used_at`, at most once a minute per token. The stamp is
+    /// bookkeeping; a client that authenticates several times a second — a
+    /// replication follower polling its leader — must not turn every request
+    /// into a write: each is an fsync, and on a replication leader each moves
+    /// the identity database's version, which made the follower fetch the
+    /// whole database again at its next check, every check.
     pub fn update_api_token_last_used(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let stale = (now - chrono::Duration::seconds(60)).to_rfc3339();
         conn.execute(
-            "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
-            params![now, id],
+            "UPDATE api_tokens SET last_used_at = ?1
+             WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)",
+            params![now.to_rfc3339(), id, stale],
         )?;
         Ok(())
     }
@@ -5993,6 +6001,56 @@ impl AuthDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The last-used stamp is written at most once a minute per token: a
+    /// client that authenticates twice a second — a replication follower —
+    /// must not turn every request into a write, nor move the identity
+    /// database's version (which the follower watches) with its own polling.
+    /// A file-backed database, so there is a `data_version` to watch.
+    #[test]
+    fn the_last_used_stamp_is_written_at_most_once_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = AuthDb::open(&dir.path().join("auth.db")).unwrap();
+        db.create_user("u1", "alice", "alice@example.com", "hash", SystemRole::User)
+            .unwrap();
+        db.create_api_token("t1", "u1", "tok", "h1", "ots_h1", &[ApiScope::Read], None)
+            .unwrap();
+        let stamp = || {
+            db.get_api_token_by_hash("h1")
+                .unwrap()
+                .unwrap()
+                .last_used_at
+        };
+
+        db.update_api_token_last_used("t1").unwrap();
+        let first = stamp().expect("stamped on first use");
+        let version = db.data_version();
+        assert!(version.is_some());
+        db.update_api_token_last_used("t1").unwrap();
+        db.update_api_token_last_used("t1").unwrap();
+        assert_eq!(
+            stamp().as_deref(),
+            Some(first.as_str()),
+            "within the minute: kept"
+        );
+        assert_eq!(db.data_version(), version, "and the database did not move");
+
+        // Two minutes old: stamped again, and the version moves.
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339();
+        db.pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE api_tokens SET last_used_at = ?1 WHERE id = 't1'",
+                params![old],
+            )
+            .unwrap();
+        let moved = db.data_version();
+        db.update_api_token_last_used("t1").unwrap();
+        let again = stamp().unwrap();
+        assert!(again > old, "{again} is newer than {old}");
+        assert_ne!(db.data_version(), moved);
+    }
 
     #[test]
     fn test_create_and_get_user() {
