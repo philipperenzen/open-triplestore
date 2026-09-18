@@ -3,21 +3,36 @@
 //! validation of 1M OTL assets (~9M quads) against the six OTL property
 //! shapes, on a persistent store, in the deployment's real configuration.
 //!
-//! Ignored: it loads nine million quads and runs for minutes. Run it on
-//! purpose, with the configuration under test set in the environment:
+//! **It runs by default at a size that fits a test run** — 20 000 assets,
+//! about 180 000 quads — and asserts what the measurement is for: the load
+//! lands, the mirror publishes, whole-dataset validation finds exactly the
+//! violations the fixture plants, twice, and a validation straight after a
+//! write still does. That is the path a pipeline run takes after an edit, and
+//! nothing else covers it end to end on a persistent store.
+//!
+//! **The 9M measurement is the same harness with the size turned up.** It
+//! loads nine million quads and runs for minutes, so it is run on purpose,
+//! with the configuration under test in the environment:
 //!
 //! ```text
 //! # A — mirror on (needs ~40 GB of container budget, or the override):
-//! OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000 cargo test --release --test scale_shacl_9m -- --ignored --nocapture
+//! OTS_SCALE_ASSETS=1000000 OTS_SCALE_SETTLE_SECS=150 OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000 \
+//!   cargo test --release --test scale_shacl_9m -- --nocapture
 //! # B — the shipped 4g container (mirror off, run index capped):
-//! docker run -m 4g … cargo test --release --test scale_shacl_9m -- --ignored --nocapture
+//! docker run -m 4g … OTS_SCALE_ASSETS=1000000 OTS_SCALE_SETTLE_SECS=150 \
+//!   cargo test --release --test scale_shacl_9m -- --nocapture
 //! ```
 //!
-//! Knobs: `OTS_SCALE_ASSETS` (default 1 000 000), `OTS_SCALE_SETTLE_SECS`
-//! (default 150, the quiet window the 9M mirror needs to publish). The
-//! result is one JSON line per phase on stdout, including the report's
-//! `metrics` (data source, run index, duration) that the telemetry item
-//! added, so a run says which path it measured.
+//! Knobs: `OTS_SCALE_ASSETS` (default 20 000), `OTS_SCALE_SETTLE_SECS`
+//! (default 60; the 9M mirror needs about 150). Every phase still prints one
+//! JSON line on stdout, including the report's `metrics` (data source, run
+//! index, duration) that the telemetry item added, so a run says which path it
+//! measured — the measurement is unchanged, only its default size and the
+//! assertions around it are new.
+//!
+//! At the 9M size configuration B never publishes a mirror, on purpose: the
+//! store is over the cap. The assertions account for that — the mirror is only
+//! required to publish when the data fits under the configured cap.
 
 use std::time::{Duration, Instant};
 
@@ -99,7 +114,7 @@ fn assets_ttl(from: usize, count: usize) -> String {
     s
 }
 
-fn validate(store: &TripleStore, label: &str) -> f64 {
+fn validate(store: &TripleStore, label: &str) -> (f64, usize, bool) {
     let t = Instant::now();
     let report =
         open_triplestore::shacl::validate(store, SHAPES, &[MODEL.to_string(), DATA.to_string()])
@@ -120,14 +135,19 @@ fn validate(store: &TripleStore, label: &str) -> f64 {
             "engine_ms": m.duration_ms,
         })
     );
-    secs
+    (secs, report.results.len(), report.conforms)
 }
 
 #[test]
-#[ignore = "loads ~9M quads and runs for minutes; the P2 §1.5 measurement, run on purpose"]
-fn whole_dataset_validation_at_nine_million_quads() {
-    let assets = env_usize("OTS_SCALE_ASSETS", 1_000_000);
-    let settle = env_usize("OTS_SCALE_SETTLE_SECS", 150);
+fn whole_dataset_validation_on_a_persistent_store() {
+    let assets = env_usize("OTS_SCALE_ASSETS", 20_000);
+    let settle = env_usize("OTS_SCALE_SETTLE_SECS", 60);
+    // The fixture plants one bad code every 10 000 assets.
+    let planted = assets / 10_000;
+    assert!(
+        planted > 0,
+        "OTS_SCALE_ASSETS must be at least 10 000 for the fixture to plant a violation"
+    );
     let dir = tempfile::tempdir().unwrap();
     let store = TripleStore::open(dir.path()).unwrap();
 
@@ -166,11 +186,15 @@ fn whole_dataset_validation_at_nine_million_quads() {
     //    full copy to be published, up to `settle` seconds. Configuration B
     //    (over the cap) never publishes and runs the timeout out.
     let t = Instant::now();
-    std::thread::sleep(Duration::from_secs(10));
-    let _ = store.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1");
+    let mut probe = 0usize;
     while store.mirror_full_copy().is_none() && t.elapsed() < Duration::from_secs(settle as u64) {
-        std::thread::sleep(Duration::from_secs(5));
-        let _ = store.query("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1");
+        std::thread::sleep(Duration::from_millis(200));
+        // Each probe has to be a *new* query. The result cache answers a repeat
+        // without reaching the mirror at all, so polling with one fixed query
+        // builds the mirror at most once — and never, if that first probe lands
+        // inside the post-write quiet window and is then served from the cache.
+        probe += 1;
+        let _ = store.query(&format!("SELECT ?s WHERE {{ ?s ?p ?o }} LIMIT 1 # {probe}"));
     }
     println!(
         "{}",
@@ -182,9 +206,39 @@ fn whole_dataset_validation_at_nine_million_quads() {
         })
     );
 
+    // The load landed: every asset carries eight triples plus the optional
+    // `partOf`, so this is a floor rather than an equality.
+    assert!(
+        total >= assets * 8,
+        "expected at least {} quads from {assets} assets, got {total}",
+        assets * 8
+    );
+    // The mirror publishes whenever the data fits under the cap. At the 9M
+    // size in the shipped container it does not, and that is the measurement.
+    let cap = std::env::var("OTS_PARALLEL_QUERY_MAX_TRIPLES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2_000_000);
+    if total <= cap {
+        assert!(
+            store.mirror_full_copy().is_some(),
+            "{total} quads is under the {cap} cap, so the mirror should have published \
+             within {settle}s"
+        );
+    }
+
     // 3. Whole-dataset validation, twice (the second on warm caches).
-    let a1 = validate(&store, "validate_1");
-    let a2 = validate(&store, "validate_2");
+    let (a1, n1, conforms1) = validate(&store, "validate_1");
+    let (a2, n2, _) = validate(&store, "validate_2");
+    assert_eq!(
+        n1, planted,
+        "the fixture plants one bad code per 10 000 assets"
+    );
+    assert!(
+        !conforms1,
+        "with {planted} planted violations it cannot conform"
+    );
+    assert_eq!(n2, n1, "a second run over unchanged data must agree");
 
     // 4. A 500-quad write, then validation straight away: the mirror is dirty,
     //    so this is the path a pipeline run after an edit takes.
@@ -199,7 +253,14 @@ fn whole_dataset_validation_at_nine_million_quads() {
     }
     ins.push_str("} }");
     store.update(&ins).unwrap();
-    let c = validate(&store, "validate_after_write");
+    let (c, n3, _) = validate(&store, "validate_after_write");
+    // The 500 added triples use a predicate no shape constrains, so the
+    // violation count is unchanged — but the run has to see the new data
+    // rather than a stale mirror, which is the path this phase exists for.
+    assert_eq!(
+        n3, planted,
+        "a validation straight after a write must see the store as it now is"
+    );
     println!(
         "{}",
         json!({

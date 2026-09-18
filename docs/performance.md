@@ -732,9 +732,11 @@ clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
 The analytical-layer notes (`docs/notes/analytical-mirror-design.md` §1.5)
 made the SHACL→SQL question conditional on one number nobody had: whole-
 dataset validation at 9M quads on the deployment's real configuration. The
-harness is [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs), an
-ignored test: 1M OTL assets (the same generator as `examples/scale_otl.rs`,
-~9 quads each, every 10 000th with a bad code) into a persistent store, the
+harness is [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs), which
+runs in the ordinary suite at 20 000 assets and becomes this measurement
+with `OTS_SCALE_ASSETS=1000000`: 1M OTL assets (the same generator as
+`examples/scale_otl.rs`, ~9 quads each, every 10 000th with a bad code)
+into a persistent store, the
 six property shapes, then `shacl::validate` over the model and instance
 graphs, with the report's `metrics` naming the data source each run took.
 Reference system (AMD Ryzen 9 7900X3D), Docker, release build.
@@ -766,10 +768,13 @@ index (A) spent longer building it than B spent probing RocksDB with a
 1.8M-quad one — the index cap's upper range is not free at this size.
 
 Run it yourself (about eight minutes per configuration, most of it the
-load):
+load). The same test runs at 20 000 assets in every suite run and asserts
+the planted violation count, the mirror publishing and the after-write
+path; the size knob turns it into the measurement:
 
 ```bash
-OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000 cargo test --release --features full --test scale_shacl_9m -- --ignored --nocapture
+OTS_SCALE_ASSETS=1000000 OTS_SCALE_SETTLE_SECS=150 OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000 \
+  cargo test --release --features full --test scale_shacl_9m -- --nocapture
 ```
 
 **Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph

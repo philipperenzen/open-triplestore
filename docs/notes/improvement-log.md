@@ -2146,6 +2146,46 @@ mattered. The pattern worth keeping is not "measure more" but "measure the
 thing the user actually pays", which for a write path is the trunk comparison,
 not a microbenchmark of the feature in isolation.
 
+### 7. Nothing is ignored
+
+The maintainer asked why two tests were ignored. Both had a stated reason, and
+both reasons turned out to be wrong in the way `nightly-ignored.yml`'s own
+header warns about — "an ignore is effectively a delete that still looks like
+a test", whose reason goes stale in both directions.
+
+**`bulk_insert_100k`** was ignored as "slow + timing-sensitive". It was neither
+slow — all three sizes together run in 1.6 s — nor testing anything worth
+being sensitive about: it asserted a wall-clock bound, which on a shared
+runner measures the runner, and the project already has a proper gate for
+ingest speed in `benches/performance.rs`. The helper now asserts what a
+correctness suite can hold: every one of the `n` triples is queryable in the
+right graph afterwards. That is a stronger test than the one it replaces, and
+the 100k case runs with the others.
+
+**`scale_shacl_9m`** was ignored because its default was a million assets.
+Reading it properly, it had **zero assertions** — a measurement script shaped
+like a test, which the nightly job could only ever fail by panicking. The
+size was already a knob (`OTS_SCALE_ASSETS`), so the default drops to 20 000
+assets (about 180 000 quads, 28 s on a persistent store) and the harness
+asserts what it measures: the load lands, the mirror publishes when the data
+is under the cap, whole-dataset validation finds exactly the `assets / 10 000`
+violations the fixture plants, twice, and a validation straight after a write
+sees the store as it now is. Nothing else covers that path end to end on a
+persistent store. The 9M measurement is the same test with the knob turned
+up, and `docs/performance.md` carries the recipe.
+
+Making it run found a bug in the harness itself. The settle phase polled the
+mirror with one fixed probe query, which after the first probe was a **result
+cache hit** and never reached the code that builds the mirror — so with any
+poll shorter than the post-write quiet window the mirror never built at all.
+The original avoided this by sleeping ten seconds before its single probe.
+Each probe is now a distinct query. The same trap waits for anyone who polls
+a store through `query` expecting side effects.
+
+**Suite: 3,163 passed / 0 failed / 0 ignored** over 99 binaries. The
+nightly-ignored job now has nothing to run, which is the state its own header
+argues for.
+
 ## Checkpoint (2026-09-17, HEAD `d2236a8` + this note)
 
 **Commits.** `8f8b2e0` the columnar copy and its evaluator · `d2236a8` QLever

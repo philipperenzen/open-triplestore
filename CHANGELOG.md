@@ -49,8 +49,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one; the elected member leads, the rest follow hot and acknowledge a
   majority; failover is automatic. Asset shipping: see
   docs/operations.md, "Replication".
-- **The 9M-quad SHACL measurement** (`tests/scale_shacl_9m.rs`, an ignored
-  test run on purpose): whole-dataset validation of 1M assets against six
+- **The 9M-quad SHACL measurement** (`tests/scale_shacl_9m.rs`, which runs
+  at 20 000 assets in the ordinary suite and at 1M with `OTS_SCALE_ASSETS`):
+  whole-dataset validation of 1M assets against six
   property shapes on a persistent store takes 6.3 s with the accelerator
   on and 13.5 s in the shipped 4 GB container (was 118 s before the engine
   rebuild); the figures and what they settle are in docs/performance.md.
