@@ -2481,3 +2481,71 @@ test` (774 passed, 61 files), `npm run typecheck`, `npm run build` (the
 page is its own chunk), and the page opened against the running example —
 the leader with its cursor table, the follower in sync, then the follower
 without a token showing the error state.
+
+### 5. The review of these six commits, and what it changed
+
+Before the push, six independent reviewers read the diff `e5a2d1b..HEAD`
+one dimension each — the replication Rust, the auth throttle, the new
+tests, the frontend, the docs against the code, the compose example — and
+every finding was put to three refuters with different lenses (reproduce
+it from the code; is it already guarded or tested; is it a defect or a
+preference). Nineteen findings, seventeen upheld by at least two of
+three, two refuted. Four commits followed, one item each:
+
+- **`fix(replication)`** — `apply_cluster` set `mode = Hot` but kept the
+  interval `parse` had computed from the default temperature (warm,
+  60 s), so a cluster member held one 25 s long-poll and then sat out the
+  rest of the minute — blind to the leader's writes for ~35 s in every 60,
+  while the same call named it a synchronous follower whose acks a write
+  waits 2 s for. A member's interval is now its poll unless
+  `OTS_REPLICATION_INTERVAL_SECS` set one; the consensus config test pins
+  it. `resync_all` now reports progress per fetched graph, so a
+  store-scoped row's resync no longer reads as stale after the health
+  window. The `Retry-After` reading is a function, `retry_after_wait`,
+  pinned directly (missing, unreadable or `0` → a second; the 30 s cap),
+  and a test waits out a `3` — before it, every case resolved to one
+  second and a client that ignored the header would have passed.
+- **`test(replication)`** — both e2e tests signed the follower's requests
+  with a session JWT, and only the API-token path stamps `last_used_at`,
+  so the identity test's "nothing changed, nothing fetched" round had never
+  exercised the once-a-minute stamp it was written to pin. The follower's
+  token is now minted on the leader the way the walkthrough mints it, and
+  the `RATE_LIMIT_DISABLED` guard reads the two spellings the server reads.
+- **`docs`** — the idle cost of a hot follower was undercounted several
+  times over (a catch-up is a manifest read plus the held request, and the
+  identity check reads the manifest every 5 s: about seven small requests
+  per 25 s); "the lag is unchanged" held only idle, so the docs now say up
+  to what write rate it is a round trip (about one every three seconds
+  sustained) and what happens past it; the administration environment
+  table still described a hot follower as polling every
+  `OTS_REPLICATION_POLL_MS`; "the follower's own requests do not move the
+  version" is "at most once a minute"; the compose header showed
+  `healthy: true` as the immediate reply after `up -d follower`; this log
+  said four runs and listed five, and gave the seeded demo two graph
+  counts without saying which run each came from.
+- **`fix(ui)`** — the sidebar already had an "Operations" section heading
+  (Import, Validate), so the page is **Node status** (nl: *Nodestatus*),
+  route unchanged; a leader was shown a follower's temperature and hint;
+  the header read "Updated in 0 seconds" after every refresh (zero is
+  "now"); `aria-pressed` on a button whose label already flips
+  Pause/Resume said two things at once; a test comment named a size its
+  assertion does not check.
+
+**Refuted, and why.** "The anonymous check 401s at the manifest, not the
+snapshot route the comment names" — the comment describes the outcome (no
+snapshot for an anonymous client), and the manifest is the first request
+either way. "The e2e limiter keys every request as 0.0.0.0, not the
+follower's IP" — true of `axum::serve` without `ConnectInfo`, and immaterial:
+one bucket for every request is exactly the pressure the test needs.
+
+**Not changed, on purpose.** The per-IP limiter still covers the replication
+routes; the docs say what that costs and how a leader whose clients are its
+followers lifts it. Exempting bearer-authenticated admin traffic from the
+limiter would be a policy change on the leader's public surface, and is the
+maintainer's call.
+
+**Verified after the fixes:** stable clippy (CI feature set, all targets);
+`consensus` (3), `replication` (16), `replication_e2e` (2, now with API
+tokens), `replication_http` (6), the unit and parity tests; frontend lint,
+780 vitest tests, typecheck, build; the renamed Playwright spec (3) against
+a fresh leader container.
