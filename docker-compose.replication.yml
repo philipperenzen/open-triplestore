@@ -61,12 +61,13 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
       - AUTH_DB_PATH=/data/auth.db
       - BASE_URL=${LEADER_BASE_URL:-http://localhost:7878}
-      # The first boot seeds a demo organisation. An empty SEED_IFC_URL
-      # leaves out the IFC building demos — several downloads and minutes
-      # of lifting that the example does not need and the follower would
-      # otherwise spend its first minutes fetching. Set SEED_IFC_URL to a
-      # model URL, or drop the line, to have them.
-      - SEED_IFC_URL=${SEED_IFC_URL:-}
+      # The first boot seeds the same demo organisation as any install —
+      # IFC buildings, files and all: downloads from GitHub and a few
+      # minutes of lifting. For an offline or quicker stack, uncomment the
+      # next line on both services: an empty SEED_IFC_URL leaves the IFC
+      # building demos out. (It is not a .env variable: an unset one must
+      # stay unset, and compose cannot pass "unset" through a default.)
+      # - SEED_IFC_URL=
       # The leader keeps change capture on whatever OTS_CHANGE_CAPTURE says
       # (docs/versioning.md, "Change log") and serves its manifest, its rows
       # and whole graphs to followers under an admin token.
@@ -87,7 +88,7 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (no default) — see .env.example}
       - AUTH_DB_PATH=/data/auth.db
       - BASE_URL=${FOLLOWER_BASE_URL:-http://localhost:7879}
-      - SEED_IFC_URL=${SEED_IFC_URL:-}
+      # - SEED_IFC_URL=
       # A follower's store is read-only: every write answers 503 and names
       # the leader. Reads, SPARQL, the web UI and SHACL validation all work.
       - OTS_REPLICATION_ROLE=follower

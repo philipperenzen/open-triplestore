@@ -2338,10 +2338,21 @@ whole is now bookmarked at once and restarts the health window
 (`note_progress`); delta rows, microseconds each, stay bookmarked by the
 page. Test-first: an observing `LeaderSource` records the follower's
 position at every fetch and expects the previous row, not the page's
-start (`[3, 3, 3]` before, `[3, 4, 5]` after). And the compose example
-now sets `SEED_IFC_URL=` on both nodes, so it depends on no download and
-the follower's first catch-up is the demo organisation, not minutes of
-lifts; the walkthrough says so.
+start (`[3, 3, 3]` before, `[3, 4, 5]` after). The compose example set
+`SEED_IFC_URL=` on both nodes for a while, so that it depended on no
+download and the follower's first catch-up was not minutes of lifts —
+and the maintainer saw the result as a broken install: no files in the
+libraries, no ifcOWL, no buildings in the viewer. The example now seeds
+what every install seeds; the empty `SEED_IFC_URL` is a documented
+opt-out, and the walkthrough says what a follower shows and does not:
+graphs and data, and the file libraries' listings (asset metadata travels
+with the identity database), but not the files' bytes, which are not
+shipped — a download on the follower answers `500` today, which is the
+asset-shipping item from the P4 checkpoint showing through and should be
+a `404` that names the leader until that item is built. Run again with the
+full seed: the leader seeded in 130 s (IFC downloads and lifts included),
+the follower fetched 125 graphs whole in 138 s, the write showed up within
+the second, the follower's own write answered `503`.
 
 **Not changed:** the limiter itself. Exempting replication routes or admin
 tokens from it would be a policy change on the leader's public surface;

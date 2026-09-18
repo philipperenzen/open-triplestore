@@ -101,11 +101,13 @@ printf 'OTS_REPLICATION_TOKEN=%s\n' '<token>' >> .env
 
 **2. The follower.** It bootstraps — reads the leader's manifest, fetches
 every graph whole, adopts the epoch — and then long-polls. The demo
-organisation the leader seeded on its first boot is what comes across
-(the compose file leaves the IFC building demos out of that seed with an
-empty `SEED_IFC_URL`, so the leader is not still lifting models while
-the follower bootstraps; the leader's rate limiter allows a follower one
-whole-graph fetch a second past its burst).
+organisation the leader seeded on its first boot is what comes across:
+the datasets, their graphs, the IFC lifts, the shapes. Not the files'
+bytes: a follower replicates the store and the identity database, not the
+asset store, so its file libraries list the leader's files (their metadata
+travels with the identity database) but a download, or a 3D model that
+loads from an asset, answers on the leader only (see
+[What is not here](#what-is-not-here)).
 
 ```bash
 docker compose -f docker-compose.replication.yml up -d follower
@@ -113,13 +115,15 @@ curl -s localhost:7879/api/replication/status
 # "role":"follower", "mode":"hot", "epoch":"…", "lag_rows":0, "healthy":true
 ```
 
-The bootstrap fetches every graph whole — the seeded demo is about a
+The bootstrap fetches every graph whole — the seeded demo is well over a
 hundred graphs — at one a second past the leader's rate-limiter burst of
-40, so allow a minute or two before the status reads `lag_rows: 0`. The
-leader also goes on seeding — vocabularies, shapes, the demo datasets —
-for about a minute after it is up; a follower started during that applies
-the seed's rows as they land, at the same pace, and `applied_rows` climbs
-until the seed is done.
+40, so allow a few minutes before the status reads `lag_rows: 0`. The
+leader also goes on seeding for several minutes after it is up —
+vocabularies, shapes, the demo datasets, and the IFC buildings it
+downloads and lifts; a follower started during that applies the seed's
+rows as they land, at the same pace, and `applied_rows` climbs until the
+seed is done. Uncommenting `SEED_IFC_URL=` on both services in the compose
+file leaves the IFC demos out, for a quicker, offline stack.
 
 **3. A write on the leader shows up on the follower.** Capture is on
 because the leader role turns it on; the follower applies the row within a
