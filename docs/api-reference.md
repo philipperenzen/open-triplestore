@@ -3,7 +3,111 @@
 The full machine-readable API specification is available as an OpenAPI 3 JSON document. You can import it into **Postman**, **Insomnia**, or any OpenAPI-compatible tooling to explore and test all available endpoints.
 
 - **OpenAPI specification** — <a href="/api-docs/openapi.json" target="_blank" rel="noopener noreferrer">/api-docs/openapi.json</a> — machine-readable JSON, always up to date. (An interactive viewer is available at [API Reference](/api-docs).)
-- **Authentication** — Most write endpoints and private resources require an `Authorization: Bearer <token>` header. Generate a token in **Settings → API Tokens** and include it with every request that needs access beyond public resources.
+- **Authentication** — every endpoint needs one of three levels, **none**, **token** or **admin**; [the table below](#authentication--the-level-every-endpoint-needs) states the level per endpoint. A **token** or **admin** endpoint wants an `Authorization: Bearer <token>` header, generated in **Settings → API Tokens**.
+
+## Authentication — the level every endpoint needs
+
+Authentication is a property of the route, not of the caller: the level below is
+what the router demands before a handler runs. Three levels cover the whole API.
+
+- **none** — answered without an `Authorization` header. What comes back is
+  **public data only**: datasets marked *public*, the graphs and files they
+  hold, and the metadata that names them. A **none** endpoint is not a hole in
+  access control — the handler scopes its answer to what is public, so an
+  anonymous caller reaches nothing private through one.
+- **token** — any valid session or API token, sent as
+  `Authorization: Bearer <token>` (mint one in **Settings → API Tokens**).
+  Without one the answer is `401`. A token buys the caller *its own* access, not
+  everyone's: a dataset it has no grant on still answers `403` (or `404`) with a
+  perfectly valid token.
+- **admin** — an admin or super-admin account. Anonymously `401`, with an
+  ordinary token `403`.
+
+Three facts worth knowing before an instance is exposed:
+
+- **A public dataset is readable without a token, by design.** That is what
+  *public* means here: its triples answer over `/sparql`, `/store`, the browse
+  API and `/resource/…`, its files download, and it appears in
+  `GET /api/datasets` — to anybody who can reach the host. Do not mark a dataset
+  public unless the world may read it.
+- **A private dataset discloses nothing to a caller without a grant.** Its
+  triples and its uploaded files answer `401` anonymously and `403` to a
+  signed-in user who holds no grant on it, on the read endpoints as well as the
+  write ones, and it stays out of every listing. Only the owner — plus whoever
+  has been granted access, and an admin — sees it.
+- **Listing every account is admin-only.** `GET /api/users` and the
+  `/api/admin/users` directory are **admin**. `GET /api/users/public` is
+  deliberately *not* a roster: it answers with the accounts the caller could
+  already infer — the owners of the datasets it may read, the members of its own
+  organisations, and itself — so the UI can label an owner chip without
+  enumerating the instance.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `GET` | `/` | **none** | SPARQL 1.1 Service Description of this node. |
+| `GET` | `/health` | **none** | Liveness plus store counters. |
+| `GET` | `/livez` | **none** | Liveness only; never touches the store. |
+| `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones. |
+| `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**. |
+| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph answers anonymously, a private one `401`/`403`. |
+| `GET` | `/store` | **admin** | A read that names no graph dumps the **default graph**, which no per-graph ACL covers, so it is admin-only — a non-admin token is refused here too, with `401` rather than `403`. |
+| `PUT` | `/store` | **token** | Graph Store Protocol: replace a graph. |
+| `POST` | `/store` | **token** | Graph Store Protocol: merge into a graph. |
+| `DELETE` | `/store` | **token** | Graph Store Protocol: drop a graph. |
+| `POST` | `/sparql/batch` | **token** | Several updates as one transaction (see below). |
+| `GET` | `/api/browse/graphs` | **none** | The graphs in scope for the caller. |
+| `GET` | `/api/browse/triples` | **none** | Browse rows, filtered by the caller's visibility and graph permissions. |
+| `GET` | `/api/browse/facets` | **none** | Facet counts over the same scope. |
+| `GET` | `/api/browse/resource` | **none** | One resource's triples, in scope. |
+| `GET` | `/api/browse/stats` | **none** | Counts over the scope. |
+| `GET` | `/api/browse/suggest` | **none** | Type-ahead over the terms in scope. |
+| `GET` | `/api/datasets` | **none** | The datasets the caller may read; anonymously, the public ones. |
+| `POST` | `/api/datasets` | **token** | Create a dataset. |
+| `GET` | `/api/datasets/{dataset_id}` | **none** | A public dataset's metadata; a private one is `401` anonymously, `403` without a grant. |
+| `GET` | `/api/datasets/{dataset_id}/assets` | **none** | A public dataset's file list; per-file visibility still applies. |
+| `POST` | `/api/datasets/{dataset_id}/assets` | **token** | Upload a file. |
+| `POST` | `/api/datasets/{dataset_id}/validate` | **token** | Run SHACL validation over the dataset. |
+| `GET` | `/api/datasets/{dataset_id}/validation/latest` | **token** | The dataset's last validation run. |
+| `GET` | `/api/datasets/{dataset_id}/shapes` | **token** | The dataset's shapes graph. |
+| `PUT` | `/api/datasets/{dataset_id}/shapes` | **token** | Replace the shapes graph (`text/shaclc` or RDF). |
+| `GET` | `/api/organisations` | **none** | Anonymously, only organisations that own something public. |
+| `POST` | `/api/organisations` | **admin** | Provisioning an organisation is an operator action. |
+| `GET` | `/api/organisations/{org_id}` | **none** | As the listing: an organisation that owns something public is visible. |
+| `GET` | `/api/organisations/{org_id}/members` | **token** | Membership, to members and admins. |
+| `GET` | `/api/users/public` | **none** | Scoped label lookup, not a roster — see above. |
+| `GET` | `/api/users` | **admin** | Every account. |
+| `GET` | `/api/auth/me` | **token** | The caller's own account. |
+| `POST` | `/api/auth/login` | **none** | Rate-limited against brute force. |
+| `POST` | `/api/import/bulk` | **token** | Bulk import; rate-limited. |
+| `GET` | `/api/shacl/shape-graphs` | **token** | SHACL studio: the caller's shape-graph library. |
+| `POST` | `/api/shacl/shape-graphs` | **token** | SHACL studio: create a shape graph. |
+| `GET` | `/api/shacl/detect-shapes` | **token** | SHACL studio: infer shapes from data. |
+| `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
+| `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
+| `POST` | `/api/shaclc/parse` | **token** | SHACLC → SHACL. Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
+| `POST` | `/api/shaclc/serialize` | **none** | SHACL → SHACLC of a graph the caller posts; rate-limited. |
+| `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
+| `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
+| `GET` | `/api/vocab/search` | **none** | Bundled vocabulary search; rate-limited. |
+| `POST` | `/api/vocab/install` | **admin** | Installs a vocabulary into the instance. |
+| `GET` | `/api/admin/telemetry` | **admin** | Store counters across every tenant. |
+| `GET` | `/api/admin/changes` | **admin** | Change-log rows carry quads from every tenant. |
+| `GET` | `/api/admin/changes/status` | **admin** | Capture state, epoch, cursors, caps. |
+| `PUT` | `/api/admin/changes/cursors/{name}` | **admin** | Move a consumer's bookmark. |
+| `DELETE` | `/api/admin/changes/cursors/{name}` | **admin** | Drop a bookmark. |
+| `GET` | `/api/admin/users` | **admin** | The account directory. |
+| `GET` | `/api/admin/audit` | **admin** | The audit trail. |
+| `GET` | `/api/replication/status` | **none** | This node's role and lag; a health signal, beside `/livez`. |
+| `GET` | `/api/replication/manifest` | **admin** | What a follower needs to bootstrap. |
+| `GET` | `/api/replication/identity` | **admin** | The identity database, whole. |
+| `GET` | `/resource/{path}` | **none** | Content-negotiated dereference of a public IRI. |
+| `GET` | `/.well-known/void` | **none** | Catalog of the public datasets. |
+| `GET` | `/api-docs/openapi.json` | **none** | The spec is tailored to the caller: operations it may not reach are left out. |
+| `GET` | `/api/docs` | **none** | Documentation pages; admin-only pages are filtered out. |
+
+`tests/api_reference_auth.rs` reads this table out of the shipped Markdown and
+fires an anonymous request at every row it can address, so a level stated here
+and the level the router enforces cannot drift apart.
 
 ## Common API paths
 
