@@ -8248,8 +8248,12 @@ pub async fn shaclc_parse(
 
 /// POST /api/shaclc/serialize — convert a shapes graph (by IRI) from the store → SHACLC
 ///
-/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text
+/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text.
+/// Requires a token, and the caller must be allowed to read the graph they
+/// name: the handler reads whatever IRI it is given straight out of the
+/// store, so without that check any caller could read any graph.
 pub async fn shaclc_serialize(
+    Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
@@ -8272,6 +8276,19 @@ pub async fn shaclc_serialize(
     } else {
         body_str.trim().to_string()
     };
+
+    // The IRI comes from the caller, so it is only theirs to read if the
+    // same visibility rules that gate /store and /sparql say so. A graph the
+    // caller may not read is refused with the same answer whether or not it
+    // exists, so this cannot be used to discover graph IRIs.
+    if !check_graph_read_access(&state, Some(&current_user), &shapes_iri)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "No read access to that graph".to_string(),
+        ));
+    }
 
     let shaclc = crate::shaclc::serialize(&state.store, &shapes_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;

@@ -1419,20 +1419,17 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         // nothing stored, but it runs a parser over caller-supplied text, and an
         // anonymous caller had no reason to spend the instance's CPU on that.
         .route("/api/shaclc/parse", post(routes::shaclc_parse))
+        // Serialisation reads a caller-named graph out of the store. It was
+        // anonymous, which let anyone name a private dataset's shapes graph
+        // and read it back; the handler now also checks that the caller may
+        // read that graph, because a token alone would only narrow the leak
+        // from everyone to every signed-in user.
+        .route("/api/shaclc/serialize", post(routes::shaclc_serialize))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state.clone());
-
-    // SHACLC serialisation (no auth required) — rate-limited so it can't be used
-    // for cheap CPU-DoS / fuzzing.
-    let shaclc_routes = Router::new()
-        .route("/api/shaclc/serialize", post(routes::shaclc_serialize))
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
         .with_state(state.clone());
 
     // Internal prefix service (bundled prefix.cc/LOV snapshot + platform
@@ -1865,7 +1862,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(asset_routes)
         .merge(dataset_sparql_routes)
         .merge(shacl_routes)
-        .merge(shaclc_routes)
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)

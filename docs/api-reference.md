@@ -85,7 +85,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/api/shacl/dataset-shape-graphs` | **token** | The datasets that carry a shapes graph. |
 | `POST` | `/api/shacl/validation/latest` | **token** | The last validation run of several datasets at once. |
 | `POST` | `/api/shaclc/parse` | **token** | SHACLC → SHACL. Needs a token since 0.6.x: it spends the instance's CPU on caller-supplied text. |
-| `POST` | `/api/shaclc/serialize` | **none** | SHACL → SHACLC of a graph the caller posts; rate-limited. |
+| `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACLC of a graph named by the caller. Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
 | `GET` | `/api/vocab/search` | **none** | Bundled vocabulary search; rate-limited. |
