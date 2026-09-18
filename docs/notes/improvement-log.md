@@ -1533,6 +1533,11 @@ and 403; a fully applied batch stays 200.
 
 ### 4. Change capture on by default
 
+> **Superseded 2026-09-18 — see P5 section 6.** The default went back to
+> `off` once the perf gate measured on-by-default against the trunk
+> (`update_delete_where/10000` ×4.2). Everything below still describes the
+> mechanism and the cost correctly; only the default changed.
+
 **Decision.** The maintainer chose the default the measurement in P2 §2
 left open: on. **Shipped:** `ChangeLog::open` records unless
 `OTS_CHANGE_CAPTURE=off`; a replication leader records regardless (its
@@ -1740,7 +1745,7 @@ tests.
 | 1 Synchronous hot: the recommendation, with the settings and the modes explained | named sync followers, `required` (`all` allowed), a 2 s default timeout, visible degradation (`X-Replication-Ack`, `sync` in the status), automatic recovery, no policy knob; the long-poll on the change endpoint so a hot follower's lag is a round trip; the modes table in `docs/operations.md` |
 | 2 Consensus: make a choice, dependencies allowed | `openraft` 0.9.25; Raft elects and fences, the change log stays the data path; automatic failover; quorum acknowledgement derived from the cluster; the Raft transport over the server's port behind a shared secret |
 | 3 Identity database: WAL-style | the database's own bytes, not an event log: a consistent snapshot from SQLite's backup API, applied in place under the follower's open connections when SQLite's own change counter moves |
-| 4 Change capture on by default, explained | on unless `OTS_CHANGE_CAPTURE=off`; a leader or cluster member always on; a follower off unless asked; the configuration row and the docs say what it is for and what it costs |
+| 4 Change capture on by default, explained | Shipped on, then **reversed to off** once the perf gate measured it against the trunk (section 6): a `WHERE` update pays ×2.5–4 and a store with no consumer for the log should not. A leader or cluster member is still always on; the configuration row and the docs carry the cost and the reason |
 | 5 `/sparql/batch` 422 with a message | 422 on a rolled-back batch, `error` naming the statement and why; 200 for an applied batch, 400/403 for parse and authorisation |
 
 **Still the maintainer's, or worth knowing.**
@@ -2096,6 +2101,50 @@ that is too kind hides the entire integration: the real client could not read
 a single `SELECT` from a real server. Where a feature's whole purpose is to
 talk to something else, at least one test has to talk to the real thing, even
 if it can only ever be run by hand.
+
+### 6. Change capture back to off by default
+
+**What changed.** `OTS_CHANGE_CAPTURE` defaults to `off` again. A replication
+leader or cluster member still forces it on — its followers tail that log and
+the role is meaningless without it — and `OTS_CHANGE_CAPTURE=on` turns it on
+anywhere else. The follower branch went with it: off is off for everyone but a
+leader, so `follower_role_configured` and the `env_off` helper had no callers
+left and were removed.
+
+**Why the answer changed.** The cost was measured when capture was turned on
+(P2, section 2) and written down: a ground update 4–13 %, a `WHERE` update
+×2.5–4. The maintainer chose on-by-default knowing that. What changed the
+answer was seeing it as a *gate failure against the trunk* — the perf gate on
+the pull request read `update_delete_where/10000` at ×4.2 and
+`concurrent_writes/threads/4` at ×2.1 against `develop` — which put the
+question differently: not "is the log worth its cost" but "should a store that
+never reads the log pay for one". It should not.
+
+**The shape of the cost is the argument, and it is now written where the
+switch is read.** `ChangeLog::open`'s documentation carries the table and the
+reason: a ground `INSERT DATA`/`DELETE DATA` is cheap because the statement
+already *is* the delta, while a `WHERE` update names its target by pattern, so
+the only way to record what it changed is to read the target graph before the
+update, read it again through the transaction, and subtract. That is
+proportional to the *target graph*, not to the size of the change — which
+makes a small `DELETE WHERE` against a large graph the worst case, and is
+exactly the shape a caller cannot guess from the statement they wrote.
+`OTS_CHANGE_CAPTURE_MAX_SCAN` bounds it at the price of rows that say
+`unknown`.
+
+**Documentation.** `docs/administration.md` (the row now carries the ×2.5–4
+and the reason), `docs/versioning.md` ("Off by default" and the cost bullet),
+`docs/api-reference.md`, `docs/operations.md` (both the leader and the
+follower notes), `docs/performance.md` ("Change capture and the update
+benchmarks", which now says the default is off *because of* these
+benchmarks), `docs/triplestore-comparison.md` §5.2, and the CHANGELOG.
+
+**Stated plainly.** This is the second decision in P5 reversed by a
+measurement rather than by an argument — QLever was the first. Both had been
+settled on reasoning that was sound but untested against the number that
+mattered. The pattern worth keeping is not "measure more" but "measure the
+thing the user actually pays", which for a write path is the trunk comparison,
+not a microbenchmark of the feature in isolation.
 
 ## Checkpoint (2026-09-17, HEAD `d2236a8` + this note)
 

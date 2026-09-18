@@ -161,14 +161,6 @@ pub fn cluster_role_configured() -> bool {
         .unwrap_or(false)
 }
 
-/// True when `OTS_REPLICATION_ROLE=follower`: the change log stays off
-/// unless asked for (a follower's log is not a source).
-pub fn follower_role_configured() -> bool {
-    env_opt("OTS_REPLICATION_ROLE")
-        .map(|r| r.eq_ignore_ascii_case("follower") || r.eq_ignore_ascii_case("replica"))
-        .unwrap_or(false)
-}
-
 impl ReplicationConfig {
     pub fn none() -> Self {
         Self::parse("none", "warm", None, None, None, None, None, None, None)

@@ -54,8 +54,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   property shapes on a persistent store takes 6.3 s with the accelerator
   on and 13.5 s in the shipped 4 GB container (was 118 s before the engine
   rebuild); the figures and what they settle are in docs/performance.md.
-- **Per-quad change capture with a durable cursor** (on by default;
-  `OTS_CHANGE_CAPTURE=off` turns it off): every write records one row per graph it touched — the
+- **Per-quad change capture with a durable cursor** (off by default;
+  `OTS_CHANGE_CAPTURE=on` turns it on, and a replication leader keeps it on
+  regardless): every write records one row per graph it touched — the
   net delta as N-Quads, exact counts above the payload cap, or an honest
   `unknown` — with a dense sequence number in commit order, an epoch per
   store lineage, open-time repair of rows a crash left pending, and a

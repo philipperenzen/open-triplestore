@@ -1560,17 +1560,27 @@ make the recount grow with the sample count.
 
 ### Change capture and the update benchmarks
 
-The per-quad change log (`OTS_CHANGE_CAPTURE`, **on by default** since the
-maintainer's decision of 2026-09-16) records one row per graph per write.
-With it off, the three update groups above and the two
+The per-quad change log (`OTS_CHANGE_CAPTURE`) records one row per graph per
+write. It is **off by default**, and these benchmarks are why.
+
+With it off — the shipped default — the three update groups above and the two
 `insert/sparql_update*` groups measure within run-to-run noise of a tree
-without the log. With it on — the shipped default — a ground update pays a
-few microseconds (`insert_data/1` +7 %, `single_triple` +13 %) and a `WHERE`
-update pays a scan of its target graph plus the payload (`insert_where`
-×2.5, `delete_where` ×3–4). The regression gate compares like with like
-(both sides of a comparison run with the same default), so the change of
-default is not a regression to it; a benchmark of the raw write path sets
-`OTS_CHANGE_CAPTURE=off`. The table and the reasoning are in
+without the log at all. With it on, a ground update pays a few microseconds
+(`insert_data/1` +7 %, `single_triple` +13 %) and a `WHERE` update pays
+**×2.5–4** (`insert_where` ×2.5, `delete_where` ×3–4), because a `WHERE`
+update names its target by pattern: the only way to record what it changed is
+to read the target graph before the update, read it again through the
+transaction, and subtract. That cost is proportional to the *graph*, not to
+the size of the change, so a small `DELETE WHERE` against a large graph is the
+worst case; `OTS_CHANGE_CAPTURE_MAX_SCAN` bounds it, at the price of rows
+that say `unknown`.
+
+It was briefly on by default in this branch. The regression gate, comparing
+against the trunk, measured what that meant for a store that never reads the
+log — `update_delete_where/10000` ×4.2, `concurrent_writes/threads/4` ×2.1 —
+and the default went back to off. Turn it on where something reads it: a
+replication follower, the dataset history, an audit. A replication leader
+keeps it on regardless. The table and the reasoning are in
 [versioning.md](versioning.md#what-it-costs).
 
 ### `geosparql/sf_contains` and `geosparql/distance`

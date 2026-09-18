@@ -64,9 +64,9 @@ timeout out.
 
 ### How it works
 
-**The leader** sets `OTS_REPLICATION_ROLE=leader`, which keeps change
-capture on whatever `OTS_CHANGE_CAPTURE` says (capture is on by default
-anyway). It
+**The leader** sets `OTS_REPLICATION_ROLE=leader`, which turns change
+capture on whatever `OTS_CHANGE_CAPTURE` says — capture is off by default
+elsewhere, and a leader without it has nothing for a follower to read. It
 serves three things a follower reads, all under an admin token:
 
 - `GET /api/replication/manifest` — its change-log epoch and newest
@@ -286,7 +286,7 @@ model. Three things to know:
   own from the data it receives.
 - **Not the follower's own change log.** Applying a delta does not produce
   a row on the follower; a follower is not a leader for further followers.
-  (Capture is on by default elsewhere, but off on a follower unless
+  (Capture is off by default, and a follower is no exception unless
   `OTS_CHANGE_CAPTURE=on`: a follower's log would only hold the graphs it
   fetched whole, a partial log.)
 - **At boot, a follower logs the seed's refusals.** The boot-time seed (the

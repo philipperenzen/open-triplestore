@@ -49,8 +49,8 @@
 
 **Bottom line for this project:** Open Triplestore ranks **1st among open-source single-binary
 deployments** on standards breadth — **27 of 29** rows in section 4, recounted, against 14 for
-the next open-source store — and its **~465,000 t/s** bulk load (section 5.1, re-measured) beats
-every Java competitor by 1.2–3×. GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID and RML are standout
+the next open-source store — and its **~430,000 t/s** bulk load (section 5.1, re-measured) beats
+every Java competitor by 1.1–2.9×. GeoSPARQL 1.1, SHACL-AF, DCAT 2, VoID and RML are standout
 features rare in open-source stores. The primary gap vs. QLever and Virtuoso is scale: those
 systems are engineered specifically for datasets in the tens-of-billions to trillion range.
 
@@ -327,7 +327,7 @@ ingestion path. Numbers below are triples/second.
 
 | System | Throughput | Dataset | Notes |
 |--------|-----------|---------|-------|
-| **Open Triplestore** | **~465,000 t/s** | 500 K triples (`insert/bulk_loader/100000`, 1.07 s) | `load_str` into an in-memory store; the persistent path pays RocksDB write amplification on top |
+| **Open Triplestore** | **~430,000 t/s** | 500 K triples (`insert/bulk_loader/100000`, 1.16 s) | `load_str` into an in-memory store; the persistent path pays RocksDB write amplification on top |
 | QLever | ~1,500,000+ t/s | DBLP 390M triples | C++ inverted-index construction |
 | Amazon Neptune (Graviton4) | ~1,000,000 t/s† | 2B triples (bulk CSV) | 4.7× improvement on r8g instances (2024) |
 | GraphDB | ~500,000 t/s | BSBM 100M triples | Parallel Loader, consistent at scale |
@@ -347,7 +347,7 @@ QLever            ████████████████████�
 Neptune (r8g)     ████████████████████            1,000,000
 GraphDB           ██████████                        500,000
 Stardog           ██████████                        500,000
-Open Triplestore  █████████                         465,000
+Open Triplestore  █████████                         430,000
 Virtuoso          ████████                          400,000
 RDF4J 5           ███████                           350,000
 Blazegraph        █████                             250,000
@@ -361,7 +361,7 @@ per statement reduces per-triple cost significantly.
 
 | System | Single-triple cost | Single-triple t/s | 10-triple batch t/s |
 |--------|-------------------|-------------------|---------------------|
-| **Open Triplestore** | ~86 µs | **~11,600 t/s** | **~57,000 t/s** |
+| **Open Triplestore** | ~77 µs | **~13,000 t/s** | **~63,000 t/s** |
 | Virtuoso | ~50–80 µs | ~12,500–20,000 t/s | ~80,000–150,000 t/s |
 | GraphDB | ~80–120 µs | ~8,000–12,000 t/s | ~60,000–90,000 t/s |
 | Blazegraph | ~60–100 µs | ~10,000–16,000 t/s | — (abandoned) |
@@ -370,12 +370,16 @@ per statement reduces per-triple cost significantly.
 | Neptune | ~1–5 ms | ~200–1,000 t/s (API round-trip) | — |
 
 **Key insight:** Batching 10 triples per INSERT DATA statement reduces per-triple cost
-**~4.9×** on open-triplestore (86 µs → 17.5 µs) by amortising the SPARQL parser. Use the bulk
-loader for initial loading — it is another ~8× faster again.
+**~4.8×** on open-triplestore (77 µs → 15.8 µs) by amortising the SPARQL parser. Use the bulk
+loader for initial loading — it is another ~7× faster again.
 
-Both figures are with the per-quad [change log](versioning.md#change-log) **on**, which is the
-shipped default: every write records what it changed so replication, history and audits have a
-source. `OTS_CHANGE_CAPTURE=off` removes that cost for a write-heavy store with no consumer.
+> The `insert/*` group has a wide run-to-run spread — the regression gate gives it a 1.5×
+> tolerance for that reason — so read these as a band, not a point.
+
+Both figures are with the per-quad [change log](versioning.md#change-log) **off**, which is the
+shipped default. Turning it on (`OTS_CHANGE_CAPTURE=on`, for replication, history or audits)
+costs a ground write 4–13 % and a `WHERE` update ×2.5–4 — see
+[versioning.md](versioning.md#what-it-costs).
 (`insert/sparql_update/single_triple`, `insert/sparql_update_batch/10_triples`.)
 
 ---
@@ -976,8 +980,8 @@ security patches not applied. Any existing deployment should migrate to QLever o
 
 ### Where Open Triplestore Excels
 
-1. **Ingest speed:** ~465,000 t/s bulk load (re-measured, section 5.1) beats every Java
-   competitor by 1.2–3×. Only QLever and
+1. **Ingest speed:** ~430,000 t/s bulk load (re-measured, section 5.1) beats every Java
+   competitor by 1.1–2.9×. Only QLever and
    Neptune (Graviton4 cloud bulk loader) match this.
 
 2. **GeoSPARQL 1.1:** One of only three open-source triplestores with full GeoSPARQL 1.1 support

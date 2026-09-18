@@ -83,7 +83,10 @@ other.
 
 Every write records what it did, per graph, in a small SQLite log beside
 the store (`{data_dir}/changes/changes.db`; in memory for an in-memory
-store). Capture is on by default; `OTS_CHANGE_CAPTURE=off` turns it off.
+store). Capture is **off by default** — `OTS_CHANGE_CAPTURE=on` turns it on,
+and a replication leader keeps it on regardless. It is off because a
+`WHERE` update pays ×2.5–4 for it (see [What it costs](#what-it-costs)),
+which is not a price a store with no consumer for the log should pay.
 The log is the source for the replication work and for the dataset history,
 and it is designed so that a consumer can *tail* it: rows carry a dense
 sequence number in commit order, a consumer bookmarks the last one it
@@ -193,15 +196,21 @@ less; the scan cost does not shrink.
 - **Caps.** `OTS_CHANGE_CAPTURE_MAX_SCAN` (250 000) bounds the before-image
   scan; `OTS_CHANGE_CAPTURE_MAX_PAYLOAD` (250 000) bounds the quads a
   `full` row may carry — above it the row is `counts`.
-- **On by default.** Every node records unless `OTS_CHANGE_CAPTURE=off`;
-  a replication leader records regardless (its followers read this log);
-  a replication follower does not unless asked (`OTS_CHANGE_CAPTURE=on`),
-  because its log is not a source. What the default buys: a follower, the
-  dataset history and an audit can start from the log as it stands, with
-  no reload. What it costs: each write pays for its row — the table above
-  — and a write-heavy store that will never have a consumer can turn it
-  off. Off, the log records nothing and every write path is the one it
-  was.
+- **Off by default.** A node records only when asked
+  (`OTS_CHANGE_CAPTURE=on`); a replication leader or cluster member records
+  regardless, because its followers read this log and the role means nothing
+  without it; a replication follower does not unless asked, because its own
+  log would hold only the graphs it fetched whole — a partial log, worse than
+  none. What turning it on buys: a follower, the dataset history and an audit
+  can start from the log as it stands, with no reload. What it costs is the
+  table above, and the shape of that cost is the reason for the default — a
+  ground update pays 4–13 % because the statement already is the delta, while
+  a `WHERE` update pays ×2.5–4 because it names its target by pattern, so the
+  graph has to be read before the update and again through the transaction and
+  the two subtracted. That is proportional to the target graph rather than to
+  the size of the change, which makes a small `DELETE WHERE` against a large
+  graph the worst case. `OTS_CHANGE_CAPTURE_MAX_SCAN` bounds it, at the price
+  of rows that say `unknown`.
 - **What is not recorded.** The commit-trail insert itself (its own
   `urn:system:commit-log` graph would otherwise produce a row per row);
   registry writes to the identity database (not RDF); the text, spatial and

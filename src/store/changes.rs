@@ -71,17 +71,6 @@ fn env_on(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn env_off(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "off" | "no"
-            )
-        })
-        .unwrap_or(false)
-}
-
 /// How much of the delta a row carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -434,25 +423,46 @@ fn exec(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> rusqli
 
 impl ChangeLog {
     /// Open the log beside a persistent store (`{dir}/changes/changes.db`),
-    /// or in memory when `dir` is `None`. Capture is **on by default**
-    /// (the maintainer's decision, 2026-09-16): every write pays for its
-    /// row (docs/versioning.md has the measured cost) and the log is there
-    /// the day a follower, the history or an audit needs it.
-    /// `OTS_CHANGE_CAPTURE=off` turns it off; a replication leader keeps it
-    /// on regardless (its followers read this log); a follower keeps it
-    /// off unless `OTS_CHANGE_CAPTURE=on` (its log is not a source).
+    /// or in memory when `dir` is `None`.
+    ///
+    /// Capture is **off by default**. It is not free, and what it costs is
+    /// not uniform — which is the whole reason the default is off rather
+    /// than on:
+    ///
+    /// | write | with capture | why |
+    /// |---|---|---|
+    /// | ground `INSERT DATA` / `DELETE DATA` | +4-13 % | the quads are already in hand; the row is a serialise and an insert |
+    /// | `INSERT ... WHERE` | x2.5 | the target graph must be read *before* the update to know what the pattern will match |
+    /// | `DELETE ... WHERE` | x3-4 | the same before-image read, then the after-image through the transaction, then the diff |
+    ///
+    /// A `WHERE` update names its target by *pattern*, so the only way to
+    /// record what it changed is to look at the graph before and after and
+    /// subtract. That is a scan of the target graph (capped by
+    /// `OTS_CHANGE_CAPTURE_MAX_SCAN`, above which the row honestly says
+    /// `unknown`), a second read through the transaction, a diff, and an
+    /// N-Quads payload. A ground update needs none of it: the statement
+    /// already *is* the delta. So the cost is proportional to the target
+    /// graph, not to the size of the change, and a small `DELETE WHERE`
+    /// against a large graph is the worst case.
+    ///
+    /// Turn it on (`OTS_CHANGE_CAPTURE=on`) when something reads it: a
+    /// replication follower, the dataset history, an audit. A replication
+    /// leader or cluster member keeps it on regardless — its followers tail
+    /// this log and the role means nothing without it. A follower keeps it
+    /// off unless asked, because its own log would hold only the graphs it
+    /// fetched whole, which is a partial log and worse than none.
+    ///
+    /// The measured table is in docs/versioning.md, "What it costs".
     pub fn open(dir: Option<&Path>) -> Result<Self, StoreError> {
-        let (leader, follower) = (
-            crate::store::replication::leader_role_configured()
-                || crate::store::replication::cluster_role_configured(),
-            crate::store::replication::follower_role_configured(),
-        );
+        let leader = crate::store::replication::leader_role_configured()
+            || crate::store::replication::cluster_role_configured();
         let on = if leader {
+            // Its followers read this log; the role is meaningless without it.
             true
-        } else if follower {
-            env_on("OTS_CHANGE_CAPTURE")
         } else {
-            !env_off("OTS_CHANGE_CAPTURE")
+            // Off unless asked — on a follower too, whose own log would be
+            // partial. See the cost table above.
+            env_on("OTS_CHANGE_CAPTURE")
         };
         if !on {
             return Ok(Self::disabled());
@@ -1656,9 +1666,14 @@ mod tests {
 
     #[test]
     fn the_off_switch_records_nothing() {
-        // On is the default; an explicit off is off.
+        // Off is the default, an explicit off is off, and `on` turns it on:
+        // the cost of a `WHERE` update's before-image scan is not something a
+        // store with no consumer for the log should pay (see `open`).
         std::env::remove_var("OTS_CHANGE_CAPTURE");
         std::env::remove_var("OTS_REPLICATION_ROLE");
+        let log = ChangeLog::open(None).unwrap();
+        assert!(!log.enabled(), "capture is off unless asked for");
+        std::env::set_var("OTS_CHANGE_CAPTURE", "on");
         assert!(ChangeLog::open(None).unwrap().enabled());
         std::env::set_var("OTS_CHANGE_CAPTURE", "off");
         let log = ChangeLog::open(None).unwrap();
