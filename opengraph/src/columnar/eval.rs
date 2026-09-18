@@ -459,6 +459,67 @@ impl<'a> Ctx<'a> {
 /// is 50 % faster than the engine, at a hundred thousand it is slower.
 const BULK_SCAN_ROWS: usize = 50_000;
 
+/// Triple patterns anywhere under `p` — what a row budget would have to stop
+/// early *through*, not just at.
+fn triple_patterns(p: &GraphPattern) -> usize {
+    match p {
+        GraphPattern::Bgp { patterns } => patterns.len(),
+        GraphPattern::Path { .. } => 1,
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::Lateral { left, right } => triple_patterns(left) + triple_patterns(right),
+        GraphPattern::LeftJoin { left, right, .. } => {
+            triple_patterns(left) + triple_patterns(right)
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. } => triple_patterns(inner),
+        _ => 0,
+    }
+}
+
+/// A `LIMIT` over more than one triple pattern. The budget reaches only the
+/// last pattern of a basic graph pattern — an earlier one's rows can still be
+/// dropped by a later one — so every stage but the last is materialised in
+/// full, while the engine stops early throughout. Measured on the perf gate's
+/// `concurrent/reads` (a two-pattern join, `LIMIT 100`, 50 000 triples): 377 us
+/// for the engine against 605 us here. Declined for speed, not fidelity.
+fn limited_over_several_patterns(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::Slice {
+            inner,
+            length: Some(_),
+            ..
+        } => triple_patterns(inner) > 1 || limited_over_several_patterns(inner),
+        GraphPattern::Join { left, right }
+        | GraphPattern::Union { left, right }
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::Lateral { left, right } => {
+            limited_over_several_patterns(left) || limited_over_several_patterns(right)
+        }
+        GraphPattern::LeftJoin { left, right, .. } => {
+            limited_over_several_patterns(left) || limited_over_several_patterns(right)
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Graph { inner, .. }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Group { inner, .. } => limited_over_several_patterns(inner),
+        _ => false,
+    }
+}
+
 /// The exact row count when `pattern` is one triple pattern with nothing
 /// above it that bounds or reduces the rows — two binary searches, no scan.
 fn bulk_scan_rows(idx: &Columnar, pattern: &GraphPattern) -> Option<usize> {
@@ -496,6 +557,21 @@ fn bulk_scan_rows(idx: &Columnar, pattern: &GraphPattern) -> Option<usize> {
     }
 }
 
+/// Whether an `ORDER BY` sits under the `LIMIT`, in which case nothing can
+/// stop early on either side and the budget costs nothing.
+fn orders_before_limiting(p: &GraphPattern) -> bool {
+    match p {
+        GraphPattern::OrderBy { .. } => true,
+        GraphPattern::Slice { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Extend { inner, .. }
+        | GraphPattern::Group { inner, .. } => orders_before_limiting(inner),
+        _ => false,
+    }
+}
+
 pub fn evaluate(idx: &Columnar, query: &Query) -> Result<Option<ParAnswer>, String> {
     if accepts(query).is_err() {
         return Ok(None);
@@ -505,6 +581,11 @@ pub fn evaluate(idx: &Columnar, query: &Query) -> Result<Option<ParAnswer>, Stri
     } = query
     {
         if dataset.is_none() && bulk_scan_rows(idx, pattern).is_some_and(|n| n > BULK_SCAN_ROWS) {
+            return Ok(None);
+        }
+        // An `ORDER BY` has to see every row anyway, so a limit above one costs
+        // the engine the same full evaluation and this copy keeps the shape.
+        if limited_over_several_patterns(pattern) && !orders_before_limiting(pattern) {
             return Ok(None);
         }
     }

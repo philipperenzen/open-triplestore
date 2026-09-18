@@ -329,6 +329,12 @@ pub fn has_sum_or_avg(sparql: &str) -> bool {
     let Ok(query) = SparqlParser::new().parse_query(sparql) else {
         return false;
     };
+    has_sum_or_avg_query(&query)
+}
+
+/// [`has_sum_or_avg`] on a query that is already parsed, for a caller that
+/// has the syntax tree in hand and should not pay for a second parse.
+pub fn has_sum_or_avg_query(query: &Query) -> bool {
     let pattern = match &query {
         Query::Select { pattern, .. }
         | Query::Construct { pattern, .. }

@@ -727,6 +727,20 @@ impl TripleStore {
         // Snapshot the generation BEFORE evaluating: a write that commits while
         // this query runs must invalidate the result, not be stamped onto it.
         let gen = self.query_cache.generation();
+        // A global `COUNT(*)` is answered from the maintained count index in a
+        // few microseconds and needs no syntax tree, so it is asked before the
+        // classifier — whose verdict costs a parse. Asking first cost such a
+        // query 3.0 us -> 6.8 us, which the perf gate caught.
+        if let Some(fast) = self.try_fast_count(sparql) {
+            let shape = QueryShape {
+                analytical: true,
+                aggregate_text: true,
+            };
+            let results = self.query_cache.put(sparql, gen, fast, shape);
+            self.telemetry
+                .record_query(Served::FastCount, t0.elapsed(), shape);
+            return Ok(results);
+        }
         // The shape bits, once per uncached evaluation: the classifier parses
         // (the mirror reuses its verdict rather than parsing again), and the
         // bits are stamped on the cache entry so a hit inherits them.
@@ -758,7 +772,9 @@ impl TripleStore {
         // the maintained per-graph count index instead of materialising and then
         // discarding every solution tuple. Callgrind shows ~30% of COUNT(*) cost is
         // tuple build/copy (`InternalTuple::set`, `EncodedTerm::clone`, memcpy) —
-        // pure waste when the projection is only a count.
+        // pure waste when the projection is only a count. `query` asks this before
+        // the classifier and returns; the check stays here for the paths that come
+        // straight to `query_uncached`.
         if let Some(fast) = self.try_fast_count(sparql) {
             return Ok((fast, Served::FastCount));
         }

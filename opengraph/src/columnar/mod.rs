@@ -68,7 +68,7 @@ pub fn accepts_text(sparql: &str) -> bool {
 /// `__og_bnode_*`, and strips those columns before returning. A query that
 /// used a variable of its own by that name would lose it, so such a query is
 /// declined rather than answered.
-fn uses_reserved_names(sparql: &str) -> bool {
+pub fn uses_reserved_names(sparql: &str) -> bool {
     sparql.contains("__og_")
 }
 

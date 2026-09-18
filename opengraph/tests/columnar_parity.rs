@@ -382,6 +382,15 @@ fn a_limit_is_the_prefix_of_the_unlimited_answer() {
         let (vars, full, _) = columnar(&c, &q).unwrap_or_else(|| panic!("declined: {q}"));
         assert!(!full.is_empty(), "fixture produces no rows for {body}");
 
+        // A `LIMIT` over more than one triple pattern is declined for speed —
+        // the engine stops early through the whole chain and this evaluator
+        // only through the last pattern (see `limited_over_several_patterns`).
+        // Where that applies the property is unobservable from here, and the
+        // decline itself is pinned by `a_limited_join_is_left_to_the_engine`.
+        if columnar(&c, &format!("{q} LIMIT 1")).is_none() {
+            continue;
+        }
+
         for n in 0..=full.len() + 1 {
             let limited = format!("{q} LIMIT {n}");
             let (lv, lr, _) =
@@ -412,7 +421,6 @@ fn a_zero_budget_is_a_bound_not_an_absence() {
     let (_, c) = stores();
     for body in [
         "SELECT ?s ?name WHERE { ?s ex:name ?name }",
-        "SELECT ?x WHERE { { ?x ex:name ?n } UNION { ?x ex:type ?t } }",
         "SELECT ?t (COUNT(?s) AS ?n) WHERE { ?s ex:type ?t } GROUP BY ?t",
     ] {
         let (vars, full, _) = columnar(&c, &format!("{P}{body}")).unwrap();
@@ -423,4 +431,42 @@ fn a_zero_budget_is_a_bound_not_an_absence() {
             columnar(&c, &format!("{P}{body} OFFSET {} LIMIT 5", full.len() + 3)).unwrap();
         assert!(past.is_empty(), "OFFSET past the end returned rows: {body}");
     }
+}
+
+/// A `LIMIT` over several triple patterns goes to the engine; over one it stays
+/// here. This is a *speed* decision, measured on the perf gate's
+/// `concurrent/reads` (a two-pattern join with `LIMIT 100`: 377 us for the
+/// engine, 605 us here), and the only one of the copy's declines that depends
+/// on a limit being present at all — so it is worth stating both halves.
+#[test]
+fn a_limited_join_is_left_to_the_engine() {
+    let (_, c) = stores();
+    let declined = |q: &str| columnar(&c, &format!("{P}{q}")).is_none();
+
+    // One pattern: the budget stops the scan, so the copy keeps it.
+    assert!(!declined("SELECT ?n WHERE { ?s ex:name ?n } LIMIT 5"));
+    assert!(!declined(
+        "SELECT ?n WHERE { ?s ex:name ?n } OFFSET 2 LIMIT 5"
+    ));
+    // …and without a limit a join is the copy's best shape, so it keeps that too.
+    assert!(!declined(
+        "SELECT ?n ?a WHERE { ?s ex:name ?n ; ex:age ?a }"
+    ));
+
+    // Several patterns under a limit: the engine stops early throughout.
+    assert!(declined(
+        "SELECT ?n ?a WHERE { ?s ex:name ?n ; ex:age ?a } LIMIT 5"
+    ));
+    assert!(declined(
+        "SELECT ?n ?k WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } } LIMIT 5"
+    ));
+    assert!(declined(
+        "SELECT ?x WHERE { { ?x ex:name ?n } UNION { ?x ex:type ?t } } LIMIT 5"
+    ));
+
+    // An ORDER BY under the limit has to see every row anyway, so nothing can
+    // stop early on either side and the copy keeps the shape.
+    assert!(!declined(
+        "SELECT ?n ?a WHERE { ?s ex:name ?n ; ex:age ?a } ORDER BY ?n LIMIT 5"
+    ));
 }

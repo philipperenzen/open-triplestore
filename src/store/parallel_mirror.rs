@@ -50,6 +50,7 @@ use oxigraph::sparql::{
     QueryResults, QuerySolution, QuerySolutionIter, QueryTripleIter, SparqlEvaluator, Variable,
 };
 use oxigraph::store::Store;
+use spargebra::SparqlParser;
 use tracing::{debug, warn};
 
 /// Floor for the in-memory mirror cap when no explicit override is set. The
@@ -602,12 +603,20 @@ impl ParallelMirror {
         if !self.inner.enabled || !self.inner.columnar_enabled {
             return None;
         }
-        if parallel::has_sum_or_avg(sparql) || !opengraph::columnar::accepts_text(sparql) {
+        // One parse, three questions. Asking `has_sum_or_avg`, `accepts_text`
+        // and `Columnar::query` each with the query *text* parsed it three
+        // times; on a short query that dominated, and the perf gate measured
+        // it as `concurrent_reads/threads/1` 237 us -> 610 us.
+        if opengraph::columnar::uses_reserved_names(sparql) {
+            return None;
+        }
+        let query = SparqlParser::new().parse_query(sparql).ok()?;
+        if parallel::has_sum_or_avg_query(&query) || opengraph::columnar::accepts(&query).is_err() {
             return None;
         }
         self.get_or_build(store)?;
         let columnar = self.inner.columnar.read().ok()?.clone()?;
-        match columnar.query(sparql) {
+        match opengraph::columnar::evaluate(&columnar, &query) {
             Ok(Some(answer)) => Some(par_answer_to_results(answer)),
             _ => None,
         }
