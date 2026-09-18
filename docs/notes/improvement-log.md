@@ -2408,7 +2408,7 @@ count index, columnar copy, and the routing rule that keeps the engine's
 answer), the change log (with the ×2.5–4 reason it is off by default in
 the row itself, so nobody turns it on without knowing the price),
 replication and failover (linking the compose example), and workload
-telemetry (naming the Operations page) — each linking to its chapter.
+telemetry (naming the Node status page) — each linking to its chapter.
 The Quick Start gains an "Optional — a read replica" paragraph beside the
 LLM and mail options, with the two commands and a link to the walkthrough.
 `docs/overview.md` gains two capability bullets (change log & replication;
@@ -2421,7 +2421,7 @@ fragments (`/docs/operations`, not `#replication`) because the README and
 the in-app renderer slug headings differently; the README's own links use
 GitHub's slugs.
 
-### 4. The Operations page: `/admin/operations`
+### 4. The Node status page: `/admin/operations`
 
 **What it is.** One admin page, in the sidebar under *Admin* beside AI
 Requests, that reads the three status bodies — `/api/replication/status`

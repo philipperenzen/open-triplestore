@@ -159,12 +159,17 @@ export function relativeTime(iso?: string | null, now: number = Date.now(), loca
   if (!Number.isFinite(t)) return '—';
   const diff = Math.round((t - now) / 1000); // negative = in the past
   const abs = Math.abs(diff);
-  let rtf: Intl.RelativeTimeFormat;
-  try {
-    rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'always' });
-  } catch {
-    rtf = new Intl.RelativeTimeFormat('en', { numeric: 'always' });
-  }
+  // `numeric: 'auto'` says "now" for zero; 'always' would say "in 0 seconds",
+  // a future tense for a moment that has just passed.
+  const make = (numeric: 'always' | 'auto') => {
+    try {
+      return new Intl.RelativeTimeFormat(locale, { numeric });
+    } catch {
+      return new Intl.RelativeTimeFormat('en', { numeric });
+    }
+  };
+  if (diff === 0) return make('auto').format(0, 'second');
+  const rtf = make('always');
   if (abs < 60) return rtf.format(diff, 'second');
   if (abs < 3600) return rtf.format(Math.round(diff / 60), 'minute');
   if (abs < 86400) return rtf.format(Math.round(diff / 3600), 'hour');

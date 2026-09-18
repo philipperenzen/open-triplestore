@@ -151,7 +151,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:7879/sparql \
 The same access token works on both nodes because they share the secret and
 the follower's identity database is a copy of the leader's
 ([below](#identity-database)). The web UI on either port shows the same
-data; the **Operations** page under *Admin* shows this node's role, lag and
+data; the **Node status** page under *Admin* shows this node's role, lag and
 last catch-up, the leader's change-log status, and the follower's cursor as
 the leader sees it. `OTS_REPLICATION_MODE=warm` in `.env` turns the
 follower into a once-a-minute reporting replica; uncommenting

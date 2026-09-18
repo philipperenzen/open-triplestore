@@ -102,7 +102,7 @@
           {$t('pages.adminOperations.updated', { values: { when: ago(new Date(updatedAt).toISOString()) } })}
         </span>
       {/if}
-      <button class="btn btn-sm" on:click={togglePause} aria-pressed={paused}>
+      <button class="btn btn-sm" on:click={togglePause}>
         {#if paused}<Play size={14} /> {$t('pages.adminOperations.resume')}{:else}<Pause size={14} /> {$t('pages.adminOperations.pause')}{/if}
       </button>
       <button class="btn btn-sm" on:click={refresh} disabled={loading}>
@@ -144,14 +144,15 @@
             </dd>
           </div>
           {#if state !== 'standalone'}
-            <div>
-              <dt>{$t('pages.adminOperations.replication.mode')}</dt>
-              <dd><code>{replication.mode}</code>{#if modeHint} <span class="muted">— {modeHint}</span>{/if}</dd>
-            </div>
             <div><dt>{$t('pages.adminOperations.replication.scope')}</dt><dd><code>{replication.scope}</code></dd></div>
             <div><dt>{$t('pages.adminOperations.replication.node')}</dt><dd><code>{replication.node_id}</code></dd></div>
           {/if}
           {#if isFollower}
+            <!-- The temperature is how often a follower asks; a leader has none. -->
+            <div>
+              <dt>{$t('pages.adminOperations.replication.mode')}</dt>
+              <dd><code>{replication.mode}</code>{#if modeHint} <span class="muted">— {modeHint}</span>{/if}</dd>
+            </div>
             <div><dt>{$t('pages.adminOperations.replication.leaderUrl')}</dt><dd><code>{replication.leader_url || '—'}</code></dd></div>
             <div><dt>{$t('pages.adminOperations.replication.epoch')}</dt><dd><code title={replication.epoch || ''}>{shortId(replication.epoch)}</code></dd></div>
             <div>

@@ -85,6 +85,8 @@ describe('AdminOperations', () => {
   it('names a leader, lists every exit in try order, and shows its follower’s cursor', async () => {
     const { findByText, container, unmount } = mount(LEADER, TELEMETRY, CAPTURING);
     await findByText('Leader');
+    // The temperature is a follower's; a leader gets no "catches up every minute".
+    expect(container.textContent).not.toContain('catches up every minute');
     expect(api.replicationStatus).toHaveBeenCalledTimes(1);
     expect(api.adminTelemetry).toHaveBeenCalledTimes(1);
     expect(api.adminChangesStatus).toHaveBeenCalledTimes(1);
@@ -98,7 +100,7 @@ describe('AdminOperations', () => {
     expect(container.textContent).toContain('replica-1');
     // Retention floor is the lowest cursor.
     expect(container.textContent).toContain('lowest one (480)');
-    // 33.4 MB on disk; the uptime in the queries header.
+    // 34 205 696 bytes -> 32.6 MB (powers of 1024); the uptime in the queries header.
     expect(container.textContent).toContain('32.6 MB');
     expect(container.textContent).toContain('Up 1h 02m');
     unmount();

@@ -52,14 +52,14 @@ test.beforeEach(async ({ page }) => {
   await signIn(page);
 });
 
-test('the sidebar offers Operations to an admin and the page matches the API', async ({ page }) => {
+test('the sidebar offers Node status to an admin and the page matches the API', async ({ page }) => {
   const replication = await (await api.get('/api/replication/status')).json();
   const changes = await (await api.get('/api/admin/changes/status', { headers: authHeaders() })).json();
   const telemetry = await (await api.get('/api/admin/telemetry', { headers: authHeaders() })).json();
 
-  await page.getByRole('link', { name: 'Operations' }).click();
+  await page.getByRole('link', { name: 'Node status' }).click();
   await expect(page).toHaveURL(/\/admin\/operations$/);
-  await expect(page.getByRole('heading', { name: 'Operations', level: 2 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Node status', level: 2 })).toBeVisible();
 
   // Replication: the badge is the API's role in a word.
   const state =
@@ -105,7 +105,7 @@ test('the page refreshes on its own and pauses on request', async ({ page }) => 
     await route.continue();
   });
   await clientNavigate(page, '/admin/operations');
-  await expect(page.getByRole('heading', { name: 'Operations', level: 2 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Node status', level: 2 })).toBeVisible();
   await expect.poll(() => calls, { timeout: 8_000 }).toBeGreaterThanOrEqual(2);
 
   await page.getByRole('button', { name: 'Pause' }).click();
@@ -128,12 +128,12 @@ test('a signed-out visitor is not offered the page and its data needs an admin',
 
   // The signed-in page has the link; a signed-out visitor in a fresh browser
   // context (no session cookie) does not, and is sent home from the route.
-  await expect(page.getByRole('link', { name: 'Operations' })).toHaveCount(1);
+  await expect(page.getByRole('link', { name: 'Node status' })).toHaveCount(1);
   const visitor = await browser.newContext();
   const fresh = await visitor.newPage();
   await fresh.goto('/');
   await expect(fresh.getByRole('heading', { level: 1 }).first()).toBeVisible();
-  await expect(fresh.getByRole('link', { name: 'Operations' })).toHaveCount(0);
+  await expect(fresh.getByRole('link', { name: 'Node status' })).toHaveCount(0);
   await fresh.goto('/admin/operations');
   await expect(fresh).not.toHaveURL(/\/admin\/operations$/);
   await visitor.close();

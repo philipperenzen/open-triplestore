@@ -57,7 +57,7 @@
     "degradedDesc": "Een of meer services zijn niet beschikbaar — sommige functies werken mogelijk niet.",
     "details": "Details",
     "adminLlm": "AI-verzoeken",
-    "adminOperations": "Operations",
+    "adminOperations": "Nodestatus",
     "vocabularySearch": "Vocabulaire zoeken",
     "files": "Bestanden"
   },
@@ -2814,7 +2814,7 @@
       "continue": "Doorgaan"
     },
     "adminOperations": {
-      "title": "Operations",
+      "title": "Nodestatus",
       "detail": "Wat deze node op dit moment doet: replicatie, hoe en hoe snel query’s worden beantwoord, SHACL-validaties, schrijfacties en het wijzigingslogboek.",
       "refresh": "Vernieuwen",
       "pause": "Pauzeren",

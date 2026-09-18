@@ -93,7 +93,7 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **In-memory query accelerator** | Over a persistent store, an in-RAM mirror answers most reads: subject shards for aggregates, an O(1) count index, and a columnar copy with its own evaluator for joins and lookups. Every query is routed to the cheapest exit that gives the engine's exact answer, and anything else goes to the engine ([docs](docs/performance.md#4-the-columnar-copy-opengraphcolumnar)) |
 | **Change log** | Every write recorded per graph in commit order, with sequence numbers a consumer can tail and bookmark. Off by default — a `WHERE` update pays ×2.5–4 for its before/after diff — and on whenever there is a consumer ([docs](docs/versioning.md#change-log)) |
 | **Replication & failover** | A leader ships its change log to cold, warm or hot followers: read-only replicas that catch up hourly, every minute, or within a round trip. Synchronous acknowledgement and Raft consensus are opt-in; failover is by epoch. Two-container example in [`docker-compose.replication.yml`](docker-compose.replication.yml) ([docs](docs/operations.md#replication)) |
-| **Workload telemetry** | Which exit answered each query (exact counts), sampled latencies for analytical and other queries, validation and write-gap histograms — `GET /api/admin/telemetry`, and the **Operations** page in the web UI ([docs](docs/performance.md#telemetry)) |
+| **Workload telemetry** | Which exit answered each query (exact counts), sampled latencies for analytical and other queries, validation and write-gap histograms — `GET /api/admin/telemetry`, and the **Node status** page in the web UI ([docs](docs/performance.md#telemetry)) |
 | **HTTP protocols** | SPARQL Protocol + Graph Store HTTP Protocol (RFC 7230) + LDP 1.0 |
 | **Docker-ready** | Multi-stage image; non-root runtime; health-check built-in |
 
@@ -302,7 +302,7 @@ A full-featured browser interface is bundled with the server at `http://localhos
 | `/organisations` | Organisation management (requires auth) |
 | `/settings` | Profile, password change, API token management (requires auth) |
 | `/admin/users` | User management — create, edit role/status, reset password, deactivate (requires admin+) |
-| `/admin/operations` | Operations — replication role, lag and last catch-up; which exit answered each query and how fast; SHACL validations; write gaps; the change log with its cursors (requires admin+) |
+| `/admin/operations` | Node status — replication role, lag and last catch-up; which exit answered each query and how fast; SHACL validations; write gaps; the change log with its cursors (requires admin+) |
 
 ### Development
 

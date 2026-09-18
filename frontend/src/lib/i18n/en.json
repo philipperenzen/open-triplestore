@@ -57,7 +57,7 @@
     "degradedDesc": "One or more services are unavailable — some features may not work.",
     "details": "Details",
     "adminLlm": "AI Requests",
-    "adminOperations": "Operations",
+    "adminOperations": "Node status",
     "vocabularySearch": "Vocabulary Search",
     "files": "Files"
   },
@@ -2814,7 +2814,7 @@
       "continue": "Continue"
     },
     "adminOperations": {
-      "title": "Operations",
+      "title": "Node status",
       "detail": "What this node is doing right now: replication, how queries are answered and how fast, SHACL validations, writes, and the change log.",
       "refresh": "Refresh",
       "pause": "Pause",

@@ -86,7 +86,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   follower's token, follower up, a write on the leader appearing on the
   follower within a round trip, a write on the follower refused with 503.
   `.env.example` documents the follower's knobs.
-- **An Operations page in the web UI** (`/admin/operations`, admin): this
+- **A Node status page in the web UI** (`/admin/operations`, admin): this
   node's replication state in one word with what it means for reads and
   writes, its lag and last catch-up; which exit answered each query, each
   exit explained in plain words, with exact counts and sampled latencies;

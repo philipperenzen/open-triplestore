@@ -138,6 +138,9 @@ describe('formatting', () => {
     expect(relativeTime('2026-09-18T07:00:00Z', now, 'en')).toBe('3 hours ago');
     expect(relativeTime('2026-09-16T10:00:00Z', now, 'en')).toBe('2 days ago');
     expect(relativeTime('2026-09-18T09:59:48Z', now, 'nl')).toBe('12 seconden geleden');
+    // The moment itself is "now", not "in 0 seconds".
+    expect(relativeTime('2026-09-18T10:00:00Z', now, 'en')).toBe('now');
+    expect(relativeTime('2026-09-18T10:00:00Z', now, 'nl')).toBe('nu');
     expect(relativeTime(null, now)).toBe('—');
     expect(relativeTime('not a date', now)).toBe('—');
   });
