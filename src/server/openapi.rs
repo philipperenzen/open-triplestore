@@ -1854,8 +1854,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                     false,
                     "`true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
                 )],
-                vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error (position named)")],
-                false,
+                vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error (position named)"), ("401", "Authentication required")],
+                true,
             ),
         )],
     );
@@ -2010,7 +2010,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(paths, "/api/rml/preview", vec![
         (M::Post, o("Mappings", "Preview RML mapping", "Run an inline RML mapping against sample input and return the generated triples without storing them.",
-            vec![], vec![("200", "Generated triples"), ("400", "Invalid mapping")], false)),
+            vec![], vec![("200", "Generated triples"), ("400", "Invalid mapping"), ("401", "Authentication required")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3572,7 +3572,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Users",
                 "List public users",
-                "Minimal public user directory (id, username, avatar).",
+                "Minimal public user directory (id, username, avatar), scoped to the users the caller can already see: the owners of the datasets it may read, the members of its organisations, and itself. An admin sees every account.",
                 vec![],
                 vec![("200", "Array of public users")],
                 false,

@@ -219,7 +219,10 @@ mod http {
     use tower::ServiceExt as _;
 
     async fn post(uri: &str, body: &str) -> (StatusCode, String) {
-        let (state, _) = admin_state();
+        // The endpoint is authenticated compute now, so these strictness cases
+        // carry a token; the auth contract itself lives in
+        // tests/api_auth_exposure.rs.
+        let (state, token) = admin_state();
         let app = test_app(state);
         let resp = app
             .oneshot(
@@ -227,6 +230,7 @@ mod http {
                     .method(Method::POST)
                     .uri(uri)
                     .header(header::CONTENT_TYPE, "text/shaclc")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )

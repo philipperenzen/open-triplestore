@@ -1087,8 +1087,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
     // Public user listing (no auth required — only returns id/username/avatar_key).
     // Must be registered before user_routes so the static segment "public" wins
     // over the dynamic ":user_id" capture.
+    //
+    // optional_auth, not "no auth": the handler scopes the list to the users the
+    // caller can already infer, so it needs to know who — if anyone — is asking.
     let public_user_routes = Router::new()
         .route("/api/users/public", get(handlers::list_public_users))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
     // User admin routes (auth required) — legacy, kept for backward compat
@@ -1407,6 +1415,10 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/shacl/dataset-shape-graphs",
             get(routes::list_accessible_shape_graphs),
         )
+        // SHACLC parsing joins its authenticated SHACL siblings: it discloses
+        // nothing stored, but it runs a parser over caller-supplied text, and an
+        // anonymous caller had no reason to spend the instance's CPU on that.
+        .route("/api/shaclc/parse", post(routes::shaclc_parse))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
@@ -1414,10 +1426,9 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    // SHACLC standalone conversion routes (no auth required). Anonymous parser
-    // surface — rate-limited so it can't be used for cheap CPU-DoS / fuzzing.
+    // SHACLC serialisation (no auth required) — rate-limited so it can't be used
+    // for cheap CPU-DoS / fuzzing.
     let shaclc_routes = Router::new()
-        .route("/api/shaclc/parse", post(routes::shaclc_parse))
         .route("/api/shaclc/serialize", post(routes::shaclc_serialize))
         .route_layer(GovernorLayer {
             config: sparql_rate_conf.clone(),
@@ -1487,20 +1498,16 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
             "/api/datasets/:dataset_id/mappings/execute",
             post(routes::execute_rml_mapping),
         )
+        // The standalone preview runs a mapping into a throwaway store and
+        // persists nothing, so it discloses nothing — but it is the same
+        // parse-and-transform work as `mappings/execute`, and the instance no
+        // longer does it for callers it cannot name.
+        .route("/api/rml/preview", post(routes::rml_preview))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state.clone());
-
-    // RML standalone preview (no auth required). Anonymous RML execution into a
-    // throwaway store — rate-limited to bound anonymous CPU/RAM work.
-    let rml_preview_routes = Router::new()
-        .route("/api/rml/preview", post(routes::rml_preview))
-        .route_layer(GovernorLayer {
-            config: sparql_rate_conf.clone(),
-        })
         .with_state(state.clone());
 
     // Triple browsing API (optional auth)
@@ -1862,7 +1869,6 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(studio_auth)
         .merge(studio_optional)
         .merge(rml_routes)
-        .merge(rml_preview_routes)
         .merge(browse_routes)
         .merge(sparql_routes)
         .merge(llm_history_routes)

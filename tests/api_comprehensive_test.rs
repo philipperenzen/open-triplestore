@@ -1947,12 +1947,17 @@ shape <PersonShape> -> <Person> {
     <name> minCount 1 ;
 }
 "#;
-        let resp = test_app(test_state())
+        // The parser is authenticated compute now, so an anonymous request would
+        // only ever prove that 401 is a 4xx. The token keeps the endpoint itself
+        // under test (see tests/api_auth_exposure.rs for the auth contract).
+        let (state, token) = admin_state();
+        let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/shaclc/parse")
                     .header(header::CONTENT_TYPE, "text/shaclc")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(shaclc))
                     .unwrap(),
             )
@@ -2141,7 +2146,11 @@ mod rml {
             m = SIMPLE_RML,
             c = csv
         );
-        let resp = test_app(test_state())
+        // The preview is authenticated compute now; the token keeps this test on
+        // the mapping run itself rather than on the 401 (see
+        // tests/api_auth_exposure.rs for the auth contract).
+        let (state, token) = admin_state();
+        let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2150,6 +2159,7 @@ mod rml {
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
                     )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(body))
                     .unwrap(),
             )
