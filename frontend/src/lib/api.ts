@@ -581,7 +581,8 @@ export const browseTriples = (params, init: RequestInit = {}) => {
   return request('GET', `/api/browse/triples?${qs}`, null, init);
 };
 // `opts` may be a bare graph IRI (back-compat) or an object carrying the same
-// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
+// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id,
+// org_ids, versions }.
 // Scope lets the graph view expand a resource within the active browse scope
 // (dataset/org + version pins) instead of the broad accessible set.
 // `init.signal` cancels an in-flight lookup — the viewer's inspector windows
@@ -589,7 +590,7 @@ export const browseTriples = (params, init: RequestInit = {}) => {
 export const browseResource = (iri, opts = {}, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams({ iri });
   const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
-  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
+  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'org_ids', 'versions']) {
     if (o[k]) qs.set(k, o[k]);
   }
   return request('GET', `/api/browse/resource?${qs.toString()}`, null, init);
@@ -636,7 +637,9 @@ export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
 };
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
-// org_id, versions, graph). The chip `filters` JSON may also be passed through.
+// org_id, org_ids, versions, graph) — the rail describes the same scope the
+// results do only because both are sent the whole selection. The chip `filters`
+// JSON may also be passed through.
 export const browseFacets = (params, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams(params).toString();
   return request('GET', `/api/browse/facets?${qs}`, null, init);

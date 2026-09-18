@@ -1,6 +1,6 @@
 # Browse & Search Syntax
 
-The [Triple Browser](/browse) exposes one consistent search across its Table, Graph and Schema views. There are three complementary tools: the free-text **search box**, the per-field **filter chips**, and the scope-aware **facet rail**. A **Simple / Advanced** toggle keeps the same search while revealing extra detail (regex, the equivalent SPARQL, and natural-language search) in Advanced.
+The [Triple Browser](/browse) exposes one consistent search across its Table, Graph and Schema views. There are three complementary tools: the free-text **search box**, the per-field **filter chips**, and the scope-aware **facet rail**. Everything is available at once; the **SPARQL** button in the browser's header shows the query behind whatever you are looking at.
 
 ## Free-text search operators
 
@@ -26,12 +26,12 @@ Chips filter a specific position of the triple. Add several on one field to **OR
 |---|---|---|
 | **contains** (substring) | `≈` | type a value and press Enter — the default |
 | **exact** (full IRI / literal) | `=` | pick a value from the autosuggestions, or click a facet |
-| **regex** (Advanced only) | `.*` | choose the *regex* mode, then type a pattern (case-insensitive) |
+| **regex** | `.*` | choose the *regex* mode, then type a pattern (case-insensitive) |
 
 ## Facets in scope
 
 The rail lists what is actually present in the current dataset / organisation / version scope — **Classes**, **Properties**, **Vocabularies** (grouped by namespace prefix) and **Graphs** (with their detected role) — each with a count. Clicking a facet adds the matching filter chip, so you can drill down without typing IRIs.
 
-## Advanced extras
+## The SPARQL behind the view
 
-Switching to **Advanced** keeps the same search box but adds: the *regex* chip mode, a live **equivalent-SPARQL** preview you can copy or open in the [SPARQL workspace](/sparql), and **natural-language search** — describe what you want in plain English and the configured LLM drafts a SPARQL query for you (see [API Services & AI Queries](/docs/api-services)).
+The **SPARQL** button opens the query your current scope, chips and search add up to: read it, copy it, or open it in the [SPARQL workspace](/sparql) to take it further. The same panel offers **natural-language search** wherever an LLM gateway is configured — describe what you want in plain English and it drafts the query for you (see [API Services & AI Queries](/docs/api-services)).

@@ -17,12 +17,13 @@
     Download, Copy, ChevronLeft, ChevronRight, Search, X,
     Network, Table2, Maximize2, Share2, Unlink, ExternalLink, Plus,
     FileText, Image, Filter, LayoutList, Building2, Database, History,
-    Sparkles, SlidersHorizontal, Code2, HelpCircle, Map as MapIcon, Boxes,
+    Sparkles, Code2, HelpCircle, Map as MapIcon, Boxes,
   } from 'lucide-svelte';
   import { slide } from 'svelte/transition';
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
   import { navigate } from '../lib/router/index.js';
-  import { copyToClipboard } from '../lib/clipboard.js';
+  import { copyOrWarn } from '../lib/clipboard.js';
+  import { buildScopeParams as scopeParamsFor, isPinnedVersion as isPinned, loadScope, saveScope, reconcileScope } from '../lib/browseScope.js';
   import { collapseClosure } from '../lib/graphCollapse';
   import PageHeader from '../components/PageHeader.svelte';
   import Select from '../components/Select.svelte';
@@ -523,7 +524,7 @@
       else if (action === 'expandBoth')  browseExpandUri(data.fullIri, 'both');
       else if (action === 'expandBnode') browseExpandBnode(data.id);
       else if (action === 'collapse')    browseCollapseUri(data.fullIri || data.id);
-      else if (action === 'copyIri')     void copyToClipboard(data.fullIri);
+      else if (action === 'copyIri')     void copyOrWarn(data.fullIri);
       else if (action === 'remove')      graphCanvas?.removeNode(data.id);
     }
   }
@@ -586,23 +587,21 @@
   // / facets scoping.
   let filterGraph = '';
 
-  // ─── UI mode (Simple = guided for newcomers · Advanced = raw IRIs + DX) ─────
-  let uiMode = 'simple';
-  if (typeof localStorage !== 'undefined' && localStorage.getItem('tb_uimode') === 'advanced') uiMode = 'advanced';
-  function setUiMode(m) {
-    uiMode = m;
-    try { localStorage.setItem('tb_uimode', m); } catch {}
-    if (m === 'advanced') {
-      if (llmStatus === null) llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
-    } else {
-      // Close advanced-only panels when leaving Advanced.
-      sparqlPreviewOpen = false;
-    }
-  }
+  // ─── Equivalent-SPARQL panel ───────────────────────────────────────────────
+  // Everything the page can do is available to everyone; this panel is the way
+  // out to the query behind the current view (read it, copy it, run it).
   let sparqlPreviewOpen = false;
+  function toggleSparqlPreview() {
+    sparqlPreviewOpen = !sparqlPreviewOpen;
+    // The natural-language box inside the panel talks to an LLM gateway that is
+    // often not configured at all, so probe it the first time the panel opens
+    // rather than on every page load.
+    if (sparqlPreviewOpen && llmStatus === null) llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
+  }
   let syntaxHelpOpen = false;
 
-  // Natural-language → SPARQL (Advanced SPARQL panel).
+  // Natural-language → SPARQL. Only offered once the gateway has answered the
+  // health probe — there is nothing to ask when no LLM is configured.
   let llmStatus = null;     // { reachable, gateway } or null until checked
   let nlQuestion = '';
   let nlLoading = false;
@@ -664,8 +663,6 @@
   let dsVersions = {};        // dsId -> selected version ('' = live)
   let versionsByDs = {};      // dsId -> DatasetVersion[]
   let versionPanelOpen = false;
-  const LIVE_SENTINELS = ['', 'live', 'latest', 'current'];
-  const isPinned = (v) => !!v && !LIVE_SENTINELS.includes(v);
 
   // Dataset IDs in scope: explicit dataset items + all datasets owned by any org item.
   $: scopedDatasetIds = (() => {
@@ -690,6 +687,13 @@
     try {
       const vs = await listDatasetVersions(id);
       versionsByDs = { ...versionsByDs, [id]: vs || [] };
+      // A pin can outlive the version it names — remembered from a previous
+      // session, or carried in on a ?version= link to a snapshot since deleted.
+      // Fall back to live instead of querying a version that is no longer there.
+      if (isPinned(dsVersions[id]) && !(vs || []).some(v => String(v.version) === String(dsVersions[id]))) {
+        dsVersions = { ...dsVersions, [id]: '' };
+        refetchAll();
+      }
     } catch {
       versionsByDs = { ...versionsByDs, [id]: [] };
     }
@@ -940,6 +944,17 @@
     saveState();
   }
 
+  // ── Remembered scope (localStorage) ───────────────────────────────────────
+  // Everything above is per tab and dies with it, which is right for a page
+  // number or a half-typed filter but wrong for the scope: which datasets and
+  // organisations you browse (and any version pins) is a standing choice, so it
+  // outlives the tab. A scope in the URL still wins over it, and clearing the
+  // scope is remembered too — an empty selection is an answer, not a blank.
+  $: if (_persistReady) {
+    void (scopeItems, dsVersions);
+    saveScope(scopeItems, dsVersions);
+  }
+
   // Persist synchronously when the page is being hidden/unloaded (e.g. the user
   // hits back before the debounce fires) so the snapshot is always current.
   function flushOnHide() { if (_persistReady) flushSaveState(); }
@@ -989,7 +1004,6 @@
       listOrganisations().then(os => { allOrgs = os || []; }).catch(() => {});
       fetchFacets();
       loadGraphRoles();
-      if (uiMode === 'advanced') llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
       // If the graph view was active but the snapshot dropped the (too-large)
       // graph payload, fall back to a fresh fetch so the view isn't empty.
       if (viewMode === 'graph' && graphNodes.length === 0 && graphEdges.length === 0) {
@@ -1030,9 +1044,34 @@
         .then(o => { backContextName = o?.name ?? backOrgId; scopeItems = [{ type: 'org', id: backOrgId, name: backContextName }]; })
         .catch(() => { backContextName = backOrgId; });
     }
+    // Nothing in the URL says where to browse → pick up where the user left off,
+    // before the first fetch so the page opens straight into that scope.
+    const remembered = (!backDatasetId && !backOrgId) ? loadScope() : null;
+    if (remembered) {
+      scopeItems = remembered.items;
+      dsVersions = { ...dsVersions, ...remembered.versions };
+    }
     // Load all available datasets/orgs for the scope picker
-    listDatasets().then(ds => { allDatasets = ds || []; }).catch(() => {});
-    listOrganisations().then(os => { allOrgs = os || []; }).catch(() => {});
+    const inventories = Promise.all([
+      listDatasets().then(ds => (allDatasets = ds || [])),
+      listOrganisations().then(os => (allOrgs = os || [])),
+    ]);
+    inventories.catch(() => {}); // picker stays empty; the scope is unaffected
+    if (remembered?.items.length) {
+      // A remembered dataset or organisation can have been deleted, or stopped
+      // being shared with this user, since it was saved. Drop it silently — an
+      // error page or an empty result is not the answer to a stale bookmark.
+      // Only once BOTH inventories have arrived: a failed request would otherwise
+      // look like "nothing exists" and wipe a perfectly good scope.
+      inventories.then(([datasets, orgs]) => {
+        const live = reconcileScope({ items: scopeItems, versions: dsVersions }, { datasets, orgs });
+        if (live.items.length !== scopeItems.length) {
+          scopeItems = live.items;
+          dsVersions = live.versions;
+          refetchAll();
+        }
+      }).catch(() => {});
+    }
     fetchTriples();
     // Compute the exact total up-front so users see "Page X of Y" immediately (and
     // the Last/jump-to-page controls work) — but only when that count is cheap. It
@@ -1042,7 +1081,6 @@
     // Facets + graph roles power the always-visible rail across every view.
     fetchFacets();
     loadGraphRoles();
-    if (uiMode === 'advanced') llmHealth().then((s) => { llmStatus = s; }).catch(() => {});
     if (viewMode === 'graph') fetchGraphData();
     _persistReady = true; // start persisting once the initial load is in flight
   });
@@ -1050,26 +1088,11 @@
   // Build the params common to both the page fetch and the count fetch so the
   // backend filter set stays consistent.
   // Scope (dataset/org) + per-dataset version params, shared by every fetch path.
+  // The whole selection travels — see buildScopeParams() in lib/browseScope. The
+  // rows, the exact count and the facet rail all come through here, which is what
+  // keeps "Terms in scope" describing the same triples the table is showing.
   function buildScopeParams() {
-    const params = {};
-    const dsIds = scopeItems.filter(s => s.type === 'dataset').map(s => s.id);
-    const orgIds = scopeItems.filter(s => s.type === 'org').map(s => s.id);
-    if (dsIds.length === 1 && orgIds.length === 0) {
-      params.dataset_id = dsIds[0]; // backward compat — single dataset
-    } else if (dsIds.length > 1) {
-      params.dataset_ids = dsIds.join(',');
-      if (orgIds.length > 0) params.org_id = orgIds[0]; // first org included via org_id
-    } else if (dsIds.length === 0 && orgIds.length === 1) {
-      params.org_id = orgIds[0];
-    } else if (dsIds.length === 0 && orgIds.length > 1) {
-      params.org_id = orgIds[0]; // MVP: only first org (multi-org backend support is future work)
-    }
-    // Per-dataset version pins (datasetId:version) for any scoped dataset.
-    const verPairs = scopedDatasetIds
-      .filter(id => isPinned(dsVersions[id]))
-      .map(id => `${id}:${dsVersions[id]}`);
-    if (verPairs.length) params.versions = verPairs.join(',');
-    return params;
+    return scopeParamsFor({ scopeItems, datasetIds: scopedDatasetIds, versions: dsVersions });
   }
 
   // Scope-only params for graph expansion: dataset/org + version pins (+ single-graph
@@ -1206,6 +1229,23 @@
     fieldFilters = { ...fieldFilters };
     refetchResults();
   }
+  // A filter value is usually a full IRI, far longer than any field that shares a
+  // row with a label and two mode buttons — and the part that identifies it, the
+  // local name, sits at the END. So whenever the field is not being edited we
+  // park its scroll at the tail: the reader sees "…/bot#hasElement" instead of
+  // five fields all reading "https://w3id.org/". Typing scrolls normally again.
+  function tailScroll(node) {
+    const input = node.querySelector('input');
+    if (!input) return {};
+    const toTail = () => { if (document.activeElement !== input) input.scrollLeft = input.scrollWidth; };
+    const schedule = () => requestAnimationFrame(toTail); // let the new value paint first
+    input.addEventListener('blur', schedule);
+    schedule();
+    return {
+      update: schedule,
+      destroy: () => input.removeEventListener('blur', schedule),
+    };
+  }
   // Toggle a facet selection: if the facet's chip(s) are already selected, remove
   // them; otherwise add them. Lets the sidebar act as a multi-select.
   function toggleFacet(chips) {
@@ -1334,7 +1374,7 @@
     lines.push(`} LIMIT ${pageSize}`);
     return lines.join('\n');
   })();
-  function copySparql() { void copyToClipboard(sparqlPreview); }
+  function copySparql() { void copyOrWarn(sparqlPreview); }
   function openInSparqlEditor() { navigate(`/sparql?query=${encodeURIComponent(sparqlPreview)}`); }
 
   // Monotonic request tokens: facet clicks / chip edits can fire overlapping
@@ -1530,18 +1570,11 @@
 
       <div class="header-spacer"></div>
 
-      <div class="mode-toggle" role="tablist" aria-label={$i18nT('pages.tripleBrowser.interfaceMode')}>
-        <button class="mode-btn" class:mode-active={uiMode === 'simple'}
-          on:click={() => setUiMode('simple')} role="tab" aria-selected={uiMode === 'simple'}
-          title={$i18nT('pages.tripleBrowser.simpleModeHint')}>
-          <Sparkles size={13} /> <span class="mode-label">{$i18nT('pages.tripleBrowser.simpleMode')}</span>
-        </button>
-        <button class="mode-btn" class:mode-active={uiMode === 'advanced'}
-          on:click={() => setUiMode('advanced')} role="tab" aria-selected={uiMode === 'advanced'}
-          title={$i18nT('pages.tripleBrowser.advancedModeHint')}>
-          <SlidersHorizontal size={13} /> <span class="mode-label">{$i18nT('pages.tripleBrowser.advancedMode')}</span>
-        </button>
-      </div>
+      <button class="btn-adv-toggle" class:btn-adv-active={sparqlPreviewOpen}
+        on:click={toggleSparqlPreview} aria-expanded={sparqlPreviewOpen}
+        title={$i18nT('pages.tripleBrowser.showEquivalentSparql')}>
+        <Code2 size={13} /> SPARQL
+      </button>
 
       {#if versionableDatasets.length > 0}
         <div class="version-ctl" use:clickOutside={() => versionPanelOpen = false}>
@@ -1719,11 +1752,6 @@
           {#if activeChips.length}<span class="adv-badge">{activeChips.length}</span>{/if}
           {filtersOpen ? '▲' : '▼'}
         </button>
-        {#if uiMode === 'advanced'}
-          <button class="btn-adv-toggle" class:btn-adv-active={sparqlPreviewOpen} on:click={() => sparqlPreviewOpen = !sparqlPreviewOpen} title={$i18nT('pages.tripleBrowser.showEquivalentSparql')}>
-            <Code2 size={13} /> SPARQL
-          </button>
-        {/if}
         {#if hasActiveFilters}
           <button class="btn btn-sm btn-ghost" on:click={clearFilters} title={$i18nT('pages.tripleBrowser.clearSearchAndFilters')}><X size={13}/> {$i18nT('system.clear')}</button>
         {/if}
@@ -1745,11 +1773,12 @@
                 title={fieldFilters[f].neg ? $i18nT('pages.tripleBrowser.negOnHint') : $i18nT('pages.tripleBrowser.negOffHint')}>
                 {$i18nT('pages.tripleBrowser.modeNot')}
               </button>
-              <div class="ff-input-wrap">
+              <div class="ff-input-wrap" use:tailScroll={fieldFilters[f].value}>
                 <Combobox
                   class="ff-input"
                   suggestions={(fieldSuggestions[f] || []).map(s => s)}
                   placeholder={fieldFilters[f].mode === 'regex' ? $i18nT('pages.tripleBrowser.regexPlaceholder') : FIELD_PLACEHOLDER[f]}
+                  title={fieldFilters[f].value || undefined}
                   bind:value={fieldFilters[f].value}
                   on:input={() => onFilterInput(f)}
                   on:change={applyFiltersNow}
@@ -1766,31 +1795,33 @@
         </div>
       {/if}
 
-      {#if uiMode === 'advanced' && sparqlPreviewOpen}
+      {#if sparqlPreviewOpen}
         <div class="sparql-preview">
-          <!-- Natural-language → SPARQL via the configured LLM endpoint -->
-          <div class="nl-row">
-            <Sparkles size={13} class="nl-icon" />
-            <input
-              class="nl-input"
-              placeholder={llmStatus && !llmStatus.reachable ? $i18nT('pages.tripleBrowser.llmOfflinePlaceholder') : $i18nT('pages.tripleBrowser.nlAskPlaceholder')}
-              bind:value={nlQuestion}
-              disabled={llmStatus && !llmStatus.reachable}
-              on:keydown={(e) => { if (e.key === 'Enter') generateFromNl(); }}
-            />
-            <button class="btn btn-sm" on:click={generateFromNl} disabled={nlLoading || !nlQuestion.trim() || (llmStatus && !llmStatus.reachable)}>
-              {nlLoading ? $i18nT('pages.tripleBrowser.generating') : $i18nT('pages.tripleBrowser.generate')}
-            </button>
-            {#if llmStatus}
+          <!-- Natural-language → SPARQL via the configured LLM endpoint. Shown
+               only once the health probe has answered: with no gateway there is
+               nothing to ask, and the row would be an empty promise. -->
+          {#if llmStatus}
+            <div class="nl-row">
+              <Sparkles size={13} class="nl-icon" />
+              <input
+                class="nl-input"
+                placeholder={llmStatus.reachable ? $i18nT('pages.tripleBrowser.nlAskPlaceholder') : $i18nT('pages.tripleBrowser.llmOfflinePlaceholder')}
+                bind:value={nlQuestion}
+                disabled={!llmStatus.reachable}
+                on:keydown={(e) => { if (e.key === 'Enter') generateFromNl(); }}
+              />
+              <button class="btn btn-sm" on:click={generateFromNl} disabled={nlLoading || !nlQuestion.trim() || !llmStatus.reachable}>
+                {nlLoading ? $i18nT('pages.tripleBrowser.generating') : $i18nT('pages.tripleBrowser.generate')}
+              </button>
               <span class="nl-status" class:offline={!llmStatus.reachable} title={llmStatus.reachable ? `${$i18nT('pages.tripleBrowser.llmOnline')} (${llmStatus.gateway})` : `${$i18nT('pages.tripleBrowser.llmOffline')} (${llmStatus.gateway})`}>{llmStatus.reachable ? '● LLM' : '○ LLM'}</span>
-            {/if}
-          </div>
+            </div>
+          {/if}
           {#if nlError}<p class="nl-error">{nlError}</p>{/if}
           {#if llmSparql}
             <div class="sparql-preview-head">
               <span>{$i18nT('pages.tripleBrowser.generatedFromQuestion')}</span>
               <div class="sparql-preview-actions">
-                <button class="btn btn-sm btn-ghost" on:click={() => copyToClipboard(llmSparql)}><Copy size={12}/> {$i18nT('system.copy')}</button>
+                <button class="btn btn-sm btn-ghost" on:click={() => copyOrWarn(llmSparql)}><Copy size={12}/> {$i18nT('system.copy')}</button>
                 <button class="btn btn-sm" on:click={() => navigate(`/sparql?query=${encodeURIComponent(llmSparql)}`)}><ExternalLink size={12}/> {$i18nT('pages.tripleBrowser.openInEditor')}</button>
               </div>
             </div>
@@ -2104,27 +2135,19 @@
   }
   .header-spacer { flex: 1; }
 
-  /* ─── Simple / Advanced mode toggle ──────────────────────────────────────── */
-  .mode-toggle { display: flex; border: 1px solid #e2e8f0; border-radius: 7px; overflow: hidden; }
-  .mode-btn {
-    display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px;
-    border: none; background: #f8fafc; cursor: pointer; color: #94a3b8;
-    font-size: 0.78rem; font-weight: 500; transition: background 0.12s, color 0.12s;
-  }
-  .mode-btn + .mode-btn { border-left: 1px solid #e2e8f0; }
-  .mode-btn:hover { background: #eef2ff; color: #4f46e5; }
-  .mode-active { background: #4f46e5 !important; color: #fff !important; }
-
   /* ─── Chips area + facet rail body ───────────────────────────────────────── */
   /* ─── Multi-field filter form ────────────────────────────────────────────── */
+  /* One column per ~440px: a filter value is an IRI, and two columns of them on a
+     1080px screen left neither readable. `min(100%, …)` keeps the track from
+     out-growing a narrow window, where the grid drops to a single column. */
   .filter-form {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
     gap: 0.4rem 0.9rem; align-items: center;
     padding: 0.6rem 0.75rem; background: #f8fafc; border-bottom: 1px solid #e2e8f0;
   }
   .ff-row { display: flex; align-items: center; gap: 0.4rem; }
   .ff-label {
-    flex: 0 0 78px; font-size: 0.76rem; font-weight: 600; color: #475569; text-align: right;
+    flex: 0 0 72px; font-size: 0.76rem; font-weight: 600; color: #475569; text-align: right;
   }
   .ff-mode {
     flex: 0 0 auto; min-width: 26px; height: 26px; padding: 0 6px;
@@ -2147,10 +2170,14 @@
   .ff-neg:hover { border-color: #fca5a5; color: #ef4444; }
   .ff-neg-on { background: #fef2f2; border: 1px solid #fca5a5; color: #dc2626; }
   .ff-input-wrap { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+  /* Monospace at a slightly smaller size fits appreciably more of an IRI in the
+     same width, and keeps the punctuation that separates its parts legible. */
   .ff-input {
     width: 100%; box-sizing: border-box;
     padding: 0.3rem 1.6rem 0.3rem 0.5rem !important;
-    border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.78rem; background: #fff; color: #333;
+    border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.74rem; background: #fff; color: #333;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-overflow: ellipsis;
   }
   .ff-input:focus { outline: none; border-color: #6366f1; background: #fff; }
   .ff-clear {
@@ -2659,13 +2686,9 @@
      `:global(:is(...))` prefix lifts specificity back above the scoped rules
      while keeping the descendant selectors scoped to this component. */
   :global(:is([data-theme="dark"], .dark)) .card-header { background: var(--bg-strong); border-bottom-color: var(--line-soft); }
-  :global(:is([data-theme="dark"], .dark)) .mode-toggle,
   :global(:is([data-theme="dark"], .dark)) .view-toggle { border-color: var(--line-strong); }
-  :global(:is([data-theme="dark"], .dark)) .mode-btn,
   :global(:is([data-theme="dark"], .dark)) .vtoggle-btn { background: rgba(255,255,255,0.03); color: var(--ink-600); }
-  :global(:is([data-theme="dark"], .dark)) .mode-btn + .mode-btn,
   :global(:is([data-theme="dark"], .dark)) .vtoggle-btn + .vtoggle-btn { border-left-color: var(--line-soft); }
-  :global(:is([data-theme="dark"], .dark)) .mode-btn:hover { background: rgba(99,102,241,0.15); color: #a5b4fc; }
   :global(:is([data-theme="dark"], .dark)) .vtoggle-btn:hover { background: rgba(59,130,246,0.15); color: #60a5fa; }
 
   :global(:is([data-theme="dark"], .dark)) .filter-form,
