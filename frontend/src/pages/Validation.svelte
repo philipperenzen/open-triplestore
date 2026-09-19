@@ -399,6 +399,7 @@
                 disabled={status.loading || noShapesIds.has(ds.id)}
                 title={noShapesIds.has(ds.id) ? $t('pages.validation.configureShapesFirst') : $t('pages.validation.runValidation')}>
                 {#if status.loading}<Loader2 size={12} class="spin" />{:else}<Play size={12} />{/if}
+                <span class="run-label">{$t('pages.validation.runValidation')}</span>
               </button>
               <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
               <label class="toggle" on:click|stopPropagation on:keydown|stopPropagation>
@@ -517,8 +518,13 @@
   :global(.auth-gate-icon) { color: var(--ink-400); }
   /* A chip naming an owner shows the owner's name, all of it. It used to stop
      at 7rem with an ellipsis, which turns two organisations with a shared
-     prefix into the same chip. */
-  .owner-chip { display: inline-flex; align-items: flex-start; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; flex: 0 1 auto; min-width: 0; }
+     prefix into the same chip.
+     No `min-width: 0` here, which is what let the flex algorithm take the chip
+     below the width of its own content — the name then spilled over the end of
+     the pill background. Its automatic minimum is its longest word, and the
+     name wraps inside it; `.ds-name` cannot be starved by that because it has
+     its own 4.5rem floor and the row wraps. */
+  .owner-chip { display: inline-flex; align-items: flex-start; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; flex: 0 1 auto; }
   /* `break-word`, not `anywhere`: an owner is a human name, so it wraps
      between words and only splits one if a single word cannot fit. At 375px
      `anywhere` broke "Open Triplestore" into three lines with a stray "e". */
@@ -575,6 +581,9 @@
 
   .row-actions { display: flex; align-items: center; gap: 0.35rem; }
   .ds-error { color: #b91c1c; font-size: 0.75rem; margin: 0.3rem 0 0; }
+  /* The run button names itself only where there is room for a word; on a wide
+     panel the row is a dense list and the icon plus its title carry it. */
+  .run-label { display: none; }
 
   .toggle { position: relative; display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; user-select: none; }
   .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
@@ -629,6 +638,33 @@
     .summary-actions .btn { width: 100%; }
     .split { grid-template-columns: 1fr; }
     .ds-list { max-height: none; }
+  }
+
+  /* Phone. Below 720px the app's own `.btn { width: 100% }` turned the
+     icon-only run button into a wide empty bar, which left the toggle beside
+     it so little room that "On write" broke over two lines. The button takes
+     its own width back and says what it does; the toggle keeps the far end of
+     the line and drops to a line of its own when the two no longer fit. */
+  @media (max-width: 720px) {
+    .row-actions { flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; margin-top: 0.15rem; }
+    .row-actions .btn { width: auto; min-height: 2.5rem; padding: 0.45rem 0.9rem; }
+    .run-label { display: inline; }
+    .toggle { min-height: 2.5rem; }
+
+    /* The shapes picker is a control, not a chip: it takes the width of the
+       status line rather than the sliver left over beside the pill — which
+       means the status line has to take the row's width first. */
+    .row-status { flex: 1 1 100%; }
+    .inline-shapes-picker { flex: 1 1 100%; margin-left: 0; }
+    .inline-shapes-picker :global(.sel-trigger) { min-height: 2.5rem; }
+
+    .pane-tabs { flex-wrap: wrap; }
+    .tab-row { flex: 1 1 100%; flex-wrap: wrap; }
+    .tab { min-height: 2.5rem; }
+    .pane-tabs > .btn { width: 100%; min-height: 2.5rem; }
+
+    .history-main { flex-wrap: wrap; }
+    .history-time { margin-left: auto; }
   }
 
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */

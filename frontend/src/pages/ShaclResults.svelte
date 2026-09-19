@@ -429,7 +429,10 @@
   .pill-muted { background: #f1f5f9; color: #64748b; }
   .run-row.selected { background: linear-gradient(90deg, #ecfeff, #ffffff); border-left: 3px solid #2F7A8C; padding-left: calc(0.85rem - 3px); }
   .run-kind { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
-  .run-name { font-weight: 600; color: #1e293b; font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The row's first grid track is minmax(0, 1fr), so a name is free to wrap
+     inside it rather than lose its tail — two pipelines that differ only in
+     their last word read the same once an ellipsis gets to them. */
+  .run-name { font-weight: 600; color: #1e293b; font-size: 0.88rem; min-width: 0; overflow-wrap: break-word; }
   .run-status { display: flex; align-items: center; gap: 0.35rem; }
   .run-time { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.74rem; color: #94a3b8; }
   :global(.kicon) { color: #6d28d9; }
@@ -460,6 +463,24 @@
   @media (max-width: 880px) {
     .layout { grid-template-columns: 1fr; }
     .timeline { max-height: 50vh; }
+  }
+
+  /* Phone. The run row's four columns cannot share one narrow line, so the
+     name takes a line and the verdict, the age and the two run buttons share
+     the one under it. The KPIs pair up instead of becoming a five-high stack. */
+  @media (max-width: 720px) {
+    .kpis { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+    .kpi-cell { min-height: 2.75rem; }
+    .run-row { display: flex; flex-wrap: wrap; row-gap: 0.35rem; }
+    .run-kind { flex: 1 1 100%; }
+    .run-status { flex: 0 1 auto; flex-wrap: wrap; }
+    .run-actions { margin-left: auto; gap: 0.35rem; }
+    .act { width: 2.5rem; height: 2.5rem; }
+    .panel-head { flex-wrap: wrap; gap: 0.3rem; }
+    .report-head { flex-wrap: wrap; gap: 0.4rem; }
+    .report-title { flex-wrap: wrap; }
+    .placeholder-actions { flex-wrap: wrap; justify-content: center; }
+    .placeholder-actions :global(.btn) { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
   }
 
   /* ---- Dark mode overrides (scoped rules out-specify global theme.css) ---- */

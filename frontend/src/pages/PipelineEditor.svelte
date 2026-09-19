@@ -897,7 +897,7 @@
   .icon-danger { color: #b91c1c; }
   .desc-input { width: 100%; margin-top: 0.5rem; padding: 0.4rem 0.55rem; font-size: 0.88rem; border: 1px solid var(--line-soft); border-radius: 8px; font-family: inherit; resize: vertical; }
 
-  /* minmax(0, 1fr): long graph/dataset names must truncate inside the column,
+  /* minmax(0, 1fr): long graph/dataset names must wrap inside the column,
      never widen it past the viewport (grid min-content blowout). */
   .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0.85rem; align-items: start; }
   .panel { padding: 0.85rem 1rem !important; }
@@ -914,7 +914,11 @@
   .picker-row:hover { background: #f1f5f9; }
   .picker-row input[type="checkbox"] { margin: 0; flex-shrink: 0; }
   .picker-row > :global(svg) { flex-shrink: 0; color: #64748b; }
-  .picker-row > span:not(.dim) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* A picker row is a menu entry: it wraps onto a second line rather than
+     hiding the end of the name you are picking. Graph rows get `anywhere`
+     because an IRI tail has nowhere else to break. */
+  .picker-row > span:not(.dim) { min-width: 0; overflow-wrap: break-word; }
+  .picker-graphs .picker-row > span:not(.dim) { overflow-wrap: anywhere; }
   .empty { color: #94a3b8; font-size: 0.82rem; margin: 0.4rem; }
   .dim { color: #94a3b8; font-size: 0.74rem; margin-left: auto; }
 
@@ -942,10 +946,12 @@
   .sel-chip.warn { border-color: #fcd34d; background: #fffbeb; }
   .sel-chip-head { display: inline-flex; align-items: center; gap: 0.3rem; min-width: 0; }
   .sel-chip-head > :global(svg) { flex-shrink: 0; color: var(--ink-500); }
-  .sel-chip-name { font-size: 0.76rem; font-weight: 600; color: var(--ink-800); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 17rem; }
+  .sel-chip-name { font-size: 0.76rem; font-weight: 600; color: var(--ink-800); min-width: 0; max-width: 17rem; overflow-wrap: break-word; }
   .sel-chip-x { display: inline-flex; align-items: center; border: none; background: transparent; cursor: pointer; color: var(--ink-400); padding: 1px; border-radius: 4px; margin-left: 0.1rem; }
   .sel-chip-x:hover { color: var(--danger-500); background: var(--danger-100); }
-  .sel-chip-sub { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.67rem; color: var(--ink-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 19rem; }
+  /* "Validated by …" already names at most two shape graphs before it counts
+     the rest, so it fits in a line or two and needs no trimming. */
+  .sel-chip-sub { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.67rem; color: var(--ink-500); min-width: 0; max-width: 19rem; overflow-wrap: break-word; }
   .sel-chip.warn .sel-chip-sub { color: #b45309; font-weight: 600; }
   .sel-chip.warn .sel-chip-sub > :global(svg) { flex-shrink: 0; }
 
@@ -994,7 +1000,7 @@
   .ic-schedule { background: #fef3c7; color: #b45309; }
   .stat-body { display: flex; flex-direction: column; gap: 0.05rem; min-width: 0; }
   .stat-label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; color: #94a3b8; }
-  .stat-value { font-size: 0.86rem; font-weight: 600; color: #1e293b; text-transform: capitalize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat-value { font-size: 0.86rem; font-weight: 600; color: #1e293b; text-transform: capitalize; min-width: 0; overflow-wrap: break-word; }
   /* Names are data, not labels — never capitalise them. */
   .stat-value.stat-names { text-transform: none; }
 
@@ -1003,6 +1009,29 @@
   .chip-gate { background: #fee2e2; color: #b91c1c; }
 
   @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+
+  /* Phone. The header stops being a row — a name field with three buttons
+     beside it leaves the field a stub and the buttons their first letters —
+     and the actions pair up underneath, each tall enough to be tapped. The
+     same for the schedule's radios and the group labels, which carry a note
+     and a count badge that no longer have to share the line. */
+  @media (max-width: 720px) {
+    .header-row { flex-wrap: wrap; }
+    .header-main { flex: 1 1 100%; }
+    .header-actions { width: 100%; flex-wrap: wrap; }
+    .header-actions .btn { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
+    .group-label { flex-wrap: wrap; }
+    .count-badge { margin-left: 0; }
+    .panel-head .count-badge { margin-left: auto; }
+    .radio-row label { min-height: 2.5rem; }
+    .sel-chip-x { padding: 0.35rem; }
+    .stat { min-height: 2.75rem; }
+    /* Rows a thumb has to hit, and enough visible list left to make the
+       taller rows worth scrolling through. */
+    .panel label.picker-row, .panel label.check { min-height: 2.5rem; }
+    .target-group .picker { max-height: 220px; }
+    .target-group .picker-graphs { max-height: 280px; }
+  }
 
   :global(:is([data-theme="dark"], .dark) .edit-page .back) { color: var(--brand-700); }
   :global(:is([data-theme="dark"], .dark) .hicon) { color: #c4b5fd; }

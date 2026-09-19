@@ -50,6 +50,12 @@
     :global(.studio-nav .tab) { flex: 1 1 auto; justify-content: center; padding: 0.45rem 0.6rem; }
   }
 
+  /* On a phone the wrapped bar is the page's main navigation and is tapped
+     with a thumb, so each tab gets a finger-sized row. */
+  @media (max-width: 720px) {
+    :global(.studio-nav .tab) { min-height: 2.5rem; }
+  }
+
   :global(:is([data-theme="dark"], .dark)) .studio-nav { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark) .studio-nav .tab) { color: var(--ink-500); }
   :global(:is([data-theme="dark"], .dark) .studio-nav .tab:hover) { background: rgba(255,255,255,0.06); color: var(--ink-800); }

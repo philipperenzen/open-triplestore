@@ -3014,3 +3014,32 @@ things fixed on the way that the report did not name: at 320px the
 article shrink-wrapped to its widest code block and gave the *page* 784px
 of horizontal scroll, and the `<=1024px` rule that dropped the article's
 `max-width` meant the reading measure ran to ~990px on a tablet.
+
+**The Studio** (`fix(ui): the Studio's pages fit a phone`). Seven pages,
+the same shape of problem on each: a row built for a desktop width, and
+the shared `.btn` rule turning whichever button shared it into a
+full-width bar. On the validation list that bar was the run control — an
+icon-only button stretched across the row, starving the toggle beside it
+until "On write" broke over two lines. It sizes to its content below
+720px and says what it does, reusing the label it already carried as its
+`title`. The shapes library's `minmax(320px, 1fr)` grid floor was pushing
+a 320px screen sideways; the pipelines list drew its `position: absolute`
+corner links over the heading on a narrow card; the shape-graph editor's
+four-column table made the whole modal scroll sideways instead of the
+table. Six ellipsis rules went, on facet labels, run names, pipeline
+names, picker rows and selection chips.
+
+**What the review caught.** A combined adversarial pass over the five
+diffs found four things, two of which were real. One agent had added
+`white-space: nowrap` to the "On write" label — the only such rule added
+anywhere in the five diffs, on a translated string, days after the commit
+that removed them everywhere else; it is gone. And one agent reported,
+without acting on it, a measurement that matched a live assertion in
+`validation-list.spec.ts`: the owner chip rendering 75.7px against a
+content width of 78. That was the spec genuinely red. `.owner-chip`
+carried `min-width: 0`, which lets the flex algorithm take an item below
+the width of its own content, so the name spilled past the end of the pill
+background. It is removed: the chip's automatic minimum is its longest
+word, and `.ds-name` cannot be starved by that because it has its own
+4.5rem floor. The "pre-existing, not mine" label on that finding was
+wrong, and it would have merged red.

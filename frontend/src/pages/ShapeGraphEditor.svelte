@@ -345,6 +345,7 @@
               {#if metaReport.conforms}<Check size={15} /> {$i18nT('pages.shapeGraphEditor.shapesWellFormed')}{:else}<X size={15} /> {metaReport.results_count === 1 ? $i18nT('pages.shapeGraphEditor.issuesFound', { values: { count: metaReport.results_count } }) : $i18nT('pages.shapeGraphEditor.issuesFoundPlural', { values: { count: metaReport.results_count } })}{/if}
             </p>
             {#if (metaReport.results || []).length}
+              <div class="table-scroll">
               <table class="meta-table">
                 <thead><tr><th>{$i18nT('pages.shapeGraphEditor.colSeverity')}</th><th>{$i18nT('pages.shapeGraphEditor.colFocus')}</th><th>{$i18nT('pages.shapeGraphEditor.colPath')}</th><th>{$i18nT('pages.shapeGraphEditor.colMessage')}</th></tr></thead>
                 <tbody>
@@ -358,6 +359,7 @@
                   {/each}
                 </tbody>
               </table>
+              </div>
             {/if}
           {/if}
         </div>
@@ -429,7 +431,9 @@
      names) must render verbatim; only taxonomy chips get capitalised. */
   .chip { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.7rem; padding: 2px 7px; border-radius: 999px; background: #f1f5f9; color: #475569; font-weight: 600; }
   .chip-cap { text-transform: capitalize; }
-  .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; text-transform: none; }
+  /* Identifiers have no spaces to break at, so they break anywhere rather
+     than push the card past the viewport. */
+  .chip-target { background: #ecfeff; color: #0e7490; font-family: 'IBM Plex Mono', monospace; font-weight: 500; text-transform: none; max-width: 100%; overflow-wrap: anywhere; }
   .chip-source-derived { background: #fef3c7; color: #92400e; }
   .chip-source-ai { background: #fce7f3; color: #9d174d; }
   .chip-source-imported { background: #dbeafe; color: #1d4ed8; }
@@ -441,6 +445,9 @@
 
   .meta-verdict { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 600; font-size: 0.9rem; color: #991b1b; margin: 0 0 0.6rem; }
   .meta-verdict.ok { color: #166534; }
+  /* Four columns of report detail need more room than a phone has; the table
+     carries its own sideways scroll so the page keeps none. */
+  .table-scroll { overflow-x: auto; }
   .meta-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
   .meta-table th, .meta-table td { text-align: left; padding: 0.3rem 0.45rem; border-bottom: 1px solid var(--line-soft, #e5e7eb); vertical-align: top; }
   .sev { padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.7rem; text-transform: capitalize; }
@@ -470,6 +477,23 @@
   .rev-time { font-size: 0.75rem; color: #94a3b8; }
   .btn-xs { font-size: 0.72rem; padding: 0.2rem 0.5rem; }
   .dim { color: #94a3b8; }
+
+  /* Phone. Every `.btn` is full width below this breakpoint, which turned the
+     header's seven small actions into seven stacked bars and left the edit
+     form's Cancel/Save and each revision's Preview/Restore fighting a select
+     or a note for the same line. They pair up two to a row instead, each row
+     tall enough to be tapped. */
+  @media (max-width: 720px) {
+    .meta-actions .btn { width: auto; flex: 1 1 9rem; min-height: 2.5rem; }
+    .meta-quiet { white-space: normal; margin-left: 0; }
+    .meta-edit-row { flex-wrap: wrap; }
+    .meta-edit-row :global(.sel-trigger) { flex: 1 1 100%; min-height: 2.5rem; }
+    .meta-edit-row .btn { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
+    .rev-row { flex-wrap: wrap; row-gap: 0.35rem; }
+    .rev-note { flex: 1 1 8rem; overflow-wrap: break-word; }
+    .rev-row .btn { width: auto; flex: 1 1 6rem; min-height: 2.5rem; }
+    .icon-btn { width: 2.5rem; height: 2.5rem; }
+  }
 
   :global(:is([data-theme="dark"], .dark)) .error { color: #fca5a5; background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.35); }
   :global(:is([data-theme="dark"], .dark) .editor-page .back) { color: var(--brand-700); }

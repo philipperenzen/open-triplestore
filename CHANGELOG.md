@@ -703,6 +703,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The SHACL Studio's pages were cramped at phone width.** On the validation
+  list each dataset row crammed a status pill, a shapes picker, a run button
+  rendered as a wide empty bar and a toggle whose label broke over two lines
+  into one narrow card; the shapes library's grid had a 320px column floor that
+  pushed a 320px screen sideways; the pipelines list drew its two corner links
+  on top of the heading; and the shape-graph editor stacked seven full-width
+  buttons down the page. Across all seven Studio pages the control rows wrap or
+  stack below 720px, tap targets are at least 40px, and the facet labels, run
+  names, pipeline names and selection chips wrap rather than being cut.
 - **The documentation index had no structure.** It was a bare two-column list
   of plain-text links under all-caps headings, with column heights so uneven
   that a one-entry section sat beside a four-entry one, and no cards, borders
