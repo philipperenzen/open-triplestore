@@ -703,6 +703,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **A follower's first boot printed a wall of warnings.** The boot seed writes
+  the Studio's meta-shapes, the per-standard shape graphs, the bundled demo
+  organisation and its data, the standard vocabularies and the built-in
+  documentation — and every one of those writes is refused on a node that keeps
+  its store read-only, each refusal logged as a warning. An operator had no way
+  to tell them from a real fault. A follower skips the seed now and says so
+  once, at info level. Nothing is lost: the same graphs arrive from the leader,
+  and a follower's identity database is replaced wholesale by the leader's
+  snapshot, so anything seeded locally was overwritten at the first catch-up
+  anyway — which it had been, silently creating local dataset rows the leader
+  then replaced.
 - **The in-page section bar was a hard rectangle across the page.** Square
   corners, a single bottom rule and negative margins bleeding it to the
   container edges, so the moment it stuck it cut the page in two and the

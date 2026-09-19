@@ -3110,3 +3110,24 @@ it read as a hard horizontal cut with the page disappearing under its
 edge. It is a rounded translucent bar with the cards' own 12px radius
 now, inset, with a gap above it when stuck so the page is visibly still
 there behind it.
+
+### 7. A follower's boot seed (2026-09-19)
+
+The last of the carried items, and the smallest in code: a follower does
+not run the boot seed. Every write in that chain is refused on a
+read-only store and every refusal was logged as a warning, so a
+follower's first boot printed a wall of them describing a node working
+exactly as designed — with nothing to distinguish them from a real fault.
+
+The chain moved out of `serve` into `run_boot_seed`, unchanged, with one
+decision in front of it and a return value (`Ran` / `SkippedReadOnly`) so
+a test can tell the difference. Disabling the guard turns the follower
+test red, and that is where the fix turned out to be more than cosmetic:
+the store writes were refused, but the *identity* writes were not, so a
+follower had been quietly creating local dataset and organisation rows
+that the leader's snapshot replaced at the first catch-up. The test
+asserts the dataset list is empty, and it was not.
+
+Two of the seven carried items are now struck rather than built —
+`cargo deny` was already a passing CI gate, and asset shipping's
+stand-in answer is the `404` from item 1 of this section.

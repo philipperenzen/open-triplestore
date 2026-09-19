@@ -2452,59 +2452,9 @@ pub async fn run(
         // still starts serving immediately.
         let seed_state = state.clone();
         let base = state.base_url.to_string();
+        let boot_seed_dir = seed_dir.clone();
         let seed_handle = tokio::task::spawn_blocking(move || {
-            let store = &seed_state.store;
-            let auth = &seed_state.auth_db;
-            // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
-            if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
-                tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
-            }
-            if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, &base) {
-                tracing::warn!("shacl_studio: legacy migration failed: {e}");
-            }
-            // Self-healing: adopt every dataset's shapes graph(s) — configured
-            // `shapes_graph_iri` or shapes-role dataset graphs — into the Studio
-            // Library and bind them in the validation layer (idempotent).
-            crate::shacl_studio::migrate::backfill_dataset_shapes(&seed_state);
-            if let Err(e) = crate::shacl_studio::seed_standards::seed_standards(store, auth) {
-                tracing::warn!("shacl_studio: standards seed failed: {e}");
-            }
-            // 2. Dataset-structure governance shapes (must exist before the audit).
-            let _ = crate::auth::dataset_audit::seed_dataset_structure_shapes(store, auth);
-            // 3. Bundled public demo org + datasets + graph data + saved queries.
-            //    Idempotent and self-healing: back-fills any registered-but-empty
-            //    public demo graph left behind by an earlier interrupted seed.
-            crate::saved_queries::seed::seed_open_triplestore(&seed_state);
-            // 3b. Operator-supplied seed bundles (--seed-dir / SEED_DIR), if any —
-            //     same idempotent/fail-soft engine as the reference bundle above.
-            //     Sequenced here (not a separate spawn) for the same reason the
-            //     demo seed is: concurrent writers to the same SQLite identity DB
-            //     and RDF store previously produced boot-time lock contention.
-            if let Some(ref dir) = seed_dir {
-                crate::seed_bundles::load_seed_dir(&seed_state, dir);
-            }
-            // 4. Standard RDF vocabularies into the model registry.
-            crate::data_models::seed_vocab::seed_standard_vocabularies(&seed_state);
-            // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
-            crate::auth::dataset_graph::reconcile_all_dataset_metadata(
-                store,
-                &seed_state.base_url,
-                auth,
-            );
-            // 5b. Model/Vocabulary/Instance reframe: reclassify stored property
-            //     graphs (model→vocabulary) and rewrite legacy …/ontology/ IRIs to …/ns#.
-            crate::auth::dataset_graph::migrate_model_vocabulary_reframe(
-                store,
-                &seed_state.base_url,
-                auth,
-            );
-            if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(store, auth, &base) {
-                tracing::warn!("dataset metadata audit failed: {e}");
-            }
-            // 6. Built-in documentation pages (idempotent; preserves user edits).
-            if let Err(e) = crate::docs::seed_builtin_docs(auth) {
-                tracing::warn!("docs seed failed: {e}");
-            }
+            run_boot_seed(&seed_state, &base, boot_seed_dir.as_deref());
         });
         // 7. Vocabulary search boot (corpus discovery + LOV term index +
         //    catalog/prefix platform overlay) — sequenced after the seed
@@ -2785,4 +2735,93 @@ fn upload_limit_bytes(default_mb: usize) -> usize {
         .filter(|&v| v > 0)
         .unwrap_or(default_mb);
     mb.saturating_mul(1024 * 1024)
+}
+
+/// What the boot seed did, so the caller and its tests can tell the difference
+/// between "seeded" and "deliberately did not".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootSeed {
+    /// The chain ran (it is idempotent, so this covers "was already seeded").
+    Ran,
+    /// This node keeps its store read-only, so there was nothing to seed.
+    SkippedReadOnly,
+}
+
+/// The boot-time migration and seed chain: the Studio's meta-shapes, the
+/// per-standard shape graphs, the bundled demo organisation and its data, any
+/// operator seed bundle, the standard vocabularies, the dataset-metadata
+/// reconciliation and audit, and the built-in documentation.
+///
+/// **A follower does not run it.** Every one of those writes is refused on a
+/// node that keeps its store read-only, and every refusal was logged as a
+/// warning — so a follower's first boot printed a wall of warnings describing
+/// a node working exactly as designed, with nothing to distinguish them from a
+/// real fault. Skipping loses nothing: the same graphs arrive from the leader,
+/// and a follower's identity database is replaced wholesale by the leader's
+/// snapshot, so anything seeded locally would be overwritten at the first
+/// catch-up anyway.
+///
+/// Sequential on purpose, and spawned rather than awaited by the caller: the
+/// migration and the demo seed write the same SQLite identity database and the
+/// same RDF store, and running them concurrently produced "database is locked"
+/// contention and a boot deadlock that left the public demo datasets
+/// half-seeded.
+pub fn run_boot_seed(
+    seed_state: &AppState,
+    base: &str,
+    seed_dir: Option<&std::path::Path>,
+) -> BootSeed {
+    if seed_state.store.replication().read_only() {
+        tracing::info!(
+            "boot seed skipped: this node replicates a leader and keeps its \
+             store read-only; its shapes, demo data, vocabularies and docs \
+             arrive from the leader"
+        );
+        return BootSeed::SkippedReadOnly;
+    }
+    let store = &seed_state.store;
+    let auth = &seed_state.auth_db;
+    // 1. SHACL Studio meta-shapes, legacy shape import, per-standard shapes.
+    if let Err(e) = crate::shacl_studio::seed::seed_shacl_shacl(store, auth) {
+        tracing::warn!("shacl_studio: SHACL-SHACL seed failed: {e}");
+    }
+    if let Err(e) = crate::shacl_studio::migrate::migrate_legacy(store, auth, base) {
+        tracing::warn!("shacl_studio: legacy migration failed: {e}");
+    }
+    // Self-healing: adopt every dataset's shapes graph(s) — configured
+    // `shapes_graph_iri` or shapes-role dataset graphs — into the Studio
+    // Library and bind them in the validation layer (idempotent).
+    crate::shacl_studio::migrate::backfill_dataset_shapes(seed_state);
+    if let Err(e) = crate::shacl_studio::seed_standards::seed_standards(store, auth) {
+        tracing::warn!("shacl_studio: standards seed failed: {e}");
+    }
+    // 2. Dataset-structure governance shapes (must exist before the audit).
+    let _ = crate::auth::dataset_audit::seed_dataset_structure_shapes(store, auth);
+    // 3. Bundled public demo org + datasets + graph data + saved queries.
+    //    Idempotent and self-healing: back-fills any registered-but-empty
+    //    public demo graph left behind by an earlier interrupted seed.
+    crate::saved_queries::seed::seed_open_triplestore(seed_state);
+    // 3b. Operator-supplied seed bundles (--seed-dir / SEED_DIR), if any —
+    //     same idempotent/fail-soft engine as the reference bundle above.
+    //     Sequenced here (not a separate spawn) for the same reason the
+    //     demo seed is: concurrent writers to the same SQLite identity DB
+    //     and RDF store previously produced boot-time lock contention.
+    if let Some(dir) = seed_dir {
+        crate::seed_bundles::load_seed_dir(seed_state, dir);
+    }
+    // 4. Standard RDF vocabularies into the model registry.
+    crate::data_models::seed_vocab::seed_standard_vocabularies(seed_state);
+    // 5. Canonical dataset-metadata IRIs, then audit/repair — datasets exist now.
+    crate::auth::dataset_graph::reconcile_all_dataset_metadata(store, &seed_state.base_url, auth);
+    // 5b. Model/Vocabulary/Instance reframe: reclassify stored property
+    //     graphs (model→vocabulary) and rewrite legacy …/ontology/ IRIs to …/ns#.
+    crate::auth::dataset_graph::migrate_model_vocabulary_reframe(store, &seed_state.base_url, auth);
+    if let Err(e) = crate::auth::dataset_audit::audit_dataset_metadata(store, auth, base) {
+        tracing::warn!("dataset metadata audit failed: {e}");
+    }
+    // 6. Built-in documentation pages (idempotent; preserves user edits).
+    if let Err(e) = crate::docs::seed_builtin_docs(auth) {
+        tracing::warn!("docs seed failed: {e}");
+    }
+    BootSeed::Ran
 }
