@@ -14,6 +14,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Copy the IRI of any term in the Triple Browser's table.** Subject,
+  predicate, object and graph each carry the same copy control, and it copies
+  the IRI itself rather than the prefixed form the cell displays — a literal
+  by its value, a blank node as `_:label`, nothing for the default graph,
+  which has none. The control is keyboard reachable and named for what it
+  copies; before this the predicate and graph cells had no control at all and
+  the other two were invisible and unfocusable. A copy that fails now says
+  so, everywhere it can fail: the Clipboard API needs a secure context and a
+  focused document, so it fails routinely on a store reached over plain HTTP
+  on a LAN, and every caller had been testing the result and doing nothing
+  with it.
 - **A columnar copy with its own SPARQL evaluator** (`opengraph::columnar`,
   on by default; `OTS_COLUMNAR_QUERY=off`): the in-memory mirror keeps a
   third copy — a term dictionary and three sorted permutations of the quads
@@ -472,6 +483,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **The Triple Browser sends its whole scope, remembers it, and offers the
+  query behind the view.** A selection mixing datasets with an organisation
+  sent only part of itself — and one dataset plus one organisation matched no
+  branch at all, so it sent no scope — which is why the rows, the count and
+  the facet rail's "Terms in scope" described less than was selected. Every
+  selected dataset and organisation is now sent, through a new `org_ids`
+  parameter; `org_id` is still sent alongside it, so a backend without
+  `org_ids` degrades to the old behaviour rather than losing the organisation
+  half. The scope also survives the tab: it is a versioned `localStorage`
+  snapshot, a scope in the URL still wins, an empty scope is remembered as a
+  choice, datasets that are gone or no longer visible are dropped once the
+  inventories load, and a failed inventory request never wipes a good scope.
+  IRI filter fields are wider and monospaced, and park their scroll at the
+  local name when unfocused.
+- **The API reference says what every endpoint needs.** Each documented
+  endpoint carries its level — none, token or admin, defined once — where the
+  reference previously said only that "most write endpoints and private
+  resources require an Authorization header", leaving a reader to guess about
+  every individual endpoint. The facts a deployer needs are stated where they
+  will be read: public datasets are readable without a token by design, a
+  private dataset's triples *and* its files are refused both to anonymous
+  callers and to signed-in users without a grant, and listing all accounts is
+  admin-only. A document about access control is worth nothing once it
+  drifts, so `tests/api_reference_auth.rs` parses the levels back out of the
+  table and fires an anonymous request at every documented endpoint — `none`
+  must not answer 401, `token` and `admin` must — and asserts it exercised a
+  reasonable number of rows, so an unparseable table fails loudly rather than
+  vacuously passing.
 - **The README and the overview page now lead to what the store can do
   under load and in production**: Highlights rows for the in-memory
   accelerator, the change log (with why it is off by default), replication
@@ -631,6 +670,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Removed
+- **The Triple Browser's Simple/Advanced switch.** Everything it gated is
+  simply available, and in its place is one SPARQL button that opens the
+  query behind the current view. The natural-language panel now appears on
+  its own real condition — whether a gateway is configured — rather than on a
+  mode. The five dead translation keys are out of both dictionaries, and
+  docs/search-syntax.md, which is compiled into the binary and linked from
+  the browser's own help popover, no longer tells the reader to flip a
+  control that is not there.
 - **The invented vocabulary term sets.** The seeded registry, the bundled
   `vocab/` files and the term-lookup map lose the four hand-authored files
   that had no authoritative source to copy from — `bag` (a "3DBAG
@@ -646,6 +693,62 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Every dataset name in the SHACL validation list rendered at zero width.**
+  Measured 0.0px against a `scrollWidth` of 138px: the text in the DOM and
+  nothing on screen, on every row. `overflow: hidden` replaces a flex item's
+  automatic minimum size with 0, so the flex algorithm was free to shrink the
+  name away entirely — and did, because the owner chip beside it has
+  `overflow: visible`, whose minimum is its content, and gave up none of its
+  115px. The name now has a 4.5rem floor and grows into whatever is left, the
+  chip yields, and the status pill wraps under the title instead of crushing
+  it; measured after, names are 117–155px and the chip falls to 72px where a
+  name is long. jsdom has no layout, so no component test can see this class
+  of bug at all: the regression test is a Playwright spec that measures, and
+  it fails against the previous CSS with `"3D, Map & BIM Demo" is 0px`.
+- **The validation page's "link shapes" picker offered two graphs where the
+  Shapes view offers twenty-seven.** It listed the datasets that already had
+  a shapes graph attached rather than the SHACL library, so a shape graph
+  authored in the Library was unreachable until somebody had already linked
+  it somewhere else. It now offers the library itself — the same source the
+  Shapes view reads — labelled by each graph's own name and shape count, with
+  the old source folded in behind it so nothing that used to be linkable
+  stopped being so. The Studio nav gains a Datasets tab, and wraps rather
+  than overflowing once there are five.
+- **A browse scope naming datasets *and* organisations dropped the
+  organisations.** The handlers resolved their scope as `if dataset_ids …
+  else if org_id …`, so a caller sending both — which the Triple Browser does
+  whenever a selection mixes them — had the organisation silently ignored, at
+  the facets path, the triples query builder and the resource view alike.
+  `scope_dataset_ids` now returns the deduplicated union of the datasets
+  named directly and the datasets of every organisation named; `dataset_id`,
+  `dataset_ids` and `org_id` used alone behave exactly as before, and an
+  empty union still means nothing in scope rather than everything. Access
+  control is unchanged — the union only builds a list of ids, which every
+  caller passes through the same per-dataset visibility filtering as before —
+  and a test asserts that a non-member reaches a private graph by none of the
+  four spellings.
+- **The graph's double-click looked broken because it was silent.** The
+  handler fires, fetches and merges correctly; it simply said nothing in four
+  of its five outcomes, which made the ways it can legitimately do nothing
+  indistinguishable from a dead control: the neighbours are already on the
+  canvas (a node with seven edges fetched exactly seven triples and changed
+  nothing), the node was expanded earlier and its neighbours came back with
+  the restored working state — a cache hit with no request and no visible
+  change, which survives a reload and so can make a whole session feel dead —
+  the scope genuinely has no more neighbours, or the expansion failed and a
+  bare `catch {}` swallowed it. Every outcome now says which it was, once,
+  through the existing toast. The gesture was also tighter than the
+  platform's, a hand-rolled 300ms window against a ~500ms default
+  double-click speed on both Windows and macOS; it now listens for the
+  container's native `dblclick` and keeps the manual detector for touch only.
+- **The resource page's Copy IRI was easy to miss and silent when it
+  failed.** An unlabelled 16px icon sat at the far end of a one-line IRI that
+  was itself truncated with an ellipsis, so selecting the text by hand
+  yielded a clipped IRI; and the failure path was an `if` with no `else`, on
+  a path that fails whenever the document is unfocused or the store is
+  reached over plain HTTP. The control is a labelled button, the IRI wraps in
+  full and stays selectable, the two duplicated header blocks are one
+  snippet, and a failed copy says to select the text and press Ctrl/Cmd + C.
 - **A follower waits out the leader's rate limiter instead of restarting its
   bootstrap.** The leader answers `429` with `Retry-After` to a follower
   like to any client of its address; the follower took that as a failed
@@ -1180,6 +1283,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
+  a graph IRI from the request body and handed it straight to the serialiser
+  — no authentication, no authorisation — so any caller could name any named
+  graph in the store and read back whatever the SHACLC serialiser could
+  express of it: shape IRIs, target classes, property paths, datatypes and
+  constraint values. Verified against a running instance before the fix, a
+  private dataset's shapes graph came back in full to a client with no token
+  at all. The route now sits with its authenticated SHACL siblings **and**
+  the handler asks `check_graph_read_access`, the same visibility helper that
+  gates `/store` and `/sparql`, because a token alone would only have
+  narrowed the leak from everyone to every signed-in user. A graph the caller
+  may not read answers `403` whether or not it exists, so the endpoint cannot
+  be used to discover which graph IRIs are present either.
+- **`GET /api/users/public` returned every active account to anyone who
+  asked** — id, username and avatar, signed in or not. The endpoint exists so
+  the web UI can label the owner of something public, which is fair; handing
+  over the whole roster is account enumeration, and it made "only an admin
+  sees all users" true of `/api/users` alone. It now lists only the users the
+  caller could already infer: the owners of datasets they may read, the
+  members of organisations they belong to, and themselves. An admin still
+  sees everyone, and the status codes and JSON shape are unchanged, so the
+  owner chips that depend on it keep working. In the same pass, `POST
+  /api/shaclc/parse` and `POST /api/rml/preview` join their authenticated
+  siblings: neither discloses anything stored, but both spent the instance's
+  CPU for callers it could not name, and no frontend page calls either.
 - **LDP `PATCH` ran arbitrary SPARQL Update without authorisation.**
   `PATCH /ldp/*path` read a SPARQL Update from the request body and ran it
   verbatim; the handler took no authenticated user, so the only gate was the

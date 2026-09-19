@@ -2560,3 +2560,246 @@ maintainer's call.
 tokens), `replication_http` (6), the unit and parity tests; frontend lint,
 780 vitest tests, typecheck, build; the renamed Playwright spec (3) against
 a fresh leader container.
+## What use found, and what the audit it prompted found (2026-09-19)
+
+Ten items and two table regenerations, all after `1789309`, and none of
+them from the plan. Every one began either as a report from somebody
+using the store — a list with no names in it, an IRI that could not be
+copied, a filter that ignored half the selection, a double-click that
+seemed dead — or as a consequence of the audit those reports prompted,
+which was the question of what the API hands out to a caller with no key.
+
+The through-line is that **inspection kept agreeing with the code and
+disagreeing with the screen**. Every one of these was settled by
+measuring the running thing: element widths out of the live DOM,
+`0 passed` in a test runner, a private graph read back over HTTP with no
+token. Three times the reading contradicted what the code plainly said,
+and the reading was right.
+
+### 1. A list of datasets with no dataset names (`a7eeabe`)
+
+Reported as "names for datasets in shacl studio" missing. They were in
+the DOM. Measured, every one of them was **0.0px wide against a
+`scrollWidth` of 138px** — rendered, laid out, and given no room at all.
+
+`overflow: hidden` replaces a flex item's automatic minimum size with 0.
+That is the whole bug: `.ds-name` was hidden-overflow, so the flex
+algorithm was permitted to take it to nothing, while the owner chip
+beside it is `overflow: visible`, whose minimum is its content, and so
+surrendered none of its 115px. In a 280–320px panel carrying a status
+pill and a shapes picker as well, there is never enough width, and the
+item that was allowed to reach zero reached zero every time.
+
+The name now has a 4.5rem floor and takes what is left, the chip yields,
+the status wraps under the title. Measured after: names 117–155px, chip
+down to 72px beside a long name, no horizontal overflow, rows 3px taller.
+
+**jsdom has no layout, so no component test in this repo could have seen
+this, and none of the 800-odd that pass did.** The regression test is a
+Playwright spec that measures real boxes in a real browser. Against the
+previous CSS it fails with `"3D, Map & BIM Demo" is 0px`, which is the
+report, verbatim, as an assertion.
+
+### 2. Four IRIs to a row, and no way to copy one (`d13beb2`, `4332322`)
+
+The Triple Browser's table shows subject, predicate, object and graph and
+let you copy none of them. Predicate and graph were bare spans with no
+control; subject and object had one at `opacity: 0` with `tabindex="-1"`,
+inside a cell whose `overflow: hidden` clipped it off the end of any long
+term. Selecting the text by hand gives the *prefixed* form — `rdf:type`,
+not the IRI — so the manual route produced the wrong string as well. The
+only working copy on the page copied the entire triple.
+
+All four cells now carry the same control, and it copies the IRI: a
+literal by its value, a blank node as `_:label`, nothing for the default
+graph, which has none. `RdfTerm` loses its invisibility and its
+`tabindex="-1"` for its eight other users at the same time.
+
+The resource page had the same gesture failing differently: a 16px
+unlabelled icon at the end of a one-line IRI truncated with an ellipsis.
+
+Underneath both was a failure mode nobody could see. `copyToClipboard`
+returns a boolean and **every caller tested it and did nothing with a
+`false`** — while a copy fails routinely: `NotAllowedError: Document is
+not focused`, or no Clipboard API at all outside a secure context, which
+is any store reached over plain HTTP on a LAN. The click did nothing and
+read as a dead button. `copyOrWarn` says so, and says what to do instead.
+
+### 3. A scope of datasets and organisations is a union (`685aa94`, `82022b6`, `7a74332`)
+
+"Terms in scope does not work when multiple filters are selected."
+
+Two independent bugs, one at each end, which is why the symptom survived
+looking at either end alone:
+
+- The **backend** resolved `if dataset_ids … else if org_id …`, so a
+  request naming both had the organisation silently dropped, at all three
+  resolution sites (facets, the triples query builder, the resource
+  view). `scope_dataset_ids` now returns the deduplicated union, with a
+  new optional `org_ids` beside the existing `org_id`.
+- The **frontend** never sent the whole selection anyway.
+  `buildScopeParams` carried an explicit `MVP: only first org`, and the
+  combination of one dataset with one organisation matched none of its
+  branches, so it sent **no scope at all**. The mapping now lives in
+  `browseScope.ts`, where it is tested, and `org_id` is still sent
+  alongside `org_ids` so an older backend degrades instead of losing the
+  organisation half.
+
+Access control did not change and this is worth stating precisely,
+because widening a scope resolver is exactly the shape of change that
+leaks: the union only produces a list of dataset ids, and every caller
+passes that list through the same per-dataset visibility filtering as
+before. A dataset reached *through* an organisation is filtered exactly
+as one named directly. `tests/browse_scope_http.rs` (9 tests) asserts a
+non-member reaches a private graph by none of the four spellings.
+
+Three smaller reports rode along in the same file: the scope lived in
+`sessionStorage` per route, so it died with the tab (now a versioned
+`localStorage` snapshot, where an empty scope is a remembered choice and
+a failed inventory request never wipes a good scope); IRIs were
+unreadable in the filter fields (wider, monospaced, scrolled to the local
+name when unfocused); and **Simple/Advanced is gone** — everything it
+gated is simply available, and in its place is a SPARQL button that opens
+the query behind the current view. The five dead keys left both
+dictionaries and `docs/search-syntax.md`, which is compiled into the
+binary, stopped describing a control that no longer exists.
+
+### 4. What the API gives away without a key (`9467535`, `465f23b`, `8523d88`, `bfbde07`)
+
+Prompted by "a lot more should be hidden behind an api key", with the
+specific worry that files belonging to private datasets were reachable
+without a token. That part turned out to be **already correct**, and the
+audit is recorded here in full because a negative result is the more
+useful half of it.
+
+**Found and fixed.**
+
+- `POST /api/shaclc/serialize` took a graph IRI from the request body and
+  handed it to the serialiser with **no authentication and no
+  authorisation**. Any caller could name any named graph and read back
+  whatever SHACLC can express of it. Confirmed on a running instance by
+  creating a private dataset with a shapes graph and reading it back with
+  no credentials at all: shape IRI, target class, property path,
+  datatype, constraint value, in full. A token alone would have narrowed
+  that only from everyone to every signed-in user, so the handler also
+  asks `check_graph_read_access` — the same helper that gates `/store`
+  and `/sparql` — and a graph the caller may not read answers 403 whether
+  or not it exists, so it cannot be used to enumerate graph IRIs either.
+- `GET /api/users/public` returned every active account to anyone. It
+  exists so the UI can label the owner of something public, which is
+  fair; the roster is account enumeration, and it made "only an admin
+  sees all users" true of `/api/users` alone. Now scoped to what the
+  caller could already infer — owners of datasets they may read, members
+  of their organisations, themselves — admin unchanged, shape unchanged.
+- `POST /api/shaclc/parse` and `POST /api/rml/preview` ran a parser and a
+  mapping for anonymous callers. Neither discloses anything stored, so
+  this is about spending the instance's CPU for people it cannot name.
+
+**Checked and already correct**, i.e. the parts of the report that were
+not true of this build: a private dataset's triples; a private dataset's
+**files**, including direct download; `/api/users`; the validation
+endpoints; organisations and their membership. These were probed
+anonymously, not read — the audit's own harness is
+`tests/api_auth_exposure.rs` (7 tests).
+
+**The documentation half.** The reference said only that "most write
+endpoints and private resources require an Authorization header", which
+leaves a reader guessing about each endpoint. Every documented endpoint
+now carries its level — none, token, admin — and `api_reference_auth.rs`
+parses those levels back out of the table and fires an anonymous request
+at each: `none` must not answer 401, `token` and `admin` must. It asserts
+a row count too, so an unparseable table fails loudly rather than
+vacuously.
+
+That test earned itself immediately. Ordering the commits so each is
+internally consistent, the documentation commit still describes serialize
+as `none` because at that commit it *is* `none`; the serialize commit
+flips the code and the table together. The first arrangement had them the
+other way round and the test failed, which is exactly the drift it was
+written to catch, caught on its author.
+
+### 5. The double-click that worked (`61f37f8`)
+
+"Graph double click does not work." The handler fires, fetches and merges
+correctly. It is **silent in four of its five outcomes**, and the ways it
+can legitimately do nothing are indistinguishable from a broken control:
+
+- the neighbours are already drawn — double-clicking a node with seven
+  edges fetched exactly seven triples and changed nothing;
+- the node was expanded before and its neighbours arrived with the
+  restored working state, so the expansion is a cache hit with no request
+  and no visible change — and that survives a reload, which is how a
+  whole session comes to feel dead;
+- the scope genuinely has no further neighbours;
+- the expansion failed and a bare `catch {}` ate it, a fifth silent path
+  that was invisible even in the console.
+
+Each outcome now reports itself once through the existing toast. The
+decision is a pure function, `decideExpansion`, with its own tests, so
+the Svelte component only displays the result.
+
+The gesture was also stricter than the platform's: a hand-rolled 300ms
+window against a ~500ms default double-click speed on Windows and macOS,
+so a perfectly ordinary double-click was not one. It now listens for the
+container's native `dblclick` and keeps the manual detector for touch.
+
+### 6. Two shapes where the Shapes view has twenty-seven (`a632d2c`)
+
+The validation page's "link shapes" picker listed the datasets that
+already had a shapes graph attached — not the SHACL library. A shape
+graph authored in the Library was therefore unreachable until somebody
+had already linked it somewhere else, which is circular, and the list was
+visibly shorter than the Shapes view for no reason a user could see. It
+now reads the library through the same `listShapeGraphs()` the Shapes
+view uses, labelled by each graph's name and shape count, with the old
+source folded in behind it so nothing that used to be linkable stopped
+being so. On the demo instance: **27 options where there were 2.**
+
+The Studio nav gains a Datasets tab and wraps rather than overflowing at
+five.
+
+### The author's mistakes in this stretch, and what each cost
+
+Recorded because three of them would have shipped a green test that
+tested nothing, and one would have left a false security report standing.
+
+- **A leak that was not one.** The exposure probe reported a private
+  value coming back from `/api/browse/resource`. It was matching the
+  endpoint's echo of the `iri` field the probe itself had sent, on an
+  otherwise empty response. Corrected to the user before it was acted on;
+  the detector now matches only the secret's value.
+- **`0 passed` read as success, twice.** A `-- <filter>` placed after
+  several `--test` binaries applies to *all* of them, so
+  `--test a --test b -- browse` ran nothing and reported
+  `0 passed; N filtered out` per binary. Nine tests, and then 4+7+9+11,
+  were believed to have passed without ever running.
+- **A layout test at the one width where the bug cannot occur.** The
+  first version of the validation Playwright spec used a 900px viewport
+  — *below* the 960px breakpoint, where `.split` collapses and the panel
+  becomes full width, the single layout in which nothing competes for the
+  name's space. It also contained `expect(chipWidth).toBeGreaterThanOrEqual(0)`,
+  which is true of every number a browser can report. Found by an
+  adversarial review of my own test, not by the test failing.
+- **An unfalsifiable replacement.** The fix for the above asserted that a
+  clipped name implies a chip narrower than its content. It never is:
+  `.owner-chip-name` carries its own `max-width: 7rem` and ellipsis, so
+  chip width equals chip content width always. Re-measured live (name
+  121px, chip 102px, row 251px) and replaced with the invariant that is
+  actually true — the name absorbs the slack.
+- **A diagnosis corrected by a subagent.** The graph's restored-state
+  case was hypothesised as state *refusing* to expand. No such code
+  exists; it is a cache hit, neighbours having arrived with the snapshot,
+  so there is no request to see and nothing to change. The report to the
+  user was corrected.
+
+### Verified
+
+Stable-toolchain clippy over the CI feature set, all targets, clean.
+`shaclc_serialize_access` (4), `api_auth_exposure` (7),
+`api_reference_auth` (2), `browse_scope_http` (9), `shaclc_conformance`
+(11). Frontend: eslint, `svelte-check`, build, and 827 vitest tests
+across 67 files. The validation Playwright spec against a real browser,
+red on the previous CSS. `scripts/conformance_table.py --check` passes;
+`7a74332` and `bfbde07` are its two regenerations, for the browse-scope
+suite and for the three security suites respectively — bookkeeping for a
+generated table, which is why they carry no CHANGELOG line.
