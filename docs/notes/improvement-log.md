@@ -2993,3 +2993,14 @@ toolbar row. Line wrapping is now a CodeMirror compartment driven by a
 `matchMedia` listener, so the editor soft-wraps on a phone and keeps its
 horizontal scroll on a desktop. The reported "empty black box" was the
 natural-language question input at zero width — same rule, same fix.
+
+**The Datasets page** (`fix(ui): the dataset list is cards on a phone`).
+Two reported problems and a third found underneath them. The action row
+was the shared `.btn` rule again. The table was the usual desktop-table-
+at-375px, but it had been "solved" by deleting information: media queries
+hid the owner column below 700px and the role and visibility columns
+below 480px, so a phone user could not see who owned a dataset or whether
+it was public. Below 720px each row is a card instead, and every column's
+information is on it. The select-all control needed somewhere to live once
+the header row was gone; it is a strip above the cards, using the string
+it already had.

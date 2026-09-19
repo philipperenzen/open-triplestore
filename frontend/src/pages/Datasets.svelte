@@ -174,7 +174,7 @@
     title={$t('pages.datasets.title')}
     count={loading ? null : `${datasets.length} ${datasets.length === 1 ? $t('pages.datasets.datasetSingular') : $t('pages.datasets.datasetPlural')}`}
   >
-    <div slot="actions">
+    <div slot="actions" class="ds-actions">
       <button class="info-btn" on:click={() => showInfo = !showInfo} aria-expanded={showInfo}>
         <Info size={14} />
         {$t('pages.datasets.about')}
@@ -243,16 +243,22 @@
       <tr>
         {#if $isAuthenticated}
         <th class="th-check">
-          <input
-            type="checkbox"
-            bind:this={dsHeaderCheckbox}
-            on:change={toggleSelectAll}
-            aria-label={$t('pages.datasets.selectAllWritable')}
-            class="row-check"
-          />
+          <!-- The card layout drops the header row, so the label rides along
+               with the checkbox and shows itself there — otherwise selecting
+               every writable dataset would only be possible on a desktop. -->
+          <label class="check-cell">
+            <input
+              type="checkbox"
+              bind:this={dsHeaderCheckbox}
+              on:change={toggleSelectAll}
+              aria-label={$t('pages.datasets.selectAllWritable')}
+              class="row-check"
+            />
+            <span class="check-cell-label">{$t('pages.datasets.selectAllWritable')}</span>
+          </label>
         </th>
         {/if}
-        <th>{$t('pages.datasets.name')}</th>
+        <th class="col-name">{$t('pages.datasets.name')}</th>
         <th class="col-role">{$t('pages.datasets.roleColumn')}</th>
         <th class="col-validation">{$t('pages.datasets.validationColumn')}</th>
         <th class="col-visibility">{$t('pages.datasets.visibility')}</th>
@@ -271,17 +277,19 @@
           {#if $isAuthenticated}
           <td class="td-check" on:click|stopPropagation>
             {#if ds.can_write}
-              <input
-                type="checkbox"
-                checked={isSelected}
-                on:change={() => toggleSelect(String(ds.id))}
-                aria-label={$t('pages.datasets.selectItem', { values: { name: ds.name } })}
-                class="row-check"
-              />
+              <label class="check-cell">
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  on:change={() => toggleSelect(String(ds.id))}
+                  aria-label={$t('pages.datasets.selectItem', { values: { name: ds.name } })}
+                  class="row-check"
+                />
+              </label>
             {/if}
           </td>
           {/if}
-          <td>
+          <td class="col-name">
             <Link to={`/datasets/${ds.id}`} class="ds-name-link">{ds.name}</Link>
             {#if ds.description}<span class="ds-desc-line" title={ds.description}>{ds.description}</span>{/if}
           </td>
@@ -497,6 +505,14 @@
 {/if}
 
 <style>
+  /* About and New Dataset are one action row, not two stacked controls. */
+  .ds-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
   .info-panel {
     background: #f0f9ff;
     border: 1px solid #bae6fd;
@@ -523,6 +539,7 @@
     border-radius: 3px;
     font-size: 0.8rem;
     font-weight: 500;
+    overflow-wrap: break-word;
   }
   .vis-public { background: #d4edda; color: #155724; }
   .vis-members { background: #fff3cd; color: #856404; }
@@ -560,6 +577,7 @@
     font-weight: 600;
     color: var(--brand-600, #0d9488);
     text-decoration: none;
+    overflow-wrap: break-word;
   }
   :global(.ds-name-link:hover) { text-decoration: underline; }
   :global(.onto-link) { color: var(--brand-600, #0d7490); text-decoration: none; font-size: 0.82rem; display: inline-flex; align-items: center; gap: 0.3rem; }
@@ -639,6 +657,15 @@
     width: 36px;
     padding: 0.5rem 0.25rem 0.5rem 0.75rem;
   }
+  .check-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+  }
+  /* The name of the select-all box is carried by its aria-label on desktop,
+     where the column header says what it does. */
+  .check-cell-label { display: none; }
   .row-check {
     width: 15px;
     height: 15px;
@@ -655,6 +682,7 @@
   .ds-desc-line {
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
     overflow: hidden;
+    overflow-wrap: break-word;
     font-size: 0.75rem; color: var(--ink-500); max-width: 46ch;
   }
   .empty-cta { margin-left: 0.6rem; }
@@ -682,12 +710,75 @@
   }
   .shield-btn:hover { background: var(--brand-200); color: var(--brand-700); }
 
-  /* Responsive: hide less important columns on narrow screens */
-  @media (max-width: 700px) {
-    .col-owner { display: none; }
-  }
-  @media (max-width: 480px) {
-    .col-role, .col-visibility { display: none; }
+  /* The phone treatment. 720px is where the shared stylesheet already decides a
+     screen is a phone — it stretches every .btn across its own row, which is
+     what dropped New Dataset onto a line of its own beneath the About chip.
+     Here the two belong to one row, so the chip keeps the width it asks for,
+     the primary keeps its own, and both stand tall enough for a thumb.
+
+     The table is the other half. Six columns have nowhere to go at 375px: the
+     name wrapped inside a sliver of a column, Validation sat empty, and Role,
+     Visibility and Owner were hidden outright — the one thing a list of
+     datasets may not do to itself. So a row becomes a card: the name first,
+     then its badges, each of which says what it is without a header above it. */
+  @media (max-width: 720px) {
+    .ds-actions .info-btn,
+    .ds-actions .btn {
+      min-height: 2.75rem;
+      border-radius: 999px;
+    }
+    .ds-actions .info-btn { font-size: 0.85rem; }
+    .ds-actions .btn { width: auto; }
+
+    .card { padding: 0.75rem; }
+    table, thead, tbody { display: block; }
+    /* Only the select-all box is worth keeping from the header row. */
+    thead tr { display: flex; }
+    thead th:not(.th-check) { display: none; }
+    .th-check { width: auto; padding: 0 0 0.6rem; border-bottom: none; }
+    .check-cell-label {
+      display: inline;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-500);
+    }
+
+    /* Two narrow gutters and everything else between them: the name owns the
+       first line so it stops wrapping, the badges line up underneath it, and
+       the two icon buttons sit where a thumb expects them. */
+    tr.ds-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.4rem 0.55rem;
+      padding: 0.55rem 0.65rem;
+      border: 1px solid var(--line-soft);
+      border-radius: 12px;
+    }
+    tr.ds-row + tr.ds-row { margin-top: 0.55rem; }
+    tr.ds-row td { padding: 0; border-bottom: none; background: transparent; }
+
+    .td-check       { grid-area: 1 / 1; width: auto; align-self: start; }
+    .col-name       { grid-area: 1 / 2; min-width: 0; }
+    .td-actions     { grid-area: 1 / 3; width: auto; align-self: start; }
+    .col-role       { grid-area: 2 / 2 / auto / -1; }
+    .col-validation { grid-area: 3 / 1; width: auto; }
+    .col-visibility { grid-area: 3 / 2 / auto / -1; }
+    .col-owner      { grid-area: 4 / 2 / auto / -1; min-width: 0; }
+    .owner-cell     { display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0; }
+    .ds-desc-line   { max-width: none; }
+
+    /* Everything you tap on a phone is at least thumb-sized. */
+    .check-cell { min-width: 2.5rem; min-height: 2.5rem; justify-content: center; }
+    .row-check { width: 18px; height: 18px; }
+    .shield-btn, .tbl-btn { width: 2.5rem; height: 2.5rem; }
+
+    /* The skeleton and the empty state are single cells spanning the table. */
+    tbody tr:not(.ds-row) { display: block; }
+    tbody tr:not(.ds-row) td { display: block; padding: 0.5rem 0.15rem; }
+    .empty-cta { margin: 0.6rem 0 0; }
   }
 
   /* Dataset create modal */

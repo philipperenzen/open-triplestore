@@ -703,6 +703,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The dataset list was a desktop table squeezed into a phone.** "About" sat
+  as a small chip on its own line above a full-width "New Dataset" pill; the
+  table below had a name column so narrow that every name wrapped, a nearly
+  empty validation column, and rules that simply *hid* the owner below 700px
+  and the role and visibility below 480px. The two actions are one row now,
+  and below 720px each dataset is a card carrying its name, description, roles,
+  validation state, visibility and owner — nothing is hidden any more, and
+  nothing scrolls sideways.
 - **The SPARQL editor's Format button was drawn on top of the query.** At
   phone width it covered both `PREFIX` lines, because the button is
   `position: absolute` *and* a `.btn`, which `app.css` stretches to
