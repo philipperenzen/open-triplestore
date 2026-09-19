@@ -5,6 +5,7 @@
   import { navigate } from '../lib/router/index.js';
   import { OPEN_RESOURCE_CONTEXT } from '../lib/viewer/windows';
   import { isDark } from '../lib/theme.js';
+  import { iriDisplay } from '../lib/iriDisplay';
   import { langToFlag } from '../lib/i18n/langFlag.js';
   import { Check, Copy, MapPin, Boxes } from 'lucide-svelte';
   import { copyOrWarn } from '../lib/clipboard.js';
@@ -160,9 +161,14 @@
     }
   }
 
+  // The prefixed name is the label unless the reader has asked for whole IRIs,
+  // which is one app-wide preference rather than a control on every surface.
+  // Literals and blank nodes have no prefixed form, so it does not touch them.
   $: display = (() => {
     if (!term) return '—';
-    if (term.type === 'uri' || term.type === 'iri') return shortenIRI(term.value);
+    if (term.type === 'uri' || term.type === 'iri') {
+      return $iriDisplay === 'full' ? String(term.value ?? '') : shortenIRI(term.value);
+    }
     if (term.type === 'literal') return `"${term.value}"`;
     if (term.type === 'bnode') return `_:${term.value}`;
     return term.value || '—';

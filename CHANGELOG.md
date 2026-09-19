@@ -14,6 +14,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A switch between prefixed names and whole IRIs**, in the Triple Browser's
+  toolbar beside SPARQL. The prefixed name (`rdf:type`) stays the default
+  because it is what makes a table of triples readable, but it is a lossy
+  rendering of the identifier you came to read, and the only way to see the
+  IRI was to hover a tooltip — no use from a keyboard, and nothing at all on a
+  touch screen. The preference is app-wide and persisted, so it is asked once
+  and answered everywhere a term is rendered: the triple table, the graph, the
+  resource page, the inspector panels. Literals and blank nodes have no
+  prefixed form and are unaffected, and the copy controls still copy the IRI in
+  either mode.
 - **Copy the IRI of any term in the Triple Browser's table.** Subject,
   predicate, object and graph each carry the same copy control, and it copies
   the IRI itself rather than the prefixed form the cell displays — a literal

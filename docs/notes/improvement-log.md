@@ -2803,3 +2803,31 @@ red on the previous CSS. `scripts/conformance_table.py --check` passes;
 `7a74332` and `bfbde07` are its two regenerations, for the browse-scope
 suite and for the three security suites respectively — bookkeeping for a
 generated table, which is why they carry no CHANGELOG line.
+
+
+## The truncation policy (2026-09-19)
+
+"The layout should really try to always show the full IRI and text, not
+'something…'." Three overlapping answers came with it: wrap in the table
+cells, full text everywhere including chips and lists, and keep the
+prefixed names with the full IRI available on demand. Two items.
+
+### 1. Asked once, answered everywhere (`eb4251d`)
+
+"On demand" was already claimed by a `title` tooltip, which is not an
+answer: it needs a pointer, it cannot be reached from a keyboard, it
+shows nothing on a touch screen, and it is gone the moment the pointer
+moves. The switch is a real control in the Triple Browser's toolbar, and
+what it sets is an app-wide persisted preference rather than a
+per-surface toggle — asked once, so every consumer of `RdfTerm` answers
+it: the triple table, the graph, the resource page, the inspector
+windows.
+
+The prefixed name stays the default. It is what makes a table of triples
+readable at all, and the report was not that prefixed names are wrong but
+that the thing underneath them was unreachable.
+
+Two invariants are pinned by tests rather than left to review: literals
+and blank nodes have no prefixed form and are untouched by the switch,
+and a copy control copies the IRI in either mode — a copy is for the
+identifier, never for whatever the label happens to be.

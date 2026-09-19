@@ -4,6 +4,7 @@
   import { autofocus } from '../lib/actions/autofocus.js';
   import { browseTriples, browseSuggest, browseFacets, getDataset, getOrganisation, browseResource, listDatasets, listOrganisations, listDatasetVersions, listDatasetGraphs, nlToSparql, llmHealth, getViewerFeed, getGeoStatsBatch } from '../lib/api.js';
   import { shortenIRI, downloadFile, graphResultsToElements, loadPrefixCcPrefixes, normalizeGraphRole, graphRoleLabel, detectGeoBindings, triplesToResults } from '../lib/rdf-utils.js';
+  import { iriDisplay, toggleIriDisplay } from '../lib/iriDisplay';
   import DataTable from '../components/DataTable.svelte';
   // GraphCanvas (cytoscape) and ViewerMap (maplibre + leaflet) are loaded lazily
   // the first time the graph/map view is opened — see graphCanvasMod/viewerMapMod
@@ -17,7 +18,7 @@
     Download, Copy, ChevronLeft, ChevronRight, Search, X,
     Network, Table2, Maximize2, Share2, Unlink, ExternalLink, Plus,
     FileText, Image, Filter, LayoutList, Building2, Database, History,
-    Sparkles, Code2, HelpCircle, Map as MapIcon, Boxes,
+    Sparkles, Code2, HelpCircle, Map as MapIcon, Boxes, Link2,
   } from 'lucide-svelte';
   import { slide } from 'svelte/transition';
   import { toNTriples, toNQuads, toTurtle, toTrig } from '../lib/rdf-utils.js';
@@ -1629,6 +1630,16 @@
         on:click={toggleSparqlPreview} aria-expanded={sparqlPreviewOpen}
         title={$i18nT('pages.tripleBrowser.showEquivalentSparql')}>
         <Code2 size={13} /> SPARQL
+      </button>
+
+      <!-- The prefixed name is a lossy rendering of the thing you came to read,
+           and hovering for a tooltip is no answer on a touch screen or from a
+           keyboard. The preference is app-wide, so asking here answers it
+           everywhere terms are rendered. -->
+      <button class="btn-adv-toggle" class:btn-adv-active={$iriDisplay === 'full'}
+        on:click={toggleIriDisplay} aria-pressed={$iriDisplay === 'full'}
+        title={$i18nT('system.iriDisplayHint')}>
+        <Link2 size={13} /> {$iriDisplay === 'full' ? $i18nT('system.iriShowFull') : $i18nT('system.iriShowCurie')}
       </button>
 
       {#if versionableDatasets.length > 0}
