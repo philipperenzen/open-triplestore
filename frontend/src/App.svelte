@@ -14,7 +14,7 @@
     Upload, Database, Building2, BookOpen, HelpCircle, Library,
     LogIn, LogOut, UserPlus, Menu, X, Globe, AlertTriangle, RefreshCw,
     Settings as SettingsIcon, Users as UsersIcon, Shield, FolderOpen,
-    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge
+    Share2, Terminal, CheckCircle2, Network, FileCode, Sparkles, Sun, Moon, Activity, Gauge, Tags
   } from 'lucide-svelte';
   import { isDark, toggleTheme } from './lib/theme.js';
   import { runtimeBranding } from './lib/runtimeConfig.js';
@@ -57,6 +57,7 @@
   const lazyShaclResults        = () => import('./pages/ShaclResults.svelte');
   const lazyAdminUsers          = () => import('./pages/AdminUsers.svelte');
   const lazyAdminSecurity       = () => import('./pages/AdminSecurity.svelte');
+  const lazyAdminPrefixes       = () => import('./pages/AdminPrefixes.svelte');
   const lazyAdminOperations     = () => import('./pages/AdminOperations.svelte');
   const lazyAdminLlm            = () => import('./pages/AdminLlm.svelte');
   const lazyDocEditor           = () => import('./pages/DocEditor.svelte');
@@ -244,6 +245,7 @@
       ['/settings', 'pages.settings.title', 'pages.settings.detail'],
       ['/admin/llm', 'pages.adminLlm.title', 'pages.adminLlm.detail'],
       ['/admin/operations', 'pages.adminOperations.title', 'pages.adminOperations.detail'],
+      ['/admin/prefixes', 'pages.adminPrefixes.title', 'pages.adminPrefixes.detail'],
       ['/admin', 'pages.admin.title', 'pages.admin.detail'],
       ['/models', 'pages.modelRegistry.title', 'pages.modelRegistry.detail'],
       ['/vocabularies', 'pages.vocabularySearch.title', 'pages.vocabularySearch.detail'],
@@ -432,6 +434,10 @@
               <Link to="/admin/operations" class={`nav-item ${currentPath.startsWith('/admin/operations') ? 'selected' : ''}`} on:click={navClick}>
                 <Gauge size={16} />
                 <span class="nav-item-label">{$t('nav.adminOperations')}</span>
+              </Link>
+              <Link to="/admin/prefixes" class={`nav-item ${currentPath.startsWith('/admin/prefixes') ? 'selected' : ''}`} on:click={navClick}>
+                <Tags size={16} />
+                <span class="nav-item-label">{$t('nav.adminPrefixes')}</span>
               </Link>
               <Link to="/admin/docs" class={`nav-item ${currentPath.startsWith('/admin/docs') ? 'selected' : ''}`} on:click={navClick}>
                 <SettingsIcon size={16} />
@@ -679,6 +685,9 @@
         </Route>
         <Route path="/admin/operations">
           <LazyPage loader={lazyAdminOperations} />
+        </Route>
+        <Route path="/admin/prefixes">
+          <LazyPage loader={lazyAdminPrefixes} />
         </Route>
         <Route path="/admin/docs">
           <LazyPage loader={lazyDocEditor} />

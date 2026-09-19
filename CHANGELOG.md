@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **An admin page for prefix overrides** (`/admin/prefixes`). Lists what this
+  deployment has decided its prefixes mean, adds one, repoints one and removes
+  one. While a label is being typed it resolves that label live and says what
+  it means today and from which tier — "geo: already resolves to
+  http://www.opengis.net/ont/geosparql# (from the bundled snapshot)" — so
+  claiming a shorthand is an informed choice rather than a surprise, and a
+  refused duplicate shows the namespace from the `409` rather than a bare
+  error. Removal asks first, and says the prefix is not deleted: it falls back
+  a tier.
 - **An administrator can say what a prefix means here** (`/api/admin/prefixes`,
   admin-only). A community list is a good default and a poor authority: `geo`
   means one thing on prefix.cc and another on a deployment that publishes its

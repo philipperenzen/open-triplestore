@@ -3202,3 +3202,24 @@ resolution order with the admin tier at its head, and says what deleting
 an override does and does not do. The four endpoints are in the API
 reference's auth table, so `api_reference_auth.rs` fires an anonymous
 request at each and requires a `401`.
+
+### The page
+
+Built alongside the API, and worth two notes.
+
+The live resolution while a label is typed is the part that makes this
+usable rather than merely possible. A prefix is a shared name; claiming
+one without being told what it already means is how a deployment quietly
+repoints `geo` and then wonders why its CURIEs expand oddly. The field
+debounces a lookup of the label being typed and reports the current
+mapping and which tier it came from, and the `409` renders the namespace
+out of its own body rather than a bare "conflict".
+
+Verified end to end against a server built from this branch rather than
+the demo image, because the demo image predates the endpoint and the dev
+proxy answered the SPA's own HTML for it — which is exactly the shape of
+"the page works, the API works, and nobody ran them against each other".
+Create → 201 and listed; the same label again → 409 naming the namespace
+it already has; repoint → `/api/prefixes/geo` answers the new namespace
+with `source: admin`; remove → it falls back to `prefix.cc` and
+`http://www.opengis.net/ont/geosparql#`.
