@@ -6577,10 +6577,7 @@ fn asset_download_error(
     filename: &str,
     err: &anyhow::Error,
 ) -> (StatusCode, String) {
-    if err
-        .downcast_ref::<crate::storage::AssetMissing>()
-        .is_none()
-    {
+    if err.downcast_ref::<crate::storage::AssetMissing>().is_none() {
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
     let replication = state.store.replication();

@@ -36,9 +36,9 @@ struct Fixture {
 /// A dataset with one asset row whose bytes were never written to `store`.
 fn fixture(store: ObjectStore, follower: bool) -> Fixture {
     let triples = if follower {
-        TripleStore::in_memory().unwrap().with_replication(
-            ReplicationConfig::follower(LEADER, Mode::Hot, Scope::All),
-        )
+        TripleStore::in_memory()
+            .unwrap()
+            .with_replication(ReplicationConfig::follower(LEADER, Mode::Hot, Scope::All))
     } else {
         TripleStore::in_memory().unwrap()
     };
@@ -79,10 +79,7 @@ fn fixture(store: ObjectStore, follower: bool) -> Fixture {
 }
 
 async fn download(f: &Fixture) -> (StatusCode, String) {
-    let uri = format!(
-        "/api/datasets/{}/assets/{}",
-        f.dataset_id, f.asset_id
-    );
+    let uri = format!("/api/datasets/{}/assets/{}", f.dataset_id, f.asset_id);
     let resp = f
         .app
         .clone()

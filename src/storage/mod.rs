@@ -223,9 +223,7 @@ impl ObjectStore {
                     .map_err(|e| {
                         // "the bucket has no such object" is an absence; every
                         // other way this can fail is a fault.
-                        if e.as_service_error()
-                            .is_some_and(|se| se.is_no_such_key())
-                        {
+                        if e.as_service_error().is_some_and(|se| se.is_no_such_key()) {
                             anyhow::Error::from(AssetMissing {
                                 key: key.to_string(),
                             })
