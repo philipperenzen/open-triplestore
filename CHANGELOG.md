@@ -14,6 +14,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **An administrator can say what a prefix means here** (`/api/admin/prefixes`,
+  admin-only). A community list is a good default and a poor authority: `geo`
+  means one thing on prefix.cc and another on a deployment that publishes its
+  own geo namespace. An override is stored in the identity database — so it
+  survives a restart and reaches a follower with the rest of it — and sits in a
+  new top tier of the resolver, above the platform overlay, an installed
+  bundle's seeds and the bundled snapshot, for lookup, reverse lookup, search,
+  listing, CURIE expansion and IRI shrinking alike. **No two overrides share a
+  shorthand**: the label is the primary key of the table they live in, so
+  `POST` of a label that already has one is refused with `409` and told what it
+  currently resolves to. Repointing is a `PUT`, a different request on purpose
+  — a prefix changing meaning should be a decision, not a side effect. Deleting
+  an override does not delete the prefix; the label falls back to whichever
+  lower tier answers first.
 - **A switch between prefixed names and whole IRIs**, in the Triple Browser's
   toolbar beside SPARQL. The prefixed name (`rdf:type`) stays the default
   because it is what makes a table of triples readable, but it is a lossy

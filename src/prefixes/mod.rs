@@ -132,6 +132,11 @@ pub struct PrefixRegistry {
     state: Mutex<RuntimeState>,
     dataset: PrefixDataset,
     platform: RwLock<PlatformPrefixes>,
+    /// Mappings an administrator set for this deployment, loaded from the
+    /// identity database at boot and replaced whole on every write. The
+    /// top tier: a deployment's own statement outranks the platform
+    /// overlay, an installed bundle's seeds and the community snapshot.
+    admin: RwLock<PlatformPrefixes>,
     /// Prefixes declared by installed seed bundles. Its own tier because it is a
     /// deployment's own statement about its namespaces and must outrank the
     /// bundled prefix.cc/LOV snapshots (see `insert_seeded`).
@@ -189,6 +194,7 @@ impl PrefixRegistry {
             }),
             dataset: PrefixDataset::bundled(),
             platform: RwLock::new(PlatformPrefixes::default()),
+            admin: RwLock::new(PlatformPrefixes::default()),
             seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network,
         })
@@ -203,6 +209,7 @@ impl PrefixRegistry {
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::empty(),
             platform: RwLock::new(PlatformPrefixes::default()),
+            admin: RwLock::new(PlatformPrefixes::default()),
             seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network: false,
         }
@@ -217,6 +224,7 @@ impl PrefixRegistry {
             state: Mutex::new(RuntimeState::default()),
             dataset: PrefixDataset::bundled(),
             platform: RwLock::new(PlatformPrefixes::default()),
+            admin: RwLock::new(PlatformPrefixes::default()),
             seeded: RwLock::new(PlatformPrefixes::default()),
             allow_network: false,
         }
@@ -231,8 +239,34 @@ impl PrefixRegistry {
         self.seeded.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn read_admin(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {
+        self.admin.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn read_platform(&self) -> std::sync::RwLockReadGuard<'_, PlatformPrefixes> {
         self.platform.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Replace the administrator overlay with `pairs` (label, namespace).
+    ///
+    /// Called once at boot with what the identity database holds, and again
+    /// after every admin write, so the process never disagrees with the
+    /// stored configuration. Invalid entries are dropped rather than
+    /// trusted: the API validates before storing, but a database restored
+    /// from elsewhere is not this process's to vouch for.
+    pub fn set_admin_prefixes(&self, pairs: impl IntoIterator<Item = (String, String)>) {
+        let mut by_label = HashMap::new();
+        let mut by_iri = HashMap::new();
+        for (label, iri) in pairs {
+            if !is_valid_label(&label) || !is_valid_iri(&iri) {
+                warn!("stored prefix override dropped (invalid): {label:?} → {iri:?}");
+                continue;
+            }
+            by_iri.entry(iri.clone()).or_insert_with(|| label.clone());
+            by_label.insert(label, iri);
+        }
+        let mut admin = self.admin.write().unwrap_or_else(|e| e.into_inner());
+        *admin = PlatformPrefixes { by_label, by_iri };
     }
 
     /// Replace the platform prefix overlay with `pairs` (label, namespace).
@@ -255,10 +289,18 @@ impl PrefixRegistry {
 
     // ── Local resolution ─────────────────────────────────────────────────────
 
-    /// Resolve `label` from the local tiers only (platform → seeded → dataset → cache).
+    /// Resolve `label` from the local tiers only
+    /// (admin → platform → seeded → dataset → cache).
     pub fn lookup_local(&self, label: &str) -> Option<ResolvedPrefix> {
         if !is_valid_label(label) {
             return None;
+        }
+        if let Some(iri) = self.read_admin().by_label.get(label) {
+            return Some(ResolvedPrefix {
+                prefix: label.to_string(),
+                namespace: iri.clone(),
+                source: PrefixSource::Admin,
+            });
         }
         if let Some(iri) = self.read_platform().by_label.get(label) {
             return Some(ResolvedPrefix {
@@ -293,6 +335,13 @@ impl PrefixRegistry {
     pub fn reverse_local(&self, iri: &str) -> Option<ResolvedPrefix> {
         if !is_valid_iri(iri) {
             return None;
+        }
+        if let Some(label) = self.read_admin().by_iri.get(iri) {
+            return Some(ResolvedPrefix {
+                prefix: label.clone(),
+                namespace: iri.to_string(),
+                source: PrefixSource::Admin,
+            });
         }
         if let Some(label) = self.read_platform().by_iri.get(iri) {
             return Some(ResolvedPrefix {
@@ -330,6 +379,28 @@ impl PrefixRegistry {
         let mut seen: HashSet<String> = HashSet::new();
 
         {
+            let admin = self.read_admin();
+            let mut hits: Vec<(&String, &String)> = admin
+                .by_label
+                .iter()
+                .filter(|(label, iri)| {
+                    q.is_empty()
+                        || label.to_ascii_lowercase().contains(&q)
+                        || iri.to_ascii_lowercase().contains(&q)
+                })
+                .collect();
+            hits.sort_by(|a, b| a.0.cmp(b.0));
+            for (label, iri) in hits.into_iter().take(limit) {
+                seen.insert(label.clone());
+                out.push(ResolvedPrefix {
+                    prefix: label.clone(),
+                    namespace: iri.clone(),
+                    source: PrefixSource::Admin,
+                });
+            }
+        }
+
+        {
             let platform = self.read_platform();
             let mut platform_hits: Vec<(&String, &String)> = platform
                 .by_label
@@ -342,12 +413,13 @@ impl PrefixRegistry {
                 .collect();
             platform_hits.sort_by(|a, b| a.0.cmp(b.0));
             for (label, iri) in platform_hits.into_iter().take(limit) {
-                seen.insert(label.clone());
-                out.push(ResolvedPrefix {
-                    prefix: label.clone(),
-                    namespace: iri.clone(),
-                    source: PrefixSource::Platform,
-                });
+                if seen.insert(label.clone()) {
+                    out.push(ResolvedPrefix {
+                        prefix: label.clone(),
+                        namespace: iri.clone(),
+                        source: PrefixSource::Platform,
+                    });
+                }
             }
         }
 
@@ -367,22 +439,37 @@ impl PrefixRegistry {
         out
     }
 
-    /// All known prefixes (platform overlay first, then the bundled dataset,
-    /// then cache-confirmed extras), deduplicated by label.
+    /// All known prefixes (administrator overrides first, then the platform
+    /// overlay, the bundled dataset and cache-confirmed extras), deduplicated
+    /// by label — so the listing agrees with what `lookup_local` resolves.
     pub fn all_prefixes(&self) -> Vec<ResolvedPrefix> {
         let mut out = Vec::with_capacity(self.dataset.len() + 16);
         let mut seen: HashSet<String> = HashSet::new();
         {
-            let platform = self.read_platform();
-            let mut labels: Vec<_> = platform.by_label.iter().collect();
+            let admin = self.read_admin();
+            let mut labels: Vec<_> = admin.by_label.iter().collect();
             labels.sort_by(|a, b| a.0.cmp(b.0));
             for (label, iri) in labels {
                 seen.insert(label.clone());
                 out.push(ResolvedPrefix {
                     prefix: label.clone(),
                     namespace: iri.clone(),
-                    source: PrefixSource::Platform,
+                    source: PrefixSource::Admin,
                 });
+            }
+        }
+        {
+            let platform = self.read_platform();
+            let mut labels: Vec<_> = platform.by_label.iter().collect();
+            labels.sort_by(|a, b| a.0.cmp(b.0));
+            for (label, iri) in labels {
+                if seen.insert(label.clone()) {
+                    out.push(ResolvedPrefix {
+                        prefix: label.clone(),
+                        namespace: iri.clone(),
+                        source: PrefixSource::Platform,
+                    });
+                }
             }
         }
         {
@@ -442,6 +529,27 @@ impl PrefixRegistry {
             return None;
         }
         let mut best: Option<(ResolvedPrefix, String)> = None;
+        {
+            let admin = self.read_admin();
+            for (ns, label) in admin.by_iri.iter() {
+                if iri.starts_with(ns.as_str()) && iri.len() > ns.len() {
+                    let better = match &best {
+                        Some((b, _)) => ns.len() > b.namespace.len(),
+                        None => true,
+                    };
+                    if better {
+                        best = Some((
+                            ResolvedPrefix {
+                                prefix: label.clone(),
+                                namespace: ns.clone(),
+                                source: PrefixSource::Admin,
+                            },
+                            iri[ns.len()..].to_string(),
+                        ));
+                    }
+                }
+            }
+        }
         {
             let platform = self.read_platform();
             for (ns, label) in platform.by_iri.iter() {

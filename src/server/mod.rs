@@ -721,6 +721,19 @@ async fn mark_vocab_dirty_after_success(
 }
 
 pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNet>) -> Router {
+    // What a prefix means on this deployment is configuration, held in the
+    // identity database and answered from an in-memory overlay. Load it here,
+    // where the routes that answer with it are assembled: a router over an
+    // identity database that ignored the overrides stored in it would resolve
+    // CURIEs differently from the same database a moment later, and the
+    // difference would only show up after the first admin write.
+    match state.auth_db.list_prefix_overrides() {
+        Ok(rows) => state
+            .prefix_registry
+            .set_admin_prefixes(rows.into_iter().map(|o| (o.label, o.namespace))),
+        Err(e) => tracing::warn!("prefix overrides not loaded: {e}"),
+    }
+
     // NOTE: `per_second(n)` in tower_governor is misleadingly named — it sets the
     // replenish *period* to n seconds (one token every n seconds), NOT n tokens per
     // second. So `per_second(6)` means one request per 6s, i.e. 10/min sustained.
@@ -1455,6 +1468,18 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth))
         .with_state(state.clone());
 
+    // What a prefix means on this deployment. Read-only for everyone (above);
+    // changing one is admin-only, because repointing a prefix changes what
+    // every stored CURIE expands to.
+    let prefix_admin_routes = crate::prefixes::routes::prefix_admin_routes()
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_acl_guard,
+        ))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_admin))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .with_state(state.clone());
+
     // Vocabulary install (copies a vocabulary from the bundled LOV corpus
     // into the model registry) — admin only.
     let vocab_service_admin_routes = crate::vocab_search::routes::vocab_admin_routes()
@@ -1881,6 +1906,7 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .merge(saved_query_read)
         .merge(saved_query_write)
         .merge(prefix_service_routes)
+        .merge(prefix_admin_routes)
         .merge(vocab_service_routes)
         .merge(vocab_service_admin_routes)
         .merge(

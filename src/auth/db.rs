@@ -1180,6 +1180,20 @@ impl AuthDb {
                 updated_at TEXT NOT NULL
             );
 
+            -- ── Prefix overrides ────────────────────────────────────────────
+            -- What a prefix means *here*, set by an administrator. The label is
+            -- the primary key, which makes no-two-prefixes-with-the-same-
+            -- shorthand a property of the storage rather than a check someone
+            -- has to remember to run. Lives in the identity database so
+            -- it survives a restart and reaches a follower with the rest of it.
+            CREATE TABLE IF NOT EXISTS prefix_overrides (
+                label TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             -- ── OIDC provider (this store as the identity provider for client apps) ──
             -- Registered relying-party clients (SPAs and services signing users
             -- in AGAINST this store; distinct from oauth_providers = upstream
@@ -2310,6 +2324,95 @@ impl AuthDb {
             ],
         )?;
         Ok(())
+    }
+
+    // ─── Prefix overrides (what a prefix means on this deployment) ───────────
+
+    /// Every override, ordered by label.
+    pub fn list_prefix_overrides(&self) -> anyhow::Result<Vec<PrefixOverride>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT label, namespace, created_by, created_at, updated_at
+             FROM prefix_overrides ORDER BY label",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PrefixOverride {
+                    label: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_by: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// One override by label; None when the label has none.
+    pub fn get_prefix_override(&self, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
+        let conn = self.pool.get()?;
+        read_prefix_override(&conn, label)
+    }
+
+    /// Create an override, refusing a label that already has one.
+    ///
+    /// The refusal is the point: two prefixes with the same shorthand cannot
+    /// both be right, and silently repointing an established prefix changes
+    /// what every stored CURIE means. Repointing is [`Self::put_prefix_override`],
+    /// which says so.
+    pub fn create_prefix_override(
+        &self,
+        label: &str,
+        namespace: &str,
+        created_by: Option<&str>,
+    ) -> anyhow::Result<PrefixOverride> {
+        // One connection for the whole call: the pool is small, and holding one
+        // while asking for another is how you deadlock it.
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO prefix_overrides
+                 (label, namespace, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![label, namespace, created_by, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("prefix {label} already has an override");
+        }
+        read_prefix_override(&conn, label)?
+            .ok_or_else(|| anyhow::anyhow!("override vanished after insert"))
+    }
+
+    /// Create or repoint an override.
+    pub fn put_prefix_override(
+        &self,
+        label: &str,
+        namespace: &str,
+        created_by: Option<&str>,
+    ) -> anyhow::Result<(PrefixOverride, bool)> {
+        let conn = self.pool.get()?;
+        let existed = read_prefix_override(&conn, label)?.is_some();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO prefix_overrides
+                 (label, namespace, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(label) DO UPDATE SET
+                 namespace = excluded.namespace,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![label, namespace, created_by, now],
+        )?;
+        let row = read_prefix_override(&conn, label)?
+            .ok_or_else(|| anyhow::anyhow!("override vanished after upsert"))?;
+        Ok((row, !existed))
+    }
+
+    /// Remove an override, so the label falls back to whatever the lower tiers
+    /// say. Returns whether there was one.
+    pub fn delete_prefix_override(&self, label: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        Ok(conn.execute("DELETE FROM prefix_overrides WHERE label = ?1", [label])? > 0)
     }
 
     // ─── App settings (runtime-changeable admin toggles) ──────────────────────
@@ -6917,4 +7020,25 @@ mod refresh_rotation_tests {
         // An unknown hash is simply absent, not an error.
         assert!(db.take_client_refresh_token("nope").unwrap().is_none());
     }
+}
+
+/// Read one override on a connection the caller already holds.
+fn read_prefix_override(conn: &Connection, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
+    let row = conn
+        .query_row(
+            "SELECT label, namespace, created_by, created_at, updated_at
+             FROM prefix_overrides WHERE label = ?1",
+            [label],
+            |r| {
+                Ok(PrefixOverride {
+                    label: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_by: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
 }

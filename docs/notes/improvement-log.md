@@ -3131,3 +3131,74 @@ asserts the dataset list is empty, and it was not.
 Two of the seven carried items are now struck rather than built —
 `cargo deny` was already a passing CI gate, and asset shipping's
 stand-in answer is the `404` from item 1 of this section.
+
+
+## Prefixes an administrator can edit (2026-09-19)
+
+The second of the two UI items, and the one with real work behind it. The
+ask: "allow editing of prefixes as admin/maintainer — do not allow two of
+the same prefixes shorthand."
+
+**What was already there, and why it was not enough.** The registry had
+four tiers and a `Seeded` one above the bundled prefix.cc/LOV snapshot,
+and `insert_seeded` already refused a second mapping for a label it knew.
+But that tier is re-applied from installed bundles on every boot and its
+rule is *first seed wins* — right for a bundle, useless for somebody
+changing a mapping on a running store. There was no write API, and
+nothing survived a restart. The registry had the shape of the feature and
+none of its substance.
+
+**The tier.** `PrefixSource::Admin`, above everything, replaced whole
+rather than inserted into. Above the platform overlay too, which is the
+point: the platform overlay is derived from this instance's own
+registered vocabularies, and an administrator overruling *that* is
+exactly the case the feature exists for. Five resolution paths had to
+learn about it — `lookup_local`, `reverse_local`, `search`,
+`all_prefixes` and `shrink_iri` — and the last one matters more than it
+looks: without it a deployment's own IRIs would never shorten back into
+the prefix it declared for them, so they would render in full everywhere
+while expanding correctly.
+
+Adding a tier above `platform` also exposed that `platform` had been
+written as *the* first tier: in `search` and `all_prefixes` it inserted
+into `seen` unconditionally instead of checking it. Harmless while it was
+first, a duplicate listing the moment it was not.
+
+**"No two of the same shorthand" is storage, not a check.** The label is
+the primary key of `prefix_overrides`. There is no validation step to
+forget, no race between two admins to lose, and a restored database
+cannot carry a duplicate. The API refuses a `POST` of a claimed label
+with `409` **and the namespace it currently resolves to** — a refusal
+that does not say what the label already means leaves the reader to go
+and look it up before they can decide.
+
+**Repointing is a different verb.** `POST` claims, `PUT` repoints.
+Changing what a prefix means changes what every stored CURIE expands to,
+so it should take a request that says so rather than falling out of a
+retry.
+
+**What the tests hold.** Six of them: that a non-admin and an anonymous
+caller are refused; that an override outranks the bundled snapshot *and*
+that a CURIE expands through it (the mapping resolving is not the same
+claim as the expansion following it); that a label cannot be claimed
+twice and the first mapping is untouched by the attempt; that repointing
+and removal work and that removal restores the lower tier rather than
+deleting the label; that an override survives a restart, built as a
+second `AppState` over the same identity database; and that bad labels
+and `javascript:` / `file:` / non-URL namespaces are refused before
+anything is stored.
+
+**A bug the tests found immediately.** Every write returned `500`. The
+handlers were fine; `create_prefix_override` took a pooled connection and
+then called `get_prefix_override`, which takes *another* — with a
+small pool that is a deadlock, and it surfaced as "timed out waiting for
+connection" rather than as anything resembling its cause. The write paths
+now read back on the connection they already hold. This is the class of
+defect an in-process test catches and a code review does not.
+
+**Documented where it is used**, not only in the reference: the prefix
+service's own chapter in `docs/vocabulary-search.md` now states the full
+resolution order with the admin tier at its head, and says what deleting
+an override does and does not do. The four endpoints are in the API
+reference's auth table, so `api_reference_auth.rs` fires an anonymous
+request at each and requires a `401`.

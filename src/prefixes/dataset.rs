@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrefixSource {
+    /// Set by an administrator of this deployment, stored in the identity
+    /// database and outranking every other tier: when a deployment says
+    /// what `geo` means here, that is what it means here.
+    Admin,
     /// Registered on this triplestore (model/vocabulary registry).
     Platform,
     /// Declared by a seed bundle installed on this deployment. Outranks the

@@ -36,13 +36,45 @@ pub fn test_state() -> AppState {
 /// A state around a store the test built itself (a follower, a store with
 /// change capture on).
 pub fn test_state_with_store(store: TripleStore) -> AppState {
-    let auth_db = Arc::new(AuthDb::in_memory().unwrap());
+    test_state_parts(
+        store,
+        Arc::new(AuthDb::in_memory().unwrap()),
+        PrefixRegistry::empty(),
+    )
+}
+
+/// A second state over an identity database a test already has — what a
+/// restart looks like, for anything that is meant to be configuration rather
+/// than process state.
+pub fn test_state_with_auth_db(auth_db: Arc<AuthDb>) -> AppState {
+    test_state_parts(
+        TripleStore::in_memory().unwrap(),
+        auth_db,
+        PrefixRegistry::bundled_only(),
+    )
+}
+
+/// A state whose registry carries the bundled prefix.cc/LOV snapshot, for
+/// tests that care what a well-known label means before anyone overrides it.
+pub fn test_state_with_bundled_prefixes() -> AppState {
+    test_state_parts(
+        TripleStore::in_memory().unwrap(),
+        Arc::new(AuthDb::in_memory().unwrap()),
+        PrefixRegistry::bundled_only(),
+    )
+}
+
+fn test_state_parts(
+    store: TripleStore,
+    auth_db: Arc<AuthDb>,
+    prefix_registry: PrefixRegistry,
+) -> AppState {
     let audit = Arc::new(open_triplestore::auth::audit::AuditLogger::new(
         auth_db.pool(),
     ));
     AppState {
         store,
-        prefix_registry: Arc::new(PrefixRegistry::empty()),
+        prefix_registry: Arc::new(prefix_registry),
         auth_db,
         audit,
         backup: None,
@@ -100,7 +132,11 @@ pub fn admin_state() -> (AppState, String) {
 
 /// As [`admin_state`], around a store the test built itself.
 pub fn admin_state_with_store(store: TripleStore) -> (AppState, String) {
-    let state = test_state_with_store(store);
+    admin_state_over(test_state_with_store(store))
+}
+
+/// As [`admin_state`], over a state the test assembled itself.
+pub fn admin_state_over(state: AppState) -> (AppState, String) {
     state
         .auth_db
         .create_user(

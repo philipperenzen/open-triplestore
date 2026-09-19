@@ -88,6 +88,10 @@ Three facts worth knowing before an instance is exposed:
 | `POST` | `/api/shaclc/serialize` | **token** | SHACL → SHACLC of a graph named by the caller. Needs a token since 0.6.x, and the caller must be allowed to read that graph: it reads whatever IRI it is given out of the store, so it was previously a way for anyone to read any graph. A graph you may not read answers `403`, whether or not it exists. |
 | `POST` | `/api/rml/preview` | **token** | Runs a mapping into a throwaway store. Needs a token since 0.6.x, for the same reason as `/api/shaclc/parse`. |
 | `GET` | `/api/prefixes` | **none** | Bundled prefix registry; rate-limited. |
+| `GET` | `/api/admin/prefixes` | **admin** | What this deployment has decided its prefixes mean. |
+| `POST` | `/api/admin/prefixes` | **admin** | Claim a shorthand for a namespace. Refuses a label that already has an override, with `409` and what it currently resolves to — two prefixes with the same shorthand cannot both be right, and repointing one silently would change what every stored CURIE expands to. |
+| `PUT` | `/api/admin/prefixes/{label}` | **admin** | Set or repoint a shorthand. `201` when it is new, `200` when it repointed one. |
+| `DELETE` | `/api/admin/prefixes/{label}` | **admin** | Drop this deployment's opinion of a shorthand, so it falls back to the platform overlay, an installed bundle's seeds or the community snapshot. The prefix itself does not go away. |
 | `GET` | `/api/vocab/search` | **none** | Bundled vocabulary search; rate-limited. |
 | `POST` | `/api/vocab/install` | **admin** | Installs a vocabulary into the instance. |
 | `GET` | `/api/admin/telemetry` | **admin** | Store counters across every tenant. |
