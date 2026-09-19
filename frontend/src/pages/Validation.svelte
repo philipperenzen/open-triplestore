@@ -13,6 +13,7 @@
   import Select from '../components/Select.svelte';
   import { isAuthenticated, user } from '../lib/stores.js';
   import PageHeader from '../components/PageHeader.svelte';
+  import ShaclStudioNav from '../components/ShaclStudioNav.svelte';
   import ShapesEditor from '../components/ShapesEditor.svelte';
   import IssueResults from '../components/IssueResults.svelte';
   import { toastError } from '../lib/toast.ts';
@@ -283,6 +284,11 @@
     </div>
   {:else}
 
+  <!-- This page is the Studio's dataset overview, so it carries the Studio's
+       own bar: it was reachable from the Overview card but had no way back
+       except the browser's own. -->
+  <ShaclStudioNav />
+
   <PageHeader
     title={$t('pages.validation.title')}
     breadcrumbs={backOrgId
@@ -513,7 +519,10 @@
      at 7rem with an ellipsis, which turns two organisations with a shared
      prefix into the same chip. */
   .owner-chip { display: inline-flex; align-items: flex-start; gap: 0.3rem; margin-left: 0.4rem; font-size: 0.72rem; color: var(--ink-500); background: #f1f5f9; padding: 1px 6px 1px 2px; border-radius: 10px; flex: 0 1 auto; min-width: 0; }
-  .owner-chip-name { overflow-wrap: anywhere; }
+  /* `break-word`, not `anywhere`: an owner is a human name, so it wraps
+     between words and only splits one if a single word cannot fit. At 375px
+     `anywhere` broke "Open Triplestore" into three lines with a stray "e". */
+  .owner-chip-name { overflow-wrap: break-word; }
 
   .error { color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; padding: 0.6rem 0.8rem; border-radius: 10px; font-size: 0.85rem; }
 
@@ -553,7 +562,7 @@
   /* The floor stays: a flex item that may shrink to nothing did, and that was
      the bug that made this list nameless. What goes is the clipping — a
      dataset whose name does not fit on one line takes two. */
-  .ds-name { flex: 1 1 auto; min-width: 4.5rem; font-weight: 600; font-size: 0.88rem; color: #1e293b; overflow-wrap: anywhere; }
+  .ds-name { flex: 1 1 auto; min-width: 4.5rem; font-weight: 600; font-size: 0.88rem; color: #1e293b; overflow-wrap: break-word; }
   .row-status { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
   .ran-at { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.68rem; color: #94a3b8; }
 

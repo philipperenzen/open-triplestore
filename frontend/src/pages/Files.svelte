@@ -245,14 +245,14 @@
      the dataset's own page carries the whole of it. */
   .files-ds-name {
     font-weight: 700; font-size: 0.88rem; color: var(--ink-900, #0f172a);
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
   .files-ds-sub {
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
     overflow: hidden;
     font-size: 0.72rem; color: var(--ink-400, #94a3b8);
     text-transform: capitalize;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
   .files-page :global(.files-ds-open) { color: var(--ink-300, #cbd5e1); flex-shrink: 0; }
   :global(.files-ds-card:hover .files-ds-open) { color: var(--brand-500, #3b82f6); }

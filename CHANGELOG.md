@@ -703,6 +703,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The Studio's Datasets tab left the Studio.** It pointed at `/datasets`,
+  the global catalogue, which is not part of the SHACL workspace and offers no
+  way back into it — while the Overview's own "Datasets to validate" card
+  pointed at `/validation`, the validation overview, which is what "datasets"
+  means inside the Studio. The tab now goes where the card goes. The tabs also
+  run in the order the work runs — Overview, Shapes, Datasets, Pipelines,
+  Results — and the validation overview renders the Studio bar, which it never
+  did, so the page is reachable *and* leaveable. Results no longer claims
+  `/validation` as its own: that claim was invisible while nothing on the page
+  drew the bar, and would now light the wrong tab.
 - **Terms, names and IRIs were cut off rather than shown.** Measured on the
   seeded demo, one screen of the triple browser had **110 elements whose text
   did not fit the box drawn for it** — a cell 31px wide holding an IRI that

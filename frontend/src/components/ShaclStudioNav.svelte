@@ -1,9 +1,13 @@
 <script>
-  // Sub-navigation pinned above every /shacl/* page. Keeps the Studio surfaces
-  // (Overview · Shapes · Pipelines · Results) one click from each other,
-  // satisfying the "one consistent SHACL workspace" goal. Datasets sits
-  // alongside them because shapes are always validated against one, and the
-  // catalogue is where a user goes next.
+  // Sub-navigation pinned above every Studio page. Keeps the workspace's
+  // surfaces one click from each other, in the order the work runs: you look
+  // at the Overview, author Shapes, pick the Datasets to validate, arrange
+  // Pipelines, and read Results.
+  //
+  // Datasets points at /validation, the validation overview — the same list the
+  // Overview's "Datasets to validate" card opens. It used to leave for the
+  // global catalogue at /datasets, which is not part of the workspace and
+  // carries no way back into it.
   import { LayoutDashboard, FileCode, Workflow, ListChecks, Database } from 'lucide-svelte';
   import { t } from 'svelte-i18n';
   import { Link } from '../lib/router/index.js';
@@ -12,11 +16,12 @@
   const TABS = [
     { to: '/shacl',            labelKey: 'components.shaclStudioNav.tabOverview',  icon: LayoutDashboard, match: (p) => p === '/shacl' },
     { to: '/shacl/shapes',     labelKey: 'components.shaclStudioNav.tabShapes',    icon: FileCode,        match: (p) => p.startsWith('/shacl/shapes') },
+    { to: '/validation',       labelKey: 'components.shaclStudioNav.tabDatasets',  icon: Database,        match: (p) => p.startsWith('/validation') },
     { to: '/shacl/pipelines',  labelKey: 'components.shaclStudioNav.tabPipelines', icon: Workflow,        match: (p) => p.startsWith('/shacl/pipelines') },
-    { to: '/shacl/results',    labelKey: 'components.shaclStudioNav.tabResults',   icon: ListChecks,      match: (p) => p.startsWith('/shacl/results') || p.startsWith('/validation') },
-    // Exact-or-child, so a dataset detail page highlights Datasets while none of
-    // the /shacl/* or /validation paths above can fall into it.
-    { to: '/datasets',         labelKey: 'components.shaclStudioNav.tabDatasets',  icon: Database,        match: (p) => p === '/datasets' || p.startsWith('/datasets/') },
+    // Results no longer claims /validation: it did while nothing on that page
+    // rendered this bar, so the claim was invisible — and now that the page
+    // does, it would light the wrong tab.
+    { to: '/shacl/results',    labelKey: 'components.shaclStudioNav.tabResults',   icon: ListChecks,      match: (p) => p.startsWith('/shacl/results') },
   ];
 
   $: path = $location.pathname;

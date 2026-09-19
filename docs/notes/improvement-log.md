@@ -2878,3 +2878,28 @@ number. Both are replaced by what is now true and falsifiable: the floor
 holds, nothing reports needing more width than it has, and the longest
 name is more than one line tall. Red against the previous CSS with
 `"3D, Map & BIM Demo" needs 138px but was given 128.7px`.
+
+### 3. The Studio's Datasets tab led out of the Studio (this commit)
+
+Reported against the bar added two commits earlier: it "just goes to the
+dataset page - instead of the validation page dataset overview like the
+card does". Exactly right, and the card is the tell — the Overview's
+"12 Datasets to validate" card already pointed at `/validation`, so the
+same word led to two different places depending on which control you
+used.
+
+Inside the Studio, "datasets" means the datasets you are validating. The
+tab now points at `/validation`, and that page renders the Studio bar,
+which it never did: it was reachable from the Overview card and had no
+way back except the browser's own button. Because nothing on it drew the
+bar, the Results tab's claim on `/validation` had never been visible —
+and would now have lit the wrong tab, so it is gone.
+
+The tabs also run in the order the work runs — Overview, Shapes,
+Datasets, Pipelines, Results — rather than with datasets appended after
+the surfaces that depend on them.
+
+A component test pins all of it: the Datasets tab's target, the order,
+that every tab stays inside the workspace, and that each path lights
+exactly one tab. That last one is what would have caught the two tabs
+claiming `/validation` between them.
