@@ -119,7 +119,7 @@
       <p class="muted">{paramError}</p>
     {:else if busy && !checked}
       <Loader2 size={24} class="spin" />
-      <p class="muted">{$t('common.loading')}</p>
+      <p class="muted">{$t('system.loading')}</p>
     {:else if error}
       <XCircle size={28} class="err-icon" />
       <h2>{$t('pages.oauthAuthorize.errorTitle')}</h2>

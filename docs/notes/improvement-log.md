@@ -3223,3 +3223,30 @@ Create → 201 and listed; the same label again → 409 naming the namespace
 it already has; repoint → `/api/prefixes/geo` answers the new namespace
 with `source: admin`; remove → it falls back to `prefix.cc` and
 `http://www.opengis.net/ont/geosparql#`.
+
+### A key that renders as itself (2026-09-19)
+
+Found in passing while building the prefixes page: `$t('common.loading')`
+in two files and `$t('common.delete')` in one, against a `common`
+namespace that does not exist in either dictionary. svelte-i18n renders a
+missing key as the key, so those controls read literally
+`common.loading` and `common.delete` on screen — in both languages, with
+nothing logged and nothing failing.
+
+Three lines to fix and not worth a commit on its own, so the commit is
+the ratchet: a test that scans the source for literal `$t('…')`
+references and requires each to resolve in English *and* in Dutch, plus
+that the two dictionaries have the same shape. A key present in one and
+not the other falls back silently, which reads as an untranslated app
+rather than a bug.
+
+It found five things, and two of them were mine. `$t('pages.import.role.'
++ role)` and `$t('pages.import.bump' + level…)` build their keys, and my
+first regex matched the literal prefix of a concatenation, so it reported
+two bugs that do not exist. Requiring the literal to be followed by `,`
+or `)` excludes them. Checking the two before fixing them is the only
+reason they are not now three "fixes" that broke a working screen.
+
+The test also asserts it found more than 500 call sites, because a regex
+that quietly stops matching makes every assertion after it vacuously
+true — the failure mode this whole file exists to prevent.

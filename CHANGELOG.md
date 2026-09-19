@@ -726,6 +726,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Three controls rendered the name of their translation key.** `common.loading`
+  and `common.delete` were asked for in the admin security page and the OAuth
+  consent screen, and there is no `common` namespace in either dictionary —
+  svelte-i18n renders a missing key as the key, so those spinners and that
+  button read literally `common.loading` and `common.delete` on screen, in both
+  languages, without anything failing. They point at `system.*`, which exists.
+  A test now scans the source for literal `$t('…')` references and requires
+  each to resolve in English and in Dutch, so the next one fails the build
+  instead of shipping.
 - **A follower's first boot printed a wall of warnings.** The boot seed writes
   the Studio's meta-shapes, the per-standard shape graphs, the bundled demo
   organisation and its data, the standard vocabularies and the built-in

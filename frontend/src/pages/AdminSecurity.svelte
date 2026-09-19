@@ -388,7 +388,7 @@
         <p class="hint">{$t('pages.adminSecurity.clientsHint')}</p>
       </div>
       {#if oidcClients === null}
-        <p class="hint"><Loader2 size={14} class="spin" /> {$t('common.loading')}</p>
+        <p class="hint"><Loader2 size={14} class="spin" /> {$t('system.loading')}</p>
       {:else}
         {#if oidcClients.length === 0}
           <p class="hint">{$t('pages.adminSecurity.clientsEmpty')}</p>
@@ -398,7 +398,7 @@
             <div class="panel-header">
               <h3>{c.name} <code>{c.client_id}</code></h3>
               <button class="btn btn-sm btn-danger" on:click={() => removeOidcClient(c.client_id)}>
-                <Trash2 size={14} /> {$t('common.delete')}
+                <Trash2 size={14} /> {$t('system.delete')}
               </button>
             </div>
             <p class="hint">
@@ -453,7 +453,7 @@
         <p class="hint">{$t('pages.adminSecurity.guestRegHint')}</p>
       </div>
       {#if guestReg === null}
-        <p class="hint"><Loader2 size={14} class="spin" /> {$t('common.loading')}</p>
+        <p class="hint"><Loader2 size={14} class="spin" /> {$t('system.loading')}</p>
       {:else}
         <div class="form-card">
           <h3>{$t('pages.adminSecurity.guestRegTitle')}</h3>
