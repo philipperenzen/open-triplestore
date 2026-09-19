@@ -703,6 +703,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Every dialog in the app opened in the middle of the page, not the middle
+  of the screen.** `.route-view` carried `animation: routeIn … both`, and
+  `both` includes `forwards`: the final keyframe keeps applying after the
+  animation ends. That frame reads `transform: none`, but a filled animation
+  still *sets* the property, so the computed value stayed
+  `matrix(1, 0, 0, 1, 0, 0)` — and any transform but `none` makes an element
+  the containing block for its `position: fixed` descendants. A
+  `position: fixed; inset: 0` backdrop was therefore the size of the routed
+  page rather than the viewport: measured 5052px tall against a 900px screen,
+  so a centred dialog opened about 2500px down, out of sight, at a scroll
+  position unrelated to where the reader was. `backwards` keeps the entrance
+  and drops the residue.
 - **The SHACL Studio's pages were cramped at phone width.** On the validation
   list each dataset row crammed a status pill, a shapes picker, a run button
   rendered as a wide empty bar and a toggle whose label broke over two lines

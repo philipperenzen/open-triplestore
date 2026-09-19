@@ -3043,3 +3043,33 @@ background. It is removed: the chip's automatic minimum is its longest
 word, and `.ds-name` cannot be starved by that because it has its own
 4.5rem floor. The "pre-existing, not mine" label on that finding was
 wrong, and it would have merged red.
+
+
+### 4. Every dialog opened off screen (2026-09-19)
+
+Reported as the page-settings dialog opening "on the middle of the page
+with a wrong scroll", and the computed styles that came with the report
+had the answer in them: a `position: fixed` backdrop measuring **5052px
+tall in a 900px viewport**. A fixed element that is not the viewport has
+an ancestor acting as its containing block, and only a handful of
+properties do that.
+
+It was `transform`, on `.route-view`, and nothing in the stylesheet asks
+for one. `animation: routeIn … both` does: `both` is
+`backwards` plus `forwards`, and `forwards` keeps applying the final
+keyframe forever. That keyframe says `transform: none` — but a filled
+animation still *sets* the property, so the computed value is
+`matrix(1, 0, 0, 1, 0, 0)`, which is not `none`, and that is enough. One
+word, every modal in the app, on every page.
+
+`backwards` keeps the part that matters (the first frame is held before
+the animation starts, so there is no flash) and drops the part that did
+the damage.
+
+Two Playwright tests, because jsdom has neither layout nor animations:
+one on the invariant — a settled `.route-view` computes `transform: none`
+— and one on the symptom, measuring that the dialog's backdrop is the
+viewport and the dialog is on screen. The second creates its own dataset
+through the API rather than assuming anything about the seeded set, since
+the control it clicks is only offered to someone who may edit. Red on the
+old CSS with "the backdrop is 2924px tall in a 720px viewport".
