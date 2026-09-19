@@ -327,12 +327,18 @@ many have applied it, and degrades visibly when they cannot — exactly the
 synchronous mode above, with the follower list and the count derived
 from the cluster.
 
-Two things to know. The Raft log and vote are kept in memory: a restarted
-member rejoins with term 0 and learns the current term from the first
-heartbeat; because the state machine holds no data and the data path
-fences by epoch, the worst a double vote could do is elect a second leader
-for one term, which the epoch handling turns into a resynchronisation,
-not a divergence. And the members talk over the server's own HTTP port
+Two things to know. The Raft log is kept in memory — a restarted member
+rejoins with term 0, learns the current term from the first heartbeat, and
+catches up on the change log like any other follower, because the state
+machine holds no data. Its **vote** is not: that lives in
+`{data_dir}/raft-vote.json`, rewritten on each vote and only on a vote, so
+a member that restarts cannot vote twice in one term. (Even without it the
+consequences were bounded — the election timeout usually outlasts a restart,
+and a double vote could at worst elect a second leader for one term, which
+the epoch fence turns into a resynchronisation rather than a divergence —
+but remembering one `{term, node}` pair is cheap.) An unreadable file is
+logged and ignored rather than refused: starting without it is where this
+began. And the members talk over the server's own HTTP port
 (`POST /api/replication/raft/vote`, `/append`, `/snapshot`); put those
 paths on the private network — the secret authenticates them, the
 network should hide them.

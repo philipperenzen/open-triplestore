@@ -3250,3 +3250,36 @@ reason they are not now three "fixes" that broke a working screen.
 The test also asserts it found more than 500 call sites, because a regex
 that quietly stops matching makes every assertion after it vacuously
 true — the failure mode this whole file exists to prevent.
+
+### The Raft vote, persisted (2026-09-19)
+
+Carried since the P4 checkpoint, where it was written down as "the first
+thing to add if a double election ever shows up in a status" — a
+conditional the evidence never met. Doing it anyway, because the
+condition was the wrong test: the argument for leaving it was that the
+*consequences* are bounded, not that the situation is fine. Raft's safety
+rests on a member voting at most once per term, and a member that forgets
+its vote across a restart breaks that premise; everything after it in the
+old note is about why breaking it does not cost much here.
+
+One `{term, node}` pair, in a file beside the store's own replication
+bookmark, written and renamed so a crash cannot leave half of one, read
+once at start-up because openraft asks for the vote during start-up and
+holds its own copy after. Rewritten only on a vote — Raft votes once per
+election, not once per write — so it is on no hot path.
+
+The log stays in memory, and the module docs now separate the two claims,
+which they had run together: the log is replayable because the state
+machine holds no data and the data path is the change log, and that says
+nothing at all about the vote.
+
+Two deliberate non-failures: an in-memory store passes `None` and behaves
+exactly as before, which every in-process consensus test relies on; and an
+unreadable file is logged and ignored rather than refused, because
+refusing to boot over a corrupt vote file is strictly worse than the
+problem it would be protecting against.
+
+Four tests: the vote comes back after a restart, the file holds the
+latest of several, no path means no file and no memory, and a corrupt
+file is ignored and then overwritten. Commenting out the one line that
+writes the file turns three of them red.

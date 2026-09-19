@@ -1545,7 +1545,14 @@ pub fn spawn_identity_follower_if_configured(auth: crate::auth::db::AuthDb) {
 pub(crate) fn spawn_follower_if_configured(store: &TripleStore) {
     let rep = store.replication();
     if let Some(cluster) = &rep.config().cluster {
-        consensus::spawn(cluster.clone());
+        // The vote goes beside the bookmark, in the store's own directory. An
+        // in-memory store has neither, and keeps the previous behaviour.
+        let vote_path = rep
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join("raft-vote.json"));
+        consensus::spawn(cluster.clone(), vote_path);
     }
     if rep.role() != Role::Follower && rep.role() != Role::Cluster {
         return;

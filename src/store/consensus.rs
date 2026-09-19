@@ -4,7 +4,7 @@
 //!
 //! What Raft decides here is *who leads* — nothing else. The replicated
 //! state machine holds no data: its entries are membership changes and a
-//! blank heartbeat, and the log and vote live in memory. That keeps the
+//! blank heartbeat, and the log lives in memory. That keeps the
 //! dependency to its strength (a proven election with a majority quorum and
 //! an election timeout that fences a partitioned leader) and leaves the
 //! data where P4 put it: one leader recording every write in its change
@@ -14,15 +14,24 @@
 //! [`view`]); a node that wins it starts recording and serving. Followers
 //! notice the new leader's epoch and resynchronise once.
 //!
-//! Why the log and vote are not persisted: a restarted member rejoins with
-//! term 0 and learns the current term from the first heartbeat or vote
-//! request. Raft's guarantee against a node voting twice in one term then
-//! rests on the election timeout being longer than a restart, which is the
-//! case for the defaults (1.5–3 s); and since the state machine holds no
-//! data and the data path fences by epoch, a double vote could at worst
-//! elect a second leader for one term, which the epoch handling turns into a
-//! resynchronisation, not a divergence. A persistent vote is the first
-//! thing to add if that ever shows up in a status.
+//! Why the log is not persisted: a restarted member rejoins with term 0 and
+//! learns the current term from the first heartbeat or vote request, and the
+//! state machine it would replay holds no data — the data path is the change
+//! log, and a restarted member catches up on it like any other follower.
+//!
+//! The **vote** is persisted, in one small file beside the store
+//! (`{data_dir}/raft-vote.json`, rewritten on each vote and only on a vote,
+//! so never on a hot path). Raft's safety argument is that a member votes at
+//! most once per term; a member that forgets its vote across a restart can
+//! vote again in the same term. The consequences here were bounded — the
+//! election timeout (1.5–3 s by default) usually outlasts a restart, and
+//! since the state machine holds no data and the data path fences by epoch,
+//! a double vote could at worst elect a second leader for one term, which
+//! the epoch handling turns into a resynchronisation rather than a
+//! divergence — but bounded is not the same as absent, and remembering one
+//! `{term, node}` pair is cheap. An in-memory store has no file and behaves
+//! as it always did; an unreadable file is logged and ignored rather than
+//! refused, since starting without it is exactly where this began.
 //!
 //! Transport: the Raft RPCs travel as JSON over the server's own HTTP port
 //! (`POST /api/replication/raft/{vote,append,snapshot}`), authenticated by
@@ -67,6 +76,8 @@ openraft::declare_raft_types!(
         R = Ack,
 );
 
+use std::path::PathBuf;
+
 pub type NodeId = u64;
 
 // ─── The in-memory log ──────────────────────────────────────────────────────
@@ -79,13 +90,82 @@ struct LogInner {
     committed: Option<LogId<NodeId>>,
 }
 
-/// The Raft log, in memory. See the module docs for why.
+/// The Raft log, in memory — with the vote, and only the vote, on disk.
+///
+/// The log itself stays in memory: it holds elections, not data, and a member
+/// that restarts rejoins by catching up on the change log like any other
+/// follower (see the module docs). The *vote* is different. Raft's safety
+/// argument is that a member votes at most once per term, and a member that
+/// forgets its vote across a restart can vote a second time in the same term —
+/// at worst electing a second leader for that term, which the epoch fence turns
+/// into a resynchronisation rather than a divergence, but which is still a
+/// thing that should not happen and is cheap not to.
+///
+/// One small file, rewritten on each vote. Raft votes rarely — once per
+/// election, not once per write — so this is not on any hot path.
 #[derive(Clone, Default)]
-pub struct MemLog(Arc<Mutex<LogInner>>);
+pub struct MemLog {
+    inner: Arc<Mutex<LogInner>>,
+    /// Where the vote is kept. `None` keeps the previous behaviour exactly:
+    /// an in-memory store, or a member configured before there was a file.
+    vote_path: Option<Arc<PathBuf>>,
+}
 
 impl MemLog {
+    /// `vote_path` is `{data_dir}/raft-vote.json` for a persistent store.
+    pub fn new(vote_path: Option<PathBuf>) -> Self {
+        let me = Self {
+            inner: Arc::new(Mutex::new(LogInner::default())),
+            vote_path: vote_path.map(Arc::new),
+        };
+        // Read it once here rather than on every `read_vote`: openraft asks for
+        // the vote during start-up, and after that the in-memory copy is the
+        // one it has been updating.
+        if let Some(vote) = me.read_vote_file() {
+            me.lock().vote = Some(vote);
+        }
+        me
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, LogInner> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn read_vote_file(&self) -> Option<Vote<NodeId>> {
+        let path = self.vote_path.as_ref()?;
+        let text = std::fs::read_to_string(path.as_path()).ok()?;
+        match serde_json::from_str::<Vote<NodeId>>(&text) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                // A corrupt file is not a reason to refuse to start: the worst
+                // it costs is the risk this whole mechanism removes, which is
+                // where we were before it existed. Refusing to boot would be
+                // strictly worse than the problem.
+                tracing::warn!("raft: vote file unreadable ({e}); starting without it");
+                None
+            }
+        }
+    }
+
+    fn write_vote_file(&self, vote: &Vote<NodeId>) {
+        let Some(path) = self.vote_path.as_ref() else {
+            return;
+        };
+        // Write-and-rename: a vote half-written by a crash is exactly the
+        // forgotten vote this is here to prevent.
+        let tmp = path.with_extension("json.tmp");
+        let body = match serde_json::to_vec(vote) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("raft: vote not serialised: {e}");
+                return;
+            }
+        };
+        if let Err(e) =
+            std::fs::write(&tmp, &body).and_then(|()| std::fs::rename(&tmp, path.as_path()))
+        {
+            tracing::warn!("raft: vote not persisted to {}: {e}", path.display());
+        }
     }
 }
 
@@ -126,6 +206,7 @@ impl RaftLogStorage<TypeConfig> for MemLog {
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
         self.lock().vote = Some(*vote);
+        self.write_vote_file(vote);
         Ok(())
     }
 
@@ -579,6 +660,7 @@ impl Member {
         members: BTreeMap<NodeId, String>,
         transport: Transport,
         timing: Timing,
+        vote_path: Option<PathBuf>,
     ) -> Result<Self, String> {
         let config = Config {
             cluster_name: "open-triplestore".to_string(),
@@ -595,7 +677,7 @@ impl Member {
             id,
             Arc::new(config),
             NetworkFactory::new(transport),
-            MemLog::default(),
+            MemLog::new(vote_path),
             MemStateMachine::default(),
         )
         .await
@@ -733,7 +815,7 @@ impl ClusterConfig {
 /// Start this process's member on its own runtime thread and keep the view
 /// current. Called once, by the replication set-up, when the environment
 /// configures a cluster.
-pub fn spawn(config: ClusterConfig) {
+pub fn spawn(config: ClusterConfig, vote_path: Option<PathBuf>) {
     if MEMBER.get().is_some() {
         return;
     }
@@ -761,6 +843,7 @@ pub fn spawn(config: ClusterConfig) {
                     config.members.clone(),
                     transport,
                     config.timing(),
+                    vote_path,
                 )
                 .await
                 {
@@ -824,5 +907,69 @@ mod tests {
     #[test]
     fn the_view_is_empty_until_a_member_publishes() {
         assert!(view().is_none() || !view().unwrap().members.is_empty());
+    }
+
+    // ── The vote on disk ────────────────────────────────────────────────────
+
+    /// The whole point: a member that restarts remembers who it voted for in
+    /// the term it was in, so it cannot vote a second time in that term and
+    /// help elect a second leader.
+    #[tokio::test]
+    async fn a_saved_vote_comes_back_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raft-vote.json");
+
+        let mut log = MemLog::new(Some(path.clone()));
+        let vote = Vote::new(7, 2);
+        log.save_vote(&vote).await.unwrap();
+
+        // A second process over the same directory.
+        let mut rebooted = MemLog::new(Some(path));
+        assert_eq!(rebooted.read_vote().await.unwrap(), Some(vote));
+    }
+
+    /// The later vote wins, and the file holds exactly one.
+    #[tokio::test]
+    async fn the_file_holds_the_latest_vote() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raft-vote.json");
+
+        let mut log = MemLog::new(Some(path.clone()));
+        log.save_vote(&Vote::new(1, 1)).await.unwrap();
+        log.save_vote(&Vote::new(2, 3)).await.unwrap();
+
+        let mut rebooted = MemLog::new(Some(path));
+        assert_eq!(rebooted.read_vote().await.unwrap(), Some(Vote::new(2, 3)));
+    }
+
+    /// Without a path it behaves exactly as it always did, which is what an
+    /// in-memory store and every test that builds one rely on.
+    #[tokio::test]
+    async fn no_path_means_no_file_and_no_memory() {
+        let mut log = MemLog::new(None);
+        assert_eq!(log.read_vote().await.unwrap(), None);
+        log.save_vote(&Vote::new(4, 1)).await.unwrap();
+        assert_eq!(log.read_vote().await.unwrap(), Some(Vote::new(4, 1)));
+        // …but a fresh instance has nothing, because nothing was written.
+        let mut fresh = MemLog::new(None);
+        assert_eq!(fresh.read_vote().await.unwrap(), None);
+    }
+
+    /// A corrupt or truncated file is not a reason to refuse to start: an
+    /// unreadable vote is the same risk as the in-memory one this replaces,
+    /// and refusing to boot over it would be strictly worse.
+    #[tokio::test]
+    async fn an_unreadable_vote_file_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("raft-vote.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        let mut log = MemLog::new(Some(path.clone()));
+        assert_eq!(log.read_vote().await.unwrap(), None);
+
+        // And it is overwritten by the next real vote rather than left to rot.
+        log.save_vote(&Vote::new(9, 1)).await.unwrap();
+        let mut rebooted = MemLog::new(Some(path));
+        assert_eq!(rebooted.read_vote().await.unwrap(), Some(Vote::new(9, 1)));
     }
 }

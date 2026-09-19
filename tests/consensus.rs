@@ -53,6 +53,9 @@ async fn three_members_elect_one_leader_and_re_elect_when_it_leaves() {
             members.clone(),
             Transport::InProcess(router.clone()),
             timing,
+            // In-process members keep their vote in memory, as they always
+            // have: the file is for a member that can actually restart.
+            None,
         )
         .await
         .expect("member starts");

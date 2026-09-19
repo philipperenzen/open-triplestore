@@ -726,6 +726,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **A Raft member's vote survives a restart.** The vote was kept in memory with
+  the log, so a member that restarted could vote a second time in the same
+  term. The consequences were bounded and documented — the election timeout
+  (1.5–3 s) usually outlasts a restart, and because the state machine holds no
+  data and the data path fences by epoch, a double vote could at worst elect a
+  second leader for one term, which resynchronises rather than diverges — but
+  bounded is not absent, and remembering one `{term, node}` pair is cheap. It
+  lives in `{data_dir}/raft-vote.json`, written and renamed so a crash cannot
+  leave half of one, rewritten only on a vote and so never on a hot path. An
+  in-memory store has no file and behaves as before; an unreadable file is
+  logged and ignored rather than refused, because starting without it is
+  exactly where this began.
 - **Three controls rendered the name of their translation key.** `common.loading`
   and `common.delete` were asked for in the admin security page and the OAuth
   consent screen, and there is no `common` namespace in either dictionary —
