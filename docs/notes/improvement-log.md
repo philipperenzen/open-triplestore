@@ -3073,3 +3073,28 @@ viewport and the dialog is on screen. The second creates its own dataset
 through the API rather than assuming anything about the seeded set, since
 the control it clicks is only offered to someone who may edit. Red on the
 old CSS with "the backdrop is 2924px tall in a 720px viewport".
+
+
+### 5. A dark field you could not see (2026-09-19)
+
+The other half of the same report: "really bad looking UI contrast wise".
+Measured rather than eyeballed, and two of the five things I checked
+failed.
+
+A text field's background was `rgb(17, 24, 39)`. So was its dialog's.
+That is a contrast ratio of **1.00** — the same colour — and the only
+thing marking the field was a border at 0.18 alpha, which composites to
+about 1.9:1 against it. The rule is in `theme.css` and reads
+`background: var(--bg-strong)`, which is also what every card and dialog
+in dark mode uses, so this was every form in the app, not one dialog.
+Fields are now sunk below whatever surface holds them, with a border that
+clears 3:1 — the contrast WCAG 1.4.11 asks of a UI component's boundary,
+and here the thing actually doing the work.
+
+The section headings (BASICS, APPEARANCE, LICENSING & RIGHTS) used
+`var(--ink-400, #888)`: 3.73:1 in dark, and in light the fallback `#888`
+on white is 3.54:1, both under AA's 4.5 for text that small. `--ink-500`
+is muted in both themes and measures 6.9:1.
+
+The three that passed and were left alone: the dialog title (16.2:1), the
+field labels (12.0:1) and the field text itself (16.2:1).

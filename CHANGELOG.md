@@ -703,6 +703,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **A dark-mode form field was the same colour as the card holding it.** The
+  dark input rule set `background: var(--bg-strong)`, which is also the
+  background of every card and dialog those fields sit in — measured on the
+  dataset page-settings dialog, an input and its dialog were both
+  `rgb(17, 24, 39)`, a contrast ratio of **1.00** — and the border sat at 0.18
+  alpha, about 1.9:1 against that surface. A form read as a column of labels
+  with nothing underneath. Fields are sunk below their surface now with an edge
+  at 3.1:1, the contrast WCAG 1.4.11 asks of a UI component's boundary. The
+  section headings in the dataset and organisation settings dialogs were also
+  under AA — 3.73:1 in dark and 3.54:1 in light for 12.5px text — and are now
+  6.9:1.
 - **Every dialog in the app opened in the middle of the page, not the middle
   of the screen.** `.route-view` carried `animation: routeIn … both`, and
   `both` includes `forwards`: the final keyframe keeps applying after the
