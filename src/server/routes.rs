@@ -6562,6 +6562,37 @@ fn asset_etag(asset: &crate::auth::models::Asset) -> String {
     format!("\"{:x}-{:x}\"", h, asset.size_bytes)
 }
 
+/// Why an asset's bytes could not be served.
+///
+/// Bytes this node simply does not hold are a `404`, not a `500`: a follower
+/// replicates the store and the identity database but not the object store, so
+/// it lists the leader's files — their metadata travels with the identity
+/// database — without holding any of them. Saying "internal server error" there
+/// blames the node for working as designed, and tells the caller nothing about
+/// where the file actually is, so a follower names its leader.
+///
+/// Anything else is a real fault and keeps its `500`.
+fn asset_download_error(
+    state: &AppState,
+    filename: &str,
+    err: &anyhow::Error,
+) -> (StatusCode, String) {
+    if err
+        .downcast_ref::<crate::storage::AssetMissing>()
+        .is_none()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    let replication = state.store.replication();
+    let message = match (replication.role(), replication.leader_url()) {
+        (crate::store::replication::Role::Follower, Some(leader)) => format!(
+            "This node replicates data, not files: {filename} is stored on the leader at {leader}"
+        ),
+        _ => format!("No stored bytes for {filename}"),
+    };
+    (StatusCode::NOT_FOUND, message)
+}
+
 async fn serve_asset(
     state: &AppState,
     user_id: Option<&str>,
@@ -6634,7 +6665,7 @@ async fn serve_asset(
         .object_store
         .download(&asset.s3_key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| asset_download_error(state, &asset.filename, &e))?;
 
     // Active content types (SVG / HTML / XML) can execute script when a browser
     // renders them inline in the app's origin — stored XSS. Serve those as a

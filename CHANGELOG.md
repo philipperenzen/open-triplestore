@@ -703,6 +703,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Asking a node for an asset it does not hold was a `500`.** A follower
+  replicates the store and the identity database but not the object store, so
+  its file libraries list the leader's files — the metadata travels with the
+  identity database — while the bytes stay on the leader. Downloading one
+  answered `500 Failed to read asset "/data/assets/…": No such file or
+  directory`, which blames the node for working as designed, tells the caller
+  nothing about where the file is, and puts a server-side absolute path in the
+  response body. It is a `404` now, and on a follower the message names the
+  leader that holds the bytes. A store that is genuinely misconfigured or
+  unreachable is a different thing and keeps its `500`: conflating the two
+  would make a broken S3 endpoint look like an empty one.
 - **The Studio's Datasets tab left the Studio.** It pointed at `/datasets`,
   the global catalogue, which is not part of the SHACL workspace and offers no
   way back into it — while the Overview's own "Datasets to validate" card

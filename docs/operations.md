@@ -106,8 +106,9 @@ the datasets, their graphs, the IFC lifts, the shapes. Not the files'
 bytes: a follower replicates the store and the identity database, not the
 asset store, so its file libraries list the leader's files (their metadata
 travels with the identity database) but a download, or a 3D model that
-loads from an asset, answers on the leader only (see
-[What is not here](#what-is-not-here)).
+loads from an asset, answers on the leader only. On a follower such a
+download is a `404` that names the leader holding the bytes, not a
+server error — see [What is not here](#what-is-not-here).
 
 ```bash
 docker compose -f docker-compose.replication.yml up -d follower
@@ -390,6 +391,9 @@ model. Three things to know:
   tokens, ACLs), shipped whole — see "Identity database" below.
 - **Not the object store.** Point both nodes at the same S3 bucket; with the
   local filesystem store, assets exist only on the node that received them.
+  A node asked for bytes it does not hold answers `404`, and on a follower
+  the message names the leader that does — the file's metadata replicates
+  with the identity database, so the asset is listed either way.
 - **Not the text, spatial or accelerator indexes.** Each node rebuilds its
   own from the data it receives.
 - **Not the follower's own change log.** Applying a delta does not produce

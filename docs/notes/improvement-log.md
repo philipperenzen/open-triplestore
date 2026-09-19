@@ -2903,3 +2903,48 @@ A component test pins all of it: the Datasets tab's target, the order,
 that every tab stays inside the workspace, and that each path lights
 exactly one tab. That last one is what would have caught the two tabs
 claiming `/validation` between them.
+
+
+## The carried items, taken one at a time (2026-09-19)
+
+### 1. A follower's asset download said the wrong thing (this commit)
+
+Carried from the P4 checkpoint and named in the replication example's
+own walkthrough: "a download on the follower answers `500` today … and
+should be a `404` that names the leader until that item is built." It
+now does.
+
+Three things were wrong with the old answer and only one of them was the
+status code. `500` says the node is broken when it is doing exactly what
+the documentation says it does. It offers the caller no route to the
+bytes, which do exist, one hop away. And the body was
+`Failed to read asset "/data/assets/<uuid>": No such file or directory` —
+the server's own absolute path, handed to anyone who can list the file.
+
+The fix is a distinction the object store did not draw: `AssetMissing`,
+returned for a local `ErrorKind::NotFound` and for S3's `NoSuchKey`, and
+nothing else. The handler downcasts: that error is a `404`, and every
+other storage failure keeps its `500`. This matters more than it looks —
+a misconfigured bucket, an expired credential and an unreachable endpoint
+must not start answering "not found", or an outage reads as an empty
+store and nobody goes looking for the real problem. A test holds that
+line by asking an unconfigured store for a file and requiring a `500`.
+
+On a follower the `404` reads "This node replicates data, not files:
+plan.ifc is stored on the leader at http://…". The node already knows: it
+is the same `leader_url` the replication client polls.
+
+The container export path, the other caller of `download`, already logged
+and skipped an unreadable asset; it now logs a message that does not
+contain a filesystem path either.
+
+### 2. `cargo deny`, which turned out to be done
+
+Listed as open at both the P4 and P5 checkpoints, on the strength of the
+note that "cargo deny was not run here (the tool is not in the builder
+image)". That was true of the *local* runs and false of the project:
+`deny.toml` is in the repo and CI's "Dependency audit" job runs
+`cargo-deny check advisories bans sources licenses` on every push. It is
+green on this branch, `openraft` and the rest of the P2–P5 additions
+included. The item was a gap in local verification, not in the gate, and
+it is struck rather than built.
