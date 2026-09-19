@@ -2948,3 +2948,38 @@ image)". That was true of the *local* runs and false of the project:
 green on this branch, `openraft` and the rest of the P2–P5 additions
 included. The item was a gap in local verification, not in the gate, and
 it is struck rather than built.
+
+### 3. Five surfaces that did not fit a phone (2026-09-19)
+
+Reported in three messages while the truncation work was landing: the
+validation pages and their sub-pages, the SPARQL editor's Format button,
+the global search modal, the Datasets page's two action buttons, and the
+documentation — that last one "bad for both desktop as mobile".
+
+One cause turned up under four of the five. `app.css` carries
+`@media (max-width: 720px) { .btn { width: 100% } }`, which is right for
+a button that owns its row and wrong for every button that shares one.
+It is what made an icon-only run button a wide empty bar, what squeezed
+the search modal's input down to its magnifier, what pushed "New Dataset"
+onto a line of its own beneath "About", what collapsed the
+natural-language question field to the "empty black box" in the report —
+and, because `.cm-format-btn` is both `.btn` and `position: absolute`,
+what turned the Format button into a full-width overlay pinned across the
+top of the query. The rule stands; each surface that shares a row now
+says so, scoped tighter than it.
+
+Five commits, one per surface, all behind `@media (max-width: 720px)`
+except where the truncation policy replaced an ellipsis, which applies at
+every width by design.
+
+**The search palette** (`fix(ui): the search palette fits a phone`). The
+modal was wider than the screen: an input with a ~20-character intrinsic
+width beside a button that would not shrink. Its labels were the worst
+case of the truncation policy anywhere in the app — three navigation
+cards reading "Da…", "Or…" and "Mo…" over "Coll…", "Tea…" and "Ver…",
+which name nothing. Below 720px the row is a column, the cards stack, and
+the ellipsis rules are gone in favour of wrapping. One thing found on the
+way that was not in the report and is not mobile-specific: the global
+`input` rule in `app.css` outranks the field's `pl-14` utility, so the
+leading magnifier had been drawn on top of the placeholder at every
+width — computed `padding-left` was 15.2px where the icon needs 56.

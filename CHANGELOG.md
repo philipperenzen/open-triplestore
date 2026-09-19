@@ -703,6 +703,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The global search palette did not fit a phone.** The dialog was wider
+  than a 375px viewport, so the "Open" button was cut off past the right edge;
+  the input had collapsed to roughly its magnifier icon; and the three
+  "Navigate to" cards had squeezed their labels to "Da…", "Or…", "Mo…" over
+  sublabels reading "Coll…", "Tea…", "Ver…". Below 720px the input takes its
+  own row with the button beneath it, the cards stack, and every label reads in
+  full. On desktop the only change is that the card sublabels wrap to a second
+  line instead of being cut.
 - **Asking a node for an asset it does not hold was a `500`.** A follower
   replicates the store and the identity database but not the object store, so
   its file libraries list the leader's files — the metadata travels with the
