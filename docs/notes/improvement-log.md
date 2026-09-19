@@ -3004,3 +3004,13 @@ it was public. Below 720px each row is a card instead, and every column's
 information is on it. The select-all control needed somewhere to live once
 the header row was gone; it is a strip above the cards, using the string
 it already had.
+
+**The documentation** (`fix(ui): the documentation index has a shape`).
+The one report that named desktop as well as mobile, and the one with
+real design latitude. The index was plain links in ragged columns, which
+read as unstyled beside the rest of a card-based app; it is section cards
+in balanced multi-columns now, reflowing to one column on a phone. Two
+things fixed on the way that the report did not name: at 320px the
+article shrink-wrapped to its widest code block and gave the *page* 784px
+of horizontal scroll, and the `<=1024px` rule that dropped the article's
+`max-width` meant the reading measure ran to ~990px on a tablet.

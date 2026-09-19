@@ -703,6 +703,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The documentation index had no structure.** It was a bare two-column list
+  of plain-text links under all-caps headings, with column heights so uneven
+  that a one-entry section sat beside a four-entry one, and no cards, borders
+  or separation anywhere — on desktop as much as on a phone. The sections are
+  cards now, in balanced columns that reflow to one at phone width, matching
+  the rest of the app. The article also keeps its reading measure at tablet
+  widths (it had been allowed to run to the full column), headings step down on
+  a phone, and long doc titles wrap instead of being cut. A page whose widest
+  code block set the layout width no longer scrolls the whole page sideways at
+  320px.
 - **The dataset list was a desktop table squeezed into a phone.** "About" sat
   as a small chip on its own line above a full-width "New Dataset" pill; the
   table below had a name column so narrow that every name wrapped, a nearly
