@@ -703,6 +703,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The in-page section bar was a hard rectangle across the page.** Square
+  corners, a single bottom rule and negative margins bleeding it to the
+  container edges, so the moment it stuck it cut the page in two and the
+  content scrolling under it ran straight into that edge. It is a rounded
+  translucent bar now, the same radius as the cards it sits among, inset from
+  the edges with a gap above it when stuck.
 - **A dark-mode form field was the same colour as the card holding it.** The
   dark input rule set `background: var(--bg-strong)`, which is also the
   background of every card and dialog those fields sit in — measured on the

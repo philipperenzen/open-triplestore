@@ -3098,3 +3098,15 @@ is muted in both themes and measures 6.9:1.
 
 The three that passed and were left alone: the dialog title (16.2:1), the
 field labels (12.0:1) and the field text itself (16.2:1).
+
+
+### 6. The section bar that cut the page in half (2026-09-19)
+
+Reported against the dataset page's in-page anchor bar: "still
+rectangular and not rounded, does not blend in well with the scrolling up
+and down". It had square corners, one bottom rule, and negative margins
+bleeding it to the container edges — a band, not a bar — so once it stuck
+it read as a hard horizontal cut with the page disappearing under its
+edge. It is a rounded translucent bar with the cards' own 12px radius
+now, inset, with a gap above it when stuck so the page is visibly still
+there behind it.
