@@ -47,6 +47,18 @@
   const completionCompartment = new Compartment();
   const lintCompartment = new Compartment();
   const themeCompartment = new Compartment();
+  const wrapCompartment = new Compartment();
+
+  // A phone screen has no room to scroll a long triple pattern sideways, so the
+  // editor soft-wraps at the width where the app switches to its narrow layout.
+  // Wider screens keep horizontal scrolling, where unwrapped lines read better.
+  const NARROW_QUERY = '(max-width: 720px)';
+  let narrow = typeof window !== 'undefined' && window.matchMedia
+    ? window.matchMedia(NARROW_QUERY).matches
+    : false;
+  let unsubNarrow = null;
+  $: wrapExt = narrow ? EditorView.lineWrapping : [];
+  $: if (view) view.dispatch({ effects: wrapCompartment.reconfigure(wrapExt) });
 
   let isDark = resolveDark(theme);
   let unsubTheme = null;
@@ -250,6 +262,7 @@ WHERE {
         }
       }),
       themeCompartment.of(buildEditorTheme(isDark, height)),
+      wrapCompartment.of(wrapExt),
     ];
 
     if (readonly) extensions.push(EditorState.readOnly.of(true));
@@ -259,9 +272,20 @@ WHERE {
       parent: container,
     });
     unsubTheme = onThemeChange(recomputeDark);
+
+    if (typeof window !== 'undefined' && window.matchMedia) {
+      const mq = window.matchMedia(NARROW_QUERY);
+      const onNarrowChange = () => { narrow = mq.matches; };
+      mq.addEventListener?.('change', onNarrowChange);
+      unsubNarrow = () => mq.removeEventListener?.('change', onNarrowChange);
+    }
   });
 
-  onDestroy(() => { if (unsubTheme) unsubTheme(); if (view) view.destroy(); });
+  onDestroy(() => {
+    if (unsubTheme) unsubTheme();
+    if (unsubNarrow) unsubNarrow();
+    if (view) view.destroy();
+  });
 
   $: if (view && query !== view.state.doc.toString()) {
     view.dispatch({
@@ -329,4 +353,22 @@ WHERE {
     backdrop-filter: blur(4px);
   }
   .cm-format-btn:hover { opacity: 1; }
+
+  /* Phone. Floating the button over the top-right corner only works while
+     there is empty gutter to float in, and the app's `.btn { width: 100% }`
+     below 720px stretched it across the whole corner, so it sat on top of the
+     PREFIX lines. Here it stops floating and becomes a toolbar row above the
+     editor instead, at its own width and with a thumb-sized hit area. */
+  @media (max-width: 720px) {
+    .cm-host { display: flex; flex-direction: column; }
+    .cm-format-btn {
+      position: static;
+      align-self: flex-end;
+      width: auto;
+      min-height: 2.5rem;
+      margin-bottom: 0.35rem;
+      opacity: 1;
+      backdrop-filter: none;
+    }
+  }
 </style>

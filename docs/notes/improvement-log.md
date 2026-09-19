@@ -2983,3 +2983,13 @@ way that was not in the report and is not mobile-specific: the global
 `input` rule in `app.css` outranks the field's `pl-14` utility, so the
 leading magnifier had been drawn on top of the placeholder at every
 width — computed `padding-left` was 15.2px where the icon needs 56.
+
+**The SPARQL editor** (`fix(ui): the Format button stops covering the
+query`). The headline bug is the clearest case of the shared `.btn` rule:
+`.cm-format-btn` is absolutely positioned *and* a `.btn`, so at phone
+width it became a full-width overlay across the top of the editor, over
+the two `PREFIX` lines. Below 720px it stops floating and becomes its own
+toolbar row. Line wrapping is now a CodeMirror compartment driven by a
+`matchMedia` listener, so the editor soft-wraps on a phone and keeps its
+horizontal scroll on a desktop. The reported "empty black box" was the
+natural-language question input at zero width — same rule, same fix.

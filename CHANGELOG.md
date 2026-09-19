@@ -703,6 +703,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The SPARQL editor's Format button was drawn on top of the query.** At
+  phone width it covered both `PREFIX` lines, because the button is
+  `position: absolute` *and* a `.btn`, which `app.css` stretches to
+  `width: 100%` below 720px — a full-width overlay pinned across the top of the
+  editor. Below that breakpoint it now sits in its own right-aligned row above
+  the editor instead of floating over it, and the editor soft-wraps rather than
+  scrolling sideways. The "empty black box" between the LLM chip and Generate
+  was the natural-language question field, squeezed to nothing by the same
+  rule; the row wraps now, so the field keeps a readable size and the button
+  takes the line below. Desktop keeps the floating button and the unwrapped
+  editor.
 - **The global search palette did not fit a phone.** The dialog was wider
   than a 375px viewport, so the "Open" button was cut off past the right edge;
   the input had collapsed to roughly its magnifier icon; and the three
