@@ -78,6 +78,19 @@ pub fn management_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(service_description_handler))
         .route("/health", get(health_check))
+        .route("/api/admin/telemetry", get(admin_telemetry))
+        .route("/api/admin/changes", get(admin_changes))
+        .route("/api/admin/changes/status", get(admin_changes_status))
+        .route(
+            "/api/admin/changes/cursors/:name",
+            put(admin_changes_set_cursor).delete(admin_changes_delete_cursor),
+        )
+        .route("/api/replication/status", get(replication_status))
+        .route("/api/replication/manifest", get(replication_manifest))
+        .route("/api/replication/identity", get(replication_identity))
+        .route("/api/replication/raft/vote", post(raft_vote))
+        .route("/api/replication/raft/append", post(raft_append))
+        .route("/api/replication/raft/snapshot", post(raft_snapshot))
         .route("/livez", get(liveness_check))
 }
 
@@ -768,16 +781,22 @@ pub(crate) async fn execute_update(
             .unwrap_or_default()
     };
     let timeout = std::time::Duration::from_secs(state.query_timeout_secs);
+    let ctx = write_context(state, user, crate::commit_log::CommitKind::Sparql);
     let delta = tokio::time::timeout(
         timeout,
         tokio::task::spawn_blocking(move || {
+            let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
             store.update_targeted_delta(&effective, &affected, requires_admin)
         }),
     )
     .await
     .map_err(|_| AppError::BadRequest("Update execution timed out".to_string()))?
     .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    .map_err(|e| match e {
+        // A replica refuses every write: 503, not a client error.
+        crate::store::engine::StoreError::ReadOnly(_) => AppError::from(e),
+        other => AppError::BadRequest(other.to_string()),
+    })?;
     // Writer-pays text-index maintenance: a ground update (INSERT DATA /
     // DELETE DATA) knows its exact quads, so just those documents change;
     // any other update with known target graphs refreshes exactly those; a
@@ -837,7 +856,7 @@ pub(crate) async fn execute_update(
         }
     }
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// Graph access a SPARQL UPDATE performs, resolved for per-graph ACL enforcement.
@@ -1085,7 +1104,8 @@ struct BatchUpdateRequest {
 
 /// POST /sparql/batch — execute multiple SPARQL UPDATE statements in one batch.
 ///
-/// Amortises write-lock acquisition and SPARQL parse overhead across all
+/// The batch is one transaction: either every statement is applied or none
+/// is. Amortises write-lock acquisition and SPARQL parse overhead across all
 /// statements (3-7x faster than individual updates). Max 1000 statements.
 async fn sparql_batch_update(
     State(state): State<AppState>,
@@ -1123,32 +1143,57 @@ async fn sparql_batch_update(
     let results = state.store.batch_update(&resolved)?;
 
     // Build per-statement status
+    use crate::store::engine::BatchStatement;
     let statuses: Vec<serde_json::Value> = results
         .iter()
         .enumerate()
         .map(|(i, r)| match r {
-            Ok(()) => serde_json::json!({ "index": i, "status": "ok" }),
-            Err(e) => serde_json::json!({ "index": i, "status": "error", "error": e }),
+            BatchStatement::Applied => serde_json::json!({ "index": i, "status": "ok" }),
+            BatchStatement::Failed(e) => {
+                serde_json::json!({ "index": i, "status": "error", "error": e })
+            }
+            BatchStatement::RolledBack => {
+                serde_json::json!({ "index": i, "status": "rolled_back" })
+            }
         })
         .collect();
 
-    let all_ok = results.iter().all(|r| r.is_ok());
+    let all_ok = results.iter().all(|r| *r == BatchStatement::Applied);
 
     if all_ok {
-        Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "count": results.len(),
-            })),
-        )
-            .into_response())
+        Ok(with_ack(
+            &state,
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "count": results.len(),
+                })),
+            )
+                .into_response(),
+        ))
     } else {
+        // One transaction: a failing statement rolls every other statement
+        // back, so `results` names the failure and marks the rest
+        // `rolled_back`. 422: the request was understood, nothing was
+        // applied, and `error` says which statement failed and why. (The
+        // earlier 200-with-a-body was retired by the maintainer.)
+        let error = results
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match r {
+                BatchStatement::Failed(e) => {
+                    Some(format!("statement {i} failed: {e}; nothing was applied"))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "a statement failed; nothing was applied".to_string());
         Ok((
-            StatusCode::OK,
+            StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
-                "status": "partial",
+                "status": "rolled_back",
                 "count": results.len(),
+                "error": error,
                 "results": statuses,
             })),
         )
@@ -1257,11 +1302,20 @@ async fn graph_store_get(
     // Triple-level security label filtering: when the target graph has labels,
     // we have to load+filter+re-serialize, which fundamentally needs the bytes
     // in memory. Otherwise we can stream the dump directly through axum.
+    // Fail closed: if the label table cannot be read, the graph may carry
+    // labels this read cannot apply, so the read is refused rather than served
+    // unfiltered — the rule the endpoint ACL already follows on a DB error.
+    // (`unwrap_or(false)` used to turn that error into an unfiltered 200.)
     let needs_label_filter = match params.graph_iri() {
         Some(iri) => state
             .auth_db
             .has_triple_security_labels(&[iri][..])
-            .unwrap_or(false),
+            .map_err(|e| {
+                tracing::error!(error = %e, graph = iri, "triple-label check failed; refusing the read");
+                AppError::ServiceUnavailable(
+                    "triple security labels could not be checked; the read is refused".to_string(),
+                )
+            })?,
         None => false,
     };
 
@@ -1488,8 +1542,14 @@ pub(crate) fn validate_on_write(
     .map_err(|e| AppError::Internal(format!("Failed to load shapes into temp store: {e}")))?;
 
     let data_graphs = vec![iri.to_string()];
-    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs)
-        .map_err(|e| AppError::Internal(format!("SHACL validation error: {e}")))?;
+    // Fail closed: a shapes graph the engine cannot evaluate (an ill-formed
+    // shape, a `sh:sparql` that does not parse) refuses the write with the
+    // same 422 report the Studio gates use, not a 500 and never a 204.
+    let report = crate::shacl::validate(&temp, &shapes_graph_iri, &data_graphs).map_err(|e| {
+        AppError::ValidationFailed(crate::shacl_studio::gate::gate_error(format!(
+            "dataset shapes graph <{shapes_graph_iri}>: {e}"
+        )))
+    })?;
 
     // Continuous mode (Phase 5): record a report for this validate-on-write so it
     // shares the on-demand report history. Best-effort — a storage hiccup (or a
@@ -1627,7 +1687,13 @@ async fn graph_store_put(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     run_store_write(&state, "graph store PUT", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_put(graph.as_deref(), &data, format)
     })
     .await?;
@@ -1662,7 +1728,7 @@ async fn graph_store_put(
         before,
         None,
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// POST /store?graph=... — Merge into graph
@@ -1711,7 +1777,13 @@ async fn graph_store_post(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     let inserted = run_store_write(&state, "graph store POST", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_post_delta(graph.as_deref(), &data, format)
     })
     .await?;
@@ -1732,7 +1804,8 @@ async fn graph_store_post(
         let ent_graphs: Vec<String> = commit_graph.iter().cloned().collect();
         let _ = tokio::task::spawn_blocking(move || {
             crate::ldes::capture::after(&st, ldes_before);
-            crate::entailment::after_write(&st, &ent_graphs);
+            // A merge only adds quads: the entailment graph is extended, not rebuilt.
+            crate::entailment::after_additive_write(&st, &ent_graphs);
         })
         .await;
     }
@@ -1757,7 +1830,7 @@ async fn graph_store_post(
         0,
         None,
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// DELETE /store?graph=... — Remove a graph
@@ -1784,7 +1857,13 @@ async fn graph_store_delete(
     let store = state.store.clone();
     let graph = params.graph_iri().map(|s| s.to_string());
     let touched = graph.clone();
+    let ctx = write_context(
+        &state,
+        user.as_deref(),
+        crate::commit_log::CommitKind::GraphStore,
+    );
     run_store_write(&state, "graph store DELETE", move || {
+        let _ctx = crate::store::changes::WriteContextGuard::set(ctx);
         store.graph_store_delete(graph.as_deref())
     })
     .await?;
@@ -1822,7 +1901,7 @@ async fn graph_store_delete(
         before.saturating_sub(after),
         None,
     );
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_ack(&state, StatusCode::NO_CONTENT.into_response()))
 }
 
 /// Keep the text index in step with a Graph Store write, writer-pays: refresh
@@ -2003,6 +2082,287 @@ async fn liveness_check() -> impl IntoResponse {
 }
 
 /// GET /health — detailed subsystem probe
+/// GET /api/admin/telemetry — the workload telemetry summary: which exit of
+/// the query path answers and how fast, split by the analytical bit; SHACL
+/// runs by path, source and duration; the inter-write gap histogram. Admins
+/// only: latency distributions and validation scopes describe tenants.
+async fn admin_telemetry(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    match user.as_deref() {
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        )),
+        Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
+        Some(_) => Ok(Json(state.store.telemetry().summary())),
+    }
+}
+
+/// The context the change log stamps on a write's rows: the actor IRI as the
+/// commit trail mints it, and the commit kind. The guard is set inside the
+/// blocking closure that runs the primitive, never across an await.
+fn write_context(
+    state: &AppState,
+    user: Option<&AuthenticatedUser>,
+    kind: crate::commit_log::CommitKind,
+) -> crate::store::changes::WriteContext {
+    crate::store::changes::WriteContext {
+        actor_iri: user.map(|u| format!("{}/users/{}", state.base_url, u.user_id)),
+        commit_iri: None,
+        kind: Some(kind.as_str().to_string()),
+    }
+}
+
+fn require_admin(
+    user: Option<&AuthenticatedUser>,
+) -> Result<&AuthenticatedUser, (StatusCode, String)> {
+    match user {
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "Authentication required".to_string(),
+        )),
+        Some(u) if !u.is_admin() => Err((StatusCode::FORBIDDEN, "Admin role required".to_string())),
+        Some(u) => Ok(u),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    after: Option<i64>,
+    limit: Option<usize>,
+    graph: Option<String>,
+    /// Long-poll: when no row is above `after`, hold the request up to
+    /// this long for one to land (at most 30 s).
+    wait_ms: Option<u64>,
+}
+
+/// GET /api/admin/changes?after=&limit=&graph= — rows of the change log with
+/// a sequence number above `after`, in commit order; `graph` narrows to one
+/// graph's rows plus the store-scoped rows every reader must see. Admins
+/// only: rows carry quads from every tenant.
+async fn admin_changes(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Query(q): Query<ChangesQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let after = q.after.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(500).clamp(1, 5000);
+    let log = state.store.changes();
+    // Register for the wake-up before looking, so a row finalised between
+    // the look and the wait is not missed.
+    let mut notified = Box::pin(log.rows_notified());
+    notified.as_mut().enable();
+    let mut rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    let wait = q.wait_ms.unwrap_or(0).min(30_000);
+    if rows.is_empty() && wait > 0 {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(wait), notified).await;
+        rows = log.rows_after_in(after, limit, q.graph.as_deref());
+    }
+    let next_after = rows.last().and_then(|r| r.seq).unwrap_or(after);
+    Ok(Json(serde_json::json!({
+        "epoch": log.epoch(),
+        "rows": rows,
+        "next_after": next_after,
+    })))
+}
+
+/// GET /api/admin/changes/status — the log's epoch, sequence, row states,
+/// cursors and caps.
+async fn admin_changes_status(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    Ok(Json(state.store.changes().status()))
+}
+
+#[derive(Deserialize)]
+struct CursorBody {
+    seq: i64,
+}
+
+/// PUT /api/admin/changes/cursors/:name — bookmark a consumer's position.
+/// Rows at or below the lowest live cursor are what retention keeps.
+async fn admin_changes_set_cursor(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(name): Path<String>,
+    Json(body): Json<CursorBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let u = require_admin(user.as_deref())?;
+    let valid_name = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !valid_name {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cursor names are 1-64 characters of [A-Za-z0-9._-]".to_string(),
+        ));
+    }
+    let log = state.store.changes();
+    let last = log.last_seq();
+    if body.seq < 0 || body.seq > last {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("seq must be between 0 and {last}"),
+        ));
+    }
+    log.set_cursor(&name, body.seq, Some(&u.user_id))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    log.cursor(&name).map(Json).ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "cursor not stored".to_string(),
+    ))
+}
+
+/// DELETE /api/admin/changes/cursors/:name — 204, or 404 for a name the log
+/// does not hold.
+async fn admin_changes_delete_cursor(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    if state.store.changes().delete_cursor(&name) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "no such cursor".to_string()))
+    }
+}
+
+/// Stamp a write's response with what the synchronous followers said:
+/// `X-Replication-Ack: sync` while the required ones keep up, `degraded`
+/// while a success means "durable on the leader only". Absent when no
+/// synchronous follower is configured.
+fn with_ack(state: &AppState, mut resp: Response) -> Response {
+    if let Some(ack) = state.store.replication().ack_state() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(ack) {
+            resp.headers_mut().insert("x-replication-ack", v);
+        }
+    }
+    resp
+}
+
+/// GET /api/replication/status — this node's role, temperature, scope and,
+/// on a follower, its position and lag. Public, beside `/livez`: a load
+/// balancer or an operator asks a replica how far behind it is without a
+/// token; nothing in it names data.
+async fn replication_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.store.replication().status())
+}
+
+/// GET /api/replication/manifest — what a follower needs to start or to
+/// resynchronise: the leader's epoch and position, every graph it holds, and
+/// each dataset's graphs (so a follower can select datasets). Admins only.
+async fn replication_manifest(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let datasets = state
+        .auth_db
+        .list_datasets()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| crate::store::replication::DatasetGraphs {
+            graphs: state.auth_db.list_dataset_graphs(&d.id).unwrap_or_default(),
+            id: d.id,
+        })
+        .collect();
+    Ok(Json(crate::store::replication::manifest_of(
+        &state.store,
+        datasets,
+        state.auth_db.data_version(),
+    )))
+}
+
+/// GET /api/replication/identity — the identity database, whole, as a
+/// consistent SQLite snapshot (the online backup API). What a follower
+/// applies in place when the manifest's `identity_version` moves. Admins
+/// only: it holds every user, token and rule.
+async fn replication_identity(
+    State(state): State<AppState>,
+    user: Option<Extension<AuthenticatedUser>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_admin(user.as_deref())?;
+    let auth = state.auth_db.clone();
+    let bytes = tokio::task::spawn_blocking(move || auth.snapshot_bytes())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(([(CONTENT_TYPE, "application/vnd.sqlite3")], bytes))
+}
+
+/// The Raft RPCs of a cluster member, over the server's own port. Not user
+/// routes: the members share `OTS_REPLICATION_CLUSTER_SECRET`, sent as
+/// `X-Cluster-Secret`, compared in constant time. 404 on a node that is not
+/// a cluster member, 503 while the member is starting.
+fn cluster_member(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<&'static crate::store::consensus::Member, (StatusCode, String)> {
+    let Some(cluster) = state.store.replication().config().cluster.as_ref() else {
+        return Err((StatusCode::NOT_FOUND, "not a cluster member".to_string()));
+    };
+    let given = headers
+        .get("x-cluster-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (a, b) = (given.as_bytes(), cluster.secret.as_bytes());
+    let equal = a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0;
+    if !equal {
+        return Err((StatusCode::UNAUTHORIZED, "cluster secret".to_string()));
+    }
+    crate::store::consensus::member().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cluster member starting".to_string(),
+    ))
+}
+
+async fn raft_vote(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::VoteRequest<u64>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .vote(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn raft_append(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::AppendEntriesRequest<crate::store::consensus::TypeConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .append_entries(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn raft_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(rpc): Json<openraft::raft::InstallSnapshotRequest<crate::store::consensus::TypeConfig>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let m = cluster_member(&state, &headers)?;
+    m.raft
+        .install_snapshot(rpc)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     // Triplestore — read the maintained O(1) count index, NOT store.len() /
     // named_graphs(), which scan RocksDB (O(total quads)) and can block past the
@@ -3034,25 +3394,13 @@ fn resolve_scope_graphs(
         return Ok(ScopeGraphs::Set(vec![graph.clone()]));
     }
 
-    if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some() {
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
+    if let Some(ds_ids) = scope_dataset_ids(
+        state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
         let scoped = scope_dataset_graphs(state, &ds_ids, &versions_map, user_id, is_admin)?;
         return Ok(if scoped.is_empty() {
             ScopeGraphs::Empty
@@ -3102,14 +3450,17 @@ pub struct BrowseTripleParams {
     /// can access.
     pub dataset_id: Option<String>,
     /// Comma-separated list of dataset IDs. Scopes results to the union of all
-    /// named graphs registered under those datasets. When present, takes
-    /// precedence over `dataset_id`. Non-admin users are additionally restricted
-    /// to graphs they can access.
+    /// named graphs registered under those datasets. Unioned with `dataset_id`
+    /// and with the organisation scopes below. Non-admin users are additionally
+    /// restricted to graphs they can access.
     pub dataset_ids: Option<String>,
     /// Scope browse results to all named graphs of all datasets owned by this
-    /// organisation ID. Non-admin users are additionally restricted to graphs
-    /// they can access.
+    /// organisation ID. Unioned with any dataset scope rather than overridden by
+    /// it. Non-admin users are additionally restricted to graphs they can access.
     pub org_id: Option<String>,
+    /// Comma-separated list of organisation IDs, for a scope spanning several
+    /// organisations. Unioned with `org_id` and with the dataset scopes.
+    pub org_ids: Option<String>,
     /// Optional per-dataset version map: comma-separated `datasetId:version`
     /// pairs. For a dataset with a pinned version, results come from that
     /// version's snapshot graphs instead of its live graphs. Datasets absent
@@ -3131,11 +3482,14 @@ pub struct BrowseResourceParams {
     /// `BrowseTripleParams` so the graph view can expand a resource within the
     /// same scope as the initial browse load. `graph` takes precedence.
     pub dataset_id: Option<String>,
-    /// Comma-separated dataset IDs; union of their named graphs. Takes
-    /// precedence over `dataset_id`.
+    /// Comma-separated dataset IDs; union of their named graphs, unioned in turn
+    /// with `dataset_id` and the organisation scopes.
     pub dataset_ids: Option<String>,
     /// Scope to all datasets owned by this organisation ID.
     pub org_id: Option<String>,
+    /// Comma-separated organisation IDs, for a scope spanning several
+    /// organisations.
+    pub org_ids: Option<String>,
     /// Per-dataset version pins (comma-separated `datasetId:version`). A pinned
     /// dataset is read from its version snapshot graphs instead of live graphs.
     pub versions: Option<String>,
@@ -3292,6 +3646,77 @@ fn private_snapshot_graphs(
             .collect(),
         None => std::collections::HashSet::new(),
     }
+}
+
+/// Split a comma-separated id list, dropping surrounding whitespace and empty
+/// entries — `a, ,b` names two ids, and a lone `,` names none.
+fn split_id_csv(csv: &str) -> Vec<String> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The dataset ids a browse request is scoped to: everything named by
+/// `dataset_id` and `dataset_ids`, plus every dataset of every organisation
+/// named by `org_id` and `org_ids`, deduplicated.
+///
+/// These four used to be resolved by an if/else chain, so a request that named
+/// both datasets and an organisation — what the triple browser sends as soon as
+/// a user picks some datasets *and* an organisation — silently lost the
+/// organisation, and both the rows and the facets came back covering the
+/// datasets alone. They name one scope together.
+///
+/// `None` means the request carried no dataset/organisation scope at all, which
+/// is not the same as an empty union: an organisation with no datasets, or an
+/// empty `dataset_ids`, has always narrowed the request to nothing rather than
+/// widening it to everything, and still does.
+///
+/// Authorisation is deliberately left to `scope_dataset_graphs`, which every
+/// caller applies to the whole list: a dataset reached through an organisation
+/// is filtered exactly like one named directly, so a wider scope can never mean
+/// a wider view.
+fn scope_dataset_ids(
+    state: &AppState,
+    dataset_id: Option<&str>,
+    dataset_ids: Option<&str>,
+    org_id: Option<&str>,
+    org_ids: Option<&str>,
+) -> Result<Option<Vec<String>>, AppError> {
+    if dataset_id.is_none() && dataset_ids.is_none() && org_id.is_none() && org_ids.is_none() {
+        return Ok(None);
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(id) = dataset_id {
+        ids.push(id.to_string());
+    }
+    if let Some(csv) = dataset_ids {
+        ids.extend(split_id_csv(csv));
+    }
+    for org in org_id
+        .map(str::to_string)
+        .into_iter()
+        .chain(org_ids.map(split_id_csv).unwrap_or_default())
+    {
+        ids.extend(
+            state
+                .auth_db
+                .list_datasets_by_org(&org)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter()
+                .map(|ds| ds.id),
+        );
+    }
+
+    // A dataset named directly and again through its organisation is still one
+    // dataset. `scope_dataset_graphs` deduplicates the graphs it returns, so this
+    // is not what keeps rows from appearing twice; it spares the repeated
+    // per-dataset resolution and authorisation behind each duplicate id.
+    ids.sort();
+    ids.dedup();
+    Ok(Some(ids))
 }
 
 /// Resolve the scoped named-graph set for a set of datasets, honouring an
@@ -3852,30 +4277,16 @@ pub async fn browse_triples(
                 g = graph, bgp = bgp, fc = fc,
             )),
         )
-    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
-    {
-        // Resolve the set of dataset IDs in scope, then collect their graphs —
-        // each dataset's graphs come from its pinned version snapshot (if any) or
-        // its live graphs. Shared across the dataset_ids / org_id / dataset_id cases.
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
-
+    } else if let Some(ds_ids) = scope_dataset_ids(
+        &state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
+        // The datasets in scope are the union of the dataset and organisation
+        // parameters; their graphs come from each dataset's pinned version
+        // snapshot (if any) or its live graphs.
         let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
 
         if scoped.is_empty() {
@@ -4172,8 +4583,13 @@ pub async fn browse_resource(
             }
         }
         vec![graph.clone()]
-    } else if params.dataset_ids.is_some() || params.org_id.is_some() || params.dataset_id.is_some()
-    {
+    } else if let Some(ds_ids) = scope_dataset_ids(
+        &state,
+        params.dataset_id.as_deref(),
+        params.dataset_ids.as_deref(),
+        params.org_id.as_deref(),
+        params.org_ids.as_deref(),
+    )? {
         // Honour the browse scope (dataset/org + version pins), mirroring
         // browse_triples → resolve_scope_graphs, so expanding a resource in the
         // graph view reads the same (possibly version-snapshot) graphs as the
@@ -4184,24 +4600,6 @@ pub async fn browse_resource(
             .as_deref()
             .map(parse_versions_map)
             .unwrap_or_default();
-        let ds_ids: Vec<String> = if let Some(ref ids_csv) = params.dataset_ids {
-            ids_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        } else if let Some(ref org_id) = params.org_id {
-            state
-                .auth_db
-                .list_datasets_by_org(org_id)
-                .map_err(|e| AppError::Internal(e.to_string()))?
-                .into_iter()
-                .map(|ds| ds.id.to_string())
-                .collect()
-        } else {
-            vec![params.dataset_id.clone().unwrap()]
-        };
         let scoped = scope_dataset_graphs(&state, &ds_ids, &versions_map, user_id, is_admin)?;
         if scoped.is_empty() {
             return Ok(Json(serde_json::json!({
@@ -6164,6 +6562,34 @@ fn asset_etag(asset: &crate::auth::models::Asset) -> String {
     format!("\"{:x}-{:x}\"", h, asset.size_bytes)
 }
 
+/// Why an asset's bytes could not be served.
+///
+/// Bytes this node simply does not hold are a `404`, not a `500`: a follower
+/// replicates the store and the identity database but not the object store, so
+/// it lists the leader's files — their metadata travels with the identity
+/// database — without holding any of them. Saying "internal server error" there
+/// blames the node for working as designed, and tells the caller nothing about
+/// where the file actually is, so a follower names its leader.
+///
+/// Anything else is a real fault and keeps its `500`.
+fn asset_download_error(
+    state: &AppState,
+    filename: &str,
+    err: &anyhow::Error,
+) -> (StatusCode, String) {
+    if err.downcast_ref::<crate::storage::AssetMissing>().is_none() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    let replication = state.store.replication();
+    let message = match (replication.role(), replication.leader_url()) {
+        (crate::store::replication::Role::Follower, Some(leader)) => format!(
+            "This node replicates data, not files: {filename} is stored on the leader at {leader}"
+        ),
+        _ => format!("No stored bytes for {filename}"),
+    };
+    (StatusCode::NOT_FOUND, message)
+}
+
 async fn serve_asset(
     state: &AppState,
     user_id: Option<&str>,
@@ -6236,7 +6662,7 @@ async fn serve_asset(
         .object_store
         .download(&asset.s3_key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| asset_download_error(state, &asset.filename, &e))?;
 
     // Active content types (SVG / HTML / XML) can execute script when a browser
     // renders them inline in the app's origin — stored XSS. Serve those as a
@@ -7226,15 +7652,21 @@ fn merge_validation_reports(
 ) -> crate::shacl::report::ValidationReport {
     let mut conforms = true;
     let mut results = Vec::new();
+    let mut metrics: Option<crate::shacl::report::RunMetrics> = None;
     for r in reports {
         conforms &= r.conforms;
         results.extend(r.results);
+        metrics = match (metrics.take(), r.metrics) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        };
     }
     let results_count = results.len();
     crate::shacl::report::ValidationReport {
         conforms,
         results,
         results_count,
+        metrics,
     }
 }
 
@@ -7323,7 +7755,7 @@ pub async fn validate_dataset(
     // Shapes graphs stay IN the data set: SHACL allows the shapes graph and
     // data graph to coincide (merged uploads), and excluding them would make
     // a merged shapes+instances graph validate vacuously to "conforms".
-    let data_graphs: Vec<String> = state
+    let mut data_graphs: Vec<String> = state
         .auth_db
         .list_dataset_graphs(&dataset_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -7331,12 +7763,43 @@ pub async fn validate_dataset(
         .filter(|g| !g.starts_with("urn:system:reports:"))
         .collect();
 
+    // The declared model version's graphs join the data graphs. SHACL reads
+    // the class hierarchy out of the data graph it is given — "all the
+    // rdfs:subClassOf declarations needed to walk the class hierarchy need to
+    // exist in the data graph" (§2.1.3.2), "the data graph is expected to
+    // include all the ontology axioms related to the data" (§3.2) — but model
+    // graphs live in the model registry, not in `dataset_graphs`, so a dataset
+    // that declares `dct:conformsTo` was validated without the model it
+    // conforms to: `sh:targetClass` on a superclass targeted nothing and
+    // `sh:class` on one failed, silently. Reasoning already reads them
+    // (`conformance::reasoning_sources`); validation now does too. Only graphs
+    // the caller may read are added, on the registry's own visibility rule.
+    {
+        let existing: std::collections::HashSet<String> = data_graphs.iter().cloned().collect();
+        data_graphs.extend(
+            crate::conformance::model_graphs_for_dataset(
+                &state.store,
+                &state.auth_db,
+                &state.base_url,
+                &dataset,
+                Some(current_user.user_id.as_str()),
+            )
+            .into_iter()
+            .filter(|g| !existing.contains(g)),
+        );
+    }
+
     // Run SHACL validation once per shapes graph and merge into one report.
+    // The path label is a thread-local and must not outlive this loop: the
+    // awaits below would let it leak onto whatever task runs here next.
     let mut reports = Vec::with_capacity(shapes_graphs.len());
-    for shapes_graph_iri in &shapes_graphs {
-        let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        reports.push(report);
+    {
+        let _path = crate::store::telemetry::ValidationPathGuard::set("dataset");
+        for shapes_graph_iri in &shapes_graphs {
+            let report = crate::shacl::validate(&state.store, shapes_graph_iri, &data_graphs)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            reports.push(report);
+        }
     }
     let report = merge_validation_reports(reports);
 
@@ -7431,7 +7894,7 @@ fn persist_validation_run(
         }
     }
     let report_json = serde_json::to_string(report)?;
-    state.auth_db.insert_validation_run(
+    let summary = state.auth_db.insert_validation_run(
         dataset_id,
         report.conforms,
         report.results_count as i64,
@@ -7440,7 +7903,21 @@ fn persist_validation_run(
         info_count,
         &report_json,
         triggered_by,
-    )
+    )?;
+    // What the run read and how long it took, so the history survives a
+    // restart (the telemetry rings do not).
+    if let Some(m) = &report.metrics {
+        if let Err(e) = state.auth_db.set_validation_run_metrics(
+            &summary.id,
+            m.duration_ms as i64,
+            m.quads as i64,
+            &m.source,
+            m.run_index,
+        ) {
+            tracing::warn!("validation run {}: metrics not stored: {e}", summary.id);
+        }
+    }
+    Ok(summary)
 }
 
 /// GET /api/datasets/:dataset_id/validation/latest — latest stored run (full report) or null
@@ -7642,6 +8119,7 @@ pub async fn put_shapes(
     Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(dataset_id): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     _headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -7674,8 +8152,18 @@ pub async fn put_shapes(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/turtle");
     let data = if content_type.contains("shaclc") {
-        crate::shaclc::parse(&raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("SHACLC parse error: {e}")))?
+        // Strict by default: unrecognised SHACLC is a 400, never an emptied
+        // shapes graph. `?lenient=true` restores the drop-what-you-cannot-parse
+        // behaviour for callers that want it.
+        let lenient = query
+            .get("lenient")
+            .is_some_and(|v| v == "true" || v == "1");
+        let parsed = if lenient {
+            crate::shaclc::parse_lenient(&raw)
+        } else {
+            crate::shaclc::parse(&raw)
+        };
+        parsed.map_err(|e| (StatusCode::BAD_REQUEST, e))?
     } else {
         raw
     };
@@ -7768,17 +8256,32 @@ pub async fn infer_dataset(
 ///
 /// Body: SHACLC text (Content-Type: text/shaclc or text/plain)
 /// Response: Turtle (Content-Type: text/turtle)
-pub async fn shaclc_parse(body: Bytes) -> Result<Response, (StatusCode, String)> {
+pub async fn shaclc_parse(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
     let input = String::from_utf8(body.to_vec())
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UTF-8".to_string()))?;
-    let turtle = crate::shaclc::parse(&input).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let lenient = query
+        .get("lenient")
+        .is_some_and(|v| v == "true" || v == "1");
+    let turtle = if lenient {
+        crate::shaclc::parse_lenient(&input)
+    } else {
+        crate::shaclc::parse(&input)
+    }
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], turtle).into_response())
 }
 
 /// POST /api/shaclc/serialize — convert a shapes graph (by IRI) from the store → SHACLC
 ///
-/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text
+/// Body: JSON `{"shapesGraphIri": "urn:..."}` or the IRI directly as plain text.
+/// Requires a token, and the caller must be allowed to read the graph they
+/// name: the handler reads whatever IRI it is given straight out of the
+/// store, so without that check any caller could read any graph.
 pub async fn shaclc_serialize(
+    Extension(current_user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
@@ -7801,6 +8304,19 @@ pub async fn shaclc_serialize(
     } else {
         body_str.trim().to_string()
     };
+
+    // The IRI comes from the caller, so it is only theirs to read if the
+    // same visibility rules that gate /store and /sparql say so. A graph the
+    // caller may not read is refused with the same answer whether or not it
+    // exists, so this cannot be used to discover graph IRIs.
+    if !check_graph_read_access(&state, Some(&current_user), &shapes_iri)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "No read access to that graph".to_string(),
+        ));
+    }
 
     let shaclc = crate::shaclc::serialize(&state.store, &shapes_iri)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -8421,6 +8937,19 @@ pub fn reasoning_routes() -> Router<AppState> {
         .route("/api/reasoning/status", get(reasoning_status))
         .route("/api/reasoning/rewrite", post(reasoning_rewrite))
         .route("/api/text-search/reindex", post(text_search_reindex))
+        // Identity policy (owl:sameAs) — per dataset and per organisation.
+        .route(
+            "/api/datasets/:dataset_id/identity",
+            get(crate::entailment::get_dataset_identity)
+                .put(crate::entailment::put_dataset_identity)
+                .delete(crate::entailment::delete_dataset_identity),
+        )
+        .route(
+            "/api/organisations/:org_id/identity",
+            get(crate::entailment::get_org_identity)
+                .put(crate::entailment::put_org_identity)
+                .delete(crate::entailment::delete_org_identity),
+        )
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -8444,6 +8973,7 @@ pub(crate) fn run_regime(
     regime: &str,
     sources: Option<Vec<String>>,
     target: &str,
+    identity: crate::reasoning::identity::IdentityPolicy,
 ) -> Result<Option<crate::reasoning::ReasoningReport>, AppError> {
     let _sources: Vec<String> = sources.clone().unwrap_or_default();
     // Apply the scope to whichever reasoner the regime selects.
@@ -8460,7 +8990,7 @@ pub(crate) fn run_regime(
     }
     // Silence unused-variable warnings for the case where no reasoning feature is
     // compiled in (only the `_ => Err(...)` arm fires, leaving state/target unused).
-    let _ = (&state, target);
+    let _ = (&state, target, identity);
 
     // Match returns Some(report) for a recognised regime or None for an unknown one.
     // Both branches are always present in the match so no unreachable-code warning fires.
@@ -8478,9 +9008,9 @@ pub(crate) fn run_regime(
         }
         #[cfg(feature = "owl2-rl")]
         "owl2-rl" => {
-            let m =
-                scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
-                    .with_target(target));
+            let m = scoped!(crate::reasoning::owl2_rl::Owl2RLReasoner::new(&state.store)
+                .with_target(target)
+                .with_identity_policy(identity));
             Some(
                 m.materialize()
                     .map_err(|e| AppError::Internal(e.to_string()))?,
@@ -8532,7 +9062,7 @@ pub(crate) fn run_regime(
                 }
                 _ => Box::new(NativeTableauStub),
             };
-            let bridge = ExternalReasonerBridge::new(reasoner);
+            let bridge = ExternalReasonerBridge::new(reasoner).with_identity_policy(identity);
             Some(
                 bridge
                     .materialize(&state.store, &_sources, target)
@@ -8595,6 +9125,10 @@ async fn reasoning_materialize(
     // dataset's named graphs were invisible to this endpoint however it was
     // called. Scoped now: a dataset's conformance layer, explicit graphs the
     // caller may read, or (neither given) the default graph as before.
+    // A dataset run applies the dataset's identity policy (what owl:sameAs
+    // may do, whether linksets are premises); an unscoped run reads whatever
+    // it is given and keeps the full behaviour.
+    let mut identity = crate::reasoning::identity::IdentityPolicy::Full;
     let sources: Option<Vec<String>> = if let Some(ds_id) = body.dataset.as_deref() {
         let ds = state
             .auth_db
@@ -8608,7 +9142,8 @@ async fn reasoning_materialize(
         if !visible {
             return Err(AppError::NotFound(format!("Dataset '{ds_id}' not found")));
         }
-        let mut layer = crate::conformance::resolve(&state, &ds).reasoning_sources;
+        let (mut layer, effective) = crate::entailment::reasoning_sources(&state, &ds);
+        identity = effective.policy;
         for g in body.source_graphs.clone().unwrap_or_default() {
             if !check_graph_read_access(&state, Some(&user), &g)
                 .map_err(|e| AppError::Internal(e.to_string()))?
@@ -8634,7 +9169,7 @@ async fn reasoning_materialize(
     } else {
         None
     };
-    let report = run_regime(&state, &body.regime, sources.clone(), &target)?;
+    let report = run_regime(&state, &body.regime, sources.clone(), &target, identity)?;
 
     match report {
         Some(r) => Ok((

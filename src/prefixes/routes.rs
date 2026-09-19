@@ -307,3 +307,156 @@ async fn jsonld_context(State(state): State<AppState>) -> Response {
     )
         .into_response()
 }
+
+// ─── Administration ──────────────────────────────────────────────────────────
+//
+// What a prefix means *here*. The read side above is the community snapshot
+// plus what this instance derives from its own datasets; this is a deployment
+// stating, for example, that `geo` is its geo namespace and not the one
+// prefix.cc lists. Overrides are stored in the identity database, so they
+// survive a restart and reach a follower with the rest of it, and the label is
+// that table's primary key — two prefixes cannot share a shorthand.
+//
+// Mounted admin-only. Repointing a prefix changes what every stored CURIE
+// expands to, which is not a thing an ordinary user should be able to do to
+// everyone else.
+
+/// Reload the in-memory overlay from storage. Called after every write so the
+/// process never disagrees with what is stored.
+fn refresh_admin_overlay(state: &AppState) -> Result<(), AppError> {
+    let stored = state
+        .auth_db
+        .list_prefix_overrides()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .prefix_registry
+        .set_admin_prefixes(stored.into_iter().map(|o| (o.label, o.namespace)));
+    Ok(())
+}
+
+/// Reject a label or namespace the registry would refuse anyway, with a reason
+/// rather than a silent no-op.
+fn validate(label: &str, namespace: &str) -> Result<(), AppError> {
+    if !is_valid_label(label) {
+        return Err(AppError::BadRequest(format!(
+            "{label:?} is not a prefix label: start with a letter, then letters, \
+             digits, '_' or '-'"
+        )));
+    }
+    if !super::is_valid_iri(namespace) {
+        return Err(AppError::BadRequest(format!(
+            "{namespace:?} is not a usable namespace: an http or https IRI"
+        )));
+    }
+    Ok(())
+}
+
+pub fn prefix_admin_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/admin/prefixes",
+            get(list_overrides).post(create_override),
+        )
+        .route(
+            "/api/admin/prefixes/:label",
+            axum::routing::put(put_override).delete(delete_override),
+        )
+}
+
+#[derive(Deserialize)]
+pub struct CreateOverride {
+    label: String,
+    namespace: String,
+}
+
+#[derive(Deserialize)]
+pub struct PutOverride {
+    namespace: String,
+}
+
+/// GET /api/admin/prefixes — the overrides this deployment has set.
+async fn list_overrides(State(state): State<AppState>) -> Result<Response, AppError> {
+    let rows = state
+        .auth_db
+        .list_prefix_overrides()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(rows).into_response())
+}
+
+/// POST /api/admin/prefixes — claim a label.
+///
+/// Refuses a label that already has an override, and says what it currently
+/// means: two prefixes with the same shorthand cannot both be right, and
+/// repointing an established one silently would change what stored CURIEs
+/// expand to. `PUT` is the way to repoint, which says so by being a different
+/// request.
+async fn create_override(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    Json(body): Json<CreateOverride>,
+) -> Result<Response, AppError> {
+    validate(&body.label, &body.namespace)?;
+    if let Some(existing) = state
+        .auth_db
+        .get_prefix_override(&body.label)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
+        return Err(AppError::Conflict(serde_json::json!({
+            "error": format!(
+                "the prefix {:?} already resolves to {} here; PUT to repoint it",
+                existing.label, existing.namespace
+            ),
+            "label": existing.label,
+            "namespace": existing.namespace,
+        })));
+    }
+    let row = state
+        .auth_db
+        .create_prefix_override(&body.label, &body.namespace, Some(&user.user_id))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    refresh_admin_overlay(&state)?;
+    Ok((axum::http::StatusCode::CREATED, Json(row)).into_response())
+}
+
+/// PUT /api/admin/prefixes/:label — set or repoint a label.
+async fn put_override(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+    axum::Extension(user): axum::Extension<crate::auth::middleware::AuthenticatedUser>,
+    Json(body): Json<PutOverride>,
+) -> Result<Response, AppError> {
+    validate(&label, &body.namespace)?;
+    let (row, created) = state
+        .auth_db
+        .put_prefix_override(&label, &body.namespace, Some(&user.user_id))
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    refresh_admin_overlay(&state)?;
+    let status = if created {
+        axum::http::StatusCode::CREATED
+    } else {
+        axum::http::StatusCode::OK
+    };
+    Ok((status, Json(row)).into_response())
+}
+
+/// DELETE /api/admin/prefixes/:label — drop the override.
+///
+/// The label is not deleted, only this deployment's opinion of it: it falls
+/// back to the platform overlay, an installed bundle's seeds, or the community
+/// snapshot, whichever answers first.
+async fn delete_override(
+    State(state): State<AppState>,
+    Path(label): Path<String>,
+) -> Result<Response, AppError> {
+    let removed = state
+        .auth_db
+        .delete_prefix_override(&label)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    if !removed {
+        return Err(AppError::NotFound(format!(
+            "no override for the prefix {label:?}"
+        )));
+    }
+    refresh_admin_overlay(&state)?;
+    Ok(axum::http::StatusCode::NO_CONTENT.into_response())
+}

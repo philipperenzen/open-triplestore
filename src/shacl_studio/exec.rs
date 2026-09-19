@@ -56,6 +56,59 @@ pub fn resolve_data_graphs(
     graphs
 }
 
+/// The graphs a pipeline run READS: [`resolve_data_graphs`] without the
+/// persisted-report graphs, plus the model version each dataset in scope
+/// declares `dct:conformsTo` — so a Studio run resolves `sh:class` and
+/// `sh:targetClass` against the model exactly as `POST …/validate` does.
+///
+/// Deliberately separate from [`resolve_data_graphs`], which is the pipeline's
+/// WRITE surface: it authorises the targets, gates inference, and decides where
+/// derived graphs are attached. Widening that one would do more than change
+/// what a run reads — `shacl::infer` materialises into a named graph only when
+/// it is handed exactly one data graph, so an extra model graph would silently
+/// relocate a single-graph pipeline's in-place inference into the store's
+/// default graph, which the run cannot even read back.
+///
+/// The principal is the pipeline's owner: the scheduler runs with no actor, so
+/// `created_by` is the only one available, and it is what the write
+/// authorisation already assumes.
+pub fn resolve_read_graphs(
+    store: &TripleStore,
+    auth_db: &AuthDb,
+    studio: &ShaclStudioStore,
+    base_url: &str,
+    pipeline: &ValidationPipeline,
+) -> Vec<String> {
+    let mut graphs: Vec<String> = resolve_data_graphs(auth_db, studio, pipeline)
+        .into_iter()
+        .filter(|g| !g.starts_with("urn:system:reports:"))
+        .collect();
+
+    let mut dataset_ids: Vec<&str> = pipeline.dataset_ids.iter().map(String::as_str).collect();
+    dataset_ids.extend(
+        pipeline
+            .targets
+            .iter()
+            .filter(|t| t.kind == TargetKind::Dataset)
+            .map(|t| t.id.as_str()),
+    );
+    for id in dataset_ids {
+        if let Ok(Some(ds)) = auth_db.get_dataset(id) {
+            graphs.extend(crate::conformance::model_graphs_for_dataset(
+                store,
+                auth_db,
+                base_url,
+                &ds,
+                pipeline.created_by.as_deref(),
+            ));
+        }
+    }
+
+    graphs.sort();
+    graphs.dedup();
+    graphs
+}
+
 /// Resolve a pipeline's shapes to backing graph IRIs. Additive:
 /// * each composed `shape_graph_ids` set — its data graph;
 /// * for every dataset in scope (legacy `dataset_ids` + Dataset `targets`), the
@@ -172,9 +225,12 @@ pub fn execute_pipeline(
         );
     }
 
+    let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
+    let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");
     let (outcome, inferred_quads) = super::run::run_validation_capturing(
         main_store,
         &shape_graphs,
+        &read_graphs,
         &data_graphs,
         pipeline.severity_threshold,
         infer_ok,
@@ -440,9 +496,12 @@ pub fn execute_pipeline_dry(
             .iter()
             .all(|g| owner_can_write(auth_db, &pipeline.created_by, g));
 
-    let outcome = super::run::run_validation(
+    let read_graphs = resolve_read_graphs(main_store, auth_db, studio, base_url, pipeline);
+    let _path = crate::store::telemetry::ValidationPathGuard::set("pipeline");
+    let outcome = super::run::run_validation_scoped(
         main_store,
         &shape_graphs,
+        &read_graphs,
         &data_graphs,
         pipeline.severity_threshold,
         infer_ok,

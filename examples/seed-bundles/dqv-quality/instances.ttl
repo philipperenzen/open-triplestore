@@ -1,0 +1,97 @@
+# A catalogued dataset and its distribution with the measurements a
+# validation-run emitter would write, then seven planted violations — one
+# per shape in shapes.ttl, each built to fire exactly once. The metrics,
+# dimensions and categories are NOT restated here: they live in
+# quality-profile.ttl, which is the model this dataset conforms to and which
+# validation reads alongside the instances.
+@prefix dqv:  <http://www.w3.org/ns/dqv#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dct:  <http://purl.org/dc/terms/> .
+@prefix sd:   <http://www.w3.org/ns/sparql-service-description#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix q:    <https://example.org/dqv-quality/def#> .
+@prefix ex:   <https://example.org/dqv-quality/> .
+
+# ── The conforming core ─────────────────────────────────────────────────────
+ex:dataset-1 a dcat:Dataset ;
+    dct:title "Sample catalogued dataset"@en ;
+    dcat:distribution ex:distribution-1 ;
+    dqv:hasQualityMeasurement ex:m-conformance , ex:m-violations , ex:m-triples .
+
+ex:distribution-1 a dcat:Distribution ;
+    dct:title "Turtle dump"@en ;
+    dcat:mediaType <https://www.iana.org/assignments/media-types/text/turtle> .
+
+ex:run-2026-09-01 a prov:Activity ;
+    rdfs:label "SHACL validation run"@en ;
+    prov:endedAtTime "2026-09-01T06:00:00Z"^^xsd:dateTime .
+
+ex:m-conformance a dqv:QualityMeasurement ;
+    dqv:isMeasurementOf q:shaclConformanceMetric ;
+    dqv:computedOn ex:dataset-1 ;
+    dqv:value true ;
+    prov:wasGeneratedBy ex:run-2026-09-01 .
+
+ex:m-violations a dqv:QualityMeasurement ;
+    dqv:isMeasurementOf q:shaclViolationCountMetric ;
+    dqv:computedOn ex:dataset-1 ;
+    dqv:value 0 ;
+    prov:wasGeneratedBy ex:run-2026-09-01 .
+
+ex:m-triples a dqv:QualityMeasurement ;
+    dqv:isMeasurementOf q:tripleCountMetric ;
+    dqv:computedOn ex:dataset-1 ;
+    dqv:value 1284 .
+
+# ── Planted 1: no metric ────────────────────────────────────────────────────
+ex:m-no-metric a dqv:QualityMeasurement ;
+    rdfs:label "Planted: no dqv:isMeasurementOf"@en ;
+    dqv:computedOn ex:dataset-1 ;
+    dqv:value 3 .
+
+# ── Planted 2: no computedOn ────────────────────────────────────────────────
+ex:m-no-computed-on a dqv:QualityMeasurement ;
+    rdfs:label "Planted: no dqv:computedOn"@en ;
+    dqv:isMeasurementOf q:shaclViolationCountMetric ;
+    dqv:value 7 .
+
+# ── Planted 3: a metric in no dimension (it has the other two properties, so
+#    only the dimension fires) ──────────────────────────────────────────────
+q:undimensionedMetric a dqv:Metric ;
+    rdfs:label "Planted: metric with no dqv:inDimension"@en ;
+    dqv:expectedDataType xsd:integer ;
+    skos:definition "Planted."@en .
+
+# ── Planted 4: a dimension in no category ───────────────────────────────────
+q:orphanDimension a dqv:Dimension ;
+    rdfs:label "Planted: dimension with no dqv:inCategory"@en .
+
+# ── Planted 5: the value's datatype contradicts the metric (the measurement
+#    is otherwise well formed, so only the datatype shape fires) ────────────
+ex:m-wrong-datatype a dqv:QualityMeasurement ;
+    rdfs:label "Planted: xsd:string value for an xsd:boolean metric"@en ;
+    dqv:isMeasurementOf q:shaclConformanceMetric ;
+    dqv:computedOn ex:dataset-1 ;
+    dqv:value "0.93" .
+
+# ── Planted 6: hasQualityMeasurement and computedOn disagree — attached to
+#    the distribution, computed on the dataset ───────────────────────────────
+ex:distribution-1 dqv:hasQualityMeasurement ex:m-detached .
+ex:m-detached a dqv:QualityMeasurement ;
+    rdfs:label "Planted: attached to the distribution, computed on the dataset"@en ;
+    dqv:isMeasurementOf q:tripleCountMetric ;
+    dqv:computedOn ex:dataset-1 ;
+    dqv:value 42 .
+
+# ── Planted 7: computed on something that is neither a dataset nor a
+#    distribution (a warning: DQV says "generally expected") ─────────────────
+ex:sparql-service a sd:Service ;
+    rdfs:label "Planted: a SPARQL service, not a dcat:Dataset or dcat:Distribution"@en ;
+    sd:endpoint <https://example.org/sparql> .
+ex:m-on-service a dqv:QualityMeasurement ;
+    dqv:isMeasurementOf q:endpointAvailabilityMetric ;
+    dqv:computedOn ex:sparql-service ;
+    dqv:value true .

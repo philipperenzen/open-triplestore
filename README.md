@@ -90,6 +90,10 @@ The web UI is **served by the binary itself** at `http://localhost:7878/` — th
 | **Prefix service** | Internal prefix.cc replacement: ~3,700 bundled prefix↔namespace mappings + platform vocabularies, powering SPARQL auto-prefixing and a public lookup API — no third-party calls |
 | **Multiple RDF formats** | Turtle, N-Triples, N-Quads, TriG, RDF/XML |
 | **Storage backends** | In-memory (fast) and persistent RocksDB |
+| **In-memory query accelerator** | Over a persistent store, an in-RAM mirror answers most reads: subject shards for aggregates, an O(1) count index, and a columnar copy with its own evaluator for joins and lookups. Every query is routed to the cheapest exit that gives the engine's exact answer, and anything else goes to the engine ([docs](docs/performance.md#4-the-columnar-copy-opengraphcolumnar)) |
+| **Change log** | Every write recorded per graph in commit order, with sequence numbers a consumer can tail and bookmark. Off by default — a `WHERE` update pays ×2.5–4 for its before/after diff — and on whenever there is a consumer ([docs](docs/versioning.md#change-log)) |
+| **Replication & failover** | A leader ships its change log to cold, warm or hot followers: read-only replicas that catch up hourly, every minute, or within a round trip. Synchronous acknowledgement and Raft consensus are opt-in; failover is by epoch. Two-container example in [`docker-compose.replication.yml`](docker-compose.replication.yml) ([docs](docs/operations.md#replication)) |
+| **Workload telemetry** | Which exit answered each query (exact counts), sampled latencies for analytical and other queries, validation and write-gap histograms — `GET /api/admin/telemetry`, and the **Node status** page in the web UI ([docs](docs/performance.md#telemetry)) |
 | **HTTP protocols** | SPARQL Protocol + Graph Store HTTP Protocol (RFC 7230) + LDP 1.0 |
 | **Docker-ready** | Multi-stage image; non-root runtime; health-check built-in |
 
@@ -173,6 +177,15 @@ docker compose --profile mail up -d   # or COMPOSE_PROFILES=mail in .env, plus:
 ```
 
 Delivering straight to recipient MXes needs a host with outbound port 25 and proper DNS (rDNS + SPF); from anywhere else set `MAIL_RELAYHOST` to a smarthost you already have (workspace or transactional provider). Any external SMTP service also works directly, without the profile — see [.env.example](.env.example) and [docs/auth.md](docs/auth.md).
+
+**Optional — a read replica.** [`docker-compose.replication.yml`](docker-compose.replication.yml) is a separate two-container stack: a leader and a hot follower that tails the leader's change log and answers reads a round trip behind. It comes up in two steps because the follower authenticates with an API token minted on the leader:
+
+```bash
+docker compose -f docker-compose.replication.yml up -d leader     # then mint a token, add it to .env, and
+docker compose -f docker-compose.replication.yml up -d follower   # → curl localhost:7879/api/replication/status
+```
+
+The walkthrough — including a write on the leader showing up on the follower — is in [docs/operations.md](docs/operations.md#try-it-a-leader-and-a-hot-follower-with-docker-compose).
 
 ### Native (requires Rust 1.94.1+)
 
@@ -289,6 +302,7 @@ A full-featured browser interface is bundled with the server at `http://localhos
 | `/organisations` | Organisation management (requires auth) |
 | `/settings` | Profile, password change, API token management (requires auth) |
 | `/admin/users` | User management — create, edit role/status, reset password, deactivate (requires admin+) |
+| `/admin/operations` | Node status — replication role, lag and last catch-up; which exit answered each query and how fast; SHACL validations; write gaps; the change log with its cursors (requires admin+) |
 
 ### Development
 
@@ -838,7 +852,7 @@ and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 14 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
 | DCAT 2 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 107 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
@@ -847,13 +861,13 @@ and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
 | OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
-| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 23 |  |
+| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 30 |  |
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 18 |  |
-| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 9 |  |
-| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 17 |  |
-| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 8 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 23 |  |
+| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 20 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
 | SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 14 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
@@ -861,10 +875,11 @@ and the known gaps behind them, are in [docs/standards.md](docs/standards.md).
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 25 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 113 corpus cases: 97 pass, 1 known failure, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 485 corpus cases: 475 pass, 10 known failures, 0 runner-side skips (floor ≥450 asserted) |
 
-696 conformance tests across 25 suites; a further 372 tests in 45 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the two **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
+727 conformance tests across 26 suites; a further 500 tests in 68 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

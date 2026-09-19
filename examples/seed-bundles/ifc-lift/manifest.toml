@@ -1,0 +1,40 @@
+# The IFC lift's own ontology: every class and property the IFC importer
+# emits that no borrowed vocabulary declares. Three of the lift's four
+# namespaces are borrowed — ifcOWL (which buildingSMART published up to IFC4
+# ADD2, so IFC 4.3's bridges, roads and alignments have no IRI there), BOT
+# (which has no class for a facility) and props: (whose Pset_/Prop local
+# names the lift mints without owning the namespace) — and the terms the
+# lift adds on top of them (typed quantities and properties with QUDT units,
+# classifications, materials, the map conversion) need a home that is
+# declared, versioned and browsable.
+#
+# The namespace is `{base_url}/ns/ifc-lift#`: the `{base_url}` placeholder
+# is expanded at seed time to this deployment's base URL, so the ontology
+# sits under the instance that serves the lifted graphs and every IRI it
+# mints is dereferenceable there. The importer derives the same namespace
+# from the graph IRI it writes into (`{base_url}/dataset/…`).
+#
+# Vendored — it is this project's content, not a third-party payload — and
+# exercised on every CI run by tests/ifc_lift.rs, which checks that every
+# lift-namespace term the importer emits is declared here.
+
+id = "ifc-lift"
+opt_out_env = "SEED_IFC_LIFT"
+
+[organisation]
+slug = "ifc-lift"
+name = "IFC lift"
+description = "The vocabulary the IFC importer emits beside BOT, props: and ifcOWL: typed quantities and properties with QUDT units, classifications, materials, the IFC 4.3 facility spine and the map conversion."
+
+[[data_models]]
+id = "ifc-lift"
+title = "IFC lift ontology"
+namespace = "{base_url}/ns/ifc-lift#"
+kind = "model"
+version = "1.0.0"
+description = "Classes and properties of the IFC → linked-data lift that no borrowed vocabulary declares: Facility/Bridge/Road/Railway under bot:Zone, Quantity and Property nodes carrying qudt:hasUnit, Material, MapConversion, and the links from elements to them. Declares nothing ifcOWL, BOT or QUDT already define."
+
+[[data_models.graphs]]
+iri = "{base_url}/ns/ifc-lift"
+role = "model"
+file = "ifc-lift.ttl"

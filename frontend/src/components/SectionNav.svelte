@@ -37,17 +37,26 @@
 {/if}
 
 <style>
+  /* A floating bar, not a band across the page. It used to bleed to the
+     container edges with square corners and a single bottom rule, so the
+     moment it stuck it read as a hard rectangle cutting the page in two and
+     the content scrolling under it ran straight into that edge. It is a
+     rounded translucent bar now, the same 12px radius as the cards it sits
+     among, inset from the edges with a gap above it when stuck so the page is
+     visibly still there behind it. */
   .section-nav {
     position: sticky;
-    top: 0;
+    top: 0.5rem;
     z-index: 5;
     display: flex;
     gap: 0.35rem;
-    padding: 0.5rem 0.25rem;
-    margin: 0 -0.25rem;
+    padding: 0.4rem 0.5rem;
+    margin: 0.25rem 0;
     background: var(--bg-elevated);
-    backdrop-filter: blur(var(--glass-blur, 8px));
-    border-bottom: 1px solid var(--line-soft);
+    backdrop-filter: blur(var(--glass-blur, 10px)) saturate(140%);
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
     /* Long pages on narrow screens: the pills scroll sideways instead of wrapping
        into a bar tall enough to eat the viewport. */
     overflow-x: auto;

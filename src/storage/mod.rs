@@ -51,6 +51,30 @@ fn safe_local_join(base_path: &Path, key: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// The key is not in this node's object store.
+///
+/// Distinct from every other storage failure on purpose. A follower replicates
+/// the store and the identity database but not the object store, so it holds an
+/// asset's metadata without its bytes, and asking for one is an ordinary
+/// not-found rather than a fault. A misconfigured bucket or an unreachable
+/// endpoint *is* a fault and must keep saying so — conflating the two would make
+/// a broken S3 endpoint look like an empty one and nobody would go looking.
+///
+/// Attached with `anyhow::Error::from`, so a caller recovers it with
+/// `err.downcast_ref::<AssetMissing>()`.
+#[derive(Debug)]
+pub struct AssetMissing {
+    pub key: String,
+}
+
+impl std::fmt::Display for AssetMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no bytes stored for object key {}", self.key)
+    }
+}
+
+impl std::error::Error for AssetMissing {}
+
 enum Backend {
     S3 { client: S3Client, bucket: String },
     Local { base_path: PathBuf },
@@ -196,7 +220,17 @@ impl ObjectStore {
                     .key(key)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("S3 download failed: {}", e))?;
+                    .map_err(|e| {
+                        // "the bucket has no such object" is an absence; every
+                        // other way this can fail is a fault.
+                        if e.as_service_error().is_some_and(|se| se.is_no_such_key()) {
+                            anyhow::Error::from(AssetMissing {
+                                key: key.to_string(),
+                            })
+                        } else {
+                            anyhow::anyhow!("S3 download failed: {}", e)
+                        }
+                    })?;
                 let content_type = resp
                     .content_type()
                     .unwrap_or("application/octet-stream")
@@ -210,8 +244,18 @@ impl ObjectStore {
             }
             Backend::Local { base_path } => {
                 let path = safe_local_join(base_path, key)?;
-                let data = std::fs::read(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read asset {:?}: {}", path, e))?;
+                let data = std::fs::read(&path).map_err(|e| {
+                    // The old message pasted the server's absolute path into
+                    // the response body as well as conflating absence with a
+                    // read failure.
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        anyhow::Error::from(AssetMissing {
+                            key: key.to_string(),
+                        })
+                    } else {
+                        anyhow::anyhow!("Failed to read asset {:?}: {}", path, e)
+                    }
+                })?;
                 // Content-type stored as a sidecar file
                 let ct_path = path.with_extension("ct");
                 let content_type = std::fs::read_to_string(&ct_path)

@@ -27,10 +27,10 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 | SHACL Advanced (AF / SPARQL) | SPARQL constraints, rules, targets | Partial⁷ |
 | SHACL-C | Compact-syntax parser/serializer | Partial⁸ |
 | OPM (Ontology for Property Management) | Property states with history | Partial — `opm:Property` / `opm:PropertyState` / current-outdated / reliability classes via the property-state API; no `opm:Calculation` or derived-property inference. See [datasets.md](datasets.md#time-evolving-properties-opm-profile). |
-| buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification/material/predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). |
+| buildingSMART IDS 1.0 | Information Delivery Specification → SHACL | Partial — entity, property, attribute, partOf facets with value restrictions and cardinality; classification and material facets target `props:ifcClassification` / `props:ifcMaterial`, which the IFC lift emits; predefinedType by convention only; dataset-level existence not enforced. See [shacl.md](shacl.md#importing-constraint-specifications-ids). Round-trips: export back to IDS 1.0 covers the shared subset, and anything outside the IDS facet model is reported as a loss. |
 | ISO 21597-1 ICDD | Information container for linked document delivery | Partial — Part 1 containers import (documents, linksets, payload triples, ontology resources, index) and export (RDF/XML index); Part 2 not interpreted. See [containers.md](containers.md). |
 | RDF Patch (RDF Delta) | Change log line format | Partial — version diffs served as patches; patches applied atomically per dataset (`H`, one `TX`/`TC`/`TA`, `PA`/`PD`, `A`/`D` quads); no blank-node deletes, no nested transactions. See [versioning.md](versioning.md#rdf-patch). |
-| LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, entity-level version objects, tombstones, an incremental client; no retention policies, `tree:shape` or spatial/substring fragmentations. See [ldes.md](ldes.md). |
+| LDES / TREE | Event streams of version objects; hypermedia fragmentation | Partial — time-ordered fixed-size fragments with `GreaterThanOrEqualToRelation`, frozen once full; entity-level version objects, tombstones; retention policies (`fullLogDuration`, `versionAmount`, `versionDuration`, `versionDeleteDuration`, `startingFrom`) enforced inside frozen pages with `410 Gone` for a compacted node; an incremental client that treats 410 as an empty page. No `tree:shape`, `ldes:versionKey` or spatial/substring fragmentations. Spec-derived rules in `tests/ldes_conformance.rs` (no external corpus exists). See [ldes.md](ldes.md). |
 | LDP (Linked Data Platform) 1.0 | Basic/Direct/Indirect Containers; NonRDFSource | Full |
 | DCAT 3 / DCAT-AP 3 / DCAT-AP-NL 3 | Dataset catalogue description; EU / NL application profiles | Partial — DCAT 3 catalogue with VoID statistics; `DCAT_PROFILE` adds the AP/AP-NL mandatory properties (typed agents, identifiers, language, file types, data services, EU-authority statuses); no `dcat:CatalogRecord`, no temporal coverage, and the official DCAT-AP SHACL suite is not run in CI. See [dcat.md](dcat.md). |
 | RML / R2RML | CSV/JSON/XML → RDF mapping | Partial⁹ |
@@ -44,15 +44,19 @@ golden-standard conformance pass (engine + high-complexity edge cases):
 Conformance and high-complexity stress tests live in `tests/`. Each suite encodes
 expected results taken from the specification text; intentional non-conformances
 are encoded as documented, flip-when-fixed tests. Two things the table makes
-explicit: only the **vendored** rows run a published test corpus (the W3C SHACL
-Core manifests and the OGC GeoSPARQL validator shapes) — every other suite is
-hand-written and *derived from* its spec, not the W3C/OGC corpus — and the counts
-are generated from the suites themselves, so they cannot drift from the code.
+explicit: only the **vendored** rows run a published test corpus (the W3C SPARQL
+1.1 query and update manifests, the W3C SHACL Core manifests and the OGC
+GeoSPARQL validator shapes) — every other suite is hand-written and *derived
+from* its spec, not the W3C/OGC corpus — and the counts are generated from the
+suites themselves, so they cannot drift from the code. The vendored corpora are
+scored in [conformance/sparql11.md](conformance/sparql11.md),
+[conformance/shacl.md](conformance/shacl.md) and
+[conformance/geosparql.md](conformance/geosparql.md).
 
 <!-- conformance-table:start -->
 | Standard | Suite | Basis | Tests | Notes |
 |---|---|---|---:|---|
-| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 14 |  |
+| SPARQL 1.1 Protocol / Graph Store | `tests/api_protocol_conformance.rs` | spec-derived | 17 |  |
 | DCAT 2 / VoID | `tests/dcat_conformance.rs` | spec-derived | 4 |  |
 | GeoSPARQL 1.1 | `tests/geosparql_conformance.rs` | spec-derived | 107 |  |
 | LDP 1.0 (store level) | `tests/ldp_conformance.rs` | spec-derived | 43 |  |
@@ -61,13 +65,13 @@ are generated from the suites themselves, so they cannot drift from the code.
 | OWL 2 DL extension rules | `tests/owl2_dl_conformance.rs` | spec-derived | 34 |  |
 | OWL 2 EL | `tests/owl2_el_conformance.rs` | spec-derived | 14 |  |
 | OWL 2 QL | `tests/owl2_ql_conformance.rs` | spec-derived | 21 |  |
-| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 23 |  |
+| OWL 2 RL | `tests/owl2_rl_conformance.rs` | spec-derived | 30 |  |
 | RDF 1.1 formats | `tests/rdf11_conformance.rs` | spec-derived | 63 |  |
 | RDFS entailment | `tests/rdfs_conformance.rs` | spec-derived | 23 |  |
 | RML / R2RML | `tests/rml_conformance.rs` | spec-derived | 18 |  |
-| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 9 |  |
-| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 17 |  |
-| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 8 |  |
+| SHACL Core | `tests/shacl_conformance.rs` | spec-derived | 23 |  |
+| SHACL-AF rules | `tests/shacl_rules_conformance.rs` | spec-derived | 20 |  |
+| SHACL Compact Syntax | `tests/shaclc_conformance.rs` | spec-derived | 11 |  |
 | ShEx | `tests/shex_conformance.rs` | spec-derived | 10 |  |
 | SPARQL 1.2 / RDF-star | `tests/sparql12_conformance.rs` | spec-derived | 14 |  |
 | SP2B / BSBM query shapes | `tests/sparql_benchmarks.rs` | benchmark-derived | 28 |  |
@@ -75,10 +79,11 @@ are generated from the suites themselves, so they cannot drift from the code.
 | SPARQL engine coverage (sparqloscope) | `tests/sparqloscope_conformance.rs` | sparqloscope-derived | 67 |  |
 | Cross-standard HTTP smoke | `tests/standards_conformance.rs` | spec-derived | 25 |  |
 | SWRL | `tests/swrl_conformance.rs` | spec-derived | 4 |  |
-| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 113 corpus cases: 97 pass, 1 known failure, 15 runner-side skips (floor ≥90 asserted) |
+| SHACL Core | `tests/w3c_shacl_conformance.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 136 corpus cases: 119 pass, 2 known failures, 15 runner-side skips (floor ≥90 asserted) |
 | SPARQL 1.1 Query/Update | `tests/w3c_sparql11_conformance.rs` | spec-derived (+ cx01–cx15 high-complexity) | 125 |  |
+| SPARQL 1.1 Query/Update | `tests/w3c_sparql11_manifests.rs` | **vendored W3C corpus** (manifest-driven) | 1 | 485 corpus cases: 475 pass, 10 known failures, 0 runner-side skips (floor ≥450 asserted) |
 
-696 conformance tests across 25 suites; a further 372 tests in 45 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the two **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
+727 conformance tests across 26 suites; a further 500 tests in 68 integration, security and regression suites under `tests/`, plus the crate's unit tests. Only the 3 **vendored** rows run a published corpus; every other suite is hand-written and derived from the specification text.
 
 _Generated by `scripts/conformance_table.py` — edit the suites, not the table._
 <!-- conformance-table:end -->

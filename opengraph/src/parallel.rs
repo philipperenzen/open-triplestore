@@ -88,6 +88,8 @@ pub enum ParAnswer {
     },
     /// ASK-style boolean result.
     Boolean(bool),
+    /// CONSTRUCT-style result: the triples, deduplicated.
+    Graph(Vec<oxrdf::Triple>),
 }
 
 impl ParAnswer {
@@ -96,6 +98,7 @@ impl ParAnswer {
         match self {
             ParAnswer::Solutions { rows, .. } => rows.len(),
             ParAnswer::Boolean(_) => 1,
+            ParAnswer::Graph(t) => t.len(),
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -326,6 +329,12 @@ pub fn has_sum_or_avg(sparql: &str) -> bool {
     let Ok(query) = SparqlParser::new().parse_query(sparql) else {
         return false;
     };
+    has_sum_or_avg_query(&query)
+}
+
+/// [`has_sum_or_avg`] on a query that is already parsed, for a caller that
+/// has the syntax tree in hand and should not pay for a second parse.
+pub fn has_sum_or_avg_query(query: &Query) -> bool {
     let pattern = match &query {
         Query::Select { pattern, .. }
         | Query::Construct { pattern, .. }
@@ -1531,6 +1540,7 @@ mod tests {
                 r.sort();
                 r
             }
+            ParAnswer::Graph(_) => vec!["<graph>".into()],
         }
     }
 

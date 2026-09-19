@@ -102,6 +102,15 @@ pub(crate) struct DataView<'a> {
     /// can hold no quads), so the other graphs are still validated.
     graphs: Vec<GraphName>,
     classes: HashMap<(String, GraphSel), ClassInfo>,
+    /// The run's SPARQL evaluator, built once from the store's own options so
+    /// the GeoSPARQL, 3D, RDF 1.2 and `sh:SPARQLFunction` registrations are
+    /// present. Building it scans the store for user-defined functions, which
+    /// is exactly the per-probe cost this module exists to remove, so it is
+    /// built once here and cloned per query (`SparqlEvaluator` is `Clone`;
+    /// `parse_query` consumes it).
+    evaluator: oxigraph::sparql::SparqlEvaluator,
+    /// Graph-reach measurement for this run (see [`ReachProbe`]).
+    pub(crate) reach_probe: ReachProbe,
     /// Per-run adjacency for the shape predicates, built for the snapshot and
     /// live sources when the run is large enough to pay for it (see
     /// [`RunIndex`]). `None` on the mirror source, whose probes are RAM lookups.
@@ -134,6 +143,66 @@ struct RunIndex {
 pub(crate) struct IndexPolicy {
     pub min_probes: usize,
     pub max_quads: usize,
+}
+
+/// Counts, for one validation run, how often a property path yields FEWER
+/// value nodes when evaluated inside each data graph separately than it would
+/// over the merge of them — the observable consequence of evaluating `sh:path`
+/// per graph while `sh:sparql` and the class machinery read the graphs merged.
+///
+/// It measures; it never changes an answer: the extra evaluation's result is
+/// counted and dropped. Two things bound its cost. It only runs for paths that
+/// *can* cross a graph boundary — a single hop matches quads that each live in
+/// exactly one graph, so per-graph-and-union and merged evaluation return the
+/// same set by construction — and it only runs when the flag is set.
+///
+/// Off unless `OTS_SHACL_REACH_PROBE` is `1` or `true`. An earlier form of this
+/// probe only fired when the per-graph result was *empty*, which made it blind
+/// to every lookup where the merge adds values to a non-empty result — the case
+/// that changes a `sh:maxCount`, `sh:uniqueLang` or `sh:qualifiedMaxCount`
+/// answer. A zero reading from that form was not evidence.
+#[derive(Debug, Default)]
+pub(crate) struct ReachProbe {
+    pub(crate) enabled: bool,
+    /// Lookups whose merged evaluation yielded more value nodes.
+    pub(crate) diverged: std::sync::atomic::AtomicUsize,
+    /// Value nodes the merge would have added, summed over those lookups.
+    pub(crate) extra_values: std::sync::atomic::AtomicUsize,
+    /// Cross-graph-capable lookups examined, the denominator for `diverged`.
+    pub(crate) examined: std::sync::atomic::AtomicUsize,
+}
+
+impl ReachProbe {
+    fn from_env() -> Self {
+        let enabled = std::env::var("OTS_SHACL_REACH_PROBE")
+            .ok()
+            .is_some_and(|v| matches!(v.trim(), "1" | "true"));
+        Self {
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    /// `(diverged lookups, extra value nodes, lookups examined)`.
+    pub(crate) fn totals(&self) -> (usize, usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.diverged.load(Relaxed),
+            self.extra_values.load(Relaxed),
+            self.examined.load(Relaxed),
+        )
+    }
+
+    /// Record one examined lookup. `extra` is how many more value nodes the
+    /// merged evaluation produced; zero means the two agreed.
+    pub(crate) fn record(&self, extra: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.examined.fetch_add(1, Relaxed);
+        if extra > 0 {
+            self.diverged.fetch_add(1, Relaxed);
+            self.extra_values.fetch_add(extra, Relaxed);
+        }
+    }
 }
 
 impl IndexPolicy {
@@ -211,6 +280,8 @@ impl<'a> DataView<'a> {
             raw,
             graphs,
             classes: HashMap::new(),
+            evaluator: store.query_options(),
+            reach_probe: ReachProbe::from_env(),
             index: None,
         }
     }
@@ -380,6 +451,37 @@ impl<'a> DataView<'a> {
     /// queries are bare basic graph patterns, so a plain evaluator — no
     /// GeoSPARQL/SHACL-AF function registration, no `sh:SPARQLFunction`
     /// discovery — is enough. `None` when the query does not parse or run.
+    /// Evaluate a SPARQL query against the run's own data source.
+    ///
+    /// `sh:sparql` constraints, custom-component validators and SHACL-AF
+    /// SPARQL targets used to go through `TripleStore::query`, i.e. the LIVE
+    /// store, while every native probe in the same run read the mirror copy or
+    /// the RocksDB snapshot taken at its start. A write landing mid-run was
+    /// therefore visible to the SPARQL half of a shapes graph and invisible to
+    /// the rest of it, so one run could report against two instants. Routing
+    /// them here makes the run consistent.
+    ///
+    /// The cost is the result cache and the accelerator's shard routing, which
+    /// `TripleStore::query` would have applied and this does not — the same
+    /// trade every native probe in the run already makes.
+    pub(crate) fn query(&self, query: &str) -> Result<oxigraph::sparql::QueryResults<'_>, String> {
+        let prepared = self
+            .evaluator
+            .clone()
+            .parse_query(query)
+            .map_err(|e| e.to_string())?;
+        match &self.raw {
+            RawSource::Snapshot(tx) => prepared.on_transaction(tx).execute(),
+            RawSource::Mirror(store) => prepared.on_store(store).execute(),
+            RawSource::Live(store) => prepared.on_store(store).execute(),
+        }
+        .map_err(|e| e.to_string())
+    }
+
+    /// A bare-evaluator SELECT for the view's own internal scans (instance
+    /// sets, the run index). It deliberately does NOT use [`Self::query`]'s
+    /// evaluator: these patterns call no custom function, and cloning the
+    /// populated evaluator per scan would cost more than building an empty one.
     fn select(&self, query: &str) -> Option<oxigraph::sparql::QuerySolutionIter<'_>> {
         let prepared = oxigraph::sparql::SparqlEvaluator::new()
             .parse_query(query)
@@ -666,7 +768,18 @@ impl<'a> DataView<'a> {
         let computed: Vec<((String, GraphSel), ClassInfo)> = keys
             .par_iter()
             .map(|(class, sel)| {
-                let closure = self.compute_closure(class, *sel);
+                // The `rdfs:subClassOf*` chain is read across every data graph
+                // for BOTH selectors. `sh:targetClass` (§2.1.3.2) and
+                // `sh:class` (§4.1.1) are the same specification relation —
+                // "SHACL instance of C in the data graph" — evaluated at two
+                // moments, so they must agree on the class hierarchy. Reading
+                // the chain per graph made them disagree: a dataset that keeps
+                // `ex:Bridge rdfs:subClassOf ex:Asset` in its model graph and
+                // `ex:b1 a ex:Bridge` in its instances graph had
+                // `sh:targetClass ex:Asset` silently target nothing, while
+                // `sh:class ex:Asset` on the same node held. Only the instance
+                // scan stays per graph.
+                let closure = self.compute_closure(class, GraphSel::All);
                 let instances = match sel {
                     GraphSel::One(i) => Some(Arc::new(self.scan_instances(&closure, *i))),
                     // With a single data graph the "all graphs" instance set is

@@ -205,7 +205,10 @@ impl<'a> ArgParser<'a> {
         let mut out = Vec::new();
         loop {
             self.skip_ws();
-            if self.pos >= self.s.len() {
+            // The end of the input, or of the enclosing list: `()` is an
+            // empty list, not a list of one unknown byte — consuming that `)`
+            // as an argument would swallow every argument after the list.
+            if self.pos >= self.s.len() || self.s[self.pos] == b')' {
                 break;
             }
             out.push(self.parse_arg());
@@ -484,6 +487,30 @@ ENDSEC;\nEND-ISO-10303-21;";
             }
             other => panic!("expected typed, got {other:?}"),
         }
+    }
+
+    /// `()` is an empty list. It used to be parsed as a list holding one
+    /// unknown byte, with the closing paren consumed — so every argument
+    /// after it was swallowed into the list, and an IfcProject's
+    /// `UnitsInContext` (which follows the always-present
+    /// `RepresentationContexts` list) was never seen.
+    #[test]
+    fn an_empty_list_does_not_swallow_the_arguments_after_it() {
+        let step = "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n\
+#1= IFCPROJECT('0AAAAAAAAAAAAAAAAAAAP1',$,'P',$,$,$,$,(),#10);\n\
+#2= IFCRELCONNECTSPATHELEMENTS('0AAAAAAAAAAAAAAAAAAAR7',$,$,$,$,#3,#4,(),(),.ATEND.,.ATSTART.);\n\
+ENDSEC;\nEND-ISO-10303-21;";
+        let f = parse(step).unwrap();
+        let project = f.get(1).unwrap();
+        assert_eq!(project.args.len(), 9, "{:?}", project.args);
+        assert_eq!(project.args[7], Arg::List(vec![]));
+        assert_eq!(project.args[8], Arg::Ref(10));
+        let rel = f.get(2).unwrap();
+        assert_eq!(rel.args.len(), 11, "{:?}", rel.args);
+        assert_eq!(rel.args[7], Arg::List(vec![]));
+        assert_eq!(rel.args[8], Arg::List(vec![]));
+        assert_eq!(rel.args[9], Arg::Enum("ATEND".into()));
+        assert_eq!(rel.args[10], Arg::Enum("ATSTART".into()));
     }
 
     #[test]

@@ -181,7 +181,7 @@
   .pipe-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.35rem; }
   .pipe-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
   :global(.pipe-icon) { color: #6d28d9; }
-  :global(.pipe-name-link) { font-weight: 600; color: #1e293b; text-decoration: none; }
+  :global(.pipe-name-link) { font-weight: 600; color: #1e293b; text-decoration: none; overflow-wrap: break-word; min-width: 0; }
   :global(.pipe-name-link:hover) { color: #2F7A8C; text-decoration: underline; }
   .pipe-desc { margin: 0; color: #64748b; font-size: 0.85rem; }
   .pipe-meta { font-size: 0.78rem; color: #64748b; display: flex; gap: 0.4rem; flex-wrap: wrap; }
@@ -205,6 +205,18 @@
   .pill-ok { background: #dcfce7; color: #15803d; }
   .pill-fail { background: #fee2e2; color: #b91c1c; }
   .dim { color: #94a3b8; }
+
+  /* Phone. The two header links are pinned to the card's top-right corner,
+     which on a narrow card means they sit on top of the heading and the
+     intro; below the breakpoint they rejoin the flow underneath. The card
+     itself stops being a row, so "Run now" spans the card instead of being
+     squeezed against its right edge. */
+  @media (max-width: 720px) {
+    .toolbar-cta { position: static; margin-top: 0.6rem; flex-wrap: wrap; }
+    .toolbar-cta :global(.btn) { width: auto; flex: 1 1 8rem; min-height: 2.5rem; }
+    .pipe-card { flex-direction: column; align-items: stretch; gap: 0.6rem; }
+    .pipe-actions .btn { width: 100%; min-height: 2.5rem; }
+  }
 
   :global(:is([data-theme="dark"], .dark)) .pipe-card { background: var(--bg-strong); }
   :global(:is([data-theme="dark"], .dark)) .pipe-card:hover { border-color: var(--line-strong); }

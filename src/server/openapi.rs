@@ -140,6 +140,7 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::auth::handlers::SetResourceGrantRequest,
             // SHACL report types
             crate::shacl::report::ValidationReport,
+            crate::shacl::report::RunMetrics,
             crate::shacl::report::ValidationResult,
             crate::shacl::report::Severity,
             // Route-level types
@@ -435,8 +436,8 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     ]);
     mount(paths, "/sparql/batch", vec![
         (M::Post, o("SPARQL", "Batched SPARQL update",
-            "Apply several SPARQL updates atomically in one transaction. Requires authentication.",
-            vec![], vec![("204", "All updates applied"), ("400", "Invalid update"), ("401", "Authentication required")], true)),
+            "Apply several SPARQL updates (`{\"updates\": [\"…\", …]}`, at most 1000) as ONE transaction: either every statement is applied or none is. Statements run in order and each sees the effect of the previous ones. Requires authentication.",
+            vec![], vec![("200", "`status: ok` — every statement applied"), ("422", "`status: rolled_back` — a statement failed at execution and nothing was applied; `error` says which statement and why, and the per-statement `results` mark the failing one `error` and every other one `rolled_back` (`ok` never appears there)"), ("400", "A statement does not parse or is not authorised for this caller; nothing applied"), ("401", "Authentication required")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1484,10 +1485,15 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Upload shapes graph",
-                    "Replace the dataset's SHACL shapes graph.",
-                    vec![],
+                    "Replace the dataset's SHACL shapes graph (Turtle, or SHACL-C with Content-Type: text/shaclc). SHACL-C is parsed strictly: unrecognised input is a 400 naming its position and nothing is stored.",
+                    vec![qp(
+                        "lenient",
+                        false,
+                        "SHACL-C only: `true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
+                    )],
                     vec![
                         ("204", "Shapes graph updated"),
+                        ("400", "SHACL-C parse error (position named)"),
                         ("401", "Authentication required"),
                     ],
                     true,
@@ -1666,6 +1672,171 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("200", "ShEx validation result"), ("400", "Invalid schema or data")], false)),
     ]);
 
+    // Constraint-specification import/export (buildingSMART IDS today).
+    mount(paths, "/api/shacl/importers", vec![
+        (M::Get, o("Validation", "List specification importers", "Specification formats that can be turned into SHACL shapes. Each entry is `{id, label, media_types}`.",
+            vec![], vec![("200", "Array of importers")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/import/:format",
+        vec![(
+            M::Post,
+            o(
+                "Validation",
+                "Import a constraint specification",
+                "Body is the specification document (for `ids`: an IDS 1.0 XML file). Returns `{format, title, description, turtle, specifications, warnings, shape_graph}`; `warnings` lists everything the importer could not carry. With `?create=true` the result is also stored as a SHACL Studio shape graph and the response is a 201.",
+                vec![
+                    qp("create", false, "`true` also creates a SHACL Studio shape graph from the result (default: false)."),
+                    qp("name", false, "Name for the created shape graph (default: the specification title)."),
+                    qp("visibility", false, "Visibility of the created shape graph: `public` or `private`."),
+                ],
+                vec![
+                    ("200", "Imported shapes (Turtle + per-specification summary)"),
+                    ("201", "Imported and stored as a shape graph"),
+                    ("400", "Empty body"),
+                    ("401", "Authentication required"),
+                    ("404", "Unknown format (the known ids are named)"),
+                    ("422", "The document could not be imported"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/shacl/exporters", vec![
+        (M::Get, o("Validation", "List specification exporters", "Specification formats SHACL shapes can be exported to. Each entry is `{id, label, media_type, file_extension}`.",
+            vec![], vec![("200", "Array of exporters")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/export/:format",
+        vec![(
+            M::Post,
+            o(
+                "Validation",
+                "Export shapes to a constraint specification",
+                "Body is a shapes graph in Turtle. The default response is a JSON report `{format, document, specification_count, losses}` — `losses` names every constraint the target format cannot express, which for IDS is most of SHACL beyond a facet, a required/prohibited cardinality and one value restriction. `?raw=true` returns the bare document with the format's media type. A shapes graph from which nothing can be expressed is a 422, not an empty document.",
+                vec![
+                    qp("raw", false, "`true` returns the document itself instead of the report (default: false)."),
+                    qp("title", false, "Title written into the document (default: `Exported shapes`)."),
+                ],
+                vec![
+                    ("200", "Export report, or the bare document with `?raw=true`"),
+                    ("400", "Empty body, or the Turtle does not parse"),
+                    ("401", "Authentication required"),
+                    ("404", "Unknown format (the known ids are named)"),
+                    ("422", "The shapes could not be loaded, or nothing in them is expressible in the target format"),
+                ],
+                true,
+            ),
+        )],
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Linked Data Event Streams
+    // ═══════════════════════════════════════════════════════════════════════
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/ldes",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Datasets",
+                    "Event stream",
+                    "The dataset's `ldes:EventStream` (Turtle, JSON-LD or N-Triples by `Accept`): its declared paths, `tree:view` to the first node that still has members, and — when declared — the retention policy on that root node as an IRI described in the same document.",
+                    vec![],
+                    vec![("200", "Stream description"), ("404", "No stream, or dataset not visible")],
+                    false,
+                ),
+            ),
+            (
+                M::Put,
+                ob(
+                    "Datasets",
+                    "Enable a stream and declare its retention",
+                    "Enable (or disable) the dataset's event stream. Enabling a stream with no members yet publishes every entity of the non-private graphs. `retention` declares and enforces an LDES 1.0 §4.4 policy: absent leaves it unchanged, `{}` clears it. Full pages are frozen before any member is removed, so a fragment served as immutable only ever shrinks; a fragment emptied by the policy answers 410. A policy is applied when set and after later writes.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("enabled", ObjectBuilder::new().schema_type(Type::Boolean))
+                            .property("page_size", ObjectBuilder::new().schema_type(Type::Integer).description(Some("Members per fragment, 1–10000 (default 100). Already-full pages keep their old size.")))
+                            .property(
+                                "retention",
+                                ObjectBuilder::new()
+                                    .property("full_log_duration", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:fullLogDuration`, an xsd:duration: every member from now back this far is kept.")))
+                                    .property("version_amount", ObjectBuilder::new().schema_type(Type::Integer).description(Some("`ldes:versionAmount` (> 0): the newest N versions of each entity are kept.")))
+                                    .property("version_duration", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:versionDuration`: those versions are kept only this long (needs version_amount).")))
+                                    .property("version_delete_duration", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:versionDeleteDuration`: tombstones are kept this long.")))
+                                    .property("starting_from", ObjectBuilder::new().schema_type(Type::String).description(Some("`ldes:startingFrom`, an xsd:dateTime with a timezone: nothing older is kept.")))
+                                    .description(Some("The retention policy; `{}` clears it. Durations are the `PnYnMnDTnHnMnS` subset of xsd:duration (a year counts as 365 days, a month as 30).")),
+                            )
+                            .required("enabled"),
+                        json!({ "enabled": true, "page_size": 100, "retention": { "full_log_duration": "P30D", "version_amount": 2, "version_delete_duration": "P7D" } }),
+                    ),
+                    vec![
+                        ("200", "`{dataset_id, enabled, page_size, stream, members_seeded, members_pruned, members, retention}`"),
+                        ("400", "Malformed retention policy"),
+                        ("401", "Authentication required"),
+                        ("403", "Write access required"),
+                        ("404", "Dataset not found"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/datasets/:dataset_id/ldes/nodes/:n",
+        vec![(
+            M::Get,
+            o(
+                "Datasets",
+                "Event stream fragment",
+                "Fragment `n` (1-based): the stream description, `<node> a tree:Node`, `ldes:immutable true` plus `Cache-Control: immutable` on every page but the last, a `tree:GreaterThanOrEqualToRelation` on `dct:created` to the next fragment that still has members, and the page's members as version objects.",
+                vec![],
+                vec![
+                    ("200", "Fragment"),
+                    ("404", "No such node, or no stream"),
+                    ("410", "The node's members were all removed by the retention policy; the body names where the stream continues"),
+                ],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/ldes/sync",
+        vec![(
+            M::Post,
+            ob(
+                "Datasets",
+                "Sync a remote event stream",
+                "Follow a remote LDES from `url` (origin must be in `OTS_REMOTE_ALLOWLIST`), keep the newest version of each entity and materialise it into `graph_iri` of `dataset_id`; a bookmark makes later runs incremental. A `410 Gone` fragment is processed as an empty page. The report carries the publisher's declared retention policy and warns when the bookmark predates its window.",
+                vec![],
+                json_body(
+                    ObjectBuilder::new()
+                        .property("url", ObjectBuilder::new().schema_type(Type::String))
+                        .property("dataset_id", ObjectBuilder::new().schema_type(Type::String))
+                        .property("graph_iri", ObjectBuilder::new().schema_type(Type::String))
+                        .required("url")
+                        .required("dataset_id")
+                        .required("graph_iri"),
+                    json!({ "url": "https://other.example.org/api/datasets/roads/ldes", "dataset_id": "roads-mirror", "graph_iri": "https://example.org/roads-mirror/instances" }),
+                ),
+                vec![
+                    ("200", "Sync report: nodes_visited, nodes_gone, members_seen, members_skipped_older, entities_updated, entities_deleted, last_timestamp, retention_policy, warnings"),
+                    ("401", "Authentication required"),
+                    ("403", "Write access required, or the origin is not allow-listed"),
+                    ("404", "Dataset not found"),
+                    ("502", "The remote stream could not be read"),
+                ],
+                true,
+            ),
+        )],
+    );
+
     // ═══════════════════════════════════════════════════════════════════════
     // SHACL-C
     // ═══════════════════════════════════════════════════════════════════════
@@ -1677,10 +1848,14 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "SHACL-C",
                 "Parse SHACL Compact Syntax",
-                "Parse SHACL-C text and return the equivalent SHACL RDF.",
-                vec![],
-                vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error")],
-                false,
+                "Parse SHACL-C text and return the equivalent SHACL RDF. Strict by default: unrecognised input is a 400 naming its line and column.",
+                vec![qp(
+                    "lenient",
+                    false,
+                    "`true` or `1` ignores unrecognised input instead of failing on it (default: strict).",
+                )],
+                vec![("200", "SHACL graph (text/turtle)"), ("400", "Parse error (position named)"), ("401", "Authentication required")],
+                true,
             ),
         )],
     );
@@ -1703,6 +1878,28 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     // ═══════════════════════════════════════════════════════════════════════
     // Reasoning
     // ═══════════════════════════════════════════════════════════════════════
+    mount(paths, "/api/datasets/:dataset_id/identity", vec![
+        (M::Get, o("Reasoning", "Dataset identity policy",
+            "What the dataset's reasoning does with `owl:sameAs`: the policy in force (`sameas-off` — the equality rules never run; `sameas-narrow` — they run over the dataset's own graphs, linkset graphs are not premises; `sameas-full` — every sameAs propagates, linksets included), where it comes from (`dataset`, `organisation`, `default`), the dataset's own setting and the options with descriptions.",
+            vec![pp("dataset_id")], vec![("200", "Effective policy, source, setting, options"), ("404", "Dataset not found")], true)),
+        (M::Put, o("Reasoning", "Set the dataset's identity policy",
+            "Body `{\"policy\": \"sameas-off|sameas-narrow|sameas-full\"}`. Overrides the organisation's setting for this dataset; a dataset in `materialize` mode is re-materialised at once. Requires write access to the dataset.",
+            vec![pp("dataset_id")], vec![("200", "Effective policy after the change"), ("400", "Unknown policy"), ("403", "Write access required")], true)),
+        (M::Delete, o("Reasoning", "Drop the dataset's identity setting",
+            "The dataset falls back to its organisation's policy, or the built-in default (`sameas-narrow`).",
+            vec![pp("dataset_id")], vec![("200", "Effective policy after the change"), ("403", "Write access required")], true)),
+    ]);
+    mount(paths, "/api/organisations/:org_id/identity", vec![
+        (M::Get, o("Reasoning", "Organisation identity policy",
+            "The `owl:sameAs` policy every dataset the organisation owns inherits unless the dataset sets its own. Members may read it.",
+            vec![pp("org_id")], vec![("200", "Policy, source, setting, options"), ("404", "Organisation not found or not a member")], true)),
+        (M::Put, o("Reasoning", "Set the organisation's identity policy",
+            "Body `{\"policy\": \"sameas-off|sameas-narrow|sameas-full\"}`. Inheriting datasets in `materialize` mode are re-materialised. Organisation admin role required.",
+            vec![pp("org_id")], vec![("200", "Policy after the change"), ("400", "Unknown policy"), ("403", "Organisation admin role required")], true)),
+        (M::Delete, o("Reasoning", "Drop the organisation's identity setting",
+            "Inheriting datasets fall back to the built-in default (`sameas-narrow`).",
+            vec![pp("org_id")], vec![("200", "Policy after the change"), ("403", "Organisation admin role required")], true)),
+    ]);
     mount(paths, "/api/reasoning/materialize", vec![
         (M::Post, o("Reasoning", "Materialise entailments", "Materialise inferred triples for an entailment regime (rdfs, owl2-rl, owl2-el, owl2-ql, owl2-dl).",
             vec![], vec![("200", "Reasoning report"), ("401", "Authentication required")], true)),
@@ -1813,7 +2010,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     );
     mount(paths, "/api/rml/preview", vec![
         (M::Post, o("Mappings", "Preview RML mapping", "Run an inline RML mapping against sample input and return the generated triples without storing them.",
-            vec![], vec![("200", "Generated triples"), ("400", "Invalid mapping")], false)),
+            vec![], vec![("200", "Generated triples"), ("400", "Invalid mapping"), ("401", "Authentication required")], true)),
     ]);
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3375,7 +3572,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             o(
                 "Users",
                 "List public users",
-                "Minimal public user directory (id, username, avatar).",
+                "Minimal public user directory (id, username, avatar), scoped to the users the caller can already see: the owners of the datasets it may read, the members of its organisations, and itself. An admin sees every account.",
                 vec![],
                 vec![("200", "Array of public users")],
                 false,
@@ -3909,6 +4106,194 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             ),
         )],
     );
+    mount(
+        paths,
+        "/api/admin/telemetry",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Workload telemetry",
+                "Which exit of the query path answers (result cache, count index, mirror shards, full copy, engine) with latency percentiles split by the analytical bit; SHACL runs by path, data source and duration; the inter-write gap histogram. Fixed-size rings since start, nothing persisted — the inputs to the analytical-layer decision. See docs/performance.md.",
+                vec![],
+                vec![
+                    ("200", "Telemetry summary"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/changes",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Change log rows",
+                "Rows of the per-quad change log with a sequence number above `after`, in commit order: one row per graph per write with its extent (`full` carries the added and removed quads as N-Quads, `counts` only the exact counts, `unknown` says the graph changed), the count after the write, origin, kind, actor and commit. `graph` narrows to one graph plus the store-scoped rows every reader must see. Returns `epoch`, `rows` and `next_after` (pass it back as `after`). Admins only. See docs/versioning.md.",
+                vec![
+                    qp("after", false, "Return rows with seq above this (default 0)."),
+                    qp("limit", false, "Rows per page, 1-5000 (default 500)."),
+                    qp("graph", false, "Only this graph's rows, plus store-scoped rows."),
+                    qp("wait_ms", false, "Long-poll: when no row is above `after`, hold the request up to this many milliseconds (at most 30000) for one to land, then answer."),
+                ],
+                vec![
+                    ("200", "Rows in commit order"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/changes/status",
+        vec![(
+            M::Get,
+            o(
+                "Admin",
+                "Change log status",
+                "Whether capture is on, the epoch, the next sequence number, row counts by state, the oldest and newest sequence numbers, the live cursors, the scan and payload caps and the retention window.",
+                vec![],
+                vec![
+                    ("200", "Status"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/admin/changes/cursors/:name",
+        vec![
+            (
+                M::Put,
+                ob(
+                    "Admin",
+                    "Set a change-log cursor",
+                    "Bookmark a consumer's position (the last sequence number it applied). Retention keeps every row above the lowest live cursor; a cursor expires after OTS_CURSOR_TTL_DAYS without an update.",
+                    vec![],
+                    json_body(
+                        ObjectBuilder::new()
+                            .property("seq", ObjectBuilder::new().schema_type(Type::Integer))
+                            .required("seq"),
+                        json!({ "seq": 42 }),
+                    ),
+                    vec![
+                        ("200", "The cursor"),
+                        ("400", "Invalid name or seq beyond the log"),
+                        ("401", "Authentication required"),
+                        ("403", "Admin role required"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Admin",
+                    "Delete a change-log cursor",
+                    "Drop a consumer's bookmark; retention no longer waits for it.",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("401", "Authentication required"),
+                        ("403", "Admin role required"),
+                        ("404", "No such cursor"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/replication/status",
+        vec![(
+            M::Get,
+            o(
+                "Replication",
+                "Replication status",
+                "This node's replication role (`none`, `leader`, `follower`), temperature (`cold`, `warm`, `hot`), scope, and — on a follower — the leader epoch it adopted, the last sequence number it applied, the leader's newest sequence number and the lag in rows, the last catch-up time and error, and `healthy`. Public, beside /livez. See docs/operations.md (Replication).",
+                vec![],
+                vec![("200", "Replication status")],
+                false,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/replication/manifest",
+        vec![(
+            M::Get,
+            o(
+                "Replication",
+                "Replication manifest",
+                "What a follower needs to start or resynchronise: the leader's change-log epoch and newest sequence number, whether capture is on, every graph the store holds (`null` is the default graph) and each dataset's graphs. Admins only.",
+                vec![],
+                vec![
+                    ("200", "Manifest"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/replication/identity",
+        vec![(
+            M::Get,
+            o(
+                "Replication",
+                "Identity database snapshot",
+                "The identity database (users, organisations, datasets, tokens, rules), whole, as a consistent SQLite file (`application/vnd.sqlite3`) taken with the online backup API. A follower fetches it when the manifest's `identity_version` moves and applies it in place. Admins only.",
+                vec![],
+                vec![
+                    ("200", "The database as SQLite file bytes"),
+                    ("401", "Authentication required"),
+                    ("403", "Admin role required"),
+                ],
+                true,
+            ),
+        )],
+    );
+    for (path, what) in [
+        ("/api/replication/raft/vote", "a vote request"),
+        ("/api/replication/raft/append", "an append-entries request"),
+        (
+            "/api/replication/raft/snapshot",
+            "an install-snapshot chunk",
+        ),
+    ] {
+        mount(
+            paths,
+            path,
+            vec![(
+                M::Post,
+                o(
+                    "Replication",
+                    "Raft RPC (cluster members only)",
+                    &format!("The Raft transport between the members of a consensus cluster: {what}, as JSON, authenticated by the shared `X-Cluster-Secret`. Not a user route: 404 on a node that is not a cluster member, 401 without the secret, 503 while the member starts. See docs/operations.md (Consensus)."),
+                    vec![],
+                    vec![
+                        ("200", "The Raft response"),
+                        ("401", "Cluster secret missing or wrong"),
+                        ("404", "Not a cluster member"),
+                        ("503", "Member starting"),
+                    ],
+                    false,
+                ),
+            )],
+        );
+    }
     mount(
         paths,
         "/api/admin/acl/endpoints",

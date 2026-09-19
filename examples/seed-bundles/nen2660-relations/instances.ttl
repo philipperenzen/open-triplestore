@@ -1,0 +1,81 @@
+# Sample decomposition for the NEN 2660-2 relation profile, with geometries
+# (WGS 84 / CRS84, lon lat). Conforming: bridge-1 → deck-1 → bearing-1 (the
+# bearing is transitively part of the bridge), the service area containing
+# pump-1. Planted violations: loop-a/loop-b form a hasPart cycle; the head of
+# lamp-post-1 lies outside the post; service-area-1 "contains" pump-2, which
+# lies outside it; cabinet-1 contains itself.
+@prefix nen2660: <https://w3id.org/nen2660/def#> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:      <https://example.org/nen2660-relations/> .
+
+# ── A bridge, its deck, a bearing ────────────────────────────────────────────
+
+ex:bridge-1 a nen2660:PhysicalObject ;
+    rdfs:label "Bridge 1"@en ;
+    nen2660:hasPart ex:deck-1 ;
+    nen2660:consistsOf ex:concrete ;
+    geo:hasGeometry [ geo:asWKT "POLYGON ((5.860 51.845, 5.870 51.845, 5.870 51.848, 5.860 51.848, 5.860 51.845))"^^geo:wktLiteral ] .
+
+ex:deck-1 a nen2660:PhysicalObject ;
+    rdfs:label "Deck of bridge 1"@en ;
+    nen2660:hasTechnicalPart ex:bearing-1 ;
+    geo:hasGeometry [ geo:asWKT "POLYGON ((5.862 51.846, 5.868 51.846, 5.868 51.847, 5.862 51.847, 5.862 51.846))"^^geo:wktLiteral ] .
+
+ex:bearing-1 a nen2660:PhysicalObject ;
+    rdfs:label "Bearing 1 of deck 1"@en ;
+    geo:hasGeometry [ geo:asWKT "POLYGON ((5.8625 51.8462, 5.8635 51.8462, 5.8635 51.8466, 5.8625 51.8466, 5.8625 51.8462))"^^geo:wktLiteral ] .
+
+ex:concrete a nen2660:Matter ;
+    rdfs:label "Concrete"@en .
+
+# A connection between the deck and the bridge's abutment (no hierarchy).
+ex:abutment-1 a nen2660:PhysicalObject ;
+    rdfs:label "Abutment 1"@en .
+
+ex:joint-1 a nen2660:Connection ;
+    rdfs:label "Expansion joint 1"@en ;
+    nen2660:connectsObject ex:deck-1 , ex:abutment-1 .
+
+# ── A service area containing pumps ──────────────────────────────────────────
+
+ex:service-area-1 a nen2660:SpatialRegion ;
+    rdfs:label "Service area 1"@en ;
+    nen2660:contains ex:pump-1 , ex:pump-2 ;
+    geo:hasGeometry [ geo:asWKT "POLYGON ((5.880 51.850, 5.885 51.850, 5.885 51.853, 5.880 51.853, 5.880 51.850))"^^geo:wktLiteral ] .
+
+ex:pump-1 a nen2660:PhysicalObject ;
+    rdfs:label "Pump 1 (inside the area)"@en ;
+    geo:hasGeometry [ geo:asWKT "POINT (5.882 51.851)"^^geo:wktLiteral ] .
+
+# Planted: contained, but located outside the region.
+ex:pump-2 a nen2660:PhysicalObject ;
+    rdfs:label "Pump 2 (outside the area — planted violation)"@en ;
+    geo:hasGeometry [ geo:asWKT "POINT (5.900 51.860)"^^geo:wktLiteral ] .
+
+# ── Planted: a lamp post whose head escapes it ───────────────────────────────
+
+ex:lamp-post-1 a nen2660:PhysicalObject ;
+    rdfs:label "Lamp post 1 (planted violation: its head lies elsewhere)"@en ;
+    nen2660:hasPart ex:lamp-head-1 ;
+    geo:hasGeometry [ geo:asWKT "POLYGON ((5.8700 51.8500, 5.8702 51.8500, 5.8702 51.8502, 5.8700 51.8502, 5.8700 51.8500))"^^geo:wktLiteral ] .
+
+ex:lamp-head-1 a nen2660:PhysicalObject ;
+    rdfs:label "Lamp head 1"@en ;
+    geo:hasGeometry [ geo:asWKT "POLYGON ((5.8900 51.8600, 5.8902 51.8600, 5.8902 51.8602, 5.8900 51.8602, 5.8900 51.8600))"^^geo:wktLiteral ] .
+
+# ── Planted: a hasPart cycle ─────────────────────────────────────────────────
+
+ex:loop-a a nen2660:PhysicalObject ;
+    rdfs:label "Loop A (planted violation: cycle)"@en ;
+    nen2660:hasPart ex:loop-b .
+
+ex:loop-b a nen2660:PhysicalObject ;
+    rdfs:label "Loop B (planted violation: cycle)"@en ;
+    nen2660:hasFunctionalPart ex:loop-a .
+
+# ── Planted: a cabinet containing itself ─────────────────────────────────────
+
+ex:cabinet-1 a nen2660:SpatialRegion ;
+    rdfs:label "Cabinet 1 (planted violation: contains itself)"@en ;
+    nen2660:contains ex:cabinet-1 .

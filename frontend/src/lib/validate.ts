@@ -39,3 +39,49 @@ export function validatePassword(password: string): string | null {
   if (password.length > 1024) return 'tooLong';
   return null;
 }
+
+// ── Prefix overrides ─────────────────────────────────────────────────────────
+//
+// Mirrors `is_valid_label` / `is_valid_iri` in src/prefixes/mod.rs so an
+// administrator hears about a malformed label before spending a round trip on
+// it. The server still decides: these checks only shorten the feedback loop,
+// and a label this function accepts can still be refused with a 400.
+
+/** The server's MAX_LABEL_LENGTH. */
+export const PREFIX_LABEL_MAX_LENGTH = 64;
+
+/**
+ * A prefix label: an ASCII letter, then letters, digits, `_` or `-`.
+ *
+ * Spaces are excluded by the charset rather than checked separately — a label
+ * goes into a `PREFIX label: <IRI>` declaration, where a space would end it.
+ */
+export function validatePrefixLabel(label: string): string | null {
+  if (!label) return 'required';
+  if (label.length > PREFIX_LABEL_MAX_LENGTH) return 'tooLong';
+  if (!/^[A-Za-z]/.test(label)) return 'start';
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(label)) return 'charset';
+  return null;
+}
+
+/**
+ * A namespace: an absolute `http` or `https` IRI.
+ *
+ * Parsed rather than pattern-matched, because the schemes that matter to
+ * exclude — `javascript:`, `data:`, `file:` — are exactly the ones a regex over
+ * "looks like a URL" tends to let through. No base is passed, so a relative
+ * reference fails to parse and is refused, which is what we want: a namespace
+ * that only resolves against whatever page happened to be open is not a
+ * namespace.
+ */
+export function validatePrefixNamespace(namespace: string): string | null {
+  if (!namespace) return 'required';
+  let url: URL;
+  try {
+    url = new URL(namespace);
+  } catch {
+    return 'format';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return 'scheme';
+  return null;
+}

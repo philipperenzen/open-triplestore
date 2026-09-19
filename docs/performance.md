@@ -681,8 +681,13 @@ Apple M-series laptop, release build.
 | group by + avg (41 groups) | 1.18 s | 9.5 s | —² |
 | property path `partOf+` | 0.08 ms | 0.07 ms | —² |
 | `COUNT(*)` in `GRAPH` | 237 ms | 2.1 s | —² |
-| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 118 s (76k quads/s) | — |
+| SHACL, all assets, 6 shapes | 10.8 s (83k quads/s) | 6.3 s on the mirror, 13.5 s on RocksDB in the 4g container⁴ (118 s before the engine rebuild) | — |
 | 4 writers + 4 readers, 20 s | 46k quads/s written, write p95 71 ms; 10.6k reads/s, read p95 1.6 ms | 34k quads/s written, write p95 122 ms; 5.7k reads/s, read p95 3.1 ms | — |
+
+⁴ Measured 2026-09-16 with [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs)
+(ignored; run on purpose) on the reference system below, in Docker, release
+build; the row's other 9M cells are the laptop figures of the first run. The
+full measurement is under "The 9M SHACL measurement" further down.
 
 ² The Docker Fuseki image is amd64-only and the webapp distribution needs a
 login; the comparison ran Fuseki *main* (the no-UI jar) natively over HTTP —
@@ -721,6 +726,78 @@ into a temporary store first (so a malformed body cannot empty the graph) and
 indexes every literal for full-text search; Fuseki does neither. A graph
 clear walks every quad through RocksDB: deleting a 1.6M-quad graph took
 36 s with the chunked clear (before it, 34–60 s for 900k quads).
+
+##### The 9M SHACL measurement (2026-09-16)
+
+The analytical-layer notes (`docs/notes/analytical-mirror-design.md` §1.5)
+made the SHACL→SQL question conditional on one number nobody had: whole-
+dataset validation at 9M quads on the deployment's real configuration. The
+harness is [`tests/scale_shacl_9m.rs`](../tests/scale_shacl_9m.rs), which
+runs in the ordinary suite at 20 000 assets and becomes this measurement
+with `OTS_SCALE_ASSETS=1000000`: 1M OTL assets (the same generator as
+`examples/scale_otl.rs`, ~9 quads each, every 10 000th with a bad code)
+into a persistent store, the
+six property shapes, then `shacl::validate` over the model and instance
+graphs, with the report's `metrics` naming the data source each run took.
+Reference system (AMD Ryzen 9 7900X3D), Docker, release build.
+
+| 1M assets, 9M quads, RocksDB, in-process (release, Docker) | A — mirror on (55 GB budget) | B — the shipped 4g container |
+|---|--:|--:|
+| Load, 1M assets in 50k-asset Turtle chunks | 96.8 s (93k quads/s) | 93.6 s (96k quads/s) |
+| Mirror published after the load | 131 s (one build) | never (over the cap) |
+| SHACL, every asset, 6 property shapes — first run | **6.29 s** (source `mirror`, no run index) | **13.5 s** (source `snapshot`, run index) |
+| — second run | 6.27 s | 13.8 s |
+| — straight after a 500-quad `INSERT DATA` (mirror dirty) | 18.5 s (`snapshot`, run index built to the 8M cap) | 12.4 s (`snapshot`, run index at the 1.8M cap) |
+| Violations found | 100 of 1 000 000 assets, both | 100, both |
+
+Configuration A is `OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000` in a container
+without a memory limit (the RAM-aware cap would have allowed 13.4M on this
+machine anyway); B is `docker run -m 4g`, the shipped default, where the
+accelerator is off at 9M and the run index is capped at `memory/8/300`.
+
+What it settles: the note's thresholds were A ≤ 15 s and B ≤ 60 s for
+SHACL→SQL to stay deferred, and the linear prediction from 0.72 s at 0.9M
+was ≈ 7 s on the mirror. A came in at 6.3 s and B at 13.5 s — the 118 s of
+the first 9M run is the pre-rebuild engine, not the store. So the translator
+stays deferred, and the remaining cost is per run, not per shape: at 9M the
+whole-dataset pipeline run is 6–14 s, which points at changed-node scoping
+of the gate and pipeline runs (validate what a write touched, not the
+dataset) as the next lever. One thing to keep in mind from the after-write
+rows: with the mirror dirty, a budget large enough to build an 8M-quad run
+index (A) spent longer building it than B spent probing RocksDB with a
+1.8M-quad one — the index cap's upper range is not free at this size.
+
+Run it yourself (about eight minutes per configuration, most of it the
+load). The same test runs at 20 000 assets in every suite run and asserts
+the planted violation count, the mirror publishing and the after-write
+path; the size knob turns it into the measurement:
+
+```bash
+OTS_SCALE_ASSETS=1000000 OTS_SCALE_SETTLE_SECS=150 OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000 \
+  cargo test --release --features full --test scale_shacl_9m -- --nocapture
+```
+
+**Graph Store `PUT` replace (2026-09-10).** A replace of a non-empty graph
+is now one transaction — `clear_graph` plus every parsed quad inserted on
+the same `Transaction`, one commit — so a concurrent reader sees the old
+graph or the new one, never an empty or half-filled one, and a crash cannot
+leave the graph empty (`tests/graph_store_put_atomicity.rs`). That costs
+one write batch the size of old + new, and `Transaction::insert` is about
+2.4× slower per quad than the bulk loader. Measured in-process on RocksDB
+(release-dev, mirror and cache off, `examples`-style harness, 900k quads
+replaced by 900k quads, idle machine):
+
+| PUT of 900k quads | before (chunked clear + bulk load) | now (one transaction) |
+|---|--:|--:|
+| into an empty graph (first PUT, boot seed) | 5.6 s | 5.6 s — kept on the bulk loader; nothing to replace |
+| replacing 900k quads | 17.7 s / 18.8 s | 32.3 s / 30.2 s |
+
+The maintainer accepted the +70 % on a large replace for the guarantee
+(the same trade the version restore makes with its staging graph + `MOVE`).
+Memory: the transaction holds old + new until the commit, so a replace of a
+graph with tens of millions of quads needs RAM for two copies of its index
+entries; split such deliveries into `DELETE` + appended `POST`s, or keep them
+on separate graphs, if that is a concern.
 
 | 1M assets, 9M quads, over HTTP | Open Triplestore 0.6 | Fuseki 6.2 main (TDB2) |
 |---|--:|--:|
@@ -906,6 +983,75 @@ GraphDB, Virtuoso or RDF4J on your own hardware for an apples-to-apples result.
 
 ---
 
+### Could QLever be the engine?
+
+The table above puts QLever within 1.1–1.7× of this store on six aggregate
+queries at 501k triples, and it is the fastest open-source SPARQL engine most
+people can name. It is a fair question whether it should *be* the engine rather
+than sit beside it, and in 2026-09 the question was asked properly: a QLever
+backend was built, fed from the change log, and measured against the engine on
+the same data. The backend was then removed. What it measured is worth keeping,
+because the question will come round again.
+
+The harness ran 29 query shapes through both, on the same 501k triples,
+comparing solutions as multisets rather than eyeballing timings.
+
+**What QLever does better.**
+
+* **Scale.** Its index is disk-resident and built for hundreds of millions to
+  billions of triples. This store's accelerator is bounded by
+  `OTS_PARALLEL_QUERY_MAX_TRIPLES` and switches off above it, leaving RocksDB
+  to answer a multi-pattern join one point lookup per result row. That tier —
+  data far larger than RAM — is exactly where QLever is built to win and where
+  this store is weakest.
+* **Small-result aggregates**, even at this size. `COUNT`, `GROUP BY` and
+  `DISTINCT` came back level or ahead (`DISTINCT` 48 ms against 105 ms).
+* **Memory per triple.** A C++ engine with a compressed disk index against an
+  in-RAM mirror is not a close contest.
+
+**What would have to be solved first.**
+
+* **It changes the terms.** QLever reports an `xsd:integer` literal as
+  `xsd:int`. In RDF those are different terms, so `DATATYPE(?x)` returns
+  something else, `sameTerm` and `=` change answer, and every `COUNT`, `SUM`,
+  `AVG`, `MIN` and `MAX` comes back carrying a datatype SPARQL does not specify
+  for it. Thirteen of the 29 shapes differed for this reason alone. For a
+  platform whose SHACL, reasoning and conformance suites all turn on exact term
+  identity, this is not a tuning matter.
+* **Large results are its weak spot.** The queries that lost were the ones
+  returning many rows: `VALUES` + join over 20 000 rows took 6.9 s against
+  79 ms, `MINUS` over 90 000 rows 15.5 s against 351 ms, `UNION` over 20 000
+  rows 3.6 s against 63 ms. The engine work is not the problem; the result
+  export is. Two 100 000-row queries did not finish at all.
+* **A partial result can arrive as `200 OK`.** When export fails midway QLever
+  streams what it has, then appends a marker and a plain-text message into the
+  body — its own text says HTTP/1.1 leaves it no better channel. One
+  100 000-row query returned 85 852 rows that way. Any client must parse
+  strictly and look for that marker, or it will serve a partial answer as a
+  whole one.
+* **Its SPARQL-JSON is not quite the standard's**: a trailing `meta` member
+  after `results`, which a conforming parser rejects. Its XML is clean, so a
+  client should ask for XML.
+* **Everything else the platform is.** Transactional writes, SHACL on write,
+  GeoSPARQL, reasoning, per-graph access control, the Graph Store protocol,
+  LDES, backups — all of it is built on the Oxigraph store's semantics and its
+  transaction API. Replacing the read path is a fraction of the work.
+
+**The honest conclusion.** QLever is a credible engine for a store far larger
+than RAM, and a poor fit as a drop-in for this one, because the cost is paid in
+answer fidelity rather than in effort. It would become the right choice if two
+things changed: if this platform needed to serve a tier the in-memory mirror
+cannot reach, and if QLever's term handling matched the standard exactly, or
+could be made to by configuration. Until then the boundary is where the
+[columnar copy](#4-the-columnar-copy-opengraphcolumnar) and the persistent
+shards sit — in-process, at a size we can hold, with answers the engine itself
+would give.
+
+The measurement harness and the backend were removed with the decision; both
+are in the history, and `docs/notes/improvement-log.md` records how they ran if
+anyone wants to repeat it.
+
+
 ## Parallel & multi-core execution
 
 A single SPARQL query in Oxigraph runs on **one thread** — its evaluator has no
@@ -966,7 +1112,7 @@ bandwidth + merge overhead). Reproduce with `cargo bench -p opengraph --bench pa
 ### 3. Wired into the live `/sparql` path (`ParallelMirror`)
 
 `TripleStore` now uses this **automatically**. Beside its other in-memory derived
-indexes (`GraphIndex`, `SpatialIndex`), it maintains a two-part in-memory `ParallelMirror`:
+indexes (`GraphIndex`, `SpatialIndex`), it maintains a three-part in-memory `ParallelMirror`:
 
 * **subject-hash shards** — a decomposable aggregate/`ASK` is answered across shards
   and merged (the speedups in the table below);
@@ -978,16 +1124,20 @@ indexes (`GraphIndex`, `SpatialIndex`), it maintains a two-part in-memory `Paral
   materialises in ~150 ms — see the Fuseki/QLever comparison above). The full copy
   declines `SUM`/`AVG` ([`has_sum_or_avg`](../opengraph/src/parallel.rs)) so a
   double-precision sum is never computed in a re-ordered copy — the persistent store
-  answers those, byte-identically.
+  answers those, byte-identically;
+* **a columnar copy** — a dictionary of terms and three sorted permutations of the
+  quads as flat arrays of ids, with an evaluator of its own (`opengraph::columnar`,
+  section 4 below). It is consulted after the shards and before the full copy, for
+  the query shapes it implements exactly, and declines the rest untouched.
 
-Both copies are faithful mirrors evaluated by the same engine over the same quads, so
-results are identical (a parity suite asserts equality across shard counts,
+The shards and the full copy are faithful mirrors evaluated by the same engine over
+the same quads, so results are identical (a parity suite asserts equality across shard counts,
 named-graph/`FROM` scoping, the default graph, the non-decomposable join/`GROUP BY`/
 `DISTINCT` shapes, write-invalidation, and that the mirror is actually consulted).
 The mirror is a derived index: rebuilt lazily after writes and **bounded by a
-triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable; the two copies cost
-~2× the dataset in RAM) so it never mirrors a store larger than RAM — above the cap
-both copies stay off and the persistent store answers, leaving the 1–100M disk tiers
+triple-count cap** (default 2M, `OTS_PARALLEL_QUERY*`-tunable; the two engine copies cost
+~2× the dataset in RAM, the columnar copy about 48 bytes a quad on top) so it never
+mirrors a store larger than RAM — above the cap the copies stay off and the persistent store answers, leaving the 1–100M disk tiers
 (data > RAM) unaffected.
 
 Before/after on the **same `TripleStore` the HTTP server runs** (501k triples,
@@ -1011,6 +1161,107 @@ on the full copy, and byte-identical (`SUM`/`AVG` over `xsd:double`/`float` and
 blank-node distinct values decline to the unsharded copy / persistent store). Reproduce
 with `cargo bench --bench parallel_live`. (`COUNT(*)` over a full scan is omitted — the
 O(1) fast-count index below already answers it in ~2 µs.)
+
+### 4. The columnar copy (`opengraph::columnar`)
+
+The two copies above are the same engine on the same key-encoded storage, only in
+RAM; what separates an in-RAM join from a columnar engine's is the
+*representation*. The third copy is that representation: a **dictionary** of terms
+and **three sorted permutations** of the quads — graph-first `GSPO`, `GPOS`,
+`GOSP` — as flat arrays of 32-bit ids, about 48 bytes a quad against roughly a
+kilobyte in an in-memory Oxigraph store, with **an evaluator of its own** over
+them. A triple pattern is a binary search on the permutation whose prefix it
+binds; a basic graph pattern is an index nested loop in selectivity order, on ids
+only; a join is a hash join on ids. Terms are decoded only where an expression, an
+order key or the output needs them, through the same `xsd` datatypes Oxigraph uses
+(`oxsdatatypes`).
+
+It is consulted **after the shards and before the full copy** — it takes the work
+the full copy would otherwise do. A decomposable aggregate is 8–11× faster across
+the shards' cores than in one single-threaded evaluator, so the shards keep it.
+
+**The rule is decline rather than differ.** A query using anything the evaluator
+does not implement *exactly* is refused by a static gate before any data is
+touched, and the shards, the full copy and finally the persistent store answer it
+as before. The accepted set is deliberately narrower than what the evaluator could
+attempt:
+
+| | |
+|---|---|
+| **Accepted** | `SELECT`, `ASK`, `CONSTRUCT` (templates without blank nodes); basic graph patterns, including a property-path sequence of named nodes, which the parser folds into one; joins, `OPTIONAL` with its filter, `UNION`, `MINUS`, `FILTER`, `BIND`, `VALUES`; `GRAPH` with a constant name, and `GRAPH ?g` when the body surely binds a triple and `?g` is not reused inside it; `FROM` / `FROM NAMED`; `GROUP BY` with `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, `SAMPLE` (and `DISTINCT` within them); `ORDER BY`, `DISTINCT` / `REDUCED`, `LIMIT` / `OFFSET`, subqueries; the logical, comparison and arithmetic operators, `IF`, `COALESCE`, `BOUND`, `IN`, `sameTerm`, and the string, `IRI` and type-test functions |
+| **Declined for fidelity** | property paths the parser cannot fold into a basic graph pattern (an alternative, or a sequence with one), and unbounded or negated paths; `EXISTS`, `SERVICE`, `LATERAL`, `DESCRIBE`, quoted triples; `NOW`, `RAND`, `BNODE`, `UUID`, the hashes, the casts, custom functions and aggregates; `SUBSTR`, `STRLANG`, `STRDT` and the date/time accessors, whose argument validation differs; `GRAPH ?g` over a body that need not bind a triple, or with `?g` reused inside; `CONSTRUCT` templates with blank nodes; and — as the full copy also declines them — `SUM` and `AVG`, whose IEEE-754 summation order a re-ordered copy cannot reproduce |
+| **Declined for speed** | Four shapes the engine simply answers faster, each measured rather than assumed. `REGEX` and `REPLACE`, whose work is string matching over decoded terms that the engine does against its own storage (3× the engine here). A query that is one unconstrained triple pattern returning more than 50 000 rows, which has no join for the index to accelerate and would only be materialised twice. A `LIMIT` over more than one triple pattern, where the row budget reaches only the last pattern while the engine stops early throughout (`concurrent/reads`, 377 µs against 605 µs). And a `FILTER` over a single triple pattern: finding rows is this copy's advantage, testing them is not, because each candidate goes back through the dictionary to become a term — a cost a join pays for many times over and one pattern has nothing to pay with (`query/filter`, slower on three consecutive gate runs). A filtered *join*, an unfiltered single pattern, and `HAVING` (one test per group, not per solution) all keep the shape. These are a routing policy, not a limit: the parity suites go through `query_semantics`, which skips them, so the evaluator is still held to the engine's answer for every one |
+
+**A `LIMIT` stops the scan.** The evaluator carries a row budget down through the
+operators that are one-row-in-one-row-out (`Project`, `BIND`, `GRAPH`) or that can
+widen it arithmetically (`OFFSET` + `LIMIT`, a `UNION`'s two sides); every other
+operator bounds only its own output, because an operator that drops rows needs
+more input than output. Inside a basic graph pattern only the *last* pattern may
+stop early. The budget is therefore an early exit on the same row order — the rows
+it keeps are exactly the rows an unbounded evaluation would have put first — and
+the suite pins that for every shape and every `n`. An `ASK` runs with a budget of
+one row.
+
+**Parity is the guard, and it is adversarial.** `columnar_parity.rs` runs about a
+hundred queries through the engine and the evaluator over the same data and
+requires the same solutions, as multisets and in order where the query orders.
+`columnar_corners.rs` runs seventy-four shapes drawn from a review that set out to
+find silent divergence — mixed and ill-typed datatypes in one column, several
+language tags, the date/time family, blank nodes, aggregates over erroring
+expressions, `GRAPH ?g` used against itself — and allows a query only two
+outcomes: declined, or equal to the engine. Thirty-four of those corners diverged
+when they were first run; the table above is the result.
+`OTS_COLUMNAR_QUERY=off` switches the copy off entirely.
+
+**Before and after** — the `query/*` and `path/*` groups of
+`benches/performance.rs` on the reference system, the same builder image, back to
+back, `f0adb95` (the commit before this work, in its own worktree) against this
+commit; each figure is the median of the rounds:
+
+| benchmark | `f0adb95` | this commit | change |
+|---|--:|--:|--:|
+| `query/simple_lookup/100` | 47.9 µs | 19.5 µs | **-59 %** |
+| `query/simple_lookup/1000` | 293.2 µs | 134.4 µs | **-54 %** |
+| `query/simple_lookup/10000` | 3.18 ms | 1.54 ms | **-52 %** |
+| `query/lookup_with_limit/1000` | 25.1 µs | 7.2 µs | **-72 %** |
+| `query/lookup_with_limit/10000` | 30.0 µs | 7.1 µs | **-76 %** |
+| `query/lookup_with_limit/100000` | 34.6 µs | 7.2 µs | **-79 %** |
+| `query/join_2way/100` | 88.8 µs | 36.2 µs | **-59 %** |
+| `query/join_2way/1000` | 691.4 µs | 266.9 µs | **-61 %** |
+| `query/join_2way/10000` | 8.44 ms | 3.12 ms | **-63 %** |
+| `query/join_3way/100` | 135.3 µs | 52.3 µs | **-61 %** |
+| `query/join_3way/1000` | 1.12 ms | 425.3 µs | **-62 %** |
+| `query/join_3way/10000` | 13.29 ms | 4.84 ms | **-64 %** |
+| `query/filter/1000` | 252.5 µs | 292.2 µs | **+16 %** |
+| `query/filter/10000` | 2.52 ms | 2.80 ms | **+11 %** |
+| `query/optional/1000` | 710.9 µs | 326.3 µs | **-54 %** |
+| `query/optional/10000` | 9.46 ms | 3.49 ms | **-63 %** |
+| `query/group_concat/1000` | 657.8 µs | 369.9 µs | **-44 %** |
+| `query/group_concat/10000` | 8.34 ms | 3.91 ms | **-53 %** |
+| `query/subquery/1000` | 782.2 µs | 414.6 µs | **-47 %** |
+| `query/subquery/10000` | 9.12 ms | 4.10 ms | **-55 %** |
+| `query/bind/1000` | 430.1 µs | 365.0 µs | **-15 %** |
+| `query/bind/10000` | 4.58 ms | 3.57 ms | **-22 %** |
+| `query/minus/1000` | 326.9 µs | 155.2 µs | **-53 %** |
+| `query/minus/10000` | 3.60 ms | 1.54 ms | **-57 %** |
+| `query/construct/1000` | 440.7 µs | 353.0 µs | **-20 %** |
+| `query/construct/10000` | 592.2 µs | 338.1 µs | **-43 %** |
+| `query/named_graph/1000` | 344.1 µs | 179.5 µs | **-48 %** |
+| `query/named_graph/10000` | 3.51 ms | 2.32 ms | **-34 %** |
+| `path/sequence/100` | 85.4 µs | 33.2 µs | **-61 %** |
+| `path/sequence/500` | 324.9 µs | 128.8 µs | **-60 %** |
+| `path/sequence/1000` | 633.3 µs | 247.7 µs | **-61 %** |
+| `path/inverse/100` | 49.8 µs | 18.8 µs | **-62 %** |
+| `path/inverse/1000` | 301.9 µs | 132.0 µs | **-56 %** |
+| `path/inverse/10000` | 3.09 ms | 1.40 ms | **-55 %** |
+| `path/negated_property_set/10000` | 15.06 ms | 12.43 ms | **-17 %** |
+| *22 other benchmarks* | | | *within ±10 %* |
+
+33 benchmarks are faster and 2 slower by more than 10 %, with 22 unchanged. The largest gain is `query/lookup_with_limit/100000` at -79 %; the largest loss is `query/filter/1000` at +16 %, inside the programme's 20 % bound. The two that lost are a `FILTER` over a single
+pattern, where there is no join to accelerate and the copy pays for
+materialising the rows as ids before testing them. The `path/*` gains are the
+sequence and inverse paths, which the parser folds into a basic graph pattern;
+the alternative and unbounded ones are declined and unchanged.
 
 ### Roadmap
 
@@ -1049,14 +1300,16 @@ The first two increments — a tested engine capability *and* its wiring — are
   `SUM`/`MIN`/`MAX`/`AVG` now take the same empty-keys decomposition path as the grouped
   ones — closing a regression where the double-fidelity full-copy decline had sent
   global integer sums to the persistent store.
+* **✅ Sorted permutations and an evaluator over them** — the columnar copy
+  (section 4 above), which needed no pluggable evaluator in Oxigraph: the
+  representation was what separated the in-RAM join from QLever's. What it gives up
+  is coverage, and it declines rather than differ.
 
 Next:
 
-* **Sorted-permutation merge joins** (QLever's edge) would need Oxigraph to expose a
-  pluggable evaluator — a larger effort, but it is what separates the ~150 ms in-RAM
-  join from QLever's ~10 ms.
 * **Persistent shards** so the accelerator works beyond the in-memory cap (today
-  large/100M-tier stores fall back to the persistent store).
+  large/100M-tier stores fall back to the persistent store). This is the tier
+  a different engine would be for — see "Could QLever be the engine?" below.
 
 ---
 
@@ -1310,6 +1563,31 @@ path on a one-triple graph by contrast — also steady-state now: the previous
 iteration's triple is removed in the setup, where it used to accumulate and
 make the recount grow with the sample count.
 
+### Change capture and the update benchmarks
+
+The per-quad change log (`OTS_CHANGE_CAPTURE`) records one row per graph per
+write. It is **off by default**, and these benchmarks are why.
+
+With it off — the shipped default — the three update groups above and the two
+`insert/sparql_update*` groups measure within run-to-run noise of a tree
+without the log at all. With it on, a ground update pays a few microseconds
+(`insert_data/1` +7 %, `single_triple` +13 %) and a `WHERE` update pays
+**×2.5–4** (`insert_where` ×2.5, `delete_where` ×3–4), because a `WHERE`
+update names its target by pattern: the only way to record what it changed is
+to read the target graph before the update, read it again through the
+transaction, and subtract. That cost is proportional to the *graph*, not to
+the size of the change, so a small `DELETE WHERE` against a large graph is the
+worst case; `OTS_CHANGE_CAPTURE_MAX_SCAN` bounds it, at the price of rows
+that say `unknown`.
+
+It was briefly on by default in this branch. The regression gate, comparing
+against the trunk, measured what that meant for a store that never reads the
+log — `update_delete_where/10000` ×4.2, `concurrent_writes/threads/4` ×2.1 —
+and the default went back to off. Turn it on where something reads it: a
+replication follower, the dataset history, an audit. A replication leader
+keeps it on regardless. The table and the reasoning are in
+[versioning.md](versioning.md#what-it-costs).
+
 ### `geosparql/sf_contains` and `geosparql/distance`
 
 GeoSPARQL custom functions are called once per binding via GEOS C++ library.
@@ -1520,6 +1798,74 @@ SELECT ?f WHERE {
   FILTER(geof:sfIntersects(?wkt, ?bbox))           -- expensive GEOS call
 }
 ```
+
+---
+
+## Telemetry
+
+`GET /api/admin/telemetry` (admin) reports what the store has actually been
+asked to do since it started — the inputs to the analytical-layer decision
+in `docs/notes/analytical-mirror-design.md` §1.4, gathered at no measurable
+cost to the paths they describe.
+
+```json
+{
+  "uptime_secs": 86400,
+  "queries": {
+    "total": 412093, "window": 8192,
+    "by_served": { "cache_hit": 6021, "fast_count": 118, "shards": 402, "columnar": 1104, "full_copy": 186, "engine": 361 },
+    "aggregate_text": 1875,
+    "analytical": { "count": 1533, "share": 0.187, "p50_us": 41, "p95_us": 18300, "p99_us": 91000, "max_us": 402113, "by_served": { "cache_hit": 1100, "shards": 402, "engine": 31 } },
+    "other": { "count": 6659, "share": 0.813, "p50_us": 37, "p95_us": 2210, "p99_us": 14400, "max_us": 88000, "by_served": { "…": 0 } }
+  },
+  "validations": {
+    "total": 91, "window": 91,
+    "by_path": { "dataset": 12, "gate": 70, "pipeline": 9 },
+    "by_source": { "mirror": 9, "snapshot": 12, "live": 70 },
+    "with_run_index": 21, "p50_ms": 14, "p95_ms": 2210, "max_ms": 7150, "max_quads": 9000000
+  },
+  "writes": {
+    "total": 3312,
+    "gaps": [ { "label": "lt_100ms", "upper_ms": 100, "count": 2900 }, { "label": "lt_500ms", "upper_ms": 500, "count": 210 }, "…" ]
+  }
+}
+```
+
+- **Queries.** Every call to the query path records which exit answered —
+  the result cache, the O(1) count index, the shards, the columnar copy or
+  the full copy of the in-memory mirror, or the engine itself (RocksDB on
+  a persistent store) —
+  and how long it took. Two shape bits are computed once per *uncached*
+  evaluation and stamped on the cache entry, so a hit inherits them without
+  a parse: `analytical` (the parallel classifier calls the query an
+  aggregate or an `ASK`) and `aggregate_text` (the text mentions `COUNT(` or
+  `GROUP BY`).
+
+  **The counts are exact; the latencies are a sample.** `total` and
+  `by_served` are relaxed atomic counters covering every query since the
+  process started — not the ring's window — so a dashboard firing one query
+  all day cannot push the rest of the day's exits out of view. The percentiles
+  come from a fixed-size ring (`OTS_TELEMETRY_QUERY_RING`, default 8192,
+  reported as `window`), filled by one query in `OTS_TELEMETRY_TIMING_STRIDE`
+  (default 8). That split is what the `query/cache_hit` benchmark forced:
+  reading the clock and taking the ring's lock costs about 40 ns, which on a
+  111 ns cache hit was 40 % of the work, so a query that is not sampled never
+  reads the clock at all. Set the stride to 1 to time every query.
+- **Validations.** Every SHACL run records its data source (`mirror`,
+  `snapshot`, `live`), whether a run index was built, the quads and graphs
+  in scope, its duration and who asked — `dataset` (the validate route),
+  `gate` (a write gate), `pipeline` (a Studio run) or `engine` (a direct
+  call). The same numbers travel in the report as `metrics` and are stored
+  on the run row (`duration_ms`, `quads`, `source_kind`, `run_index`), so
+  the history survives a restart even though the ring does not.
+- **Writes.** A histogram of the gap between consecutive writes. The
+  in-memory mirror can only publish a rebuilt copy inside a quiet gap of at
+  least the rebuild quiet period, so this distribution — not the write
+  rate — says how often a copy can exist at all.
+
+Nothing here is persisted except the run-row columns; a restart starts the
+rings again. The endpoint is admin-only because latency distributions and
+validation scopes describe an operator's tenants.
 
 ---
 

@@ -14,6 +14,13 @@ let _refreshToken: string | null = null;
 
 class ApiError extends Error {
   status?: number;
+  /**
+   * The server's error body, parsed, when it sent JSON. Some refusals carry
+   * facts the caller has to act on and not just a sentence to display — a 409
+   * from the prefix admin endpoints names the namespace the label resolves to
+   * today, which is what makes repointing it an informed choice.
+   */
+  body?: unknown;
 }
 
 function getAccessToken(): string | null {
@@ -45,19 +52,29 @@ function authHeaders() {
   return headers;
 }
 
-async function extractErrorMessage(res) {
+// Reads a failed response once, for both the sentence to show and the body it
+// came from: the response stream can only be consumed once, so a caller that
+// needs the structured body cannot read it after asking for the message.
+async function extractError(res): Promise<{ message: string; body: unknown }> {
   try {
     const text = await res.text();
+    let json: any = null;
     try {
-      const json = JSON.parse(text);
-      const msg = json.message || json.error || json.detail;
-      if (msg) return msg;
+      json = JSON.parse(text);
     } catch {}
+    if (json) {
+      const msg = json.message || json.error || json.detail;
+      if (msg) return { message: msg, body: json };
+    }
     const stripped = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    return stripped || res.statusText;
+    return { message: stripped || res.statusText, body: json };
   } catch {
-    return res.statusText;
+    return { message: res.statusText, body: null };
   }
+}
+
+async function extractErrorMessage(res) {
+  return (await extractError(res)).message;
 }
 
 let isRefreshing = false;
@@ -165,9 +182,10 @@ async function request(method, path, body = null, init: { signal?: AbortSignal }
   }
 
   if (!res.ok) {
-    const msg = await extractErrorMessage(res);
-    const err = new ApiError(msg);
+    const { message, body: errorBody } = await extractError(res);
+    const err = new ApiError(message);
     err.status = res.status;
+    err.body = errorBody;
     throw err;
   }
   const ct = res.headers.get('content-type') || '';
@@ -581,7 +599,8 @@ export const browseTriples = (params, init: RequestInit = {}) => {
   return request('GET', `/api/browse/triples?${qs}`, null, init);
 };
 // `opts` may be a bare graph IRI (back-compat) or an object carrying the same
-// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id, versions }.
+// scope params as browseTriples: { graph, dataset_id, dataset_ids, org_id,
+// org_ids, versions }.
 // Scope lets the graph view expand a resource within the active browse scope
 // (dataset/org + version pins) instead of the broad accessible set.
 // `init.signal` cancels an in-flight lookup — the viewer's inspector windows
@@ -589,7 +608,7 @@ export const browseTriples = (params, init: RequestInit = {}) => {
 export const browseResource = (iri, opts = {}, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams({ iri });
   const o = typeof opts === 'string' ? { graph: opts } : (opts || {});
-  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'versions']) {
+  for (const k of ['graph', 'dataset_id', 'dataset_ids', 'org_id', 'org_ids', 'versions']) {
     if (o[k]) qs.set(k, o[k]);
   }
   return request('GET', `/api/browse/resource?${qs.toString()}`, null, init);
@@ -636,7 +655,9 @@ export const getGeoStatsBatch = (datasetIds: string[]): Promise<GeoStats> => {
 };
 // Classes / properties / graphs present in the current scope, with counts.
 // Accepts the same scope params as browseTriples (dataset_id, dataset_ids,
-// org_id, versions, graph). The chip `filters` JSON may also be passed through.
+// org_id, org_ids, versions, graph) — the rail describes the same scope the
+// results do only because both are sent the whole selection. The chip `filters`
+// JSON may also be passed through.
 export const browseFacets = (params, init: { signal?: AbortSignal } = {}) => {
   const qs = new URLSearchParams(params).toString();
   return request('GET', `/api/browse/facets?${qs}`, null, init);
@@ -849,6 +870,22 @@ export const adminLlmRequests = (opts: { limit?: number; offset?: number; status
 };
 export const adminLlmStats = () =>
   request('GET', '/api/admin/llm/stats'); // { last_24h: {...}, top_users_7d: [...] }
+
+// ─── Operations: replication, workload telemetry, the change log ─────────────
+// Public, beside /livez: { role, configured_role, mode, scope, leader_url,
+// node_id, read_only, epoch, applied_seq, leader_newest_seq, lag_rows,
+// last_sync_at, last_error, applied_rows, refetched_graphs, resyncs,
+// interval_secs, healthy, sync?, identity?, cluster? }
+export const replicationStatus = () =>
+  request('GET', '/api/replication/status');
+// Admin: { uptime_secs, queries: { total, window, by_served, analytical, other },
+// validations: {...}, writes: { total, gaps } } — see docs/performance.md "Telemetry".
+export const adminTelemetry = () =>
+  request('GET', '/api/admin/telemetry');
+// Admin: { enabled, epoch, next_seq, rows, committed, pending, unknown,
+// oldest_seq, newest_seq, cursors, max_scan, max_payload, retention_days, size_bytes }
+export const adminChangesStatus = () =>
+  request('GET', '/api/admin/changes/status');
 
 // ─── OIDC provider (this store as the identity provider for client apps) ─────
 // decision: 'check' → { client_name, scope, requires_consent };
@@ -1542,6 +1579,41 @@ export const createTripleSecurityLabel = (data) =>
 export const deleteTripleSecurityLabel = (id) =>
   request('DELETE', `/api/admin/acl/triples/${id}`);
 
+// ─── Admin: Prefix overrides ─────────────────────────────────────────────────
+// What a prefix label means *on this deployment*, outranking the bundled
+// community snapshot and the labels derived from the store's own datasets.
+
+export interface PrefixOverride {
+  label: string;
+  namespace: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The overrides this deployment has set, ordered by label. */
+export const adminListPrefixOverrides = (): Promise<PrefixOverride[]> =>
+  request('GET', '/api/admin/prefixes');
+
+/**
+ * Claim a label. Refused with 409 when the label already has an override —
+ * the thrown ApiError's `body` then carries `{ error, label, namespace }`,
+ * where `namespace` is what the label resolves to today.
+ */
+export const adminCreatePrefixOverride = (label: string, namespace: string): Promise<PrefixOverride> =>
+  request('POST', '/api/admin/prefixes', { label, namespace });
+
+/** Repoint a label, or create it if this deployment had no opinion of it yet. */
+export const adminPutPrefixOverride = (label: string, namespace: string): Promise<PrefixOverride> =>
+  request('PUT', `/api/admin/prefixes/${encodeURIComponent(label)}`, { namespace });
+
+/**
+ * Drop this deployment's opinion of a label. The prefix itself survives: it
+ * falls back to whichever lower tier answers first.
+ */
+export const adminDeletePrefixOverride = (label: string) =>
+  request('DELETE', `/api/admin/prefixes/${encodeURIComponent(label)}`);
+
 
 // ─── Vocabulary search service (internal LOV) ────────────────────────────────
 // Backed by the platform's own vocabulary catalog (bundled LOV snapshot +
@@ -1663,3 +1735,21 @@ export const expandCurie = (curie: string) =>
 
 export const shrinkIri = (iri: string) =>
   request('GET', `/api/prefixes/shrink?iri=${encodeURIComponent(iri)}`);
+
+/**
+ * What a label resolves to right now, and from which tier — `admin` (an
+ * override set here), `platform`, `seeded`, `dataset` or `cache`. Resolves
+ * through the tiers in order, so it answers "what would this prefix mean if I
+ * used it today?" rather than "is there an override for it?".
+ *
+ * A label nothing knows gets a 404, which callers read as "undefined so far"
+ * rather than as a failure.
+ */
+export const lookupPrefixLabel = (label: string): Promise<ResolvedPrefixLookup> =>
+  request('GET', `/api/prefixes/${encodeURIComponent(label)}`);
+
+export interface ResolvedPrefixLookup {
+  prefix: string;
+  namespace: string;
+  source: string;
+}

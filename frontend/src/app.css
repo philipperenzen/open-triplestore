@@ -81,9 +81,21 @@
   to { opacity: 1; }
 }
 
-/* Per-route entrance — the routed page wrapper replays this on every navigation. */
+/* Per-route entrance — the routed page wrapper replays this on every navigation.
+
+   `backwards`, never `both`. `both` includes `forwards`, which keeps applying
+   the final keyframe after the animation ends. That frame reads
+   `transform: none`, but a filled animation still *sets* the property, so the
+   computed value stays `matrix(1, 0, 0, 1, 0, 0)` rather than the initial
+   `none` — and any transform but `none` makes this element the containing
+   block for its `position: fixed` descendants. Every modal in the app is
+   `position: fixed; inset: 0` and expects to be the viewport; it was instead
+   the height of the routed page (measured 5052px against a 900px viewport), so
+   a centred dialog opened thousands of pixels down, off screen. `backwards`
+   still holds the first frame before the animation starts, so there is no
+   flash, and afterwards the element goes back to its own styles. */
 .route-view {
-  animation: routeIn var(--dur-base) var(--ease-out) both;
+  animation: routeIn var(--dur-base) var(--ease-out) backwards;
 }
 
 /* Accessibility: honour the OS "reduce motion" setting everywhere. */

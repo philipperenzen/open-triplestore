@@ -1,7 +1,11 @@
+pub mod changes;
+pub mod consensus;
 pub mod engine;
 pub mod parallel_mirror;
 pub mod query_cache;
 pub mod recovery;
+pub mod replication;
+pub mod telemetry;
 
 pub use engine::{StoreError, TripleStore};
 

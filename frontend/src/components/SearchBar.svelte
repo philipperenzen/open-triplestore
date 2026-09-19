@@ -182,8 +182,8 @@
 
 <div class="flex flex-col gap-5">
   <form on:submit|preventDefault={submit} class="relative flex flex-col">
-    <div class="relative flex items-center gap-2">
-      <div class="flex-1 relative">
+    <div class="search-row relative flex items-center gap-2">
+      <div class="search-input-wrap flex-1 relative">
         <Search class="absolute left-4 top-1/2 -translate-y-1/2 text-ink-400 shrink-0 pointer-events-none" size={18} />
         <input
           id="global-search"
@@ -198,7 +198,7 @@
           aria-label={$t('search.placeholder')}
         />
       </div>
-      <button type="submit" class="btn btn-sm flex items-center gap-2 whitespace-nowrap shrink-0">
+      <button type="submit" class="search-submit btn btn-sm flex items-center gap-2 whitespace-nowrap shrink-0">
         <ArrowRight size={14} class="shrink-0" />
         {$t('search.open')}
       </button>
@@ -231,7 +231,7 @@
               class="w-full text-left px-4 py-2.5 flex items-center justify-between hover:bg-brand-50 transition-colors border-b border-line-soft/30 text-sm"
               class:bg-brand-50={selectedSuggestionIdx === idx}
             >
-              <span class="flex items-center gap-2.5">
+              <span class="flex items-center gap-2.5 min-w-0">
                 <!-- Now that the names are real, the icon says where one came
                      from: a dataset on this instance, or something you typed. -->
                 <svelte:component
@@ -239,7 +239,7 @@
                   size={14}
                   class="text-ink-400 shrink-0"
                 />
-                <span class="text-ink-900">{suggestion.value}</span>
+                <span class="suggestion-value text-ink-900">{suggestion.value}</span>
               </span>
               <ChevronRight size={14} class="text-ink-300 shrink-0" />
             </button>
@@ -253,7 +253,7 @@
     <!-- Navigate to -->
     <div>
       <div class="search-section-label">{$t('components.searchBar.navigateTo')}</div>
-      <div class="grid grid-cols-3 gap-2">
+      <div class="nav-shortcut-grid">
         {#each filteredNav as item}
           <button
             class="nav-shortcut"
@@ -275,11 +275,11 @@
         <div class="flex flex-wrap gap-1.5">
           {#each recentSearches.slice(0, 4) as term}
             <button
-              class="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/60 border border-[var(--line-soft)] text-[var(--ink-700)] hover:bg-white hover:border-[var(--brand-300)] transition-all text-xs cursor-pointer"
+              class="search-chip inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/60 border border-[var(--line-soft)] text-[var(--ink-700)] hover:bg-white hover:border-[var(--brand-300)] transition-all text-xs cursor-pointer"
               on:click={() => useSuggestion(term)}
             >
               <Search size={11} class="shrink-0 text-[var(--ink-400)]" />
-              <span class="max-w-[200px] truncate">{term}</span>
+              <span class="search-chip-label">{term}</span>
             </button>
           {/each}
         </div>
@@ -291,7 +291,7 @@
       <div class="flex flex-wrap gap-1.5">
         {#each quickActions as action}
           <button
-            class="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--bg-accent-soft)] text-[var(--brand-600)] hover:bg-[var(--brand-300)]/30 font-medium transition-all text-xs cursor-pointer"
+            class="search-chip inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--bg-accent-soft)] text-[var(--brand-600)] hover:bg-[var(--brand-300)]/30 font-medium transition-all text-xs cursor-pointer"
             on:click={() => goAction(action.path)}
           >
             <svelte:component this={action.icon} size={12} class="shrink-0" />
@@ -304,6 +304,37 @@
 </div>
 
 <style>
+  /* An <input> carries a browser-default intrinsic width of about twenty
+     characters and a flex item will not shrink below its content, so the input
+     and the Open button together asked for more room than a phone-width modal
+     has — which is what pushed the dialog past the viewport edge and cut the
+     button off. Letting the wrapper shrink keeps the row inside the modal. */
+  .search-input-wrap {
+    min-width: 0;
+  }
+  /* The app-wide input padding in app.css outranks the utility class on the
+     field itself, so the leading magnifier ended up sitting on the placeholder
+     instead of beside it. Reserve its room from a selector specific enough to
+     win. */
+  .search-input-wrap #global-search {
+    padding-left: 3.5rem;
+  }
+
+  .suggestion-value {
+    /* A suggestion can be a typed IRI, which has nowhere natural to break. */
+    overflow-wrap: anywhere;
+  }
+
+  .search-chip {
+    max-width: 100%;
+  }
+  .search-chip-label {
+    /* Recent searches are whatever was typed, an IRI included, so break them
+       anywhere rather than letting one long term widen the modal. */
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+
   .search-section-label {
     font-size: 0.7rem;
     font-weight: 700;
@@ -311,6 +342,12 @@
     text-transform: uppercase;
     color: var(--ink-400, #94a3b8);
     margin-bottom: 0.5rem;
+  }
+
+  .nav-shortcut-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
   }
 
   .nav-shortcut {
@@ -355,13 +392,30 @@
     min-width: 0;
     font-size: 0.8rem;
     line-height: 1.25;
-    overflow: hidden;
   }
+  /* These are destination names, not prose: they wrap onto a second line so the
+     card grows, instead of being clipped to "Da…" in a column too narrow for
+     them. The card is sized by its label, never the other way round. */
   .nav-shortcut-text > span {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: break-word;
   }
 
   :global(:is([data-theme="dark"], .dark)) .nav-shortcut { background: var(--bg-strong); }
+
+  /* Matches the breakpoint app.css uses to stretch .btn to the full width: in a
+     shared row that full-width button leaves the input a bare icon-sized box,
+     so below it the action takes a row of its own under the input. */
+  @media (max-width: 720px) {
+    .search-row {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .search-submit,
+    .search-chip {
+      min-height: 2.5rem;
+    }
+    .nav-shortcut-grid {
+      grid-template-columns: 1fr;
+    }
+  }
 </style>

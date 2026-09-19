@@ -1,11 +1,19 @@
 //! The published side of LDES: `GET /api/datasets/:id/ldes` (the
 //! `ldes:EventStream`) and `GET /api/datasets/:id/ldes/nodes/:n` (fragments),
-//! plus `PUT /api/datasets/:id/ldes` to enable the stream.
+//! plus `PUT /api/datasets/:id/ldes` to enable the stream and declare its
+//! retention policy.
 //!
 //! A stream is readable by everyone who can access the dataset, so it carries
 //! only what a dataset viewer may see: graphs marked private are never
 //! published — neither seeded when the stream is enabled nor captured on
 //! later writes (see [`super::capture`]).
+//!
+//! Fragments are frozen once full ([`store::seal_full_pages`]): a sealed
+//! node is an id range, and retention only ever deletes rows inside a range.
+//! So a page served as immutable never gains, loses to another page, or
+//! reorders a member — it can only shrink, and a page whose members are all
+//! gone answers `410 Gone` (LDES Server Primer §5.1), with every relation
+//! and `tree:view` pointing past it.
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -15,7 +23,7 @@ use oxigraph::io::{RdfFormat, RdfParser, RdfSerializer};
 use oxigraph::model::{Literal, NamedNode, NamedOrBlankNode, Triple};
 use serde::Deserialize;
 
-use super::store::{self, Member};
+use super::store::{self, Member, RetentionPolicy, SealedNode};
 use super::{member_iri, node_iri, stream_iri, DCT, LDES, OTS, TOMBSTONE, TREE, XSD};
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::models::Dataset;
@@ -54,11 +62,18 @@ pub struct StreamBody {
     pub enabled: bool,
     #[serde(default)]
     pub page_size: Option<u64>,
+    /// The retention policy to declare and enforce. Absent: unchanged. An
+    /// empty object (`{}`) clears it — the stream keeps every member again.
+    #[serde(default)]
+    pub retention: Option<RetentionPolicy>,
 }
 
-/// PUT /api/datasets/:id/ldes — enable (or disable) the dataset's stream.
-/// Enabling a stream that has no members yet publishes every entity of the
-/// dataset's non-private graphs as its first members.
+/// PUT /api/datasets/:id/ldes — enable (or disable) the dataset's stream and
+/// set its retention policy. Enabling a stream that has no members yet
+/// publishes every entity of the dataset's non-private graphs as its first
+/// members. A policy is enforced only after it is declared, never before:
+/// declaring more retention than is enforced is harmless, the reverse is the
+/// spec violation (LDES §4.4).
 pub async fn put_stream(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -73,8 +88,23 @@ pub async fn put_stream(
     {
         return Err((StatusCode::FORBIDDEN, "Write access required".to_string()));
     }
+    if let Some(policy) = &body.retention {
+        policy
+            .validate()
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("retention: {e}")))?;
+    }
     let page_size = body.page_size.unwrap_or(100).clamp(1, 10_000);
+    // Pages that are already full keep the bounds they were served with:
+    // seal them under the old page size before the new one applies.
+    if let Some(old) = store::stream(&state.auth_db, &dataset_id).map_err(e500)? {
+        if old.page_size != page_size {
+            store::seal_full_pages(&state.auth_db, &dataset_id, old.page_size).map_err(e500)?;
+        }
+    }
     store::set_stream(&state.auth_db, &dataset_id, body.enabled, page_size).map_err(e500)?;
+    if let Some(policy) = &body.retention {
+        store::set_retention(&state.auth_db, &dataset_id, policy).map_err(e500)?;
+    }
     let mut seeded = 0;
     if body.enabled && store::member_count(&state.auth_db, &dataset_id).map_err(e500)? == 0 {
         let graphs: Vec<String> = state
@@ -92,13 +122,23 @@ pub async fn put_stream(
                 .await
                 .map_err(e500)?;
     }
+    // Seal what is full and apply the policy now, not on the next write.
+    let pruned = {
+        let st = state.clone();
+        let id = dataset_id.clone();
+        tokio::task::spawn_blocking(move || super::capture::settle(&st, &id, true))
+            .await
+            .map_err(e500)?
+    };
     Ok(Json(serde_json::json!({
         "dataset_id": dataset_id,
         "enabled": body.enabled,
         "page_size": page_size,
         "stream": stream_iri(&state.base_url, &dataset_id),
         "members_seeded": seeded,
+        "members_pruned": pruned,
         "members": store::member_count(&state.auth_db, &dataset_id).map_err(e500)?,
+        "retention": store::retention(&state.auth_db, &dataset_id).map_err(e500)?,
     })))
 }
 
@@ -153,7 +193,79 @@ fn render(
     Ok(resp)
 }
 
-fn stream_description(base: &str, ds: &Dataset, first_node: &str) -> Vec<Triple> {
+/// The stream's fragment layout: the sealed nodes, then the unsealed tail
+/// paged from the last sealed id — which, for a stream sealed nowhere, is
+/// the whole stream paged from the start, as it always was.
+struct Layout {
+    sealed: Vec<SealedNode>,
+    tail_after: i64,
+    tail_count: u64,
+    page_size: u64,
+}
+
+impl Layout {
+    fn load(state: &AppState, dataset_id: &str, page_size: u64) -> Result<Self, ApiErr> {
+        let sealed = store::sealed_nodes(&state.auth_db, dataset_id).map_err(e500)?;
+        let tail_after = sealed.last().map(|s| s.last_id).unwrap_or(0);
+        let tail_count =
+            store::count_after(&state.auth_db, dataset_id, tail_after).map_err(e500)?;
+        Ok(Self {
+            sealed,
+            tail_after,
+            tail_count,
+            page_size: page_size.max(1),
+        })
+    }
+
+    fn sealed_count(&self) -> u64 {
+        self.sealed.len() as u64
+    }
+
+    /// The tail is at least one page: an empty stream is one empty node.
+    fn pages(&self) -> u64 {
+        self.sealed_count() + self.tail_count.div_ceil(self.page_size).max(1)
+    }
+
+    fn is_sealed(&self, n: u64) -> bool {
+        n >= 1 && n <= self.sealed_count()
+    }
+
+    fn has_members(&self, n: u64) -> bool {
+        if self.is_sealed(n) {
+            self.sealed[n as usize - 1].members > 0
+        } else {
+            let k = n - self.sealed_count();
+            k >= 1 && (k - 1) * self.page_size < self.tail_count
+        }
+    }
+
+    /// The first node that still has members — the last node when none has.
+    fn view(&self) -> u64 {
+        let pages = self.pages();
+        (1..=pages).find(|n| self.has_members(*n)).unwrap_or(pages)
+    }
+
+    /// Where the relation out of `n` points: the next node with members, or
+    /// the last node (the mutable tail is always a valid target).
+    fn next(&self, n: u64) -> Option<u64> {
+        let pages = self.pages();
+        if n >= pages {
+            return None;
+        }
+        Some(
+            (n + 1..pages)
+                .find(|m| self.has_members(*m))
+                .unwrap_or(pages),
+        )
+    }
+}
+
+fn stream_description(
+    base: &str,
+    ds: &Dataset,
+    view_node: &str,
+    policy: Option<&RetentionPolicy>,
+) -> Vec<Triple> {
     let s = nn(&stream_iri(base, &ds.id));
     let mut t = vec![
         Triple::new(
@@ -176,14 +288,74 @@ fn stream_description(base: &str, ds: &Dataset, first_node: &str) -> Vec<Triple>
             nn(&format!("{LDES}versionOfPath")),
             nn(&format!("{DCT}isVersionOf")),
         ),
-        Triple::new(s.clone(), nn(&format!("{TREE}view")), nn(first_node)),
+        Triple::new(s.clone(), nn(&format!("{TREE}view")), nn(view_node)),
     ];
     if let Some(d) = &ds.description {
         t.push(Triple::new(
-            s,
+            s.clone(),
             nn(&format!("{DCT}description")),
             Literal::new_simple_literal(d.clone()),
         ));
+    }
+    // The retention policy sits on the root node (LDES §4.4: "A retention
+    // policy will be described on the root node"), as an IRI (Server Primer
+    // §6.1.1) whose description travels with every document that names it —
+    // a policy IRI "without further statements in the current page" would
+    // mean the view keeps no members at all.
+    if let Some(p) = policy {
+        let view = nn(view_node);
+        let pol = nn(&format!("{}#retention", s.as_str()));
+        t.push(Triple::new(
+            view.clone(),
+            nn(&format!("{RDF}type")),
+            nn(&format!("{LDES}EventSource")),
+        ));
+        t.push(Triple::new(
+            view,
+            nn(&format!("{LDES}retentionPolicy")),
+            pol.clone(),
+        ));
+        t.push(Triple::new(
+            pol.clone(),
+            nn(&format!("{RDF}type")),
+            nn(&format!("{LDES}RetentionPolicy")),
+        ));
+        let duration = |v: &str| Literal::new_typed_literal(v, nn(&format!("{XSD}duration")));
+        if let Some(d) = &p.full_log_duration {
+            t.push(Triple::new(
+                pol.clone(),
+                nn(&format!("{LDES}fullLogDuration")),
+                duration(d),
+            ));
+        }
+        if let Some(n) = p.version_amount {
+            t.push(Triple::new(
+                pol.clone(),
+                nn(&format!("{LDES}versionAmount")),
+                Literal::new_typed_literal(n.to_string(), nn(&format!("{XSD}integer"))),
+            ));
+        }
+        if let Some(d) = &p.version_duration {
+            t.push(Triple::new(
+                pol.clone(),
+                nn(&format!("{LDES}versionDuration")),
+                duration(d),
+            ));
+        }
+        if let Some(d) = &p.version_delete_duration {
+            t.push(Triple::new(
+                pol.clone(),
+                nn(&format!("{LDES}versionDeleteDuration")),
+                duration(d),
+            ));
+        }
+        if let Some(at) = &p.starting_from {
+            t.push(Triple::new(
+                pol,
+                nn(&format!("{LDES}startingFrom")),
+                Literal::new_typed_literal(at.clone(), nn(&format!("{XSD}dateTime"))),
+            ));
+        }
     }
     t
 }
@@ -229,9 +401,16 @@ pub async fn get_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiErr> {
     let ds = visible_dataset(&state, user.as_deref(), &dataset_id)?;
-    enabled_stream(&state, &dataset_id)?;
+    let cfg = enabled_stream(&state, &dataset_id)?;
     let base = state.base_url.as_str();
-    let triples = stream_description(base, &ds, &node_iri(base, &dataset_id, 1));
+    let layout = Layout::load(&state, &dataset_id, cfg.page_size)?;
+    let policy = store::retention(&state.auth_db, &dataset_id).map_err(e500)?;
+    let triples = stream_description(
+        base,
+        &ds,
+        &node_iri(base, &dataset_id, layout.view()),
+        policy.as_ref(),
+    );
     render(&headers, &triples, "no-cache")
 }
 
@@ -251,31 +430,86 @@ pub async fn get_node(
         ));
     }
     let base = state.base_url.as_str();
-    let total = store::member_count(&state.auth_db, &dataset_id).map_err(e500)?;
-    let pages = total.div_ceil(cfg.page_size).max(1);
+    let layout = Layout::load(&state, &dataset_id, cfg.page_size)?;
+    let pages = layout.pages();
     if n > pages {
         return Err((
             StatusCode::NOT_FOUND,
             format!("node {n} does not exist (the stream has {pages})"),
         ));
     }
-    let members =
-        store::members_page(&state.auth_db, &dataset_id, n, cfg.page_size).map_err(e500)?;
+    let members = if layout.is_sealed(n) {
+        let s = &layout.sealed[n as usize - 1];
+        let members = store::members_between(&state.auth_db, &dataset_id, s.first_id, s.last_id)
+            .map_err(e500)?;
+        if members.is_empty() {
+            // Server Primer §5.1: "For nodes that are no longer available,
+            // respond with 410 Gone. Clients will treat such a page as
+            // having no members and no relations."
+            return Err((
+                StatusCode::GONE,
+                format!(
+                    "node {n} has been compacted away by the stream's retention policy; \
+                     the stream continues at node {}",
+                    layout.next(n).unwrap_or(pages)
+                ),
+            ));
+        }
+        members
+    } else {
+        store::tail_page(
+            &state.auth_db,
+            &dataset_id,
+            layout.tail_after,
+            n - layout.sealed_count(),
+            cfg.page_size,
+        )
+        .map_err(e500)?
+    };
+    let policy = store::retention(&state.auth_db, &dataset_id).map_err(e500)?;
     let stream = nn(&stream_iri(base, &dataset_id));
     let node = nn(&node_iri(base, &dataset_id, n));
-    let mut triples = stream_description(base, &ds, &node_iri(base, &dataset_id, 1));
+    let mut triples = stream_description(
+        base,
+        &ds,
+        &node_iri(base, &dataset_id, layout.view()),
+        policy.as_ref(),
+    );
     triples.push(Triple::new(
         node.clone(),
         nn(&format!("{RDF}type")),
         nn(&format!("{TREE}Node")),
     ));
-    // Relation to the next fragment: members there are created at or after
-    // its first member's timestamp.
-    if n < pages {
-        let next_first = store::members_page(&state.auth_db, &dataset_id, n + 1, 1)
+    let immutable = n < pages;
+    if immutable {
+        // LDES §3.2: a client checks `<> ldes:immutable true` before the
+        // Cache-Control header.
+        triples.push(Triple::new(
+            node.clone(),
+            nn(&format!("{LDES}immutable")),
+            Literal::new_typed_literal("true", nn(&format!("{XSD}boolean"))),
+        ));
+    }
+    // Relation to the next fragment that still has members: its members
+    // were created at or after the bound recorded when this page sealed —
+    // a lower bound for every later member, so it stays valid when the
+    // pages in between are compacted away.
+    if let Some(next) = layout.next(n) {
+        let value = if layout.is_sealed(n) {
+            Some(layout.sealed[n as usize - 1].next_created_at.clone())
+        } else {
+            store::tail_page(
+                &state.auth_db,
+                &dataset_id,
+                layout.tail_after,
+                n + 1 - layout.sealed_count(),
+                1,
+            )
             .map_err(e500)?
             .into_iter()
-            .next();
+            .next()
+            .map(|m| m.created_at)
+        };
         let rel = oxigraph::model::BlankNode::default();
         triples.push(Triple::new(
             node.clone(),
@@ -295,13 +529,13 @@ pub async fn get_node(
         triples.push(Triple::new(
             rel.clone(),
             nn(&format!("{TREE}node")),
-            nn(&node_iri(base, &dataset_id, n + 1)),
+            nn(&node_iri(base, &dataset_id, next)),
         ));
-        if let Some(m) = next_first {
+        if let Some(v) = value {
             triples.push(Triple::new(
                 rel,
                 nn(&format!("{TREE}value")),
-                Literal::new_typed_literal(m.created_at, nn(&format!("{XSD}dateTime"))),
+                Literal::new_typed_literal(v, nn(&format!("{XSD}dateTime"))),
             ));
         }
     }
@@ -313,7 +547,7 @@ pub async fn get_node(
         ));
         triples.extend(member_triples(base, m));
     }
-    let cache = if n < pages {
+    let cache = if immutable {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"

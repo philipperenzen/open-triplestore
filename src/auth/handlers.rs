@@ -4607,9 +4607,75 @@ pub async fn list_service_graphs(
 
 /// GET /api/users/public — returns minimal public info (id, username, avatar_key).
 /// No authentication required.
+///
+/// The endpoint exists so the UI can put a name and an avatar on the owner chip
+/// of something the caller is already looking at. It used to answer with every
+/// active account on the instance, to anybody, which turned that label lookup
+/// into an account-enumeration surface: a stranger could read off the whole
+/// roster of a private deployment. The list is therefore scoped to the users the
+/// caller could already infer — the owners of the datasets it may read (for an
+/// anonymous caller, the public ones), the members of the organisations it
+/// belongs to (which it may already read through
+/// `/api/organisations/:org_id/members`), and itself. Only an admin still sees
+/// everyone, matching the admin directory at `GET /api/users`. The JSON shape
+/// and the status codes are unchanged; only the membership of the list is.
 pub async fn list_public_users(
+    user: Option<Extension<AuthenticatedUser>>,
     State(db): State<Arc<AuthDb>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let caller = user.as_ref().map(|Extension(u)| u);
+
+    // `None` means "no scoping": an admin has an effective role on every
+    // resource, so computing the visible set would only ever return everybody.
+    //
+    // For every other caller the set is assembled from prefetched bulk reads and
+    // then intersected in memory. `list_accessible_datasets` resolves the whole
+    // dataset table in one pass plus a fixed number of per-caller authorization
+    // queries, and each organisation the caller belongs to costs one more query
+    // — a handful, not one per user. The endpoint stays O(users + datasets),
+    // never O(users × datasets).
+    let visible_ids: Option<std::collections::HashSet<String>> =
+        if caller.is_some_and(|u| u.is_admin()) {
+            None
+        } else {
+            let caller_id = caller.map(|u| u.user_id.as_str());
+            let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            // A signed-in caller can already read its own account back from
+            // `GET /api/users/:user_id`, so it never disappears from its own list.
+            if let Some(id) = caller_id {
+                ids.insert(id.to_string());
+            }
+
+            for dataset in db
+                .list_accessible_datasets(caller_id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                // An organisation-owned dataset names an organisation, not a
+                // person, so it discloses no account on its own. Its members are
+                // added below, and only to a caller that belongs to it.
+                if matches!(dataset.owner_type, OwnerType::User) {
+                    ids.insert(dataset.owner_id);
+                }
+            }
+
+            if let Some(id) = caller_id {
+                for org in db
+                    .list_user_organisations(id)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                {
+                    for (member, _role) in db
+                        .list_org_members(&org.id)
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                    {
+                        ids.insert(member.id);
+                    }
+                }
+            }
+
+            Some(ids)
+        };
+
     let users = db
         .list_users()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -4624,6 +4690,11 @@ pub async fn list_public_users(
     let response: Vec<PublicUser> = users
         .into_iter()
         .filter(|u| u.is_active)
+        .filter(|u| {
+            visible_ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(u.id.as_str()))
+        })
         .map(|u| PublicUser {
             id: u.id,
             username: u.username,

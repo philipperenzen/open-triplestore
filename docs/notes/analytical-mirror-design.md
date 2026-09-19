@@ -1,0 +1,367 @@
+# Analytical mirror — columnar substrate, SPARQL-subset→SQL routing, `/sql` endpoint
+
+**Status: design note only. Nothing here is implemented or approved for implementation.** It exists so that a later go/no-go is mechanical rather than a fresh argument. Every code-level claim carries a `path:line`; where a number does not exist the note says "unmeasured" and names the measurement that would produce it.
+
+Programme constraints carried throughout: the on-disk RocksDB layout is unchanged; every existing HTTP route, status code and JSON field stays backward compatible; `src/auth/`, `frontend/`, CI, the Dockerfile and the dependency sections of `Cargo.toml` are outside the implementation scope (`p2-brief.md:22` — "adding a dependency requires asking"). The brief's stop conditions — an Oxigraph/spareval fork, endpoint-ACL default-open behaviour, anything under `src/auth/` (`p2-brief.md:24`) — are each met below and flagged where they are touched (sections 7.3, 7.4, 10).
+
+---
+
+## 1. Purpose, decision record and go/no-go criteria
+
+### 1.1 What was proposed, and the decision
+
+P2-1 proposed a class-per-table Parquet/DuckDB mirror fed from `urn:system:commit-log`, a SPARQL-subset→SQL router and a read-only `/sql` endpoint; P2-2 proposed Jakubowski-style compilation of SHACL Core onto it. The maintainer held P2-2, asked whether a SQL substrate fits at all, then steered: build the reliable changelog first; SHACL→SQL may apply, because Studio pipelines validate large instance datasets and instance data is often wrong after a model update — so measure at 9M.
+
+**Recorded decision.**
+
+1. **Per-quad change capture with a durable cursor is the first deliverable** (section 5.2, designed in `docs/notes/delta-versioning-design.md`). It is the prerequisite for any persisted or incrementally maintained substrate, for delta versions, for exact count-index maintenance, and for changed-node scoping of validation.
+2. **SHACL→SQL is deferred pending measurement, not rejected.** No `shacl-to-sql-design.md` is written; section 12 says how SHACL Core would ride on a SPARQL-fragment translator and section 1.5 specifies the gating experiment.
+3. **The columnar substrate and `/sql` are not built now.** The go/no-go thresholds in section 1.4 decide later, against telemetry that does not yet exist.
+
+The brief places the SHACL→SQL answer in two places — "the analytical-mirror note's decision section and the improvement log" (`p2-brief.md:6`). This section is the first; the three numbered decisions above, verbatim, are the P2 entry to be appended to `docs/notes/improvement-log.md` under the P2 handoff (`docs/notes/improvement-log.md:394-397`) in the same change as this note. Until that entry exists the deliverable is half-placed.
+
+### 1.2 What held, what was refuted, what was missing
+
+The draft position was reviewed by a four-lens panel; its findings are folded in.
+
+**Held.** The measured aggregate gap has largely closed *under one configuration*: group-by with average over 41 groups went 1.36 s → 64 ms at 0.9M quads and 11.6 s → 0.52 s at 9M, both over HTTP (`docs/notes/readiness-audit-2026-09.md:2094`, `:2099`; republished at `docs/performance.md:652`, `:693`). The 100M tier is above the mirror cap: `GROUP BY` + `AVG` over a join runs 104.5 s on RocksDB, materialising ~20M intermediate solutions, OOM at 30.9 GiB and completing at 54.9 GiB (`docs/performance.md:590-597`). No BI/SQL/Parquet/Arrow connector exists and no product doc claims analytics (analytical-consumers map, gaps 1 and 6); tabular egress is SPARQL CSV/TSV (`src/server/content_negotiation.rs:23-24`). The feed and cursor findings held (sections 5.1, 5.2).
+
+**Refuted, and corrected here.** (a) The write gate is *not* "a per-delivery check of one payload", but the cost differs by verb. POST (`src/server/routes.rs:1720`, `WriteMode::Merge` at `:1725`) dumps the entire existing target graph to Turtle and re-parses it into a throwaway store (`src/shacl_studio/gate.rs:55-66`, run only `if mode == WriteMode::Merge`, `:139-141`), copies every shape graph the same way (`:367-382`), and validates every focus node of the merged graph (`data_graphs = [graph_iri]`, `:392`). PUT (`routes.rs:1636`, `WriteMode::Replace` at `:1641`) validates only the payload, which is the graph's whole future state — no dump, no re-parse. Both run synchronously in the async handler; the default graph is exempt (`validate_on_write` returns `Ok(())` when `graph_iri` is `None`, `routes.rs:1426-1429`). So POST is many-targets bulk Core validation on the hottest write path, and PUT is bulk validation proportional to the payload. The conclusion survives on other grounds: the sandbox is `TripleStore::in_memory()` (`gate.rs:138`) holding one graph's *future* state, so no mirror of the *live* store can serve it, and it fails closed — an evaluation error is a refused write (`gate_error`, `gate.rs:79-99`). (b) "Test-pinned semantics" is false: per-graph hop confinement for IRI focus nodes (`src/shacl/constraints.rs:1533-1540`) is asserted by no test (followup-shacl-internals Q5; taken from its grep census, not re-derived here), and the engine already carries disagreeing graph semantics in one run — `sh:sparql` prebinds `FROM <g>` per data graph and sees the merge (`constraints.rs:1305`), `sh:class` uses `GraphSel::All` (`src/shacl/view.rs:715-724`), `sh:targetClass` is confined per graph (`src/shacl/engine.rs:1196`) while `targetSubjectsOf`/`ObjectsOf` are not (`:1223`, `:1226`). So the liability for a second validator is stronger than the draft said: there is no written contract to be equivalent to. (c) "SHACL Core is a corollary of BGP + FILTER + GROUP BY" is false: `sh:class` needs an `rdfs:subClassOf*` closure (`view.rs:585-586`, `:713-728`), `zeroOrMorePath` is a closure and `alternativePath` a union, `sh:node` recursion is bounded unfolding to depth 50 (`constraints.rs:16`) where over-depth returns no results (`:73`) — the report conforms — with a server-side `warn!` (`:67-72`) that never reaches the client, and `sh:closed` enumerates every predicate of the focus node (`constraints.rs:425-433`). (d) The builder is `rust:1.94-bookworm` (`Dockerfile:39`; `rust:1.94-trixie` is the CI image, `.gitlab-ci.yml:49`), already installs `cmake`, `libclang-dev`, `lld` (`Dockerfile:42-47`) and compiles RocksDB and GEOS from C++ — a bundled C++ engine is an unmeasured compile-time and binary-size cost, not a new class of problem (section 3.3 adds the MSRV and build-host caveats).
+
+**Missing, now included.** The default deployment is `mem_limit: ${TRIPLESTORE_MEM_LIMIT:-4g}` (`docker-compose.yml:119`); the cap is `bytes/4/1024` clamped to `[2_000_000, 24_000_000]` (`src/store/parallel_mirror.rs:669-678`, constants `:56`, `:60`, `:64`, `:70`), so (4 GiB/4)/1024 = 1 048 576 clamps to the 2M floor and **at 9M quads the accelerator is OFF in the shipped container**; the same group-by then runs "at about 11 s" on RocksDB (`docs/performance.md:704-706`). Reaching 9M needs ≈ 36.9 GB of detected budget (9e6 × 1024 × 4). The mirror's headline figures were measured on `examples/scale_otl.rs`'s `SELECT ?t (COUNT(?a)) (AVG(?l)) … GROUP BY ?t` inside a constant `GRAPH` (`examples/scale_otl.rs:177`) — a shape no product endpoint issues; the product's own aggregates (browse facets, VoID, geo-stats, catalog counts, vocab metrics) are all outside the shard router's subset (section 6.1). QLever, a production columnar dictionary-ID engine, beats the mirror by under 2× at 501k triples: `GROUP BY` + `COUNT` 7.7 vs 6.5 ms, `GROUP BY` + `AVG` over a join 17 vs 10 ms, `COUNT(DISTINCT)` 8.1 vs 5.4 ms (`docs/performance.md:804-806`; cause named at `:828-830`). Adding any dependency is outside the programme's scope (`p2-brief.md:22`), so P2-1 as written cannot be implemented this phase without a separate decision.
+
+### 1.3 The strongest case for SHACL→SQL, stated fairly, and the answer
+
+The steelman: (1) bulk many-targets Core validation *does* run here — every gated POST revalidates a whole graph (`gate.rs:139-141`, `:55-66`, `:392`), every gated PUT revalidates its whole payload, and every pipeline run after a shape or model change revalidates its whole scope, because nothing scopes validation to changed nodes or shapes; (2) the vendored corpus is overwhelmingly Core — corpus-wide `sh:ConstraintComponent` 0, `sh:validator`/`nodeValidator`/`propertyValidator` 0, `sh:inversePath` 0, `sh:oneOrMorePath` 0, `sh:zeroOrOnePath` 0, against class 63, minCount 44, maxCount 36, datatype 36, nodeKind 31 and only 18 `sh:sparql` (followup-shacl-internals numbers, counted once over a local file — see below); (3) a typed shape IR already exists (`pub enum Constraint`, 31 variants, `src/shacl/shapes.rs:110`); (4) in the shipped container the cliff is at ~2M quads, not 24M.
+
+The answer, on evidence: every quantitative leg is unmeasured. The only 9M SHACL figure is 118 s, in-process, pre-engine-rebuild, accelerator off (`docs/performance.md:624`; cause at `readiness-audit:2060-2062`); post-rebuild 0.9M is 0.64–0.93 s over HTTP / 0.72 s in-process against Jena's 3.5 s (`docs/performance.md:657`), ≈ 2.5 µs per focus node on the in-memory source (`:198-199`), and the 9M cell is empty at every generation after the first (followup-workload-telemetry Q5). No SQL number exists at any size. No gate benchmark exists (followup-shacl-internals not_established #6). The corpus census rests on `nen2660-shacl.ttl`, which is git-ignored (`examples/seed-bundles/nen2660-imbor/.gitignore:2` is `*.ttl`) — the figures are not reproducible from the vendored tree and were not recounted — and 27 of its 30 node shapes get no targets today because the implicit-class ASK is scoped to the shapes graph (`src/shacl/engine.rs:455-458`) while the `rdfs:Class` assertions live in another graph; IMBOR Kern, the only shape graph the sample dataset binds (`manifest.toml:60-66`), is fetched, not vendored. And there is no automatic bulk revalidation yet: `trigger_on_write` is persisted and loaded (`src/shacl_studio/handlers.rs:1196`, `models.rs:282`, read back at `src/shacl_studio/store.rs:104`) but nothing acts on it — no write path consults the flag; only `gate_writes` is consulted, via `discover_gates` (`src/shacl_studio/gate.rs:126`, `:186`) — although `docs/shacl.md:239` advertises "(manual, on-write, cron)"; the scheduler ticks every 60 s (`src/shacl_studio/scheduler.rs:19`). So: deferred pending the measurement in 1.5, with bulk revalidation after a shape/model update treated as a real recurring workload in the meantime.
+
+### 1.4 Telemetry required, and the go/no-go thresholds
+
+Phase 0 adds a fixed-size ring buffer on `TripleStore` — per query: served-by label, elapsed µs, two shape bits. The labels are the five exits of the query path: cache hit (`src/store/engine.rs:617`), fast-count (`:639-641`), shards (`:647-652`), full RAM copy (`:659-664`), RocksDB (`:665-670`). The bits: "classifies as `Aggregate`" from `opengraph::parallel::classify`, and "mentions COUNT/GROUP BY" from the whitespace-stripped scan `try_fast_count` performs (`src/store/engine.rs:681-687`).
+
+**Where the bits are computed matters.** Today `classify` runs at `parallel_mirror.rs:320` only for queries that reach `try_query` — after the cache-hit return (`engine.rs:617-619`), after `try_fast_count` (`:639-641`), and only when the mirror is `enabled` (`:316-318`). A bit derived there never lands on a cache hit, and cache hits are exactly the repeated aggregates (facets, VoID, keyed per scope) that T1 is meant to see — the share would be biased low. Parsing on the hit path is ruled out by the code's own precedent: a scan of the query text on every call "tripled the cost of a cached point query" (`engine.rs:613-616`). Design: compute both bits **once per uncached evaluation**, independently of `enabled`, and **stamp them on the `Cached` entry** (`src/store/query_cache.rs:45-50` holds `vars` and `rows`; two bits are added beside them), so a hit inherits its bits with no parse. The hit-path cost is then one fixed-size ring-buffer push. **Phase 0 is under the programme's 20 % bound like every other phase:** the cached point query that `engine.rs:613-616` guards is benchmarked before and after; > 20 % stops the phase.
+
+Validation gains `view.source_kind()`/`has_index()`, today only a `debug!` (`src/shacl/engine.rs:88-92`), duration and quad count on `shacl_validation_runs` (which has neither, `src/auth/db.rs:795-809`; `pipeline_runs` has `duration_ms`, `:960`) and a row for the gate path, which persists nothing. Phase 0 also records the **inter-write gap histogram** from `last_write_ms` (`parallel_mirror.rs:127`), which section 5.4 needs.
+
+Over a 14-day window on a real deployment:
+
+| Trigger | Condition | Gates |
+|---|---|---|
+| **T1 latency** | ≥ 5 % of `/sparql` reads carry the analytical bit **and** their p95 exceeds 2 s | substrate |
+| **T2 envelope** | the store sits over the *effective* cap on a deployment where the analytical share is ≥ 5 %, **and** raising `TRIPLESTORE_MEM_LIMIT` has been tried. Arithmetic: the RAM-aware cap is `bytes/4/1024` (`parallel_mirror.rs:669-678`), ≈ 4 KiB of container budget per triple — 9M quads need ≈ 40g. `OTS_PARALLEL_QUERY_MAX_TRIPLES` (`:187-191`) bypasses the RAM-aware clamp entirely ("always wins", `:665-668`); the constant is over-estimated precisely because under-estimating "OOM-kill[ed] the process" and "flapped the container during a large seed" (`:65-70`). Raise the memory limit; set the override only with the arithmetic done. | substrate |
+| **T3 product** | an external tabular/BI consumer is a written product decision | `/sql` |
+| **T4 validation** | the 9M experiment (1.5) shows whole-dataset validation above its threshold on the deployment's real configuration, **and** telemetry shows ≥ 1 whole-scope pipeline run per day | SHACL→SQL revisited |
+| **T5 bar** | the ≥ 3× bar is measured against **the path the query runs on today**: RocksDB where the RAM copy declines (`SUM`/`AVG`, `parallel_mirror.rs:570-572`; `GRAPH ?g`, `UNION`, paths, top-level `Slice`, `parallel.rs:787-791`, `:919-932`) or is off (over the cap). On queries the RAM mirror already serves, a candidate must not be slower — and no more is asked, because a production columnar engine tops out under 2× there (QLever, `docs/performance.md:804-806`); that is the plausibility ceiling, not a target | any build |
+
+Substrate on T1 or T2, always with T5; `/sql` only on T3. **Counter-trigger:** if after 14 days the analytical bit is set on < 1 % of reads and no deployment is over its cap, close P2-1, keeping telemetry and change capture.
+
+### 1.5 The gating experiment for SHACL→SQL
+
+Specified so it can be run once and cited:
+
+- **Harness.** The 0.9M HTTP figures came from "the platform's Studio pipeline over HTTP" (`docs/performance.md:636-644`) with the OTL corpus; `scripts/scale_compare_http.py` has `--skip-load` (`:43`) and `--settle` (`:44`, applied `:79-81`) but no SHACL phase; `examples/scale_otl.rs` has a SHACL phase (`:191-202`) but no `--skip-load`, no settle and no source label (followup-workload-telemetry Q4). Add a `--shacl` phase to the HTTP script that creates the pipeline and calls `POST /api/shacl/pipelines/:id/run` (`src/shacl_studio/routes.rs:108`), reading `duration_ms` from the run (`src/shacl_studio/exec.rs:156`, `:184`).
+- **Data.** 1M assets / 9M quads, the six OTL property shapes (`examples/scale_otl.rs:69`), loaded once and reused with `--skip-load`.
+- **Configurations.** (A) mirror ON: `OTS_PARALLEL_QUERY_MAX_TRIPLES=10000000`, `TRIPLESTORE_MEM_LIMIT` ≥ 40g, `--settle 150` (the 9M table's settle, `docs/performance.md:702-705`); (B) mirror OFF: the shipped 4g default, so the run takes the RocksDB snapshot path with a run index capped at `memory/8/300` clamped `[250_000, 8_000_000]` (`src/shacl/view.rs:145-153`); (C) A repeated immediately after a 500-quad `INSERT DATA`.
+- **Record.** `duration_ms`, `results_count`, `view.source_kind()` and `has_index()` (emitted into the run once Phase 0 lands), process RSS, and — separately — a gate benchmark **for POST and PUT separately**: a 50-quad payload into a graph of 10^5 and 10^6 quads with one gating pipeline configured, with dump / parse / validate as separate spans for POST (`gate.rs:139-141`) and parse / validate for PUT (followup-shacl-internals not_established #6).
+- **Decision thresholds.** Linear scaling from 0.72 s at 0.9M predicts ≈ 7 s at 9M on the mirror. If configuration A is ≤ 15 s and B is ≤ 60 s, SHACL→SQL stays deferred and the work is changed-node scoping of the gate and pipeline runs (section 12). If A exceeds 30 s (super-linear) or B exceeds 120 s on the configuration real deployments run, T4 opens and section 12's translator route is costed against the native fixes. If dump+parse dominates the POST gate benchmark, the fix is a quad-level sandbox seed in `gate.rs`, not a compiler; that fix does nothing for PUT, whose cost is the payload's own validation.
+
+**Run (2026-09-16, `tests/scale_shacl_9m.rs`, reference system, Docker, release).** In-process rather than over HTTP (the HTTP script lives in `scripts/`, outside the programme's scope; the engine path is what the 118 s figure used, so the comparison is like for like), the `metrics` object of the telemetry item naming the source. Load 1M assets / 9,000,156 quads in 97 s. **A** (mirror on, `OTS_PARALLEL_QUERY_MAX_TRIPLES=12000000`, no container limit; the mirror published 131 s after the load, one build): **6.29 s / 6.27 s**, source `mirror`, no run index. **B** (`docker run -m 4g`, the shipped default; the mirror never built): **13.5 s / 13.8 s**, source `snapshot`, run index at the 1.8M cap. **C** (A, straight after a 500-quad `INSERT DATA`): 18.5 s, source `snapshot`, run index built to the 8M cap — slower than B's steady state, so the run-index cap's upper range costs more than it saves at this size (a `view.rs` follow-up, not a substrate question). Both thresholds hold with room (A ≤ 15 s, B ≤ 60 s); the linear prediction (≈ 7 s) was right. **Decision: SHACL→SQL stays deferred; T4 does not open; the work is changed-node scoping of the gate and pipeline runs (section 12).** The 118 s was the pre-rebuild engine. The POST/PUT gate benchmark of the "Record" item is not run here — it needs the HTTP harness — and stays open.
+
+### 1.6 What should not be built, stated plainly
+
+A class-per-table schema (no source exists; class counts range from OTL's 40 types to gwsw's "~2 400 classes", `examples/seed-bundles/gwsw/manifest.toml:6`); a SQL engine before the substrate is measured; `/sql` before a substrate; a virtual knowledge graph; a columnar authority (P5).
+
+---
+
+## 2. What exists today that the design builds on
+
+**The chain.** `TripleStore::query` (`src/store/engine.rs:609`) checks the result cache (`:617`), snapshots the generation before evaluating (`:622`), calls `query_uncached` (`:623`) and stores under that generation (`:624`). `query_uncached` (`:628-671`) runs `try_fast_count` (`:639-641`) → `parallel_mirror.try_query` (`:647-652`) → `parallel_mirror.try_full_query` (`:659-664`) → the RocksDB evaluator (`:665-670`). `try_full_query` declines every `SUM`/`AVG` (`has_sum_or_avg`, `src/store/parallel_mirror.rs:570-572`), so a grouped average outside the shard subset runs on RocksDB even under the cap — the most immediate win for a columnar route. **Insertion point:** between `:664` and `:665`, after the exact-by-construction RAM copy (section 6.6).
+
+**The publish/stale protocol.** `ParallelMirror::Inner` holds `shards` (`parallel_mirror.rs:103`), `full` (`:109`), `dirty: AtomicBool` starting true (`:111`, `:206`), `build_lock` (`:113`), `last_write_ms` (`:127`), `writes_in_flight` (`:141`). `begin_write()` calls `write_started()` then `query_cache.invalidate()` before mutating (`src/store/engine.rs:430-434`); `WriteGuard::drop` repeats both (`:306-311`). `get_or_build` (`parallel_mirror.rs:344`) serves only when clean (`:353-355`); while dirty it declines inside the 500 ms quiet window (`:83`; `recently_written()` `:160-170`, checked `:362`), when a background build is pending (`:375`) or `try_lock` fails (`:378`); probes `store.len()` once per dirty→clean transition (`:393`); publishes OFF when empty or over cap (`:394-397`); rebuilds inline at ≤ 50 000 triples (`:92`), else on a detached `mirror-rebuild` thread (`:417-435`). A 500 ms tokio interval drives `accelerator_tick` (`src/server/mod.rs:2393-2398`; `src/store/engine.rs:413`).
+
+**The routing predicate.** `classify` (`opengraph/src/parallel.rs:299`) returns `Aggregate`/`Rows`; the mirror accepts only `Aggregate` (`parallel_mirror.rs:320`). `collect_rowable` (`parallel.rs:769-793`) accepts `Bgp`, `Filter`, `Project`, `Extend`, `Distinct`, `Reduced` and constant-name `Graph` (`:787-790`); everything else is `_ => false` (`:791`) — 7 of spargebra 0.4.6's 18 `GraphPattern` variants (`spargebra-0.4.6/src/algebra.rs:596-668`). `subject_local` requires one shared subject variable (`:799-818`); `plan_group_aggregate` rejects a top-level `Slice` (`:919-932`; `ORDER BY … LIMIT` is a `Slice`, `spargebra-0.4.6/src/parser.rs:744-749`).
+
+**The count index.** `GraphIndex` is a `DashMap<Option<String>, usize>` plus a `scans` counter (`src/store/engine.rs:93-102`); `adjust` (`:197`) is the exact primitive, used on the ground-update path (`:974`); `graph_count_cached` (`:1782`).
+
+**The result cache.** Keyed on the SPARQL string as it reaches the store — already ACL-scoped (`src/store/query_cache.rs:9-14`); 1024 entries, 10 000 rows (`:40-41`); refuses to store if the generation moved (`:276`); generation is `AtomicU64::new(0)` per process (`:127`, `:142`). An entry is `Cached::Boolean` or `Cached::Solutions { vars, rows }` (`:45-50`) — the place section 1.4's shape bits go.
+
+**The memory budget.** Enforced only at build time, by triple count; `BYTES_PER_TRIPLE_BOTH_COPIES = 1024` is "deliberately HIGH" and covers two oxigraph copies (`parallel_mirror.rs:65-70`). No byte-level measurement of either copy exists.
+
+---
+
+## 3. Substrate options and recommendation
+
+### 3.1 Layout
+
+| Option | For | Against |
+|---|---|---|
+| **Pooled** dictionary-encoded `(g, s, p, o)` | schema-free and total; graph is a column, so ACL is a row filter and `GRAPH ?g` is groupable — what the shard router cannot do (`parallel.rs:787-790`); the divergence oracle is one `GROUP BY g` against `GraphIndex` | self-joins per pattern; no per-predicate typing |
+| **Class-per-table** (the brief's wording) | typed column pruning; SHACL cardinalities map naturally | needs a schema that no source provides (section 4); re-planning on model publish has no hook; `sh:closed` and ill-formed literals do not survive it (section 12) |
+| **Both** — pooled as the artefact of record, class views over it | class views become a cache decision, droppable per class | two things to rebuild |
+
+**Recommendation: pooled first; class views only where a measured query shape wins by ≥ 3× over the pooled plan.** The correctness contract for any class view is `class tables ∪ edge tables ∪ long tail = pooled table = store`, quad for quad.
+
+### 3.2 Two deliverables, one of which needs a SQL engine
+
+The routing win and `/sql` are separable. A SPARQL-subset router over a pooled in-process structure emits a physical plan (scan → filter → hash join → hash aggregate) directly; SQL text is only needed when an external consumer writes SQL. Since none exists (section 1.2), the substrate can be built and measured with **zero new dependencies**; the engine choice comes later, approval-gated.
+
+### 3.3 Engine
+
+| Candidate | Assessment |
+|---|---|
+| **Hand-rolled pooled structure in `opengraph/`** | Recommended for the substrate phase: term dictionary, four id columns, sorted permutations; no dependency; deletable. |
+| **Apache DataFusion / Arrow** | Preferred for `/sql`: Apache-2.0 (`deny.toml:45-47` allows MIT and Apache-2.0), pure Rust, a logical plan that can be whitelisted and rewritten (section 7.2). Large dependency tree; needs approval. |
+| **DuckDB (`duckdb-rs`, bundled C++)** | Viable: MIT passes the licence gate and the builder already compiles RocksDB and GEOS from C++ (`Dockerfile:42-47`); its compile-time and binary-size cost is **unmeasured** (a builder-stage build with and without it). Fallback if DataFusion is measured wanting. |
+| **Parquet files only** | Not a substrate; a later export format. |
+
+Grep confirms none exists: no `duckdb`/`arrow`/`parquet`/`datafusion`/`polars` in `Cargo.toml` or `Cargo.lock`; the only SQL dependencies are `rusqlite` and `r2d2_sqlite` (`Cargo.toml:179`, `:181`).
+
+**Build feasibility caveats for any engine.** MSRV is `rust-version = "1.94.1"` (`Cargo.toml:16`); a candidate must compile on that toolchain and the pinned builder (`Dockerfile:39`). A bundled C++ engine adds a very large C++ compilation to a build that has produced random cross-compiler SIGSEGVs on the build host under high parallelism — gcc ICE on `oxrocksdb-sys` at 24 jobs, rustc SIGSEGV on unrelated crates, worked around by capping `CARGO_BUILD_JOBS` (project operational memory, 2026-06-14; not in the repository, so not citable to a file). The builder-image spike (Phase 1b) therefore runs at the capped job count and reports wall-clock and binary size at that count, not at full parallelism.
+
+### 3.4 Where a persisted artefact lives; recovery and backups
+
+Phase 2 keeps the copy in RAM; **a persisted copy is Phase 4 only** (section 8.1), and nothing in Phase 2 depends on it. If persisted: `{data_dir}/columnar/`, a subdirectory beside `tantivy/` (`src/main.rs:500-502`) and `assets/` (`:490`). `quarantine_store_files` moves an entry only if `entry.path().is_file() && is_rocksdb_file(&name)` (`src/store/recovery.rs:151`), so a directory is spared; but `is_rocksdb_file` matches `.log` (`:122-133`), so a loose writer log at the top level would be quarantined. Backups write only `rdf.nq.gz` (name chosen at `src/backup/mod.rs:160-162`, dump at `:168`) and `auth.sqlite` (`:184`); `restore_latest_backup` loads only that dump (`src/store/recovery.rs:163-184`), and offline `--restore` does `DROP ALL` + load (`src/backup/mod.rs:543-549`). After any restore the columnar directory holds pre-restore state. **Mitigation: a sidecar manifest `(instance id, format version, change-capture `seq` at snapshot)` checked on open; a mismatch forces a rebuild.** Per-graph counts are *not* the staleness oracle — a restore of the latest backup onto a quiet store reproduces the same counts — they remain the divergence oracle of section 9. The `seq` is the OTS-persisted one of section 5.2, which is why a persisted copy cannot precede Phase 1. The text-index precedent is "Start dirty: the index is a derived cache that can be missing, wiped or left behind by a restore" (`src/server/mod.rs:2365-2368`). Never add the artefact to backups.
+
+---
+
+## 4. Schema derivation for class-per-table (if and when)
+
+**Sources.** (1) Instance statistics are the only complete source: `introspect::model_context` runs per-class `COUNT(DISTINCT ?s)` and per-predicate `COUNT(*)` (`src/shacl_studio/introspect.rs:63-74`) but caps at `LIMIT 250`/`400` (`:68`, `:74`) and persists nothing. (2) Shapes cover subsets — clinical's shapes miss `ex:encounter` and `ex:unit` (`examples/seed-bundles/clinical-reference/shapes.ttl:6` vs `instances.ttl:11-12`); `nen2660-relations/shapes.ttl` has zero property shapes; `load_shapes` is private (`src/shacl/engine.rs:299`). (3) The registry stores version metadata only; `kind_detector::Evidence` holds counts (`src/kind_detector.rs:141-155`).
+
+**Typing policy.** `xsd:integer` and derived types as a wide integer following `xsd_lexical_valid` (`src/shacl/constraints.rs:1940`); `xsd:decimal` as fixed-point; `xsd:double`/`float` as double, with `SUM`/`AVG` over such columns declined on the SPARQL route; strings byte-wise, no collation; `xsd:dateTime` as lexical plus a parsed shadow column used only when every value carries a timezone; `rdf:langString` as value + tag (`rdf:dirLangString` is not supported, `docs/datatypes.md:333`); geometry as lexical + `crs` + `is3d` — three datatypes are accepted (`src/geo/datatypes.rs:63-68`), the `<CRS>` prefix is stripped by `extract_wkt`/`extract_crs` (`:93`, `:111`), and there are two live 3-D detections to reuse: the SPARQL `CONTAINS` filter in `src/geo/viewer_feed.rs:152-157`, and `wkt_is_3d` (`src/geo/geom3d.rs:104`) as called by the 3-D spatial index at `src/geo/index3d.rs:170` — both modules are behind `feature = "geometry3d"` (`src/geo/mod.rs:15-18`), which is in `full` (`Cargo.toml:125`) and is what the container builds (`Dockerfile:24`, `:119`); the `#[allow(dead_code)]` and "not yet wired internally" comment at `geom3d.rs:102-103` are stale. The `is3d` column derives from `wkt_is_3d` directly. RDF 1.2 triple terms to the long tail only. Mixed datatypes on one predicate are real: IMBOR `boom-3` stores a plain `"1998"` where siblings are typed (`examples/seed-bundles/nen2660-imbor/instances.ttl:24`); `introspect::single_iri` returns `None` on mixed input (`introspect.rs:265-272`). Majority type wins the column; every non-conforming quad goes to the long tail, and **every typed-column query must also consult the long tail for the same `(s, p)` or the outlier becomes invisible.**
+
+**Re-planning.** No publish hook exists: `publish_version` stamps and returns (`src/data_models/handlers.rs:2001-2010`); the seed-bundle path bypasses it (`src/seed_bundles/mod.rs:304-308`); `entailment::after_write` (`src/entailment.rs:184`, via `after_write_kind`, `:197`) joins `dataset_graphs` (`:102`), and model graphs are not dataset graphs — "Model graphs live in the model registry, not in a dataset, so the dataset-graph read set never contains them" (`src/conformance.rs:174-176`). Deriving from instance data makes the hook unnecessary; the price is that a rebuild can change a column type under a `/sql` consumer (open question 6).
+
+---
+
+## 5. Feed
+
+### 5.1 Why "fed from the commit log" cannot be built as written
+
+The commit node carries counts and affected graphs, never quads (`src/commit_log.rs:124-135`); identity is `uuid::Uuid::new_v4()` (`:126`); ordering is `Utc::now().to_rfc3339()` (`:131`) with `ORDER BY DESC(?created)` and no tie-break (`:394`); nothing prunes the graph; the record is a **second** `store.update` after the data commit (`:277`), skipped when `graph_iris` is empty and only warned on failure (`src/server/routes.rs:828-836`). Counts differ per path — the SPARQL path records zeros although it computed the exact delta (`:794` vs `:826-836`). Several write paths never reach the HTTP layer: seed-bundle boot loads (`src/seed_bundles/mod.rs:398`, `:519`), crash recovery (`src/store/recovery.rs:182`), reasoners (`src/reasoning/rdfs.rs:88-89`), plugins (`src/plugins.rs:34`). It is a provenance trail, not a change feed.
+
+### 5.2 The prerequisite: per-quad change capture with a durable cursor
+
+This is the first deliverable and P2-4's core; its design lives in `docs/notes/delta-versioning-design.md`. What this note requires of it:
+
+1. One record per logical write: `(seq, dataset, graph, added, removed)`, with `seq` durable and monotonic **and persisted by OTS itself**, because oxigraph exposes none: `rocksdb_get_latest_sequence_number` exists in the vendored C API (`oxrocksdb-sys-0.5.9/rocksdb/db/c.cc:2436`) but the storage module is private (`oxigraph-0.5.9/src/lib.rs:11`) and `Store::storage()` is `pub(super)` (`store.rs:1099`); `Store::backup` returns `Result<(), StorageError>` with no checkpoint id (`store.rs:1058`).
+2. Emitted at the **mutation primitives**, not at `begin_write` (`WriteGuard` carries no payload, `src/store/engine.rs:304`; fires for `rebuild_graph_index`, `:1795`; double-fires for nested guards, `:1446` → `:1281`). Five primitives already hold the exact delta and discard it (`:969-970`, `:1313`/`:1323`, `:1477-1478`, `:1546-1549`, `:1534`); three need only a `contains` probe (`:1156`, `:1630`, `:1693`); five need a before-image scan (`:765`, `:877`, `:1202`, `:1494`, `:1600`). The PUT-replace pre-image can be read inside the same transaction (`Transaction::quads_for_pattern`, `oxigraph-0.5.9/src/store.rs:1254`); its cost is unmeasured on an operation that already went from 17.7 s to 32.3 s for a 900k replace (`docs/performance.md:678`) and must stay inside the programme's 20 % bound.
+3. Atomicity where possible: `on_transaction` evaluates without committing (inferred from the surrounding function; `oxigraph-0.5.9/src/sparql/update.rs:200-206` constructs the `ReadableUpdateEvaluator` for `UpdateTransaction::BorrowedReadable`), so `batch_update` (`src/store/engine.rs:1154-1163`) and PUT-replace (`:1493-1498`) can carry the record in the data commit; bulk-loader paths ingest SST files (`oxigraph-0.5.9/src/storage/rocksdb.rs:1457-1466`), so the record follows `loader.commit()` and a WAL-based feed would miss every bulk-loaded quad.
+4. Side benefit: nine count-index scan sites collapse to `GraphIndex::adjust` (`engine.rs:772`, `:882`, `:988`, `:1166`, `:1204`, `:1311`, `:1316`, `:1507`, `:1641`), the worst being `bulk_insert_quads`'s recount per 50 000-quad batch from `snapshot::copy_graph` (`src/dataset_versions/snapshot.rs:59`, `:76`).
+
+### 5.3 Full rebuild versus incremental apply
+
+An **in-RAM** third copy built in the same `build_and_publish` pass (section 8) needs no cursor: wholesale rebuild, invalidated below the HTTP layer at `begin_write`, is the argument the two existing copies rely on. Change capture is the prerequisite for a **persisted** or **incrementally maintained** copy — anything that must know what it missed across a restart (section 8.1). Both are true; the note keeps them apart.
+
+Cost: the only rebuild datapoint is "~29s" inline at 1.7M triples (`parallel_mirror.rs:88-90`); the settle for the tables was 60 s at 0.9M and 150 s at 9M (`docs/performance.md:702-705`); RocksDB load runs ~0.15 Mt/s (`:778-780`). A dictionary-encoded build should be cheaper than the oxigraph full copy, but that is arithmetic. **Phase 2 must produce columnar build time at 0.9M and 9M against `build_full_store` on the same pass.**
+
+### 5.4 Cadence and staleness contract
+
+The in-RAM copy reuses the 500 ms tick, the debounce and the `try_lock` gate unchanged. **The `/sparql` contract is never-stale**: the copy is served only when `dirty == false`.
+
+**When a copy can publish at all.** Publication needs an inter-write gap of ≥ 500 ms with `writes_in_flight == 0` (`parallel_mirror.rs:83`, `:507-509`), and then a whole build during which no write lands — otherwise `publish` sets `dirty` again (`:541-543`) and the next quiet window rebuilds. The threshold is therefore a **gap distribution, not a rate**. Quiet windows are scarcer than they look: every HTTP write is at least two engine writes — the commit-log `store.update` (`src/commit_log.rs:277`) and, for materialising datasets, `entailment::after_write` (`src/entailment.rs:184`) — each re-arming the debounce, and each `update()` also recounting or rebuilding the count index (`src/store/engine.rs:765-774`). During the measured mixed phase — 4 writers + 4 readers for 20 s, 736 000 quads written (36.8k/s), write p95 85 ms (`docs/performance.md:655`) — no copy can publish at all and every read in that phase is RocksDB; that is the existing behaviour, not a regression, but a third copy widens the window in which a copy that *could* have published is still building.
+
+**The third copy degrades the two existing ones, not only itself.** The background build runs on the detached `mirror-rebuild` thread holding `build_lock` (`:420-424`), and `get_or_build` declines while `background_building` is set (`:375-377`). If the columnar build is part of that pass, the shards and the full copy stay unpublished for the whole columnar build too. Two mitigations, decided by Phase 2 measurement: (i) a single three-copy swap (section 8, item 2) — simplest, longest outage; (ii) a two-stage publish — oxigraph copies first under `write_mark`, then the columnar copy built from the immutable `full` `Arc` and published under the same `write_mark` test — shorter outage, at the price of a second swap. **Phase 2 must produce: the wall-clock fraction of a mixed-workload run during which each copy was published, with and without the third copy, plus the inter-write gap histogram from Phase 0.** The mitigation is measured build time, not bounded staleness on `/sparql`. A persisted copy serving `/sql` may be stale and must say so (`X-OTS-As-Of: <seq>`, section 8.1).
+
+---
+
+## 6. SPARQL-subset → SQL (or physical-plan) router
+
+### 6.1 Accepted algebra, set by the platform's own queries
+
+`Bgp` with arbitrary subject variables; `Filter` over section 6.3's grammar; `Group` with `HAVING`; `Distinct`/`Reduced`; `Project`, `Extend` with aliases; `Graph` with a constant **or variable** name; `Values` binding graph IRIs; `Union` of BGPs; `Path` limited to predicate alternation and fixed-length sequences; top-level `OrderBy`/`Slice`; `Ask`.
+
+| Query | Text at | Why the shard router rejects it |
+|---|---|---|
+| browse facets | `src/server/routes.rs:4056`, `:4064`, `:4067` | `ORDER BY … LIMIT 300` → top `Slice`; `Join{Values, Graph}` has no arm (`parallel.rs:791`; algebra shape inferred from the text, not parsed here); `GRAPH ?g` fails `:787-790` |
+| VoID distinct counts | `src/store/engine.rs:541-549` | `UNION` has no arm |
+| geo-stats | `src/geo/viewer_feed.rs:143`, `:158-163` | `geo:hasGeometry\|omg:hasGeometry` is a `Path` |
+| Spark vocabulary sampler | `src/server/llm_sparql.rs:4243-4254` | outer `ORDER BY … LIMIT` |
+| catalog `count_triples` | `src/catalog/builder.rs:148`, `:156` | `FILTER(STRSTARTS(STR(?g),…))` over a variable graph |
+| vocab `local_metrics` | `src/vocab_search/local_metrics.rs:51` | `GRAPH ?g … GROUP BY ?g ?term` |
+
+`void_stats` also pays `self.len()`, an O(N) RocksDB scan, per write generation (`src/store/engine.rs:517-556`, `:540`), and is anonymously reachable: its only caller is `src/dcat/catalog.rs:600`, reached from `generate_catalog_bytes` (`src/server/linked_data.rs:194`, `:256`) behind `GET /.well-known/void` (`linked_data.rs:32`), mounted under `optional_auth` (`src/server/mod.rs:1609-1617`). These six are the workload a substrate is sized against; facets, VoID and geo-stats becoming routable and byte-identical is the checkable Phase 2 exit. Per-scope caching or index-backed distinct counts may serve several with no substrate — that comparison is part of Phase 2's report.
+
+### 6.2 Rejected forms
+
+Unbounded `Path` (`*`/`+`): set-of-nodes reachability with per-graph confinement questions (section 12). `OPTIONAL`/`LeftJoin`: filter-inside-optional is the classic mistranslation. `Minus`: the no-shared-variables rule. All decline in Phase 2. `Service`: federation stays on the live path (`IdentityGuard` at `src/server/routes.rs:659`; `is_cacheable` refuses it, `src/store/query_cache.rs:317-323`). `Lateral`, `Construct`, `Describe`: decline.
+
+### 6.3 Translation rules, and what SQL gets wrong by default
+
+| SPARQL | Naive SQL | Rule |
+|---|---|---|
+| Unbound in `FILTER` is an error → solution excluded; `!(error)` is still an error | `NULL` comparison → `NULL`; `NOT NULL` → `NULL`; row excluded | Aligns for comparisons and negations; `BOUND` → `IS NOT NULL`; `COALESCE` maps directly |
+| EBV: `FILTER(?x)` on `""`/`0` is false | no EBV | accept only comparison / connective / `BOUND` / `EXISTS` / `regex` / `langMatches` / datatype tests at the top; decline bare `FILTER(?x)` |
+| `ORDER BY` places unbound first | `NULLS FIRST/LAST` is engine-dependent | emit explicit `NULLS FIRST`, pin with a parity test |
+| Numeric promotion; a double contaminates | engine-specific hierarchy | arithmetic only over single-typed columns; any double under `SUM`/`AVG` declined, mirroring `rows_have_double` (`parallel.rs:233-235`, `:1136-1153`) and `has_sum_or_avg` (`parallel_mirror.rs:570`) |
+| string `<` by code point | collation-dependent | byte-wise UTF-8, no collation, asserted by a test |
+| `langMatches` (BCP-47 basic filtering) | none | UDF, or `lower(lang) = 'en' OR lower(lang) LIKE 'en-%'` |
+| `REGEX` (XPath F&O) | RE2/POSIX/ICU | never the engine's regex; a UDF on the same Rust path the SHACL fallback uses (`src/shacl/constraints.rs:325-333`), or decline |
+| `COUNT` → `xsd:integer`; `AVG` of integers → `xsd:decimal`; `SUM` of an empty group → `0`; `MIN`/`MAX` of an empty group → unbound | `BIGINT`/`DOUBLE`; empty-group `SUM` → `NULL` | re-literalise on output as the shards do (`parallel.rs:479-486`); special-case empty groups |
+| `DISTINCT` over blank nodes | — | the shards decline (`rows_have_blank`, `parallel.rs:260-262`) because labels are store-scoped across independent stores; one dictionary from one `store.iter()` keeps the store's own labels, so DISTINCT is safe there — document the divergence and pin it with a `DISTINCT ?b` parity test across all three copies |
+
+### 6.4 Fidelity guard policy
+
+**Decline rather than differ**, inherited verbatim: static declines at plan time, runtime declines after the scan, `Ok(None)` falling through. The caveat: the mirror's guard is cheap because every mirror path runs the *same* evaluator (`parallel.rs:400-406`, `:1120-1126`, `:1189-1204`); a translator re-implements every operator, so "decline" must be backed by a parity corpus for everything not declined. The harness is `tests/parallel_query_parity.rs`, whose `store` helper (`:63`) builds with `.with_parallel_rebuild_quiet_ms(0)` (`:71`) and asserts `parallel_build_count() > 0` (`:476-479`). Add **shadow mode** (`OTS_SQL_SHADOW=1`, off by default): run both, compare materialised solution sets, log mismatches; the go/no-go is zero mismatches over ≥ 10 000 comparisons including queries run on both sides of the cap.
+
+### 6.5 Result path
+
+`par_answer_to_results` (`src/store/parallel_mirror.rs:703-717`) builds `QueryResults::Solutions(QuerySolutionIter::new(vars, iter))` from owned rows (`:711-714`). The shorter door, unused here, is `QuerySolutionIter::from_tuples` (`spareval-0.2.6/src/model.rs:98-107`), taking `Vec<Option<Term>>` rows in variable order — a columnar cursor's shape. Constraints: the item error is `QueryEvaluationError::Dataset(Box<dyn Error + Send + Sync>)` (`spareval-0.2.6/src/error.rs:12-14`); the chain returns `QueryResults<'static>` (`src/store/engine.rs:628`), which means the iterator must **own or `Arc`-share** its data — the RocksDB exit (`:665-670`) streams lazily over a storage snapshot (`oxigraph-0.5.9/src/store.rs:448`), and `par_answer_to_results` materialises only because the merge already produced owned rows. A columnar cursor holding an `Arc` to the published copy may stream; materialisation is a choice, not a requirement. Column order must equal variable order (`src/store/query_cache.rs:288-306`).
+
+### 6.6 Insertion point, cache, observability
+
+Insert after `try_full_query` (`engine.rs:664`) and before RocksDB (`:665`): the RAM copy is exact by construction; the columnar route earns its keep where the RAM copy declines (`SUM`/`AVG`) or is off. The result cache is unchanged — the route sits inside `query_uncached`, keyed on the scoped string plus generation, results ≤ 10 000 rows cached (`query_cache.rs:239`). Observability is a sixth served-by label, carried cheapest by widening the `ct_tx` oneshot in `execute_query` (`src/server/routes.rs:653`, `:690`, `:716-720`) into an `x-ots-served-by` header (precedent `x-ots-dataset-version`, `src/saved_queries/handlers.rs:716-718`), or by the thread-local pattern `IdentityGuard` uses around that call (`routes.rs:659`; `src/federation.rs:86-88`), plus counters beside `build_count` (`parallel_mirror.rs:143`) in an admin-gated `/health` block (`routes.rs:2024-2032`; `/health` is anonymous under `optional_auth`, `src/server/mod.rs:1526-1543`, and must stay O(1)). `built_len` (`:465`, `:536`) is read by nothing.
+
+---
+
+## 7. The `/sql` endpoint
+
+Only on T3. `/sql` is the one part that needs a SQL engine.
+
+### 7.1 Surface and statements
+
+`GET /api/sql?q=…` as the primary form and `POST /api/sql` with `{ "sql", "max_rows" }` (7.3 explains why), returning SPARQL-results JSON so CSV/TSV negotiation applies. Under `/api/`: the Vite proxy enumerates `'/api'` (`frontend/vite.config.js:136`), and an unmounted top-level path falls to the SPA fallback (`src/server/mod.rs:2562-2565`), which answers 200 with HTML on GET and 405 on POST (`tower-http-0.7.0/src/services/fs/serve_dir/mod.rs:386-396`) — a route-exists test is mandatory.
+
+Whitelist the **logical plan**: one `SELECT`/`WITH … SELECT`; no DDL/DML, `ATTACH`, `COPY`, `INSTALL`, `LOAD`, `PRAGMA`, `SET`, file/network table functions or UDF registration; scalar functions from an explicit list plus the section 6.3 UDFs; the connection read-only with filesystem and network access disabled. Limits: `max_rows` clamped (precedent `q.limit.unwrap_or(1000).clamp(1, 100_000)`, `src/auth/handlers.rs:3951`); a statement timeout enforced in the handler; an `expensive_semaphore` permit with 503 on exhaustion (`src/server/routes.rs:7273-7278`; capacity `available_parallelism()/2`, `src/server/mod.rs:227-231`). `/sparql` takes no permit and its timeout bounds only time-to-first-byte (`routes.rs:710-712`) under the 300 s `TimeoutLayer` (`mod.rs:2004-2007`); an OLAP scan should buffer, then respond.
+
+### 7.2 The readable-graph predicate as a row filter
+
+Call `accessible_read_graphs` (`src/server/routes.rs:1003`, `pub(crate)`, "the exact set the query path scopes to", `:998-1002`): `D(P) ∪ A(P)`.
+
+- `D(P)`: graphs of accessible datasets, keeping `private = 1` graphs only for datasets the caller can write (`src/auth/db.rs:4183-4192`; admins get writable = accessible, `:4166-4168`); memoised per `Option<user_id>` for `ACCESSIBLE_GRAPHS_TTL = 30 s` (`:12`, `:4204-4216`) — a revocation stays effective up to 30 s; the uncached `get_accessible_graph_iris` (`:4126`) exists if `/sql` should bypass it.
+- `A(P)`: `graph_acl` read grants (`:5334`), unioned after the private filter, uncached. Lookup errors are swallowed (`routes.rs:518` is a `debug!`; `:1014-1022` is `if let Ok`), silently narrowing scope; **`/sql` should fail closed with a 500**, since a narrowed scope on an analytics surface looks like a real zero.
+- Anonymous (only when the handler's anonymous opt-in of 7.4 is set): only `Visibility::Public` datasets (`db.rs:4814-4821`), no private graphs, plus the `public` principal's grants (`routes.rs:522`).
+- Admin: do **not** copy `execute_query`'s branch, which passes the query through unscoped when the registry is empty (`routes.rs:541-550`); admins get all rows explicitly — every `g`, including `g IS NULL` — regardless of registry state, so the outcome on an empty registry equals `/sparql`'s but is reached by an explicit rule. A non-admin on an empty registry has an empty scope and gets zero rows, never a pass-through. The Phase 4 parity matrix gains an "empty registry" column for this cell.
+- Default graph: never in a non-admin's scope (`/store` returns 401 for `?default`, `routes.rs:1257-1264`); `g IS NULL`, admin only.
+- `urn:system:*`: `/store` blocks it for non-admins before consulting the set (`routes.rs:2094-2096`); `/sparql` has no such block, and such graphs *are* registered to datasets (`src/shacl_studio/exec.rs:347-348`; `routes.rs:7401`). Take `/store`'s rule; `check_graph_read_access` (`:2088`) is module-private and would be widened or re-implemented.
+- Share links contribute nothing: no path turns a share token into a graph set.
+- Triple security labels: **not applied, and not applied on `/sparql` either** — the only use is `graph_store_get` (`routes.rs:1271-1284`, calling `filter_quad_indices_by_label`, `src/auth/acl.rs:214`), whose gate `unwrap_or(false)` fails open while the helper fails closed (`acl.rs:237-246`). State it in `docs/api-reference.md`.
+
+**Mechanism: a plan rewrite, not SQL injection.** Section 7.1 already whitelists the logical plan, so the same pass applies the scope: every `TableScan` of the quads table (and of any class view) is rewritten to carry the predicate `g IN (scope)` — in DataFusion, a per-request `SessionContext` whose `TableProvider` is the published copy wrapped with the filter, or a `LogicalPlan` rewrite of each scan. The DuckDB equivalent is a per-connection `CREATE TEMP VIEW quads AS SELECT * FROM quads__<build> WHERE g IN (…)` shadowing the base table, with base tables carrying a per-build unguessable suffix. Either way the filter is applied regardless of query shape, so it is total by construction; a test asserts that no plan reaches execution with an unfiltered scan. Whether an `IN` list of thousands of graph ids is cheap is **unmeasured** (a 34-graph prologue once drove a ~3.1M-row scan, `routes.rs:4430-4434`); a joined one-column scope table is the standard fix.
+
+### 7.3 `enforce_write_scope_for_mutation` and POST
+
+It runs inside both `optional_auth` (`src/auth/middleware.rs:562-564`) and `require_auth` (`:525`); `mutating` covers POST (`:605`); the only read exemption is a literal `path == "/sparql"` (`:610-611`). So a read-scoped API token POSTing to `/api/sql` gets `403 "This API token does not have write scope"` (`:618-624`) — JWT sessions are always `write_access: true` (`:192`), so exactly the tokens an analytics endpoint would be issued are locked out. GET is therefore primary; generalising the exemption is an `src/auth/middleware.rs` edit, **outside scope and a stop condition to raise before the phase starts**, and SQL in a query string lands in access logs, which is why POST should also exist.
+
+### 7.4 Mounting, rate tier, status codes, audit, OpenAPI
+
+Copy the `/sparql` group (`src/server/mod.rs:1526-1543`): `GovernorLayer` with `make_rate_conf(1, 40)` (`mod.rs:811`), `endpoint_acl_guard` (must follow auth, `middleware.rs:646-647`; not global, so a new group must add it), `optional_auth`. Rules match `path_pattern='/api/sql'` over normalised segments (`src/auth/acl.rs:38-54`).
+
+**Endpoint ACL is default-open, and that is a stop condition.** `check_endpoint_acl` returns `true` when no rule matches (`acl.rs:151-153`, `// default allow`), then returns on the **first** rule in `Reverse(priority)` order (`:157-165`), so a higher-priority allow overrides a lower-priority deny — whereas the doc comment promises "if **any** `deny` rule matches → deny" (`:103-105`). A new endpoint mounted under the guard inherits both. The brief names endpoint-ACL default-open behaviour as a stop condition (`p2-brief.md:24`) and `src/auth/acl.rs` is out of scope, so this note does not fix it. Consequence for `/sql`: **the endpoint must not depend on the rule table for its default.** The handler itself denies anonymous callers unless `OTS_SQL_ALLOW_ANONYMOUS=1` (handler-local, `src/server/routes.rs`, in scope), so the shipped default is closed whatever the rule table holds; the priority/deny discrepancy is reported to the maintainer as a stop-condition item alongside 7.3.
+
+Status codes: **403 for every authorisation denial**, because `audit_forbidden` records only `FORBIDDEN` (`middleware.rs:477`); 400 for rejected SQL and for the timeout, matching `/sparql` (`routes.rs:712`); 503 for overload in the tuple form (`:7275-7277`), not the `Internal` → 500 form at `:8645`. Audit: denials are automatic; a fail-closed ACL error follows `check_endpoint_acl` (`acl.rs:126-140`); successful reads are unaudited, as on `/sparql` — `AuditEventType` has 35 variants and no read event (`src/auth/audit.rs:21-57`); adding one is out of scope though it needs no migration (`audit.rs:18-19`; `db.rs:770`). OpenAPI: a `mount(paths, "/api/sql", …)` beside `/health` (`src/server/openapi.rs:527-541`); document in `docs/api-reference.md`.
+
+---
+
+## 8. Publish/stale carry-over for a third copy
+
+**Current sequence.** `build_and_publish` (`src/store/parallel_mirror.rs:497-524`): refuse if `writes_in_flight() > 0` (`:507-509`); `write_mark = last_write_ms` (`:510`); `build_from_store(..).zip(build_full_store(..))` (`:511-513`); on error return, leaving state untouched and dirty (`:514-517`); `publish` (`:518`). `publish` (`:529-544`): two **separate** `RwLock` swaps (`:530-535`), `built_len` (`:536`), `build_count` (`:537`), re-arm `over_cap_warned` (`:540`), then `dirty = !(last_write_ms == write_mark && writes_in_flight() == 0)` (`:541-543`). The two copies come from two `store.iter()` calls (`:684`, `:695`), each taking its own storage snapshot (`oxigraph-0.5.9/src/store.rs:448`, `:479-481`; that two snapshots can differ follows from RocksDB snapshot semantics, not from the cited lines); a write between them is caught only by the write-mark comparison.
+
+**A third in-RAM copy adds:** (1) a field in `Inner` beside `:103`/`:109`, initialised at `:204-205`; (2) **not** a third swap — collapse all three into one `RwLock<Option<Arc<Copies>>>`, closing the existing window in which a reader passes `get_or_build`'s verdict (`:353`, `:384`) and reads `full` separately (`:574`); with one slot, `publish_off` (`:459-464`) clears all three at once, so an over-cap store cannot leave a stale copy live while `dirty = false` (`:466`) is authoritative; (3) a **third build stage after the zip resolves and before `publish`**: `build_columnar(&full)` from the already-built `full` copy (`Arc<Store>`), not a fourth `store.iter()` — `full` does not exist until the zip at `:511-513` returns, so the builder cannot sit inside it; a failure in the third stage `return None`s exactly as `:514-517` does, so the all-or-nothing property holds across three stages because nothing is published until all three exist; (4) nothing else — `dirty`, the debounce, `try_lock`, `background_building` and the inline/background split are copy-agnostic. Section 5.4's alternative (ii), a two-stage publish, gives up item (2)'s single slot for a shorter outage of the oxigraph copies; Phase 2 decides between them by measurement.
+
+**Memory budget — steady state.** `BYTES_PER_TRIPLE_BOTH_COPIES = 1024` is a two-copy estimate feeding `:673`. A pooled table is four id columns (16 B/quad at 4-byte ids) plus one dictionary entry per distinct term — the dictionary is the unknown, largest on geometry-heavy corpora. Either a measured `BYTES_PER_TRIPLE_ALL_COPIES`, or a separate cap so the columnar copy stays on when the oxigraph copies switch off (below).
+
+**Memory budget — peak.** Steady state is not the failure mode the constant guards against. `publish` swaps the slots (`:530-535`) while readers may still hold the previous `Arc`s (cloned at `:354`, `:574`), so during a rebuild the old copies, the new copies and the `store.iter()` buffers coexist; today that peak is old-2 + new-2, and it is what "flapped the container during a large seed" (`:65-70`). A third copy makes it old-3 + new-3. Building the columnar copy from `full` (item 3) at least keeps its build buffers from overlapping the `store.iter()` pass. **Phase 2 must measure RSS during a rebuild (peak), not only after (steady), at 0.9M and 9M on a geometry-heavy and a geometry-free corpus, and the cap arithmetic must be stated for the peak.**
+
+**Above the cap — the per-copy-cap path is not the step list above.** The "strongest technical case" — a columnar copy alive at 9M in the 4g container — is unreachable by items (1)–(4): `build_and_publish` is entered only after `get_or_build` has passed the `total > max_triples` gate; over the cap the code calls `publish_off` and returns before any build (`:393-397`), and `full` — the input of item (3) — never exists there. A per-copy cap therefore needs a second branch in the rebuild, designed as follows and **deferred to a Phase 2b decision (open question 2)**: a `columnar_max_triples` above `max_triples`; when `max_triples < total ≤ columnar_max_triples`, the rebuild clears the oxigraph copies, builds the columnar copy from a **fresh `store.iter()` snapshot** on the same `mirror-rebuild` thread under the same `build_lock` and `write_mark` protocol, and publishes `Copies { shards: None, full: None, columnar: Some }` with the same unchanged-test for `dirty`. The clean-state fast path (`:353-355`) then hands `try_query`/`try_full_query` a `None` and they decline; `try_columnar_query` reads the same slot under the same `dirty == false` gate — so never-stale holds with one state machine, not two. The cost is a full 9M `store.iter()` pass in every quiet window after a write, at exactly the size where a rebuild is slowest and the trickle problem of section 5.4 is worst; whether that is tolerable is what the Phase 2 build-time and published-fraction figures decide. A copy built on its own cadence for `/sql` is a different object (8.1) and never serves `/sparql`.
+
+### 8.1 The stale-serving copy for `/sql` (Phase 4 only)
+
+The never-stale copy above cannot serve `/sql` over the cap on a busy store, and a persisted copy needs the durable `seq` of section 5.2 — so this copy exists only after Phase 1 and is built only in Phase 4. Its protocol, kept separate from the mirror's:
+
+- **States.** `Absent` → `Building(seq_start)` → `Published(as_of = seq_start)` → `Stale` (a change-capture record with `seq > as_of` exists) → `Rebuilding(seq_start')` → `Published(as_of')`. `Stale` still serves; `Absent`/`Building` answer 503 in the tuple form (`routes.rs:7275-7277`).
+- **Who builds, from what.** A dedicated task on a configurable interval (not the 500 ms tick), never inside `build_lock`, so it cannot lengthen the mirror's outage. Under the cap it snapshots the currently published `full` `Arc` when one is clean; over the cap, or when none is clean, a `store.iter()` snapshot (`oxigraph-0.5.9/src/store.rs:448`). `seq_start` is the change-capture `seq` read immediately before the snapshot is taken; a record landing during the build is applied afterwards or, failing that, the copy is marked `Stale` at publish.
+- **Incremental apply.** With change capture, `Stale → Published` may apply records `(as_of, current]` instead of rebuilding; the divergence oracle of section 9 runs after every apply. Bulk-loader writes are records too (section 5.2 item 3), so they are not missed.
+- **Header.** `X-OTS-As-Of: <as_of>` on every `/sql` response, plus the served-by label; a consumer comparing against the current `seq` (exposed on the admin `/health` block) knows exactly how far behind it is.
+- **Restart.** The manifest `seq` (section 3.4) against the durable `seq`: equal → `Published`; behind with records available → incremental apply; behind without → `Absent` and rebuild; instance id or format mismatch → delete and rebuild.
+
+---
+
+## 9. Failure modes and operational notes
+
+**Divergence between copies.** At publish, `SELECT g, COUNT(*) GROUP BY g` on the columnar copy against `GraphIndex` (`src/store/engine.rs:1782`); on mismatch log and refuse to publish. The oracle is imperfect: `graph_store_delete` removes the `None` key (`:1579`) while `rebuild` always records the default graph (`:137`); `store_quad` skips index maintenance (`:1691-1695`) but has only `#[cfg(test)]` callers (`src/dataset_versions/snapshot.rs:194`, `src/text_search/index.rs:925`). A mismatch means "something is wrong", not "the columnar copy is wrong".
+
+**Peak memory during rebuild.** Section 8: old and new copies coexist while readers hold `Arc`s; a third copy raises the peak by one copy each side. Unmeasured; Phase 2 measures it.
+
+**Backup/restore and format upgrade.** Section 3.4: outside the backup, spared by recovery, self-invalidating via the manifest `seq`; on a format-version mismatch delete and rebuild — the text-index precedent reindexes whole-store at "~40s on a laptop-sized store" (`src/server/mod.rs:584-585`).
+
+**Disk.** Unmeasured; the only figure is an estimate of ~200–400 MB per 1M triples for RocksDB (`docs/triplestore-comparison.md:493`). Measure `du -sb` at known quad counts.
+
+**A mirror that never goes clean** (section 5.4) gets worse with a third, longer build on a detached `std::thread` nothing cancels at shutdown (`parallel_mirror.rs:417-435`), and the outage now covers the two existing copies too. **No CI coverage at size:** the perf gate's filter (`.github/workflows/perf.yml:145`, tolerance 1.15 at `benches/perf_baseline.json:3`) gates nothing ≥ 1M — the largest size literal in `benches/performance.rs` is `100_000` (`:331`).
+
+---
+
+## 10. Phasing, effort and measurements
+
+| Phase | Work | Effort | Must produce |
+|---|---|---|---|
+| **0 Telemetry** | ring buffer on `TripleStore` (not `AppState`, `src/server/mod.rs:235`, out of scope), served-by label + two bits stamped on the `Cached` entry, admin-gated `/health` block, `x-ots-served-by`, inter-write gap histogram; `source_kind`/duration on validation runs | 3–5 d | 14 days of per-path latency and analytical share on a real deployment; cached point query before/after within the 20 % bound |
+| **1 Change capture** | per-quad records at the mutation primitives with a durable OTS-side sequence (P2-4 core; first deliverable) | 2–3 wk | every write path's net per-graph sum equals `GraphIndex`, pinned with the `scans` counter (`engine.rs:102`, `:126`); replace-path cost within the 20 % bound |
+| **1b Measurements** | the section 1.5 experiment; POST and PUT gate benchmarks; builder-image spike for one SQL engine at the capped job count | 1 wk + machine time | the 9M SHACL row at A/B/C; dump/parse/validate spans; build-time and binary-size deltas on MSRV 1.94.1 |
+| **1c Cheap wins** | document/raise the cap; per-scope caching or index-backed counts for VoID, facets, catalog; changed-node scoping and quad-level seeding in `src/shacl_studio/gate.rs` (in scope) | 2 wk | before/after per consumer; gate p95 at 10^5 and 10^6 for POST and PUT |
+| **2 Pooled copy + router** | third copy in `ParallelMirror`, single-slot publish (or two-stage, by measurement), `try_columnar_query`, section 6.1 subset, parity + shadow mode | 3–4 wk | facets, VoID, geo-stats routed byte-identically and ≥ 3× faster than the RocksDB path they take today; no regression on queries the RAM copy already serves; steady and peak RSS and build time at 0.9M/9M; published-fraction under a write trickle with and without the third copy; no benchmark > 20 % slower |
+| **2b Per-copy cap** (decision) | the over-cap columnar-only branch of section 8, if Phase 2's build-time and published-fraction figures allow it | 1–2 wk | the 9M group-by in the 4g container served off RocksDB, or a written no |
+| **3 Class views** (optional) | materialised per-class views | 2 wk | a named shape ≥ 3× faster than the pooled plan, else skip |
+| **4 `/sql`** | dependency approval; plan whitelist and scope rewrite; handler-local anonymous default; middleware group; **`src/auth/middleware.rs` exemption approval**; the stale-serving copy of 8.1 | 3–4 wk + approvals | ACL parity matrix (anonymous / member / graph-ACL / admin × public / private / `urn:system:*` / default × populated / empty registry) |
+
+≈ 12–15 weeks (14–17 with the optional class views; Phase 2b extra) against the programme's 6–8 for P2-1, before any SHACL work — a finding in itself.
+
+**Stop conditions touched by this note, to raise before any phase starts:** the read-only POST exemption in `src/auth/middleware.rs:610-617` (7.3); the endpoint-ACL default-allow and first-rule-wins behaviour in `src/auth/acl.rs:151-166` (7.4); any dependency (3.3).
+
+**Out of scope of this note:** a virtual knowledge graph (R2RML/OBDA over an external RDBMS); an authoritative columnar store, a DuckDB write path, time-travel or spatial SQL, QLever as a read backend — all **P5**, decidable only from Phase 2's measurements; persistent shards (`docs/performance.md:1020-1021`), a simpler roadmap item; a pluggable evaluator, which "would need an evaluator fork" (`:828-830`) — a stop condition.
+
+---
+
+## 11. Open questions for the maintainer
+
+1. Collapse the two `RwLock<Option<Arc<_>>>` fields into one `Copies` swap before any third copy? It fixes an existing window and is independently testable.
+2. Per-copy cap for the columnar copy, accepting the over-cap columnar-only rebuild branch of section 8 (a full `store.iter()` pass per quiet window at 9M)?
+3. `/sql` copies `/store`'s `urn:system:` block (`routes.rs:2094-2096`) rather than `/sparql`'s registered-means-readable? Should `/sparql`'s behaviour be pinned by a test either way?
+4. Is generalising the read-only POST exemption at `middleware.rs:610-617` acceptable in principle? If not, read-scoped tokens cannot POST to `/sql` and GET is the only form.
+5. Should `/sql` fail closed on a `graph_acl` lookup error, and should `/sparql` (`routes.rs:518`) change too?
+6. Schema pinning: if class views are ever built, does a rebuild that changes a column's majority type require an opt-in, or drift with a logged event?
+7. Is adding `--shacl` to `scripts/scale_compare_http.py` and `source_kind` to pipeline runs approved as Phase 1b's first task?
+8. `query_scoped` bypasses cache, mirror and fast count (`engine.rs:890`), so reasoners always pay RocksDB join cost. Intentional, or a gap an accelerated copy should close?
+9. Pin per-graph confinement and the `sh:node` depth-50 behaviour with tests asserting an exact report on a two-graph and a cyclic fixture (`src/shacl/engine.rs:2299-2317` is nearly that), and reconcile or document the `sh:sparql` FROM-merge disagreement — cheap, in scope, prerequisite for any second validator.
+10. Should `/sql` ship closed to anonymous callers by default (7.4), given that the endpoint ACL is default-allow and out of scope to change?
+
+---
+
+## 12. How SHACL Core would ride on the translator
+
+This replaces the held `shacl-to-sql-design.md`. Deferred pending section 1.5; if it is ever built, it is built this way.
+
+**Mapping.** Violations are target − shape. `sh:targetClass`: `types` joined to a materialised `subclass_closure`, **per graph** (`src/shacl/engine.rs:1196`); `targetSubjectsOf`/`ObjectsOf`: one scan over **all** graphs (`:1223`, `:1226`). `sh:minCount n`: `GROUP BY focus HAVING COUNT(*) < n` plus an anti-join for zero values; `sh:maxCount m`: `HAVING COUNT(*) > m` (the paper's `NOT IN` of ≥ m+1). `sh:datatype`, `sh:nodeKind`, `sh:pattern`, range and length constraints, `sh:in`, `sh:hasValue`: object-column predicates under `NOT EXISTS`, always unioned with the long tail — and `sh:datatype` also requires lexical validity (`src/shacl/constraints.rs:186`), which is why the W3C fixture `"300"^^xsd:byte` (`tests/fixtures/w3c-shacl/core/property/datatype-ill-formed-data.ttl`) cannot live in a typed byte column at all; that single fact settles class-per-table for validation. `sh:class`: join to the closure over **all** graphs (`view.rs:715-724`). `sh:and`/`or`/`xone`/`not`/`node`: `EXISTS` composition; `sh:qualifiedValueShape`: a correlated count over a nested shape with sibling disjointness (`constraints.rs:967-1013`); `sh:closed`: anti-join against the allowed set over the pooled table (`constraints.rs:425-433`) — under class-per-table "not in the schema" collapses into the overflow bucket.
+
+**What stays native.** `sh:sparql`, custom components and SPARQL targets (`constraints.rs:436-438`, `engine.rs:1230`), which run per focus node against the live store with `FROM <g>` per data graph (`constraints.rs:1305`); SHACL-AF rules; unbounded paths; and **every shape in a cycle** through `sh:node` or the logical components. The engine's semantics for cycles is bounded unfolding: the depth-50 cut is a per-focus-node runtime event (`ShapeDepthGuard::enter()`, `constraints.rs:65`; limit `:16`) that returns no results (`:73`) with a server-side `warn!` (`:67-72`), so the report conforms. A compiled plan cannot know per focus node whether the native engine would have cut, so a cyclic shape set — found by a DFS over shape references at load — is declined statically and whole; that semantics must be pinned first (open question 9). The write gate stays native: its sandbox is a throwaway store of one graph's future state (`gate.rs:138-147`), and a per-write columnar build would cost more than the dump+re-parse a POST already pays (`:139-141`).
+
+**Decline semantics for validation are not the mirror's.** `ValidationReport` is `{conforms, results, results_count}` (`src/shacl/report.rs:39-43`) with `conforms = results.is_empty()` (`engine.rs:164`); there is no "not evaluated" channel and JSON compatibility forbids one. A declined shape must therefore be re-run natively in the same run: decline is static (at shape load — unsupported component, unbounded path, or membership of a cycle), propagates upward through `validate_inline_shape` (`constraints.rs:57-74`), and the fallback reads the same data view. Inside a gate a translator error is a rejected write (`gate.rs:79-99`) — a decline costs the customer's delivery, not latency.
+
+**What "identical" would mean.** The W3C runner compares only `sh:conforms` and the multiset of violation focus nodes (`tests/w3c_shacl_conformance.rs:12-20`); `source_constraint` is a display string (`report.rs:33`), `value` is `lit.value()` without datatype or language (`constraints.rs:47`), order is unspecified, and there is no graph field. Two implementations become comparable only after an additive typed component and graph field on `ValidationResult`. The suite is also a two-way ratchet (`w3c_shacl_conformance.rs:22-24`) whose path fixtures — `path-oneOrMore-001`, `path-zeroOrMore-001`, `path-zeroOrOne-001`, `path-inverse-001`, `path-alternative-001` — are not in `KNOWN_FAILURES` (`:44-51`), so any compiled path must fall back natively, never skip.
+
+**Why a test of the translator, not a separate item.** Every compilable shape above is `GROUP BY`/`HAVING`, `NOT EXISTS`, `COUNT` and `FILTER` over the section 6.1 subset **plus** a materialised closure and a union — the translator's accepted forms plus two constructs it must grow anyway. One translator, one parity corpus, one declined set; a SHACL-specific compiler would fight the same fidelity problems (section 6.3) in a second place, against semantics that are unpinned and internally inconsistent today. If the translator is built, SHACL Core becomes an acceptance test over it: compile the compilable shapes, run both engines on the seeded corpora and the 9M harness, and require identical `conforms` and focus-node multisets. If they differ, the translator is wrong.
+
+---
+
+## 13. Status (2026-09-16): what P5 built against this note
+
+- **The substrate (§3.1, and the first row of §3.3's table): built**, as
+  `opengraph::columnar` — dictionary, three graph-first sorted permutations, no
+  dependency beyond `oxsdatatypes` and `regex` — with a **SPARQL evaluator
+  rather than a translator** (§6). §6.4's fidelity policy holds and is the
+  whole design: decline rather than differ, with parity against the engine as
+  the guard. §6.1's accepted algebra turned out to be the wrong target; what
+  ships is narrower, set by what an adversarial review could not break (the
+  improvement log, P5 item 1).
+- **The feed (§5): built twice.** The columnar copy is rebuilt with the other
+  two under §8's protocol — which answers open question 2: the same cap, the
+  same rebuild, no columnar-only branch. QLever is fed incrementally from the
+  P2 capture with a cursor (§5.2–5.4).
+- **Insertion point (§6.6): after the shards, not before.** The shards'
+  aggregate decomposition is faster than one evaluator; the columnar copy takes
+  the full copy's work.
+- **Not built:** `/sql` (§7), DataFusion or DuckDB (§3.3), class views (§4).
+  The argument against DuckDB is in the improvement log, P5 item 3. Open
+  question 1 (collapsing the copies into one `Copies` swap) is still open, and
+  now covers three copies rather than two.

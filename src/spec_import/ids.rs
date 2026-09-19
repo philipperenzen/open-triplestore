@@ -14,7 +14,7 @@
 //! | attribute `Name` / `GlobalId` / other | `props:ifcName` / `props:ifcGuid` / `props:ifc<Attr>` |
 //! | partOf `IFCRELCONTAINEDINSPATIALSTRUCTURE` | `^bot:containsElement` |
 //! | partOf `IFCRELAGGREGATES` | `^bot:hasSubElement` |
-//! | classification / material | `props:ifcClassification` / `props:ifcMaterial` (convention) |
+//! | classification / material | `props:ifcClassification` / `props:ifcMaterial` (the lift emits both) |
 //!
 //! Value restrictions: `simpleValue` → `sh:hasValue`; `xs:enumeration` →
 //! `sh:in`; `xs:pattern` → `sh:pattern`; bounds → `sh:min/maxInclusive` /
@@ -557,7 +557,8 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
                 ("props:ifcMaterial", "material")
             };
             warnings.push(format!(
-                "{label} facet maps to {path} by convention; the built-in IFC importer does not emit it"
+                "{label} facet maps to {path}, which the IFC lift emits from IfcRelAssociates{} (the reference's Identification / the material's Name); a model lifted before that carries no such value and the requirement fails on it",
+                if f.name == "classification" { "Classification" } else { "Material" }
             ));
             let mut lines = vec![format!("sh:path {path}")];
             if let Some(sys) = f.simple("system") {
@@ -600,12 +601,41 @@ fn facet_constraint(f: &El, as_requirement: bool, warnings: &mut Vec<String>) ->
             count(&mut lines);
             Some(lines.join(" ;\n        "))
         }
-        "entity" => None, // handled as the target
+        // In the applicability position an entity facet IS the target, and is
+        // consumed by `entity_classes`. In the requirements position it is a
+        // requirement on the focus node itself, not on a path, so it cannot be
+        // a property shape: `requirement_node_constraint` handles it and this
+        // arm must not silently swallow it.
+        "entity" => None,
         other => {
             warnings.push(format!("facet `{other}` is not supported"));
             None
         }
     }
+}
+
+/// A requirement facet that constrains the focus NODE rather than a path.
+///
+/// Only `<ids:entity>` is one: inside `<ids:requirements>` it says the
+/// applicable node must (or must not) be of that IFC class. It used to be
+/// dropped without even a warning, so a requirement the author wrote was
+/// silently not enforced.
+fn requirement_node_constraint(f: &El, prefix: &str, warnings: &mut Vec<String>) -> Option<String> {
+    if f.name != "entity" {
+        return None;
+    }
+    let name = f.simple("name").or_else(|| {
+        warnings.push(
+            "requirement `entity` has no simple name (a restriction is not supported here); ignored"
+                .to_string(),
+        );
+        None
+    })?;
+    let class = ifc_class(&name, warnings);
+    Some(match cardinality(f) {
+        "prohibited" => format!("sh:not [ sh:class {prefix}:{class} ]"),
+        _ => format!("sh:class {prefix}:{class}"),
+    })
 }
 
 fn entity_classes(applicability: &El, warnings: &mut Vec<String>) -> Vec<String> {
@@ -628,6 +658,13 @@ fn entity_classes(applicability: &El, warnings: &mut Vec<String>) -> Vec<String>
         }
     }
     out
+}
+
+/// The importer's own sample document, so the exporter's tests can
+/// round-trip against exactly what this importer produces.
+#[cfg(test)]
+pub(crate) fn tests_sample() -> &'static str {
+    tests::SAMPLE
 }
 
 pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
@@ -717,8 +754,25 @@ pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
                     .collect()
             })
             .unwrap_or_default();
-        let prohibited_spec = spec.attr("maxOccurs") == Some("0");
-        if spec.attr("minOccurs").is_some_and(|m| m != "0") && !prohibited_spec {
+        let req_node: Vec<String> = spec
+            .child("requirements")
+            .map(|r| {
+                r.children
+                    .iter()
+                    .filter_map(|f| requirement_node_constraint(f, prefix, &mut warnings))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // IDS 1.0 puts `xs:occurs` (minOccurs/maxOccurs) on `applicabilityType`,
+        // i.e. on <ids:applicability>; IDS 0.9 carried them on the
+        // <ids:specification>. Read the 1.0 position first and fall back, or a
+        // conformant 1.0 document's prohibited specification is never seen —
+        // which it was not, because this importer's own SAMPLE writes them in
+        // the 0.9 position and so exercised only the fallback.
+        let occurs =
+            |name: &str| -> Option<&str> { applicability.attr(name).or_else(|| spec.attr(name)) };
+        let prohibited_spec = occurs("maxOccurs") == Some("0");
+        if occurs("minOccurs").is_some_and(|m| m != "0") && !prohibited_spec {
             warnings.push(format!(
                 "specification `{name}` requires at least one applicable entity to exist; SHACL validates per node, so existence is not enforced"
             ));
@@ -749,10 +803,14 @@ pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
             // No applicable entity may exist: every target violates.
             writeln!(ttl, "    sh:not [ sh:class {prefix}:{} ] .\n", classes[0]).unwrap();
         } else if applies.is_empty() {
-            if requirements.is_empty() {
+            let mut blocks: Vec<String> = req_node.iter().map(|c| format!("    {c}")).collect();
+            if !requirements.is_empty() {
+                blocks.push(props_block(&requirements));
+            }
+            if blocks.is_empty() {
                 writeln!(ttl, "    sh:deactivated false .\n").unwrap();
             } else {
-                writeln!(ttl, "{} .\n", props_block(&requirements)).unwrap();
+                writeln!(ttl, "{} .\n", blocks.join(" ;\n")).unwrap();
             }
         } else {
             writeln!(
@@ -775,10 +833,14 @@ pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
                 ttl_str(&format!("{name} — requirements"))
             )
             .unwrap();
-            if requirements.is_empty() {
+            let mut blocks: Vec<String> = req_node.iter().map(|c| format!("    {c}")).collect();
+            if !requirements.is_empty() {
+                blocks.push(props_block(&requirements));
+            }
+            if blocks.is_empty() {
                 writeln!(ttl, "    sh:deactivated false .\n").unwrap();
             } else {
-                writeln!(ttl, "{} .\n", props_block(&requirements)).unwrap();
+                writeln!(ttl, "{} .\n", blocks.join(" ;\n")).unwrap();
             }
             shape_count += 2;
         }
@@ -809,6 +871,56 @@ pub(crate) fn convert(doc: &El) -> anyhow::Result<ImportedShapes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IDS 1.0 puts the occurrence attributes on `<ids:applicability>`. Reading
+    /// them from `<ids:specification>` made the prohibited-specification branch
+    /// dead code for every conformant 1.0 document.
+    #[test]
+    fn a_prohibited_specification_is_recognised_in_the_ids_1_0_position() {
+        let doc = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <ids:info><ids:title>No plastic pipes</ids:title></ids:info>
+  <ids:specifications>
+    <ids:specification name="No plastic pipes" ifcVersion="IFC4">
+      <ids:applicability minOccurs="0" maxOccurs="0">
+        <ids:entity><ids:name><ids:simpleValue>IFCPIPESEGMENT</ids:simpleValue></ids:name></ids:entity>
+      </ids:applicability>
+    </ids:specification>
+  </ids:specifications>
+</ids:ids>"#;
+        let out = convert(&parse_xml(doc.as_bytes()).expect("parses")).expect("converts");
+        assert!(
+            out.turtle.contains("sh:not [ sh:class"),
+            "a prohibited specification must become sh:not: {}",
+            out.turtle
+        );
+    }
+
+    /// An `<ids:entity>` inside `<ids:requirements>` constrains the focus node.
+    /// It used to be dropped with no constraint and no warning.
+    #[test]
+    fn an_entity_requirement_is_enforced_not_dropped() {
+        let doc = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <ids:info><ids:title>Doors are doors</ids:title></ids:info>
+  <ids:specifications>
+    <ids:specification name="Doors are doors" ifcVersion="IFC4">
+      <ids:applicability>
+        <ids:entity><ids:name><ids:simpleValue>IFCDOOR</ids:simpleValue></ids:name></ids:entity>
+      </ids:applicability>
+      <ids:requirements>
+        <ids:entity cardinality="required"><ids:name><ids:simpleValue>IFCDOOR</ids:simpleValue></ids:name></ids:entity>
+      </ids:requirements>
+    </ids:specification>
+  </ids:specifications>
+</ids:ids>"#;
+        let out = convert(&parse_xml(doc.as_bytes()).expect("parses")).expect("converts");
+        assert!(
+            out.turtle.contains("sh:class"),
+            "the entity requirement must produce a class constraint: {}",
+            out.turtle
+        );
+    }
 
     pub(crate) const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <ids:ids xmlns:ids="http://standards.buildingsmart.org/IDS" xmlns:xs="http://www.w3.org/2001/XMLSchema">

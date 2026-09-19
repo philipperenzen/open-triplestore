@@ -389,9 +389,12 @@
 
   .section { margin-bottom: 1.25rem; }
   .section + .section { padding-top: 1rem; border-top: 1px dashed var(--line-soft, #e5e7eb); }
+  /* `--ink-400` is #64748b in dark and falls back to #888 in light: 3.73:1 and
+     3.54:1 against their dialogs, both under AA's 4.5 for text this small.
+     `--ink-500` is a muted grey in both themes and clears it. */
   .section-title {
     font-size: 0.78rem; font-weight: 700;
-    color: var(--ink-400, #888);
+    color: var(--ink-500, #6b7280);
     text-transform: uppercase; letter-spacing: 0.06em;
     margin: 0 0 0.6rem;
   }
@@ -422,7 +425,7 @@
 
   .help {
     display: inline-flex; align-items: center; justify-content: center;
-    color: var(--ink-400, #999); cursor: help;
+    color: var(--ink-500, #6b7280); cursor: help;
   }
 
   .field-hint-text { font-size: 0.78rem; color: var(--ink-400, #888); margin: 0.25rem 0 0; }
@@ -467,8 +470,18 @@
   /* .btn / .btn-ghost / .btn-danger styles come from global app.css */
 
   :global(:is([data-theme="dark"], .dark)) .modal-box { background: var(--bg-strong); }
+  /* A field has to look like a field. `--bg-soft` (#0f172a) against the
+     dialog's `--bg-strong` (#111827) is a contrast of 1.1 — indistinguishable
+     — and the border sat at 0.08 alpha, so in dark mode the form read as a
+     column of labels with nothing under them. The field is now sunk below the
+     dialog surface with an edge you can see. */
   :global(:is([data-theme="dark"], .dark)) .form-row input,
-  :global(:is([data-theme="dark"], .dark)) .form-row textarea { background: var(--bg-soft); color: var(--ink-900); }
+  :global(:is([data-theme="dark"], .dark)) .form-row textarea,
+  :global(:is([data-theme="dark"], .dark)) .form-row select {
+    background: rgba(0, 0, 0, 0.32);
+    color: var(--ink-900);
+    border-color: rgba(226, 232, 240, 0.22);
+  }
   :global(:is([data-theme="dark"], .dark)) .err { background: rgba(220,38,38,0.12); color: #fca5a5; border-color: rgba(220,38,38,0.35); }
   :global(:is([data-theme="dark"], .dark)) .danger-zone { border-top-color: rgba(239,68,68,0.35); }
   :global(:is([data-theme="dark"], .dark)) .danger-title { color: #fca5a5; }
