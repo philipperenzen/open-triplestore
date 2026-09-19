@@ -1356,6 +1356,117 @@ fn bench_geosparql_buffer(c: &mut Criterion) {
 /// All N persons have the required ex:name and ex:age properties. Measures the
 /// baseline overhead of shapes loading + focus-node resolution + constraint
 /// evaluation when no violations are found.
+/// Multi-graph SHACL validation: the one shape of run this suite never had.
+///
+/// Every other SHACL benchmark passes a one-element `data_graphs`, and with a
+/// single graph `GraphSel::All` and `GraphSel::One(0)` are the same code path —
+/// so nothing here measured graph reach, the cross-graph `rdfs:subClassOf*`
+/// closure, or the per-graph fan-out of a composite path. A change that made
+/// five-graph validation several times slower would have read as 0 %.
+///
+/// The fixture separates the pieces deliberately: the subclass axiom lives in a
+/// model graph while every `rdf:type` lives in an instance graph, so
+/// `DataView::prepare`'s closure and `resolve_targets`' per-graph instance scan
+/// are both load-bearing. The shapes use a sequence path and a
+/// `zeroOrMorePath`, because a single hop cannot diverge between the two
+/// readings and would measure nothing.
+///
+/// Three ids: `within/1` is the single-graph control, `within/4` spreads the
+/// same data over four graphs with every path resolvable inside one of them,
+/// and `crossing/4` moves the `ex:name` triples into a fifth graph so the
+/// sequence path has to cross a boundary. `crossing/4` is the one that moves if
+/// the reach semantics change.
+///
+/// Each id asserts its own violation count inside `b.iter`, so a scoping
+/// regression that silently drops focus nodes panics the benchmark instead of
+/// being reported as an improvement — the gate only fails on slowdowns.
+fn bench_shacl_validate_multigraph(c: &mut Criterion) {
+    const N: usize = 1_000;
+    let mut group = c.benchmark_group("shacl/validate_multigraph");
+    group.sample_size(20);
+
+    let model_graph = "http://example.org/mg/model";
+    let name_graph = "http://example.org/mg/names";
+    let shapes_graph = "http://example.org/mg/shapes";
+    let instance_graph = |i: usize| format!("http://example.org/mg/instances/{i}");
+
+    // `ex:absent` is on no asset anywhere, so every focus node yields exactly
+    // one violation and the count is a target-resolution assertion.
+    let shapes = r#"
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/mg#> .
+        ex:AssetShape a sh:NodeShape ;
+            sh:targetClass ex:Asset ;
+            sh:property [ sh:path ex:absent ; sh:minCount 1 ] ;
+            sh:property [ sh:path ( ex:partOf ex:name ) ] ;
+            sh:property [ sh:path [ sh:zeroOrMorePath ex:partOf ] ; sh:class ex:Asset ] .
+    "#;
+
+    // (id, number of instance graphs, names in their own graph)
+    for &(label, graphs, names_apart) in &[
+        ("within", 1_usize, false),
+        ("within", 4, false),
+        ("crossing", 4, true),
+    ] {
+        let store = fresh_store();
+        store
+            .load_str(shapes, RdfFormat::Turtle, Some(shapes_graph))
+            .unwrap();
+        // The subclass axiom, alone, in the model graph.
+        store
+            .load_str(
+                "<http://example.org/mg#Bridge> \
+                 <http://www.w3.org/2000/01/rdf-schema#subClassOf> \
+                 <http://example.org/mg#Asset> .",
+                RdfFormat::Turtle,
+                Some(model_graph),
+            )
+            .unwrap();
+
+        let mut names = String::from("@prefix ex: <http://example.org/mg#> .\n");
+        for i in 0..graphs {
+            let mut ttl = String::from("@prefix ex: <http://example.org/mg#> .\n");
+            for k in (i..N).step_by(graphs) {
+                // Typed as the SUBCLASS, so the target only resolves when the
+                // model graph's axiom is reachable.
+                ttl.push_str(&format!("ex:a{k} a ex:Bridge ; ex:partOf ex:a{}.\n", k / 2));
+                if names_apart {
+                    names.push_str(&format!("ex:a{k} ex:name \"n{k}\" .\n"));
+                } else {
+                    ttl.push_str(&format!("ex:a{k} ex:name \"n{k}\" .\n"));
+                }
+            }
+            store
+                .load_str(&ttl, RdfFormat::Turtle, Some(&instance_graph(i)))
+                .unwrap();
+        }
+        if names_apart {
+            store
+                .load_str(&names, RdfFormat::Turtle, Some(name_graph))
+                .unwrap();
+        }
+
+        let mut data_graphs: Vec<String> = (0..graphs).map(instance_graph).collect();
+        data_graphs.push(model_graph.to_string());
+        if names_apart {
+            data_graphs.push(name_graph.to_string());
+        }
+
+        let id = BenchmarkId::new(label, graphs);
+        group.throughput(Throughput::Elements(N as u64));
+        group.bench_with_input(id, &(store, data_graphs), |b, (s, dg)| {
+            b.iter(|| {
+                let report = open_triplestore::shacl::validate(s, shapes_graph, dg).unwrap();
+                // Every asset violates `ex:absent`, and nothing else may change
+                // the count: fewer means target resolution lost focus nodes.
+                assert_eq!(report.results_count, N, "focus nodes lost");
+                report
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_shacl_validate_clean(c: &mut Criterion) {
     let mut group = c.benchmark_group("shacl/validate_clean");
     group.sample_size(20);
@@ -1754,7 +1865,8 @@ criterion_group!(
     targets =
         bench_shacl_validate_clean,
         bench_shacl_validate_violations,
-        bench_shacl_validate_snapshot
+        bench_shacl_validate_snapshot,
+        bench_shacl_validate_multigraph
 );
 
 criterion_group!(

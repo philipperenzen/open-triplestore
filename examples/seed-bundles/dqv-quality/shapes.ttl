@@ -1,0 +1,126 @@
+# What a well-formed DQV quality measurement is. DQV itself constrains
+# nothing — dqv:value has no rdfs:range, dqv:expectedDataType is declared on
+# the metric but tied to the value by no axiom, and the inverse pair
+# dqv:computedOn / dqv:hasQualityMeasurement is owl:inverseOf that nothing
+# here materialises. Three shapes are SHACL core; two are SHACL-SPARQL
+# because core cannot compare a literal's datatype with an IRI read from
+# another node, or check that an inverse pair agrees.
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dqv:  <http://www.w3.org/ns/dqv#> .
+@prefix qs:   <https://example.org/dqv-quality/shapes#> .
+
+qs: a owl:Ontology ;
+    rdfs:label "DQV well-formedness shapes"@en ;
+    sh:declare [ sh:prefix "dqv" ; sh:namespace "http://www.w3.org/ns/dqv#"^^xsd:anyURI ] ;
+    sh:declare [ sh:prefix "dcat" ; sh:namespace "http://www.w3.org/ns/dcat#"^^xsd:anyURI ] .
+
+# 1. A measurement names exactly one metric, carries exactly one value, and
+#    says which resource it was computed on.
+qs:QualityMeasurementShape a sh:NodeShape ;
+    rdfs:label "A measurement has a metric, a value and a subject"@en ;
+    sh:targetClass dqv:QualityMeasurement ;
+    sh:property [
+        sh:path dqv:isMeasurementOf ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:class dqv:Metric ;
+        sh:message "A quality measurement must name exactly one dqv:Metric."@en ;
+    ] ;
+    sh:property [
+        sh:path dqv:value ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:message "A quality measurement must carry exactly one dqv:value."@en ;
+    ] ;
+    sh:property [
+        sh:path dqv:computedOn ;
+        sh:minCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:message "A quality measurement must say which resource it was computed on."@en ;
+    ] .
+
+# 2. A metric declares its dimension, the datatype its values have, and what
+#    it means.
+qs:MetricShape a sh:NodeShape ;
+    rdfs:label "A metric has a dimension, a datatype and a definition"@en ;
+    sh:targetClass dqv:Metric ;
+    sh:property [
+        sh:path dqv:inDimension ;
+        sh:minCount 1 ;
+        sh:class dqv:Dimension ;
+        sh:message "A metric must belong to at least one dqv:Dimension."@en ;
+    ] ;
+    sh:property [
+        sh:path dqv:expectedDataType ;
+        sh:minCount 1 ; sh:maxCount 1 ;
+        sh:nodeKind sh:IRI ;
+        sh:message "A metric must declare exactly one dqv:expectedDataType, as a datatype IRI."@en ;
+    ] ;
+    sh:property [
+        sh:path skos:definition ;
+        sh:minCount 1 ;
+        sh:message "A metric must say what it measures (skos:definition)."@en ;
+    ] .
+
+# 3. A dimension belongs to a category.
+qs:DimensionShape a sh:NodeShape ;
+    rdfs:label "A dimension belongs to a category"@en ;
+    sh:targetClass dqv:Dimension ;
+    sh:property [
+        sh:path dqv:inCategory ;
+        sh:minCount 1 ;
+        sh:class dqv:Category ;
+        sh:message "A dimension must belong to at least one dqv:Category."@en ;
+    ] .
+
+# 4. The value's datatype is the one its metric declares. dqv:value has no
+#    range and DQV ties it to dqv:expectedDataType by no axiom, so this is the
+#    shape that earns the bundle — and it has to be SHACL-SPARQL.
+qs:MeasurementDatatypeShape a sh:NodeShape ;
+    rdfs:label "A value has the datatype its metric expects"@en ;
+    sh:targetClass dqv:QualityMeasurement ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "A measurement's dqv:value must have the datatype its metric declares with dqv:expectedDataType."@en ;
+        sh:prefixes qs: ;
+        sh:select """
+            SELECT $this ?value
+            WHERE {
+                $this dqv:isMeasurementOf ?metric ;
+                      dqv:value ?value .
+                ?metric dqv:expectedDataType ?expected .
+                FILTER (DATATYPE(?value) != ?expected)
+            }
+            """ ;
+    ] .
+
+# 5. dqv:hasQualityMeasurement and dqv:computedOn are declared inverses;
+#    asserted data must agree, because nothing here materialises the inverse.
+qs:MeasurementInverseShape a sh:NodeShape ;
+    rdfs:label "hasQualityMeasurement and computedOn agree"@en ;
+    sh:targetSubjectsOf dqv:hasQualityMeasurement ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "dqv:hasQualityMeasurement and dqv:computedOn are inverses: the measurement must be computed on this very resource."@en ;
+        sh:prefixes qs: ;
+        sh:select """
+            SELECT $this ?value
+            WHERE {
+                $this dqv:hasQualityMeasurement ?value .
+                FILTER NOT EXISTS { ?value dqv:computedOn $this }
+            }
+            """ ;
+    ] .
+
+# 6. DQV: computedOn is "generally expected to be used in statements in which
+#    objects are instances of dcat:Dataset or dcat:Distribution" — expected,
+#    not required, so a warning.
+qs:QualityTargetShape a sh:NodeShape ;
+    rdfs:label "A measurement is computed on a dataset or a distribution"@en ;
+    sh:targetObjectsOf dqv:computedOn ;
+    sh:severity sh:Warning ;
+    sh:or ( [ sh:class dcat:Dataset ] [ sh:class dcat:Distribution ] ) ;
+    sh:message "A quality measurement is expected to be computed on a dcat:Dataset or a dcat:Distribution."@en .

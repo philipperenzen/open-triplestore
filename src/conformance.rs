@@ -169,6 +169,61 @@ pub fn resolve(state: &AppState, ds: &Dataset) -> ConformanceLayer {
     }
 }
 
+/// The graphs of the data-model version `ds` declares `dct:conformsTo`, as
+/// far as `user_id` may read them.
+///
+/// SHACL reads the class hierarchy out of the data graph it is handed — "all
+/// the `rdfs:subClassOf` declarations needed to walk the class hierarchy need
+/// to exist in the data graph" (SHACL §2.1.3.2) — but model graphs live in the
+/// model registry and never in `dataset_graphs`, so a validation run that is
+/// given only a dataset's own graphs cannot resolve `sh:class` or
+/// `sh:targetClass` against a model term.
+///
+/// Takes the three handles it actually needs rather than `&AppState`, so the
+/// SHACL Studio scheduler — which has no `AppState` — can call it too. Both
+/// validation entry points go through this, so their scopes cannot drift.
+pub fn model_graphs_for_dataset(
+    store: &crate::store::TripleStore,
+    auth_db: &crate::auth::db::AuthDb,
+    base_url: &str,
+    ds: &Dataset,
+    user_id: Option<&str>,
+) -> Vec<String> {
+    let base = base_url.trim_end_matches('/');
+    let Some(mid) = ds.conforms_to_model.as_deref().filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let record = crate::data_models::registry::get_data_model(store, base, mid);
+    let Some(version) = ds
+        .conforms_to_version
+        .clone()
+        .filter(|v| !v.is_empty())
+        .or_else(|| record.as_ref().and_then(|r| r.latest_published.clone()))
+    else {
+        return Vec::new();
+    };
+    let Some(v) = crate::data_models::registry::get_version(store, base, mid, &version) else {
+        return Vec::new();
+    };
+    let readable = record
+        .as_ref()
+        .map(|m| {
+            auth_db
+                .can_access_ontology(
+                    user_id,
+                    m.is_public,
+                    m.owner_type.as_deref(),
+                    m.owner_id.as_deref(),
+                )
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if !readable {
+        return Vec::new();
+    }
+    std::iter::once(v.graph_iri).chain(v.sub_graphs).collect()
+}
+
 /// Whether `iri` is a graph of a data-model version the user may read: the
 /// version graph `{base}/data-model/{id}/version/{ver}` or one of its
 /// sub-graphs. Model graphs live in the model registry, not in a dataset, so

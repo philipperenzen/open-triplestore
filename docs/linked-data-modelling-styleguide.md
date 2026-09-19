@@ -162,7 +162,7 @@ IRIs are the most permanent thing you create. A bad IRI outlives the data it nam
 - IRIs **MUST NOT** contain spaces, and **SHOULD NOT** contain characters that need percent-encoding.
 - Prefer **named nodes over blank nodes** for anything that another graph might reference (every concept, class, property, instance of record). Blank nodes are acceptable only for genuinely anonymous structured values (a geometry, a contact card, a SHACL constraint list).
 - An IRI's local name **SHOULD** be opaque-stable: do not encode mutable facts (status, owner, year) into it. Put those in triples.
-- Do not reuse one IRI for two different things. Do not mint two IRIs for one thing — link them with `owl:sameAs` / `skos:exactMatch` if it already happened.
+- Do not reuse one IRI for two different things. Do not mint two IRIs for one thing. If it already happened **within one source** (two IRIs for the same record, under the same registration rules), link them with `owl:sameAs`: the reasoner may then merge them. Between sources — a model element and the asset it stands for, a registration record and the physical object, a footprint and the thing it outlines — use a typed correspondence instead (`prov:specializationOf`, `prov:alternateOf`, `skos:exactMatch` / `closeMatch`), never `owl:sameAs`: identity would propagate every property between the two. See the dataset [identity policy](reasoning.md#identity-policy--what-happens-with-owlsameas).
 
 ### 3.2 Naming conventions
 
@@ -290,9 +290,35 @@ Link your terms to existing vocabularies instead of re-inventing them:
 | `skos:closeMatch` | nearly the same; safe for most uses |
 | `skos:broadMatch` / `skos:narrowMatch` | one is more general than the other |
 | `skos:relatedMatch` | associatively related, no hierarchy |
-| `owl:equivalentClass` / `owl:sameAs` | formally identical class / individual |
+| `owl:equivalentClass` | formally identical class |
+| `owl:sameAs` | two IRIs for **one** individual inside one source; never for links between sources |
+| `prov:specializationOf` / `prov:alternateOf` | a more specific representation of a thing (a model element of an asset) / two representations of one thing in different contexts — a correspondence, not identity |
 
 Keep cross-vocabulary alignments (linksets) in a **dedicated named graph**, separate from the scheme itself.
+
+### 4.x Part-whole, containment and connection
+
+"Has part" is not one relation (Keet, Fernández-Reyes & Morales-González,
+OntoPartS): an asset has a **physical** decomposition, a **functional** one and
+a **spatial** one, and conflating them makes transitive closure wrong — a pump
+*contained in* a service building is not *part of* the building; a footprint
+*within* a plot is not part of the plot. Pick the relation by what the two ends
+are:
+
+| Both ends | Relation (NEN 2660-2) | Transitive? |
+|---|---|---|
+| concrete objects, one composed of the other | `nen2660:hasPart`, refined as `hasTechnicalPart` (physical) or `hasFunctionalPart` (functional) | yes — proper parthood only |
+| a spatial region and an object located in it | `nen2660:contains` | no — location is not parthood |
+| a real object and the matter it is made of | `nen2660:consistsOf` | no |
+| a connection or interface and the objects / ports it joins | `nen2660:connectsObject`, `nen2660:connectsPort` | no |
+
+OWL can say *transitive*; it cannot say *acyclic* or *irreflexive* on the same
+transitive property (OWL 2 DL forbids it), and it cannot compute topology.
+Those are shapes: `examples/seed-bundles/nen2660-relations` ships the profile
+and SHACL-SPARQL shapes for acyclicity, irreflexivity and spatial consistency
+(a part's geometry within its whole's, an RCC8 proper part of it; a contained
+object within its region — computed with GeoSPARQL at validation time, never
+asserted as data). Do not assert `geo:sfWithin` or an RCC8 relation as a triple.
 
 ---
 

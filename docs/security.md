@@ -22,6 +22,8 @@ Rules apply across the API — `/sparql`, `/store`, `/api/**` and the rest — n
 
 **Default is open**: a request matching no rule is allowed, and role/scope middleware still applies independently. A DB failure while reading rules fails *closed* and records an `acl_error` audit event.
 
+The default is a rule away from closed: matching rules are taken in priority order and the first decides, so a `deny` for `public` on `/**` at priority `0` — and one for `role` = `user` if signed-in non-admins should be denied by default too — closes everything, and `allow` rules at any higher priority open exactly the routes you list above it. Admins are bound by the same rules, so leave `/api/admin/**` allowed for `role` = `admin`.
+
 `ENDPOINT_ACL_ENFORCE=false` disables enforcement entirely — an escape hatch for a misfiring rule, not a normal setting.
 
 ## Named-Graph ACL
@@ -32,7 +34,7 @@ Grant a principal access to a specific named graph at one of three levels: `read
 
 For cell-level security, individual triples (matched by subject, predicate, and object) can be assigned to a **label graph**. The triple is then visible only to principals who can read that label graph via the Named-Graph ACL; admins bypass filtering. Managed at `/api/admin/acl/triples`.
 
-> **Scope.** Labels are applied on **Graph Store reads** (`GET /store?graph=…`). SPARQL results are **not** filtered by triple label — scope sensitive data with a named graph and a Named-Graph ACL if it must be unreachable over `/sparql` as well. (This page previously claimed both paths were filtered; only the Graph Store path is.)
+> **Scope.** Labels are applied on **Graph Store reads** (`GET /store?graph=…`); if the label table cannot be read, the request is refused with `503` rather than served unfiltered. SPARQL results are **not** filtered by triple label — scope sensitive data with a named graph and a Named-Graph ACL if it must be unreachable over `/sparql` as well. (This page previously claimed both paths were filtered; only the Graph Store path is.)
 
 ## Audit Log
 

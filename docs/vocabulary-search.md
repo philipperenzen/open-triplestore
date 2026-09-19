@@ -114,10 +114,45 @@ search, prefix resolution and the DCAT catalog.
 - `GET /api/prefixes/all?format=json|jsonld|ttl|sparql|csv|txt` — bulk export.
 - `GET /api/prefixes/context.jsonld` — a JSON-LD `@context` of every mapping.
 
-Resolution order everywhere (including SPARQL auto-prefixing): vocabularies
-registered on this instance → bundled snapshot → previously confirmed cache.
-Live prefix.cc is only contacted when the operator sets
-`PREFIX_CC_FALLBACK=true`.
+Resolution order everywhere (including SPARQL auto-prefixing): **administrator
+overrides** → vocabularies registered on this instance → prefixes declared by
+installed seed bundles → bundled snapshot → previously confirmed cache. Live
+prefix.cc is only contacted when the operator sets `PREFIX_CC_FALLBACK=true`.
+
+### Saying what a prefix means here
+
+A community list is a good default and a poor authority: `geo` means one thing
+on prefix.cc and quite another on a deployment that publishes its own geo
+namespace. An administrator can say which:
+
+| | | |
+|---|---|---|
+| `GET` | `/api/admin/prefixes` | the overrides this deployment has set |
+| `POST` | `/api/admin/prefixes` | claim a shorthand — `{"label": "geo", "namespace": "https://data.example.org/geo/def/"}` |
+| `PUT` | `/api/admin/prefixes/{label}` | set or repoint one |
+| `DELETE` | `/api/admin/prefixes/{label}` | drop the override |
+
+Admin-only, because repointing a prefix changes what every stored CURIE
+expands to.
+
+**No two overrides share a shorthand.** The label is the primary key of the
+table they live in, so this is a property of the storage rather than a check
+somebody has to remember to run: `POST` of a label that already has one is
+refused with `409` and told what it currently resolves to. Repointing is a
+`PUT`, which is a different request on purpose — a prefix changing meaning
+should be a decision, not a side effect. Two *labels* may share a namespace
+(`dct` and `dcterms` are both right), so the constraint is on the label alone.
+
+Deleting an override does not delete the prefix. It drops this deployment's
+opinion of it, and the label falls back to whichever lower tier answers first.
+
+Overrides are stored in the identity database, so they survive a restart and
+reach a follower with the rest of it. The in-memory overlay is reloaded on
+every write and at boot, so a running process never disagrees with what is
+stored. An entry that fails validation on the way in — a label that does not
+start with a letter, a namespace that is not an `http(s)` IRI — is refused with
+a reason; one already in a database restored from elsewhere is dropped with a
+warning rather than trusted.
 
 ## The LOV corpus
 

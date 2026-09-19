@@ -6,29 +6,23 @@
 //!
 //! # Current state
 //!
-//! Oxigraph 0.4 creates a fresh RocksDB snapshot per iterator internally, so
-//! individual reads are already snapshot-isolated.  However:
+//! Oxigraph 0.5 binds **one storage snapshot per query**:
+//! `PreparedSparqlQuery::on_store` takes `storage().snapshot()` once and every
+//! iterator of the evaluation reads through that snapshot, so a `SELECT`
+//! joining several triple patterns sees one committed state for its whole
+//! duration — on RocksDB and on the in-memory backend alike. Writers are never
+//! blocked by readers (RocksDB MVCC is copy-on-write).
 //!
-//! - A **SPARQL SELECT** that spawns multiple iterators may see an
-//!   inconsistent view if a write lands between iterator creations.
-//! - Long-running queries can block writers at the RocksDB compaction layer.
-//!
-//! # Planned improvement (opengraph fork)
-//!
-//! In the `spareval` fork:
-//!
-//! 1. Call `Store::snapshot()` once at query start.
-//! 2. Pass the snapshot reference through all iterator constructors.
-//! 3. Release the snapshot when the last iterator drops.
-//!
-//! This gives readers a consistent view of the database for the full duration
-//! of the query, and never blocks writers (RocksDB MVCC is copy-on-write).
+//! An earlier version of this comment claimed a snapshot per *iterator*, i.e.
+//! that a multi-pattern `SELECT` could observe a partially applied write.
+//! `tests/read_isolation.rs` races a writer that flips two properties of
+//! every subject in one transaction against a reader joining the two: no
+//! torn read is observable on either backend, so the claim was wrong for the
+//! engine in use and has been removed.
 //!
 //! # Utilities in this module
 //!
-//! Until the fork lands, this module provides:
-//!
-//! - [`ReadIsolationLevel`] — documents the isolation guarantees per mode.
+//! - [`ReadIsolationLevel`] — names the isolation guarantee a backend gives.
 //! - [`ConcurrencyStats`] — tracks concurrent readers and writers (useful for
 //!   monitoring dashboards and adaptive rate limiting).
 
@@ -38,11 +32,13 @@ use std::sync::Arc;
 /// Read isolation guarantees for SPARQL queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadIsolationLevel {
-    /// Each index scan sees its own RocksDB snapshot (Oxigraph default).
-    /// Queries with multiple BGP patterns may see partially-applied writes.
+    /// Each index scan sees its own snapshot; a query with several patterns
+    /// could observe a partially applied write. Not what oxigraph 0.5 does —
+    /// kept as the name of the weaker guarantee.
     PerIterator,
-    /// A single snapshot covers the entire query (opengraph fork target).
-    /// Provides full read-committed isolation with no reader-writer blocking.
+    /// A single snapshot covers the entire query (oxigraph 0.5 behaviour, see
+    /// the module docs): full read-committed isolation with no reader-writer
+    /// blocking.
     PerQuery,
 }
 

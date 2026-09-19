@@ -322,6 +322,12 @@ pub struct AuthDb {
     /// uncached path does two SELECTs + a HashSet join each call.
     #[allow(clippy::type_complexity)] // a cache tuple; a type alias would obscure it
     accessible_graphs_cache: Mutex<HashMap<Option<String>, (Instant, Arc<AccessibleGraphs>)>>,
+    /// The file, for a persistent database; the replication watch
+    /// connection opens it read-only.
+    path: Option<std::path::PathBuf>,
+    /// A connection that only ever asks `PRAGMA data_version` (see
+    /// [`Self::data_version`]).
+    watch: Mutex<Option<Connection>>,
 }
 
 impl AuthDb {
@@ -349,9 +355,14 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: Some(path.to_path_buf()),
+            watch: Mutex::new(None),
         };
         db.migrate()?;
         info!("Auth database ready at {}", path.display());
+        // A replication follower keeps this database current from its
+        // leader (does nothing unless the environment configures one).
+        crate::store::replication::spawn_identity_follower_if_configured(db.thread_handle());
         Ok(db)
     }
 
@@ -367,9 +378,81 @@ impl AuthDb {
         let db = Self {
             pool,
             accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: None,
+            watch: Mutex::new(None),
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    // ─── Replication: the database shipped whole ───────────────────────────
+
+    /// A handle for a background thread: the same pool, its own caches.
+    fn thread_handle(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            accessible_graphs_cache: Mutex::new(HashMap::new()),
+            path: self.path.clone(),
+            watch: Mutex::new(None),
+        }
+    }
+
+    /// A consistent snapshot of the whole database as SQLite file bytes,
+    /// taken with the online backup API (safe under WAL, no lock on the
+    /// writers). What a replication follower fetches.
+    pub fn snapshot_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let src = self.pool.get()?;
+        let tmp = std::env::temp_dir().join(format!("ots-identity-{}.db", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut dst = Connection::open(&tmp)?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok::<Vec<u8>, anyhow::Error>(std::fs::read(&tmp)?)
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
+    /// Replace this database's contents with a snapshot, in place, under the
+    /// open connections — the backup API's destination side, so no file is
+    /// swapped and no pool reopened; every connection sees the new state on
+    /// its next statement. What a replication follower does with the
+    /// leader's identity database.
+    pub fn apply_snapshot(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        if !bytes.starts_with(b"SQLite format 3\0") {
+            anyhow::bail!("not a SQLite database ({} bytes)", bytes.len());
+        }
+        let tmp = std::env::temp_dir().join(format!("ots-identity-{}.db", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, bytes)?;
+        let result = (|| {
+            let src =
+                Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut dst = self.pool.get()?;
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+            backup.run_to_completion(100, Duration::from_millis(5), None)?;
+            Ok::<(), anyhow::Error>(())
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result?;
+        self.invalidate_accessible_graphs_cache();
+        Ok(())
+    }
+
+    /// SQLite's own change counter for this database: `PRAGMA data_version`
+    /// on a connection kept only for watching, which moves whenever any
+    /// other connection commits. The replication manifest reports it, so a
+    /// follower fetches a snapshot only after a change. `None` for an
+    /// in-memory database, whose single connection sees no "other" commits.
+    pub fn data_version(&self) -> Option<i64> {
+        let path = self.path.as_ref()?;
+        let mut watch = self.watch.lock().unwrap_or_else(|p| p.into_inner());
+        if watch.is_none() {
+            *watch =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+        }
+        let conn = watch.as_ref()?;
+        conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+            .ok()
     }
 
     /// Shared pool accessor — used by the audit logger so it can reuse the
@@ -674,6 +757,31 @@ impl AuthDb {
                 synced_at TEXT,
                 PRIMARY KEY (dataset_id, source_url)
             );
+            -- Frozen fragment bounds: once a page is full, its member→node
+            -- assignment is sealed here so retention can delete rows without
+            -- renumbering pages already served as immutable. next_created_at
+            -- is the tree:value of the relation out of the node, recorded at
+            -- sealing time so it survives whatever is pruned later.
+            CREATE TABLE IF NOT EXISTS ldes_nodes (
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                node INTEGER NOT NULL,
+                first_id INTEGER NOT NULL,
+                last_id INTEGER NOT NULL,
+                next_created_at TEXT NOT NULL,
+                sealed_at TEXT NOT NULL,
+                PRIMARY KEY (dataset_id, node)
+            );
+            -- The stream's declared retention policy (LDES 1.0 §4.4); no row
+            -- means every member is kept.
+            CREATE TABLE IF NOT EXISTS ldes_retention (
+                dataset_id TEXT PRIMARY KEY REFERENCES datasets(id) ON DELETE CASCADE,
+                full_log_duration TEXT,
+                version_amount INTEGER,
+                version_duration TEXT,
+                version_delete_duration TEXT,
+                starting_from TEXT,
+                updated_at TEXT NOT NULL
+            );
 
             -- Per-dataset entailment: selected regime, materialisation mode, last run.
             CREATE TABLE IF NOT EXISTS dataset_entailment (
@@ -803,7 +911,11 @@ impl AuthDb {
                 info_count INTEGER NOT NULL DEFAULT 0,
                 report_json TEXT NOT NULL,
                 triggered_by TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                duration_ms INTEGER,
+                quads INTEGER,
+                source_kind TEXT,
+                run_index INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_dataset ON shacl_validation_runs(dataset_id);
             CREATE INDEX IF NOT EXISTS idx_shacl_runs_ts ON shacl_validation_runs(dataset_id, run_timestamp DESC);
@@ -1068,6 +1180,20 @@ impl AuthDb {
                 updated_at TEXT NOT NULL
             );
 
+            -- ── Prefix overrides ────────────────────────────────────────────
+            -- What a prefix means *here*, set by an administrator. The label is
+            -- the primary key, which makes no-two-prefixes-with-the-same-
+            -- shorthand a property of the storage rather than a check someone
+            -- has to remember to run. Lives in the identity database so
+            -- it survives a restart and reaches a follower with the rest of it.
+            CREATE TABLE IF NOT EXISTS prefix_overrides (
+                label TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             -- ── OIDC provider (this store as the identity provider for client apps) ──
             -- Registered relying-party clients (SPAs and services signing users
             -- in AGAINST this store; distinct from oauth_providers = upstream
@@ -1143,6 +1269,11 @@ impl AuthDb {
             "ALTER TABLE users ADD COLUMN can_publish INTEGER NOT NULL DEFAULT 0",
             // Migrate legacy 'publisher' role rows: grant can_publish and reset to 'user'
             "UPDATE users SET can_publish=1, role='user' WHERE role='publisher'",
+            // What a validation run read and how long it took (workload telemetry).
+            "ALTER TABLE shacl_validation_runs ADD COLUMN duration_ms INTEGER",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN quads INTEGER",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN source_kind TEXT",
+            "ALTER TABLE shacl_validation_runs ADD COLUMN run_index INTEGER",
             "ALTER TABLE datasets ADD COLUMN conforms_to_model TEXT",
             "ALTER TABLE datasets ADD COLUMN conforms_to_version TEXT",
             "ALTER TABLE datasets ADD COLUMN graph_role TEXT",
@@ -2195,6 +2326,95 @@ impl AuthDb {
         Ok(())
     }
 
+    // ─── Prefix overrides (what a prefix means on this deployment) ───────────
+
+    /// Every override, ordered by label.
+    pub fn list_prefix_overrides(&self) -> anyhow::Result<Vec<PrefixOverride>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT label, namespace, created_by, created_at, updated_at
+             FROM prefix_overrides ORDER BY label",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(PrefixOverride {
+                    label: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_by: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// One override by label; None when the label has none.
+    pub fn get_prefix_override(&self, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
+        let conn = self.pool.get()?;
+        read_prefix_override(&conn, label)
+    }
+
+    /// Create an override, refusing a label that already has one.
+    ///
+    /// The refusal is the point: two prefixes with the same shorthand cannot
+    /// both be right, and silently repointing an established prefix changes
+    /// what every stored CURIE means. Repointing is [`Self::put_prefix_override`],
+    /// which says so.
+    pub fn create_prefix_override(
+        &self,
+        label: &str,
+        namespace: &str,
+        created_by: Option<&str>,
+    ) -> anyhow::Result<PrefixOverride> {
+        // One connection for the whole call: the pool is small, and holding one
+        // while asking for another is how you deadlock it.
+        let conn = self.pool.get()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO prefix_overrides
+                 (label, namespace, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![label, namespace, created_by, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("prefix {label} already has an override");
+        }
+        read_prefix_override(&conn, label)?
+            .ok_or_else(|| anyhow::anyhow!("override vanished after insert"))
+    }
+
+    /// Create or repoint an override.
+    pub fn put_prefix_override(
+        &self,
+        label: &str,
+        namespace: &str,
+        created_by: Option<&str>,
+    ) -> anyhow::Result<(PrefixOverride, bool)> {
+        let conn = self.pool.get()?;
+        let existed = read_prefix_override(&conn, label)?.is_some();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO prefix_overrides
+                 (label, namespace, created_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(label) DO UPDATE SET
+                 namespace = excluded.namespace,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![label, namespace, created_by, now],
+        )?;
+        let row = read_prefix_override(&conn, label)?
+            .ok_or_else(|| anyhow::anyhow!("override vanished after upsert"))?;
+        Ok((row, !existed))
+    }
+
+    /// Remove an override, so the label falls back to whatever the lower tiers
+    /// say. Returns whether there was one.
+    pub fn delete_prefix_override(&self, label: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        Ok(conn.execute("DELETE FROM prefix_overrides WHERE label = ?1", [label])? > 0)
+    }
+
     // ─── App settings (runtime-changeable admin toggles) ──────────────────────
 
     /// Read one instance setting; None when never set.
@@ -2726,12 +2946,20 @@ impl AuthDb {
         Ok(())
     }
 
+    /// Stamp `last_used_at`, at most once a minute per token. The stamp is
+    /// bookkeeping; a client that authenticates several times a second — a
+    /// replication follower polling its leader — must not turn every request
+    /// into a write: each is an fsync, and on a replication leader each moves
+    /// the identity database's version, which made the follower fetch the
+    /// whole database again at its next check, every check.
     pub fn update_api_token_last_used(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.pool.get()?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let stale = (now - chrono::Duration::seconds(60)).to_rfc3339();
         conn.execute(
-            "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
-            params![now, id],
+            "UPDATE api_tokens SET last_used_at = ?1
+             WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)",
+            params![now.to_rfc3339(), id, stale],
         )?;
         Ok(())
     }
@@ -3370,6 +3598,23 @@ impl AuthDb {
     }
 
     // ─── SHACL validation run history ──────────────────────────────────────────
+
+    /// Attach what a validation run read and how long it took.
+    pub fn set_validation_run_metrics(
+        &self,
+        run_id: &str,
+        duration_ms: i64,
+        quads: i64,
+        source_kind: &str,
+        run_index: bool,
+    ) -> anyhow::Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute(
+            "UPDATE shacl_validation_runs SET duration_ms = ?2, quads = ?3, source_kind = ?4, run_index = ?5 WHERE id = ?1",
+            params![run_id, duration_ms, quads, source_kind, run_index as i32],
+        )?;
+        Ok(())
+    }
 
     /// Persist a validation run and prune to the most recent 50 runs per dataset.
     #[allow(clippy::too_many_arguments)]
@@ -5860,6 +6105,57 @@ impl AuthDb {
 mod tests {
     use super::*;
 
+    /// The last-used stamp is written at most once a minute per token: a
+    /// client that authenticates twice a second — a replication follower —
+    /// must not turn every request into a write, nor move the identity
+    /// database's version (which the follower watches) more than once a
+    /// minute with its own polling.
+    /// A file-backed database, so there is a `data_version` to watch.
+    #[test]
+    fn the_last_used_stamp_is_written_at_most_once_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = AuthDb::open(&dir.path().join("auth.db")).unwrap();
+        db.create_user("u1", "alice", "alice@example.com", "hash", SystemRole::User)
+            .unwrap();
+        db.create_api_token("t1", "u1", "tok", "h1", "ots_h1", &[ApiScope::Read], None)
+            .unwrap();
+        let stamp = || {
+            db.get_api_token_by_hash("h1")
+                .unwrap()
+                .unwrap()
+                .last_used_at
+        };
+
+        db.update_api_token_last_used("t1").unwrap();
+        let first = stamp().expect("stamped on first use");
+        let version = db.data_version();
+        assert!(version.is_some());
+        db.update_api_token_last_used("t1").unwrap();
+        db.update_api_token_last_used("t1").unwrap();
+        assert_eq!(
+            stamp().as_deref(),
+            Some(first.as_str()),
+            "within the minute: kept"
+        );
+        assert_eq!(db.data_version(), version, "and the database did not move");
+
+        // Two minutes old: stamped again, and the version moves.
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339();
+        db.pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE api_tokens SET last_used_at = ?1 WHERE id = 't1'",
+                params![old],
+            )
+            .unwrap();
+        let moved = db.data_version();
+        db.update_api_token_last_used("t1").unwrap();
+        let again = stamp().unwrap();
+        assert!(again > old, "{again} is newer than {old}");
+        assert_ne!(db.data_version(), moved);
+    }
+
     #[test]
     fn test_create_and_get_user() {
         let db = AuthDb::in_memory().unwrap();
@@ -5943,6 +6239,7 @@ mod tests {
             conforms,
             results_count: results.len(),
             results,
+            metrics: None,
         }
     }
 
@@ -6723,4 +7020,25 @@ mod refresh_rotation_tests {
         // An unknown hash is simply absent, not an error.
         assert!(db.take_client_refresh_token("nope").unwrap().is_none());
     }
+}
+
+/// Read one override on a connection the caller already holds.
+fn read_prefix_override(conn: &Connection, label: &str) -> anyhow::Result<Option<PrefixOverride>> {
+    let row = conn
+        .query_row(
+            "SELECT label, namespace, created_by, created_at, updated_at
+             FROM prefix_overrides WHERE label = ?1",
+            [label],
+            |r| {
+                Ok(PrefixOverride {
+                    label: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_by: r.get(2)?,
+                    created_at: r.get(3)?,
+                    updated_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
 }

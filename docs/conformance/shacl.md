@@ -1,20 +1,29 @@
 # SHACL conformance — official W3C test suite
 
-The official **W3C SHACL test suite** (core section) is vendored under
+The official **W3C SHACL test suite** (`core` and `sparql` sections) is vendored under
 [`tests/fixtures/w3c-shacl/`](../../tests/fixtures/w3c-shacl/PROVENANCE.md) and runs in CI
 via [`tests/w3c_shacl_conformance.rs`](../../tests/w3c_shacl_conformance.rs).
 
-## Scorecard (2026-06-11)
+## Scorecard (2026-09-10)
 
-| | count |
-|---|---|
-| **Pass** | **97** |
-| Known-fail (ratcheted) | 1 |
-| Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 |
-| Total files | 113 |
+| | core | sparql | total |
+|---|---|---|---|
+| **Pass** | **97** | **22** | **119** |
+| Known-fail (ratcheted) | 1 | 1 | 2 |
+| Skipped (auxiliary `-data`/`-shapes` files, no test entry) | 15 | 0 | 15 |
+| Total files | 113 | 23 | 136 |
 
-*(Previous baseline, 2026-06-10: 46 pass / 52 known-fail — see "Typed-term engine
-refactor" below for what closed the gap.)*
+*(Previous baselines: 2026-06-11, core only: 97 pass / 1 known-fail; 2026-06-10:
+46 pass / 52 known-fail — see "Typed-term engine refactor" below for what closed
+that gap.)*
+
+The `sparql` section (vendored 2026-09-10) covers `sh:sparql` constraints on node
+and property shapes, `sh:prefixes` (including `owl:imports`), custom constraint
+components (`sh:validator` / `sh:nodeValidator` / `sh:propertyValidator`, optional
+parameters) and pre-binding. Seven of its cases — `pre-binding/unsupported-sparql-*`
+and `pre-binding-006` — expect the validator to *reject* the shapes graph
+(`mf:result sht:Failure`); the runner passes those when validation returns an
+error, and fails them when a report comes back.
 
 **Comparison level:** `sh:conforms` plus the multiset of violation **focus nodes**
 (IRIs/literals by lexical form, blank nodes by count). Full result-set equality
@@ -25,9 +34,16 @@ engine currently reports the source constraint as a display string, not a compon
 and every listed test must still fail — silent regressions *and* silent fixes both turn
 CI red, so the list cannot go stale.
 
-## Remaining known failure
+## Remaining known failures
 
-- **`property/uniqueLang-002.ttl`** — the test asserts that
+- **`sparql/pre-binding/shapesGraph-001.ttl`** — the constraint reads the shapes
+  graph through `$shapesGraph` / `$currentShape`. SHACL §5.3.1 leaves those two
+  variables to processors that expose the shapes graph to constraint queries;
+  this one pre-binds `$this`, `$value`, `$PATH` and the component parameters and
+  evaluates against the data graphs only, so a constraint that uses them fails
+  the shapes graph (loudly, as a load error) instead of producing the report the
+  test expects.
+- **`core/property/uniqueLang-002.ttl`** — the test asserts that
   `sh:uniqueLang "1"^^xsd:boolean` does **not** activate the constraint (the spec
   activates it only for the literal `true`). Oxigraph's storage encodes
   `xsd:boolean` natively and reads the literal back in canonical form (`"1"` →

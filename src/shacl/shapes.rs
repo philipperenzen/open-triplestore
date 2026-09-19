@@ -8,6 +8,10 @@ use oxigraph::model::Term;
 #[derive(Debug, Clone)]
 pub struct Shape {
     pub iri: String,
+    /// `sh:name` — informational for validation, but the only faithful source
+    /// of a specification's name when a shape graph is exported back to an
+    /// exchange format.
+    pub name: Option<String>,
     /// Informational (sh:NodeShape vs own-path property shape); not consulted
     /// during evaluation.
     #[allow(dead_code)]
@@ -188,6 +192,11 @@ pub enum Constraint {
         severity: Option<String>,
     },
 
+    // SHACL-AF §6: an instance of a constraint component declared in the shapes
+    // graph (`sh:ConstraintComponent` + `sh:parameter` + a validator), created
+    // for a shape that carries the component's parameter predicates.
+    Custom(Box<CustomConstraint>),
+
     // SHACL-AF: sh:expression (node expression) — path + comparison subset. The values
     // reached along `path` from the focus node must satisfy every constraint in `checks`
     // (e.g. sh:minExclusive); a single violation is reported with `message`.
@@ -196,6 +205,26 @@ pub enum Constraint {
         checks: Vec<Constraint>,
         message: Option<String>,
     },
+}
+
+/// A validator of a SHACL-AF constraint component: an ASK evaluated once per
+/// value node (`false` = violation) or a SELECT whose rows are the violations.
+#[derive(Debug, Clone)]
+pub enum CustomValidator {
+    Ask(String),
+    Select(String),
+}
+
+/// An instantiated constraint component (SHACL-AF §6): the component's IRI,
+/// the parameter values the shape supplies (by the parameter's local name,
+/// the SPARQL variable the validator sees), the validator picked for the
+/// shape's kind and the validator's `sh:message`.
+#[derive(Debug, Clone)]
+pub struct CustomConstraint {
+    pub component: String,
+    pub params: Vec<(String, Term)>,
+    pub validator: CustomValidator,
+    pub message: Option<String>,
 }
 
 /// sh:nodeKind values.

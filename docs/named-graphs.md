@@ -22,6 +22,7 @@ A named graph is an IRI that identifies a set of RDF triples in the triplestore.
   - `DELETE /sparql?graph=<iri>` — delete the entire graph
 - **Dataset ownership** — A dataset is a higher-level concept: it is owned by a user or organisation, has visibility settings (public / members / private), and may span multiple named graphs. You typically interact with datasets through the UI; named graphs are the storage primitive underneath.
 - **Reasoning and inference** — When you trigger OWL reasoning, inferred triples are written to a separate named graph (e.g. `urn:entailment:rdfs`) so you can inspect and manage them separately from source data.
+- **Graph roles** — A dataset's graphs carry a role (`instances`, `model`, `vocabulary`, `domain-values`, `shapes`, `linkset`, `provenance`, `catalog`, `entailment`, `system`). Roles decide what a reasoner reads: instance, model, vocabulary and domain-value graphs are premises; shapes, provenance, catalogue and entailment graphs are not. A **`linkset`** graph holds the links *between* sources — `owl:sameAs`, `skos:*Match`, `prov:specializationOf` / `prov:alternateOf` — and is a premise only when the dataset's [identity policy](/docs/reasoning#identity-policy--what-happens-with-owlsameas) is `sameas-full`.
 
 ## Common Patterns
 

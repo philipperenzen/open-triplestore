@@ -5,9 +5,10 @@
   import { navigate } from '../lib/router/index.js';
   import { OPEN_RESOURCE_CONTEXT } from '../lib/viewer/windows';
   import { isDark } from '../lib/theme.js';
+  import { iriDisplay } from '../lib/iriDisplay';
   import { langToFlag } from '../lib/i18n/langFlag.js';
   import { Check, Copy, MapPin, Boxes } from 'lucide-svelte';
-  import { copyToClipboard } from '../lib/clipboard.js';
+  import { copyOrWarn } from '../lib/clipboard.js';
   import { modelFormatFromUrl, isWktDatatype } from '../lib/viewer/detect';
   import { openPreview } from '../lib/viewer/preview';
   import { resourceHover, hideNow } from '../lib/resourcePreview.js';
@@ -28,6 +29,11 @@
   /** True when this term is rendered inside a quoted triple — suppresses the copy
    *  button so nested terms stay compact. */
   export let nested = false;
+  /** Set false when the host surface renders its own copy control for this term,
+   *  so a cell doesn't end up with two of them. The triple table does this: it
+   *  needs one identical control in all four columns, including the predicate
+   *  and graph cells, which are chips rather than terms. */
+  export let copyable = true;
 
   let copied = false;
 
@@ -149,15 +155,20 @@
   async function copyValue(e) {
     e.stopPropagation();
     const val = typeof term?.value === 'string' ? term.value : (display || '');
-    if (await copyToClipboard(val)) {
+    if (await copyOrWarn(val)) {
       copied = true;
       setTimeout(() => (copied = false), 1500);
     }
   }
 
+  // The prefixed name is the label unless the reader has asked for whole IRIs,
+  // which is one app-wide preference rather than a control on every surface.
+  // Literals and blank nodes have no prefixed form, so it does not touch them.
   $: display = (() => {
     if (!term) return '—';
-    if (term.type === 'uri' || term.type === 'iri') return shortenIRI(term.value);
+    if (term.type === 'uri' || term.type === 'iri') {
+      return $iriDisplay === 'full' ? String(term.value ?? '') : shortenIRI(term.value);
+    }
     if (term.type === 'literal') return `"${term.value}"`;
     if (term.type === 'bnode') return `_:${term.value}`;
     return term.value || '—';
@@ -197,6 +208,14 @@
     openPreview({ kind: 'model', url: term.value, format: modelFormat, title: shortenIRI(term.value) });
   }
 
+  // The button copies the term verbatim, which for an IRI is the full IRI and
+  // not the prefixed form on screen — so name the action after what lands on the
+  // clipboard. "Copy IRI" sits in the data-table namespace because that is where
+  // the wording was first needed; both dictionaries already carry it.
+  $: copyLabel = term?.type === 'uri' || term?.type === 'iri'
+    ? $i18nT('components.dataTable.copyIri')
+    : $i18nT('components.rdfTerm.copyValue');
+
   $: color = colorFor(term, $isDark);
   $: isClickable = navigable && (term?.type === 'uri' || term?.type === 'iri' || term?.type === 'bnode');
   $: tooltip = typeof term?.value === 'string' ? term?.value : display;
@@ -210,14 +229,13 @@
         term={quoted.predicate} {navigable} {graph} nested /><span class="star-sep"></span><svelte:self
         term={quoted.object} {navigable} {graph} nested /><span class="star-br">»</span>
     </span>
-    {#if !nested}
+    {#if !nested && copyable}
       <button
         class="copy-btn"
         class:copied
-        title={copied ? $i18nT('system.copied') : $i18nT('components.rdfTerm.copyValue')}
+        title={copied ? $i18nT('system.copied') : copyLabel}
         on:click={copyValue}
-        tabindex="-1"
-        aria-label={$i18nT('system.copy')}
+        aria-label={copyLabel}
       >{#if copied}<Check size={11} />{:else}<Copy size={11} />{/if}</button>
     {/if}
   </span>
@@ -264,14 +282,13 @@
         <Boxes size={11} />
       </button>
     {/if}
-    {#if !nested}
+    {#if !nested && copyable}
       <button
         class="copy-btn"
         class:copied
-        title={copied ? $i18nT('system.copied') : $i18nT('components.rdfTerm.copyValue')}
+        title={copied ? $i18nT('system.copied') : copyLabel}
         on:click={copyValue}
-        tabindex="-1"
-        aria-label={$i18nT('system.copy')}
+        aria-label={copyLabel}
       >{#if copied}<Check size={11} />{:else}<Copy size={11} />{/if}</button>
     {/if}
   </span>
@@ -280,17 +297,27 @@
 {/if}
 
 <style>
+  /* A term that needs more than one line gets one: the wrapper never exceeds
+     its container, and the copy button and badges stay on the first line
+     rather than being centred against a three-line IRI. */
   .term-wrap {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 0.2rem;
+    max-width: 100%;
+    min-width: 0;
   }
 
-  .term-wrap:not(:hover) .copy-btn { opacity: 0; pointer-events: none; }
-  .term-wrap:hover .copy-btn { opacity: 1; }
+  /* The copy button used to be opacity:0 until the term was hovered, which in a
+     table cell meant most people never learned it was there at all. It is now
+     always drawn, just quiet, and brightens on hover or keyboard focus. */
+  .term-wrap .copy-btn { opacity: 0.55; }
+  .term-wrap:hover .copy-btn,
+  .term-wrap:focus-within .copy-btn,
+  .copy-btn.copied { opacity: 1; }
 
-  /* Always-visible viz affordances (unlike the hover-only copy button): they
-     advertise that a geometry/model can be previewed in place. */
+  /* Always-visible viz affordances, like the copy button: they advertise that a
+     geometry/model can be previewed in place. */
   .viz-chip {
     display: inline-flex;
     align-items: center;
@@ -310,7 +337,11 @@
 
   .rdf-term {
     font-size: 0.875rem;
-    word-break: break-word;
+    /* An IRI has no spaces to break at, so `break-word` — which only breaks a
+       word that would not fit on a line of its own — leaves it overflowing.
+       `anywhere` breaks it where the box ends, which is the point. */
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
 
   .clickable {
@@ -392,7 +423,8 @@
     transition: color 0.1s, opacity 0.1s;
     flex-shrink: 0;
   }
-  .copy-btn:hover { color: #4a90d9; }
+  .copy-btn:hover, .copy-btn:focus-visible { color: #4a90d9; }
+  .copy-btn:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; border-radius: 3px; }
   .copy-btn.copied { color: #4caf50; }
   :global(html.dark) .copy-btn { color: #64748b; }
   :global(html.dark) .copy-btn:hover { color: #7db4f0; }

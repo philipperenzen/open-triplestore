@@ -5,8 +5,8 @@
 //! acceptance gate for the GeoSPARQL + SHACL (Core/SPARQL/AF) work: as each engine gap
 //! closes, the corresponding `#[ignore]` is removed.
 //!
-//! Known gaps blocking cases (see docs/notes/recon.md §8), confirmed empirically by the
-//! first R0 run (4 active pass, 8 ignored pending the listed milestone):
+//! Known gaps blocking cases, confirmed empirically by the first R0 run
+//! (4 active pass, 8 ignored pending the listed milestone):
 //!   G1  — sh:prefixes not injected into SHACL-SPARQL bodies → prefixed queries silently skip (R1)
 //!   G2  — complex property paths (sequence/inverse/sh:alternativePath) not parsed from RDF (R2)
 //!   G3  — sh:expression node expressions unimplemented (R5)
@@ -230,8 +230,13 @@ fn fail_bogen_too_close_geosparql() {
 
 #[test]
 fn fail_doorvaarthoogte_expression() {
+    // Both files: shapes-af.ttl's own header says its rule, target and
+    // function bodies use the `ex:prefixes` declaration that lives in
+    // shapes-sparql.ttl. Loading it alone leaves the SPARQL target's query
+    // without its prefixes — which used to be silent (the target produced no
+    // focus nodes and the shape validated nothing) and is now a load error.
     let r = validate_case(
-        &[SHAPES_AF],
+        &[SHAPES_SPARQL, SHAPES_AF],
         include_str!("fixtures/waalbrug/fail/doorvaarthoogte-laag.ttl"),
     );
     assert!(

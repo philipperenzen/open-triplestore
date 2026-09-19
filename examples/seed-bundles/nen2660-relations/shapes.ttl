@@ -1,0 +1,117 @@
+# Consistency shapes for the NEN 2660-2 relations — what OWL cannot express
+# (Keet et al.): a decomposition is acyclic and irreflexive, containment and
+# connection are irreflexive, and parthood/containment are spatially
+# consistent. The spatial checks are COMPUTED from the geometries with the
+# GeoSPARQL functions (sfWithin, the RCC8 family) at validation time; no
+# topological relation is ever asserted as data.
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix nen2660: <https://w3id.org/nen2660/def#> .
+@prefix geo:     <http://www.opengis.net/ont/geosparql#> .
+@prefix geof:    <http://www.opengis.net/def/function/geosparql/> .
+@prefix rs:      <https://example.org/nen2660-relations/shapes#> .
+
+rs: a owl:Ontology ;
+    rdfs:label "NEN 2660-2 relation consistency shapes"@en ;
+    sh:declare [ sh:prefix "nen2660" ; sh:namespace "https://w3id.org/nen2660/def#"^^xsd:anyURI ] ;
+    sh:declare [ sh:prefix "geo" ; sh:namespace "http://www.opengis.net/ont/geosparql#"^^xsd:anyURI ] ;
+    sh:declare [ sh:prefix "geof" ; sh:namespace "http://www.opengis.net/def/function/geosparql/"^^xsd:anyURI ] .
+
+# 1. A decomposition is acyclic — and therefore irreflexive: nothing is a part
+#    of itself, directly or through any chain of hasPart and its functional /
+#    technical sub-relations. (OWL 2 DL cannot say this about a transitive
+#    property; SPARQL property paths can.)
+rs:AcyclicDecompositionShape a sh:NodeShape ;
+    rdfs:label "Decomposition is acyclic"@en ;
+    sh:targetSubjectsOf nen2660:hasPart , nen2660:hasFunctionalPart , nen2660:hasTechnicalPart ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "A decomposition must be acyclic: this object is a part of itself through a hasPart chain."@en ;
+        sh:prefixes rs: ;
+        sh:select """
+            SELECT $this ?value
+            WHERE {
+                $this (nen2660:hasPart|nen2660:hasFunctionalPart|nen2660:hasTechnicalPart)+ $this .
+                BIND ($this AS ?value)
+            }
+            """ ;
+    ] .
+
+# 2. Containment and connection are irreflexive.
+rs:IrreflexiveRelationShape a sh:NodeShape ;
+    rdfs:label "Containment and connection are irreflexive"@en ;
+    sh:targetSubjectsOf nen2660:contains , nen2660:connectsObject , nen2660:connectsPort ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "An object cannot contain, or connect, itself."@en ;
+        sh:prefixes rs: ;
+        sh:select """
+            SELECT $this ?value ?path
+            WHERE {
+                $this ?path $this .
+                FILTER (?path IN (nen2660:contains, nen2660:connectsObject, nen2660:connectsPort))
+                BIND ($this AS ?value)
+            }
+            """ ;
+    ] .
+
+# 3. A part's geometry lies within its whole's geometry.
+rs:PartWithinWholeShape a sh:NodeShape ;
+    rdfs:label "A part lies within its whole"@en ;
+    sh:targetSubjectsOf nen2660:hasPart , nen2660:hasFunctionalPart , nen2660:hasTechnicalPart ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "A part's geometry must lie within its whole's geometry (geof:sfWithin)."@en ;
+        sh:prefixes rs: ;
+        sh:select """
+            SELECT $this ?value
+            WHERE {
+                $this (nen2660:hasPart|nen2660:hasFunctionalPart|nen2660:hasTechnicalPart) ?value .
+                $this geo:hasGeometry/geo:asWKT ?wholeWkt .
+                ?value geo:hasGeometry/geo:asWKT ?partWkt .
+                FILTER (!geof:sfWithin(?partWkt, ?wholeWkt))
+            }
+            """ ;
+    ] .
+
+# 4. RCC8: a part is a tangential or non-tangential proper part of its whole,
+#    or spatially equal to it — never disconnected (dc), externally connected
+#    (ec), partially overlapping (po) or the other way round (tppi, ntppi).
+rs:PartRcc8Shape a sh:NodeShape ;
+    rdfs:label "A part is an RCC8 proper part of its whole"@en ;
+    sh:targetSubjectsOf nen2660:hasPart , nen2660:hasFunctionalPart , nen2660:hasTechnicalPart ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "A part must be an RCC8 proper part (rcc8tpp / rcc8ntpp) of its whole, or equal to it."@en ;
+        sh:prefixes rs: ;
+        sh:select """
+            SELECT $this ?value
+            WHERE {
+                $this (nen2660:hasPart|nen2660:hasFunctionalPart|nen2660:hasTechnicalPart) ?value .
+                $this geo:hasGeometry/geo:asWKT ?wholeWkt .
+                ?value geo:hasGeometry/geo:asWKT ?partWkt .
+                FILTER (!(geof:rcc8tpp(?partWkt, ?wholeWkt) || geof:rcc8ntpp(?partWkt, ?wholeWkt) || geof:rcc8eq(?partWkt, ?wholeWkt)))
+            }
+            """ ;
+    ] .
+
+# 5. Containment is spatial: what a region contains lies within the region.
+rs:ContainedWithinRegionShape a sh:NodeShape ;
+    rdfs:label "A contained object lies within its region"@en ;
+    sh:targetSubjectsOf nen2660:contains ;
+    sh:sparql [
+        a sh:SPARQLConstraint ;
+        sh:message "An object a spatial region contains must lie within the region's geometry (geof:sfWithin)."@en ;
+        sh:prefixes rs: ;
+        sh:select """
+            SELECT $this ?value
+            WHERE {
+                $this nen2660:contains ?value .
+                $this geo:hasGeometry/geo:asWKT ?regionWkt .
+                ?value geo:hasGeometry/geo:asWKT ?objectWkt .
+                FILTER (!geof:sfWithin(?objectWkt, ?regionWkt))
+            }
+            """ ;
+    ] .

@@ -1947,12 +1947,17 @@ shape <PersonShape> -> <Person> {
     <name> minCount 1 ;
 }
 "#;
-        let resp = test_app(test_state())
+        // The parser is authenticated compute now, so an anonymous request would
+        // only ever prove that 401 is a 4xx. The token keeps the endpoint itself
+        // under test (see tests/api_auth_exposure.rs for the auth contract).
+        let (state, token) = admin_state();
+        let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/shaclc/parse")
                     .header(header::CONTENT_TYPE, "text/shaclc")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(shaclc))
                     .unwrap(),
             )
@@ -2141,7 +2146,11 @@ mod rml {
             m = SIMPLE_RML,
             c = csv
         );
-        let resp = test_app(test_state())
+        // The preview is authenticated compute now; the token keeps this test on
+        // the mapping run itself rather than on the 401 (see
+        // tests/api_auth_exposure.rs for the auth contract).
+        let (state, token) = admin_state();
+        let resp = test_app(state)
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -2150,6 +2159,7 @@ mod rml {
                         header::CONTENT_TYPE,
                         format!("multipart/form-data; boundary={boundary}"),
                     )
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -2440,13 +2450,22 @@ mod performance {
 
     use super::helpers::*;
 
-    async fn bulk_insert_ntriples(n: usize, max_secs: u64) {
+    /// Bulk-load `n` triples through the Graph Store route and check every one
+    /// of them arrived.
+    ///
+    /// This used to assert a wall-clock bound instead, which is why the 100k
+    /// case was `#[ignore]`d as "timing-sensitive": a duration assertion on a
+    /// shared runner measures the runner. Ingest speed has its own gate —
+    /// `benches/performance.rs`'s `insert/*` groups, compared against the merge
+    /// base by `scripts/perf_regression.py` — so this asserts what a
+    /// correctness suite can actually hold: the right number of triples, in the
+    /// right graph, queryable afterwards.
+    async fn bulk_insert_ntriples(n: usize) {
         let (state, token) = admin_state();
         let data = ntriples(n);
         let graph = url_encode("http://perf.ex.org/graph");
 
-        let start = Instant::now();
-        let resp = test_app(state)
+        let resp = test_app(state.clone())
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
@@ -2458,33 +2477,45 @@ mod performance {
             )
             .await
             .unwrap();
-        let elapsed = start.elapsed();
         assert!(
             resp.status().is_success(),
-            "Bulk insert of {n} triples must succeed: {}",
+            "bulk insert of {n} triples must succeed: {}",
             resp.status()
         );
+
+        let count = state
+            .store
+            .query(
+                "SELECT (COUNT(*) AS ?c) WHERE {                    GRAPH <http://perf.ex.org/graph> { ?s ?p ?o }                  }",
+            )
+            .expect("the count query must run");
+        let got = match count {
+            oxigraph::sparql::QueryResults::Solutions(mut solutions) => solutions
+                .next()
+                .and_then(|row| row.ok())
+                .and_then(|row| row.get("c").map(|t| t.to_string()))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         assert!(
-            elapsed < Duration::from_secs(max_secs),
-            "Bulk insert of {n} triples took {:?}, expected < {max_secs}s",
-            elapsed
+            got.starts_with(&format!("\"{n}\"")),
+            "all {n} triples must be queryable afterwards, got {got}"
         );
     }
 
     #[tokio::test]
     async fn bulk_insert_1k() {
-        bulk_insert_ntriples(1_000, 5).await;
+        bulk_insert_ntriples(1_000).await;
     }
 
     #[tokio::test]
     async fn bulk_insert_10k() {
-        bulk_insert_ntriples(10_000, 15).await;
+        bulk_insert_ntriples(10_000).await;
     }
 
     #[tokio::test]
-    #[ignore = "perf stress test: 100k-triple bulk insert; slow + timing-sensitive, run explicitly with `cargo test -- --ignored`"]
     async fn bulk_insert_100k() {
-        bulk_insert_ntriples(100_000, 60).await;
+        bulk_insert_ntriples(100_000).await;
     }
 
     #[tokio::test]

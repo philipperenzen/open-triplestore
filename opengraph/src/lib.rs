@@ -58,6 +58,7 @@
 
 // Durable blank-node identity (headline feature).
 pub mod canonical;
+pub mod columnar;
 pub mod skolem;
 
 // Query & storage optimisation.

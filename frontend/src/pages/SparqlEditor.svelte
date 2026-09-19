@@ -1314,7 +1314,7 @@ LIMIT 25`;
   }
 
   .nl-box {
-    display: flex; align-items: center; gap: 0.5rem;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem;
     margin-bottom: 0.6rem; padding: 0.4rem 0.5rem;
     background: #f5f8ff; border: 1px solid #dbe4ff; border-radius: 6px;
   }
@@ -1322,10 +1322,15 @@ LIMIT 25`;
   .nl-status {
     font-size: 0.7rem; font-weight: 600; color: #16a34a; white-space: nowrap;
     padding: 1px 6px; border-radius: 999px; background: #ecfdf5; border: 1px solid #bbf7d0;
+    flex-shrink: 0;
   }
   .nl-status.offline { color: #b45309; background: #fffbeb; border-color: #fde68a; }
+  /* The question field asks for a sentence, so it keeps a readable basis and
+     wraps onto its own line rather than being squeezed to a sliver by the
+     Generate button, which the app widens to 100% on a phone. */
   .nl-input {
-    flex: 1; font-size: 0.85rem; padding: 0.35rem 0.5rem;
+    flex: 1 1 12rem; min-width: 0;
+    font-size: 0.85rem; padding: 0.35rem 0.5rem;
     border: 1px solid #cdd7ee; border-radius: 4px; background: #fff;
   }
   .nl-input:focus { outline: none; border-color: #4a6fd9; }
@@ -1383,6 +1388,7 @@ LIMIT 25`;
   .toolbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.75rem;
     margin-top: 0.6rem;
   }
@@ -1685,8 +1691,9 @@ LIMIT 25`;
     font-family: 'SF Mono', monospace; font-size: 0.72rem;
     color: #374151; word-break: break-all; white-space: normal;
   }
-  /* Graph chips reuse .dataset-scope-chip; clamp very long IRIs. */
-  .graph-chip { max-width: 16rem; overflow: hidden; white-space: nowrap; }
+  /* Graph chips reuse .dataset-scope-chip. A graph IRI is an identifier, so a
+     long one wraps inside the chip instead of being cut off mid-path. */
+  .graph-chip { max-width: 100%; overflow-wrap: anywhere; }
 
   :global(:is([data-theme="dark"], .dark)) .scope-picker { background: var(--bg-strong); border-color: var(--line-strong); }
   :global(:is([data-theme="dark"], .dark)) .dataset-scope-bar { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.3); color: #93c5fd; }
@@ -1705,4 +1712,13 @@ LIMIT 25`;
   :global(:is([data-theme="dark"], .dark)) .graph-scope-sep { background: rgba(59,130,246,0.35); }
   :global(:is([data-theme="dark"], .dark)) .graph-scope-item:hover { background: rgba(255,255,255,0.06); }
   :global(:is([data-theme="dark"], .dark)) .graph-scope-iri { color: var(--ink-700); }
+
+  /* Phone. The controls stacked above the editor are typed into and tapped,
+     so they take a thumb-sized height here; their desktop padding leaves them
+     around 30px tall, which is fine with a mouse and not with a finger. */
+  @media (max-width: 720px) {
+    .nl-input, .nl-comment { min-height: 2.5rem; }
+    .nl-thumb { min-height: 2.5rem; min-width: 2.5rem; }
+    .nl-box .btn { min-height: 2.5rem; }
+  }
 </style>

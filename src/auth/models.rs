@@ -986,6 +986,21 @@ pub struct OauthIdentity {
     pub created_at: String,
 }
 
+/// What a prefix means on this deployment, as set by an administrator.
+///
+/// The label is the primary key of its table, so two overrides can never share
+/// a shorthand. Two labels *may* share a namespace — `dct` and `dcterms` are
+/// both right — so the constraint is on the label alone.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PrefixOverride {
+    pub label: String,
+    pub namespace: String,
+    /// The administrator who set it; null for one restored from elsewhere.
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// An asset (non-RDF file) stored in S3.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Asset {

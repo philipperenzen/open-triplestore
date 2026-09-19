@@ -68,9 +68,12 @@ fn dl_empty_store_ok() {
         .materialize()
         .expect("an empty store is trivially consistent");
     assert_eq!(report.regime, "owl2-dl");
+    // OWL 2 RL's dt-type1 holds for every ontology, the empty one included: the
+    // 32 datatypes of the RL datatype map are rdfs:Datatypes. Nothing else can
+    // be derived from nothing.
     assert_eq!(
-        report.triples_added, 0,
-        "nothing can be derived from nothing"
+        report.triples_added, 32,
+        "only the dt-type1 datatype-map axioms are derived from nothing"
     );
 }
 

@@ -32,6 +32,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lru::LruCache;
+
+use super::telemetry::QueryShape;
 use oxigraph::model::Term;
 use oxigraph::sparql::{
     QueryEvaluationError, QueryResults, QuerySolution, QuerySolutionIter, Variable,
@@ -90,7 +92,9 @@ struct Inner {
     enabled: bool,
     generation: AtomicU64,
     max_rows: usize,
-    cache: Mutex<LruCache<String, (u64, Cached)>>,
+    /// `(generation, shape bits, value)`: the bits are computed once, on
+    /// the way in, so a hit reports its shape without a parse.
+    cache: Mutex<LruCache<String, (u64, QueryShape, Cached)>>,
 }
 
 impl QueryCache {
@@ -143,15 +147,16 @@ impl QueryCache {
         self.inner.generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Return a *fresh* (current-generation) cached result, or `None`.
-    pub fn get(&self, sparql: &str) -> Option<QueryResults<'static>> {
+    /// Return a *fresh* (current-generation) cached result with the shape
+    /// bits it was stored with, or `None`.
+    pub fn get(&self, sparql: &str) -> Option<(QueryResults<'static>, QueryShape)> {
         if !self.inner.enabled {
             return None;
         }
         let gen = self.inner.generation.load(Ordering::Acquire);
         let mut cache = self.inner.cache.lock().ok()?;
         match cache.get(sparql) {
-            Some((g, cached)) if *g == gen => Some(cached.to_results()),
+            Some((g, shape, cached)) if *g == gen => Some((cached.to_results(), *shape)),
             _ => None,
         }
     }
@@ -193,6 +198,7 @@ impl QueryCache {
         sparql: &str,
         gen_at_start: u64,
         results: QueryResults<'static>,
+        shape: QueryShape,
     ) -> QueryResults<'static> {
         if !self.inner.enabled || !is_cacheable(sparql) {
             return results;
@@ -200,7 +206,7 @@ impl QueryCache {
         let gen = gen_at_start;
         match results {
             QueryResults::Boolean(b) => {
-                self.store(sparql, gen, Cached::Boolean(b));
+                self.store(sparql, gen, shape, Cached::Boolean(b));
                 QueryResults::Boolean(b)
             }
             QueryResults::Solutions(mut sols) => {
@@ -243,6 +249,7 @@ impl QueryCache {
                     self.store(
                         sparql,
                         gen,
+                        shape,
                         Cached::Solutions {
                             vars: vars.clone(),
                             rows: rows.clone(),
@@ -268,7 +275,7 @@ impl QueryCache {
         }
     }
 
-    fn store(&self, sparql: &str, gen: u64, value: Cached) {
+    fn store(&self, sparql: &str, gen: u64, shape: QueryShape, value: Cached) {
         // A write landed while this query was being evaluated, so the value is
         // already out of date. Storing it under its start generation would be
         // harmless (`get` compares against the current one and would miss), but
@@ -277,7 +284,7 @@ impl QueryCache {
             return;
         }
         if let Ok(mut cache) = self.inner.cache.lock() {
-            cache.put(sparql.to_string(), (gen, value));
+            cache.put(sparql.to_string(), (gen, shape, value));
         }
     }
 }
@@ -367,7 +374,12 @@ mod tests {
         let gen_at_start = cache.generation();
         // A write commits while the query is being evaluated.
         cache.invalidate();
-        let _ = cache.put(q, gen_at_start, QueryResults::Boolean(true));
+        let _ = cache.put(
+            q,
+            gen_at_start,
+            QueryResults::Boolean(true),
+            QueryShape::default(),
+        );
 
         assert!(
             cache.get(q).is_none(),
@@ -382,10 +394,15 @@ mod tests {
         let q = "ASK { ?s ?p ?o }";
 
         let gen_at_start = cache.generation();
-        let _ = cache.put(q, gen_at_start, QueryResults::Boolean(true));
+        let _ = cache.put(
+            q,
+            gen_at_start,
+            QueryResults::Boolean(true),
+            QueryShape::default(),
+        );
 
         assert!(
-            matches!(cache.get(q), Some(QueryResults::Boolean(true))),
+            matches!(cache.get(q), Some((QueryResults::Boolean(true), _))),
             "an uncontended result must still be cached"
         );
     }
@@ -407,7 +424,12 @@ mod tests {
 
         let cache = QueryCache::new(true, 16, 1000);
         let q = "ASK { SERVICE <http://remote.example/sparql> { ?s ?p ?o } }";
-        let _ = cache.put(q, cache.generation(), QueryResults::Boolean(true));
+        let _ = cache.put(
+            q,
+            cache.generation(),
+            QueryResults::Boolean(true),
+            QueryShape::default(),
+        );
         assert!(cache.is_empty(), "put must refuse to store a SERVICE query");
         assert!(cache.get(q).is_none());
     }

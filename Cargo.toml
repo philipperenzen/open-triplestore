@@ -315,6 +315,7 @@ hkdf = "0.13"
 
 # In-memory concurrent cache (OAuth PKCE sessions)
 dashmap = "6"
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
