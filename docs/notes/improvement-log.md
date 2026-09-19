@@ -2812,7 +2812,7 @@ generated table, which is why they carry no CHANGELOG line.
 cells, full text everywhere including chips and lists, and keep the
 prefixed names with the full IRI available on demand. Two items.
 
-### 1. Asked once, answered everywhere (`eb4251d`)
+### 1. Asked once, answered everywhere (`67aacc9`)
 
 "On demand" was already claimed by a `title` tooltip, which is not an
 answer: it needs a pointer, it cannot be reached from a keyboard, it
@@ -2831,3 +2831,50 @@ Two invariants are pinned by tests rather than left to review: literals
 and blank nodes have no prefixed form and are untouched by the switch,
 and a copy control copies the IRI in either mode — a copy is for the
 identifier, never for whatever the label happens to be.
+
+### 2. Nothing is trimmed (this commit)
+
+The measurement first, because inspection would have found the CSS and
+not the scale of it: one screen of the triple browser held **110 elements
+whose text did not fit the box drawn for it**. A `.cell-body` 31px wide
+holding an IRI that needed 280px. Predicate chips 12px wide needing 105.
+`td` carried `overflow: hidden; text-overflow: ellipsis; white-space:
+nowrap`, so every term wider than its column was cut at the column edge,
+whatever that column happened to be worth at that window width.
+
+The fix is to stop clipping, not to widen: the column widths are what
+keep four columns on one screen without a horizontal scrollbar, so they
+stay, and a term too wide for its column wraps inside it.
+`overflow-wrap: anywhere` rather than `break-word`, because an IRI has no
+spaces to break at and `break-word` only breaks a word that would not fit
+a line of its own — it would have left the IRI overflowing. Cells are
+top-aligned once a row can be several lines tall, and the copy control
+stays on the first line beside its term.
+
+The same went for the names and owner chips in the validation list and
+the file browser's cards — an owner chip that stopped at 7rem turns two
+organisations sharing a prefix into the same chip.
+
+**The one exception, stated rather than hidden.** A description is prose,
+not an identifier, and the seeded demo has ones past a thousand
+characters: shown whole in a dataset card, a single description would run
+to twenty-four lines and bury the list it belongs to. Descriptions are
+clamped to two lines — twice what they had — with the whole text on the
+dataset's own page. Names, IRIs and chips are never cut.
+
+**The tests measure, and they measure the wrong fix too.** jsdom has no
+layout, so none of the 836 component tests can see any of this. The new
+Playwright spec asserts that nothing in the triple table reports needing
+more width than it was given, in both labelling modes, that a long IRI's
+cell is more than one line tall — wrapping is what makes it fit, not a
+shortened string — and that the page has not simply gained a horizontal
+scrollbar, which is what a naive widening would produce.
+
+It also corrects a test of my own. The validation spec's second case
+asserted that a clipped name has absorbed the row's slack; once names
+wrap there are no clipped rows, so the loop body never ran and the
+assertion above it reduced to `width >= min(width, 72)` — true of any
+number. Both are replaced by what is now true and falsifiable: the floor
+holds, nothing reports needing more width than it has, and the longest
+name is more than one line tall. Red against the previous CSS with
+`"3D, Map & BIM Demo" needs 138px but was given 128.7px`.

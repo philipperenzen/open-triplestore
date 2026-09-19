@@ -648,9 +648,14 @@
   .row-selected { background: #f0fdfa !important; }
 
   /* Actions cell */
+  /* A description is prose, not an identifier, and the seeded demo has ones a
+     thousand characters long — so this is the one place text is still cut
+     short, at two lines rather than a fraction of one, with the whole of it a
+     click away on the dataset's own page. Names and IRIs are never cut. */
   .ds-desc-line {
-    display: block; font-size: 0.75rem; color: var(--ink-500);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 0.75rem; color: var(--ink-500); max-width: 46ch;
   }
   .empty-cta { margin-left: 0.6rem; }
   .td-actions {

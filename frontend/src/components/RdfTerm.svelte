@@ -297,10 +297,15 @@
 {/if}
 
 <style>
+  /* A term that needs more than one line gets one: the wrapper never exceeds
+     its container, and the copy button and badges stay on the first line
+     rather than being centred against a three-line IRI. */
   .term-wrap {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 0.2rem;
+    max-width: 100%;
+    min-width: 0;
   }
 
   /* The copy button used to be opacity:0 until the term was hovered, which in a
@@ -332,7 +337,11 @@
 
   .rdf-term {
     font-size: 0.875rem;
-    word-break: break-word;
+    /* An IRI has no spaces to break at, so `break-word` — which only breaks a
+       word that would not fit on a line of its own — leaves it overflowing.
+       `anywhere` breaks it where the box ends, which is the point. */
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
 
   .clickable {

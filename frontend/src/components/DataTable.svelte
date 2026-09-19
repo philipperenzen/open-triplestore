@@ -284,17 +284,28 @@
     padding: 0.5rem 0.75rem; border-bottom: 2px solid #e2e8f0;
     position: sticky; top: 0; z-index: 1; text-align: left; white-space: nowrap;
   }
+  /* A term is an identifier, and half of one is not a shorter identifier — it
+     is the wrong one. So nothing here is trimmed: a term too wide for its
+     column wraps onto another line inside it. The column widths stay (the
+     table is `table-layout: fixed`, so they are what keeps four columns on
+     screen without a horizontal scrollbar); it is the clipping that goes.
+     `anywhere` rather than `break-word` because an IRI has no spaces to break
+     at, and a row of terms is read top-aligned once they are several lines. */
   td {
     padding: 0.4rem 0.75rem; border-bottom: 1px solid #f0f0f0;
-    vertical-align: middle; max-width: 280px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    vertical-align: top; max-width: 280px;
+    overflow: visible; text-overflow: clip;
+    white-space: normal; overflow-wrap: anywhere;
   }
   .triple-row:hover td { background: #f8faff; }
 
-  /* A row of [term | copy], so the copy button keeps its place at the end of the
-     cell instead of being pushed past the `overflow: hidden` edge by a long term. */
-  .cell { display: flex; align-items: center; gap: 0.3rem; min-width: 0; }
-  .cell-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* A row of [term | copy]: the copy button keeps its place at the end of the
+     cell, and stays on the first line when the term beside it wraps. */
+  .cell { display: flex; align-items: flex-start; gap: 0.3rem; min-width: 0; }
+  .cell-body {
+    flex: 1 1 auto; min-width: 0;
+    overflow: visible; text-overflow: clip; overflow-wrap: anywhere;
+  }
 
   /* Quiet but present, in all four columns: the copy affordance used to be
      invisible until hover, which is why it was reported as missing. */
@@ -317,12 +328,18 @@
   .actions-col-header { width: 30px; }
   .actions-col { width: 30px; padding: 0; text-align: center; }
 
+  /* The predicate chip is a chip around a term, so it wraps with it rather
+     than cutting it: a chip reading `dcat:byteSi…` names nothing. */
   .predicate {
     font-size: 0.78rem; font-weight: 600; padding: 1px 6px;
-    border-radius: 4px; white-space: nowrap; display: inline-block;
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+    border-radius: 4px; white-space: normal; display: inline-block;
+    max-width: 100%; overflow: visible; text-overflow: clip;
+    overflow-wrap: anywhere;
   }
-  .graph-tag { font-size: 0.75rem; color: #888; background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-family: monospace; }
+  .graph-tag {
+    font-size: 0.75rem; color: #888; background: #f0f0f0; padding: 1px 5px;
+    border-radius: 3px; font-family: monospace; overflow-wrap: anywhere;
+  }
   .graph-default { font-size: 0.75rem; color: #bbb; font-style: italic; }
 
   .row-action {

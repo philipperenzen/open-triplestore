@@ -703,6 +703,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **Terms, names and IRIs were cut off rather than shown.** Measured on the
+  seeded demo, one screen of the triple browser had **110 elements whose text
+  did not fit the box drawn for it** — a cell 31px wide holding an IRI that
+  needed 280, predicate chips 12px wide needing 105 — because `td` carried
+  `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`. Half an
+  IRI is not a shorter IRI, it is the wrong one, so nothing is trimmed now: a
+  term too wide for its column wraps inside it, the column widths stay (which
+  is what keeps four columns on screen without a horizontal scrollbar), and
+  the copy control stays on the first line beside it. The same goes for the
+  names and owner chips in the validation list and the file browser's dataset
+  cards. Descriptions are the one exception and are marked as such: they are
+  prose rather than identifiers, run past a thousand characters on the demo,
+  and are clamped to two lines with the whole text on the dataset's own page.
+  jsdom has no layout, so the regression tests measure real boxes in a real
+  browser — including the wrong fix, which is to hand the overflow to the
+  document and give the page a horizontal scrollbar.
 - **Every dataset name in the SHACL validation list rendered at zero width.**
   Measured 0.0px against a `scrollWidth` of 138px: the text in the DOM and
   nothing on screen, on every row. `overflow: hidden` replaces a flex item's
