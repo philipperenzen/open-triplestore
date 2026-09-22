@@ -688,3 +688,46 @@ async fn the_gates_default_until_configured_and_are_served_as_a_graph() {
         "{ttl}"
     );
 }
+
+#[tokio::test]
+async fn the_mapping_list_filters_by_datasource_in_either_spelling() {
+    // The Studio asks with the IRI, a script with the id. Both must find the
+    // mapping; the IRI form found nothing, so the workspace listed none.
+    sources_dir();
+    let (state, token) = admin_state();
+    let app = test_app(state);
+    let db = fresh_sqlite("listed", false);
+    register_source(&app, &token, "listed", &db).await;
+    put_turtle(&app, &token, SHAPES_GRAPH, SHAPES).await;
+    register_mapping(
+        &app,
+        &token,
+        "listed-map",
+        "listed",
+        &mapping_for("listed", "xsd:decimal"),
+    )
+    .await;
+
+    for query in ["listed", "urn:source:listed", "urn%3Asource%3Alisted"] {
+        let (st, list, txt) = req(
+            &app,
+            Method::GET,
+            &format!("/api/mappings?source={query}"),
+            &token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{txt}");
+        assert_eq!(list.as_array().unwrap().len(), 1, "?source={query}: {txt}");
+        assert_eq!(list[0]["id"], "listed-map", "{txt}");
+    }
+    let (_, other, _) = req(
+        &app,
+        Method::GET,
+        "/api/mappings?source=urn:source:other",
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert!(other.as_array().unwrap().is_empty());
+}

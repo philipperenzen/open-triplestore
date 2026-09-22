@@ -115,9 +115,19 @@ pub fn load(store: &TripleStore, id: &str, version: u32) -> Result<RmlMapping, M
 }
 
 /// A stored version as Turtle, for the API and the Studio editor.
-pub fn turtle(store: &TripleStore, id: &str, version: u32) -> Option<String> {
+///
+/// `resolve` declares a prefix for each namespace the document uses — the
+/// deployment's registry, for a document a person edits; an editor over
+/// `<http://www.w3.org/ns/r2rml#predicateObjectMap>` in full is not one
+/// anyone writes in.
+pub fn turtle<F>(store: &TripleStore, id: &str, version: u32, resolve: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<(String, String)>,
+{
     let graph = mapping_version_iri(id, version);
-    let bytes = store.dump(RdfFormat::Turtle, Some(&graph)).ok()?;
+    let bytes = store
+        .dump_prefixed(RdfFormat::Turtle, Some(&graph), resolve)
+        .ok()?;
     if bytes.is_empty() {
         return None;
     }
@@ -224,10 +234,10 @@ mod tests {
         let loaded = load(&store, "m", 1).expect("loads");
         assert_eq!(loaded.triples_maps.len(), 1);
         assert_eq!(loaded.datasources(), vec!["urn:source:legacy"]);
-        let ttl = turtle(&store, "m", 1).expect("serialises");
+        let ttl = turtle(&store, "m", 1, |_| None).expect("serialises");
         assert!(ttl.contains("urn:source:legacy"), "{ttl}");
         assert_eq!(
-            turtle(&store, "m", 2),
+            turtle(&store, "m", 2, |_| None),
             None,
             "an unwritten version is absent"
         );
@@ -239,9 +249,15 @@ mod tests {
         store_version(&store, "m", 1, &mapping_for("urn:source:legacy")).unwrap();
         let v2 = mapping_for("urn:source:legacy").replace("ex:p", "ex:renamed");
         store_version(&store, "m", 2, &v2).unwrap();
-        assert!(turtle(&store, "m", 1).unwrap().contains("example.org/p"));
-        assert!(turtle(&store, "m", 2).unwrap().contains("renamed"));
-        assert!(!turtle(&store, "m", 2).unwrap().contains("example.org/p>"));
+        assert!(turtle(&store, "m", 1, |_| None)
+            .unwrap()
+            .contains("example.org/p"));
+        assert!(turtle(&store, "m", 2, |_| None)
+            .unwrap()
+            .contains("renamed"));
+        assert!(!turtle(&store, "m", 2, |_| None)
+            .unwrap()
+            .contains("example.org/p>"));
     }
 
     #[test]

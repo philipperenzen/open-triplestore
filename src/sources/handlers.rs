@@ -394,13 +394,20 @@ pub struct MappingListParams {
     pub source: Option<String>,
 }
 
-/// `GET /api/mappings`
+/// `GET /api/mappings` — `?source=` takes the datasource id or its IRI.
 pub async fn list_mappings(
     State(state): State<AppState>,
     Query(params): Query<MappingListParams>,
 ) -> Json<Vec<MappingResponse>> {
+    // The Studio sends the IRI (`urn:source:<id>`), a script the bare id;
+    // the registry filters by id, so either spelling has to reach it as one.
+    let source = params
+        .source
+        .as_deref()
+        .map(|s| s.trim().trim_start_matches("urn:source:").to_string())
+        .filter(|s| !s.is_empty());
     Json(
-        registry::list_mappings(&state.store, params.source.as_deref())
+        registry::list_mappings(&state.store, source.as_deref())
             .iter()
             .map(|m| mapping_response(&state, m))
             .collect(),
@@ -625,8 +632,10 @@ pub async fn get_mapping_rml(
             mapping.version
         )));
     }
-    let turtle = mappings::turtle(&state.store, &id, version)
-        .ok_or_else(|| not_found("mapping version", &format!("{id} v{version}")))?;
+    let turtle = mappings::turtle(&state.store, &id, version, |ns| {
+        state.prefix_registry.declaration_for(ns)
+    })
+    .ok_or_else(|| not_found("mapping version", &format!("{id} v{version}")))?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], turtle).into_response())
 }
 
