@@ -603,20 +603,27 @@ pub fn profile_turtle(store: &TripleStore, source_id: &str, version: u32) -> Str
         pfx = prefixes(),
     );
 
-    let ds = super::model::DS;
-    let mut out = format!(
-        "@prefix csvw: <{CSVW}> .\n@prefix void: <{VOID}> .\n@prefix {PROF_LABEL}: <{PROF}> .\n\
-         @prefix prov: <{PROV}> .\n@prefix dct:  <{DCT}> .\n@prefix ds:   <{ds}> .\n\n"
-    );
-    if let Ok(QueryResults::Graph(triples)) = store.query(&query) {
-        for triple in triples.flatten() {
-            // `Triple`'s Display is N-Triples, which is a subset of Turtle.
-            out.push_str(&triple.to_string());
-            out.push('\n');
-        }
-    }
-    out
+    let triples: Vec<oxigraph::model::Triple> = match store.query(&query) {
+        Ok(QueryResults::Graph(triples)) => triples.flatten().collect(),
+        _ => Vec::new(),
+    };
+    // Declared from the profile's own vocabularies, not the deployment's
+    // registry: a profile reads the same everywhere, and its header carries a
+    // line for each namespace the document uses and none for one it does not.
+    super::turtle::turtle_of(&triples, super::turtle::fixed(&PROFILE_PREFIXES))
 }
+
+/// The vocabularies a served profile is written against.
+const PROFILE_PREFIXES: [(&str, &str); 8] = [
+    ("csvw", CSVW),
+    ("void", VOID),
+    (PROF_LABEL, PROF),
+    ("prov", PROV),
+    ("dct", DCT),
+    ("ds", super::model::DS),
+    ("rdf", RDF),
+    ("xsd", XSD),
+];
 
 // ─────────────────────────────── HTTP ───────────────────────────────
 

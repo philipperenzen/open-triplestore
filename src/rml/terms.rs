@@ -18,9 +18,97 @@ use super::model::*;
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// This store's own function vocabulary.
 pub const FN_NS: &str = "https://w3id.org/open-triplestore/fn#";
-/// The only function the engine implements: a normalise-and-look-up over a
-/// declared value map, for SQL enumerations and code lists.
+
+/// The label [`FN_NS`] is documented and rendered under. Not `fn:`, which is
+/// the XPath functions namespace in every prefix list and in SPARQL's own
+/// specification text; a store that rebound it would expand a user's
+/// `fn:concat` to a mapping function.
+pub const FN_LABEL: &str = "otsfn";
+/// A normalise-and-look-up over a declared value map, for SQL enumerations
+/// and code lists.
 pub const FN_MAP_VALUE: &str = "https://w3id.org/open-triplestore/fn#mapValue";
+/// Mint an IRI from a template whose placeholders are `{column}` or
+/// `{column_slug}` — the latter the column's value as an ASCII slug. What the
+/// legacy `{value_slug}` placeholder needs, and the one thing an `rr:template`
+/// cannot say.
+pub const FN_MINT_IRI: &str = "https://w3id.org/open-triplestore/fn#mintIri";
+
+/// A value as an ASCII slug: lower-case letters and digits, runs of anything
+/// else folded to one hyphen, no hyphen at either end. `"Rolling Stock (2024)"`
+/// becomes `rolling-stock-2024`.
+pub fn slug(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut pending = false;
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending && !out.is_empty() {
+                out.push('-');
+            }
+            pending = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending = true;
+        }
+    }
+    out
+}
+
+/// Expand a template whose placeholders may be `{column}` (percent-encoded)
+/// or `{column_slug}` (slugged). A placeholder the row cannot supply yields
+/// `None`, and so no term.
+pub fn expand_slug_template(template: &str, row: &Row) -> Option<String> {
+    let mut result = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    result.push(next);
+                }
+            }
+            '{' => {
+                let mut name = String::new();
+                for inner in chars.by_ref() {
+                    if inner == '}' {
+                        break;
+                    }
+                    name.push(inner);
+                }
+                let piece = match row.get(&name) {
+                    Some(v) => percent_encode(v),
+                    None => {
+                        let base = name.strip_suffix("_slug")?;
+                        let slugged = slug(row.get(base)?);
+                        // A value that slugs to nothing names nothing.
+                        (!slugged.is_empty()).then_some(slugged)?
+                    }
+                };
+                result.push_str(&piece);
+            }
+            _ => result.push(c),
+        }
+    }
+    Some(result)
+}
+
+/// `otsfn:mintIri`: an IRI from `otsfn:template` over the current row.
+fn mint_iri(f: &FunctionMap, row: &Row) -> Result<Option<String>, String> {
+    let template = arg_value(f.first(&format!("{FN_NS}template")), row).ok_or_else(|| {
+        format!("{FN_LABEL}:mintIri needs {FN_LABEL}:template with an absolute IRI template")
+    })?;
+    if !(template.contains("://") || template.starts_with("urn:")) {
+        return Err(format!(
+            "{FN_LABEL}:template '{template}' is not absolute; minting under an undeclared \
+             prefix would put IRIs in a namespace nobody owns"
+        ));
+    }
+    let Some(filled) = expand_slug_template(&template, row) else {
+        return Ok(None);
+    };
+    // An IRI the template cannot make well-formed skips the term, as an
+    // `rr:template` does.
+    Ok(NamedNode::new(&filled).ok().map(|n| n.to_string()))
+}
 
 /// One source row: column name → lexical value. A SQL NULL, an empty CSV cell
 /// and an absent JSON key are all "no key", so a term map over one produces
@@ -229,9 +317,12 @@ pub fn eval_function(
     row: &Row,
     kinds: Option<&Kinds>,
 ) -> Result<Option<String>, String> {
+    if f.function == FN_MINT_IRI {
+        return mint_iri(f, row);
+    }
     if f.function != FN_MAP_VALUE {
         return Err(format!(
-            "unsupported function <{}>; this engine implements <{FN_MAP_VALUE}>",
+            "unsupported function <{}>; this engine implements <{FN_MAP_VALUE}> and <{FN_MINT_IRI}>",
             f.function
         ));
     }
@@ -253,14 +344,15 @@ pub fn eval_function(
             continue;
         };
         let (k, v) = text.split_once('=').ok_or_else(|| {
-            format!("fn:mapping entry '{text}' is not in the form '<value>=<IRI>'")
+            format!("{FN_LABEL}:mapping entry '{text}' is not in the form '<value>=<IRI>'")
         })?;
         table.insert(normalize_value(k, &normalize)?, v.trim().to_string());
     }
 
     if let Some(target) = table.get(&key) {
-        let iri = NamedNode::new(target)
-            .map_err(|_| format!("fn:mapping maps '{key}' to '{target}', which is not an IRI"))?;
+        let iri = NamedNode::new(target).map_err(|_| {
+            format!("{FN_LABEL}:mapping maps '{key}' to '{target}', which is not an IRI")
+        })?;
         return Ok(Some(iri.to_string()));
     }
 
@@ -294,7 +386,9 @@ pub fn eval_function(
                 format!("{expanded}{}", percent_encode(&key))
             };
             let iri = NamedNode::new(&filled).map_err(|_| {
-                format!("fn:unmappedTemplate produced '{filled}', which is not an absolute IRI")
+                format!(
+                    "{FN_LABEL}:unmappedTemplate produced '{filled}', which is not an absolute IRI"
+                )
             })?;
             Ok(Some(iri.to_string()))
         }
@@ -308,19 +402,23 @@ fn unmapped_policy(f: &FunctionMap, row: &Row) -> Result<UnmappedPolicy, String>
         "literal" | "" => Ok(UnmappedPolicy::Literal),
         "omit" | "skip" => Ok(UnmappedPolicy::Omit),
         "template" | "mint" => {
-            let t = arg_value(f.first(&format!("{FN_NS}unmappedTemplate")), row).ok_or(
-                "fn:unmapped 'template' needs fn:unmappedTemplate with an absolute IRI template",
-            )?;
+            let t =
+                arg_value(f.first(&format!("{FN_NS}unmappedTemplate")), row).ok_or_else(|| {
+                    format!(
+                        "{FN_LABEL}:unmapped 'template' needs {FN_LABEL}:unmappedTemplate with \
+                         an absolute IRI template"
+                    )
+                })?;
             if !(t.contains("://") || t.starts_with("urn:")) {
                 return Err(format!(
-                    "fn:unmappedTemplate '{t}' is not absolute; minting under an undeclared \
-                     prefix would put IRIs in a namespace nobody owns"
+                    "{FN_LABEL}:unmappedTemplate '{t}' is not absolute; minting under an \
+                     undeclared prefix would put IRIs in a namespace nobody owns"
                 ));
             }
             Ok(UnmappedPolicy::Template(t))
         }
         other => Err(format!(
-            "unknown fn:unmapped policy '{other}'; expected literal, omit or template"
+            "unknown {FN_LABEL}:unmapped policy '{other}'; expected literal, omit or template"
         )),
     }
 }
@@ -344,8 +442,8 @@ pub fn normalize_value(value: &str, rule: &str) -> Result<String, String> {
         "upper_trim" | "trim_upper" => value.trim().to_uppercase(),
         other => {
             return Err(format!(
-                "unknown fn:normalize rule '{other}'; expected none, trim, lower, upper, \
-                 lower_trim or upper_trim"
+                "unknown {FN_LABEL}:normalize rule '{other}'; expected none, trim, lower, \
+                 upper, lower_trim or upper_trim"
             ))
         }
     })

@@ -122,6 +122,12 @@ pub struct SubjectMap {
     pub term_map: TermMap,
     /// rr:class — rdf:type assertions added to every generated subject
     pub classes: Vec<String>,
+    /// `fnml:functionValue` on the subject map: the subject is computed by a
+    /// declared function rather than by `term_map`, which then holds an
+    /// empty placeholder. A function-valued subject is never pushed down as a
+    /// join parent — the planner cannot project its columns — and resolves
+    /// through the index instead.
+    pub function: Option<FunctionMap>,
 }
 
 /// rr:PredicateObjectMap — maps source rows to predicate-object pairs.

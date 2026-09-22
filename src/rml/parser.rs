@@ -192,7 +192,24 @@ fn parse_subject_map(
     let sm_node = get_objects(store, tm_iri, &format!("{RR}subjectMap"), graph)
         .into_iter()
         .next();
-    let term_map = if let Some(ref sm) = sm_node {
+    // A function-valued subject (`fnml:functionValue` on the subject map):
+    // the term map is an empty placeholder and the function does the work.
+    let function = match &sm_node {
+        Some(sm) => get_objects(store, sm, &format!("{FNML}functionValue"), graph)
+            .into_iter()
+            .next()
+            .map(|fv| parse_function(store, sm, &fv, graph))
+            .transpose()?,
+        None => None,
+    };
+    let term_map = if function.is_some() {
+        TermMap {
+            kind: TermMapKind::Constant(String::new()),
+            term_type: TermType::IRI,
+            datatype: None,
+            language: None,
+        }
+    } else if let Some(ref sm) = sm_node {
         parse_term_map(store, sm, graph, TermType::IRI)?
     } else {
         let subjects = get_objects(store, tm_iri, &format!("{RR}subject"), graph);
@@ -218,7 +235,11 @@ fn parse_subject_map(
     classes.sort();
     classes.dedup();
 
-    Ok(SubjectMap { term_map, classes })
+    Ok(SubjectMap {
+        term_map,
+        classes,
+        function,
+    })
 }
 
 fn parse_pom(
@@ -316,6 +337,17 @@ fn parse_function_map(
     fv: &str,
     graph: Option<&str>,
 ) -> Result<ObjectMap, String> {
+    parse_function(store, om, fv, graph).map(ObjectMap::Function)
+}
+
+/// The function call under `fnml:functionValue` node `fv`, hung off the term
+/// map `om` (an object map or a subject map).
+fn parse_function(
+    store: &TripleStore,
+    om: &str,
+    fv: &str,
+    graph: Option<&str>,
+) -> Result<FunctionMap, String> {
     let mut params: BTreeMap<String, Vec<FunctionArg>> = BTreeMap::new();
     let mut function: Option<String> = None;
 
@@ -366,11 +398,11 @@ fn parse_function_map(
         .into_iter()
         .next();
 
-    Ok(ObjectMap::Function(FunctionMap {
+    Ok(FunctionMap {
         function,
         params,
         datatype,
-    }))
+    })
 }
 
 fn term_type_from_iri(iri: &str, default: TermType) -> TermType {

@@ -14,6 +14,74 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Dry-run: a sample of a mapping, validated, with every violation
+  classified** (`POST /api/sources/{id}/dry-run`). A registered mapping, a
+  version graph, or unregistered RML / YARRRML — what the proposer sends
+  before it writes a proposal — is materialised into a scratch graph
+  `urn:dryrun:<id>` from a few rows per triples map, and the sample is closed
+  under its joins: every row a sampled row references through
+  `rr:parentTriplesMap` is fetched by key and mapped too, so one row of a
+  child table does not fake an `sh:class` violation on every reference. The
+  sample is validated against the shapes named in the request, the mapping's
+  or the model version's, and each violation is classified: one hitting at
+  least `systematicShare` of a type's subjects over at least
+  `systematicMinSubjects` of them is a **mapping defect**, anything sparser a
+  **data issue**. The response carries per-entity Turtle with each entity's
+  violations, the classification, the report and what each triples map
+  contributed. Scratch graphs live for `OTS_DRYRUN_TTL_SECS` (fifteen
+  minutes) and are swept at start-up. See [`docs/sources.md`](docs/sources.md).
+- **The mapping gates as a config graph** (`GET`/`PUT /api/sources/gates`,
+  `urn:config:mapping-gates`): the confidence bands, the datatype-mismatch
+  cap, the ambiguity margin, the enumeration match minimum, the dry-run
+  classifier's two numbers, the drift threshold and the deterministic lexical
+  scorer's weights, with documented defaults until an administrator saves
+  a configuration. `PUT` is a partial update that refuses an unknown field
+  and any value that cannot be applied. The proposer reads them from here.
+- **Drift between two profile versions, and the re-map tickets it opens**
+  (`POST /api/sources/{id}/drift`). Compared against the profile version the
+  mapping was registered or approved against — recorded as `profileVersion`
+  on the mapping — or the previous version: new and removed columns and
+  tables, type changes, code lists whose value distribution moved (KL
+  divergence above the gates' threshold), code lists gained or lost, the
+  structural hash, and a model-version bump when the mapping's model has
+  published a newer version. Anything affected opens **one** re-map ticket
+  per (datasource, mapping) — a model bump lists every table on it rather
+  than opening one per table — and a later check updates that ticket.
+  `GET /api/sources/{id}/tickets`, `GET /api/tickets/{id}`,
+  `POST /api/tickets/{id}/close`.
+- **A one-time converter for the legacy `mapping.sql2rdf.yaml` bundle**
+  (`POST /api/mappings/convert`). Entities, typed literals, `lookup`,
+  `reference` and `enumeration` objects and `nested` maps become standard RML
+  through the same description YARRRML translates into; `{value_slug}` and
+  `{column_slug}` placeholders become the new `otsfn:mintIri` function. The
+  converter's fixture reproduces the legacy transformer's triples byte for
+  byte. Empty cells: this engine emits no term for one, as the legacy
+  transformer did, so the default keeps `rr:tableName`; `emptyAsNull` turns
+  the logical sources into `NULLIF` queries for a mapping that must behave
+  the same under another processor.
+- **`otsfn:mintIri`**, the engine's second function: an IRI from a template
+  whose placeholders are `{column}` or `{column_slug}` — the value as an ASCII
+  slug — on an object map or, new for the engine, on a **subject map**
+  (`fnml:functionValue` on `rr:subjectMap`). A function-valued subject is
+  never pushed down as a join parent; it resolves through the index.
+- **The store's own vocabularies are known to the prefix registry.** `ds:`
+  (datasources), `dsprof:` (source profiles), `otsfn:` (mapping functions) and
+  `ots:` (the validation layer) are seeded into every registry at construction,
+  in the tier a seed bundle's declarations use, so a datasource IRI shortens to
+  `ds:SqlSource` and a CURIE typed against one of these labels expands to the
+  store's namespace rather than to whatever the community snapshot binds the
+  label to. `ds` shadows a defunct DCAT extension on purpose — a platform
+  naming its own namespace outranks a community list, as a bundle does. `fn`
+  and `prof` were *not* claimed: they are the XPath functions and W3C Profiles
+  namespaces everywhere else, which is why the labels are `otsfn:` and
+  `dsprof:`. An administrator's override still outranks all of it.
+- **SHACL Studio in the OpenAPI document.** The shape-graph family
+  (`/api/shacl/shape-graphs…`: content, revisions, restore, clone, import,
+  meta-validation, commits and lifecycle), the shapes catalog, in-place
+  registration, bindings, a dataset's effective shapes, pipelines and their
+  runs, the model context and shape derivation were served without being
+  documented. `GET …/turtle` documents `?format=shaclc`; `PUT …/turtle`
+  documents `?message=`, the revision note the history shows.
 - **An admin page for prefix overrides** (`/admin/prefixes`). Lists what this
   deployment has decided its prefixes mean, adds one, repoints one and removes
   one. While a label is being typed it resolves that label live and says what
@@ -596,6 +664,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   term IRIs and labels before the model can coin one.
 
 ### Changed
+- **Turtle served to people carries a prefix header.** Graph Store reads
+  (`GET /store?graph=`, Turtle and TriG, streamed and label-filtered alike), a
+  dataset's shapes graph, its RML mapping, the RML preview and execute
+  responses and a datasource's profile now declare an `@prefix` line for each
+  namespace the graph actually uses, resolved through the prefix registry,
+  the way SHACL Studio's shape-graph content already did. The line-based
+  formats are unchanged. A profile used to carry a header over a body of full
+  IRIs — a dead header — and now reads as CURIEs.
+- **The mapping-function label is `otsfn:`.** The RML-FNML enumeration
+  function's namespace is unchanged (`https://w3id.org/open-triplestore/fn#`);
+  the label the documentation, the YARRRML translator and the error messages
+  use is `otsfn:` rather than `fn:`, which is the XPath functions namespace in
+  every prefix list. A mapping may still declare any label it likes for the
+  namespace.
+- **A run's SHACL gate report carries the run metrics** (duration, quads read,
+  source) the validation report gained, folded across the shapes graphs the
+  gate evaluates the way the validate route folds them.
 - **The Triple Browser sends its whole scope, remembers it, and offers the
   query behind the view.** A selection mixing datasets with an organisation
   sent only part of itself — and one dataset plus one organisation matched no
@@ -806,6 +891,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The Turtle editor colours an escaped local name as one name.**
+  `ex:shapes\/PersonShape` — what the prefixed serializer writes for a
+  path-style IRI — was tokenised as a name, an operator and a stray word. The
+  tokenizer now reads Turtle's `PN_LOCAL`, backslash escapes and
+  percent-encoding included.
+- **The shapes catalog's prompts and notices are translated.** The name
+  prompts when composing or registering a shape graph, and the notices that
+  followed, were English whatever the interface language.
 - **A Raft member's vote survives a restart.** The vote was kept in memory with
   the log, so a member that restarted could vote a second time in the same
   term. The consequences were bounded and documented — the election timeout

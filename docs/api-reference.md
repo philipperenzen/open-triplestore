@@ -49,7 +49,7 @@ Three facts worth knowing before an instance is exposed:
 | `GET` | `/livez` | **none** | Liveness only; never touches the store. |
 | `GET` | `/sparql` | **none** | Query over the graphs the caller may read — anonymously, the public ones. |
 | `POST` | `/sparql` | **none** | The same query endpoint in the protocol's POST form. A body sent as `application/sparql-update` is a write and needs a **token**. |
-| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph answers anonymously, a private one `401`/`403`. |
+| `GET` | `/store?graph={graph_iri}` | **none** | Graph Store read of one named graph, scoped exactly like the query endpoint: a public graph answers anonymously, a private one `401`/`403`. Turtle and TriG carry an `@prefix` header built from the prefix registry for the namespaces the graph actually uses; the line-based formats write every IRI in full. |
 | `GET` | `/store` | **admin** | A read that names no graph dumps the **default graph**, which no per-graph ACL covers, so it is admin-only — a non-admin token is refused here too, with `401` rather than `403`. |
 | `PUT` | `/store` | **token** | Graph Store Protocol: replace a graph. |
 | `POST` | `/store` | **token** | Graph Store Protocol: merge into a graph. |

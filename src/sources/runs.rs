@@ -518,6 +518,7 @@ fn gate(
         conforms: true,
         results: Vec::new(),
         results_count: 0,
+        metrics: None,
     };
     for shapes in &shape_graphs {
         // A gate that cannot be evaluated must refuse the promotion, not wave
@@ -528,6 +529,11 @@ fn gate(
         combined.conforms &= report.conforms;
         combined.results_count += report.results_count;
         combined.results.extend(report.results);
+        // One shapes graph at a time, folded the way the validate route does.
+        combined.metrics = match (combined.metrics.take(), report.metrics) {
+            (Some(a), Some(b)) => Some(a.merge(b)),
+            (a, b) => a.or(b),
+        };
     }
     Ok(Some(combined))
 }
@@ -705,8 +711,6 @@ fn commit(ctx: RunContext<'_>, source: &SqlSource, run: &RunRecord, what: &str) 
 /// is how a client follows a run's provenance — the same arrangement
 /// `GET /api/datasets/:id/provenance` uses for the commit log.
 pub fn provenance_turtle(store: &TripleStore, run: &RunRecord) -> String {
-    use oxigraph::sparql::QueryResults;
-
     let subjects = [
         run_activity_iri(&run.id),
         run.graph.clone(),
@@ -723,20 +727,30 @@ pub fn provenance_turtle(store: &TripleStore, run: &RunRecord) -> String {
         "CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{graph}> {{ VALUES ?s {{ {subjects} }} ?s ?p ?o }} }}",
         graph = SOURCES_GRAPH,
     );
+    prov_turtle(store, &query)
+}
 
-    let mut out = String::from(
-        "@prefix prov: <http://www.w3.org/ns/prov#> .\n\
-         @prefix dct:  <http://purl.org/dc/terms/> .\n\
-         @prefix ds:   <https://w3id.org/open-triplestore/datasource#> .\n\n",
-    );
-    if let Ok(QueryResults::Graph(triples)) = store.query(&query) {
-        for triple in triples.flatten() {
-            // `Triple`'s Display is N-Triples, which is a subset of Turtle.
-            out.push_str(&triple.to_string());
-            out.push('\n');
-        }
-    }
-    out
+/// The vocabularies a served PROV trail is written against.
+const PROV_PREFIXES: [(&str, &str); 6] = [
+    ("prov", "http://www.w3.org/ns/prov#"),
+    ("dct", "http://purl.org/dc/terms/"),
+    ("ds", crate::sources::model::DS),
+    (
+        crate::sources::profile::PROF_LABEL,
+        crate::sources::profile::PROF,
+    ),
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+];
+
+/// Run a CONSTRUCT over the system graph and serialise it as prefixed Turtle.
+fn prov_turtle(store: &TripleStore, construct: &str) -> String {
+    use oxigraph::sparql::QueryResults;
+    let triples: Vec<oxigraph::model::Triple> = match store.query(construct) {
+        Ok(QueryResults::Graph(triples)) => triples.flatten().collect(),
+        _ => Vec::new(),
+    };
+    crate::sources::turtle::turtle_of(&triples, crate::sources::turtle::fixed(&PROV_PREFIXES))
 }
 
 /// A datasource's whole PROV-O trail as Turtle: every run activity and every
@@ -746,8 +760,6 @@ pub fn provenance_turtle(store: &TripleStore, run: &RunRecord) -> String {
 /// both exist: these records live in `urn:system:sources`, which belongs to no
 /// dataset and is therefore outside a caller's SPARQL scope.
 pub fn source_provenance_turtle(store: &TripleStore, source_id: &str) -> String {
-    use oxigraph::sparql::QueryResults;
-
     let source = format!(
         "<{}>",
         crate::store::escape_sparql_iri(&source_iri(source_id))
@@ -762,19 +774,7 @@ pub fn source_provenance_turtle(store: &TripleStore, source_id: &str) -> String 
          }} }}",
         graph = SOURCES_GRAPH,
     );
-
-    let mut out = format!(
-        "@prefix prov: <http://www.w3.org/ns/prov#> .\n\
-         @prefix dct:  <http://purl.org/dc/terms/> .\n\
-         @prefix ds:   <{ds}> .\n\n"
-    );
-    if let Ok(QueryResults::Graph(triples)) = store.query(&query) {
-        for triple in triples.flatten() {
-            out.push_str(&triple.to_string());
-            out.push('\n');
-        }
-    }
-    out
+    prov_turtle(store, &query)
 }
 
 /// Operational counters for the metrics endpoint.
@@ -886,19 +886,23 @@ mod tests {
         };
         registry::put_run(&store, &run).unwrap();
         let ttl = provenance_turtle(&store, &run);
+        // Prefixed Turtle: the PROV vocabulary reads as CURIEs, the store's
+        // own `urn:` identifiers stay whole.
         for expected in [
+            "@prefix prov: <http://www.w3.org/ns/prov#>",
             "<urn:run:r1:activity>",
-            "http://www.w3.org/ns/prov#Activity",
-            "http://www.w3.org/ns/prov#used",
+            "prov:Activity",
+            "prov:used",
             "<urn:source:legacy>",
             "<urn:mapping:m:version:2>",
-            "http://www.w3.org/ns/prov#generated",
+            "prov:generated",
             "<urn:run:r1>",
             "http://x/users/adm",
         ] {
             assert!(ttl.contains(expected), "missing {expected} in:\n{ttl}");
         }
-        // A run nobody recorded produces the prefixes and nothing else.
+        assert!(!ttl.contains("prov#Activity>"), "written in full: {ttl}");
+        // A run nobody recorded produces nothing at all.
         let empty = provenance_turtle(
             &store,
             &RunRecord {
@@ -907,7 +911,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(!empty.contains("prov#Activity"), "{empty}");
+        assert!(empty.is_empty(), "{empty}");
     }
 
     #[test]
@@ -942,16 +946,16 @@ mod tests {
         .unwrap();
 
         let ttl = source_provenance_turtle(&store, "legacy");
-        assert!(ttl.contains("datasource#Run"), "{ttl}");
-        assert!(ttl.contains("datasource#Rollback"), "{ttl}");
+        assert!(ttl.contains("ds:Run"), "{ttl}");
+        assert!(ttl.contains("ds:Rollback"), "{ttl}");
         assert!(ttl.contains("<urn:run:r1:activity>"), "{ttl}");
         // The generated graph's own entity triples come along.
         assert!(
-            ttl.contains("<urn:run:r1>") && ttl.contains("prov#wasGeneratedBy"),
+            ttl.contains("<urn:run:r1>") && ttl.contains("prov:wasGeneratedBy"),
             "{ttl}"
         );
         // Another source's trail is not mixed in.
-        assert!(!source_provenance_turtle(&store, "other").contains("datasource#Run"));
+        assert!(!source_provenance_turtle(&store, "other").contains("ds:Run"));
     }
 
     #[test]
@@ -990,6 +994,7 @@ mod tests {
                 shapes_graph: None,
                 model: None,
                 model_version: None,
+                profile_version: None,
                 created_by: None,
                 created_at: registry::now(),
                 updated_at: registry::now(),

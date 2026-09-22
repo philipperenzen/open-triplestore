@@ -226,6 +226,7 @@ fn translate_mapping(
         query: source.query,
         subject,
         subject_term_type: subject_type.unwrap_or(TermTypeOut::Iri),
+        subject_mint: false,
         classes,
         poms,
     })

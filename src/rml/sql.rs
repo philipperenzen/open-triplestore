@@ -81,7 +81,7 @@ pub fn row_triples(
         .as_ref()
         .and_then(|gm| super::terms::eval_iri(gm, row, kinds, bnodes, row_bnodes));
 
-    let Some(subject) = eval_term(&tm.subject_map.term_map, row, kinds, bnodes, row_bnodes) else {
+    let Some(subject) = eval_subject(&tm.subject_map, row, kinds, bnodes, row_bnodes)? else {
         // No subject — R2RML says the row generates nothing at all.
         return Ok(out);
     };
@@ -125,9 +125,24 @@ pub fn row_triples(
     Ok(out)
 }
 
+/// The subject a subject map generates for a row: its function when it has
+/// one, its term map otherwise. `Ok(None)` is a row that generates nothing.
+pub(crate) fn eval_subject(
+    sm: &SubjectMap,
+    row: &Row,
+    kinds: Option<&Kinds>,
+    bnodes: &mut BlankNodes,
+    row_bnodes: &mut HashMap<String, String>,
+) -> Result<Option<String>, String> {
+    match &sm.function {
+        Some(f) => eval_function(f, row, kinds),
+        None => Ok(eval_term(&sm.term_map, row, kinds, bnodes, row_bnodes)),
+    }
+}
+
 /// Split a connector row into the lexical values and the per-column generic
 /// types the natural-datatype rule needs.
-fn split_row(src: &SourceRow, row: &mut Row, kinds: &mut Kinds) {
+pub(crate) fn split_row(src: &SourceRow, row: &mut Row, kinds: &mut Kinds) {
     row.clear();
     kinds.clear();
     for (name, value) in src {
@@ -138,11 +153,11 @@ fn split_row(src: &SourceRow, row: &mut Row, kinds: &mut Kinds) {
 
 /// The join key for one row: the values of `columns`, in order. `None` when
 /// any of them is NULL — SQL join semantics, so a NULL never matches.
-fn join_key(row: &Row, columns: &[String]) -> Option<Vec<String>> {
+pub(crate) fn join_key(row: &Row, columns: &[String]) -> Option<Vec<String>> {
     columns.iter().map(|c| row.get(c).cloned()).collect()
 }
 
-type ParentIndex = HashMap<Vec<String>, Vec<String>>;
+pub(crate) type ParentIndex = HashMap<Vec<String>, Vec<String>>;
 
 /// Columns a pushed-down join projects from the parent carry this prefix, and
 /// the child subquery carries it as its alias. Reserved: a source column whose
@@ -152,7 +167,7 @@ const PUSHDOWN_PREFIX: &str = "__ots_j";
 /// How one `rr:parentTriplesMap` reference is resolved. See the module docs for
 /// why the choice is not free.
 #[derive(Debug, Clone)]
-enum JoinStrategy {
+pub(crate) enum JoinStrategy {
     /// Resolved from columns carried on the child row, under `alias`.
     Pushdown {
         alias: String,
@@ -210,12 +225,12 @@ impl RowFilter {
 
 /// One triples map's execution plan: the SQL to stream, and how each of its
 /// references resolves.
-struct TmPlan {
-    sql: String,
-    strategies: HashMap<RefKey, JoinStrategy>,
+pub(crate) struct TmPlan {
+    pub(crate) sql: String,
+    pub(crate) strategies: HashMap<RefKey, JoinStrategy>,
 }
 
-type RefKey = (String, Vec<(String, String)>);
+pub(crate) type RefKey = (String, Vec<(String, String)>);
 
 /// Whether a reference can be pushed into the child's query.
 ///
@@ -234,7 +249,10 @@ fn can_push_down(
     joins: &[JoinCondition],
     unique_keys: &HashMap<String, Vec<Vec<String>>>,
 ) -> bool {
-    if joins.is_empty() || parent.subject_map.term_map.term_type != TermType::IRI {
+    if joins.is_empty()
+        || parent.subject_map.function.is_some()
+        || parent.subject_map.term_map.term_type != TermType::IRI
+    {
         return false;
     }
     let Some(table) = parent.logical_source.table_name.as_deref() else {
@@ -252,7 +270,7 @@ fn can_push_down(
 
 /// Build one triples map's plan: which references push down, and the SQL that
 /// carries them.
-fn plan_triples_map(
+pub(crate) fn plan_triples_map(
     tm: &TriplesMap,
     mapping: &RmlMapping,
     unique_keys: &HashMap<String, Vec<Vec<String>>>,
@@ -358,7 +376,7 @@ const WATERMARK_ALIAS: &str = "__ots_w";
 /// Rebuild the parent's row from the columns a pushed-down join carried along,
 /// then evaluate the parent's subject from it. `None` when no parent row
 /// matched, which is why the join columns are always projected.
-fn pushdown_subject(
+pub(crate) fn pushdown_subject(
     parent: &TriplesMap,
     alias: &str,
     witness: &[String],
@@ -411,14 +429,19 @@ fn build_parent_index(
                 continue;
             };
             let mut row_bnodes = HashMap::new();
-            let Some(subject) = eval_term(
-                &parent.subject_map.term_map,
+            let subject = match eval_subject(
+                &parent.subject_map,
                 &row,
                 Some(&kinds),
                 bnodes,
                 &mut row_bnodes,
-            ) else {
-                continue;
+            ) {
+                Ok(Some(s)) => s,
+                Ok(None) => continue,
+                Err(e) => {
+                    overflow = Some(e);
+                    return Err(SourceError::Query("mapping error".into()));
+                }
             };
             if index.len() >= cap && !index.contains_key(&key) {
                 overflow = Some(format!(
@@ -447,7 +470,7 @@ fn build_parent_index(
 /// Every parent table a reference joins to, with its unique keys — the input
 /// the planner needs. Costs one cheap catalogue lookup per distinct parent
 /// table, and nothing at all for a mapping with no joins.
-fn collect_unique_keys(
+pub(crate) fn collect_unique_keys(
     mapping: &RmlMapping,
     conn: &mut dyn SourceConnection,
 ) -> Result<HashMap<String, Vec<Vec<String>>>, String> {
@@ -652,7 +675,7 @@ pub fn execute_relational_filtered(
     Ok(outcome)
 }
 
-fn index_key(r: &RefObjectMap) -> RefKey {
+pub(crate) fn index_key(r: &RefObjectMap) -> RefKey {
     (
         r.parent_triples_map.clone(),
         r.joins
@@ -664,7 +687,7 @@ fn index_key(r: &RefObjectMap) -> RefKey {
 
 /// Blank-node labels must be valid N-Triples names, and a run id is a UUID —
 /// keep only what is safe rather than trusting it.
-fn sanitise_label(run_id: &str) -> String {
+pub(crate) fn sanitise_label(run_id: &str) -> String {
     run_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -672,7 +695,11 @@ fn sanitise_label(run_id: &str) -> String {
         .collect()
 }
 
-fn flush(store: &TripleStore, buffer: &mut String, target_graph: &str) -> Result<(), String> {
+pub(crate) fn flush(
+    store: &TripleStore,
+    buffer: &mut String,
+    target_graph: &str,
+) -> Result<(), String> {
     if buffer.is_empty() {
         return Ok(());
     }

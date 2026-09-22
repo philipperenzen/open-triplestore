@@ -20,7 +20,11 @@
 //! live under `OTS_SOURCES_DIR`.
 
 pub mod connector;
+pub mod drift;
+pub mod dryrun;
+pub mod gates;
 pub mod handlers;
+pub mod legacy;
 pub mod mappings;
 pub mod model;
 pub mod profile;
@@ -28,6 +32,7 @@ pub mod registry;
 pub mod routes;
 pub mod runs;
 pub mod sqlite;
+pub mod turtle;
 pub mod yarrrml;
 
 use std::path::{Path, PathBuf};

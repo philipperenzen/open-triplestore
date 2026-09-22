@@ -62,5 +62,9 @@ pub fn source_routes() -> Router<AppState> {
         // Each feature owns its own router, so adding one is a change to that
         // module rather than to this list.
         .merge(super::profile::routes())
+        .merge(super::gates::routes())
+        .merge(super::dryrun::routes())
+        .merge(super::legacy::routes())
+        .merge(super::drift::routes())
         .merge(crate::data_models::profile::routes())
 }

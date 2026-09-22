@@ -1343,6 +1343,7 @@ async fn graph_store_get(
     // Stream the dump straight through the response body so multi-MB graphs
     // don't get buffered in a `Vec<u8>` before the first byte is sent.
     let store = state.store.clone();
+    let registry = state.prefix_registry.clone();
     let graph_iri = params.graph_iri().map(|s| s.to_string());
     let rdf_format = format.to_rdf_format();
     let (chunk_tx, chunk_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
@@ -1353,8 +1354,14 @@ async fn graph_store_get(
         // Signal "ok to send headers" before producing data so the caller
         // can surface an error as a real 5xx if the dump cannot be initiated.
         let _ = start_tx.send(Ok(()));
+        // Turtle and TriG get an `@prefix` header for the namespaces the graph
+        // uses — the document a person opens reads as CURIEs, not as a wall of
+        // full IRIs. The line-based formats fall straight through to the plain
+        // dump; they have no header to fill.
         let result = store
-            .dump_to_writer(&mut writer, rdf_format, graph_iri.as_deref())
+            .dump_prefixed_to_writer(&mut writer, rdf_format, graph_iri.as_deref(), |ns| {
+                registry.declaration_for(ns)
+            })
             .map_err(|e| e.to_string())
             // Emit the tail of the buffered stream, else the dump is truncated.
             .and_then(|_| writer.finish().map_err(|e| e.to_string()));
@@ -1449,7 +1456,11 @@ fn apply_triple_label_filter(
             Some(graph_iri),
         )?;
     }
-    let result = out_store.dump(rdf_fmt, Some(graph_iri))?;
+    // The same prefix header the unfiltered stream gets: a reader with fewer
+    // rights still gets a readable document.
+    let result = out_store.dump_prefixed(rdf_fmt, Some(graph_iri), |ns| {
+        state.prefix_registry.declaration_for(ns)
+    })?;
     Ok(result)
 }
 
@@ -8098,12 +8109,15 @@ pub async fn get_shapes(
     }
 
     // Merge the Turtle of every resolved shapes graph (Turtle allows repeated
-    // @prefix directives, so concatenation stays valid).
+    // @prefix directives, so concatenation stays valid — each graph's header
+    // binds its labels for the statements that follow it).
     let mut data: Vec<u8> = Vec::new();
     for iri in &shapes_graphs {
         let ttl = state
             .store
-            .graph_store_get(Some(iri), oxigraph::io::RdfFormat::Turtle)
+            .dump_prefixed(oxigraph::io::RdfFormat::Turtle, Some(iri), |ns| {
+                state.prefix_registry.declaration_for(ns)
+            })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if !data.is_empty() {
             data.extend_from_slice(b"\n");
@@ -8391,9 +8405,14 @@ pub async fn get_rml_mapping(
     }
 
     let mapping_graph = format!("urn:dataset:{}:rml-mappings", dataset_id);
+    // A mapping is read and edited by people: `rr:` and `rml:` beat their IRIs.
     let data = state
         .store
-        .graph_store_get(Some(&mapping_graph), oxigraph::io::RdfFormat::Turtle)
+        .dump_prefixed(
+            oxigraph::io::RdfFormat::Turtle,
+            Some(&mapping_graph),
+            |ns| state.prefix_registry.declaration_for(ns),
+        )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if data.is_empty() {
@@ -8536,7 +8555,9 @@ pub async fn execute_rml_mapping(
         let count = crate::rml::execute(&mapping, &source_data, &temp, Some(&target_graph))
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let turtle_bytes = temp
-            .dump(oxigraph::io::RdfFormat::Turtle, Some(&target_graph))
+            .dump_prefixed(oxigraph::io::RdfFormat::Turtle, Some(&target_graph), |ns| {
+                state.prefix_registry.declaration_for(ns)
+            })
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let turtle = String::from_utf8(turtle_bytes).unwrap_or_default();
         return Ok(Json(serde_json::json!({
@@ -8587,7 +8608,10 @@ pub async fn execute_rml_mapping(
 /// POST /api/rml/preview — dry-run RML mapping without persisting
 ///
 /// Multipart: `mapping` (Turtle) + named source file parts.
-pub async fn rml_preview(mut multipart: Multipart) -> Result<Response, (StatusCode, String)> {
+pub async fn rml_preview(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Response, (StatusCode, String)> {
     let mut mapping_turtle: Option<String> = None;
     let mut source_data: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -8629,7 +8653,9 @@ pub async fn rml_preview(mut multipart: Multipart) -> Result<Response, (StatusCo
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let turtle_bytes = temp
-        .dump(oxigraph::io::RdfFormat::Turtle, None)
+        .dump_prefixed(oxigraph::io::RdfFormat::Turtle, None, |ns| {
+            state.prefix_registry.declaration_for(ns)
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({

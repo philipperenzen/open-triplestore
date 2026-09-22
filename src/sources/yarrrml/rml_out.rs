@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::rml::terms::FN_LABEL;
 use crate::store::escape_sparql_literal;
 
 pub const RR: &str = "http://www.w3.org/ns/r2rml#";
@@ -51,6 +52,9 @@ pub enum ObjectOut {
         /// `(child column, parent column)`.
         joins: Vec<(String, String)>,
     },
+    /// An IRI minted from a template with `{column_slug}` placeholders — the
+    /// `otsfn:mintIri` function, since an `rr:template` cannot slug.
+    MintIri { template: String },
     /// A value map over an enumeration column.
     Enumeration {
         column: String,
@@ -88,6 +92,9 @@ pub struct TriplesMapOut {
     pub query: Option<String>,
     pub subject: String,
     pub subject_term_type: TermTypeOut,
+    /// The subject template carries `{column_slug}` placeholders, so it is
+    /// rendered as an `otsfn:mintIri` function rather than an `rr:template`.
+    pub subject_mint: bool,
     pub classes: Vec<String>,
     pub poms: Vec<PomOut>,
 }
@@ -205,7 +212,7 @@ pub fn render(maps: &[TriplesMapOut]) -> Result<String, String> {
     out.push_str(&format!("@prefix rml:  <{RML}> .\n"));
     out.push_str(&format!("@prefix fnml: <{FNML}> .\n"));
     out.push_str(&format!("@prefix fno:  <{FNO}> .\n"));
-    out.push_str(&format!("@prefix fn:   <{FN}> .\n\n"));
+    out.push_str(&format!("@prefix {FN_LABEL}: <{FN}> .\n\n"));
 
     for m in maps {
         if m.table.is_none() && m.query.is_none() {
@@ -226,6 +233,12 @@ pub fn render(maps: &[TriplesMapOut]) -> Result<String, String> {
 
         out.push_str("  rr:subjectMap [\n");
         match m.subject_term_type {
+            _ if m.subject_mint => {
+                out.push_str(&format!(
+                    "    fnml:functionValue [\n      rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object {FN_LABEL}:mintIri ] ;\n      rr:predicateObjectMap [ rr:predicate {FN_LABEL}:template ; rr:object {} ]\n    ] ;\n",
+                    lit(&m.subject)
+                ));
+            }
             TermTypeOut::BlankNode => {
                 out.push_str(&format!("    rr:template {} ;\n", lit(&m.subject)));
                 out.push_str("    rr:termType rr:BlankNode ;\n");
@@ -320,6 +333,12 @@ fn render_object(out: &mut String, object: &ObjectOut) -> Result<(), String> {
             }
             out.push_str(" ]\n");
         }
+        ObjectOut::MintIri { template } => {
+            out.push_str(&format!(
+                "    rr:objectMap [ fnml:functionValue [\n      rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object {FN_LABEL}:mintIri ] ;\n      rr:predicateObjectMap [ rr:predicate {FN_LABEL}:template ; rr:object {} ]\n    ] ]\n",
+                lit(template)
+            ));
+        }
         ObjectOut::Enumeration {
             column,
             normalize,
@@ -332,18 +351,20 @@ fn render_object(out: &mut String, object: &ObjectOut) -> Result<(), String> {
                 out.push_str(&format!("      rr:datatype {} ;\n", iri(d)?));
             }
             out.push_str("      fnml:functionValue [\n");
-            out.push_str("        rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object fn:mapValue ] ;\n");
             out.push_str(&format!(
-                "        rr:predicateObjectMap [ rr:predicate fn:value ; rr:objectMap [ rr:column {} ] ] ;\n",
+                "        rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object {FN_LABEL}:mapValue ] ;\n"
+            ));
+            out.push_str(&format!(
+                "        rr:predicateObjectMap [ rr:predicate {FN_LABEL}:value ; rr:objectMap [ rr:column {} ] ] ;\n",
                 lit(column)
             ));
             out.push_str(&format!(
-                "        rr:predicateObjectMap [ rr:predicate fn:normalize ; rr:object {} ] ;\n",
+                "        rr:predicateObjectMap [ rr:predicate {FN_LABEL}:normalize ; rr:object {} ] ;\n",
                 lit(normalize)
             ));
             for (value, target) in entries {
                 out.push_str(&format!(
-                    "        rr:predicateObjectMap [ rr:predicate fn:mapping ; rr:object {} ] ;\n",
+                    "        rr:predicateObjectMap [ rr:predicate {FN_LABEL}:mapping ; rr:object {} ] ;\n",
                     lit(&format!("{value}={target}"))
                 ));
             }
@@ -353,12 +374,12 @@ fn render_object(out: &mut String, object: &ObjectOut) -> Result<(), String> {
                 UnmappedOut::Template(_) => "template",
             };
             out.push_str(&format!(
-                "        rr:predicateObjectMap [ rr:predicate fn:unmapped ; rr:object {} ]",
+                "        rr:predicateObjectMap [ rr:predicate {FN_LABEL}:unmapped ; rr:object {} ]",
                 lit(policy)
             ));
             if let UnmappedOut::Template(t) = unmapped {
                 out.push_str(&format!(
-                    " ;\n        rr:predicateObjectMap [ rr:predicate fn:unmappedTemplate ; rr:object {} ]",
+                    " ;\n        rr:predicateObjectMap [ rr:predicate {FN_LABEL}:unmappedTemplate ; rr:object {} ]",
                     lit(t)
                 ));
             }
@@ -469,6 +490,7 @@ mod tests {
             query: None,
             subject: "http://example.org/p{product_id}".into(),
             subject_term_type: TermTypeOut::Iri,
+            subject_mint: false,
             classes: vec!["http://example.org/Product".into()],
             poms: vec![
                 PomOut {

@@ -10,6 +10,15 @@ import { SHACL_CONSTRAINT_CARDS } from './shaclConstraints.js';
 
 const NS: Record<string, string> = NAMESPACES;
 
+/**
+ * The local part of a prefixed name, as Turtle's PN_LOCAL has it: name
+ * characters, `:`, percent-encoded bytes and backslash escapes. The store's
+ * prefixed serializer writes a path-style IRI as `ex:shapes\/PersonShape`, and
+ * a tokenizer that stopped at the backslash split one name into a namespace,
+ * an operator and a stray word.
+ */
+const PN_LOCAL = /(?:[A-Za-z0-9_:\-.À-￿]|%[0-9A-Fa-f]{2}|\\[_~.\-!$&'()*+,;=/?#@%])*/;
+
 // Turtle/N3 StreamLanguage tokenizer
 export const turtleLanguage = StreamLanguage.define({
   name: 'turtle',
@@ -108,7 +117,7 @@ export const turtleLanguage = StreamLanguage.define({
     if (stream.match(/[a-zA-Z_][a-zA-Z0-9_-]*/)) {
       if (stream.peek() === ':') {
         stream.eat(':');
-        stream.match(/[a-zA-Z0-9_\-.]*/);
+        stream.match(PN_LOCAL);
         return 'namespace';
       }
       return 'variableName';
@@ -116,7 +125,7 @@ export const turtleLanguage = StreamLanguage.define({
 
     // Bare colon
     if (stream.eat(':')) {
-      stream.match(/[a-zA-Z0-9_\-.]*/);
+      stream.match(PN_LOCAL);
       return 'namespace';
     }
 

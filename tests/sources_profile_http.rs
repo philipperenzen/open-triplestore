@@ -187,14 +187,42 @@ async fn read_profile(app: &Router, token: &str, id: &str, version: Option<u32>)
     txt
 }
 
-/// Objects of `<subject> <predicate>` in the served N-Triples-shaped Turtle.
+/// A served Turtle document as N-Triples, so an assertion about a statement
+/// does not depend on which prefixes the serializer declared.
+fn as_ntriples(turtle: &str) -> String {
+    let store = open_triplestore::store::TripleStore::in_memory().unwrap();
+    store
+        .load_str(turtle, oxigraph::io::RdfFormat::Turtle, None)
+        .unwrap_or_else(|e| panic!("not valid Turtle: {e}\n{turtle}"));
+    String::from_utf8(store.dump(oxigraph::io::RdfFormat::NTriples, None).unwrap()).unwrap()
+}
+
+/// Objects of `<subject> <predicate>` in the served Turtle, as N-Triples terms.
+///
+/// Parsed rather than scanned: the document is prefixed Turtle, and how the
+/// serializer lays it out is not what these tests are about.
 fn objects(turtle: &str, subject: &str, predicate: &str) -> Vec<String> {
-    let head = format!("<{subject}> <{predicate}> ");
-    turtle
-        .lines()
-        .filter_map(|l| l.strip_prefix(head.as_str()))
-        .map(|rest| rest.trim().trim_end_matches('.').trim().to_string())
-        .collect()
+    use oxigraph::sparql::QueryResults;
+    let store = open_triplestore::store::TripleStore::in_memory().unwrap();
+    store
+        .load_str(
+            turtle,
+            oxigraph::io::RdfFormat::Turtle,
+            Some("urn:test:profile"),
+        )
+        .unwrap_or_else(|e| panic!("the profile is not valid Turtle: {e}\n{turtle}"));
+    let query = format!(
+        "SELECT ?o WHERE {{ GRAPH <urn:test:profile> {{ <{subject}> <{predicate}> ?o }} }}"
+    );
+    let QueryResults::Solutions(solutions) = store.query(&query).unwrap() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = solutions
+        .flatten()
+        .filter_map(|b| b.get("o").map(|t| t.to_string()))
+        .collect();
+    out.sort();
+    out
 }
 
 fn object(turtle: &str, subject: &str, predicate: &str) -> Option<String> {
@@ -348,6 +376,9 @@ async fn a_profile_reports_columns_keys_and_null_counts() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+    // Prefixed Turtle on the wire; the statements are what these checks
+    // are about, so read it back as N-Triples.
+    let prov = as_ntriples(&prov);
     let activity = "urn:source:src:profile:version:1:activity";
     assert!(
         prov.contains(&format!(
@@ -896,6 +927,16 @@ async fn the_profile_declares_a_prefix_label_the_store_does_not_already_bind() {
     assert!(
         turtle.contains(&format!("@prefix {PROF_LABEL}: <{PROF}>")),
         "{turtle}"
+    );
+    // ...and the document is written against it: a header over a body of
+    // full IRIs would be a dead line, not a prefix.
+    assert!(
+        turtle.contains(&format!("{PROF_LABEL}:structuralHash")),
+        "{turtle}"
+    );
+    assert!(
+        !turtle.contains(&format!("<{PROF}structuralHash>")),
+        "written in full: {turtle}"
     );
     // `prof:` is the W3C Profiles Vocabulary in this store's prefix registry,
     // so a CURIE expanded against the registry would mean the other thing.

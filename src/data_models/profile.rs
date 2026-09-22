@@ -1083,7 +1083,7 @@ pub fn readable_model(
 /// `sh:in` value sets and its labels are its owner's, and this endpoint would
 /// otherwise be a way around the Studio's own listing rule. A bound graph the
 /// Studio has no record for declares no owner and is admitted.
-fn shape_sources(
+pub(crate) fn shape_sources(
     state: &AppState,
     user_id: Option<&str>,
     model_id: &str,

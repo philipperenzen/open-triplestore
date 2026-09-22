@@ -2449,6 +2449,9 @@ pub async fn run(
     // …) join core's SQLite one. Before any datasource is registered or run,
     // so a dialect is either available from the first request or not at all.
     crate::sources::connector::register_plugin_connectors();
+    // Scratch graphs a dry-run left behind when an earlier process stopped
+    // before their TTL: unreachable through any dataset, so only occupying space.
+    crate::sources::dryrun::sweep_leftovers(&state.store);
 
     // Spawn a background task to periodically prune expired PKCE OAuth sessions (L-7)
     {

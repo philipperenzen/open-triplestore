@@ -323,6 +323,9 @@ pub fn put_mapping(store: &TripleStore, m: &MappingRecord) -> Result<(), String>
     }
     body.push_str(&opt_lit("ds:model", &m.model));
     body.push_str(&opt_lit("ds:modelVersion", &m.model_version));
+    if let Some(p) = m.profile_version {
+        body.push_str(&format!("    ds:profileVersion \"{p}\"^^xsd:integer ;\n"));
+    }
     if let Some(a) = &m.created_by {
         body.push_str(&format!("    prov:wasAttributedTo {} ;\n", iri(a)));
     }
@@ -356,7 +359,8 @@ pub fn put_mapping(store: &TripleStore, m: &MappingRecord) -> Result<(), String>
 
 fn mapping_select(filter: &str) -> String {
     format!(
-        "{}SELECT ?id ?title ?source ?version ?state ?shapes ?model ?modelVersion ?created ?modified \
+        "{}SELECT ?id ?title ?source ?version ?state ?shapes ?model ?modelVersion ?profileVersion \
+         ?created ?modified \
          WHERE {{ GRAPH <{SOURCES_GRAPH}> {{\n\
            ?s a ds:Mapping ; ds:id ?id ; ds:source ?source ; ds:currentVersion ?version .\n\
            {filter}\n\
@@ -365,6 +369,7 @@ fn mapping_select(filter: &str) -> String {
            OPTIONAL {{ ?s dct:conformsTo ?shapes }}\n\
            OPTIONAL {{ ?s ds:model ?model }}\n\
            OPTIONAL {{ ?s ds:modelVersion ?modelVersion }}\n\
+           OPTIONAL {{ ?s ds:profileVersion ?profileVersion }}\n\
            OPTIONAL {{ ?s dct:created ?created }}\n\
            OPTIONAL {{ ?s dct:modified ?modified }}\n\
          }} }} ORDER BY ?id",
@@ -387,6 +392,7 @@ fn row_to_mapping(row: &HashMap<String, String>) -> MappingRecord {
         shapes_graph: get("shapes"),
         model: get("model"),
         model_version: get("modelVersion"),
+        profile_version: get("profileVersion").and_then(|v| v.parse().ok()),
         created_by: None,
         created_at: get("created").unwrap_or_default(),
         updated_at: get("modified").unwrap_or_default(),
@@ -774,6 +780,7 @@ mod tests {
             shapes_graph: Some("urn:shapes:products".into()),
             model: Some("product-model".into()),
             model_version: Some("1.2.0".into()),
+            profile_version: Some(3),
             created_by: None,
             created_at: now(),
             updated_at: now(),

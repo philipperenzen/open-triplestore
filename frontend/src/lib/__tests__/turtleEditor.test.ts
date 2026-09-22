@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Parser } from 'n3';
 import { EditorState } from '@codemirror/state';
-import { foldable } from '@codemirror/language';
+import { foldable, StringStream } from '@codemirror/language';
 import {
   emptyShapesTemplate,
   extractTurtlePrefixes,
@@ -361,6 +361,46 @@ describe('turtleFoldRange', () => {
     const r = turtleFoldRange(tricky, 0, tricky.indexOf('\n'));
     expect(r).not.toBeNull();
     expect(tricky.slice(r!.from, r!.to).trim()).toBe('sh:flags "i"');
+  });
+});
+
+/** Run the Turtle tokenizer over one line: `[text, style]` per token. */
+function tokens(line: string): Array<[string, string | null]> {
+  const parser = turtleLanguage.streamParser;
+  const state = parser.startState!(2);
+  const stream = new StringStream(line, 2, 2);
+  const out: Array<[string, string | null]> = [];
+  while (!stream.eol()) {
+    stream.start = stream.pos;
+    const style = parser.token(stream, state);
+    if (stream.pos === stream.start) throw new Error(`no progress at ${stream.pos}`);
+    if (stream.current().trim()) out.push([stream.current(), style]);
+  }
+  return out;
+}
+
+describe('the tokenizer reads what the prefixed serializer writes', () => {
+  it('keeps an escaped local part as one name', () => {
+    // The store shortens a path-style IRI to `ex:shapes\/PersonShape`; a
+    // tokenizer that stopped at the backslash coloured it as three things.
+    expect(tokens('ex:shapes\\/PersonShape a sh:NodeShape .')).toEqual([
+      ['ex:shapes\\/PersonShape', 'namespace'],
+      ['a', 'keyword'],
+      ['sh:NodeShape', 'namespace'],
+      ['.', 'operator'],
+    ]);
+  });
+
+  it('keeps a percent-encoded local part as one name', () => {
+    expect(tokens('ex:a%20b sh:name "x" .')[0]).toEqual(['ex:a%20b', 'namespace']);
+  });
+
+  it('still stops at punctuation and strings', () => {
+    const toks = tokens('ex:S;ex:T "q".');
+    expect(toks[0]).toEqual(['ex:S', 'namespace']);
+    expect(toks[1]).toEqual([';', 'operator']);
+    expect(toks[2]).toEqual(['ex:T', 'namespace']);
+    expect(toks[3][1]).toBe('string2');
   });
 });
 

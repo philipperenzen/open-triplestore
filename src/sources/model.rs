@@ -267,6 +267,9 @@ pub struct MappingRecord {
     /// Model registry id and version the mapping targets.
     pub model: Option<String>,
     pub model_version: Option<String>,
+    /// The datasource profile version the mapping was registered or approved
+    /// against — the baseline a drift check compares the newest profile with.
+    pub profile_version: Option<u32>,
     pub created_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -313,6 +316,10 @@ pub struct MappingResponse {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_version: Option<String>,
+    /// The profile version the mapping was registered or approved against;
+    /// the baseline for `POST /api/sources/{id}/drift`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_version: Option<u32>,
     /// Triples maps in the newest version, for a list view.
     pub triples_maps: usize,
     /// `rr:parentTriplesMap` edges in the newest version: which triples map

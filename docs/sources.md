@@ -342,22 +342,26 @@ travels with the mapping as RDF:
 ```turtle
 rr:predicateObjectMap [ rr:predicate ex:hasStatus ; rr:objectMap [
   fnml:functionValue [
-    rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object fn:mapValue ] ;
-    rr:predicateObjectMap [ rr:predicate fn:value ; rr:objectMap [ rr:column "status" ] ] ;
-    rr:predicateObjectMap [ rr:predicate fn:normalize ; rr:object "lower_trim" ] ;
-    rr:predicateObjectMap [ rr:predicate fn:mapping ; rr:object "active=http://example.org/products/ontology#Active" ] ;
-    rr:predicateObjectMap [ rr:predicate fn:mapping ; rr:object "retired=http://example.org/products/ontology#Retired" ] ;
-    rr:predicateObjectMap [ rr:predicate fn:unmapped ; rr:object "literal" ] ] ] ]
+    rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object otsfn:mapValue ] ;
+    rr:predicateObjectMap [ rr:predicate otsfn:value ; rr:objectMap [ rr:column "status" ] ] ;
+    rr:predicateObjectMap [ rr:predicate otsfn:normalize ; rr:object "lower_trim" ] ;
+    rr:predicateObjectMap [ rr:predicate otsfn:mapping ; rr:object "active=http://example.org/products/ontology#Active" ] ;
+    rr:predicateObjectMap [ rr:predicate otsfn:mapping ; rr:object "retired=http://example.org/products/ontology#Retired" ] ;
+    rr:predicateObjectMap [ rr:predicate otsfn:unmapped ; rr:object "literal" ] ] ] ]
 ```
 
-`fn:` is `https://w3id.org/open-triplestore/fn#`.
+`otsfn:` is `https://w3id.org/open-triplestore/fn#`. The label is not `fn:`
+because that is the XPath functions namespace everywhere else, including in
+the store's own prefix registry; a mapping may declare any label it likes for
+the namespace, but `otsfn:` is the one the store resolves, shortens to and
+documents.
 
 | Parameter | Values |
 |---|---|
-| `fn:value` | The column (or a constant) to look up |
-| `fn:normalize` | `none` (default), `trim`, `lower`, `upper`, `lower_trim`, `upper_trim`. Applied to the source value **and** to every map key, so `"ACTIVE "` meets `active` |
-| `fn:mapping` | Repeat once per entry, `<value>=<IRI>` |
-| `fn:unmapped` | What to do with a value the map does not cover |
+| `otsfn:value` | The column (or a constant) to look up |
+| `otsfn:normalize` | `none` (default), `trim`, `lower`, `upper`, `lower_trim`, `upper_trim`. Applied to the source value **and** to every map key, so `"ACTIVE "` meets `active` |
+| `otsfn:mapping` | Repeat once per entry, `<value>=<IRI>` |
+| `otsfn:unmapped` | What to do with a value the map does not cover |
 
 The unmapped policy is explicit, because guessing is worse than any of the
 three answers:
@@ -366,9 +370,35 @@ three answers:
   `sh:class` or `sh:in` shape reports it. A value the mapping did not
   anticipate is a finding, not something to hide.
 - **`omit`** — emit nothing.
-- **`template`** — mint an IRI from `fn:unmappedTemplate`, which must be
+- **`template`** — mint an IRI from `otsfn:unmappedTemplate`, which must be
   absolute. A relative template is refused: minting under an undeclared prefix
   would put IRIs in a namespace nobody owns.
+
+### Minted IRIs
+
+An `rr:template` can interpolate a column; it cannot transform one. A node
+whose identifier is a *slug* of a value — `http://example.org/categories/`
+followed by `fasteners-bolts` for the category `Fasteners & Bolts` — needs
+the second function the engine implements, `otsfn:mintIri`:
+
+```turtle
+rr:objectMap [ fnml:functionValue [
+  rr:predicateObjectMap [ rr:predicate fno:executes ; rr:object otsfn:mintIri ] ;
+  rr:predicateObjectMap [ rr:predicate otsfn:template ;
+                          rr:object "http://example.org/categories/{category_slug}" ] ] ]
+```
+
+The template's placeholders are `{column}` — the value, percent-encoded as in
+an `rr:template` — or `{column_slug}`: the value as an ASCII slug (lower-case
+letters and digits, runs of anything else folded to one hyphen, none at either
+end). A placeholder the row cannot supply, or a value that slugs to nothing,
+yields no term. The template must be absolute, for the same reason as above.
+
+The function may also stand on a **subject map** (`rr:subjectMap [
+fnml:functionValue [ … ] ; rr:class … ]`), which is how a lookup node gets its
+type and label from a second triples map over the same rows. A triples map
+whose subject is minted is never pushed down as a join parent — the planner
+cannot project a function — and resolves through the index instead.
 
 ---
 
@@ -560,18 +590,180 @@ contract an external proposer depends on.
 
 ---
 
+## Mapping gates
+
+The thresholds a proposal is judged by live in one config graph,
+`urn:config:mapping-gates`, served by `GET /api/sources/gates` and changed
+with `PUT` (admin only, recorded in the commit log). They are in the store
+rather than in a config file because the mapping proposer — a separate
+service that runs offline against the store — reads them from here, and
+because changing a gate is a decision, not a deployment detail. The graph is
+a system graph, outside any caller's SPARQL scope, which is why it has an
+endpoint. `Accept: text/turtle` serves the graph itself.
+
+| Gate | Default | Meaning |
+|---|---|---|
+| `autoThreshold` | 0.90 | Confidence at or above which a proposal is accepted without review |
+| `reviewThreshold` | 0.70 | At or above: a reviewer; below: an expert |
+| `datatypeMismatchCap` | 0.10 | Largest fraction of sampled values that may fail the target datatype |
+| `ambiguityMargin` | 0.05 | Smallest score margin between the best candidate and the runner-up |
+| `enumMatchMinimum` | 0.80 | Fraction of a code list that must match an enumeration's members |
+| `systematicShare` | 0.90 | Share of a type's subjects a violation must hit to be a mapping defect |
+| `systematicMinSubjects` | 2 | …and the fewest subjects that can make one |
+| `driftKlThreshold` | 0.10 | KL divergence of a code list between two profiles above which drift is reported |
+| `lexical.nameWeight` | 0.60 | The deterministic scorer: weight of column-name against property-name similarity |
+| `lexical.commentWeight` | 0.25 | …of column comment against `rdfs:comment` / definition |
+| `lexical.typeWeight` | 0.15 | …of datatype compatibility |
+| `lexical.minimumScore` | 0.40 | Below this a candidate is not proposed |
+
+`PUT` takes a partial object; an unknown field is refused, not ignored, and so
+are bands that cross, a fraction outside `[0, 1]` or weights that sum to
+nothing. Until something is saved, `GET` reports `"source": "default"`.
+
+---
+
+## Dry-run
+
+`POST /api/sources/{id}/dry-run` materialises a sample of a mapping into a
+scratch graph, validates it, and says which violations are the mapping's fault.
+
+```json
+{ "mapping": "products-map", "table": "products", "sampleSize": 5 }
+```
+
+The mapping is named in exactly one of four ways: `mapping` (a registered id
+or IRI, with an optional `version`), `mappingGraph` (a version graph,
+`urn:mapping:<id>:version:<n>`), or `rml` / `yarrrml` — an **unregistered**
+mapping, which is what the proposer sends before it writes a proposal and what
+the Studio editor sends between saves. Nothing about a dry-run is registered,
+promoted or published.
+
+**The sample.** `sampleSize` rows (default 20, at most 1 000) are taken from
+the head of each triples map — or only from those reading `table`, or listed
+in `triplesMaps`. Then the sample is **closed under its joins**: every row a
+sampled row references through `rr:parentTriplesMap` is fetched by key and
+mapped too, and a parent's own references likewise. Without that, one row of
+a child table would point at a parent that was never materialised and every
+`sh:class` on the reference would fail — a violation caused by sampling, not
+by the mapping. The plan is the run's plan: the same pushed-down joins, the
+same index fallback, the same term evaluation.
+
+**Shapes** come from `shapesGraph` in the request, else the registered
+mapping's shapes graph, else the model version's (`model` + `modelVersion`,
+from the request or the mapping). With none, nothing is validated, and the
+response says so in `warnings` rather than reporting a conforming sample.
+
+**Classification.** Results are grouped by what fired — shape, path and
+constraint — and each group is measured against the subjects of its focus
+nodes' types in the sample. A group hitting at least `systematicShare` of them
+(default 90 %), over at least `systematicMinSubjects` (default 2), is a
+**mapping defect**: the mapping produced the wrong term for that property.
+Anything sparser is a **data issue**: a fact about those rows. Both numbers
+are mapping gates, so the proposer and the reviewer apply one rule. One
+subject is never a pattern, whatever share of its type it is.
+
+**The response** carries the classification (`mappingDefects`, `dataIssues`,
+each with the shape, path, constraint, message, affected and population
+counts, share and the first focus nodes), the merged validation `report`,
+`entities` — each subject with its types, its own Turtle and the violations
+that name it — what each triples map contributed (`sampledRows`,
+`pulledInRows`, `triples`), the total `rows` and `triples`, and the scratch
+`graph` with its `expiresAt`. The graph is readable through the Graph Store
+protocol (admin) until then, and dropped after: `OTS_DRYRUN_TTL_SECS`, default
+fifteen minutes. Scratch graphs an earlier process left behind are dropped at
+start-up.
+
+---
+
+## Drift and re-map tickets
+
+A profile is one version per run, with stable node IRIs, so two versions line
+up table for table. `POST /api/sources/{id}/drift` reads the difference:
+
+```json
+{ "mapping": "products-map" }
+```
+
+**The baseline** is the profile version the mapping was registered or
+approved against — `profileVersion` on the mapping record, set when the
+mapping is created, when new RML is saved and when the state moves to
+`approved` — else the previous profile version. `baseline` and `candidate`
+in the request override both. A datasource with one profile version cannot
+drift yet, and the response says to profile it again.
+
+**Per table**, the report lists new and removed columns, type changes (native
+or XSD type), code lists whose value distribution moved — the KL divergence of
+the newer distribution from the older, both smoothed by one count over the
+union of their values, above `klThreshold` (default: the gates'
+`driftKlThreshold`) — code lists gained or lost, and whether the structural
+hash moved. New and removed tables are listed beside. A mapping registered
+against a model version is also checked against that model's newest
+published version; a newer one is a `modelVersionBump`.
+
+**Tickets.** Anything affected opens one re-map ticket for the (datasource,
+mapping) pair: `ds:RemapTicket` in `urn:system:sources`, with the affected
+tables, the reason (`schema-drift`, `model-version-bump` or `both`), the two
+profile versions and who ran the check. A model bump lists every table on
+that one ticket rather than opening one per table, and a later check updates
+the open ticket rather than opening another beside it. `GET
+/api/sources/{id}/tickets` lists them, `GET /api/tickets/{id}` reads one,
+`POST /api/tickets/{id}/close` closes it — explicitly, and in the commit log.
+`"openTicket": false` only reports. Deleting a datasource deletes its
+tickets.
+
+---
+
+## Converting a legacy bundle
+
+An earlier generation of this process kept its mappings in a bespoke YAML
+bundle — `entities`, each a table with a `subject_iri`, an `rdf_type`,
+`properties` and optional `nested` maps. `POST /api/mappings/convert` reads
+that format and returns standard RML, registered nowhere:
+
+```json
+{ "format": "sql2rdf", "source": "legacy-assets", "document": "prefixes: …" }
+```
+
+| Legacy | RML |
+|---|---|
+| `subject_iri`, `rdf_type` | `rr:subjectMap [ rr:template … ; rr:class … ]` |
+| `{column}` / `{column_slug}` | a template; a slug placeholder makes the term an `otsfn:mintIri` function |
+| a property with `datatype` | `rr:objectMap [ rr:column … ; rr:datatype … ]` |
+| `object: {kind: lookup, …}` | a template object map, plus a second triples map over the same rows that types and labels the minted node |
+| `object: {kind: reference, …}` | `rr:parentTriplesMap` with a join on the entity whose subject the template names; a plain template when no entity matches |
+| `object: {kind: enumeration, …}` | the `otsfn:mapValue` function |
+| `nested` | a second triples map over the same rows, linked from the parent by a template object map |
+
+Prefixes come from the document's `prefixes` block; `rdf`, `rdfs`, `xsd`,
+`owl`, `skos`, `dct`, `schema`, `foaf`, `prov` and `geo` need no declaration.
+An undeclared one is an error naming the entity, never a guess.
+
+**Empty cells.** The legacy transformer emitted nothing for an empty cell.
+So does this store's engine — a term map over an empty value yields no term —
+so a converted mapping reproduces the legacy output here as it stands, with
+`rr:tableName` sources that keep join pushdown and watermark runs available.
+R2RML proper says an empty cell is an empty literal; a mapping that must
+behave the same under another processor is converted with `"emptyAsNull":
+true`, which turns the logical sources into queries reading each text-valued
+column through `NULLIF(col, '')`. That query is opaque to the catalogue, so
+joins are indexed rather than pushed down and watermark runs are not
+available. Either way the response says which it did in `warnings`.
+
+The converter's own fixture — the appendix document, over a SQLite table with
+a slugged category, an unmapped status, a NULL price and an empty city —
+reproduces the legacy transformer's triples byte for byte, in both forms.
+
+---
+
 ## What is not here yet
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **Drift detection** — the profile graphs and the version diff are in place;
-  comparing them and opening a re-map ticket is not.
-- **Dry-run classification** — the mapping-defect vs data-issue split, and the
-  gates config graph behind it.
 - **Studio: Explore, Map and Dry-run.** Connect and Runs are built; the
   profile-backed screens are not.
-- **The legacy `mapping.sql2rdf.yaml` converter.** YARRRML is translated; the
-  older bespoke format is a separate one-time migration.
+- **The proposer's side of the gates.** The bands and the scorer parameters
+  are served; the service that applies them to propose a mapping is phase 3,
+  as are review items, promotion and calibration.
 - **PostgreSQL, MySQL and SQL Server connectors.** The trait and the registry
   are in place and SQLite exercises them; the drivers are plugins still to be
   written.
@@ -585,6 +777,7 @@ Stated plainly, because a gap you know about is cheaper than one you discover:
 | `OTS_ENV` | *(development)* | `production` makes the security rules above errors rather than warnings |
 | `OTS_SOURCES_DIR` | *(unset)* | Directory a file-backed datasource must live under in production |
 | `OTS_SECRET_CACHE_TTL_SECS` | `60` | How long a resolved secret is reused. `0` disables the cache |
+| `OTS_DRYRUN_TTL_SECS` | `900` | How long a dry-run's scratch graph stays readable before it is dropped |
 | `OTS_SOURCES_JOIN_MAX_ROWS` | `1000000` | Cap on distinct join-index keys per parent triples map |
 | `VAULT_ADDR` | *(unset)* | Vault address for `vault:` references |
 | `VAULT_TOKEN_FILE` / `VAULT_TOKEN` | *(unset)* | Vault token; the file form is the Vault Agent sink and is re-read per resolution |

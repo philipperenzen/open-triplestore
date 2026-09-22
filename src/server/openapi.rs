@@ -1649,6 +1649,229 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
         (M::Get, o("Validation", "List datasets' shape graphs", "Datasets accessible to the user that have a shapes graph configured (Validation-page selector).",
             vec![], vec![("200", "Array of {dataset_id, dataset_name, shapes_graph_iri}")], false)),
     ]);
+
+    // ── SHACL Studio: shape graphs, the validation layer, pipelines ──────────
+    // Every route here requires a token; visibility follows the shape graph's
+    // owner and visibility, and writing needs manage access to it.
+    mount(paths, "/api/shacl/shape-graphs", vec![
+        (M::Get, o("Validation", "List shape graphs", "The reusable shape graphs the caller may read: their own, their organisations' and the public ones.",
+            vec![], vec![("200", "Array of shape graphs")], true)),
+        (M::Post, o("Validation", "Create a shape graph", "Body: `{name, description?, visibility?, tags?, owner_type?, owner_id?, turtle?, source?}`. Without `turtle` the graph starts from an empty template. `owner_type` is `user` (default) or `organisation`.",
+            vec![], vec![("201", "The shape graph"), ("400", "Invalid Turtle"), ("403", "Not a member of the owning organisation")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id", vec![
+        (M::Get, o("Validation", "Get a shape graph", "The record: name, description, visibility, tags, status, owner, backing graph IRI and facets.",
+            vec![], vec![("200", "The shape graph"), ("403", "Not readable"), ("404", "Not found")], true)),
+        (M::Put, o("Validation", "Update a shape graph's metadata", "Body: `{name, description?, visibility?, tags?}`. The content is written through `/turtle`.",
+            vec![], vec![("200", "The updated shape graph"), ("403", "Not manageable"), ("404", "Not found")], true)),
+        (M::Delete, o("Validation", "Delete a shape graph", "Removes the record and clears its backing graph.",
+            vec![], vec![("204", "Deleted"), ("403", "Not manageable"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/turtle", vec![
+        (M::Get, o("Validation", "Read a shape graph's content", "The shapes as Turtle, with an `@prefix` header built from the prefix registry for the namespaces the graph actually uses. `?format=shaclc` (or `Accept: text/shaclc`) serialises to SHACL Compact Syntax instead.",
+            vec![qp("format", false, "`shaclc` for SHACL Compact Syntax; otherwise Turtle")],
+            vec![("200", "Turtle (`text/turtle`) or SHACL-C (`text/shaclc`)"), ("403", "Not readable"), ("404", "Not found")], true)),
+        (M::Put, o("Validation", "Replace a shape graph's content", "Body is the whole document: Turtle, or SHACL Compact Syntax with `Content-Type: text/shaclc` (parsed strictly before anything is stored). Writes a new revision and a Shapes commit.",
+            vec![qp("message", false, "Revision note shown in the history (default `Edited`); trimmed, control characters removed, at most 200 characters")],
+            vec![("200", "`{version}` — the new revision number"), ("400", "Invalid UTF-8, Turtle or SHACL-C"), ("403", "Not manageable"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/revisions", vec![
+        (M::Get, o("Validation", "List revisions", "Every stored revision of the shape graph, newest first: version, note, author, timestamp.",
+            vec![], vec![("200", "Array of revisions"), ("404", "Not found")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/shape-graphs/:id/revisions/:rev",
+        vec![(
+            M::Get,
+            o(
+                "Validation",
+                "Get a revision",
+                "One revision with its Turtle snapshot.",
+                vec![],
+                vec![
+                    ("200", "The revision"),
+                    ("404", "Shape graph or revision not found"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/shacl/shape-graphs/:id/restore/:rev", vec![
+        (M::Post, o("Validation", "Restore a revision", "Writes the revision's snapshot back as a new revision (the history is never rewritten).",
+            vec![], vec![("200", "`{version}`"), ("403", "Not manageable"), ("404", "Shape graph or revision not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/clone", vec![
+        (M::Post, o("Validation", "Clone a shape graph", "Copies the content into a new private shape graph owned by the caller. Body: `{name?}` (default: the source name with \" (copy)\").",
+            vec![], vec![("201", "The new shape graph"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/import-shapes", vec![
+        (M::Post, o("Validation", "Import shapes from other graphs", "Copies picked shapes — each with its full blank-node closure — into this shape graph. Body: `{shapes: [{source_graph, shape}], note?}`. Records a revision and a Shapes commit.",
+            vec![], vec![("200", "`{imported, version}`"), ("400", "No shapes given"), ("403", "Not manageable"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/validate", vec![
+        (M::Post, o("Validation", "Meta-validate a shape graph", "Validates the shape graph *as data* against the built-in SHACL-SHACL shapes. Nothing is persisted.",
+            vec![], vec![("200", "A validation report"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/shape-graphs/:id/commits", vec![
+        (M::Get, o("Validation", "Commit history", "The shape graph's slice of the shared commit trail, newest first, with actor names resolved. Takes the commit-log paging parameters.",
+            vec![], vec![("200", "Array of commits"), ("404", "Not found")], true)),
+    ]);
+    for (path, verb, to) in [
+        ("/api/shacl/shape-graphs/:id/stage", "Stage", "staged"),
+        (
+            "/api/shacl/shape-graphs/:id/publish",
+            "Publish",
+            "published",
+        ),
+        (
+            "/api/shacl/shape-graphs/:id/deprecate",
+            "Deprecate",
+            "deprecated",
+        ),
+    ] {
+        mount(paths, path, vec![
+            (M::Post, o("Validation", &format!("{verb} a shape graph"), &format!("Moves the shape graph to the `{to}` status along `draft → staged → published → deprecated`."),
+                vec![], vec![("200", "`{status}`"), ("400", "Not a permitted transition"), ("403", "Not manageable"), ("404", "Not found")], true)),
+        ]);
+    }
+    mount(paths, "/api/shacl/shapes", vec![
+        (M::Get, o("Validation", "Shapes catalog", "Graph-first discovery of every SHACL shape in the store, including shapes embedded in data graphs. Without `graph` a summary of the graphs holding shapes, with node/property counts and registration; with `?graph=<iri>` that graph's shapes. Registered shape graphs the caller cannot read are hidden.",
+            vec![qp("graph", false, "Graph IRI whose shapes to list")],
+            vec![("200", "`{graphs}` or `{graph, shapes}`")], true)),
+    ]);
+    mount(paths, "/api/shacl/register-shape-graph", vec![
+        (M::Post, o("Validation", "Register an existing graph as a shape graph", "Adopts a named graph that already holds SHACL as a shape graph *in place* — no copy; the record points at the graph. Idempotent. Body: `{graph_iri, name, description?, visibility?, tags?, owner_type?, owner_id?}`.",
+            vec![], vec![("200", "The existing record"), ("201", "The new shape graph"), ("403", "The graph is not writable by the caller")], true)),
+    ]);
+    mount(paths, "/api/shacl/bindings", vec![
+        (M::Get, o("Validation", "List bindings", "The validation layer. `?target_kind=&target_id=` lists the shape graphs bound to a target (`dataset` | `graph` | `shapegraph`); `?shape_graph_id=` lists the targets a shape graph validates.",
+            vec![qp("target_kind", false, "`dataset`, `graph` or `shapegraph`"), qp("target_id", false, "Dataset id, graph IRI or shape graph id"), qp("shape_graph_id", false, "Reverse lookup: the targets of this shape graph")],
+            vec![("200", "Bindings")], true)),
+        (M::Post, o("Validation", "Bind a shape graph to a target", "Body: `{target: {kind, id}, shape_graph_id}`. Idempotent. The shape graph then gates writes to the target. Needs write access to the target and manage access to the shape graph.",
+            vec![], vec![("201", "`{target, shape_graph_id, shape_graph_graph}`"), ("403", "Not allowed")], true)),
+        (M::Delete, o("Validation", "Remove a binding", "Same body and access rules as creating one.",
+            vec![], vec![("204", "Removed"), ("403", "Not allowed")], true)),
+    ]);
+    mount(paths, "/api/datasets/:id/effective-shapes", vec![
+        (M::Get, o("Validation", "A dataset's effective shapes", "The shape graphs that apply to the dataset: its own bindings and the bindings of every graph it contains. This set gates writes, runs in pipelines and drives the form manifest.",
+            vec![], vec![("200", "Array of shape graphs"), ("403", "Not readable"), ("404", "Dataset not found")], true)),
+    ]);
+    mount(paths, "/api/shacl/pipelines", vec![
+        (M::Get, o("Validation", "List pipelines", "The saved validation pipelines the caller may read.",
+            vec![], vec![("200", "Array of pipelines")], true)),
+        (M::Post, o("Validation", "Create a pipeline", "Body: `{name, description?, visibility?, owner_type?, owner_id?, targets: [{kind, id}], shape_graph_ids, severity_threshold?, run_inference?, max_results?, gate_writes?, triggers…}`. A target is a dataset, a graph or a shape graph.",
+            vec![], vec![("201", "The pipeline"), ("400", "Invalid body")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id",
+        vec![
+            (
+                M::Get,
+                o(
+                    "Validation",
+                    "Get a pipeline",
+                    "",
+                    vec![],
+                    vec![("200", "The pipeline"), ("404", "Not found")],
+                    true,
+                ),
+            ),
+            (
+                M::Put,
+                o(
+                    "Validation",
+                    "Update a pipeline",
+                    "Same body as creation.",
+                    vec![],
+                    vec![
+                        ("200", "The pipeline"),
+                        ("403", "Not manageable"),
+                        ("404", "Not found"),
+                    ],
+                    true,
+                ),
+            ),
+            (
+                M::Delete,
+                o(
+                    "Validation",
+                    "Delete a pipeline",
+                    "",
+                    vec![],
+                    vec![
+                        ("204", "Deleted"),
+                        ("403", "Not manageable"),
+                        ("404", "Not found"),
+                    ],
+                    true,
+                ),
+            ),
+        ],
+    );
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id/run",
+        vec![(
+            M::Post,
+            o(
+                "Validation",
+                "Run a pipeline",
+                "Validates every target against the composed shape graphs and stores the run.",
+                vec![],
+                vec![
+                    ("200", "The run, with its report"),
+                    ("404", "Not found"),
+                    ("503", "Server overloaded"),
+                ],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id/runs",
+        vec![(
+            M::Get,
+            o(
+                "Validation",
+                "List a pipeline's runs",
+                "Newest first.",
+                vec![],
+                vec![("200", "Array of runs"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(
+        paths,
+        "/api/shacl/pipelines/:id/runs/:run_id",
+        vec![(
+            M::Get,
+            o(
+                "Validation",
+                "Get a run",
+                "One run with its full validation report.",
+                vec![],
+                vec![("200", "The run"), ("404", "Pipeline or run not found")],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/shacl/pipelines/latest", vec![
+        (M::Post, o("Validation", "Latest run per pipeline", "Body: `{pipeline_ids}`. The newest run of each pipeline the caller may read, for dashboards.",
+            vec![], vec![("200", "Array of runs")], true)),
+    ]);
+    mount(paths, "/api/shacl/model-context", vec![
+        (M::Get, o("Validation", "Model context for shape authoring", "Classes, properties and datatypes found in a scope, for the shape builder's suggestions. Scope is `?dataset=<id>` or `?graphs=<iri,iri>`.",
+            vec![qp("dataset", false, "Dataset id"), qp("graphs", false, "Comma-separated graph IRIs")],
+            vec![("200", "The model context"), ("403", "Scope not readable")], true)),
+    ]);
+    mount(paths, "/api/shacl/derive", vec![
+        (M::Post, o("Validation", "Derive shapes from data", "Body: `{dataset_id?, graphs?, target_classes?}`. Infers candidate node and property shapes from instance data in the scope.",
+            vec![], vec![("200", "`{turtle, stats}` — the candidate shapes and what they were derived from"), ("403", "Scope not readable")], true)),
+    ]);
     mount(
         paths,
         "/api/shacl/validation/latest",
@@ -2327,6 +2550,36 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
         )],
     );
 
+    mount(paths, "/api/sources/gates", vec![
+        (M::Get, o("Sources", "The mapping gates", "The thresholds a proposal is judged by, as a config graph (`urn:config:mapping-gates`): the confidence bands (`autoThreshold`, `reviewThreshold`), `datatypeMismatchCap`, `ambiguityMargin`, `enumMatchMinimum`, the dry-run classifier's `systematicShare` and `systematicMinSubjects`, `driftKlThreshold`, and the lexical scorer's weights. `source` says whether these are the built-in defaults or a saved configuration. `Accept: text/turtle` serves the graph itself. The proposer reads this; it is outside a caller's SPARQL scope.",
+            vec![], vec![("200", "The gates, JSON or Turtle")], true)),
+        (M::Put, o("Sources", "Change the mapping gates", "A partial update: every field optional, an unknown field refused rather than ignored. Bands that cross, a fraction outside `[0, 1]` or a weight set summing to zero are a 400. Recorded in the commit log.",
+            vec![], vec![("200", "The gates as they now stand"), ("400", "A value that cannot be applied"), ("422", "An unknown field")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/dry-run", vec![
+        (M::Post, o("Sources", "Dry-run a mapping on a sample", "Materialises a sample into a scratch graph `urn:dryrun:<id>` (kept for `OTS_DRYRUN_TTL_SECS`, default fifteen minutes), validates it and classifies every violation. The mapping is named in exactly one of `mapping` (id or IRI, with optional `version`), `mappingGraph` (a version graph), `rml` or `yarrrml` (unregistered — what the proposer sends before it writes a proposal). `sampleSize` rows (default 20, at most 1 000) are taken from each triples map, or from those reading `table` / listed in `triplesMaps`; every row a sampled row references through `rr:parentTriplesMap` is pulled in as well, so a one-row preview of a child table does not fake an `sh:class` violation. Shapes come from `shapesGraph`, else the registered mapping's, else the model version's (`model` + `modelVersion`). A violation hitting at least `systematicShare` of a type's subjects over at least `systematicMinSubjects` of them is a **mapping defect**; anything sparser is a **data issue**. Returns per-entity Turtle with each entity's violations, the classification, the report, the produced triple count and what each triples map contributed. Nothing is registered, promoted or published.",
+            vec![], vec![("200", "The dry-run result"), ("400", "The request names no mapping, two, or a table nothing reads"), ("404", "Datasource or mapping not found"), ("502", "The datasource did not answer"), ("503", "Server overloaded")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/drift", vec![
+        (M::Post, o("Sources", "Drift between two profile versions", "Compares `candidate` (default: the newest profile) with `baseline` (default: the profile version the named `mapping` was registered or approved against — `profileVersion` on the mapping — else the previous version). Per table: new and removed columns, type changes, code lists whose value distribution moved (KL divergence above `klThreshold`, default the gates' `driftKlThreshold`), code lists gained or lost, and whether the structural hash moved; plus new and removed tables, and a `modelVersionBump` when the mapping's model has published a newer version than the one it targets. Anything affected opens one re-map ticket for the (datasource, mapping) pair — a model bump lists every table on that one ticket — and a later check updates it rather than opening another. `openTicket: false` only reports.",
+            vec![], vec![("200", "The drift report, with the ticket it opened or updated"), ("400", "Fewer than two profile versions, or an unknown one"), ("404", "Datasource or mapping not found")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/tickets", vec![
+        (M::Get, o("Sources", "Re-map tickets of a datasource", "Every ticket a drift check opened for the datasource, open and closed, newest first.",
+            vec![], vec![("200", "Array of tickets"), ("404", "Datasource not found")], true)),
+    ]);
+    mount(paths, "/api/tickets/:id", vec![
+        (M::Get, o("Sources", "Get a re-map ticket", "The ticket: datasource, mapping, status, reason (`schema-drift`, `model-version-bump` or `both`), affected tables, the profile versions compared, and who opened it.",
+            vec![], vec![("200", "The ticket"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/tickets/:id/close", vec![
+        (M::Post, o("Sources", "Close a re-map ticket", "Marks the ticket closed and records it in the commit log. The next finding for the same mapping opens a new one.",
+            vec![], vec![("200", "The closed ticket"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/mappings/convert", vec![
+        (M::Post, o("Sources", "Convert a legacy mapping bundle to RML", "Body: `{format: \"sql2rdf\", source, document, emptyAsNull?}`. Reads the legacy `mapping.sql2rdf.yaml` format — `entities` with `subject_iri`, `rdf_type`, `properties` (typed literals, `lookup`, `reference`, `enumeration` objects) and `nested` maps — and returns standard RML for the datasource, registered nowhere: register it with `POST /api/mappings` once reviewed. `{value_slug}` and `{column_slug}` placeholders become the `otsfn:mintIri` function. With `emptyAsNull` the logical sources become queries reading text columns through `NULLIF(col, '')`, for a mapping that must behave identically under another RML processor; by default they stay `rr:tableName`, which this store's engine already reads the legacy way and which keeps join pushdown and watermark runs available.",
+            vec![], vec![("200", "`{rml, triplesMaps, warnings}`"), ("400", "The document cannot be converted; the error names the entity and property"), ("404", "Datasource not found")], true)),
+    ]);
     mount(
         paths,
         "/api/mappings",

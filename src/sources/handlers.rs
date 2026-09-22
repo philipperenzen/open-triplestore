@@ -226,6 +226,9 @@ pub async fn delete_source(
     // continue its version sequence and serve the previous database's
     // code-list values as this datasource's history.
     super::profile::delete_profiles(&state.store, &id).map_err(internal)?;
+    // Its re-map tickets go the same way: a ticket about a datasource that no
+    // longer exists is noise for whoever registers the id next.
+    super::drift::delete_tickets(&state.store, &id).map_err(internal)?;
     registry::delete_source(&state.store, &id).map_err(internal)?;
     audit(&state, &user, &source, "deleted");
     Ok(StatusCode::NO_CONTENT)
@@ -370,6 +373,7 @@ fn mapping_response(state: &AppState, m: &MappingRecord) -> MappingResponse {
         shapes_graph: m.shapes_graph.clone(),
         model: m.model.clone(),
         model_version: m.model_version.clone(),
+        profile_version: m.profile_version,
         triples_maps: rml.as_ref().map(|r| r.triples_maps.len()).unwrap_or(0),
         joins: rml
             .as_ref()
@@ -487,6 +491,9 @@ pub async fn create_mapping(
         shapes_graph: body.shapes_graph.clone().filter(|s| !s.trim().is_empty()),
         model: body.model.clone(),
         model_version: body.model_version.clone(),
+        // The profile the mapping was written against: what a drift check
+        // compares the newest profile with.
+        profile_version: super::profile::latest_version(&state.store, &source.id),
         created_by: Some(actor_iri(&state, &user)),
         created_at: now.clone(),
         updated_at: now,
@@ -549,12 +556,21 @@ pub async fn update_mapping(
     };
 
     // Only new RML mints a version; a metadata-only edit keeps the current one.
-    if body.rml.is_some() || body.yarrrml.is_some() {
+    let new_rml = body.rml.is_some() || body.yarrrml.is_some();
+    if new_rml {
         let rml = rml_of(&body, Some(record.source_id.as_str()))?;
         mappings::validate_rml(&rml, &record.source_id).map_err(bad)?;
         record.version = existing.version + 1;
         mappings::store_version(&state.store, &record.id, record.version, &rml)
             .map_err(internal)?;
+    }
+    // New RML, or an approval, was written against the profile of the moment:
+    // that becomes the drift baseline. A metadata edit keeps the old one.
+    let approved_now =
+        record.state == MappingState::Approved && existing.state != MappingState::Approved;
+    if new_rml || approved_now {
+        record.profile_version = super::profile::latest_version(&state.store, &record.source_id)
+            .or(record.profile_version);
     }
     registry::put_mapping(&state.store, &record).map_err(internal)?;
     commit_mapping(&state, &user, &record, "updated");

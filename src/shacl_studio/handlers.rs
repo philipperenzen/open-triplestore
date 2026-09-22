@@ -262,30 +262,6 @@ pub async fn delete_shape_graph(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The `(label, namespace)` to declare for a namespace the graph draws terms
-/// from, or `None` to leave those terms in full IRI form.
-///
-/// An exact registry hit answers itself. Everything else is a namespace derived
-/// by splitting an IRI at its last delimiter, and those routinely have no
-/// registry entry: the registry knows `ex: <http://example.org/>`, while
-/// `http://example.org/shapes/PersonShape` — path-style shape IRIs are the norm
-/// in SHACL — splits at `.../shapes/`. Asking only for an exact match left every
-/// such IRI written out in full. The fallback declares the longest registered
-/// namespace the derived one sits under instead, which the serializer still
-/// matches (it tries declarations longest-namespace-first and escapes what is
-/// left, giving `ex:shapes\/PersonShape`).
-fn resolve_namespace(
-    registry: &crate::prefixes::PrefixRegistry,
-    ns: &str,
-) -> Option<(String, String)> {
-    if let Some(p) = registry.reverse_local(ns) {
-        return Some((p.prefix, p.namespace));
-    }
-    registry
-        .shrink_iri(ns)
-        .map(|(p, _)| (p.prefix, p.namespace))
-}
-
 pub async fn get_shape_graph_turtle(
     Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
@@ -312,7 +288,7 @@ pub async fn get_shape_graph_turtle(
         .dump_prefixed(
             oxigraph::io::RdfFormat::Turtle,
             Some(&set.graph_iri),
-            |ns| resolve_namespace(&state.prefix_registry, ns),
+            |ns| state.prefix_registry.declaration_for(ns),
         )
         .map_err(e500)?;
     Ok((StatusCode::OK, [(CONTENT_TYPE, "text/turtle")], data).into_response())

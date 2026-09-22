@@ -139,6 +139,16 @@ async fn put_turtle(app: &Router, token: &str, graph: &str, turtle: &str) {
     );
 }
 
+/// A served Turtle document as N-Triples, so an assertion about a statement
+/// does not depend on which prefixes the serializer declared.
+fn as_ntriples(turtle: &str) -> String {
+    let store = open_triplestore::store::TripleStore::in_memory().unwrap();
+    store
+        .load_str(turtle, oxigraph::io::RdfFormat::Turtle, None)
+        .unwrap_or_else(|e| panic!("not valid Turtle: {e}\n{turtle}"));
+    String::from_utf8(store.dump(oxigraph::io::RdfFormat::NTriples, None).unwrap()).unwrap()
+}
+
 async fn sparql_json(app: &Router, token: &str, query: &str) -> Value {
     let resp = app
         .clone()
@@ -604,7 +614,9 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let prov = body_text(resp.into_body()).await;
+    // Served as prefixed Turtle; the checks below are about the statements,
+    // not the layout, so read it back as N-Triples.
+    let prov = as_ntriples(&body_text(resp.into_body()).await);
     for expected in [
         &format!("<urn:run:{run1_id}:activity>"),
         "http://www.w3.org/ns/prov#Activity",
@@ -781,7 +793,7 @@ async fn run_materialises_swaps_and_rolls_back_without_rerunning() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let trail = body_text(resp.into_body()).await;
+    let trail = as_ntriples(&body_text(resp.into_body()).await);
     assert!(
         trail.contains("datasource#Rollback"),
         "no rollback recorded:\n{trail}"

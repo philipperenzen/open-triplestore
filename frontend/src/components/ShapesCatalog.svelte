@@ -9,6 +9,7 @@
   //   • picker mode (`picker` + `targetGraphId`) — add picks to one shape graph
   //     (used from the editor's "Add existing shapes"); emits `imported`.
   import { onMount, createEventDispatcher } from 'svelte';
+  import { t } from 'svelte-i18n';
   import {
     listShapesCatalog, listShapeGraphs, createShapeGraph, importShapesIntoGraph, registerShapeGraph,
     getShapeGraphTurtle,
@@ -136,7 +137,7 @@
     openingViewer.add(g.graph); openingViewer = new Set(openingViewer);
     try {
       const ttl = await getShapeGraphTurtle(g.shape_graph_id);
-      if (!ttl || !ttl.trim()) { toastError('No shapes to open in this graph.'); win?.close(); return; }
+      if (!ttl || !ttl.trim()) { toastError($t('components.shapesCatalog.noShapesToOpen')); win?.close(); return; }
       showShapesInViewer(win, ttl);
     } catch (e) {
       toastError(e.message); win?.close();
@@ -156,7 +157,7 @@
     busy = true;
     try {
       const res = await importShapesIntoGraph(targetGraphId, selectedRefs());
-      toastSuccess(`Added ${res.imported} shape${res.imported === 1 ? '' : 's'} (v${res.version})`);
+      toastSuccess($t('components.shapesCatalog.addedWithVersion', { values: { count: res.imported, version: res.version } }));
       selected = new Set();
       dispatch('imported', res);
     } catch (e) { toastError(e.message); } finally { busy = false; }
@@ -164,35 +165,35 @@
 
   async function createFromSelection() {
     if (!selected.size) return;
-    const name = (prompt('Name for the new shape graph:', 'New shape graph') || '').trim();
+    const name = (prompt($t('components.shapesCatalog.newGraphPrompt'), $t('components.shapesCatalog.newGraphDefault')) || '').trim();
     if (!name) return;
     busy = true;
     try {
       const sg = await createShapeGraph({ name, visibility: 'private' });
       const res = await importShapesIntoGraph(sg.id, selectedRefs());
-      toastSuccess(`Created "${sg.name}" with ${res.imported} shape${res.imported === 1 ? '' : 's'}`);
+      toastSuccess($t('components.shapesCatalog.created', { values: { name: sg.name, count: res.imported } }));
       dispatch('created', sg);
       navigate(`/shacl/shapes/${sg.id}`);
     } catch (e) { toastError(e.message); } finally { busy = false; }
   }
 
   async function addToExisting() {
-    if (!selected.size || !addTargetId) { toastError('Pick a shape graph to add into'); return; }
+    if (!selected.size || !addTargetId) { toastError($t('components.shapesCatalog.pickTarget')); return; }
     busy = true;
     try {
       const res = await importShapesIntoGraph(addTargetId, selectedRefs());
-      toastSuccess(`Added ${res.imported} shape${res.imported === 1 ? '' : 's'}`);
+      toastSuccess($t('components.shapesCatalog.added', { values: { count: res.imported } }));
       navigate(`/shacl/shapes/${addTargetId}`);
     } catch (e) { toastError(e.message); } finally { busy = false; }
   }
 
   async function registerGraph(g) {
-    const name = (prompt('Name for this shape graph:', shortenIRI(g.graph)) || '').trim();
+    const name = (prompt($t('components.shapesCatalog.registerPrompt'), shortenIRI(g.graph)) || '').trim();
     if (!name) return;
     busy = true;
     try {
       const sg = await registerShapeGraph({ graph_iri: g.graph, name, visibility: 'private' });
-      toastSuccess(`Registered "${sg.name}"`);
+      toastSuccess($t('components.shapesCatalog.registered', { values: { name: sg.name } }));
       await reload();
     } catch (e) { toastError(e.message); } finally { busy = false; }
   }

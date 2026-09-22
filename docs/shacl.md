@@ -334,6 +334,26 @@ curl http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/commits -H 'A
 
 When a dataset version is snapshotted, the dataset's effective bindings are captured into a version-scoped `{base}/dataset/{id}/version/{ver}/validation` graph and re-applied on restore — so the validation layer versions and branches together with the data it governs.
 
+### Reading and writing a shape graph's content
+
+The content of a shape graph is served and replaced as one document:
+
+```bash
+# Turtle, with an @prefix header built from the prefix registry for the
+# namespaces the graph actually uses — sh:, xsd:, the deployment's own.
+curl http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle -H 'Authorization: Bearer <token>'
+
+# SHACL Compact Syntax instead: ?format=shaclc, or Accept: text/shaclc
+curl 'http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle?format=shaclc' -H 'Authorization: Bearer <token>'
+
+# Replace the content. The revision note is what the history shows for it.
+curl -X PUT 'http://localhost:7878/api/shacl/shape-graphs/<shape_graph_id>/turtle?message=Require%20a%20name' \
+     -H 'Authorization: Bearer <token>' -H 'Content-Type: text/turtle' --data-binary @shapes.ttl
+# → {"version": 4}
+```
+
+`message` is optional (the default note is `Edited`), trimmed, bounded to 200 characters and stripped of control characters before it reaches the commit log. A body sent as `Content-Type: text/shaclc` is parsed as SHACL-C first and stored as Turtle. Reading needs read access to the shape graph; writing needs manage access.
+
 ---
 
 ## SHACL-AF Inference
