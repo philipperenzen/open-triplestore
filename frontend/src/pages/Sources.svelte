@@ -8,8 +8,8 @@
   // the API returns the reference, never a value.
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
-  import { Database, Plug, Loader2, ShieldCheck, ShieldAlert, Lock, Sparkles, Play, AlertTriangle, Check } from 'lucide-svelte';
-  import { listSources, createSource, testSource, sourceMetrics } from '../lib/api.js';
+  import { Database, Plug, Loader2, ShieldCheck, ShieldAlert, Lock, Sparkles, Play, AlertTriangle, Check, SlidersHorizontal } from 'lucide-svelte';
+  import { listSources, createSource, testSource, sourceMetrics, getMappingGates, updateMappingGates } from '../lib/api.js';
   import { Link, navigate } from '../lib/router/index.js';
   import { isAdmin, authInitialized } from '../lib/stores.js';
   import { toastError, toastSuccess } from '../lib/toast.ts';
@@ -21,6 +21,44 @@
   let testing = false;
   let saving = false;
   let testResult = null;
+
+  // The mapping gates: the thresholds a proposal is judged by, a config graph
+  // the proposer reads and an administrator edits here.
+  let gates = null;
+  let showGates = false;
+  let gatesForm = null;
+  let savingGates = false;
+  const GATE_FIELDS = [
+    'autoThreshold', 'reviewThreshold', 'datatypeMismatchCap', 'ambiguityMargin',
+    'enumMatchMinimum', 'systematicShare', 'systematicMinSubjects', 'driftKlThreshold',
+  ];
+  const LEXICAL_FIELDS = ['nameWeight', 'commentWeight', 'typeWeight', 'minimumScore'];
+
+  async function loadGates() {
+    try {
+      gates = await getMappingGates();
+      gatesForm = { ...gates, lexical: { ...gates.lexical } };
+    } catch (e) {
+      toastError(e.message);
+    }
+  }
+
+  async function saveGates() {
+    savingGates = true;
+    try {
+      const patch = {};
+      for (const f of GATE_FIELDS) patch[f] = Number(gatesForm[f]);
+      patch.lexical = {};
+      for (const f of LEXICAL_FIELDS) patch.lexical[f] = Number(gatesForm.lexical[f]);
+      gates = await updateMappingGates(patch);
+      gatesForm = { ...gates, lexical: { ...gates.lexical } };
+      toastSuccess($t('pages.sources.gatesSaved'));
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      savingGates = false;
+    }
+  }
 
   const EMPTY = {
     id: '', name: '', dialect: 'sqlite', host: '', port: null, database: '',
@@ -109,6 +147,39 @@
       <div><span class="stat-n">{(metrics.triplesProduced ?? 0).toLocaleString()}</span><span class="stat-l">{$t('pages.sources.statTriples')}</span></div>
     </div>
   {/if}
+
+  <div class="card gates">
+    <button class="gates-head" on:click={() => { showGates = !showGates; if (showGates && !gates) loadGates(); }} aria-expanded={showGates}>
+      <SlidersHorizontal size={15} /> <strong>{$t('pages.sources.gatesHeading')}</strong>
+      {#if gates}<span class="chip">{$t(`pages.sources.gatesSource_${gates.source}`)}</span>{/if}
+    </button>
+    {#if showGates}
+      <p class="hint">{$t('pages.sources.gatesIntro')}</p>
+      {#if !gatesForm}
+        <div class="placeholder"><Loader2 size={18} class="spin" /></div>
+      {:else}
+        <form class="form" on:submit|preventDefault={saveGates}>
+          <div class="grid">
+            {#each GATE_FIELDS as f (f)}
+              <label>{$t(`pages.sources.gate_${f}`)}
+                <input type="number" step={f === 'systematicMinSubjects' ? '1' : '0.01'} min="0" max={f === 'systematicMinSubjects' || f === 'driftKlThreshold' ? undefined : '1'} bind:value={gatesForm[f]} required />
+              </label>
+            {/each}
+            {#each LEXICAL_FIELDS as f (f)}
+              <label>{$t(`pages.sources.gateLexical_${f}`)}
+                <input type="number" step="0.01" min="0" max="1" bind:value={gatesForm.lexical[f]} required />
+              </label>
+            {/each}
+          </div>
+          <div class="actions">
+            <button type="submit" class="btn" disabled={savingGates}>
+              {#if savingGates}<Loader2 size={14} class="spin" />{/if} {$t('pages.sources.gatesSave')}
+            </button>
+          </div>
+        </form>
+      {/if}
+    {/if}
+  </div>
 
   {#if showForm}
     <form class="card form" on:submit|preventDefault={save}>
@@ -264,4 +335,6 @@
   .ref { font-size: .75rem; opacity: .8; }
   .placeholder { text-align: center; padding: 2rem; }
   .dim { opacity: .7; }
+  .gates-head { display: flex; align-items: center; gap: .5rem; width: 100%; background: none; border: 0; color: inherit; cursor: pointer; padding: 0; text-align: left; font-size: .95rem; }
+  .gates .form { margin-top: .75rem; }
 </style>

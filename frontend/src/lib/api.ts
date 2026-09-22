@@ -1055,6 +1055,26 @@ export const deleteMapping = (id) => request('DELETE', `/api/mappings/${encodeUR
 export const getMappingRml = (id, version?: number) =>
   request('GET', `/api/mappings/${encodeURIComponent(id)}/rml${version ? `?version=${version}` : ''}`);
 
+// Profiling: counts and shapes per table, never rows. The profile is Turtle.
+export const profileSource = (sourceId, tables?: string[]) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/profile`, tables?.length ? { tables } : {});
+export const getSourceProfile = (sourceId, version?: number) =>
+  request('GET', `/api/sources/${encodeURIComponent(sourceId)}/profile${version ? `?version=${version}` : ''}`);
+// Drift between two profile versions, and the re-map tickets it opens.
+export const driftSource = (sourceId, body = {}) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/drift`, body);
+export const listSourceTickets = (sourceId) =>
+  request('GET', `/api/sources/${encodeURIComponent(sourceId)}/tickets`);
+export const closeTicket = (ticketId) => request('POST', `/api/tickets/${encodeURIComponent(ticketId)}/close`, {});
+// A sample of a mapping, validated and classified; registers nothing.
+export const dryRunSource = (sourceId, body) =>
+  request('POST', `/api/sources/${encodeURIComponent(sourceId)}/dry-run`, body);
+// The mapping gates config graph.
+export const getMappingGates = () => request('GET', '/api/sources/gates');
+export const updateMappingGates = (patch) => request('PUT', '/api/sources/gates', patch);
+// A legacy `mapping.sql2rdf.yaml` bundle as RML, registered nowhere.
+export const convertLegacyMapping = (body) => request('POST', '/api/mappings/convert', body);
+
 export const listSourceRuns = (sourceId) => request('GET', `/api/sources/${encodeURIComponent(sourceId)}/runs`);
 export const startSourceRun = (sourceId, body) => request('POST', `/api/sources/${encodeURIComponent(sourceId)}/runs`, body);
 export const getRun = (runId) => request('GET', `/api/runs/${encodeURIComponent(runId)}`);
