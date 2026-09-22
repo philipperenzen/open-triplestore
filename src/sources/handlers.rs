@@ -32,7 +32,7 @@ fn internal(message: impl std::fmt::Display) -> (StatusCode, String) {
 }
 
 /// The actor IRI recorded as `prov:wasAttributedTo` / `prov:wasAssociatedWith`.
-fn actor_iri(state: &AppState, user: &AuthenticatedUser) -> String {
+pub(crate) fn actor_iri(state: &AppState, user: &AuthenticatedUser) -> String {
     format!(
         "{}/users/{}",
         state.base_url.trim_end_matches('/'),
@@ -135,12 +135,26 @@ async fn check_resolvable(source: &SqlSource) -> ApiResult<()> {
         .map_err(bad)
 }
 
+/// The API view of a datasource for `user`: whole for an administrator,
+/// scrubbed of its location for the proposer's service token.
+fn source_view(user: &AuthenticatedUser, source: &SqlSource) -> SourceResponse {
+    let view = SourceResponse::from(source);
+    if user.is_admin() {
+        view
+    } else {
+        view.scrubbed()
+    }
+}
+
 /// `GET /api/sources`
-pub async fn list_sources(State(state): State<AppState>) -> Json<Vec<SourceResponse>> {
+pub async fn list_sources(
+    Extension(user): Extension<AuthenticatedUser>,
+    State(state): State<AppState>,
+) -> Json<Vec<SourceResponse>> {
     Json(
         registry::list_sources(&state.store)
             .iter()
-            .map(SourceResponse::from)
+            .map(|s| source_view(&user, s))
             .collect(),
     )
 }
@@ -173,11 +187,12 @@ pub async fn create_source(
 
 /// `GET /api/sources/:id`
 pub async fn get_source(
+    Extension(user): Extension<AuthenticatedUser>,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<SourceResponse>> {
     registry::get_source(&state.store, &id)
-        .map(|s| Json(SourceResponse::from(&s)))
+        .map(|s| Json(source_view(&user, &s)))
         .ok_or_else(|| not_found("datasource", &id))
 }
 
@@ -229,6 +244,8 @@ pub async fn delete_source(
     // Its re-map tickets go the same way: a ticket about a datasource that no
     // longer exists is noise for whoever registers the id next.
     super::drift::delete_tickets(&state.store, &id).map_err(internal)?;
+    // And its review queue: every item names a run graph of this datasource.
+    super::review::delete_for_source(&state.store, &id).map_err(internal)?;
     registry::delete_source(&state.store, &id).map_err(internal)?;
     audit(&state, &user, &source, "deleted");
     Ok(StatusCode::NO_CONTENT)
@@ -438,6 +455,36 @@ fn rml_of(body: &MappingRequest, source_hint: Option<&str>) -> ApiResult<String>
     }
 }
 
+/// The state a mapping lands in, given who asked for what. An unknown state
+/// is a client error; an administrator gets what it asked for, or `fallback`
+/// when it asked for nothing; a proposer can only propose — anything else it
+/// names, `approved` above all, is a reviewer's decision and refused.
+fn mapping_state_for(
+    user: &AuthenticatedUser,
+    requested: Option<&str>,
+    fallback: MappingState,
+) -> ApiResult<MappingState> {
+    let requested = match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(
+            MappingState::parse(s).ok_or_else(|| bad(format!("unknown mapping state '{s}'")))?,
+        ),
+        None => None,
+    };
+    if user.is_admin() {
+        return Ok(requested.unwrap_or(fallback));
+    }
+    match requested {
+        None | Some(MappingState::Proposed) => Ok(MappingState::Proposed),
+        Some(other) => Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "a proposer submits mappings as 'proposed'; '{}' is a reviewer's decision",
+                other.as_str()
+            ),
+        )),
+    }
+}
+
 /// `POST /api/mappings`
 pub async fn create_mapping(
     Extension(user): Extension<AuthenticatedUser>,
@@ -484,17 +531,14 @@ pub async fn create_mapping(
     let source = registry::get_source(&state.store, &source_id)
         .ok_or_else(|| not_found("datasource", &source_id))?;
     mappings::check(&parsed, &source.id).map_err(bad)?;
+    let state_requested = mapping_state_for(&user, body.state.as_deref(), MappingState::Draft)?;
 
     let now = registry::now();
     let record = MappingRecord {
         title: body.title.clone().unwrap_or_else(|| id.clone()),
         source_id: source.id.clone(),
         version: 1,
-        state: body
-            .state
-            .as_deref()
-            .and_then(MappingState::parse)
-            .unwrap_or(MappingState::Draft),
+        state: state_requested,
         shapes_graph: body.shapes_graph.clone().filter(|s| !s.trim().is_empty()),
         model: body.model.clone(),
         model_version: body.model_version.clone(),
@@ -534,6 +578,18 @@ pub async fn update_mapping(
 ) -> ApiResult<Json<MappingResponse>> {
     let existing =
         registry::get_mapping(&state.store, &id).ok_or_else(|| not_found("mapping", &id))?;
+    // A proposer refines what it proposed; a mapping a reviewer has moved on
+    // — approved, rejected, or taken back to draft — is no longer its to edit.
+    if !user.is_admin() && existing.state != MappingState::Proposed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "mapping '{id}' is {}; a proposer may only refine a proposed mapping",
+                existing.state.as_str()
+            ),
+        ));
+    }
+    let state_requested = mapping_state_for(&user, body.state.as_deref(), existing.state)?;
     let source_id = body
         .source
         .clone()
@@ -543,11 +599,7 @@ pub async fn update_mapping(
     let mut record = MappingRecord {
         title: body.title.clone().unwrap_or_else(|| existing.title.clone()),
         source_id,
-        state: body
-            .state
-            .as_deref()
-            .and_then(MappingState::parse)
-            .unwrap_or(existing.state),
+        state: state_requested,
         shapes_graph: body
             .shapes_graph
             .clone()
@@ -607,6 +659,9 @@ pub async fn delete_mapping(
             ),
         ));
     }
+    // The decisions taken on it go with it: they name versions that will no
+    // longer exist.
+    super::decisions::delete_for_mapping(&state.store, &mapping.id).map_err(internal)?;
     registry::delete_mapping(&state.store, &mapping).map_err(internal)?;
     commit_mapping(&state, &user, &mapping, "deleted");
     Ok(StatusCode::NO_CONTENT)

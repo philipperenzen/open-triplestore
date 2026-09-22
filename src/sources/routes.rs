@@ -66,5 +66,7 @@ pub fn source_routes() -> Router<AppState> {
         .merge(super::dryrun::routes())
         .merge(super::legacy::routes())
         .merge(super::drift::routes())
+        .merge(super::decisions::routes())
+        .merge(super::review::routes())
         .merge(crate::data_models::profile::routes())
 }

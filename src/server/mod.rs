@@ -1034,10 +1034,11 @@ pub fn build_router(state: AppState, cors_origins: &str, trusted_cidrs: Vec<IpNe
         .with_state(state.clone());
 
     // SQL datasources, RML mapping registry and materialisation runs. Admin
-    // only: a datasource carries a pointer to a production credential, and a
-    // run writes instance data (src/sources).
+    // territory — a datasource carries a pointer to a production credential,
+    // and a run writes instance data — with one exception the guard knows: a
+    // service token scoped for the mapping proposer (src/sources/access.rs).
     let source_routes = crate::sources::routes::source_routes()
-        .route_layer(middleware::from_fn(require_admin))
+        .route_layer(middleware::from_fn(crate::sources::access::guard))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             endpoint_acl_guard,

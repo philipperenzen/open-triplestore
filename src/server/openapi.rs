@@ -103,6 +103,21 @@ minted at `POST /api/auth/tokens`. Send it as `Authorization: Bearer <token>`.",
             crate::sources::model::RunMode,
             crate::sources::model::MappingRef,
             crate::sources::model::ShaclSummary,
+            crate::sources::decisions::DecisionRequest,
+            crate::sources::decisions::Decision,
+            crate::sources::decisions::Outcome,
+            crate::sources::decisions::CalibrationRequest,
+            crate::sources::decisions::CalibrationPoint,
+            crate::sources::decisions::Calibration,
+            crate::sources::decisions::CurvePoint,
+            crate::sources::decisions::BrierScore,
+            crate::sources::review::ReviewItem,
+            crate::sources::review::Violation,
+            crate::sources::review::Fix,
+            crate::sources::review::StatusRequest,
+            crate::sources::review::AutofixRequest,
+            crate::sources::review::AutofixResponse,
+            crate::sources::review::Suggestion,
             crate::auth::models::Dataset,
             crate::auth::models::SparqlService,
             crate::auth::models::Asset,
@@ -2753,6 +2768,57 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
             ),
         )],
     );
+    mount(paths, "/api/mappings/:id/decisions", vec![
+        (M::Post, o("Sources", "Record a review decision", "Body: `{decision, target?, confidence?, note?}` with `decision` one of `approve`, `edit`, `reject`. Each is a distinct PROV outcome: a `ds:ReviewDecision` activity at `urn:mapping:<id>:decision:<uuid>` that `prov:used` the mapping version it judged, with the reviewer, the confidence the proposal carried (`0..=1`) and the note. `approve` moves the mapping to `approved` and re-baselines its profile version for drift; `reject` moves it to `rejected`; `edit` records that the reviewer changed the proposal before accepting — the edit itself is a `PUT /api/mappings/{id}`. Administrators only: a `mappings:propose` token proposes, it never decides.",
+            vec![], vec![("201", "The decision"), ("400", "Unknown decision, or a confidence outside `[0, 1]`"), ("404", "Mapping not found")], true)),
+    ]);
+    mount(paths, "/api/mappings/:id/reviews", vec![
+        (M::Get, o("Sources", "The decisions taken on a mapping", "Every review decision on the mapping, newest first, each with its outcome, the version it judged, the target, the confidence, the note and the reviewer. The proposer's training data: readable with `sources:read`.",
+            vec![], vec![("200", "Array of decisions"), ("404", "Mapping not found")], true)),
+    ]);
+    mount(paths, "/api/mappings/:id/provenance", vec![
+        (M::Get, o("Sources", "Mapping provenance", "The mapping's PROV-O trail as Turtle: the mapping, its frozen versions, the runs that used them and the decisions taken on them. Served here because the records live in `urn:system:sources`, outside a caller's SPARQL scope.",
+            vec![], vec![("200", "Turtle"), ("404", "Mapping not found")], true)),
+    ]);
+    mount(paths, "/api/sources/calibration", vec![
+        (M::Post, o("Sources", "Calibrate proposal confidences", "Fits a monotone map from stated confidence to observed acceptance rate — isotonic regression by pool-adjacent-violators — over `points: [{confidence, accepted}]` from the body, or, without a body, over every recorded decision that carries a confidence (an approval counts as accepted; an edit or a rejection does not). Returns the counts, the curve (one point per distinct confidence, never decreasing) and the Brier score before and after. **One-class data is refused**: a set of only acceptances or only refusals would fit a curve that assigns that outcome to every confidence. Open to `sources:read`: it computes and writes nothing.",
+            vec![], vec![("200", "The calibration"), ("400", "A confidence outside `[0, 1]`"), ("422", "Fewer than two points, or one-class data")], true)),
+    ]);
+    mount(paths, "/api/sources/:id/reviews", vec![
+        (M::Get, o("Sources", "The review queue of a datasource", "Every review item a refused run opened for the datasource, newest first — one per subject with violations, carrying the violations, a snapshot of the subject as the candidate graph describes it (N-Triples, refreshed after every fix), the fixes applied so far, the status and the last decision. Items live in `urn:system:reviews:<id>`, outside SPARQL scope. Administrators only: a snapshot is instance data, which the proposer never receives.",
+            vec![qp("status", false, "One of needsHuman, gathering, corrected, valid, approved, rejected, promoted")], vec![("200", "Array of review items"), ("400", "Unknown status"), ("404", "Datasource not found")], true)),
+    ]);
+    mount(
+        paths,
+        "/api/reviews/:id",
+        vec![(
+            M::Get,
+            o(
+                "Sources",
+                "Get a review item",
+                "One item, whichever datasource it belongs to.",
+                vec![],
+                vec![("200", "The item"), ("404", "Not found")],
+                true,
+            ),
+        )],
+    );
+    mount(paths, "/api/reviews/:id/status", vec![
+        (M::Post, o("Sources", "Decide a review item", "Body: `{status, note?}`. Sets the status — `needsHuman`, `gathering`, `corrected`, `valid`, `approved`, `rejected` or `promoted` — records who decided and keeps the note as the decision. Recorded in the commit log.",
+            vec![], vec![("200", "The item as it now stands"), ("400", "Unknown status"), ("404", "Not found")], true)),
+    ]);
+    mount(paths, "/api/reviews/:id/autofix", vec![
+        (M::Post, o("Sources", "The deterministic fixer", "Body: `{apply}`. Two rules and no others: a negative value where `sh:minInclusive` names a non-negative bound is a **sign typo** and loses its sign; a value past an inclusive bound is **clamped** to it. Both turn a literal that exists into one the constraint names. Nothing is invented — a missing required value, a wrong class, a pattern — and an item with nothing to fix is a 422. With `apply: false` the change is returned as an RDF Patch (`TX` / `D` / `A` / `TC`) and nothing moves; with `apply: true` the patch is applied through the store's patch path into the candidate graph as one commit, the snapshot refreshed and the item marked `corrected`.",
+            vec![], vec![("200", "`{applied, status, fixes: [{rule, path, from, to, constraint}], patch, unfixable}`"), ("404", "Not found"), ("422", "Nothing can be fixed without inventing a value")], true)),
+    ]);
+    mount(paths, "/api/reviews/:id/suggest", vec![
+        (M::Post, o("Sources", "Ask the model about a review item", "Sends the item's constraints and paths to the configured LLM gateway and returns its suggestion — `{explanation, replacement}` when it answered as asked. Applies nothing. What leaves the deployment follows the datasource's `allowModelAssist`: with it, the offending values go along; without it, they are withheld and only the constraints and paths are sent. The snapshot and any credential never leave.",
+            vec![], vec![("200", "`{model, applied: false, valuesShared, suggestion}`"), ("404", "Not found"), ("503", "No LLM gateway reachable")], true)),
+    ]);
+    mount(paths, "/api/runs/:id/promote", vec![
+        (M::Post, o("Sources", "Promote a corrected candidate", "Runs the SHACL write gate again over the run's kept candidate graph as it now stands — after the fixer, a patch or a human edit — and, when it passes, gives it the production role exactly as a passing run would: one pointer swap, the previous graph demoted and kept, LDES members published. Recorded as a `ds:Promotion` activity on the run's PROV trail naming who promoted it; the run's review items are marked `promoted`.",
+            vec![], vec![("200", "`{promotion, run, source}`"), ("404", "Not found"), ("409", "The run is in production already, or has no candidate graph"), ("422", "The gate still refuses; the report says why and production is unchanged")], true)),
+    ]);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Assets
@@ -5729,6 +5795,7 @@ mod tests {
             can_publish: false,
             write_access: true,
             can_mint_api_tokens: true,
+            scopes: Vec::new(),
         }
     }
 

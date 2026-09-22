@@ -9,19 +9,23 @@
   // YARRRML composer — plus the one-time converter for a legacy bundle.
   // Dry-run: a sample, validated, split into mapping defects and data issues,
   // with every attempt kept as a round.
-  // Runs: trigger a run, read the history, roll back in one click.
+  // Runs: trigger a run, read the history, roll back in one click — and the
+  // review queue a refused run leaves: the fixer, a human's decision, the
+  // model's suggestion, and promotion of the corrected candidate.
   import { onMount } from 'svelte';
   import { t } from 'svelte-i18n';
   import {
     Database, Loader2, Play, Undo2, Trash2, Table2, KeyRound, Link2, AlertTriangle, Check, Lock,
     ShieldCheck, ShieldAlert, Sparkles, FileCode, Activity, FlaskConical, GitCompareArrows, Save,
-    Ticket, X, ChevronDown, ChevronRight,
+    Ticket, X, ChevronDown, ChevronRight, ThumbsUp, ThumbsDown, Pencil, Rocket, Wand2,
+    MessageSquare, ClipboardList,
   } from 'lucide-svelte';
   import {
     getSource, introspectSource, previewSourceTable, listSourceMappings, listSourceRuns,
     startSourceRun, rollbackRun, deleteRun, getMappingRml, profileSource, getSourceProfile,
     driftSource, listSourceTickets, closeTicket, dryRunSource, createMapping, updateMapping,
-    convertLegacyMapping,
+    convertLegacyMapping, decideMapping, listMappingDecisions, promoteRun, listSourceReviews,
+    setReviewStatus, autofixReviewItem, suggestReviewFix,
   } from '../lib/api.js';
   import { Link, navigate } from '../lib/router/index.js';
   import { shortenIRI } from '../lib/rdf-utils.js';
@@ -74,9 +78,28 @@
   let rounds = [];
   let openEntity = null;
 
+  // ── Decisions (Map) ──
+  let decisions = [];
+  let decisionsFor = '';
+  let decisionNote = '';
+  let decisionConfidence = '';
+  let deciding = false;
+
   // ── Runs ──
   let running = false;
   let gateReport = null;
+  let promoting = null;
+
+  // ── Review queue (Runs) ──
+  const REVIEW_STATUSES = ['needsHuman', 'gathering', 'corrected', 'valid', 'approved', 'rejected', 'promoted'];
+  const CLOSED_STATUSES = ['valid', 'approved', 'rejected', 'promoted'];
+  let reviews = [];
+  let reviewStatus = '';
+  let openItem = null;
+  let fixPreview = {};
+  let suggestions = {};
+  let itemNote = {};
+  let busyItem = null;
 
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
@@ -95,6 +118,8 @@
       if (!profileLoaded) loadProfile();
     }
     if (next === 'map' && selectedMapping && rmlLoadedFor !== selectedMapping) loadRml(selectedMapping);
+    if (next === 'map' && decisionsFor !== selectedMapping) loadDecisions(selectedMapping);
+    if (next === 'runs') loadReviews();
   }
 
   onMount(async () => {
@@ -310,6 +335,39 @@
 
   const kindLabel = (kind) => $t(`pages.sourceDetail.kind_${kind}`);
 
+  // ── Decisions: approve, edit, reject — three distinct PROV outcomes ──
+
+  async function loadDecisions(mappingId) {
+    decisionsFor = mappingId;
+    decisions = mappingId ? await listMappingDecisions(mappingId).catch(() => []) : [];
+  }
+
+  async function selectMapping() {
+    await loadRml(selectedMapping);
+    await loadDecisions(selectedMapping);
+  }
+
+  async function decide(decision) {
+    if (!selectedMapping) return;
+    deciding = true;
+    try {
+      const body = { decision };
+      if (decisionNote.trim()) body.note = decisionNote.trim();
+      const c = parseFloat(decisionConfidence);
+      if (!Number.isNaN(c)) body.confidence = c;
+      await decideMapping(selectedMapping, body);
+      toastSuccess($t('pages.sourceDetail.decided', { values: { decision } }));
+      decisionNote = '';
+      decisionConfidence = '';
+      await load();
+      await loadDecisions(selectedMapping);
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      deciding = false;
+    }
+  }
+
   // ───────────────────────────── Dry-run ─────────────────────────────
 
   async function runDryRun() {
@@ -392,6 +450,77 @@
       toastError(e.message);
     }
   }
+
+  // ── Promotion and the review queue ──
+
+  async function promote(runId) {
+    promoting = runId;
+    gateReport = null;
+    try {
+      const out = await promoteRun(runId);
+      source = out.source;
+      toastSuccess($t('pages.sourceDetail.promoted'));
+      await load();
+      await loadReviews();
+    } catch (e) {
+      // 422: the gate still refuses; the candidate is kept, production unchanged.
+      if (e.status === 422) {
+        gateReport = e.message;
+        toastError($t('pages.sourceDetail.promoteGated'));
+      } else {
+        toastError(e.message);
+      }
+    } finally {
+      promoting = null;
+    }
+  }
+
+  async function loadReviews() {
+    reviews = await listSourceReviews(id, reviewStatus || undefined).catch(() => []);
+  }
+
+  const reviewsOf = (runId) => reviews.filter((i) => i.run === runId);
+  const openItemsOf = (runId) => reviewsOf(runId).filter((i) => !CLOSED_STATUSES.includes(i.status)).length;
+
+  async function withItem(item, work) {
+    busyItem = item.id;
+    try {
+      await work();
+    } catch (e) {
+      toastError(e.message);
+    } finally {
+      busyItem = null;
+    }
+  }
+
+  const previewFix = (item) =>
+    withItem(item, async () => {
+      fixPreview = { ...fixPreview, [item.id]: await autofixReviewItem(item.id, false) };
+    });
+
+  const applyFix = (item) =>
+    withItem(item, async () => {
+      const out = await autofixReviewItem(item.id, true);
+      fixPreview = { ...fixPreview, [item.id]: out };
+      toastSuccess($t('pages.sourceDetail.fixApplied', { values: { count: out.fixes.length } }));
+      await loadReviews();
+      await load();
+    });
+
+  const decideItem = (item, status) =>
+    withItem(item, async () => {
+      const body = { status };
+      const note = (itemNote[item.id] || '').trim();
+      if (note) body.note = note;
+      await setReviewStatus(item.id, body);
+      toastSuccess($t('pages.sourceDetail.itemStatusSet', { values: { status: $t(`pages.sourceDetail.rs_${status}`) } }));
+      await loadReviews();
+    });
+
+  const askModel = (item) =>
+    withItem(item, async () => {
+      suggestions = { ...suggestions, [item.id]: await suggestReviewFix(item.id) };
+    });
 
   const isProduction = (r) => source?.production?.run === r.id;
   const duration = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -646,7 +775,7 @@
       <div class="card">
         <div class="bar">
           {#if mappings.length}
-            <select bind:value={selectedMapping} on:change={() => loadRml(selectedMapping)}>
+            <select bind:value={selectedMapping} on:change={selectMapping}>
               {#each mappings as m (m.id)}<option value={m.id}>{m.title} (v{m.version} · {m.state})</option>{/each}
             </select>
           {:else}
@@ -656,11 +785,40 @@
             {#if selected.shapesGraph}<span class="dim small">{$t('pages.sourceDetail.gatedBy')} <code>{shortenIRI(selected.shapesGraph)}</code></span>{/if}
             <span class="grow"></span>
             <span class="small dim">{$t('pages.sourceDetail.state')}:</span>
-            {#each ['draft', 'proposed', 'approved'] as st}
-              <button class="btn btn-sm" class:btn-ghost={selected.state !== st} disabled={selected.state === st} on:click={() => setState(st)}>{$t(`pages.sourceDetail.state_${st}`)}</button>
+            <span class="chip" class:chip-ok={selected.state === 'approved'} class:chip-warn={selected.state === 'rejected'}>{$t(`pages.sourceDetail.state_${selected.state}`)}</span>
+            {#each ['draft', 'proposed'] as st}
+              {#if selected.state !== st}
+                <button class="btn btn-sm btn-ghost" on:click={() => setState(st)}>{$t(`pages.sourceDetail.state_${st}`)}</button>
+              {/if}
             {/each}
           {/if}
         </div>
+        {#if selected}
+          <!-- Approve / edit / reject: distinct outcomes, each recorded as a
+               ds:ReviewDecision on the version being judged. -->
+          <div class="decide">
+            <span class="small dim">{$t('pages.sourceDetail.decideHint')}</span>
+            <input class="mini" bind:value={decisionNote} placeholder={$t('pages.sourceDetail.decisionNote')} />
+            <input class="mini num" type="number" min="0" max="1" step="0.01" bind:value={decisionConfidence} placeholder={$t('pages.sourceDetail.decisionConfidence')} />
+            <button class="btn btn-sm" on:click={() => decide('approve')} disabled={deciding}><ThumbsUp size={12} /> {$t('pages.sourceDetail.decision_approve')}</button>
+            <button class="btn btn-sm btn-ghost" on:click={() => decide('edit')} disabled={deciding}><Pencil size={12} /> {$t('pages.sourceDetail.decision_edit')}</button>
+            <button class="btn btn-sm btn-ghost danger" on:click={() => decide('reject')} disabled={deciding}><ThumbsDown size={12} /> {$t('pages.sourceDetail.decision_reject')}</button>
+          </div>
+          {#if decisions.length}
+            <ul class="decision-list">
+              {#each decisions as d (d.id)}
+                <li>
+                  <span class="chip chip-tiny" class:chip-ok={d.outcome === 'approve'} class:chip-warn={d.outcome === 'reject'}>{$t(`pages.sourceDetail.decision_${d.outcome}`)}</span>
+                  <span class="dim small">v{d.mappingVersion} · {when(d.decidedAt)}</span>
+                  {#if d.confidence != null}<span class="small">{pct(d.confidence)}</span>{/if}
+                  {#if d.target}<code class="small">{shortenIRI(d.target)}</code>{/if}
+                  {#if d.note}<span class="small">{d.note}</span>{/if}
+                  {#if d.actor}<span class="dim small">{d.actor.split('/').pop()}</span>{/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
         <div class="subtabs">
           {#each ['matrix', 'turtle', 'yarrrml', 'legacy'] as v}
             <button class:active={mapView === v} on:click={() => (mapView = v)}>{$t(`pages.sourceDetail.view_${v}`)}</button>
@@ -909,6 +1067,17 @@
                     <Undo2 size={12} /> {$t('pages.sourceDetail.rollback')}
                   </button>
                 {/if}
+                {#if r.status === 'rejected' && !isProduction(r) && r.graphTriples > 0}
+                  <button class="btn btn-sm" on:click={() => promote(r.id)} disabled={promoting === r.id}>
+                    {#if promoting === r.id}<Loader2 size={12} class="spin" />{:else}<Rocket size={12} />{/if}
+                    {$t('pages.sourceDetail.promote')}
+                  </button>
+                {/if}
+                {#if reviewsOf(r.id).length}
+                  <span class="chip chip-tiny" class:chip-warn={openItemsOf(r.id) > 0}>
+                    <ClipboardList size={10} /> {$t('pages.sourceDetail.reviewCount', { values: { open: openItemsOf(r.id), total: reviewsOf(r.id).length } })}
+                  </span>
+                {/if}
                 {#if !isProduction(r)}
                   <button class="btn btn-sm btn-ghost danger" on:click={() => removeRun(r.id)}>
                     <Trash2 size={12} /> {$t('pages.sourceDetail.deleteRun')}
@@ -919,6 +1088,72 @@
           {/each}
         </ul>
       {/if}
+
+      <!-- The review queue: what a refused run left for a human. -->
+      <div class="card">
+        <div class="bar">
+          <h3><ClipboardList size={15} /> {$t('pages.sourceDetail.reviewQueue')}</h3>
+          <select bind:value={reviewStatus} on:change={loadReviews}>
+            <option value="">{$t('pages.sourceDetail.anyStatus')}</option>
+            {#each REVIEW_STATUSES as s}<option value={s}>{$t(`pages.sourceDetail.rs_${s}`)}</option>{/each}
+          </select>
+          <span class="grow"></span>
+          <span class="dim small">{$t('pages.sourceDetail.reviewHint')}</span>
+        </div>
+        {#if !reviews.length}
+          <p class="dim small">{$t('pages.sourceDetail.noReviews')}</p>
+        {:else}
+          <ul class="review-list">
+            {#each reviews as it (it.id)}
+              <li class="review-item">
+                <button class="tbl-head" on:click={() => (openItem = openItem === it.id ? null : it.id)}>
+                  {#if openItem === it.id}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+                  <span class="chip chip-tiny" class:chip-warn={it.status === 'needsHuman'} class:chip-ok={['valid', 'approved', 'promoted', 'corrected'].includes(it.status)}>{$t(`pages.sourceDetail.rs_${it.status}`)}</span>
+                  <code>{shortenIRI(it.subject)}</code>
+                  <span class="dim small">{$t('pages.sourceDetail.violations', { values: { count: it.violations.length } })}</span>
+                  <span class="dim small mono">{it.run.slice(0, 8)}</span>
+                  {#if it.fixes?.length}<span class="chip chip-tiny">{$t('pages.sourceDetail.fixesApplied', { values: { count: it.fixes.length } })}</span>{/if}
+                </button>
+                {#if openItem === it.id}
+                  {#each it.violations as v}
+                    <div class="small bad"><code>{v.path ? shortenIRI(v.path) : ''}</code> <span class="chip chip-tiny">{v.constraint}</span> {v.message}</div>
+                  {/each}
+                  <pre class="rml">{it.snapshot}</pre>
+                  {#if it.decision}
+                    <p class="small"><span class="dim">{$t('pages.sourceDetail.itemDecision')}:</span> {it.decision}{#if it.reviewer} <span class="dim">({it.reviewer.split('/').pop()})</span>{/if}</p>
+                  {/if}
+                  <div class="actions">
+                    <button class="btn btn-sm btn-ghost" on:click={() => previewFix(it)} disabled={busyItem === it.id}><Wand2 size={12} /> {$t('pages.sourceDetail.previewFix')}</button>
+                    <button class="btn btn-sm" on:click={() => applyFix(it)} disabled={busyItem === it.id || it.status === 'promoted'}><Wand2 size={12} /> {$t('pages.sourceDetail.applyFix')}</button>
+                    <button class="btn btn-sm btn-ghost" on:click={() => askModel(it)} disabled={busyItem === it.id}><MessageSquare size={12} /> {$t('pages.sourceDetail.askModel')}</button>
+                    <span class="grow"></span>
+                    <input class="mini" bind:value={itemNote[it.id]} placeholder={$t('pages.sourceDetail.decisionNote')} />
+                    {#each ['approved', 'rejected', 'gathering', 'valid'] as s}
+                      <button class="btn btn-sm btn-ghost" class:danger={s === 'rejected'} on:click={() => decideItem(it, s)} disabled={busyItem === it.id || it.status === s}>{$t(`pages.sourceDetail.rs_${s}`)}</button>
+                    {/each}
+                  </div>
+                  {#if fixPreview[it.id]}
+                    <div class="small fixes">
+                      {#each fixPreview[it.id].fixes as f}
+                        <div><span class="chip chip-tiny">{f.rule}</span> <code>{shortenIRI(f.path)}</code>: {f.from} → {f.to}</div>
+                      {/each}
+                      {#each fixPreview[it.id].unfixable as u}<div class="dim">{u}</div>{/each}
+                    </div>
+                    {#if fixPreview[it.id].patch}<pre class="rml">{fixPreview[it.id].patch}</pre>{/if}
+                  {/if}
+                  {#if suggestions[it.id]}
+                    <div class="small">
+                      <span class="dim">{$t('pages.sourceDetail.modelSays', { values: { model: suggestions[it.id].model } })}</span>
+                      {#if !suggestions[it.id].valuesShared}<span class="chip chip-tiny">{$t('pages.sourceDetail.valuesWithheld')}</span>{/if}
+                    </div>
+                    <pre class="rml">{JSON.stringify(suggestions[it.id].suggestion, null, 2)}</pre>
+                  {/if}
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {/if}
   {/if}
 </div>
@@ -947,8 +1182,12 @@
   .mini { width: 12rem; }
   .mini.num { width: 5.5rem; }
   .gate { display: flex; gap: .5rem; margin-top: .75rem; padding: .6rem .8rem; border-radius: 6px; background: color-mix(in srgb, crimson 12%, transparent); font-size: .85rem; }
-  .run-list, .tbl-list, .ticket-list, .entity-list, .round-list, .warnings { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .6rem; }
-  .ticket-list li, .round-list li { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: .85rem; }
+  .run-list, .tbl-list, .ticket-list, .entity-list, .round-list, .warnings, .decision-list, .review-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .6rem; }
+  .ticket-list li, .round-list li, .decision-list li { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: .85rem; }
+  .decide { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .6rem; }
+  .decision-list { margin-top: .6rem; }
+  .review-item { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: .6rem .8rem; }
+  .fixes { margin-top: .5rem; }
   .ticket-list li.closed { opacity: .6; }
   .warnings { margin-top: .5rem; gap: .25rem; font-size: .8rem; }
   .warnings li { display: flex; gap: .4rem; align-items: flex-start; }

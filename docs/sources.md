@@ -459,6 +459,7 @@ it is not a run.
 | `GET /api/runs/:id` | One run, including `graphTriples` — what its graph holds *now* |
 | `GET /api/runs/:id/provenance` | The run's PROV-O trail as Turtle |
 | `POST /api/runs/:id/rollback` | Re-point the datasource at the previous graph |
+| `POST /api/runs/:id/promote` | Re-gate a refused run's corrected candidate and swap it in (see [review items](#review-items-the-fixer-and-promotion)) |
 | `DELETE /api/runs/:id` | Delete the run and its graph. **409** while it is in production |
 | `GET /api/sources/metrics` | Rows extracted, triples produced, durations, run outcomes and the SHACL pass rate |
 
@@ -755,15 +756,181 @@ reproduces the legacy transformer's triples byte for byte, in both forms.
 
 ---
 
+## The proposer's contract
+
+The mapping proposer is a service that runs against the store and nothing
+else. It never receives a datasource DSN or credential, never a row sample;
+the store profiles the source and the proposer reads the profile graph. Its
+only network peer is this API, reached with an API token carrying two scopes:
+
+| Scope | Grants |
+|---|---|
+| `sources:read` | `GET` on the datasource registry, profiles, mappings, runs, tickets, the mapping gates and the ontology profile; `POST /api/sources/calibration` |
+| `mappings:propose` | `POST /api/mappings` and `PUT /api/mappings/:id` in the `proposed` state, and `POST /api/sources/:id/dry-run` |
+
+```bash
+curl -X POST http://localhost:7878/api/auth/tokens -H "Authorization: Bearer $SERVICE_USER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "mapping-proposer", "scopes": ["sources:read", "mappings:propose"]}'
+```
+
+What the scopes withhold is as deliberate as what they grant:
+
+- **A datasource's location.** `GET /api/sources` for a non-admin answers
+  without `host`, `port`, `database`, `username` or `credential` — the
+  credential field is a reference, not a value, but a reference is the first
+  half of a DSN. The dialect, the dataset, `allowModelAssist` and what is in
+  production remain.
+- **Rows.** `GET /api/sources/:id/preview` is an admin call whatever the
+  token's scopes, and so is the review queue, whose items carry a snapshot of
+  instance data. Row samples are consumed only by the store's own dry-run.
+- **Decisions.** A proposal is created and refined in the `proposed` state
+  and in no other: `"state": "approved"` from a proposer is a 403, and so is
+  refining a mapping a reviewer has already moved on. Running, deleting,
+  editing the gates and deciding stay with administrators.
+
+The proposer reads the gates (`GET /api/sources/gates`), the profile
+(`GET /api/sources/:id/profile`), dry-runs what it intends to propose, writes
+the proposal, and reads back the decisions taken on it and the calibration
+those decisions support.
+
+## Review decisions and calibration
+
+A reviewer decides a proposal with one call, and **approve, edit and reject
+are three distinct outcomes**. An edit — the reviewer changed the proposal
+before accepting it — is the signal a proposer learns the most from, and it
+would vanish if it were folded into "approved".
+
+```bash
+curl -X POST http://localhost:7878/api/mappings/products-map/decisions \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"decision": "edit", "target": "http://example.org/map#ProductsMap", "confidence": 0.71, "note": "price is in cents"}'
+```
+
+Each decision is a `ds:ReviewDecision` activity at
+`urn:mapping:<id>:decision:<uuid>` in `urn:system:sources` that `prov:used`
+the mapping version it judged, with the reviewer, the confidence the proposal
+carried and the note. `approve` moves the mapping to `approved` (and
+re-baselines its profile version for drift, as an approval through `PUT`
+does); `reject` moves it to `rejected`; `edit` records the outcome and leaves
+the state to the edit itself.
+
+| Call | Effect |
+|---|---|
+| `POST /api/mappings/:id/decisions` | Record a decision; **400** for anything but `approve`, `edit`, `reject` |
+| `GET /api/mappings/:id/reviews` | The decisions, newest first — the proposer's training data |
+| `GET /api/mappings/:id/provenance` | The mapping, its versions, its runs and its decisions as Turtle |
+| `POST /api/sources/calibration` | Fit stated confidence to observed acceptance |
+
+**Calibration.** A confidence is only as good as its track record. The
+calibration endpoint fits a monotone map from stated confidence to observed
+acceptance rate — isotonic regression by pool-adjacent-violators — over the
+points in the body, or, without a body, over every recorded decision that
+carries a confidence, an approval counting as accepted and anything else not.
+It answers the counts, the curve (one point per distinct confidence, never
+decreasing) and the Brier score before and after the fit; the proposer applies
+the curve before it compares a score with the gates.
+
+```bash
+curl -X POST http://localhost:7878/api/sources/calibration -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+**One-class data is refused** with a 422. A set of only approvals says the
+proposer was never wrong, a set of only rejections that it never was right,
+and a curve fitted to either would say so for every confidence. Calibration
+needs both outcomes, and at least two points.
+
+## Review items, the fixer and promotion
+
+A run the gate refuses keeps its candidate graph, and until someone looks at
+it that graph is evidence of nothing. So a refusal opens **one review item
+per subject with violations** in `urn:system:reviews:<datasource>` — a
+system graph, outside every dataset's SPARQL scope — carrying the violations
+and a snapshot of the subject as the candidate describes it, refreshed after
+every fix. A refusal over a whole table with a systematic defect is a mapping
+problem, which the dry-run classifier catches before a run; the queue is
+capped at `OTS_REVIEW_MAX_ITEMS` (default 500) per run for that reason.
+
+```bash
+curl "http://localhost:7878/api/sources/legacy-assets/reviews?status=needsHuman" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[{
+  "id": "0c4e…", "subject": "http://example.org/products/product_2", "status": "needsHuman",
+  "run": "6f1c…", "graph": "urn:run:6f1c…", "mapping": "products-map", "mappingVersion": 1,
+  "violations": [{ "constraint": "sh:minInclusive 0", "path": "http://example.org/products/ontology#hasPrice",
+                   "value": "-0.1", "message": "Value -0.1 is not >= 0", "shape": "…#ProductShape" }],
+  "snapshot": "<http://example.org/products/product_2> <…#hasPrice> \"-0.1\"^^<…#decimal> .\n…"
+}]
+```
+
+**The fixer** applies two rules and no others. A negative value where
+`sh:minInclusive` names a non-negative bound is a **sign typo** and loses its
+sign; a value past an inclusive bound is **clamped** to it. Both turn a
+literal that exists into one the constraint names. Nothing is invented: a
+missing required value, a wrong class, a pattern — anything whose fix would
+be a guess — is left to a human, and an item with nothing to fix is a 422
+that says why.
+
+```bash
+# Preview: the change as an RDF Patch, nothing applied.
+curl -X POST http://localhost:7878/api/reviews/$ITEM/autofix -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"apply": false}'
+```
+
+```
+H id <urn:uuid:…> .
+H review <urn:review:0c4e…> .
+TX .
+D <http://example.org/products/product_2> <…#hasPrice> "-0.1"^^<…#decimal> <urn:run:6f1c…> .
+A <http://example.org/products/product_2> <…#hasPrice> "0.1"^^<…#decimal> <urn:run:6f1c…> .
+TC .
+```
+
+With `"apply": true` the same patch goes through the store's patch path into
+the candidate graph as one commit, the snapshot is refreshed and the item is
+marked `corrected`. A human sets any status with `POST /api/reviews/:id/status`
+— `needsHuman`, `gathering`, `corrected`, `valid`, `approved`, `rejected`,
+`promoted` — and the note becomes the item's decision, with the reviewer.
+
+`POST /api/reviews/:id/suggest` asks the configured LLM gateway (see
+[Spark](spark.md)) for an explanation and, when the constraint implies one, an
+exact replacement. It applies nothing. What leaves the deployment follows the
+datasource's `allowModelAssist`: with it, the offending values go along;
+without it, only the constraints and paths are sent and the values are
+withheld. The snapshot and any credential never leave, and without a gateway
+the call is a 503 rather than a pretence.
+
+**Promotion** releases a corrected candidate:
+
+```bash
+curl -X POST http://localhost:7878/api/runs/$RUN_ID/promote -H "Authorization: Bearer $TOKEN"
+```
+
+The gate runs again over the graph as it now stands, and only a passing graph
+takes the production role — the same single pointer swap a passing run makes,
+the previous graph demoted and kept, LDES members published. A graph the gate
+still refuses answers 422 with the report and production is unchanged; a run
+already in production, or one without a candidate graph, is a 409. The
+promotion is its own `ds:Promotion` activity naming who released it, served
+on the run's PROV trail beside the run, and the run's review items are marked
+`promoted`.
+
+| Call | Effect |
+|---|---|
+| `GET /api/sources/:id/reviews?status=` | The queue, newest first, optionally of one status |
+| `GET /api/reviews/:id` | One item |
+| `POST /api/reviews/:id/status` | Decide: `{status, note?}` |
+| `POST /api/reviews/:id/autofix` | The fixer: `{apply}` — an RDF Patch preview, or the change applied |
+| `POST /api/reviews/:id/suggest` | The model's suggestion; never applied |
+| `POST /api/runs/:id/promote` | Re-gate the candidate and swap it in |
+
 ## What is not here yet
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **Studio: Explore, Map and Dry-run.** Connect and Runs are built; the
-  profile-backed screens are not.
-- **The proposer's side of the gates.** The bands and the scorer parameters
-  are served; the service that applies them to propose a mapping is phase 3,
-  as are review items, promotion and calibration.
 - **PostgreSQL, MySQL and SQL Server connectors.** The trait and the registry
   are in place and SQLite exercises them; the drivers are plugins still to be
   written.
@@ -778,6 +945,7 @@ Stated plainly, because a gap you know about is cheaper than one you discover:
 | `OTS_SOURCES_DIR` | *(unset)* | Directory a file-backed datasource must live under in production |
 | `OTS_SECRET_CACHE_TTL_SECS` | `60` | How long a resolved secret is reused. `0` disables the cache |
 | `OTS_DRYRUN_TTL_SECS` | `900` | How long a dry-run's scratch graph stays readable before it is dropped |
+| `OTS_REVIEW_MAX_ITEMS` | `500` | Cap on the review items one refused run opens |
 | `OTS_SOURCES_JOIN_MAX_ROWS` | `1000000` | Cap on distinct join-index keys per parent triples map |
 | `VAULT_ADDR` | *(unset)* | Vault address for `vault:` references |
 | `VAULT_TOKEN_FILE` / `VAULT_TOKEN` | *(unset)* | Vault token; the file form is the Vault Agent sink and is re-read per resolution |

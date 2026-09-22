@@ -659,6 +659,49 @@ pub fn record_rollback(
     store.update(&sparql).map_err(|e| e.to_string())
 }
 
+/// Record a promotion after review as its own activity: it `prov:used` the
+/// run's graph, so it sits on the run's trail, and it names who released it.
+/// Returns the promotion id.
+pub fn record_promotion(
+    store: &TripleStore,
+    source_id: &str,
+    run: &RunRecord,
+    actor: Option<&str>,
+    at: &str,
+) -> Result<String, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let activity = iri(&format!("urn:promotion:{id}"));
+    let mut body = format!(
+        "    a prov:Activity, ds:Promotion ;\n\
+         \x20   ds:id {} ;\n\
+         \x20   ds:source {} ;\n\
+         \x20   ds:run {} ;\n\
+         \x20   ds:toGraph {} ;\n\
+         \x20   prov:used {} ;\n\
+         \x20   prov:startedAtTime \"{now}\"^^xsd:dateTime ;\n\
+         \x20   prov:endedAtTime \"{now}\"^^xsd:dateTime ;\n",
+        lit(&id),
+        iri(&source_iri(source_id)),
+        lit(&run.id),
+        iri(&run.graph),
+        iri(&run.graph),
+        now = escape_sparql_literal(at),
+    );
+    if let Some(p) = &run.previous_graph {
+        body.push_str(&format!("    ds:fromGraph {} ;\n", iri(p)));
+    }
+    if let Some(a) = actor {
+        body.push_str(&format!("    prov:wasAssociatedWith {} ;\n", iri(a)));
+    }
+    body.push_str(&format!("    dct:created {} .\n", lit(at)));
+    let sparql = format!(
+        "{pfx}INSERT DATA {{ GRAPH <{SOURCES_GRAPH}> {{\n  {activity}\n{body}}} }}",
+        pfx = prefixes()
+    );
+    store.update(&sparql).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

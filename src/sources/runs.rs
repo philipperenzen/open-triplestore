@@ -462,6 +462,12 @@ pub fn execute(
             record.status = Some(RunStatus::Rejected);
             registry::put_run(ctx.store, &record).map_err(RunError::Failed)?;
             commit(ctx, source, &record, "rejected by the SHACL write gate");
+            // The refusal becomes work: one review item per subject. A queue
+            // that cannot be written does not turn the refusal into a failure.
+            match super::review::open_items(ctx.store, source, &record, &report) {
+                Ok(n) => tracing::info!(run = %record.id, items = n, "review items opened"),
+                Err(e) => tracing::warn!(run = %record.id, "review items not opened: {e}"),
+            }
             return Err(RunError::Gate {
                 run: Box::new(record),
                 report: Box::new(report),
@@ -557,6 +563,110 @@ fn promote(ctx: RunContext<'_>, source: &SqlSource, run: &RunRecord) -> Result<(
     Ok(())
 }
 
+/// Why a kept candidate could not be promoted.
+#[derive(Debug)]
+pub enum PromoteError {
+    /// The run is in production already, or has no graph to promote (409).
+    Conflict(String),
+    /// The gate still refuses the graph as it now stands (422).
+    Gate(Box<ValidationReport>),
+    /// Something failed while promoting (500).
+    Failed(String),
+}
+
+/// What a promotion after review produced.
+#[derive(Debug, Clone)]
+pub struct Promotion {
+    pub id: String,
+    pub run: RunRecord,
+    pub source: SqlSource,
+    pub actor: Option<String>,
+    pub at: String,
+}
+
+/// Promote a kept candidate — a run the gate refused, since corrected — after
+/// gating it again as it now stands. The same swap a passing run makes, with
+/// its own `ds:Promotion` activity naming who released it.
+pub fn promote_candidate(
+    ctx: RunContext<'_>,
+    source: &SqlSource,
+    run: &RunRecord,
+    actor: Option<&str>,
+) -> Result<Promotion, PromoteError> {
+    if source.production.as_ref().is_some_and(|p| p.run == run.id) {
+        return Err(PromoteError::Conflict(format!(
+            "run '{}' is in production for datasource '{}' already",
+            run.id, source.id
+        )));
+    }
+    if run.status == Some(RunStatus::Failed)
+        || ctx.store.count_graph(Some(&run.graph)).unwrap_or(0) == 0
+    {
+        return Err(PromoteError::Conflict(format!(
+            "run '{}' has no candidate graph to promote; trigger a new run instead",
+            run.id
+        )));
+    }
+    let mapping = registry::get_mapping(ctx.store, &run.mapping_id).ok_or_else(|| {
+        PromoteError::Conflict(format!(
+            "mapping '{}' no longer exists, so the candidate cannot be gated",
+            run.mapping_id
+        ))
+    })?;
+
+    // The gate, over the graph as it stands after correction. Refused stays
+    // refused: production is untouched, the candidate is kept.
+    let report = gate(ctx, source, &mapping, &run.graph).map_err(PromoteError::Failed)?;
+    if let Some(report) = &report {
+        if !report.conforms {
+            return Err(PromoteError::Gate(Box::new(report.clone())));
+        }
+    }
+
+    let mut record = run.clone();
+    record.status = Some(RunStatus::Succeeded);
+    record.conforms = report.as_ref().map(|r| r.conforms);
+    record.violations = 0;
+    record.error = None;
+    record.previous_graph = source.production.as_ref().map(|p| p.graph.clone());
+    promote(ctx, source, &record).map_err(PromoteError::Failed)?;
+    let entities = subjects_of(ctx.store, &record.graph);
+    record.ldes_members = publish_members(ctx, source, &record.graph, &entities);
+    registry::put_run(ctx.store, &record).map_err(PromoteError::Failed)?;
+    let at = registry::now();
+    let id = registry::record_promotion(ctx.store, &source.id, &record, actor, &at)
+        .map_err(PromoteError::Failed)?;
+    crate::commit_log::record(
+        ctx.store,
+        ctx.base_url,
+        crate::commit_log::CommitKind::Source,
+        format!(
+            "run {} of mapping '{}' v{} against datasource '{}' promoted after review ({} triples)",
+            record.id,
+            record.mapping_id,
+            record.mapping_version,
+            source.id,
+            record.triples_produced
+        ),
+        actor_id(actor).as_deref(),
+        Some(source.iri()),
+        vec![record.graph.clone()],
+        record.triples_produced as usize,
+        0,
+        None,
+    );
+    let source = registry::get_source(ctx.store, &source.id).ok_or_else(|| {
+        PromoteError::Failed("the datasource disappeared during promotion".to_string())
+    })?;
+    Ok(Promotion {
+        id,
+        run: record,
+        source,
+        actor: actor.map(str::to_string),
+        at,
+    })
+}
+
 /// Re-point a source at the graph it served before `run`.
 pub fn rollback(
     ctx: RunContext<'_>,
@@ -640,6 +750,8 @@ pub fn delete(ctx: RunContext<'_>, run: &RunRecord) -> Result<(), RunError> {
             detach(ctx, dataset_id, &run.graph);
         }
     }
+    // Its review items point at a graph that is about to go.
+    super::review::delete_for_run(ctx.store, &run.source_id, &run.id).map_err(RunError::Failed)?;
     registry::delete_run(ctx.store, run).map_err(RunError::Failed)
 }
 
@@ -723,9 +835,16 @@ pub fn provenance_turtle(store: &TripleStore, run: &RunRecord) -> String {
     .collect::<Vec<_>>()
     .join(" ");
 
+    // Whatever later used the run's graph — a promotion after review, a
+    // rollback to it — is part of the run's story too.
     let query = format!(
-        "CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{graph}> {{ VALUES ?s {{ {subjects} }} ?s ?p ?o }} }}",
+        "PREFIX prov: <http://www.w3.org/ns/prov#>\n\
+         CONSTRUCT {{ ?s ?p ?o }} WHERE {{ GRAPH <{graph}> {{\n\
+           {{ VALUES ?s {{ {subjects} }} ?s ?p ?o }}\n\
+           UNION {{ ?s prov:used <{run_graph}> ; ?p ?o }}\n\
+         }} }}",
         graph = SOURCES_GRAPH,
+        run_graph = crate::store::escape_sparql_iri(&run.graph),
     );
     prov_turtle(store, &query)
 }
@@ -744,7 +863,7 @@ const PROV_PREFIXES: [(&str, &str); 6] = [
 ];
 
 /// Run a CONSTRUCT over the system graph and serialise it as prefixed Turtle.
-fn prov_turtle(store: &TripleStore, construct: &str) -> String {
+pub(crate) fn prov_turtle(store: &TripleStore, construct: &str) -> String {
     use oxigraph::sparql::QueryResults;
     let triples: Vec<oxigraph::model::Triple> = match store.query(construct) {
         Ok(QueryResults::Graph(triples)) => triples.flatten().collect(),
@@ -817,6 +936,7 @@ pub fn metrics(store: &TripleStore) -> serde_json::Value {
         "triplesProduced": triples,
         "totalDurationMs": duration,
         "shaclPassRate": pass_rate,
+        "reviewQueueDepth": super::review::queue_depth(store),
     })
 }
 

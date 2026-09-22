@@ -14,6 +14,55 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The mapping proposer's scoped access.** Two API-token scopes name what
+  an external proposer may do and nothing else: `sources:read` reads the
+  datasource registry, profiles, mappings, runs, tickets, the mapping gates
+  and the ontology profile, and `mappings:propose` creates and refines a
+  mapping in the `proposed` state and dry-runs it. A non-admin's view of a
+  datasource omits its location — host, port, database, account and the
+  credential reference — and never reaches `/preview` or the review queue:
+  the proposer never receives a DSN or a row. A proposer that names any
+  other state, or refines a mapping a reviewer has moved on, is refused.
+- **Review decisions as PROV, and calibration**
+  (`POST /api/mappings/{id}/decisions`, `GET /api/mappings/{id}/reviews`,
+  `GET /api/mappings/{id}/provenance`, `POST /api/sources/calibration`).
+  Approve, edit and reject are three distinct `ds:ReviewDecision`
+  activities, each naming the mapping version it judged, the reviewer, the
+  confidence the proposal carried and the note; an approval moves the
+  mapping on and re-baselines drift. The decisions list is the proposer's
+  training data, and the calibration endpoint fits stated confidence to
+  observed acceptance by isotonic regression — refusing one-class data,
+  which would assign its single outcome to every confidence.
+- **Review items, the deterministic fixer and promotion**
+  (`GET /api/sources/{id}/reviews`, `GET /api/reviews/{id}`,
+  `POST /api/reviews/{id}/status`, `POST /api/reviews/{id}/autofix`,
+  `POST /api/reviews/{id}/suggest`, `POST /api/runs/{id}/promote`). A run
+  the gate refuses opens one review item per subject with violations in
+  `urn:system:reviews:<datasource>`, with the violations and a snapshot of
+  the subject, capped per run by `OTS_REVIEW_MAX_ITEMS`. The fixer applies
+  two rules only — a sign typo against a non-negative `sh:minInclusive`, and
+  a clamp to an inclusive bound — previews the change as an RDF Patch and
+  applies it through the store's patch path; anything that would need an
+  invented value is left to a human with a 422. A human sets an explicit
+  status with a note; the model-assisted suggestion sends the constraints,
+  the values only where the datasource allows model assistance, and applies
+  nothing. Promotion re-gates the corrected candidate and gives it the
+  production role exactly as a passing run would, recorded as a
+  `ds:Promotion` activity on the run's PROV trail naming who released it.
+- **Studio: Explore, Map and Dry-run in the Sources workspace.** Explore
+  shows the profile the store computed — per table and column the counts,
+  code lists, detected patterns, keys and foreign keys, in a simple and an
+  advanced view — profiles on demand, checks drift against the mapping's
+  baseline and lists the re-map tickets it opens. Map is three views of one
+  mapping graph: a matrix of what each triples map reads, mints and asserts
+  with every predicate's object described in a word, the Turtle itself in
+  the editor (save as a new version, or register as a new mapping), and a
+  YARRRML composer; a legacy `mapping.sql2rdf.yaml` bundle converts straight
+  into the editor. Dry-run takes a registered mapping or the editor's
+  unsaved content, a table and a sample size, splits the result into
+  mapping defects and data issues, shows every entity with its own Turtle
+  and violations, and keeps each attempt as a round. The Sources page
+  carries the mapping gates as an editable card.
 - **Dry-run: a sample of a mapping, validated, with every violation
   classified** (`POST /api/sources/{id}/dry-run`). A registered mapping, a
   version graph, or unregistered RML / YARRRML — what the proposer sends

@@ -426,6 +426,7 @@ mod tests {
             can_publish: false,
             write_access: true,
             can_mint_api_tokens: true,
+            scopes: Vec::new(),
         }
     }
 

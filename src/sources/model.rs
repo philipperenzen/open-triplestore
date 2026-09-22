@@ -169,10 +169,14 @@ pub struct SourceResponse {
     pub host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    pub database: String,
+    /// Absent in the view a non-admin service token gets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// The reference string, e.g. `vault:secret/data/sources/legacy#password`.
+    /// A pointer, not a value — and still withheld from a non-admin, whose
+    /// view of a datasource is the shape of its data, not where it lives.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
     pub read_only: bool,
@@ -196,6 +200,23 @@ pub struct SourceResponse {
     pub previous: Option<RunPointer>,
 }
 
+impl SourceResponse {
+    /// The view for a principal that is not an administrator — the mapping
+    /// proposer's. It keeps what a proposal is made from (dialect, dataset,
+    /// whether model assistance is allowed, what is in production) and drops
+    /// where the database is and how it is reached: host, port, database
+    /// name or file, account and credential reference. The proposer never
+    /// receives a DSN, and a reference string is the first half of one.
+    pub fn scrubbed(mut self) -> Self {
+        self.host = None;
+        self.port = None;
+        self.database = None;
+        self.username = None;
+        self.credential = None;
+        self
+    }
+}
+
 impl From<&SqlSource> for SourceResponse {
     fn from(s: &SqlSource) -> Self {
         SourceResponse {
@@ -205,7 +226,7 @@ impl From<&SqlSource> for SourceResponse {
             dialect: s.dialect.clone(),
             host: s.host.clone(),
             port: s.port,
-            database: s.database.clone(),
+            database: Some(s.database.clone()),
             username: s.username.clone(),
             credential: s.credential.as_ref().map(|r| r.to_string()),
             read_only: s.read_only,
@@ -232,6 +253,8 @@ pub enum MappingState {
     Draft,
     Proposed,
     Approved,
+    /// A reviewer rejected the proposal; a decision on record says why.
+    Rejected,
 }
 
 impl MappingState {
@@ -240,6 +263,7 @@ impl MappingState {
             MappingState::Draft => "draft",
             MappingState::Proposed => "proposed",
             MappingState::Approved => "approved",
+            MappingState::Rejected => "rejected",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -247,6 +271,7 @@ impl MappingState {
             "draft" => Some(MappingState::Draft),
             "proposed" => Some(MappingState::Proposed),
             "approved" => Some(MappingState::Approved),
+            "rejected" => Some(MappingState::Rejected),
             _ => None,
         }
     }

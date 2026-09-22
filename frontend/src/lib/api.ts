@@ -1075,11 +1075,36 @@ export const updateMappingGates = (patch) => request('PUT', '/api/sources/gates'
 // A legacy `mapping.sql2rdf.yaml` bundle as RML, registered nowhere.
 export const convertLegacyMapping = (body) => request('POST', '/api/mappings/convert', body);
 
+// Review decisions on a mapping — approve, edit, reject — as PROV, and the
+// calibration curve those decisions support.
+export const decideMapping = (mappingId, body) =>
+  request('POST', `/api/mappings/${encodeURIComponent(mappingId)}/decisions`, body);
+export const listMappingDecisions = (mappingId) =>
+  request('GET', `/api/mappings/${encodeURIComponent(mappingId)}/reviews`);
+export const calibrateConfidence = (body = {}) => request('POST', '/api/sources/calibration', body);
+
 export const listSourceRuns = (sourceId) => request('GET', `/api/sources/${encodeURIComponent(sourceId)}/runs`);
 export const startSourceRun = (sourceId, body) => request('POST', `/api/sources/${encodeURIComponent(sourceId)}/runs`, body);
 export const getRun = (runId) => request('GET', `/api/runs/${encodeURIComponent(runId)}`);
 export const rollbackRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/rollback`, {});
 export const deleteRun = (runId) => request('DELETE', `/api/runs/${encodeURIComponent(runId)}`);
+// A refused run's kept candidate, re-gated and swapped in after correction.
+export const promoteRun = (runId) => request('POST', `/api/runs/${encodeURIComponent(runId)}/promote`, {});
+
+// The review queue a refused run opens: one item per subject, with the
+// deterministic fixer (preview as an RDF Patch, or apply) and a human's
+// explicit status.
+export const listSourceReviews = (sourceId, status?: string) =>
+  request(
+    'GET',
+    `/api/sources/${encodeURIComponent(sourceId)}/reviews${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+  );
+export const getReviewItem = (itemId) => request('GET', `/api/reviews/${encodeURIComponent(itemId)}`);
+export const setReviewStatus = (itemId, body) =>
+  request('POST', `/api/reviews/${encodeURIComponent(itemId)}/status`, body);
+export const autofixReviewItem = (itemId, apply: boolean) =>
+  request('POST', `/api/reviews/${encodeURIComponent(itemId)}/autofix`, { apply });
+export const suggestReviewFix = (itemId) => request('POST', `/api/reviews/${encodeURIComponent(itemId)}/suggest`, {});
 
 // ─── SHACL Studio: validation pipelines ─────────────────────────────────────
 export const listPipelines = () => request('GET', '/api/shacl/pipelines');

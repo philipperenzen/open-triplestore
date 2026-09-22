@@ -374,6 +374,7 @@ mod http_tests {
                 can_publish: true,
                 write_access: true,
                 can_mint_api_tokens: true,
+                scopes: Vec::new(),
             }));
         (router, store)
     }
