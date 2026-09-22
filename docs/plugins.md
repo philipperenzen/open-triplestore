@@ -307,6 +307,14 @@ dependency on this project's internal types:
   `plugins/accounts-dashboard` (feature `plugin-accounts-dashboard`) a full
   consumer: a deployment-wide accounts/entitlements/LLM-usage dashboard at
   `/ext/accounts-dashboard/ui`.
+- `Plugin::connectors` *(ots-plugin-api 0.3)* — datasource drivers for the
+  SQL sources feature ([docs/sources.md](sources.md)): a plugin hands the host
+  a `SourceConnector` per dialect, registered next to the built-in SQLite
+  driver. `plugins/postgres`, `plugins/mysql` and `plugins/mssql` (features
+  `plugin-postgres`, `plugin-mysql`, `plugin-mssql`) are the three shipped
+  drivers, built on the shared `INFORMATION_SCHEMA` catalogue and profiler in
+  `ots_plugin_api::sources::catalogue`; a driver for another dialect
+  implements `Executor` and `Dialect` there and owns only its wire protocol.
 
 ### Writing a new plugin (cookiecutter flow)
 

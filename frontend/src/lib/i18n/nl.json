@@ -3147,6 +3147,8 @@
       "fieldWatermark": "Watermerkkolom",
       "fieldDataset": "Dataset",
       "fieldDatasetPlaceholder": "Dataset waar de run-grafen bij horen",
+      "fieldOptions": "Driveropties",
+      "optionsHint": "Eén key=value per regel: sslrootcert (een PEM-bundel voor een eigen CA), search_path (PostgreSQL-schema)",
       "readOnlyAlways": "Altijd alleen-lezen geopend",
       "allowModelAssist": "Modelondersteuning toestaan",
       "useTls": "TLS gebruiken",

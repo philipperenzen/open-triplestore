@@ -63,9 +63,23 @@
   const EMPTY = {
     id: '', name: '', dialect: 'sqlite', host: '', port: null, database: '',
     username: '', credential: '', readOnly: true, statementTimeoutMs: 30000,
-    watermarkColumn: '', allowModelAssist: false, tls: false, dataset: '',
+    watermarkColumn: '', allowModelAssist: false, tls: false, dataset: '', optionsText: '',
   };
   let form = { ...EMPTY };
+  const OPTIONS_EXAMPLE = 'sslrootcert=/run/secrets/db-ca.pem\nsearch_path=legacy';
+
+  /** `key=value` per line → the datasource's `options` map; blanks ignored. */
+  function parseOptions(text) {
+    const options = {};
+    for (const line of String(text ?? '').split('\n')) {
+      const at = line.indexOf('=');
+      if (at <= 0) continue;
+      const key = line.slice(0, at).trim();
+      const value = line.slice(at + 1).trim();
+      if (key && value) options[key] = value;
+    }
+    return options;
+  }
 
   let _guardChecked = false;
   $: if ($authInitialized && !_guardChecked) {
@@ -94,6 +108,9 @@
       if (!String(body[key] ?? '').trim()) delete body[key];
     }
     if (!body.port) delete body.port;
+    const options = parseOptions(body.optionsText);
+    delete body.optionsText;
+    if (Object.keys(options).length) body.options = options;
     return body;
   }
 
@@ -227,6 +244,12 @@
         <label>{$t('pages.sources.fieldDataset')}
           <input bind:value={form.dataset} placeholder={$t('pages.sources.fieldDatasetPlaceholder')} />
         </label>
+        {#if !fileBacked(form.dialect)}
+          <label class="wide">{$t('pages.sources.fieldOptions')}
+            <textarea rows="2" bind:value={form.optionsText} placeholder={OPTIONS_EXAMPLE}></textarea>
+            <span class="hint">{$t('pages.sources.optionsHint')}</span>
+          </label>
+        {/if}
       </div>
 
       <div class="switches">
@@ -315,7 +338,7 @@
   .form .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; }
   .form label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; }
   .form label.wide { grid-column: 1 / -1; }
-  .form input, .form select { padding: .45rem .6rem; border-radius: 6px; border: 1px solid var(--border, #ccc); background: inherit; color: inherit; }
+  .form input, .form select, .form textarea { padding: .45rem .6rem; border-radius: 6px; border: 1px solid var(--border, #ccc); background: inherit; color: inherit; font: inherit; }
   .hint { font-size: .78rem; opacity: .7; margin: .35rem 0 0; }
   .switches { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: .75rem; }
   .switch { display: flex; align-items: center; gap: .4rem; font-size: .85rem; }

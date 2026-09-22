@@ -160,10 +160,10 @@ jobs:
       # features" guarantee — the "backend" job separately exercises plugin-hello
       # wired INTO the main crate via the `plugin-hello` feature.
       - name: Clippy (plugin crates)
-        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard --all-targets -- -D warnings
+        run: cargo clippy -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard -p ots-plugin-postgres -p ots-plugin-mysql -p ots-plugin-mssql --all-targets -- -D warnings
 
       - name: Build & test (plugin crates)
-        run: cargo test -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard --locked
+        run: cargo test -p ots-plugin-api -p ots-plugin-hello -p ots-plugin-accounts-dashboard -p ots-plugin-postgres -p ots-plugin-mysql -p ots-plugin-mssql --locked
 
   conformance:
     name: Conformance suites

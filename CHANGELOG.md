@@ -14,6 +14,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **PostgreSQL, MySQL / MariaDB and SQL Server datasource connectors** as
+  plugins (`plugins/postgres`, `plugins/mysql`, `plugins/mssql`; features
+  `plugin-postgres`, `plugin-mysql`, `plugin-mssql`), each keeping the
+  connector contract in its dialect's terms: read-only enforced server-side
+  (`default_transaction_read_only`, `SESSION TRANSACTION READ ONLY`, and for
+  SQL Server a role check at connect that refuses a writing account), a
+  statement timeout on everything (a MySQL server that knows neither
+  `max_execution_time` nor `max_statement_time` is refused), rows streamed
+  in batches (PostgreSQL through a server-side cursor), every column typed
+  from the statement's own description and carried as text in the lexical
+  shape the natural datatype mapping expects, and TLS through rustls with
+  `options.sslrootcert` for a private CA and no trust-all switch. The three
+  share one `INFORMATION_SCHEMA` catalogue and one aggregate profiler in
+  `ots_plugin_api::sources::catalogue`. Each crate carries a live test that
+  runs when `OTS_TEST_<DIALECT>_HOST` is set.
 - **The mapping proposer's scoped access.** Two API-token scopes name what
   an external proposer may do and nothing else: `sources:read` reads the
   datasource registry, profiles, mappings, runs, tickets, the mapping gates

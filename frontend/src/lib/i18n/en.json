@@ -3147,6 +3147,8 @@
       "fieldWatermark": "Watermark column",
       "fieldDataset": "Dataset",
       "fieldDatasetPlaceholder": "Dataset the run graphs join",
+      "fieldOptions": "Driver options",
+      "optionsHint": "One key=value per line: sslrootcert (a PEM bundle for a private CA), search_path (PostgreSQL schema)",
       "readOnlyAlways": "Opened read-only, always",
       "allowModelAssist": "Allow model assistance",
       "useTls": "Use TLS",

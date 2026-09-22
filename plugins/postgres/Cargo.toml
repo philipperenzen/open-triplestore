@@ -1,0 +1,16 @@
+[package]
+name = "ots-plugin-postgres"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Open Triplestore plugin: the PostgreSQL datasource connector — read-only, statement-timed, streaming through a server-side cursor."
+
+[dependencies]
+ots-plugin-api = { path = "../api" }
+postgres = "0.19"
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "1", features = ["std"] }
+tracing = "0.1"

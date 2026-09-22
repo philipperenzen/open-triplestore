@@ -108,14 +108,48 @@ equivalent per dialect), not by convention.
 SQLite is compiled into core, so the whole pipeline works without a database
 server. Every other dialect is a plugin that implements `SourceConnector` (see
 [`plugins/api`](../plugins/api/src/sources.rs)) and hands it to the host from
-`Plugin::connectors`, which keeps the driver decision per deployment.
+`Plugin::connectors`, which keeps the driver decision per deployment: a build
+carries the drivers its operator asked for and no others.
+
+| Dialect | Build feature | Read-only, enforced how | Statement timeout | TLS |
+|---|---|---|---|---|
+| `sqlite` | core | `SQLITE_OPEN_READ_ONLY` | progress handler | — |
+| `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls; `options.sslrootcert` for a private CA |
+| `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls; `options.sslrootcert` |
+| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls; `options.sslrootcert` |
+
+```bash
+cargo build --features full,plugin-postgres,plugin-mysql,plugin-mssql
+```
+
+The three networked drivers share one catalogue and one profiler
+([`plugins/api/src/sources/catalogue.rs`](../plugins/api/src/sources/catalogue.rs)):
+tables, columns, keys and foreign keys are read from `INFORMATION_SCHEMA`,
+and the profile's counts, code lists and numeric summaries are the same
+aggregate statements in each dialect's spelling, so three drivers cannot
+disagree on what a primary key or a code list is. Each driver owns only what
+the wire protocol dictates: how it connects, how it streams, and how a value
+becomes a lexical form. Rows stream in batches everywhere — PostgreSQL through
+a server-side cursor in a read-only transaction, the others off the wire one
+row at a time — and every column reaches the mapping as text typed from the
+statement's own description, in the shape the natural datatype mapping
+expects (`true` / `false`, `2026-01-01T12:00:00+00:00`, hex for binary).
+
+A datasource in a schema of its own names it in `options.search_path`
+(PostgreSQL). `options.sslrootcert` points at a PEM bundle for a private CA;
+host names are always verified and there is no trust-all switch.
 
 ```bash
 curl -s localhost:7878/api/sources/metrics -H "Authorization: Bearer $TOKEN"
 ```
 
 Registering an unknown dialect answers 400 and names what the running binary
-does support.
+does support. Each driver's crate carries a live test that runs against a real
+server when `OTS_TEST_POSTGRES_HOST`, `OTS_TEST_MYSQL_HOST` or
+`OTS_TEST_MSSQL_HOST` is set (see the test file's header for the variables),
+and is skipped otherwise; `tests/sources_postgres_http.rs` runs the whole
+pipeline — register, introspect, profile, dry-run, run, read the graph — over
+HTTP through the PostgreSQL plugin (`--features plugin-postgres`).
 
 ---
 
@@ -931,9 +965,15 @@ on the run's PROV trail beside the run, and the run's review items are marked
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **PostgreSQL, MySQL and SQL Server connectors.** The trait and the registry
-  are in place and SQLite exercises them; the drivers are plugins still to be
-  written.
+- **Virtual sources.** A datasource is materialised into a graph; an
+  Ontop-style virtual endpoint that answers SPARQL over the database directly
+  is phase 4.
+- **Writeback.** Corrections stay in the store; the worker that carries an
+  approved correction back to the source system is phase 4.
+- **Live MySQL and SQL Server runs in CI.** Those two drivers are verified by
+  their unit tests and by whoever sets `OTS_TEST_MYSQL_HOST` or
+  `OTS_TEST_MSSQL_HOST`; the PostgreSQL driver's live tests ran against a
+  container in development, and no CI job starts a database server yet.
 
 ---
 

@@ -24,6 +24,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod catalogue;
+
 /// A resolved secret. `Debug` never prints the value, and there is no
 /// `Display` at all, so it cannot reach a log line or an error message by
 /// accident — a caller has to spell `expose()` to read it.
