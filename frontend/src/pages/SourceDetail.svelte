@@ -18,7 +18,7 @@
     Database, Loader2, Play, Undo2, Trash2, Table2, KeyRound, Link2, AlertTriangle, Check, Lock,
     ShieldCheck, ShieldAlert, Sparkles, FileCode, Activity, FlaskConical, GitCompareArrows, Save,
     Ticket, X, ChevronDown, ChevronRight, ThumbsUp, ThumbsDown, Pencil, Rocket, Wand2,
-    MessageSquare, ClipboardList,
+    MessageSquare, ClipboardList, Camera,
   } from 'lucide-svelte';
   import {
     getSource, introspectSource, previewSourceTable, listSourceMappings, listSourceRuns,
@@ -419,6 +419,27 @@
     } catch (e) {
       // A 422 is the write gate refusing the run, not a failure to run: the
       // candidate graph exists and production is unchanged. Say so.
+      if (e.status === 422) {
+        gateReport = e.message;
+        toastError($t('pages.sourceDetail.runGated'));
+        await load();
+      } else {
+        toastError(e.message);
+      }
+    } finally {
+      running = false;
+    }
+  }
+
+  /** A virtual source's whole graph as a run: no mapping, the same gate and swap. */
+  async function snapshot() {
+    running = true;
+    gateReport = null;
+    try {
+      await startSourceRun(id, { mode: 'snapshot' });
+      toastSuccess($t('pages.sourceDetail.snapshotSucceeded'));
+      await load();
+    } catch (e) {
       if (e.status === 422) {
         gateReport = e.message;
         toastError($t('pages.sourceDetail.runGated'));
@@ -1019,8 +1040,14 @@
             {#if running}<Loader2 size={14} class="spin" />{:else}<Play size={14} />{/if}
             {$t('pages.sourceDetail.runNow')}
           </button>
+          {#if source.dialect === 'sparql'}
+            <button class="btn btn-ghost" on:click={snapshot} disabled={running} title={$t('pages.sourceDetail.snapshotHint')}>
+              {#if running}<Loader2 size={14} class="spin" />{:else}<Camera size={14} />{/if}
+              {$t('pages.sourceDetail.snapshotNow')}
+            </button>
+          {/if}
         </div>
-        {#if !mappings.length}
+        {#if !mappings.length && source.dialect !== 'sparql'}
           <p class="dim">{$t('pages.sourceDetail.noMappings')}</p>
         {/if}
         {#if gateReport}
@@ -1044,7 +1071,11 @@
                 <span class="dim">{when(r.startedAt)}</span>
               </div>
               <div class="run-meta">
-                <span>{$t('pages.sourceDetail.mappingVersion', { values: { id: r.mapping.id, version: r.mapping.version } })}</span>
+                {#if r.mapping}
+                  <span>{$t('pages.sourceDetail.mappingVersion', { values: { id: r.mapping.id, version: r.mapping.version } })}</span>
+                {:else}
+                  <span class="chip chip-tiny">{$t('pages.sourceDetail.snapshotOfEndpoint')}</span>
+                {/if}
                 <span>{r.rowsExtracted.toLocaleString()} {$t('pages.sourceDetail.rows')}</span>
                 <span>{r.triplesProduced.toLocaleString()} {$t('pages.sourceDetail.triples')}</span>
                 <span>{$t('pages.sourceDetail.nowHolding', { values: { count: r.graphTriples.toLocaleString() } })}</span>

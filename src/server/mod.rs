@@ -2450,6 +2450,9 @@ pub async fn run(
     // …) join core's SQLite one. Before any datasource is registered or run,
     // so a dialect is either available from the first request or not at all.
     crate::sources::connector::register_plugin_connectors();
+    // Virtual sources resolve `SERVICE <urn:source:id>`; their endpoints are
+    // read once here and kept in step by the registry from then on.
+    crate::sources::virtual_source::load_all(&state.store);
     // Scratch graphs a dry-run left behind when an earlier process stopped
     // before their TTL: unreachable through any dataset, so only occupying space.
     crate::sources::dryrun::sweep_leftovers(&state.store);

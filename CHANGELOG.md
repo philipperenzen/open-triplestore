@@ -14,6 +14,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Virtual sources: a SPARQL endpoint as a datasource** (dialect `sparql`,
+  in core). An Ontop virtual knowledge graph — or any endpoint — is
+  registered like a database, with the same secret reference and the same
+  allowlist, and introspected as class-tables: each class a table, `subject`
+  its key, the predicates its columns. A mapping reads a class with
+  `rr:tableName` or a SPARQL `SELECT` as `rml:query`; a run of it is a run
+  like any other. A **snapshot run** (`mode: snapshot`) materialises the
+  endpoint's whole graph with no mapping — gated, swapped in, reviewable —
+  and `SERVICE <urn:source:id>` in a local query resolves to the endpoint
+  with its credential, so the source is also queryable live.
 - **PostgreSQL, MySQL / MariaDB and SQL Server datasource connectors** as
   plugins (`plugins/postgres`, `plugins/mysql`, `plugins/mssql`; features
   `plugin-postgres`, `plugin-mysql`, `plugin-mssql`), each keeping the

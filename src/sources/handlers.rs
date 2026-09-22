@@ -739,9 +739,6 @@ pub async fn create_run(
 
     let source =
         registry::get_source(&state.store, &id).ok_or_else(|| not_found("datasource", &id))?;
-    let mapping_id = body.mapping.trim_start_matches("urn:mapping:").to_string();
-    let mapping = registry::get_mapping(&state.store, &mapping_id)
-        .ok_or_else(|| not_found("mapping", &mapping_id))?;
     let mode = match body
         .mode
         .as_deref()
@@ -752,10 +749,29 @@ pub async fn create_run(
     {
         "full" => RunMode::Full,
         "watermark" | "incremental" => RunMode::Watermark,
+        "snapshot" => RunMode::Snapshot,
         other => {
             return Err(bad(format!(
-                "unknown run mode '{other}'; expected full or watermark"
+                "unknown run mode '{other}'; expected full, watermark or snapshot"
             )))
+        }
+    };
+    // A snapshot of a virtual source runs no mapping; every other mode needs one.
+    let mapping = match body
+        .mapping
+        .as_deref()
+        .map(|m| m.trim().trim_start_matches("urn:mapping:").to_string())
+        .filter(|m| !m.is_empty())
+    {
+        Some(mapping_id) => Some(
+            registry::get_mapping(&state.store, &mapping_id)
+                .ok_or_else(|| not_found("mapping", &mapping_id))?,
+        ),
+        None if mode == RunMode::Snapshot => None,
+        None => {
+            return Err(bad(
+                "a run needs a mapping; only mode 'snapshot' runs without one",
+            ))
         }
     };
     let batch_size = body.batch_size.unwrap_or(1_000);
@@ -767,7 +783,7 @@ pub async fn create_run(
         runs::execute(
             ctx(&blocking_state),
             &source,
-            &mapping,
+            mapping.as_ref(),
             mode,
             model_version,
             batch_size,

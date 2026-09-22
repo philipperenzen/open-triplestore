@@ -117,6 +117,7 @@ carries the drivers its operator asked for and no others.
 | `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls; `options.sslrootcert` for a private CA |
 | `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls; `options.sslrootcert` |
 | `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls; `options.sslrootcert` |
+| `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_REMOTE_ALLOWLIST` |
 
 ```bash
 cargo build --features full,plugin-postgres,plugin-mysql,plugin-mssql
@@ -150,6 +151,67 @@ server when `OTS_TEST_POSTGRES_HOST`, `OTS_TEST_MYSQL_HOST` or
 and is skipped otherwise; `tests/sources_postgres_http.rs` runs the whole
 pipeline — register, introspect, profile, dry-run, run, read the graph — over
 HTTP through the PostgreSQL plugin (`--features plugin-postgres`).
+
+---
+
+## Virtual sources
+
+An **Ontop** virtual knowledge graph — or any SPARQL endpoint — is a datasource
+too, behind the same connector trait as a database: registered with the same
+record, the same secret reference, the same allowlist and the same test
+button. The dialect is `sparql`; `host`, `port`, `database` (the endpoint's
+path, `/sparql` by default) and `tls` name the endpoint, and `username` plus
+the credential reference become HTTP Basic, resolved at the moment of use.
+Every request the store makes to it goes through the remote allowlist
+([`OTS_REMOTE_ALLOWLIST`](security.md)), in every posture: a virtual source is
+never a way around the door SPARQL federation and LDES sync use.
+
+```bash
+curl -X POST http://localhost:7878/api/sources -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id": "assets-vkg", "dialect": "sparql", "host": "ontop.internal", "port": 8080,
+       "database": "/sparql", "username": "reader", "credential": "env:ONTOP_READER_PASSWORD",
+       "statementTimeoutMs": 30000, "tls": true}'
+```
+
+**The catalogue is the classes.** An endpoint has no tables, so introspection
+presents each class as one: its instances are the rows, `subject` the primary
+key, and the predicates its instances carry are the columns, named by
+predicate IRI and typed from a sample of their values. Profiling, dry-run and
+the mapping matrix work from that catalogue exactly as they do for a table.
+
+**Mapping a virtual source.** A triples map reads a class with
+`rr:tableName "<class IRI>"` (columns `subject` and the predicate IRIs), or
+runs its own `rml:query`, which for this dialect is a SPARQL `SELECT` whose
+variables are the columns. Rows are typed from the bindings' datatypes and
+carried as lexical forms, so the natural datatype mapping applies. A run of
+such a mapping is a run like any other: a fresh graph, PROV, the gate, the
+swap.
+
+```turtle
+rml:logicalSource [ rml:source <urn:source:assets-vkg> ; rml:referenceFormulation ql:SQL2008 ;
+  rml:query "SELECT ?s ?name ?price WHERE { ?s a ex:Product ; ex:name ?name . OPTIONAL { ?s ex:price ?price } }" ] ;
+rr:subjectMap [ rr:column "s" ; rr:termType rr:IRI ; rr:class out:Item ] ;
+```
+
+**A snapshot** materialises the endpoint's whole graph without any mapping —
+one `CONSTRUCT`, loaded in one pass so blank nodes keep their identity — as a
+run with `mode: snapshot`: gated against the bound dataset's shapes, swapped
+in atomically, listed with the mapped runs, reviewable and promotable, with
+`prov:used <urn:source:…>` on its trail and no `mapping` on its record. The
+body is fetched whole; a very large virtual graph is better mapped than
+snapshotted.
+
+```bash
+curl -X POST http://localhost:7878/api/sources/assets-vkg/runs -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"mode": "snapshot"}'
+```
+
+**Live queries.** `SERVICE <urn:source:assets-vkg> { … }` in a local query
+resolves to the source's endpoint with its credential — the query names no
+URL and no secret — so a virtual source is also queryable without
+materialising anything. Federation's own rules apply unchanged: the endpoint
+must be allowlisted, the remote timeout and row cap hold.
 
 ---
 
@@ -965,11 +1027,10 @@ on the run's PROV trail beside the run, and the run's review items are marked
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **Virtual sources.** A datasource is materialised into a graph; an
-  Ontop-style virtual endpoint that answers SPARQL over the database directly
-  is phase 4.
 - **Writeback.** Corrections stay in the store; the worker that carries an
   approved correction back to the source system is phase 4.
+- **Streaming snapshots.** A snapshot of a virtual source is fetched whole;
+  a graph too large for that is mapped, not snapshotted.
 - **Live MySQL and SQL Server runs in CI.** Those two drivers are verified by
   their unit tests and by whoever sets `OTS_TEST_MYSQL_HOST` or
   `OTS_TEST_MSSQL_HOST`; the PostgreSQL driver's live tests ran against a

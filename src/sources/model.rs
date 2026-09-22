@@ -388,8 +388,11 @@ impl RunStatus {
 pub enum RunMode {
     /// Re-materialise everything the mapping selects.
     Full,
-    /// Only rows newer than the last watermark (phase 3).
+    /// Only rows newer than the last watermark.
     Watermark,
+    /// A virtual source's whole graph, as the endpoint serves it — no
+    /// mapping involved.
+    Snapshot,
 }
 
 impl RunMode {
@@ -397,6 +400,7 @@ impl RunMode {
         match self {
             RunMode::Full => "full",
             RunMode::Watermark => "watermark",
+            RunMode::Snapshot => "snapshot",
         }
     }
 }
@@ -404,8 +408,8 @@ impl RunMode {
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRequest {
-    /// Mapping id, or its IRI.
-    pub mapping: String,
+    /// Mapping id, or its IRI. Required unless `mode` is `snapshot`.
+    pub mapping: Option<String>,
     pub model_version: Option<String>,
     #[serde(default)]
     pub mode: Option<String>,
@@ -442,6 +446,14 @@ pub struct RunRecord {
     pub ldes_members: u64,
 }
 
+impl RunRecord {
+    /// The mapping the run executed, or `None` for a snapshot of a virtual
+    /// source — recorded with an empty mapping id.
+    pub fn mapping(&self) -> Option<(&str, u32)> {
+        (!self.mapping_id.is_empty()).then_some((self.mapping_id.as_str(), self.mapping_version))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunResponse {
@@ -453,7 +465,9 @@ pub struct RunResponse {
     pub previous_graph: Option<String>,
     pub status: String,
     pub mode: String,
-    pub mapping: MappingRef,
+    /// Absent for a snapshot of a virtual source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mapping: Option<MappingRef>,
     pub rows_extracted: u64,
     pub triples_produced: u64,
     /// Triples the run's graph holds *now*. Differs from `triplesProduced`
@@ -516,11 +530,11 @@ impl From<&RunRecord> for RunResponse {
             previous_graph: r.previous_graph.clone(),
             status: r.status.map(|s| s.as_str()).unwrap_or("failed").to_string(),
             mode: r.mode.clone(),
-            mapping: MappingRef {
-                id: r.mapping_id.clone(),
-                version: r.mapping_version,
-                iri: mapping_version_iri(&r.mapping_id, r.mapping_version),
-            },
+            mapping: r.mapping().map(|(id, version)| MappingRef {
+                id: id.to_string(),
+                version,
+                iri: mapping_version_iri(id, version),
+            }),
             rows_extracted: r.rows_extracted,
             triples_produced: r.triples_produced,
             // Filled in by `RunResponse::of`, which has the store.

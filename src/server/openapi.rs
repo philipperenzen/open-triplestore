@@ -2297,10 +2297,16 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                 o(
                     "Sources",
                     "Register a datasource",
-                    "Register a SQL datasource. The credential reference is validated — \
+                    "Register a datasource: a SQL database (`sqlite`, `postgresql`, `mysql`, \
+                     `mssql`), or a SPARQL endpoint (`sparql` — an Ontop virtual knowledge \
+                     graph, say) whose `host`, `port`, `database` (the path, `/sparql` by \
+                     default) and `tls` name the endpoint and whose `username` and credential \
+                     reference become HTTP Basic. The credential reference is validated — \
                      well-formed and resolvable — before the record is stored. In the production \
                      posture a raw secret, a missing statement timeout, a host outside the egress \
-                     allowlist and a file outside OTS_SOURCES_DIR are all refused.",
+                     allowlist and a file outside OTS_SOURCES_DIR are all refused; a `sparql` \
+                     endpoint must be on the allowlist in every posture, since every request to \
+                     it goes through the same door as SPARQL federation.",
                     vec![],
                     vec![
                         ("201", "Registered"),
@@ -2473,17 +2479,20 @@ vault:<mount>/data/<path>#<key>), never a value: nothing here accepts or returns
                     "Materialise the mapping into a fresh graph urn:run:<id>, record a PROV \
                      activity, apply the SHACL write gate to that graph, and — only on a pass — \
                      give it the production role atomically. A failing gate answers 422 with the \
-                     report; production is untouched and the candidate graph is kept.",
+                     report; production is untouched and the candidate graph is kept. `mode` is \
+                     `full` (default), `watermark` (only rows past the last cursor), or \
+                     `snapshot` — a virtual (`sparql`) source's whole graph as the endpoint \
+                     serves it, with no mapping involved; a snapshot run carries no `mapping`.",
                     vec![],
                     vec![
                         ("201", "The run"),
                         (
                             "400",
-                            "Unknown mode, or the mapping belongs to another datasource",
+                            "Unknown mode, no mapping outside snapshot mode, a snapshot of a \
+                             database, or the mapping belongs to another datasource",
                         ),
                         ("404", "Datasource or mapping not found"),
                         ("422", "The SHACL write gate refused the run"),
-                        ("501", "Watermark runs are not available yet"),
                         ("503", "Server overloaded"),
                     ],
                     true,

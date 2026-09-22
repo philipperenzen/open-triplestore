@@ -20,6 +20,9 @@ fn registry() -> &'static RwLock<BTreeMap<String, Arc<dyn SourceConnector>>> {
         let mut m: BTreeMap<String, Arc<dyn SourceConnector>> = BTreeMap::new();
         let sqlite: Arc<dyn SourceConnector> = Arc::new(SqliteConnector);
         m.insert(sqlite.dialect().to_string(), sqlite);
+        // A SPARQL endpoint is HTTP, which core already speaks: no plugin.
+        let sparql: Arc<dyn SourceConnector> = Arc::new(super::virtual_source::SparqlConnector);
+        m.insert(sparql.dialect().to_string(), sparql);
         RwLock::new(m)
     })
 }

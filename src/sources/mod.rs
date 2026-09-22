@@ -36,6 +36,7 @@ pub mod routes;
 pub mod runs;
 pub mod sqlite;
 pub mod turtle;
+pub mod virtual_source;
 pub mod yarrrml;
 
 use std::path::{Path, PathBuf};
@@ -186,7 +187,8 @@ pub fn validate_source(source: &SqlSource) -> Result<(), ValidationError> {
         dialect: source.dialect.clone(),
         available: connector::dialects().join(", "),
     })?;
-    if source.database.trim().is_empty() {
+    // A virtual source's "database" is the endpoint path, `/sparql` by default.
+    if source.database.trim().is_empty() && !virtual_source::is_virtual(source) {
         return Err(ValidationError::Database);
     }
     if !source.read_only {

@@ -321,18 +321,37 @@ fn materialise_increment(
 pub fn execute(
     ctx: RunContext<'_>,
     source: &SqlSource,
-    mapping: &MappingRecord,
+    mapping: Option<&MappingRecord>,
     mode: RunMode,
     model_version: Option<String>,
     batch_size: usize,
     actor: Option<&str>,
 ) -> Result<RunRecord, RunError> {
-    if mapping.source_id != source.id {
-        return Err(RunError::BadRequest(format!(
-            "mapping '{}' is registered against datasource '{}', not '{}'",
-            mapping.id, mapping.source_id, source.id
-        )));
+    if let Some(mapping) = mapping {
+        if mapping.source_id != source.id {
+            return Err(RunError::BadRequest(format!(
+                "mapping '{}' is registered against datasource '{}', not '{}'",
+                mapping.id, mapping.source_id, source.id
+            )));
+        }
     }
+    // A snapshot is a virtual source's own graph, whole; every other mode
+    // runs a mapping.
+    if mode == RunMode::Snapshot {
+        if !super::virtual_source::is_virtual(source) {
+            return Err(RunError::BadRequest(format!(
+                "datasource '{}' is a {} database; a snapshot run materialises a virtual \
+                 (sparql) source's graph — run a mapping instead",
+                source.id, source.dialect
+            )));
+        }
+        return snapshot(ctx, source, model_version, actor);
+    }
+    let mapping = mapping.ok_or_else(|| {
+        RunError::BadRequest(
+            "a run needs a mapping; only mode 'snapshot' runs without one".to_string(),
+        )
+    })?;
 
     // An incremental run builds on the graph currently in production and needs
     // a cursor to resume from. Both come from the run log, so the first run of
@@ -449,7 +468,7 @@ pub fn execute(
     record.watermark = watermark;
 
     // ── The write gate applies to the candidate graph, not to every batch ──
-    let report = gate(ctx, source, mapping, &graph).map_err(RunError::Failed)?;
+    let report = gate(ctx, source, Some(mapping), &graph).map_err(RunError::Failed)?;
     if let Some(report) = &report {
         record.conforms = Some(report.conforms);
         record.violations = report.results_count as u64;
@@ -491,18 +510,88 @@ pub fn execute(
     Ok(record)
 }
 
+/// Materialise a virtual source's whole graph as a run: the endpoint's
+/// `CONSTRUCT`, then the same gate, swap and record as a mapped run.
+fn snapshot(
+    ctx: RunContext<'_>,
+    source: &SqlSource,
+    model_version: Option<String>,
+    actor: Option<&str>,
+) -> Result<RunRecord, RunError> {
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let graph = run_graph_iri(&run_id);
+    let started_at = registry::now();
+    let clock = std::time::Instant::now();
+    let mut record = RunRecord {
+        id: run_id.clone(),
+        source_id: source.id.clone(),
+        mapping_id: String::new(),
+        mapping_version: 0,
+        model_version,
+        mode: RunMode::Snapshot.as_str().to_string(),
+        graph: graph.clone(),
+        previous_graph: source.production.as_ref().map(|p| p.graph.clone()),
+        started_at,
+        actor: actor.map(str::to_string),
+        ..Default::default()
+    };
+    let triples = match super::virtual_source::snapshot(source, ctx.store, &graph) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = ctx.store.bulk_delete_graphs(&[graph.as_str()]);
+            let message = scrub(&e, source, None);
+            record.status = Some(RunStatus::Failed);
+            record.ended_at = registry::now();
+            record.duration_ms = clock.elapsed().as_millis() as u64;
+            record.error = Some(message.clone());
+            let _ = registry::put_run(ctx.store, &record);
+            return Err(RunError::Failed(message));
+        }
+    };
+    record.triples_produced = triples;
+    let report = gate(ctx, source, None, &graph).map_err(RunError::Failed)?;
+    if let Some(report) = &report {
+        record.conforms = Some(report.conforms);
+        record.violations = report.results_count as u64;
+    }
+    record.ended_at = registry::now();
+    record.duration_ms = clock.elapsed().as_millis() as u64;
+    if let Some(report) = report {
+        if !report.conforms {
+            record.status = Some(RunStatus::Rejected);
+            registry::put_run(ctx.store, &record).map_err(RunError::Failed)?;
+            commit(ctx, source, &record, "rejected by the SHACL write gate");
+            match super::review::open_items(ctx.store, source, &record, &report) {
+                Ok(n) => tracing::info!(run = %record.id, items = n, "review items opened"),
+                Err(e) => tracing::warn!(run = %record.id, "review items not opened: {e}"),
+            }
+            return Err(RunError::Gate {
+                run: Box::new(record),
+                report: Box::new(report),
+            });
+        }
+    }
+    record.status = Some(RunStatus::Succeeded);
+    promote(ctx, source, &record).map_err(RunError::Failed)?;
+    let entities = subjects_of(ctx.store, &graph);
+    record.ldes_members = publish_members(ctx, source, &graph, &entities);
+    registry::put_run(ctx.store, &record).map_err(RunError::Failed)?;
+    commit(ctx, source, &record, "snapshot taken and promoted");
+    Ok(record)
+}
+
 /// Validate the candidate graph against every shapes graph that applies: the
 /// one the mapping declares it conforms to, and the bound dataset's own
 /// `shacl_on_write` shapes. `None` means no gate applied.
 fn gate(
     ctx: RunContext<'_>,
     source: &SqlSource,
-    mapping: &MappingRecord,
+    mapping: Option<&MappingRecord>,
     candidate: &str,
 ) -> Result<Option<ValidationReport>, String> {
     let mut shape_graphs: Vec<String> = Vec::new();
-    if let Some(g) = &mapping.shapes_graph {
-        shape_graphs.push(g.clone());
+    if let Some(g) = mapping.and_then(|m| m.shapes_graph.clone()) {
+        shape_graphs.push(g);
     }
     if let Some(dataset_id) = &source.dataset {
         if let Ok(Some(ds)) = ctx.auth_db.get_dataset(dataset_id) {
@@ -607,16 +696,20 @@ pub fn promote_candidate(
             run.id
         )));
     }
-    let mapping = registry::get_mapping(ctx.store, &run.mapping_id).ok_or_else(|| {
-        PromoteError::Conflict(format!(
-            "mapping '{}' no longer exists, so the candidate cannot be gated",
-            run.mapping_id
-        ))
-    })?;
+    // A snapshot has no mapping; a mapped run's mapping must still exist for
+    // its shapes graph to be found.
+    let mapping = match run.mapping() {
+        Some((id, _)) => Some(registry::get_mapping(ctx.store, id).ok_or_else(|| {
+            PromoteError::Conflict(format!(
+                "mapping '{id}' no longer exists, so the candidate cannot be gated"
+            ))
+        })?),
+        None => None,
+    };
 
     // The gate, over the graph as it stands after correction. Refused stays
     // refused: production is untouched, the candidate is kept.
-    let report = gate(ctx, source, &mapping, &run.graph).map_err(PromoteError::Failed)?;
+    let report = gate(ctx, source, mapping.as_ref(), &run.graph).map_err(PromoteError::Failed)?;
     if let Some(report) = &report {
         if !report.conforms {
             return Err(PromoteError::Gate(Box::new(report.clone())));
@@ -797,15 +890,16 @@ fn commit(ctx: RunContext<'_>, source: &SqlSource, run: &RunRecord, what: &str) 
         ctx.store,
         ctx.base_url,
         crate::commit_log::CommitKind::Source,
-        format!(
-            "run {} of mapping '{}' v{} against datasource '{}' {what} ({} rows, {} triples)",
-            run.id,
-            run.mapping_id,
-            run.mapping_version,
-            source.id,
-            run.rows_extracted,
-            run.triples_produced
-        ),
+        match run.mapping() {
+            Some((id, version)) => format!(
+                "run {} of mapping '{id}' v{version} against datasource '{}' {what} ({} rows, {} triples)",
+                run.id, source.id, run.rows_extracted, run.triples_produced
+            ),
+            None => format!(
+                "snapshot run {} of datasource '{}' {what} ({} triples)",
+                run.id, source.id, run.triples_produced
+            ),
+        },
         actor_id(run.actor.as_deref()).as_deref(),
         Some(source.iri()),
         vec![run.graph.clone()],
@@ -823,17 +917,20 @@ fn commit(ctx: RunContext<'_>, source: &SqlSource, run: &RunRecord, what: &str) 
 /// is how a client follows a run's provenance — the same arrangement
 /// `GET /api/datasets/:id/provenance` uses for the commit log.
 pub fn provenance_turtle(store: &TripleStore, run: &RunRecord) -> String {
-    let subjects = [
+    let mut subjects = vec![
         run_activity_iri(&run.id),
         run.graph.clone(),
         source_iri(&run.source_id),
-        mapping_version_iri(&run.mapping_id, run.mapping_version),
-        mapping_iri(&run.mapping_id),
-    ]
-    .iter()
-    .map(|s| format!("<{}>", crate::store::escape_sparql_iri(s)))
-    .collect::<Vec<_>>()
-    .join(" ");
+    ];
+    if let Some((id, version)) = run.mapping() {
+        subjects.push(mapping_version_iri(id, version));
+        subjects.push(mapping_iri(id));
+    }
+    let subjects = subjects
+        .iter()
+        .map(|s| format!("<{}>", crate::store::escape_sparql_iri(s)))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     // Whatever later used the run's graph — a promotion after review, a
     // rollback to it — is part of the run's story too.

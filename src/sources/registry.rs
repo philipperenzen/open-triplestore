@@ -152,7 +152,9 @@ pub fn put_source(store: &TripleStore, source: &SqlSource) -> Result<(), String>
         pfx = prefixes(),
         del = delete_subject_sparql(&source.iri()),
     );
-    store.update(&sparql).map_err(|e| e.to_string())
+    store.update(&sparql).map_err(|e| e.to_string())?;
+    super::virtual_source::remember(source);
+    Ok(())
 }
 
 fn source_select(filter: &str) -> String {
@@ -258,7 +260,9 @@ pub fn list_sources(store: &TripleStore) -> Vec<SqlSource> {
 pub fn delete_source(store: &TripleStore, id: &str) -> Result<(), String> {
     store
         .update(&delete_subject_sparql(&source_iri(id)))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    super::virtual_source::forget(id);
+    Ok(())
 }
 
 /// Re-point a source at `production`, keeping `previous` as the graph a
@@ -442,15 +446,23 @@ pub fn put_run(store: &TripleStore, r: &RunRecord) -> Result<(), String> {
     let activity = iri(&run_activity_iri(&r.id));
     let graph = iri(&r.graph);
     let source = iri(&source_iri(&r.source_id));
-    let version = iri(&mapping_version_iri(&r.mapping_id, r.mapping_version));
     let status = r.status.map(|s| s.as_str()).unwrap_or("failed");
+    // A snapshot of a virtual source ran no mapping: it used the source and
+    // nothing else.
+    let (mapping_line, used) = match r.mapping() {
+        Some((id, version)) => (
+            format!("    ds:mapping {} ;\n", iri(&mapping_iri(id))),
+            format!("{source}, {}", iri(&mapping_version_iri(id, version))),
+        ),
+        None => (String::new(), source.clone()),
+    };
 
     let mut body = format!(
         "    a prov:Activity, ds:Run ;\n\
          \x20   ds:id {} ;\n\
          \x20   ds:source {source} ;\n\
-         \x20   ds:mapping {} ;\n\
-         \x20   prov:used {source}, {version} ;\n\
+         {mapping_line}\
+         \x20   prov:used {used} ;\n\
          \x20   prov:generated {graph} ;\n\
          \x20   ds:status {} ;\n\
          \x20   ds:mode {} ;\n\
@@ -460,7 +472,6 @@ pub fn put_run(store: &TripleStore, r: &RunRecord) -> Result<(), String> {
          \x20   prov:startedAtTime \"{}\"^^xsd:dateTime ;\n\
          \x20   prov:endedAtTime \"{}\"^^xsd:dateTime ;\n",
         lit(&r.id),
-        iri(&mapping_iri(&r.mapping_id)),
         lit(status),
         lit(&r.mode),
         r.rows_extracted,
@@ -500,10 +511,15 @@ pub fn put_run(store: &TripleStore, r: &RunRecord) -> Result<(), String> {
     body.push_str(&format!("    dct:created {} .\n", lit(&r.started_at)));
 
     // The graph the run produced is the PROV entity, so provenance can be
-    // followed from the data back to the mapping version and the source.
+    // followed from the data back to the mapping version (or the source, for
+    // a snapshot) and the source.
+    let derived_from = match r.mapping() {
+        Some((id, version)) => iri(&mapping_version_iri(id, version)),
+        None => source.clone(),
+    };
     let entity = format!(
         "  {graph} a prov:Entity ; prov:wasGeneratedBy {activity} ; \
-         prov:wasDerivedFrom {version} ; ds:run {} .\n",
+         prov:wasDerivedFrom {derived_from} ; ds:run {} .\n",
         lit(&r.id)
     );
 
@@ -520,9 +536,9 @@ fn run_select(filter: &str) -> String {
         "{}SELECT ?id ?source ?mapping ?version ?modelVersion ?status ?mode ?rows ?triples ?duration \
          ?started ?ended ?actor ?conforms ?violations ?error ?previous ?watermark ?members \
          WHERE {{ GRAPH <{SOURCES_GRAPH}> {{\n\
-           ?a a ds:Run ; ds:id ?id ; ds:source ?source ; ds:mapping ?mapping ;\n\
+           ?a a ds:Run ; ds:id ?id ; ds:source ?source ;\n\
               ds:status ?status ; ds:mode ?mode ; prov:startedAtTime ?started .\n\
-           ?a prov:used ?v . ?v a ds:MappingVersion ; ds:version ?version .\n\
+           OPTIONAL {{ ?a ds:mapping ?mapping . ?a prov:used ?v . ?v a ds:MappingVersion ; ds:version ?version }}\n\
            {filter}\n\
            OPTIONAL {{ ?a ds:modelVersion ?modelVersion }}\n\
            OPTIONAL {{ ?a ds:rowsExtracted ?rows }}\n\
@@ -551,7 +567,7 @@ fn row_to_run(row: &HashMap<String, String>) -> RunRecord {
         mapping_id: get("mapping")
             .and_then(|s| s.strip_prefix("urn:mapping:").map(str::to_string))
             .unwrap_or_default(),
-        mapping_version: get("version").and_then(|v| v.parse().ok()).unwrap_or(1),
+        mapping_version: get("version").and_then(|v| v.parse().ok()).unwrap_or(0),
         model_version: get("modelVersion"),
         mode: get("mode").unwrap_or_else(|| "full".into()),
         status: get("status").and_then(|s| RunStatus::parse(&s)),

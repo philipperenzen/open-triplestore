@@ -197,14 +197,21 @@ fn item_turtle(item: &ReviewItem) -> String {
     } else {
         format!("<{}>", escape_sparql_iri(&item.subject))
     };
+    let mapping = if item.mapping.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "ds:mapping <{}> ;\n    ",
+            escape_sparql_iri(&mapping_iri(&item.mapping))
+        )
+    };
     let mut body = format!(
-        "  <{}> a ds:ReviewItem ;\n    ds:id \"{}\" ;\n    ds:source <{}> ;\n    ds:run \"{}\" ;\n    ds:graph <{}> ;\n    ds:mapping <{}> ;\n    ds:mappingVersion \"{}\"^^xsd:integer ;\n    ds:subject {subject} ;\n    ds:status \"{}\" ;\n    ds:violations \"{}\"^^rdf:JSON ;\n    ds:snapshot \"{}\" ;\n",
+        "  <{}> a ds:ReviewItem ;\n    ds:id \"{}\" ;\n    ds:source <{}> ;\n    ds:run \"{}\" ;\n    ds:graph <{}> ;\n    {mapping}ds:mappingVersion \"{}\"^^xsd:integer ;\n    ds:subject {subject} ;\n    ds:status \"{}\" ;\n    ds:violations \"{}\"^^rdf:JSON ;\n    ds:snapshot \"{}\" ;\n",
         escape_sparql_iri(&item.iri),
         escape_sparql_literal(&item.id),
         escape_sparql_iri(&item.source),
         escape_sparql_literal(&item.run),
         escape_sparql_iri(&item.graph),
-        escape_sparql_iri(&mapping_iri(&item.mapping)),
         item.mapping_version,
         escape_sparql_literal(&item.status),
         escape_sparql_literal(&violations),
@@ -274,10 +281,11 @@ fn item_select(graph_pattern: &str, filter: &str) -> String {
         "{}SELECT ?i ?id ?source ?run ?graph ?mapping ?version ?subject ?status ?violations ?snapshot \
          ?fixes ?reviewer ?decision ?created ?modified WHERE {{ {graph_pattern} {{\n\
            ?i a ds:ReviewItem ; ds:id ?id ; ds:source ?source ; ds:run ?run ; ds:graph ?graph ;\n\
-              ds:mapping ?mapping ; ds:mappingVersion ?version ; ds:subject ?subject ;\n\
+              ds:mappingVersion ?version ; ds:subject ?subject ;\n\
               ds:status ?status ; ds:violations ?violations ; ds:snapshot ?snapshot ;\n\
               dct:created ?created ; dct:modified ?modified .\n\
            {filter}\n\
+           OPTIONAL {{ ?i ds:mapping ?mapping }}\n\
            OPTIONAL {{ ?i ds:fixes ?fixes }}\n\
            OPTIONAL {{ ?i prov:wasAttributedTo ?reviewer }}\n\
            OPTIONAL {{ ?i ds:decision ?decision }}\n\
@@ -298,9 +306,9 @@ fn items(store: &TripleStore, graph_pattern: &str, filter: &str) -> Vec<ReviewIt
                 source: lex(&row, "source")?,
                 run: lex(&row, "run")?,
                 graph: lex(&row, "graph")?,
-                mapping: lex(&row, "mapping")?
-                    .trim_start_matches("urn:mapping:")
-                    .to_string(),
+                mapping: lex(&row, "mapping")
+                    .map(|m| m.trim_start_matches("urn:mapping:").to_string())
+                    .unwrap_or_default(),
                 mapping_version: lex(&row, "version").and_then(|v| v.parse().ok())?,
                 subject: lex(&row, "subject")?,
                 status: lex(&row, "status")?,

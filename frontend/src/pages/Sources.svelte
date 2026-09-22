@@ -215,6 +215,7 @@
             <option value="postgresql">PostgreSQL</option>
             <option value="mysql">MySQL</option>
             <option value="mssql">SQL Server</option>
+            <option value="sparql">{$t('pages.sources.dialectSparql')}</option>
           </select>
         </label>
         {#if !fileBacked(form.dialect)}
@@ -228,8 +229,8 @@
             <input bind:value={form.username} placeholder="reader" />
           </label>
         {/if}
-        <label class="wide">{fileBacked(form.dialect) ? $t('pages.sources.fieldPath') : $t('pages.sources.fieldDatabase')}
-          <input bind:value={form.database} required />
+        <label class="wide">{fileBacked(form.dialect) ? $t('pages.sources.fieldPath') : form.dialect === 'sparql' ? $t('pages.sources.fieldEndpointPath') : $t('pages.sources.fieldDatabase')}
+          <input bind:value={form.database} required={form.dialect !== 'sparql'} placeholder={form.dialect === 'sparql' ? '/sparql' : ''} />
         </label>
         <label class="wide">{$t('pages.sources.fieldCredential')}
           <input bind:value={form.credential} placeholder="vault:secret/data/sources/legacy#password" />
