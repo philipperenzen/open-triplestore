@@ -1023,12 +1023,60 @@ on the run's PROV trail beside the run, and the run's review items are marked
 | `POST /api/reviews/:id/suggest` | The model's suggestion; never applied |
 | `POST /api/runs/:id/promote` | Re-gate the candidate and swap it in |
 
+## Writeback
+
+Corrections and approved changes live in the store; carrying them back to a
+source system is a **separate program**, never the store. `ots-writeback`
+([`tools/writeback`](../tools/writeback)) follows a dataset's LDES stream —
+one member per changed entity, a tombstone when one disappeared — reads the
+mapping backwards, and upserts the rows into a SQL database with a writing
+account of its own. The store's datasource accounts stay read-only; the
+worker reaches the store as any client does, with an API token.
+
+```bash
+cargo build -p ots-writeback --release
+OTS_WRITEBACK_TOKEN=ots_… target/release/ots-writeback \
+  --store http://localhost:7878 --token env:OTS_WRITEBACK_TOKEN \
+  --dataset shop --mapping products-map \
+  --target sqlite:/var/lib/shop/shop.db --state /var/lib/writeback/shop.json
+```
+
+What it inverts is what a mapping states plainly: a triples map that reads a
+**table** (`rr:tableName`), mints its subject from a **template with one
+placeholder** (or takes a column as the IRI), and asserts **columns** as
+objects. A member that fits a rule's subject template and carries one of its
+`rr:class`es becomes an upsert on the key — `INSERT … ON CONFLICT (key) DO
+UPDATE` — naming only the columns the member carried, so a column the mapping
+knows but the member did not mention keeps what the row already holds; a
+tombstone becomes a delete by key. A query source, a computed object
+(template, constant, function), a join: each is reported at start-up and
+left alone. The worker never guesses a value.
+
+| Option | Meaning |
+|---|---|
+| `--target sqlite:<path>` | A SQLite file; the upsert needs the key column to be unique |
+| `--target env:NAME` / `file:/path` | A PostgreSQL DSN, as a secret reference — never on the command line |
+| `--token env:NAME` / `file:/path` | The store API token, likewise (default `env:OTS_WRITEBACK_TOKEN`) |
+| `--state <path>` | The cursor: the last member applied and the node it was read from, so a restart resumes |
+| `--once` | Process what is there and exit; otherwise poll every `--interval` seconds |
+| `--dry-run` | Print the SQL on stdout (logs go to stderr) and apply nothing |
+| `--from-file page.nt --mapping-file map.ttl` | A fragment and a mapping from disk, no store involved |
+
+Each fragment is one transaction; the cursor is written after it commits, so
+a crash in between replays the fragment — and every statement is idempotent.
+Values travel as text: SQLite applies the column's affinity and PostgreSQL
+coerces an untyped literal to the column's type, booleans as `1` / `0`.
+
+---
+
 ## What is not here yet
 
 Stated plainly, because a gap you know about is cheaper than one you discover:
 
-- **Writeback.** Corrections stay in the store; the worker that carries an
-  approved correction back to the source system is phase 4.
+- **Writeback beyond plain columns.** The worker inverts column-valued
+  object maps under a one-placeholder subject template; a template, function
+  or join object, a query source, and MySQL / SQL Server targets are not
+  written back.
 - **Streaming snapshots.** A snapshot of a virtual source is fetched whole;
   a graph too large for that is mapped, not snapshotted.
 - **Live MySQL and SQL Server runs in CI.** Those two drivers are verified by

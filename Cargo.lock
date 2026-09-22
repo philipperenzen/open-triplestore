@@ -4640,6 +4640,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ots-writeback"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oxrdf",
+ "oxttl",
+ "postgres",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5601,6 +5619,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http 1.5.0",

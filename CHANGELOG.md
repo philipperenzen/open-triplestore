@@ -14,6 +14,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`ots-writeback`, the external writeback worker** (`tools/writeback`, a
+  separate binary — never inside the store). It follows a dataset's LDES
+  stream from where it left off, reads an RML mapping backwards — a table
+  source, a one-placeholder subject template or a column subject, and
+  column-valued objects; anything else is reported and left alone — and
+  upserts the changed entities into SQLite or PostgreSQL with a writing
+  account of its own, one transaction per fragment, a tombstone as a delete.
+  Secrets are `env:` / `file:` references, never command-line values;
+  `--dry-run` prints the SQL, `--from-file` works without a store.
 - **Virtual sources: a SPARQL endpoint as a datasource** (dialect `sparql`,
   in core). An Ontop virtual knowledge graph — or any endpoint — is
   registered like a database, with the same secret reference and the same

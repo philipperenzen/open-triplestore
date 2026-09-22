@@ -3,7 +3,7 @@
 # copying `plugins/hello`) makes it a workspace member automatically — no edit
 # needed here. It still needs an optional dependency entry + feature flag
 # below, and a registration in `src/plugins.rs`, to actually be built in.
-members = [".", "opengraph", "plugins/*"]
+members = [".", "opengraph", "plugins/*", "tools/*"]
 resolver = "2"
 
 [package]
