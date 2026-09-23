@@ -116,7 +116,7 @@ carries the drivers its operator asked for and no others.
 | `sqlite` | core | `SQLITE_OPEN_READ_ONLY` | progress handler | — |
 | `postgresql` | `plugin-postgres` | `SET default_transaction_read_only = on` per session | `SET statement_timeout` | rustls; `options.sslrootcert` for a private CA |
 | `mysql` (MariaDB too) | `plugin-mysql` | `SET SESSION TRANSACTION READ ONLY` per session | `max_execution_time` (MySQL) or `max_statement_time` (MariaDB); a server that knows neither is refused | rustls; `options.sslrootcert` |
-| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls; `options.sslrootcert` |
+| `mssql` | `plugin-mssql` | the account is checked at connect: `sysadmin`, `db_owner`, `db_datawriter` or `db_ddladmin` is refused; only a query the driver can wrap as a derived table runs | the driver bounds every statement and every wait for a next row; `SET LOCK_TIMEOUT` | rustls; `options.sslrootcert` |
 | `sparql` (virtual; Ontop or any endpoint) | core | a SPARQL endpoint has no write path | the remote timeout (`OTS_REMOTE_TIMEOUT_SECS`) | `tls` picks `https`; the endpoint must be on `OTS_REMOTE_ALLOWLIST` |
 
 ```bash
@@ -140,6 +140,17 @@ A datasource in a schema of its own names it in `options.search_path`
 (PostgreSQL). `options.sslrootcert` points at a PEM bundle for a private CA;
 host names are always verified and there is no trust-all switch.
 
+Two server differences surface in what a profile shows. On SQL Server give
+the reading account `db_datareader` plus `VIEW DEFINITION`: without the
+latter the catalogue hides column defaults (the read-only check does not
+mind either). MariaDB's `JSON` is an alias of `LONGTEXT` with a
+`json_valid()` check, so a MariaDB JSON column introspects and streams as
+text; set `rr:datatype rdf:JSON` in the mapping to type it. Column defaults
+come out in MySQL's spelling on both (MariaDB reports `'x'` and `NULL` as
+expressions), and fractional seconds and doubles in their shortest form on
+every driver (`2026-01-01T12:00:00`, not `…12:00:00.000000`; `2`, not
+`2.0000000000000000e+000`).
+
 ```bash
 curl -s localhost:7878/api/sources/metrics -H "Authorization: Bearer $TOKEN"
 ```
@@ -150,7 +161,11 @@ server when `OTS_TEST_POSTGRES_HOST`, `OTS_TEST_MYSQL_HOST` or
 `OTS_TEST_MSSQL_HOST` is set (see the test file's header for the variables),
 and is skipped otherwise; `tests/sources_postgres_http.rs` runs the whole
 pipeline — register, introspect, profile, dry-run, run, read the graph — over
-HTTP through the PostgreSQL plugin (`--features plugin-postgres`).
+HTTP through the PostgreSQL plugin (`--features plugin-postgres`). CI's
+`live-sources` job (GitHub and GitLab alike) starts PostgreSQL 16, MySQL 8.4,
+MariaDB 11.4 and SQL Server 2022 as service containers and runs all of them
+with `OTS_TEST_LIVE_REQUIRED=1`, which turns a missing server variable into
+a failure instead of a skip.
 
 ---
 
@@ -1079,10 +1094,6 @@ Stated plainly, because a gap you know about is cheaper than one you discover:
   written back.
 - **Streaming snapshots.** A snapshot of a virtual source is fetched whole;
   a graph too large for that is mapped, not snapshotted.
-- **Live MySQL and SQL Server runs in CI.** Those two drivers are verified by
-  their unit tests and by whoever sets `OTS_TEST_MYSQL_HOST` or
-  `OTS_TEST_MSSQL_HOST`; the PostgreSQL driver's live tests ran against a
-  container in development, and no CI job starts a database server yet.
 
 ---
 

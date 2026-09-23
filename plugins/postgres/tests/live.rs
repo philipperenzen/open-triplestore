@@ -26,7 +26,15 @@ struct Target {
 }
 
 fn target() -> Option<Target> {
-    let host = std::env::var("OTS_TEST_POSTGRES_HOST").ok()?;
+    let Ok(host) = std::env::var("OTS_TEST_POSTGRES_HOST") else {
+        // The CI job that starts the servers sets OTS_TEST_LIVE_REQUIRED, so
+        // a missing or renamed variable fails there instead of skipping.
+        assert!(
+            std::env::var_os("OTS_TEST_LIVE_REQUIRED").is_none(),
+            "OTS_TEST_LIVE_REQUIRED is set but OTS_TEST_POSTGRES_HOST is not"
+        );
+        return None;
+    };
     Some(Target {
         host,
         port: std::env::var("OTS_TEST_POSTGRES_PORT")
@@ -37,6 +45,22 @@ fn target() -> Option<Target> {
         password: std::env::var("OTS_TEST_POSTGRES_PASSWORD").ok(),
         db: std::env::var("OTS_TEST_POSTGRES_DB").unwrap_or_else(|_| "postgres".into()),
     })
+}
+
+/// The server may still be starting when a CI job reaches this test: the
+/// administrator's connection is retried for up to a minute.
+fn patiently<T, E: std::fmt::Display>(mut attempt: impl FnMut() -> Result<T, E>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match attempt() {
+            Ok(v) => return v,
+            Err(e) if std::time::Instant::now() < deadline => {
+                eprintln!("waiting for the server: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => panic!("admin connection: {e}"),
+        }
+    }
 }
 
 fn params(t: &Target, timeout_ms: u64, schema: &str) -> ConnectParams {
@@ -62,7 +86,7 @@ fn fixture(t: &Target) -> String {
     if let Some(p) = &t.password {
         admin.password(p);
     }
-    let mut client = admin.connect(postgres::NoTls).expect("admin connection");
+    let mut client = patiently(|| admin.connect(postgres::NoTls));
     client
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema}; \

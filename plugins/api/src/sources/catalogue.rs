@@ -155,8 +155,9 @@ pub fn standard_type(native: &str) -> ValueKind {
 }
 
 /// The lexical form the R2RML natural mapping wants, from what a server
-/// prints: booleans as `true` / `false`, timestamps with a `T` and a full
-/// `±hh:mm` offset. Anything else passes through as the server wrote it.
+/// prints: booleans as `true` / `false`, timestamps with a `T`, no trailing
+/// zeros in the fractional seconds and a full `±hh:mm` offset. Anything else
+/// passes through as the server wrote it.
 pub fn canonical(kind: ValueKind, lexical: &str) -> String {
     match kind {
         ValueKind::Boolean => match lexical.trim().to_ascii_lowercase().as_str() {
@@ -173,16 +174,55 @@ pub fn canonical(kind: ValueKind, lexical: &str) -> String {
             {
                 s.replace_range(10..11, "T");
             }
-            with_full_offset(&s)
+            with_full_offset(&without_trailing_fraction_zeros(&s))
         }
-        ValueKind::Time => with_full_offset(lexical.trim()),
+        ValueKind::Time => with_full_offset(&without_trailing_fraction_zeros(lexical.trim())),
         ValueKind::Float => match lexical.trim() {
             "Infinity" | "inf" | "+Infinity" => "INF".to_string(),
             "-Infinity" | "-inf" => "-INF".to_string(),
-            other => other.to_string(),
+            other => shortest_double(other).unwrap_or_else(|| other.to_string()),
         },
         _ => lexical.to_string(),
     }
+}
+
+/// `2.0000000000000000e+000` → `2`: the shortest spelling that reads back
+/// as the same double, so a driver that ships floats at full precision
+/// (SQL Server's style 3) and one that prints them short agree on a value.
+/// Very large and very small magnitudes keep an exponent. `None` for what
+/// is not a finite number, which passes through as the server wrote it.
+fn shortest_double(s: &str) -> Option<String> {
+    let x: f64 = s.parse().ok()?;
+    if !x.is_finite() {
+        return None;
+    }
+    let magnitude = x.abs();
+    Some(if magnitude == 0.0 || (1e-4..1e16).contains(&magnitude) {
+        x.to_string()
+    } else {
+        format!("{x:e}")
+    })
+}
+
+/// `12:00:00.250000` → `12:00:00.25`, `12:00:00.000000` → `12:00:00`: XSD's
+/// canonical form ends the seconds at their last significant digit, and a
+/// server may pad them to the column's declared precision (MySQL's
+/// `DATETIME(6)` does).
+fn without_trailing_fraction_zeros(s: &str) -> String {
+    let Some(dot) = s.find('.') else {
+        return s.to_string();
+    };
+    let end = s[dot + 1..]
+        .find(|c: char| !c.is_ascii_digit())
+        .map_or(s.len(), |i| dot + 1 + i);
+    let fraction = s[dot + 1..end].trim_end_matches('0');
+    let mut out = s[..dot].to_string();
+    if !fraction.is_empty() {
+        out.push('.');
+        out.push_str(fraction);
+    }
+    out.push_str(&s[end..]);
+    out
 }
 
 /// `…+00` → `…+00:00`: PostgreSQL prints a whole-hour offset without its
@@ -745,9 +785,25 @@ mod tests {
         assert_eq!(canonical(ValueKind::DateTime, "2026-01-01"), "2026-01-01");
         assert_eq!(canonical(ValueKind::Time, "12:30:00+01"), "12:30:00+01:00");
         assert_eq!(canonical(ValueKind::Time, "12:30:00"), "12:30:00");
+        assert_eq!(
+            canonical(ValueKind::DateTime, "2026-01-01 12:00:00.000000"),
+            "2026-01-01T12:00:00"
+        );
+        assert_eq!(
+            canonical(ValueKind::DateTime, "2026-01-01 12:00:00.250000+01"),
+            "2026-01-01T12:00:00.25+01:00"
+        );
+        assert_eq!(canonical(ValueKind::Time, "12:30:00.100Z"), "12:30:00.1Z");
         assert_eq!(canonical(ValueKind::Float, "Infinity"), "INF");
         assert_eq!(canonical(ValueKind::Float, "-Infinity"), "-INF");
         assert_eq!(canonical(ValueKind::Float, "1.5"), "1.5");
+        assert_eq!(canonical(ValueKind::Float, "2.0000000000000000e+000"), "2");
+        assert_eq!(
+            canonical(ValueKind::Float, "5.0000000000000000e-001"),
+            "0.5"
+        );
+        assert_eq!(canonical(ValueKind::Float, "1e+300"), "1e300");
+        assert_eq!(canonical(ValueKind::Float, "NaN"), "NaN");
         assert_eq!(canonical(ValueKind::Text, " x "), " x ");
         // A date is not an offset: `2026-01-01` ends in `-01` and stays.
         assert_eq!(canonical(ValueKind::Date, "2026-01-01"), "2026-01-01");

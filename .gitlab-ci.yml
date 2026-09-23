@@ -3,7 +3,8 @@
 # Mirrors the GitHub Actions workflows (.github/workflows/ci.yml, perf.yml,
 # perf-baseline.yml, release.yml + e2e.yml) so a fork hosted on any GitLab
 # instance (gitlab.com or self-managed) gets the same gates: rustfmt + clippy +
-# build + test (incl. conformance & security suites), the frontend
+# build + test (incl. conformance & security suites), the database connectors
+# against live PostgreSQL / MySQL / MariaDB / SQL Server services, the frontend
 # lint/test/build, the cargo-deny supply-chain audit (advisories, bans, sources,
 # licenses), an npm production-dependency audit, a gitleaks secret scan, the
 # performance-regression gate, and a tag-driven release. Commands and versions
@@ -68,7 +69,83 @@ rust:
     # `opengraph` member is neither linted nor test-compiled (see ci.yml).
     - cargo clippy --workspace --all-targets --all-features -- -D warnings
     - cargo build --all-features --locked
-    - cargo test --workspace --all-features --locked
+    # No test is ignored (see scripts/no-ignored-tests.sh and ci.yml).
+    - scripts/no-ignored-tests.sh
+    - set -o pipefail; cargo test --workspace --all-features --locked 2>&1 | tee test.log
+    - if grep -E 'test result:.* [1-9][0-9]* ignored' test.log; then echo "Some tests were ignored"; exit 1; fi
+
+# ── Database connectors against live servers (mirrors ci.yml live-sources) ──
+# Each driver crate's live test skips when its OTS_TEST_<DIALECT>_HOST is
+# unset; here the servers run as services and OTS_TEST_LIVE_REQUIRED turns a
+# missing variable into a failure. GitLab waits only for a service's port, so
+# each test retries its administrator connection while the server starts. The
+# passwords are throwaway values for these containers.
+live-sources:
+  stage: test
+  image: rust:1.94-trixie
+  services:
+    - name: postgres:16
+      alias: postgres
+    - name: mysql:8.4
+      alias: mysql
+    - name: mariadb:11.4
+      alias: mariadb
+    - name: mcr.microsoft.com/mssql/server:2022-latest
+      alias: mssql
+  variables:
+    POSTGRES_PASSWORD: ots-live-pw
+    MYSQL_ROOT_PASSWORD: ots-live-pw
+    MARIADB_ROOT_PASSWORD: ots-live-pw
+    ACCEPT_EULA: "Y"
+    MSSQL_SA_PASSWORD: OtsLive-Passw0rd
+    OTS_TEST_LIVE_REQUIRED: "1"
+    OTS_TEST_POSTGRES_HOST: postgres
+    OTS_TEST_POSTGRES_PASSWORD: ots-live-pw
+    OTS_TEST_MYSQL_HOST: mysql
+    OTS_TEST_MYSQL_PASSWORD: ots-live-pw
+    OTS_TEST_MSSQL_HOST: mssql
+    OTS_TEST_MSSQL_PASSWORD: OtsLive-Passw0rd
+    OTS_TEST_MSSQL_READER_PASSWORD: OtsLive-R3ader
+  cache:
+    key: "rust-trixie-live-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld
+  script:
+    - cargo test -p ots-plugin-postgres --test live --locked
+    - cargo test -p ots-plugin-mysql --test live --locked
+    - OTS_TEST_MYSQL_HOST=mariadb cargo test -p ots-plugin-mysql --test live --locked
+    - cargo test -p ots-plugin-mssql --test live --locked
+    - cargo test --features test-utils,plugin-postgres --test sources_postgres_http --locked
+
+# ── Seed bundles on real data (mirrors the last steps of ci.yml conformance) ─
+# NEN 2660-2, IMBOR and GWSW are not vendored (NEN 2660-2 carries no licence
+# that allows redistributing it), so each bundle's fetch.sh downloads them from
+# the publisher and OTS_TEST_SEED_PAYLOADS_REQUIRED fails a missing payload.
+seed-bundles:
+  stage: test
+  image: rust:1.94-trixie
+  variables:
+    OTS_TEST_SEED_PAYLOADS_REQUIRED: "1"
+  cache:
+    key: "rust-trixie-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+    policy: pull
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq libgeos-dev libsfcgal-dev cmake pkg-config libclang-dev libssl-dev libxmlsec1-dev lld curl unzip
+  script:
+    - examples/seed-bundles/nen2660-imbor/fetch.sh
+    - examples/seed-bundles/nen2660-relations/fetch.sh
+    - examples/seed-bundles/gwsw/fetch.sh
+    - cargo test --all-features --locked --test nen2660_imbor_bundle --test nen2660_relations_bundle --test gwsw_bundle
 
 # ── Conformance table parity (mirrors the GitHub docs-parity job) ────────────
 # README.md / docs/standards.md carry a table generated from the test suites;

@@ -27,7 +27,15 @@ struct Target {
 }
 
 fn target() -> Option<Target> {
-    let host = std::env::var("OTS_TEST_MYSQL_HOST").ok()?;
+    let Ok(host) = std::env::var("OTS_TEST_MYSQL_HOST") else {
+        // The CI job that starts the servers sets OTS_TEST_LIVE_REQUIRED, so
+        // a missing or renamed variable fails there instead of skipping.
+        assert!(
+            std::env::var_os("OTS_TEST_LIVE_REQUIRED").is_none(),
+            "OTS_TEST_LIVE_REQUIRED is set but OTS_TEST_MYSQL_HOST is not"
+        );
+        return None;
+    };
     Some(Target {
         host,
         port: std::env::var("OTS_TEST_MYSQL_PORT")
@@ -38,6 +46,22 @@ fn target() -> Option<Target> {
         password: std::env::var("OTS_TEST_MYSQL_PASSWORD").ok(),
         db: std::env::var("OTS_TEST_MYSQL_DB").unwrap_or_else(|_| "ots_live".into()),
     })
+}
+
+/// The server may still be starting when a CI job reaches this test: the
+/// administrator's connection is retried for up to a minute.
+fn patiently<T, E: std::fmt::Display>(mut attempt: impl FnMut() -> Result<T, E>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        match attempt() {
+            Ok(v) => return v,
+            Err(e) if std::time::Instant::now() < deadline => {
+                eprintln!("waiting for the server: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => panic!("admin connection: {e}"),
+        }
+    }
 }
 
 fn params(t: &Target, timeout_ms: u64) -> ConnectParams {
@@ -61,7 +85,7 @@ fn fixture(t: &Target) {
         .tcp_port(t.port)
         .user(Some(t.user.clone()))
         .pass(t.password.clone());
-    let mut admin = mysql::Conn::new(opts).expect("admin connection");
+    let mut admin = patiently(|| mysql::Conn::new(opts.clone()));
     let db = &t.db;
     for statement in [
         format!("DROP DATABASE IF EXISTS `{db}`"),
@@ -79,7 +103,7 @@ fn fixture(t: &Target) {
             flags BIT(8), \
             when_at DATETIME(6), \
             day DATE, \
-            blob VARBINARY(16), \
+            bin VARBINARY(16), \
             doc JSON, \
             parent_id INT, \
             UNIQUE KEY child_name_key (name), \
@@ -87,7 +111,7 @@ fn fixture(t: &Target) {
             .to_string(),
         "CREATE VIEW child_v AS SELECT cid, name FROM child".to_string(),
         "INSERT INTO parent VALUES (1, 'p1'), (2, 'p2')".to_string(),
-        "INSERT INTO child (name, code, amount, ratio, ok, flags, when_at, day, blob, doc, parent_id) VALUES \
+        "INSERT INTO child (name, code, amount, ratio, ok, flags, when_at, day, bin, doc, parent_id) VALUES \
            ('a', 'NL', 1.50, 2.0, 1, b'00000101', '2026-01-01 12:00:00', '2026-01-01', X'DEAD', '{\"k\": 1}', 1), \
            ('b', 'BE', 9.00, 0.5, 0, NULL, NULL, NULL, NULL, NULL, 1), \
            ('c', 'NL', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 2), \
@@ -106,6 +130,18 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
     };
     fixture(&t);
     let mut conn = MysqlConnector.connect(&params(&t, 5_000)).expect("connect");
+    // MariaDB's JSON is an alias of LONGTEXT with a json_valid() check: the
+    // catalogue and the wire both say text, so it maps as text there.
+    let json = if conn
+        .server_version()
+        .unwrap()
+        .unwrap()
+        .starts_with("MariaDB")
+    {
+        ValueKind::Text
+    } else {
+        ValueKind::Json
+    };
 
     let tables = conn.introspect().expect("introspect");
     let names: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
@@ -145,7 +181,7 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
             .find(|c| c.name == "doc")
             .unwrap()
             .generic_type,
-        ValueKind::Json
+        json
     );
     assert_eq!(
         tables.iter().find(|t| t.name == "child_v").unwrap().kind,
@@ -194,9 +230,9 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
     assert_eq!(a["when_at"].lexical, "2026-01-01T12:00:00");
     assert_eq!(a["when_at"].kind, ValueKind::DateTime);
     assert_eq!(a["day"].lexical, "2026-01-01");
-    assert_eq!(a["blob"].lexical, "DEAD");
-    assert_eq!(a["blob"].kind, ValueKind::Binary);
-    assert_eq!(a["doc"].kind, ValueKind::Json);
+    assert_eq!(a["bin"].lexical, "DEAD");
+    assert_eq!(a["bin"].kind, ValueKind::Binary);
+    assert_eq!(a["doc"].kind, json);
     assert!(a["doc"].lexical.contains("\"k\""));
     assert_eq!(a["code"].lexical, "NL");
     let b = &rows[1];
@@ -208,7 +244,13 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
         Some("4")
     );
     assert_eq!(conn.sample("parent", 1).unwrap().len(), 1);
-    assert!(conn.server_version().unwrap().unwrap().starts_with("MySQL"));
+    let version = conn.server_version().unwrap().unwrap();
+    assert!(
+        version.starts_with("MySQL") || version.starts_with("MariaDB"),
+        "{version}"
+    );
+    let code = child.columns.iter().find(|c| c.name == "code").unwrap();
+    assert_eq!(code.default, None, "a nullable column has no default");
 
     let profile = conn.profile("child").expect("profile");
     assert_eq!(profile.row_count, Some(4));
@@ -240,9 +282,24 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
     );
 
     // The statement budget is enforced by the server and reported as such.
+    // A statement that reads rows is refused with the timeout error; MySQL
+    // lets an interrupted SLEEP() return 1 where MariaDB raises the error —
+    // cut off at the budget either way, which the elapsed time shows.
     let mut short = MysqlConnector.connect(&params(&t, 300)).expect("connect");
-    let slow = short.stream("SELECT SLEEP(2)", 1, &mut |_| Ok(()));
+    let slow = short.stream(
+        "SELECT COUNT(*) FROM information_schema.columns a, information_schema.columns b, \
+         information_schema.columns c",
+        1,
+        &mut |_| Ok(()),
+    );
     assert!(matches!(slow, Err(SourceError::Timeout)), "{slow:?}");
+    let started = std::time::Instant::now();
+    let slept = short.stream("SELECT SLEEP(5)", 1, &mut |_| Ok(()));
+    assert!(
+        matches!(slept, Ok(1) | Err(SourceError::Timeout)),
+        "{slept:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
     assert!(short.server_version().is_ok());
 
     let mut wrong = params(&t, 1_000);

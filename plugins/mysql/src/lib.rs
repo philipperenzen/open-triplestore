@@ -274,7 +274,7 @@ fn lexical(kind: ValueKind, value: &MyValue) -> String {
                 if *us > 0 {
                     out.push_str(&format!(".{us:06}"));
                 }
-                out
+                canonical(ValueKind::DateTime, &out)
             }
         }
         MyValue::Time(negative, days, h, mi, s, us) => {
@@ -289,7 +289,7 @@ fn lexical(kind: ValueKind, value: &MyValue) -> String {
             if *us > 0 {
                 out.push_str(&format!(".{us:06}"));
             }
-            out
+            canonical(ValueKind::Time, &out)
         }
     }
 }
@@ -408,7 +408,13 @@ impl SourceConnection for MysqlConnection {
             .first()
             .and_then(|r| r.first().cloned())
             .flatten()
-            .map(|v| format!("MySQL {v}")))
+            .map(|v| {
+                if v.contains("MariaDB") {
+                    format!("MariaDB {v}")
+                } else {
+                    format!("MySQL {v}")
+                }
+            }))
     }
 
     fn profile(&mut self, table: &str) -> Result<TableProfile, SourceError> {
@@ -449,8 +455,18 @@ impl Dialect for MysqlDialect {
     }
 
     fn columns_sql(&self, table: &str) -> String {
+        // MariaDB spells a default as an expression — `'x'` for the literal
+        // x, `NULL` for DEFAULT NULL — where MySQL reports the bare value and
+        // no default at all; both come out as MySQL's.
         format!(
-            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, NULLIF(COLUMN_COMMENT, '') \
+            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
+               CASE WHEN VERSION() NOT LIKE '%MariaDB%' THEN COLUMN_DEFAULT \
+                    WHEN COLUMN_DEFAULT = 'NULL' THEN NULL \
+                    WHEN CHAR_LENGTH(COLUMN_DEFAULT) >= 2 AND COLUMN_DEFAULT LIKE '''%''' \
+                      THEN REPLACE(SUBSTRING(COLUMN_DEFAULT, 2, CHAR_LENGTH(COLUMN_DEFAULT) - 2), \
+                                   '''''', '''') \
+                    ELSE COLUMN_DEFAULT END, \
+               NULLIF(COLUMN_COMMENT, '') \
              FROM INFORMATION_SCHEMA.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {} \
              ORDER BY ORDINAL_POSITION",
@@ -556,7 +572,7 @@ mod tests {
                 ValueKind::DateTime,
                 &MyValue::Date(2026, 1, 2, 3, 4, 5, 250000)
             ),
-            "2026-01-02T03:04:05.250000"
+            "2026-01-02T03:04:05.25"
         );
         assert_eq!(
             lexical(ValueKind::Date, &MyValue::Date(2026, 1, 2, 0, 0, 0, 0)),

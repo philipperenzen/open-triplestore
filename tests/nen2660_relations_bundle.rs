@@ -6,9 +6,11 @@
 //! GeoSPARQL functions — Keet et al., OntoPartS.
 //!
 //! The profile, shapes and sample are vendored and run on every CI run. The
-//! NEN 2660-2 RDFS file the *bundle* also ships is not (run the bundle's
-//! fetch.sh once); without it the bundle test reports that it skipped and
-//! passes, like tests/nen2660_imbor_bundle.rs.
+//! NEN 2660-2 RDFS file the *bundle* also loads is not — no licence allows
+//! redistributing it — so the bundle's fetch.sh downloads it; without it the
+//! bundle test reports that it skipped. CI's conformance job fetches it and
+//! sets OTS_TEST_SEED_PAYLOADS_REQUIRED, which turns a missing payload into a
+//! failure, like tests/nen2660_imbor_bundle.rs.
 
 mod common;
 
@@ -204,6 +206,12 @@ async fn bundle_loads_and_validates_when_the_nen_payload_is_present() {
         .join("nen2660-rdfs.ttl")
         .exists()
     {
+        // CI fetches the payload and sets OTS_TEST_SEED_PAYLOADS_REQUIRED, so
+        // a failed fetch fails there instead of skipping.
+        assert!(
+            std::env::var_os("OTS_TEST_SEED_PAYLOADS_REQUIRED").is_none(),
+            "OTS_TEST_SEED_PAYLOADS_REQUIRED is set but nen2660-rdfs.ttl is not present"
+        );
         eprintln!("SKIP: nen2660-rdfs.ttl is not present — run examples/seed-bundles/nen2660-relations/fetch.sh to run the bundle test");
         return;
     }

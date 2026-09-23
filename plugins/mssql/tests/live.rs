@@ -7,7 +7,8 @@
 //! administrator: the test builds its own database and a reader login.
 //!
 //! ```bash
-//! docker run -d --rm --name ots-mssql -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Pass' \
+//! docker run -d --rm --platform linux/amd64 --name ots-mssql -e ACCEPT_EULA=Y \
+//!   -e MSSQL_SA_PASSWORD='Str0ng!Pass' \
 //!   -p 1499:1433 mcr.microsoft.com/mssql/server:2022-latest
 //! OTS_TEST_MSSQL_HOST=127.0.0.1 OTS_TEST_MSSQL_PORT=1499 OTS_TEST_MSSQL_PASSWORD='Str0ng!Pass' \
 //!   OTS_TEST_MSSQL_READER_PASSWORD='R3ader!Pass' cargo test -p ots-plugin-mssql --test live
@@ -30,7 +31,15 @@ struct Target {
 }
 
 fn target() -> Option<Target> {
-    let host = std::env::var("OTS_TEST_MSSQL_HOST").ok()?;
+    let Ok(host) = std::env::var("OTS_TEST_MSSQL_HOST") else {
+        // The CI job that starts the servers sets OTS_TEST_LIVE_REQUIRED, so
+        // a missing or renamed variable fails there instead of skipping.
+        assert!(
+            std::env::var_os("OTS_TEST_LIVE_REQUIRED").is_none(),
+            "OTS_TEST_LIVE_REQUIRED is set but OTS_TEST_MSSQL_HOST is not"
+        );
+        return None;
+    };
     Some(Target {
         host,
         port: std::env::var("OTS_TEST_MSSQL_PORT")
@@ -73,9 +82,24 @@ fn fixture(t: &Target) {
         config.port(t.port);
         config.authentication(tiberius::AuthMethod::sql_server(&t.user, &t.password));
         config.encryption(tiberius::EncryptionLevel::NotSupported);
-        let tcp = tokio::net::TcpStream::connect(config.get_addr()).await.unwrap();
-        tcp.set_nodelay(true).unwrap();
-        let mut client = tiberius::Client::connect(config, tcp.compat_write()).await.unwrap();
+        // The server may still be starting when a CI job reaches this test:
+        // the administrator's connection is retried for up to a minute.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut client = loop {
+            let attempt = async {
+                let tcp = tokio::net::TcpStream::connect(config.get_addr()).await?;
+                tcp.set_nodelay(true)?;
+                tiberius::Client::connect(config.clone(), tcp.compat_write()).await
+            };
+            match attempt.await {
+                Ok(client) => break client,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    eprintln!("waiting for the server: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => panic!("admin connection: {e}"),
+            }
+        };
         let db = &t.db;
         let reader_password = &t.reader_password;
         for statement in [
@@ -83,7 +107,7 @@ fn fixture(t: &Target) {
             format!("CREATE DATABASE [{db}]"),
             "IF SUSER_ID('ots_reader') IS NOT NULL DROP LOGIN [ots_reader]".to_string(),
             format!("CREATE LOGIN [ots_reader] WITH PASSWORD = '{reader_password}', CHECK_POLICY = OFF"),
-            format!("USE [{db}]; CREATE USER [ots_reader] FOR LOGIN [ots_reader]; ALTER ROLE db_datareader ADD MEMBER [ots_reader]"),
+            format!("USE [{db}]; CREATE USER [ots_reader] FOR LOGIN [ots_reader]; ALTER ROLE db_datareader ADD MEMBER [ots_reader]; GRANT VIEW DEFINITION TO [ots_reader]"),
             format!("USE [{db}]; CREATE TABLE parent (pid INT PRIMARY KEY, label NVARCHAR(20) NOT NULL)"),
             format!("USE [{db}]; EXEC sp_addextendedproperty 'MS_Description', 'the parents', 'SCHEMA', 'dbo', 'TABLE', 'parent'"),
             format!(
@@ -259,16 +283,28 @@ fn a_real_server_is_introspected_profiled_and_streamed_read_only() {
     assert_eq!(numeric.max, 9.0);
     assert_eq!(numeric.p50, 4.25);
 
-    // The reader cannot write, and the server says so.
+    // A statement that is not a query never runs: the connector only
+    // executes what it can wrap as a derived table (and the account it runs
+    // as was checked for write roles at connect).
     let refused = conn.stream("INSERT INTO parent VALUES (9, 'nope')", 1, &mut |_| Ok(()));
     assert!(matches!(refused, Err(SourceError::Query(_))), "{refused:?}");
+    assert_eq!(
+        conn.sample("parent", 10).unwrap().len(),
+        2,
+        "nothing was written"
+    );
 
     // The budget bounds every statement.
     let mut short = MssqlConnector
         .connect(&params(&t, "ots_reader", &t.reader_password, 300))
         .expect("connect");
-    let slow = short.stream("WAITFOR DELAY '00:00:02'; SELECT 1 AS one", 1, &mut |_| {
-        Ok(())
-    });
+    let slow = short.stream(
+        // A predicate over every combination, so the optimizer cannot count
+        // the cross join by multiplying the three counts.
+        "SELECT COUNT_BIG(*) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b \
+         CROSS JOIN sys.all_objects c WHERE CHECKSUM(a.name, b.name, c.name) = 42",
+        1,
+        &mut |_| Ok(()),
+    );
     assert!(matches!(slow, Err(SourceError::Timeout)), "{slow:?}");
 }

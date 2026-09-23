@@ -14,6 +14,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The database connectors run against live servers in CI.** A
+  `live-sources` job (GitHub Actions and GitLab alike) starts PostgreSQL 16,
+  MySQL 8.4, MariaDB 11.4 and SQL Server 2022 as service containers and runs
+  each driver's live test plus the whole pipeline over HTTP through the
+  PostgreSQL plugin. `OTS_TEST_LIVE_REQUIRED=1` turns a missing server
+  variable into a failure instead of a skip, and each test retries its
+  administrator connection while a server starts.
+- **The real-data seed bundles run in CI.** NEN 2660-2 and GWSW are not
+  vendored — NEN 2660-2 carries no licence that allows redistributing it,
+  GWSW's ontology states none — so the conformance job downloads the NEN
+  2660-2, IMBOR and GWSW payloads from their publishers with each bundle's
+  `fetch.sh`, and `OTS_TEST_SEED_PAYLOADS_REQUIRED=1` fails a missing payload
+  where the tests used to skip green. The NEN 2660-2 fetch now reads from
+  NEN's own repository, which took the files over from DigiGO's.
+- **No test is ignored, and CI keeps it that way.** `scripts/no-ignored-tests.sh`
+  rejects an `#[ignore]` — plain, with a reason, or behind a `cfg_attr` for
+  one platform — and the backend test step fails when cargo reports any
+  ignored test, doctests included.
 - **`ots-writeback`, the external writeback worker** (`tools/writeback`, a
   separate binary — never inside the store). It follows a dataset's LDES
   stream from where it left off, reads an RML mapping backwards — a table
@@ -951,6 +969,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - None.
 
 ### Removed
+- **The nightly ignored-tests job.** It ran `#[ignore]`d tests so the set
+  stayed visible; with none left, the gate above replaces it.
 - **The Triple Browser's Simple/Advanced switch.** Everything it gated is
   simply available, and in its place is one SPARQL button that opens the
   query behind the current view. The natural-language panel now appears on
@@ -974,6 +994,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already holds; only the seed no longer provides these. (`f20a87b`)
 
 ### Fixed
+- **The IMBOR bundle's sample conforms to the real Kern.** Every IMBOR
+  beheerobject inherits NEN 3610 `identificatie` and `domein`, a `geometrie`
+  and a Geo-object `status` from its superclasses; the three sample trees
+  carried none of them, so validation reported every tree, not only the
+  planted violation. The sample now carries them and the test asserts that
+  the planted `kiemjaar` datatype violation is the only result.
+- **Two persistence tests ran nowhere on Apple silicon.** Their macOS arm64
+  `ignore` cited a RocksDB `TryFromIntError` that no longer occurs; they run
+  everywhere again.
+- **MySQL, MariaDB and SQL Server values come out in one spelling.**
+  Fractional seconds lose their trailing zeros (MySQL pads `DATETIME(6)` to
+  `…12:00:00.000000`) and doubles take their shortest round-trip form (SQL
+  Server's lossless style 3 printed `2.0000000000000000e+000`), in the shared
+  canonicaliser, so every driver writes the same lexical form for the same
+  value. On MariaDB a column default is reported the way MySQL reports it —
+  `'x'` unquoted, `DEFAULT NULL` as no default rather than the string
+  `NULL` — and the server version names MariaDB. The first runs against real
+  servers also corrected the live tests themselves: a reserved column name,
+  timeout probes that MySQL answers without an error and SQL Server's
+  optimiser answers instantly, and the `VIEW DEFINITION` a SQL Server reader
+  needs to see column defaults.
 - **The Turtle editor colours an escaped local name as one name.**
   `ex:shapes\/PersonShape` — what the prefixed serializer writes for a
   path-style IRI — was tokenised as a name, an operator and a stray word. The
