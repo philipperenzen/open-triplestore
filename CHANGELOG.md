@@ -1460,6 +1460,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as an operand.
 
 ### Security
+- **A dataset's SPARQL service could read any graph in the store.** Adding
+  a graph to a service (`POST /api/datasets/{id}/services/{service_id}/graphs`)
+  checked only that the caller could write the dataset in the path. It
+  checked neither the graph nor that the service belonged to that dataset.
+  So any user who could create a dataset could scope a service to another
+  tenant's private graph or a `urn:system:` graph and read it through the
+  service, and so could everyone who could read that dataset, anonymous
+  callers on a public one included. A writer of one dataset could also read,
+  rename, delete or re-scope another dataset's service by putting its id
+  under their own dataset's path. Every `/services/{service_id}` route now
+  answers 404 for a service of another dataset. Adding a graph needs the
+  dataset to hold it (its namespace, its well-known graphs, or registered
+  to it), except for admins. A service query serves only the service graphs
+  the dataset holds when it runs, so rows made before this fix, and rows
+  whose graph was detached since, serve nothing. A service left with no
+  such graph returns nothing; it does not fall back to the whole dataset.
+  Every released version was affected.
 - **`POST /api/shaclc/serialize` read any named graph, for anyone.** It took
   a graph IRI from the request body and handed it straight to the serialiser
   — no authentication, no authorisation — so any caller could name any named
