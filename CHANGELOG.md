@@ -2023,6 +2023,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checked against the pipeline's creator and skipped when they may no longer
   read its scope. Run summaries (counts only) stay listed to everyone who can
   see the pipeline.
+- **A pipeline's persisted report was readable by everyone who could read its
+  dataset.** A run that persists its report as RDF (`results_target`), or its
+  inferred triples in a new graph, attached that graph to the dataset holding
+  its data, non-private, even when the run had validated one of the
+  dataset's private graphs or a graph that belongs to no dataset. So a
+  public dataset's viewers read the private graph's focus nodes and values
+  over `/sparql`. A derived graph is now attached to a dataset only when that
+  dataset holds every graph the run validated, and is private there when any
+  of them is. A pipeline's own report or inferred graph collects every run,
+  so before a run over other data it is detached, and it is newly attached
+  only while empty. A graph the pipeline's owner named as the target keeps
+  its registrations; it is attached only when nothing in the scope is private.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model
