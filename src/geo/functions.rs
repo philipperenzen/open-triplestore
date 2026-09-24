@@ -12,7 +12,15 @@
 //! - RCC8 topological relations
 //! - Non-topological / constructive functions
 //! - Scalar measurement functions
+//! - Metric functions — metres on the WGS84 ellipsoid (see [`super::geodesic`])
 //! - Serialisation (`geof:asGeoJSON`)
+//!
+//! Units of measure (`geof:distance`, `geof:buffer`): a linear unit on a
+//! geographic CRS (CRS84, EPSG:4326) is geodesic metres, the same as the metric
+//! functions; an angular unit there scales the planar degrees. A projected CRS
+//! (RD New, Web Mercator) computes planar in its own metres, converted between
+//! linear units only. A CRS this build does not know is planar in its own units,
+//! a linear unit taken to be a conversion from metres.
 
 use std::sync::Arc;
 
@@ -21,6 +29,7 @@ use oxrdf::{NamedNode, Term};
 
 use super::crs::Crs;
 use super::datatypes::*;
+use super::geodesic;
 use super::vocabulary as vocab;
 
 /// Type alias for the custom function handler that Oxigraph expects.
@@ -70,6 +79,12 @@ pub fn all_functions() -> Vec<(NamedNode, FnHandler)> {
         make_fn(vocab::AREA, fn_area),
         make_fn(vocab::GET_SRID, fn_get_srid),
         make_fn(vocab::RELATE, fn_relate),
+        // ─── Metric functions (GeoSPARQL 1.1): metres on the WGS84 ellipsoid ───
+        make_fn(vocab::METRIC_DISTANCE, fn_metric_distance),
+        make_fn(vocab::METRIC_AREA, fn_metric_area),
+        make_fn(vocab::METRIC_LENGTH, fn_metric_length),
+        make_fn(vocab::METRIC_PERIMETER, fn_metric_perimeter),
+        make_fn(vocab::METRIC_BUFFER, fn_metric_buffer),
         // ─── CRS transform ───
         make_fn(vocab::TRANSFORM, fn_transform),
         // ─── Serialisation ───
@@ -367,22 +382,50 @@ fn fn_boundary(args: &[Term]) -> Option<Term> {
     geometry_to_wkt_literal_in(&result, crs.as_deref())
 }
 
+/// Whether a CRS is geographic (degrees of longitude and latitude).
+fn is_geographic(crs: Crs) -> bool {
+    matches!(crs, Crs::Wgs84 | Crs::Epsg4326)
+}
+
+/// The radius argument of a buffer: any numeric literal.
+fn radius_arg(term: Option<&Term>) -> Option<f64> {
+    match term {
+        Some(Term::Literal(lit)) => lit.value().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// `geof:buffer(geom, radius, units)` in the operand's CRS. A linear unit on a
+/// geographic CRS buffers by geodesic metres (as `geof:metricBuffer`); an
+/// angular unit there buffers by that many planar degrees. A projected (or
+/// unknown) CRS buffers planar in its own units, a linear radius converted to
+/// metres. No unit: the radius is in the CRS's own units.
 fn fn_buffer(args: &[Term]) -> Option<Term> {
-    let crs = args.first().and_then(term_crs_uri);
-    let g = parse_one_geom(args)?;
-
-    // Second arg: radius (xsd:double)
-    let radius = match args.get(1) {
-        Some(Term::Literal(lit)) => lit.value().parse::<f64>().ok()?,
-        _ => return None,
+    let term = args.first()?;
+    let radius = radius_arg(args.get(1))?;
+    let units = args.get(2).and_then(parse_uom);
+    let crs = geodesic::literal_crs(term);
+    let geographic = crs.is_some_and(is_geographic);
+    let native_radius = match units {
+        Some(Uom::Linear(metres)) if geographic => {
+            return metric_buffer_literal(term, crs?, radius * metres)
+        }
+        Some(Uom::Linear(metres)) => radius * metres,
+        Some(Uom::Angular(degrees)) if geographic => radius * degrees,
+        _ => radius,
     };
+    let result = parse_one_geom(args)?.buffer(native_radius, 16).ok()?;
+    geometry_to_wkt_literal_in(&result, term_crs_uri(term).as_deref())
+}
 
-    // Third arg (optional): units IRI — for now we use the raw radius
-    // A full implementation would convert units based on the CRS
-    let _unit_scale = args.get(2).and_then(parse_uom).unwrap_or(1.0);
-
-    let result = g.buffer(radius, 16).ok()?;
-    geometry_to_wkt_literal_in(&result, crs.as_deref())
+/// A geodesic buffer of `radius_m` metres around a geometry literal in `crs`,
+/// as a WKT literal in the same CRS (and with the same prefix spelling).
+fn metric_buffer_literal(term: &Term, crs: Crs, radius_m: f64) -> Option<Term> {
+    use wkt::ToWkt;
+    let buffered = geodesic::metric_buffer(&geodesic::literal_to_crs84(term)?, radius_m)?;
+    let out = geodesic::reproject(&buffered, Crs::Wgs84, crs)?;
+    let geos = GeosGeometry::new_from_wkt(&out.wkt_string()).ok()?;
+    geometry_to_wkt_literal_in(&geos, term_crs_uri(term).as_deref())
 }
 
 fn fn_convex_hull(args: &[Term]) -> Option<Term> {
@@ -439,35 +482,69 @@ fn fn_union(args: &[Term]) -> Option<Term> {
 // Scalar Measurement Functions
 // ═══════════════════════════════════════════════════════════════
 
+/// `geof:distance(geom1, geom2, units)`, calculated in the CRS of `geom1`.
+///
+/// A linear unit on a geographic CRS is the geodesic distance on the WGS84
+/// ellipsoid (as `geof:metricDistance`) in that unit — it used to be the planar
+/// distance in *degrees*, whatever the unit said. An angular unit there converts
+/// the planar degree distance. On a projected (or unknown) CRS the distance is
+/// planar in the CRS's own metres, converted between linear units only. No unit:
+/// planar, in the CRS's own units.
 fn fn_distance(args: &[Term]) -> Option<Term> {
+    let units = args.get(2).and_then(parse_uom);
+    let geographic = geodesic::literal_crs(args.first()?).is_some_and(is_geographic);
+    if let (Some(Uom::Linear(metres)), true) = (units, geographic) {
+        let metric = geodesic::literal_distance(args.first()?, args.get(1)?)?;
+        return Some(double_literal(metric / metres));
+    }
     let (g1, g2) = parse_two_geoms(args)?;
-
-    // Planar distance in the CRS of the first geometry. The optional third argument
-    // is a units-of-measure IRI; for a metre-based CRS (e.g. EPSG:28992) the planar
-    // value is already in metres, so we convert by dividing by the unit's metre size
-    // (metre → ÷1, kilometre → ÷1000, …). For a geographic CRS the planar value is in
-    // degrees and no linear conversion is applied — geodesic metres would need
-    // geof:metricDistance (a separate, still-tracked gap).
-    let metres_per_unit = args.get(2).and_then(uom_metres_per_unit).unwrap_or(1.0);
-
-    let dist = g1.distance(&g2).ok()? / metres_per_unit;
+    let planar = g1.distance(&g2).ok()?;
+    let dist = match units {
+        Some(Uom::Linear(metres)) => planar / metres,
+        Some(Uom::Angular(degrees)) if geographic => planar / degrees,
+        _ => planar,
+    };
     Some(double_literal(dist))
 }
 
-/// Size of a linear units-of-measure IRI in metres, for converting a metre-based
-/// planar distance into the requested unit. Returns `None` for non-linear/unknown
-/// units so the caller falls back to the raw (unscaled) planar value.
-fn uom_metres_per_unit(term: &Term) -> Option<f64> {
-    match term {
-        Term::NamedNode(nn) => match nn.as_str() {
-            s if s == vocab::METRE => Some(1.0),
-            s if s == vocab::KILOMETRE => Some(1000.0),
-            s if s == vocab::CENTIMETRE => Some(0.01),
-            s if s == vocab::MILLIMETRE => Some(0.001),
-            _ => None,
-        },
-        _ => None,
-    }
+// ═══════════════════════════════════════════════════════════════
+// Metric functions (GeoSPARQL 1.1) — metres on the WGS84 ellipsoid,
+// whatever the operand's CRS; unbound for a CRS this build cannot
+// reproject. See `super::geodesic`.
+// ═══════════════════════════════════════════════════════════════
+
+/// `geof:metricDistance(geom1, geom2)` — shortest geodesic distance in metres.
+fn fn_metric_distance(args: &[Term]) -> Option<Term> {
+    geodesic::literal_distance(args.first()?, args.get(1)?).map(double_literal)
+}
+
+/// `geof:metricArea(geom)` — geodesic area in square metres; zero for anything
+/// but (multi)polygons.
+fn fn_metric_area(args: &[Term]) -> Option<Term> {
+    let g = geodesic::literal_to_crs84(args.first()?)?;
+    Some(double_literal(geodesic::metric_area(&g)))
+}
+
+/// `geof:metricLength(geom)` — geodesic length in metres of the lines, and of a
+/// polygon's rings; zero for points.
+fn fn_metric_length(args: &[Term]) -> Option<Term> {
+    let g = geodesic::literal_to_crs84(args.first()?)?;
+    Some(double_literal(geodesic::metric_length(&g)))
+}
+
+/// `geof:metricPerimeter(geom)` — geodesic length in metres of a polygon's
+/// rings, holes included; zero for anything but (multi)polygons.
+fn fn_metric_perimeter(args: &[Term]) -> Option<Term> {
+    let g = geodesic::literal_to_crs84(args.first()?)?;
+    Some(double_literal(geodesic::metric_perimeter(&g)))
+}
+
+/// `geof:metricBuffer(geom, radius)` — a geodesic buffer of `radius` metres,
+/// returned in the operand's CRS.
+fn fn_metric_buffer(args: &[Term]) -> Option<Term> {
+    let term = args.first()?;
+    let radius = radius_arg(args.get(1))?;
+    metric_buffer_literal(term, geodesic::literal_crs(term)?, radius)
 }
 
 /// `geof:transform(geom, targetCrsIri)` — reproject a geometry literal to the target
@@ -507,14 +584,12 @@ fn fn_transform(args: &[Term]) -> Option<Term> {
 
 /// `geof:asGeoJSON(geom)` — the geometry as a `geo:geoJSONLiteral` (GeoSPARQL 1.1
 /// Geometry Extension). GeoJSON is CRS84 by definition (RFC 7946), so the
-/// geometry is reprojected from its literal's CRS on the way out; `None` for a
-/// CRS this build cannot reproject, or a geometry that does not parse.
+/// geometry is reprojected from its literal's CRS (a GML literal's `srsName`
+/// included) on the way out; `None` for a CRS this build cannot reproject, or a
+/// geometry that does not parse.
 fn fn_as_geojson(args: &[Term]) -> Option<Term> {
     let term = args.first()?;
-    let source = match literal_crs_uri(term) {
-        Some(uri) => Crs::from_uri(uri)?,
-        None => Crs::Wgs84,
-    };
+    let source = geodesic::literal_crs(term)?;
     let geom = parse_wkt_literal(term)?;
     let to_crs84 = |x: f64, y: f64| super::crs::transform_xy(source, Crs::Wgs84, x, y);
     let json = super::geojson::geometry_to_geojson(&geom, &to_crs84)?;
@@ -789,5 +864,67 @@ mod tests {
         assert!(iris.contains(&vocab::CONVEX_HULL.to_string()));
         assert!(iris.contains(&vocab::RCC8_DC.to_string()));
         assert!(iris.contains(&vocab::EH_CONTAINS.to_string()));
+        for metric in [
+            vocab::METRIC_DISTANCE,
+            vocab::METRIC_AREA,
+            vocab::METRIC_LENGTH,
+            vocab::METRIC_PERIMETER,
+            vocab::METRIC_BUFFER,
+        ] {
+            assert!(iris.contains(&metric.to_string()), "{metric}");
+        }
+    }
+
+    fn uom(unit: &str) -> Term {
+        Term::NamedNode(NamedNode::new_unchecked(unit))
+    }
+
+    fn num(t: Option<Term>) -> f64 {
+        match t {
+            Some(Term::Literal(l)) => l.value().parse().unwrap(),
+            other => panic!("expected a number, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distance_in_metres_on_crs84_is_geodesic() {
+        // JFK–LHR, GeographicLib's example: 5 551 759.400 m.
+        let (a, b) = (wkt_term("POINT(-73.8 40.6)"), wkt_term("POINT(-0.5 51.6)"));
+        let m = num(fn_distance(&[a.clone(), b.clone(), uom(vocab::METRE)]));
+        assert!((m - 5_551_759.400).abs() < 0.001, "{m}");
+        let km = num(fn_distance(&[a.clone(), b.clone(), uom(vocab::KILOMETRE)]));
+        assert!((km - m / 1000.0).abs() < 1e-9);
+        // No unit, or an angular one: planar degrees, as before.
+        let planar = num(fn_distance(&[a.clone(), b.clone()]));
+        let degrees = num(fn_distance(&[a.clone(), b.clone(), uom(vocab::DEGREE)]));
+        assert!((planar - 73.3f64.hypot(11.0)).abs() < 1e-9);
+        assert_eq!(planar, degrees);
+        let radians = num(fn_distance(&[a, b, uom(vocab::RADIAN)]));
+        assert!((radians - planar.to_radians()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn buffer_radius_units() {
+        let rd = Term::Literal(Literal::new_typed_literal(
+            "<http://www.opengis.net/def/crs/EPSG/0/28992> POINT(155000 463000)",
+            NamedNode::new_unchecked(vocab::WKT_LITERAL),
+        ));
+        let area = |t: Option<Term>| parse_wkt_literal(&t.unwrap()).unwrap().area().unwrap();
+        // A projected CRS: a kilometre is 1000 of its metres.
+        let km = area(fn_buffer(&[
+            rd.clone(),
+            double_term(1.0),
+            uom(vocab::KILOMETRE),
+        ]));
+        let m = area(fn_buffer(&[rd, double_term(1000.0), uom(vocab::METRE)]));
+        assert!((km - m).abs() < 1e-6, "{km} vs {m}");
+        // CRS84 with metres: a geodesic buffer — an ellipse of ~0.029° × 0.018°
+        // at 52°N, ~4.1e-4 square degrees — not a disc of 1000 degrees.
+        let geo = area(fn_buffer(&[
+            wkt_term("POINT(5 52)"),
+            double_term(1000.0),
+            uom(vocab::METRE),
+        ]));
+        assert!(geo > 3.5e-4 && geo < 4.5e-4, "{geo}");
     }
 }

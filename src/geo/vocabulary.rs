@@ -139,6 +139,14 @@ pub const AREA: &str = "http://www.opengis.net/def/function/geosparql/area";
 pub const RELATE: &str = "http://www.opengis.net/def/function/geosparql/relate";
 pub const TRANSFORM: &str = "http://www.opengis.net/def/function/geosparql/transform";
 
+// ─── Metric function IRIs (GeoSPARQL 1.1): metres on the WGS84 ellipsoid ───
+
+pub const METRIC_DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/metricDistance";
+pub const METRIC_AREA: &str = "http://www.opengis.net/def/function/geosparql/metricArea";
+pub const METRIC_LENGTH: &str = "http://www.opengis.net/def/function/geosparql/metricLength";
+pub const METRIC_PERIMETER: &str = "http://www.opengis.net/def/function/geosparql/metricPerimeter";
+pub const METRIC_BUFFER: &str = "http://www.opengis.net/def/function/geosparql/metricBuffer";
+
 // ─── Serialisation function IRIs ───
 
 pub const AS_GEOJSON: &str = "http://www.opengis.net/def/function/geosparql/asGeoJSON";

@@ -111,6 +111,11 @@ pub fn generate(
         "relate",
         "transform",
         "asGeoJSON",
+        "metricDistance",
+        "metricArea",
+        "metricLength",
+        "metricPerimeter",
+        "metricBuffer",
     ];
 
     for (i, func) in geo_functions.iter().enumerate() {

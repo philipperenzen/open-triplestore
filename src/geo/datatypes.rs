@@ -167,21 +167,33 @@ pub fn double_literal(value: f64) -> Term {
     ))
 }
 
-/// Parse a units-of-measure IRI from a Term, returning a scale factor
-/// relative to the geometry's native units.
-pub fn parse_uom(term: &Term) -> Option<f64> {
-    match term {
-        Term::NamedNode(nn) => {
-            match nn.as_str() {
-                s if s == vocabulary::METRE => Some(1.0),
-                s if s == vocabulary::DEGREE => Some(1.0), // assume CRS84 in degrees
-                s if s == vocabulary::RADIAN => Some(std::f64::consts::PI / 180.0),
-                s if s == vocabulary::UNITY => Some(1.0),
-                _ => Some(1.0), // default: pass through
-            }
-        }
-        _ => None,
-    }
+/// A units-of-measure IRI (`uom:`) as `geof:distance` and `geof:buffer` use it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Uom {
+    /// A length, as metres per unit (metre 1, kilometre 1000, …).
+    Linear(f64),
+    /// An angle, as degrees per unit (degree 1, radian 180/π).
+    Angular(f64),
+}
+
+/// Parse a units-of-measure IRI. `None` for a term that is not one of the
+/// linear or angular OGC units this build converts (`uom:unity` included): the
+/// functions then keep the geometry's native units, as they always have.
+pub fn parse_uom(term: &Term) -> Option<Uom> {
+    let Term::NamedNode(nn) = term else {
+        return None;
+    };
+    Some(match nn.as_str() {
+        vocabulary::METRE => Uom::Linear(1.0),
+        vocabulary::KILOMETRE => Uom::Linear(1000.0),
+        vocabulary::CENTIMETRE => Uom::Linear(0.01),
+        vocabulary::MILLIMETRE => Uom::Linear(0.001),
+        vocabulary::DEGREE => Uom::Angular(1.0),
+        vocabulary::RADIAN => Uom::Angular(180.0 / std::f64::consts::PI),
+        // Dimensionless: nothing to convert, the native units stand.
+        vocabulary::UNITY => return None,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

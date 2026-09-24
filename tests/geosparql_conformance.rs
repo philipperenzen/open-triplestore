@@ -1620,10 +1620,10 @@ fn geo_data_model_property_path_wkt() {
 //
 // Grounded in OGC GeoSPARQL 1.1 (22-047r1) and adversarially fact-checked.
 // The verifier corrected geos-09 (line-on-boundary ehCovers/ehCoveredBy = FALSE,
-// matching the engine's DE-9IM mask T*TFT*FF*). Of the GeoSPARQL-1.1 functions once
-// encoded here as documented gaps, geof:relate, transform and geo:geoJSONLiteral are
-// implemented and their tests assert results; the metric family and aggUnion remain
-// tracked gaps.
+// matching the engine's DE-9IM mask T*TFT*FF*). The GeoSPARQL-1.1 functions once
+// encoded here as documented gaps — geof:relate, transform, the metric family and
+// geo:geoJSONLiteral — are implemented, and their tests assert results;
+// geof:aggUnion remains a tracked gap.
 // ═══════════════════════════════════════════════════════════
 
 /// Evaluate a single geof: expression. Returns None if unsupported (query error or
@@ -1873,28 +1873,403 @@ fn geos_cx_relate_de9im() {
     );
 }
 
-// Tracked feature gaps: geof:metricDistance / metricArea need a geodesic library and
-// geof:aggUnion needs SPARQL aggregate support. Calling them yields an unbound result.
-// These flip when the corresponding capability is added. (geof:transform is now
-// supported — see geos_cx_transform_rd_to_wgs84 below.)
+// geof:metricDistance / geof:metricArea were tracked gaps (unbound). They measure on
+// the WGS84 ellipsoid now: (0,0)–(1,1) is 156 899.568 m (Vincenty/Karney), and the
+// 1°×1° cell at the equator is 12 308 463 894 m² between parallels — its top edge is
+// a geodesic here, which bulges poleward by a few metres, hence the 1e-4 tolerance.
 #[test]
-fn geos_cx_geosparql11_function_gaps() {
+fn geos_cx_geosparql11_metric_functions() {
     let s = ts();
     let p = "\"POINT(0 0)\"^^geo:wktLiteral";
     let q = "\"POINT(1 1)\"^^geo:wktLiteral";
     let poly = "\"POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))\"^^geo:wktLiteral";
-    let gaps = [
-        format!("geof:metricDistance({p}, {q})"),
-        format!("geof:metricArea({poly})"),
-    ];
-    for g in gaps {
-        let r = geof_opt(&s, &g);
-        assert!(
-            r.is_none() || r.as_deref() == Some(""),
-            "expected unsupported (tracked gap): {g} -> {:?}",
-            r
+    let d = geof_num(&s, &format!("geof:metricDistance({p}, {q})"));
+    assert!(
+        (d - 156_899.568).abs() < 0.01,
+        "metricDistance (0,0)-(1,1): {d}"
+    );
+    let a = geof_num(&s, &format!("geof:metricArea({poly})"));
+    assert!(
+        ((a - 12_308_463_894.0) / 12_308_463_894.0).abs() < 1e-4,
+        "metricArea of the 1°x1° equatorial cell: {a}"
+    );
+}
+
+// GeographicLib's worked examples (Karney 2013) on WGS84: JFK (40.6N 73.8W) to
+// LHR (51.6N 0.5W) is 5 551 759.400 m, and Wellington (41.32S 174.81E) to
+// Salamanca (40.96N 5.50W) — nearly antipodal, where Vincenty's iteration fails —
+// is 19 959 679.267 m.
+#[test]
+fn metric_distance_matches_published_geodesic_distances() {
+    let s = ts();
+    let jfk_lhr = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            wkt("POINT(-73.8 40.6)"),
+            wkt("POINT(-0.5 51.6)")
+        ),
+    );
+    assert!((jfk_lhr - 5_551_759.400).abs() < 0.01, "JFK-LHR: {jfk_lhr}");
+    let wlg_slm = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            wkt("POINT(174.81 -41.32)"),
+            wkt("POINT(-5.5 40.96)")
+        ),
+    );
+    assert!(
+        (wlg_slm - 19_959_679.267).abs() < 0.01,
+        "Wellington-Salamanca: {wlg_slm}"
+    );
+    // Whatever the CRS: an EPSG:4326 literal (lat lon order) is the same place.
+    let authority = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            "\"<http://www.opengis.net/def/crs/EPSG/0/4326> POINT(40.6 -73.8)\"^^geo:wktLiteral",
+            wkt("POINT(-0.5 51.6)")
+        ),
+    );
+    assert!((authority - jfk_lhr).abs() < 1e-6, "EPSG:4326: {authority}");
+    // A projected operand is reprojected first: 3-4-5 metres in RD New near the
+    // Amersfoort origin is 5 m on the ellipsoid (RD's scale error is 1e-4).
+    let rd5 = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            rd("POINT(155000 463000)"),
+            rd("POINT(155003 463004)")
+        ),
+    );
+    assert!((rd5 - 5.0).abs() < 0.01, "RD New 3-4-5: {rd5}");
+    // An unsupported CRS cannot be measured on the ellipsoid: unbound, not a guess.
+    let lambert = geof_opt(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            "\"<http://www.opengis.net/def/crs/EPSG/0/2154> POINT(650000 6860000)\"^^geo:wktLiteral",
+            wkt("POINT(2.35 48.85)")
+        ),
+    );
+    assert!(
+        lambert.is_none(),
+        "unsupported CRS must be unbound: {lambert:?}"
+    );
+}
+
+// Between non-point geometries metricDistance is the geodesic distance between their
+// nearest points: a point 0.5° north of an equatorial segment is one meridian arc
+// away, and a geometry that touches the other is at distance zero.
+#[test]
+fn metric_distance_between_lines_and_polygons() {
+    let s = ts();
+    let segment = wkt("LINESTRING(-1 0, 1 0)");
+    let d = geof_num(
+        &s,
+        &format!("geof:metricDistance({}, {segment})", wkt("POINT(0 0.5)")),
+    );
+    // The WGS84 meridian arc from the equator to 0.5°N.
+    assert!((d - 55_287.152).abs() < 0.01, "point to equator: {d}");
+    // At 60°N a degree of longitude is half a degree of latitude. Of the two points
+    // below, (11 60) is 1° away in raw lon/lat but 55 799.470 m on the ground, and
+    // (12 60.8) is 0.8° away but 89 135.239 m: the nearest one is the western point,
+    // which a nearest-point search in raw degrees would miss.
+    let d = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            wkt("POINT(12 60)"),
+            wkt("MULTIPOINT((11 60), (12 60.8))")
+        ),
+    );
+    assert!((d - 55_799.470).abs() < 0.01, "nearest is due west: {d}");
+    let touching = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, {})",
+            wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"),
+            wkt("LINESTRING(1 0.5, 2 0.5)")
+        ),
+    );
+    assert_eq!(touching, 0.0, "touching geometries are 0 m apart");
+}
+
+// metricLength: 1° along the equator is a·π/180 = 111 319.491 m; 1° of meridian arc
+// from the equator is 110 574.389 m. A projected operand is reprojected first.
+#[test]
+fn metric_length_of_equator_and_meridian_arcs() {
+    let s = ts();
+    let eq = geof_num(
+        &s,
+        &format!("geof:metricLength({})", wkt("LINESTRING(0 0, 0.5 0, 1 0)")),
+    );
+    assert!((eq - 111_319.491).abs() < 0.01, "equator: {eq}");
+    let mer = geof_num(
+        &s,
+        &format!("geof:metricLength({})", wkt("LINESTRING(0 0, 0 1)")),
+    );
+    assert!((mer - 110_574.389).abs() < 0.01, "meridian: {mer}");
+    let multi = geof_num(
+        &s,
+        &format!(
+            "geof:metricLength({})",
+            wkt("MULTILINESTRING((0 0, 1 0), (0 0, 0 1))")
+        ),
+    );
+    assert!(
+        (multi - (eq + mer)).abs() < 0.01,
+        "multilinestring: {multi}"
+    );
+    // 1 km of RD New is 1 km on the ground, within RD's 1e-4 scale error.
+    let km = geof_num(
+        &s,
+        &format!(
+            "geof:metricLength({})",
+            rd("LINESTRING(155000 463000, 156000 463000)")
+        ),
+    );
+    assert!((km - 1000.0).abs() < 1.0, "RD New kilometre: {km}");
+    let point = geof_num(&s, &format!("geof:metricLength({})", wkt("POINT(5 52)")));
+    assert_eq!(point, 0.0, "a point has no length");
+}
+
+// metricArea and metricPerimeter: winding does not matter, a hole is subtracted from
+// the area and added to the perimeter, and non-polygons have no area or perimeter.
+#[test]
+fn metric_area_and_perimeter() {
+    let s = ts();
+    let ccw = geof_num(
+        &s,
+        &format!(
+            "geof:metricArea({})",
+            wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))")
+        ),
+    );
+    let cw = geof_num(
+        &s,
+        &format!(
+            "geof:metricArea({})",
+            wkt("POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))")
+        ),
+    );
+    assert!(
+        (ccw - cw).abs() < 1.0,
+        "winding must not matter: {ccw} vs {cw}"
+    );
+    let holed = geof_num(
+        &s,
+        &format!(
+            "geof:metricArea({})",
+            wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0), (0.25 0.25, 0.25 0.75, 0.75 0.75, 0.75 0.25, 0.25 0.25))")
+        ),
+    );
+    let hole = geof_num(
+        &s,
+        &format!(
+            "geof:metricArea({})",
+            wkt("POLYGON((0.25 0.25, 0.75 0.25, 0.75 0.75, 0.25 0.75, 0.25 0.25))")
+        ),
+    );
+    assert!(
+        (holed - (ccw - hole)).abs() < 1.0,
+        "a hole is subtracted: {holed} vs {ccw} - {hole}"
+    );
+    // A 100 m square in RD New is ~10 000 m² on the ellipsoid.
+    let rd_area = geof_num(
+        &s,
+        &format!(
+            "geof:metricArea({})",
+            rd("POLYGON((155000 463000, 155100 463000, 155100 463100, 155000 463100, 155000 463000))")
+        ),
+    );
+    assert!(
+        (rd_area - 10_000.0).abs() < 10.0,
+        "RD New hectare: {rd_area}"
+    );
+    for g in ["POINT(5 52)", "LINESTRING(0 0, 1 1)"] {
+        assert_eq!(
+            geof_num(&s, &format!("geof:metricArea({})", wkt(g))),
+            0.0,
+            "{g} has no area"
+        );
+        assert_eq!(
+            geof_num(&s, &format!("geof:metricPerimeter({})", wkt(g))),
+            0.0,
+            "{g} has no perimeter"
         );
     }
+    // The perimeter is the geodesic length of the rings — equal to measuring the
+    // exterior ring as a line.
+    let perimeter = geof_num(
+        &s,
+        &format!(
+            "geof:metricPerimeter({})",
+            wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))")
+        ),
+    );
+    let ring = geof_num(
+        &s,
+        &format!(
+            "geof:metricLength({})",
+            wkt("LINESTRING(0 0, 1 0, 1 1, 0 1, 0 0)")
+        ),
+    );
+    // Equator 111 319.491 + two meridian arcs of 110 574.389 + the 1°N geodesic
+    // of 111 302.649.
+    assert!(
+        (perimeter - 443_770.917).abs() < 0.01,
+        "perimeter: {perimeter}"
+    );
+    assert!(
+        (perimeter - ring).abs() < 1e-6,
+        "perimeter {perimeter} vs ring {ring}"
+    );
+    let holed_perimeter = geof_num(
+        &s,
+        &format!(
+            "geof:metricPerimeter({})",
+            wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0), (0.25 0.25, 0.25 0.75, 0.75 0.75, 0.75 0.25, 0.25 0.25))")
+        ),
+    );
+    assert!(holed_perimeter > perimeter + 200_000.0, "{holed_perimeter}");
+}
+
+// metricBuffer: a geodesic buffer in metres, returned in the operand's CRS. Around a
+// point every vertex of the 64-gon is 1 km away, so its area is n/2·r²·sin(2π/n) and
+// the nearest point of its ring is r·cos(π/n) from the centre.
+#[test]
+fn metric_buffer_is_geodesic_and_keeps_the_crs() {
+    use std::f64::consts::PI;
+    let s = ts();
+    let buf = format!("geof:metricBuffer({}, 1000)", wkt("POINT(5 52)"));
+    let area = geof_num(&s, &format!("geof:metricArea({buf})"));
+    let inscribed = 32.0 * 1_000_000.0 * (2.0 * PI / 64.0).sin();
+    assert!(
+        ((area - inscribed) / inscribed).abs() < 1e-3,
+        "1 km buffer area {area} vs {inscribed}"
+    );
+    let to_ring = geof_num(
+        &s,
+        &format!(
+            "geof:metricDistance({}, geof:boundary({buf}))",
+            wkt("POINT(5 52)")
+        ),
+    );
+    assert!(
+        to_ring > 1000.0 * (PI / 64.0).cos() - 0.5 && to_ring < 1000.5,
+        "ring distance {to_ring}"
+    );
+    let rd_buf = format!("geof:metricBuffer({}, 10)", rd("POINT(155000 463000)"));
+    let srid = geof_opt(&s, &format!("geof:getSRID({rd_buf})")).unwrap_or_default();
+    assert!(srid.contains("28992"), "stays in RD New: {srid}");
+    let rd_area = geof_num(&s, &format!("geof:area({rd_buf})"));
+    let expected = 32.0 * 100.0 * (2.0 * PI / 64.0).sin();
+    assert!(
+        ((rd_area - expected) / expected).abs() < 0.01,
+        "10 m buffer in RD units: {rd_area} vs {expected}"
+    );
+}
+
+// G7, the `uom:` gap: geof:distance with a metre unit on a geographic CRS used to
+// return planar *degrees*. It is geodesic metres now — the same as metricDistance
+// — while an angular unit keeps the planar degree distance (converted for radians)
+// and a projected CRS keeps its own metres, converted only between linear units.
+#[test]
+fn distance_units_on_geographic_and_projected_crs() {
+    let s = ts();
+    let london = wkt("POINT(-0.1278 51.5074)");
+    let paris = wkt("POINT(2.3522 48.8566)");
+    let metres = geof_num(&s, &format!("geof:distance({london}, {paris}, uom:metre)"));
+    let metric = geof_num(&s, &format!("geof:metricDistance({london}, {paris})"));
+    assert!(
+        (metres - 343_923.120).abs() < 0.01,
+        "London-Paris: {metres}"
+    );
+    assert!((metres - metric).abs() < 1e-6, "{metres} vs {metric}");
+    let km = geof_num(
+        &s,
+        &format!("geof:distance({london}, {paris}, uom:kilometre)"),
+    );
+    assert!((km - metres / 1000.0).abs() < 1e-9, "kilometres: {km}");
+    let plain = geof_num(&s, &format!("geof:distance({london}, {paris})"));
+    let degrees = geof_num(&s, &format!("geof:distance({london}, {paris}, uom:degree)"));
+    let radians = geof_num(&s, &format!("geof:distance({london}, {paris}, uom:radian)"));
+    assert!(
+        (degrees - plain).abs() < 1e-12,
+        "degree stays planar: {degrees}"
+    );
+    assert!(
+        (radians - plain.to_radians()).abs() < 1e-12,
+        "radian converts the planar degrees: {radians}"
+    );
+    // RD New: planar metres, as before.
+    let (a, b) = (rd("POINT(155000 463000)"), rd("POINT(155003 463004)"));
+    assert_eq!(
+        geof_num(&s, &format!("geof:distance({a}, {b}, uom:metre)")),
+        5.0
+    );
+    assert!(
+        (geof_num(&s, &format!("geof:distance({a}, {b}, uom:kilometre)")) - 0.005).abs() < 1e-12
+    );
+    assert_eq!(geof_num(&s, &format!("geof:distance({a}, {b})")), 5.0);
+}
+
+// G7 for geof:buffer: a metre radius on a geographic CRS used to buffer by that many
+// degrees (the unit was ignored). It is a geodesic buffer now; a degree radius stays
+// planar degrees; a projected CRS buffers in its own metres, now converting a
+// kilometre radius (which used to be taken as metres).
+#[test]
+fn buffer_units_on_geographic_and_projected_crs() {
+    use std::f64::consts::PI;
+    let s = ts();
+    let inscribed = |r: f64| 32.0 * r * r * (2.0 * PI / 64.0).sin();
+    let geodesic = geof_num(
+        &s,
+        &format!(
+            "geof:metricArea(geof:buffer({}, 1000, uom:metre))",
+            wkt("POINT(5 52)")
+        ),
+    );
+    assert!(
+        ((geodesic - inscribed(1000.0)) / inscribed(1000.0)).abs() < 1e-3,
+        "1000 m on CRS84: {geodesic}"
+    );
+    let degrees = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:buffer({}, 0.01, uom:degree))",
+            wkt("POINT(5 52)")
+        ),
+    );
+    assert!(
+        ((degrees - inscribed(0.01)) / inscribed(0.01)).abs() < 1e-9,
+        "0.01 degree stays planar: {degrees}"
+    );
+    let projected = geof_num(
+        &s,
+        &format!(
+            "geof:area(geof:buffer({}, 1, uom:kilometre))",
+            rd("POINT(155000 463000)")
+        ),
+    );
+    assert!(
+        ((projected - inscribed(1000.0)) / inscribed(1000.0)).abs() < 1e-6,
+        "1 km in RD New metres: {projected}"
+    );
+    let srid = geof_opt(
+        &s,
+        &format!(
+            "geof:getSRID(geof:buffer({}, 1000, uom:metre))",
+            wkt("POINT(5 52)")
+        ),
+    )
+    .unwrap_or_default();
+    assert!(
+        srid.contains("CRS84"),
+        "a CRS84 operand stays CRS84: {srid}"
+    );
 }
 
 // geof:transform reprojects between EPSG:28992 / CRS84 / 4326 / 3857. An RD New

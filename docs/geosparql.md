@@ -1,6 +1,6 @@
 # GeoSPARQL
 
-OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT, GML or GeoJSON literals and query it using standard spatial relation functions. The grade is *Partial* — [Supported Standards](/docs/standards) lists what is not implemented.
+OGC GeoSPARQL 1.1 support via the GEOS C++ library. Store geometry data as WKT, GML or GeoJSON literals and query it using standard spatial relation and measurement functions. The grade is *Partial* — [Supported Standards](/docs/standards) lists what is not implemented.
 
 ## Geometry literals
 
@@ -15,6 +15,25 @@ Three serialisations are geometries, and every `geof:` function accepts any of t
 ## Supported functions
 
 `sf:intersects`, `sf:contains`, `sf:within`, `sf:overlaps`, `sf:touches`, `sf:crosses`, `sf:disjoint`, `sf:equals`, `geof:distance`, `geof:buffer`, `geof:convexHull`, `geof:envelope`, `geof:union`, `geof:intersection`, `geof:asGeoJSON`.
+
+## Metres on the ellipsoid
+
+The GeoSPARQL 1.1 metric functions measure on the WGS84 ellipsoid (Karney's geodesic algorithms), in metres or square metres, whatever CRS the operand is written in — it is reprojected first, and a CRS this build cannot reproject gives an unbound result:
+
+| Function | Result |
+|---|---|
+| `geof:metricDistance(g1, g2)` | Shortest geodesic distance between the two geometries |
+| `geof:metricLength(g)` | Geodesic length of the lines, and of a polygon's rings; 0 for points |
+| `geof:metricPerimeter(g)` | Geodesic length of a polygon's rings, holes included; 0 for non-polygons |
+| `geof:metricArea(g)` | Geodesic area; 0 for non-polygons |
+| `geof:metricBuffer(g, r)` | A buffer of `r` metres, returned in `g`'s CRS |
+
+The unit argument of `geof:distance` and `geof:buffer` follows the CRS of the (first) operand:
+
+| CRS | Linear unit (`uom:metre`, `kilometre`, …) | Angular unit (`uom:degree`, `radian`) | No unit |
+|---|---|---|---|
+| Geographic (CRS84, EPSG:4326) | Geodesic, as the metric functions | Planar degrees, converted | Planar degrees |
+| Projected (RD New, Web Mercator) | Planar in the CRS's metres, converted | Planar CRS units | Planar CRS units |
 
 ## Example query
 
