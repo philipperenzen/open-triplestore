@@ -2039,6 +2039,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stored before this release, or one whose creator has since lost that write
   access or been deactivated, no longer gates. The server logs a warning at
   each write such a pipeline would have gated.
+- **A database error lifted every SHACL write gate it touched.** Finding a
+  write's gates read a failed lookup as "nothing found": an error listing the
+  gating pipelines dropped every `gate_writes` pipeline, an error finding the
+  graph's dataset dropped the dataset-scoped pipelines, the dataset's
+  validation-layer bindings and its `shacl_on_write` gate, and a failed
+  binding query dropped the bindings. The write then landed unvalidated, on
+  the Graph Store path and on bulk import alike. A failed lookup now refuses
+  the write with the existing 422 and a `gate-evaluation-failure` report, as
+  any other gate the server cannot evaluate does; a bulk import is refused
+  before anything is written. The Graph Store path's `shacl_on_write` gate
+  refuses the same way when its own dataset lookup fails.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

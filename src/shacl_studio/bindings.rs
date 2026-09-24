@@ -17,7 +17,7 @@
 //! [`effective_shape_graphs_for_dataset`] gives dynamic inheritance: a dataset
 //! validates against its own bindings *plus* those of every graph it contains.
 
-use oxigraph::model::Term;
+use oxigraph::model::{NamedNode, Term};
 use oxigraph::sparql::QueryResults;
 
 use crate::auth::db::AuthDb;
@@ -37,15 +37,20 @@ pub const OTS: &str = "https://opentriplestore.org/ns#";
 const DCT: &str = "http://purl.org/dc/terms/";
 
 fn col0(store: &TripleStore, q: &str) -> Vec<String> {
+    try_col0(store, q).unwrap_or_default()
+}
+
+/// [`col0`] for a caller that must tell a failed query from an empty result.
+fn try_col0(store: &TripleStore, q: &str) -> Result<Vec<String>, StoreError> {
     let mut out = Vec::new();
-    if let Ok(QueryResults::Solutions(sols)) = store.query(q) {
-        for row in sols.flatten() {
-            if let Some(Term::NamedNode(nn)) = row.values().first().and_then(|t| t.as_ref()) {
+    if let QueryResults::Solutions(sols) = store.query(q)? {
+        for row in sols {
+            if let Some(Term::NamedNode(nn)) = row?.values().first().and_then(|t| t.as_ref()) {
                 out.push(nn.as_str().to_string());
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Validation-layer target IRI for a whole dataset (the DCAT dataset IRI, i.e.
@@ -103,11 +108,25 @@ pub fn remove_binding(
 
 /// Shape-set graph IRIs bound to `target_iri` (its `ots:validatedBy` objects).
 pub fn bindings_for_target(store: &TripleStore, target_iri: &str) -> Vec<String> {
+    try_bindings_for_target(store, target_iri).unwrap_or_default()
+}
+
+/// [`bindings_for_target`], but a failed query is an error rather than "no
+/// bindings" — the write gate must not read a lookup failure as no shapes.
+/// A target that is not an IRI holds no binding (a binding's subject is an
+/// IRI), so it answers empty without being spliced into a query.
+pub fn try_bindings_for_target(
+    store: &TripleStore,
+    target_iri: &str,
+) -> Result<Vec<String>, StoreError> {
+    if NamedNode::new(target_iri).is_err() {
+        return Ok(Vec::new());
+    }
     let q = format!(
         r#"PREFIX ots: <{OTS}>
         SELECT ?ss WHERE {{ GRAPH <{VALIDATION_GRAPH}> {{ <{target_iri}> ots:validatedBy ?ss }} }}"#
     );
-    col0(store, &q)
+    try_col0(store, &q)
 }
 
 /// Target IRIs validated by the shape graph whose data lives in
@@ -296,6 +315,26 @@ mod tests {
 
         remove_binding(&store, target, ss).unwrap();
         assert!(bindings_for_target(&store, target).is_empty());
+    }
+
+    /// The gate's lookup answers a target that is not an IRI with no
+    /// bindings — none can be stored for it — instead of splicing it into
+    /// the query, where it could rewrite the pattern or fail the lookup.
+    #[test]
+    fn a_target_that_is_not_an_iri_has_no_bindings() {
+        let store = TripleStore::in_memory().unwrap();
+        add_binding(&store, "urn:data:g1", "urn:shapes:s1").unwrap();
+
+        assert_eq!(
+            try_bindings_for_target(&store, "urn:data:g1").unwrap(),
+            vec!["urn:shapes:s1".to_string()]
+        );
+        for target in ["not an iri", "urn:data:g1> ots:validatedBy ?ss } } #"] {
+            assert!(
+                try_bindings_for_target(&store, target).unwrap().is_empty(),
+                "{target}"
+            );
+        }
     }
 
     #[test]

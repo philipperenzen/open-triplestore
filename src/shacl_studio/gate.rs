@@ -125,7 +125,7 @@ pub fn check_write_gates(
     } = ctx;
     // The legacy per-dataset `shacl_on_write` gate is handled separately by
     // `validate_on_write` on this path, so it is excluded here.
-    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, false);
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, false)?;
     if gates.is_empty() {
         return Ok(());
     }
@@ -156,16 +156,22 @@ pub fn check_write_gates(
 /// (graph- and dataset-level) and the owning dataset's legacy `shacl_on_write`
 /// shapes graph. Metadata lookups only — no quad scans, no temp store — so
 /// large imports with no gates configured (the common case) pay near-nothing.
+///
+/// `true` when a lookup fails: whether a gate applies is then unknown, so the
+/// import goes on to [`check_import_gates`], which discovers again and refuses
+/// it unless the lookup now succeeds.
 pub fn import_gates_apply(ctx: GateContext<'_>, graph_iri: &str) -> bool {
-    !discover_gates(
+    match discover_gates(
         ctx.main_store,
         ctx.auth_db,
         ctx.studio,
         ctx.base_url,
         graph_iri,
         true,
-    )
-    .is_empty()
+    ) {
+        Ok(gates) => !gates.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// Quad-based write gate for bulk import: validates `quads` (re-homed into
@@ -185,7 +191,7 @@ pub fn check_import_gates(
         studio,
         base_url,
     } = ctx;
-    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, true);
+    let gates = discover_gates(main_store, auth_db, studio, base_url, graph_iri, true)?;
     if gates.is_empty() {
         return Ok(());
     }
@@ -262,6 +268,14 @@ impl GateSet {
     }
 }
 
+/// Every gate that applies to a write to `graph_iri`.
+///
+/// `Err` when a lookup fails. Each lookup used to fall back to "none" — the
+/// owning dataset on `.ok().flatten()`, the gating pipelines on
+/// `.unwrap_or_default()`, the bindings on an empty result — so a database
+/// error dropped the gates it would have found and the write landed
+/// unvalidated. A gate set that could not be discovered is a gate that could
+/// not be evaluated, and refuses the write like one.
 fn discover_gates(
     main_store: &TripleStore,
     auth_db: &AuthDb,
@@ -269,16 +283,18 @@ fn discover_gates(
     base_url: &str,
     graph_iri: &str,
     include_legacy_dataset_gate: bool,
-) -> GateSet {
+) -> Result<GateSet, ValidationReport> {
     // Which dataset (if any) owns the graph being written — needed both for
     // pipelines scoped by dataset and for dataset-level bindings.
-    let owning_dataset = auth_db.find_dataset_by_graph_iri(graph_iri).ok().flatten();
+    let owning_dataset = auth_db
+        .find_dataset_by_graph_iri(graph_iri)
+        .map_err(|e| gate_error(format!("looking up the dataset holding <{graph_iri}>: {e}")))?;
 
     // (a) Gating pipelines whose scope covers this graph, by a route their
     // creator may still write.
     let pipelines: Vec<ValidationPipeline> = studio
         .list_gating_pipelines()
-        .unwrap_or_default()
+        .map_err(|e| gate_error(format!("listing the gating pipelines: {e}")))?
         .into_iter()
         .filter(|p| {
             pipeline_covers_graph(p, graph_iri, owning_dataset.as_ref().map(|d| d.id.as_str()))
@@ -308,12 +324,17 @@ fn discover_gates(
 
     // (b) Bindings that apply to this write: shapes on the written graph itself
     // plus dataset-level shapes on its owner.
-    let mut binding_graphs: BTreeSet<String> = bindings::bindings_for_target(main_store, graph_iri)
-        .into_iter()
-        .collect();
+    let bindings_of = |target: &str| {
+        bindings::try_bindings_for_target(main_store, target).map_err(|e| {
+            gate_error(format!(
+                "reading the validation-layer bindings of <{target}>: {e}"
+            ))
+        })
+    };
+    let mut binding_graphs: BTreeSet<String> = bindings_of(graph_iri)?.into_iter().collect();
     if let Some(ds) = &owning_dataset {
         let ds_iri = bindings::dataset_target_iri(base_url, &ds.id);
-        binding_graphs.extend(bindings::bindings_for_target(main_store, &ds_iri));
+        binding_graphs.extend(bindings_of(&ds_iri)?);
     }
 
     // (c) Legacy per-dataset gate (`shacl_on_write` + `shapes_graph_iri`).
@@ -327,11 +348,11 @@ fn discover_gates(
         None
     };
 
-    GateSet {
+    Ok(GateSet {
         pipelines,
         binding_graphs,
         legacy_shapes_graph,
-    }
+    })
 }
 
 /// The graphs holding a pipeline's shapes, resolved from its shape-graph ids.
@@ -898,6 +919,105 @@ mod tests {
             "gate-evaluation-failure"
         );
         assert!(report.results[0].message.contains("was not applied"));
+    }
+
+    /// Make every query on `table` fail, as a database error would. The
+    /// in-memory pool holds one connection, so every later lookup sees it.
+    fn drop_table(auth: &AuthDb, table: &str) {
+        auth.pool()
+            .get()
+            .unwrap()
+            .execute_batch(&format!("DROP TABLE {table}"))
+            .unwrap();
+    }
+
+    /// With gate discovery failing, the import pre-check says a gate applies
+    /// and both write paths refuse conforming data with a report naming
+    /// `reason`.
+    fn assert_both_paths_refuse(
+        store: &TripleStore,
+        auth: &AuthDb,
+        studio: &ShaclStudioStore,
+        reason: &str,
+    ) {
+        let c = ctx(store, auth, studio, "http://x");
+        assert!(
+            import_gates_apply(c, DATA_GRAPH),
+            "a failed discovery must send the import on to check_import_gates"
+        );
+        let import = check_import_gates(c, DATA_GRAPH, &person_quads(true))
+            .expect_err("a failed discovery must block the import");
+        let write = check_write_gates(
+            c,
+            DATA_GRAPH,
+            "<http://example.org/p1> a <http://example.org/Person> ; \
+             <http://example.org/name> \"Ada\" .",
+            RdfFormat::Turtle,
+            WriteMode::Replace,
+        )
+        .expect_err("a failed discovery must block the write");
+        for report in [import, write] {
+            assert!(!report.conforms);
+            assert_eq!(
+                report.results[0].source_constraint,
+                "gate-evaluation-failure"
+            );
+            assert!(
+                report.results[0].message.contains(reason),
+                "the refusal names the failed lookup: {}",
+                report.results[0].message
+            );
+        }
+    }
+
+    /// A database error listing the gating pipelines refuses the write.
+    /// `.unwrap_or_default()` read it as "no gating pipelines", so every
+    /// `gate_writes` pipeline stopped gating and the write landed unvalidated.
+    #[test]
+    fn a_failed_pipeline_lookup_blocks_both_paths() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        let mut p = pipe(vec![graph_target(DATA_GRAPH)], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id.clone()];
+        studio.insert_pipeline(&p).unwrap();
+
+        drop_table(&auth, "validation_pipelines");
+        assert!(studio.list_gating_pipelines().is_err());
+
+        assert_both_paths_refuse(&store, &auth, &studio, "listing the gating pipelines");
+    }
+
+    /// A database error finding the graph's dataset refuses the write.
+    /// `.ok().flatten()` read it as "no dataset", which dropped every gate
+    /// that comes with one: dataset-scoped pipelines, dataset-level bindings
+    /// and, on the import path, the legacy `shacl_on_write` gate.
+    #[test]
+    fn a_failed_dataset_lookup_blocks_both_paths() {
+        let store = TripleStore::in_memory().unwrap();
+        let auth = AuthDb::in_memory().unwrap();
+        let (studio, set) = studio_with_shapes(&store, &auth);
+        auth.create_dataset(
+            "d1",
+            "D1",
+            None,
+            OwnerType::User,
+            CREATOR,
+            Visibility::Private,
+            None,
+        )
+        .unwrap();
+        auth.add_dataset_graph("d1", DATA_GRAPH).unwrap();
+        auth.update_dataset_shacl("d1", true, Some(SHAPES_GRAPH))
+            .unwrap();
+        let mut p = pipe(vec![dataset_target("d1")], vec![], vec![]);
+        p.shape_graph_ids = vec![set.id.clone()];
+        studio.insert_pipeline(&p).unwrap();
+
+        drop_table(&auth, "dataset_graphs");
+        assert!(auth.find_dataset_by_graph_iri(DATA_GRAPH).is_err());
+
+        assert_both_paths_refuse(&store, &auth, &studio, "looking up the dataset holding");
     }
 
     /// A gate acts with its creator's write authority, checked at every

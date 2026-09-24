@@ -475,3 +475,64 @@ ex:PersonShape a sh:NodeShape ;
         "a refused PUT must not land in the graph"
     );
 }
+
+/// A database error while finding a write's gates refuses the write. Listing
+/// the gating pipelines fell back to "none" on an error, so every
+/// `gate_writes` pipeline stopped gating and the write landed unvalidated.
+#[tokio::test]
+async fn a_database_error_finding_the_gates_refuses_the_write() {
+    let (state, token) = admin_state();
+    let app = test_app(state.clone());
+    let sg = create_shape_graph(&app, &token, SHAPES).await;
+    let (st, _, txt) = json_req(
+        &app,
+        Method::POST,
+        "/api/shacl/pipelines",
+        &token,
+        json!({
+            "name": "people-gate",
+            "targets": [{ "kind": "graph", "id": DATA_GRAPH }],
+            "shape_graph_ids": [sg],
+            "gate_writes": true,
+        }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "create gating pipeline: {txt}");
+
+    // Every query on the pipelines table now fails, as a database error
+    // would: the in-memory pool holds one connection.
+    state
+        .auth_db
+        .pool()
+        .get()
+        .unwrap()
+        .execute_batch("DROP TABLE validation_pipelines")
+        .unwrap();
+
+    // Data the gate would admit is refused: the gate cannot be found.
+    let gsp_uri = format!("/store?graph={}", url_encode(DATA_GRAPH));
+    let (st, body, txt) = send(
+        &app,
+        Method::PUT,
+        &gsp_uri,
+        &token,
+        "text/turtle",
+        "<http://example.org/bob> a <http://example.org/Person> ; <http://example.org/name> \"Bob\" .",
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a gate that cannot be discovered must refuse the write: {txt}"
+    );
+    assert!(
+        txt.contains("gate-evaluation-failure") && txt.contains("listing the gating pipelines"),
+        "the refusal names the failed lookup, not a data problem: {txt}"
+    );
+    assert_eq!(body["conforms"], false, "{txt}");
+    assert_eq!(
+        state.store.count_graph(Some(DATA_GRAPH)).unwrap(),
+        0,
+        "a refused PUT must not land in the graph"
+    );
+}
