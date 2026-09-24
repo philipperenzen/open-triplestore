@@ -208,6 +208,17 @@ writers and to callers who may read every graph the run validated; anyone else
 gets the run's summary (counts, `conforms`) with `"report": null` and
 `"report_withheld": true`.
 
+A report also carries its shapes' messages, paths and shape IRIs, so shapes
+follow the same rule. A graph some dataset holds as private shapes only the
+runs of who may read it: the dataset's private shapes-role graph, or another
+dataset's private graph linked or bound as shapes here. A run that leaves one
+out is a test run too. `GET /api/datasets/<id>/shapes` and the form manifest
+serve such a graph only to who may read it (`GET …/shapes` answers 404 when
+that leaves none). Linking one as a dataset's shapes graph
+(`PUT /api/datasets/<id>/shacl`) needs that right too. When its readers link
+it into another dataset, that dataset's official runs count it among the
+graphs they read, for the stored report and the report graph alike.
+
 ---
 
 ## Validation on Write
@@ -330,6 +341,8 @@ curl -X POST http://localhost:7878/api/shacl/register-shape-graph \
 ```
 
 Every Studio write checks that right again: save, restore, import shapes, and a visibility change of an adopted graph. Managing a Library entry is enough on its own only for a graph the Studio minted for it (`urn:shapes:…`). So a dataset's shapes graph is edited in the Studio by the members who may write the dataset, not by an org viewer, as with `PUT /api/datasets/{id}/shapes`.
+
+A dataset's shapes graph is adopted into the Library in place when the dataset is validated or imported into, or when its shapes graph or graph roles change. The entry takes the dataset's visibility, except for a graph the dataset holds as private, whose entry is `private`. An entry's visibility does not decide who reads a private graph, however: an entry of a graph some dataset holds as private is shown to, and worked on by, only those who may read that graph by the `/sparql` rule (its dataset's writers, graph-ACL read grants, admins). That covers the entry, its Turtle, revisions and clone, the Library list, bindings, effective shapes, the catalogue and pipelines. It holds for an entry made before the graph was marked private, too, and marking the graph public again gives the entry back.
 
 Impact — *what data a shape graph is applied to* — is the reverse binding lookup: `GET /api/shacl/bindings?shape_graph_id=<shape_graph_id>` → `{ shape_graph_id, targets: [ …IRIs ] }`.
 

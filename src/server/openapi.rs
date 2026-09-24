@@ -1531,11 +1531,12 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
                 o(
                     "Validation",
                     "Get shapes graph",
-                    "The dataset's SHACL shapes graph in Turtle.",
+                    "The dataset's SHACL shapes graph in Turtle. A shapes graph some dataset holds as private is served only to those who may read it (the `/sparql` rule: its dataset's writers, graph-ACL read grants, admins).",
                     vec![],
                     vec![
                         ("200", "Shapes graph (text/turtle)"),
                         ("401", "Authentication required"),
+                        ("404", "No shapes graph, or none the caller may read"),
                     ],
                     true,
                 ),
@@ -1808,7 +1809,7 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
             vec![], vec![("204", "Removed"), ("403", "Not allowed")], true)),
     ]);
     mount(paths, "/api/datasets/:id/effective-shapes", vec![
-        (M::Get, o("Validation", "A dataset's effective shapes", "The shape graphs that apply to the dataset: its own bindings and the bindings of every graph it contains. This set gates writes, runs in pipelines and drives the form manifest.",
+        (M::Get, o("Validation", "A dataset's effective shapes", "The shape graphs that apply to the dataset: its own bindings and the bindings of every graph it contains. This set gates writes, runs in pipelines and drives the form manifest. An entry of a private dataset graph is listed only to those who may read that graph.",
             vec![], vec![("200", "Array of shape graphs"), ("403", "Not readable"), ("404", "Dataset not found")], true)),
     ]);
     mount(paths, "/api/shacl/pipelines", vec![

@@ -2062,6 +2062,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - An explicit `shapes_graph` must be readable by the same rule. It used to
     need a graph-ACL grant, so a graph of a dataset the caller may read now
     works too.
+- **A dataset's private shapes graph reached everyone who could view the
+  dataset.** A graph marked private in a dataset is its writers' to read, but
+  four paths served a private shapes graph to the dataset's viewers:
+  - `GET /api/datasets/{id}/shapes` returned it.
+  - The SHACL Studio Library adopts a dataset's shapes graph in place when the
+    dataset is validated or imported into, or when its shapes graph or graph
+    roles change, and gave the entry the dataset's visibility. A public
+    dataset's private shapes graph became a public Library entry: its Turtle,
+    its revisions (revision 1 is a copy), a clone, the Library list, bindings,
+    effective shapes, the catalogue and pipelines were open to every signed-in
+    user.
+  - That adoption also bound the graph to the dataset, and the form manifest
+    (`GET /api/datasets/{id}/form-manifest`, anonymous for a public dataset)
+    carries the Turtle of every bound shapes graph, so anonymous callers got it.
+  - `PUT /api/datasets/{id}/shacl` let anyone who could see a dataset link its
+    shapes graph as the shapes graph of a dataset of their own, then read it
+    from there.
+
+  Now a graph some dataset holds as private is read only by those who may read
+  it by the rule `/sparql` applies (its dataset's writers, graph-ACL read
+  grants, admins), whatever names it:
+  - `GET …/shapes`, validation runs and the form manifest leave out a private
+    shapes graph the caller may not read, whether it is this dataset's or
+    another's linked or bound here. `GET …/shapes` answers 404 when nothing is
+    left, the manifest no longer lists private data graphs to them either, and
+    a validation run that leaves out a shapes graph is a test run.
+  - A private graph is adopted as a `private` Library entry. Every Library path
+    that reads an entry (the entry, its Turtle, revisions, clone, the list,
+    bindings, effective shapes, the catalogue, pipelines, re-registration)
+    withholds an entry of a private graph from those who may not read the
+    graph, whatever the entry's visibility. That covers entries adopted before
+    this release and graphs marked private after adoption, with no migration.
+    Marking the graph public again gives the entry back.
+  - Linking a private graph the caller may not read as a shapes graph is
+    refused (403).
+  - When a dataset's writer links its private shapes graph into another
+    dataset, official runs there count it among the graphs they read: the
+    stored run's full report and the report graph are no more readable than
+    the shapes graph.
 - **Detaching or deleting a dataset could wipe graphs it never owned.**
   `DELETE /api/datasets/{id}/graphs` deleted any graph no other dataset
   claimed, so any user who could create a dataset could wipe the model

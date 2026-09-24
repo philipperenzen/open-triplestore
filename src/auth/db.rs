@@ -4478,6 +4478,31 @@ impl AuthDb {
         Ok(())
     }
 
+    /// The graphs some dataset holds as private
+    /// ([`Self::set_dataset_graph_private`]).
+    pub fn list_private_dataset_graph_iris(
+        &self,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT graph_iri FROM dataset_graphs WHERE private != 0")?;
+        let iris = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(iris)
+    }
+
+    /// Whether some dataset holds `graph_iri` as private.
+    pub fn is_private_dataset_graph(&self, graph_iri: &str) -> anyhow::Result<bool> {
+        let conn = self.pool.get()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM dataset_graphs WHERE graph_iri=?1 AND private != 0",
+            params![graph_iri],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Returns `true` when `graph_iri` is still registered to at least one dataset
     /// other than `exclude_dataset_id`.  Pass `""` for `exclude_dataset_id` when the
     /// calling dataset's own rows have already been removed from the table.
